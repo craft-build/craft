@@ -35,7 +35,8 @@ tracing-subscriber = { workspace = true }
 smol = { workspace = true }
 futures-lite = { workspace = true }
 tempfile = { workspace = true }
-isahc = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
 thiserror = { workspace = true }
 libc = { workspace = true }
 
@@ -158,6 +159,13 @@ monty = { git = "https://github.com/pydantic/monty.git", rev = "2e9df4b", packag
 notify = { version = "9.0.0-rc.2", default-features = false, features = ["flume", "macos_fsevent"] }
 serde_yaml = "0.9"
 shell-words = "1"
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io", "compat"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "charset", "http2", "stream"
+] }
+futures = "0.3"
 
 wait-timeout = "0.2"
 

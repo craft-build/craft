@@ -9,7 +9,7 @@ use maki_storage::StateDir;
 use crate::cli::{AuthAction, Cli, Command, McpAction};
 use crate::update;
 
-pub fn dispatch(cli: Cli) -> Result<()> {
+pub async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Auth { action }) => {
             let storage = StateDir::resolve().context("resolve data directory")?;
@@ -32,7 +32,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Update { yes, no_color }) => {
-            update::update(yes, no_color).map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+            update::update(yes, no_color).await.map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
         }
         Some(Command::Rollback) => {
             update::rollback().map_err(|e| color_eyre::eyre::eyre!("{e}"))?;

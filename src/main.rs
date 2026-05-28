@@ -8,9 +8,10 @@ use clap::Parser;
 
 use cli::Cli;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     color_eyre::install().ok();
-    if let Err(e) = cmd::dispatch(Cli::parse()) {
+    if let Err(e) = cmd::dispatch(Cli::parse()).await {
         print_error(&e);
         std::process::exit(1);
     }

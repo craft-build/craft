@@ -15,7 +15,7 @@ pub enum UpdateError {
     Fetch {
         url: &'static str,
         #[source]
-        source: isahc::Error,
+        source: reqwest::Error,
     },
 
     #[error("failed to determine current binary path: {0}")]
@@ -54,16 +54,19 @@ pub enum UpdateError {
     VersionCheck(#[from] VersionError),
 }
 
-fn fetch_script() -> Result<String, UpdateError> {
-    use isahc::ReadResponseExt;
-    let mut response = isahc::get(INSTALL_SCRIPT_URL).map_err(|e| UpdateError::Fetch {
-        url: INSTALL_SCRIPT_URL,
-        source: e,
-    })?;
-    response.text().map_err(|e| UpdateError::Fetch {
-        url: INSTALL_SCRIPT_URL,
-        source: e.into(),
-    })
+async fn fetch_script() -> Result<String, UpdateError> {
+    reqwest::get(INSTALL_SCRIPT_URL)
+        .await
+        .map_err(|e| UpdateError::Fetch {
+            url: INSTALL_SCRIPT_URL,
+            source: e,
+        })?
+        .text()
+        .await
+        .map_err(|e| UpdateError::Fetch {
+            url: INSTALL_SCRIPT_URL,
+            source: e,
+        })
 }
 
 fn backup_binary(exe_path: &Path, storage: &StateDir) -> Result<PathBuf, UpdateError> {
@@ -149,8 +152,8 @@ fn prompt_yes() -> bool {
     std::io::stdin().read_line(&mut input).is_ok() && input.trim().eq_ignore_ascii_case("y")
 }
 
-pub fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateError> {
-    let latest = version::fetch_latest()?;
+pub async fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateError> {
+    let latest = version::fetch_latest().await?;
     if !version::is_newer(&latest, version::CURRENT) {
         println!("Already up to date (v{})", version::CURRENT);
         return Ok(());
@@ -163,7 +166,7 @@ pub fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateError> {
     let exe_path = std::env::current_exe().map_err(UpdateError::CurrentExe)?;
     let storage = StateDir::resolve()?;
 
-    let script = fetch_script()?;
+    let script = fetch_script().await?;
 
     if no_color {
         println!("{script}");

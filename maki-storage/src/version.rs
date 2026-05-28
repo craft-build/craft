@@ -1,7 +1,5 @@
+use reqwest::Client;
 use std::time::Duration;
-
-use isahc::config::Configurable;
-use isahc::{AsyncReadResponseExt, ReadResponseExt, Request};
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const RELEASES_URL: &str = "https://api.github.com/repos/tontinton/maki/releases/latest";
@@ -11,11 +9,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, thiserror::Error)]
 pub enum VersionError {
     #[error("HTTP request failed: {0}")]
-    Http(#[from] isahc::Error),
-    #[error("failed to build request: {0}")]
-    Request(#[from] isahc::http::Error),
-    #[error("failed to read response: {0}")]
-    Io(#[from] std::io::Error),
+    Http(#[from] reqwest::Error),
     #[error("server returned HTTP {0}")]
     Status(u16),
     #[error("invalid response: {0}")]
@@ -36,18 +30,11 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     matches!((parse(latest), parse(current)), (Some(l), Some(c)) if l > c)
 }
 
-fn client() -> Result<isahc::HttpClient, VersionError> {
-    Ok(isahc::HttpClient::builder()
+fn client() -> Result<Client, VersionError> {
+    Ok(Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .build()?)
-}
-
-fn request() -> Result<isahc::Request<()>, VersionError> {
-    Ok(Request::get(RELEASES_URL)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "maki")
-        .body(())?)
 }
 
 fn parse_tag(bytes: &[u8]) -> Result<String, VersionError> {
@@ -59,20 +46,19 @@ fn parse_tag(bytes: &[u8]) -> Result<String, VersionError> {
     Ok(tag.strip_prefix('v').unwrap_or(tag).to_owned())
 }
 
-pub fn fetch_latest() -> Result<String, VersionError> {
-    let mut resp = client()?.send(request()?)?;
-    if !resp.status().is_success() {
-        return Err(VersionError::Status(resp.status().as_u16()));
+pub async fn fetch_latest() -> Result<String, VersionError> {
+    let resp = client()?
+        .get(RELEASES_URL)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "maki")
+        .send()
+        .await?;
+    let status = resp.status().as_u16();
+    if status != 200 {
+        return Err(VersionError::Status(status));
     }
-    parse_tag(&resp.bytes()?)
-}
-
-pub async fn fetch_latest_async() -> Result<String, VersionError> {
-    let mut resp = client()?.send_async(request()?).await?;
-    if !resp.status().is_success() {
-        return Err(VersionError::Status(resp.status().as_u16()));
-    }
-    parse_tag(&resp.bytes().await?)
+    let bytes = resp.bytes().await?;
+    parse_tag(&bytes)
 }
 
 #[cfg(test)]
