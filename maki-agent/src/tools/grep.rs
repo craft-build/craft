@@ -61,7 +61,7 @@ impl Grep {
             .unwrap_or(search_limit);
         let file_tracker = ctx.file_tracker.clone();
 
-        smol::unblock(move || {
+        tokio::task::spawn_blocking(move || {
             let search_path = resolve_search_path(path.as_deref())?;
             let is_multiline = needs_multiline(&pattern);
             debug!(
@@ -155,6 +155,7 @@ impl Grep {
             Ok(ToolOutput::GrepResult { entries })
         })
         .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     pub fn start_header(&self) -> String {

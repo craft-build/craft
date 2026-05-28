@@ -36,7 +36,7 @@ impl Edit {
         let new_string = self.new_string.clone();
         let replace_all = self.replace_all.unwrap_or(false);
         let file_tracker = ctx.file_tracker.clone();
-        smol::unblock(move || {
+        tokio::task::spawn_blocking(move || {
             let p = Path::new(&path);
             file_tracker.check_before_edit(p)?;
 
@@ -54,6 +54,7 @@ impl Edit {
             })
         })
         .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     pub fn start_header(&self) -> String {
@@ -102,75 +103,72 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
-    #[test]
-    fn edit_reads_replaces_writes() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
+    #[tokio::test]
+    async fn edit_reads_replaces_writes() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
 
-            let path = temp_file(&dir, "f.rs", "fn old() {}\nfn keep() {}");
-            pre_read(&ctx, &path);
-            Edit {
-                path: path.clone(),
-                old_string: "fn old() {}".into(),
-                new_string: "fn new() {}".into(),
-                replace_all: None,
-            }
-            .execute(&ctx)
-            .await
-            .unwrap();
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                "fn new() {}\nfn keep() {}"
-            );
+        let path = temp_file(&dir, "f.rs", "fn old() {}\nfn keep() {}");
+        pre_read(&ctx, &path);
+        Edit {
+            path: path.clone(),
+            old_string: "fn old() {}".into(),
+            new_string: "fn new() {}".into(),
+            replace_all: None,
+        }
+        .execute(&ctx)
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "fn new() {}\nfn keep() {}"
+        );
 
-            let path = temp_file(&dir, "g.rs", "let x = 1;\nlet x = 1;\nlet y = 2;");
-            pre_read(&ctx, &path);
-            Edit {
-                path: path.clone(),
-                old_string: "let x = 1;".into(),
-                new_string: "let x = 9;".into(),
-                replace_all: Some(true),
-            }
-            .execute(&ctx)
-            .await
-            .unwrap();
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                "let x = 9;\nlet x = 9;\nlet y = 2;"
-            );
-        });
+        let path = temp_file(&dir, "g.rs", "let x = 1;\nlet x = 1;\nlet y = 2;");
+        pre_read(&ctx, &path);
+        Edit {
+            path: path.clone(),
+            old_string: "let x = 1;".into(),
+            new_string: "let x = 9;".into(),
+            replace_all: Some(true),
+        }
+        .execute(&ctx)
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "let x = 9;\nlet x = 9;\nlet y = 2;"
+        );
     }
 
     /// Regression: when `old_string` contains a literal `\n` it is unescaped
     /// before writing, so the Diff snapshots must be the post-unescape file
     /// content, not the raw single-line input. This is the structural
     /// guarantee that prevents the old "diff full of `\n` escapes" bug.
-    #[test]
-    fn diff_snapshots_are_real_file_content_not_raw_input() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
-            let original = "const A: u8 = 1;\nconst B: u8 = 2;\n";
-            let updated = "const A: u8 = 9;\nconst B: u8 = 2;\n";
-            let path = temp_file(&dir, "f.rs", original);
-            pre_read(&ctx, &path);
-            let output = Edit {
-                path: path.clone(),
-                old_string: "const A: u8 = 1;\\nconst B: u8 = 2;".into(),
-                new_string: "const A: u8 = 9;\\nconst B: u8 = 2;".into(),
-                replace_all: None,
-            }
-            .execute(&ctx)
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn diff_snapshots_are_real_file_content_not_raw_input() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let original = "const A: u8 = 1;\nconst B: u8 = 2;\n";
+        let updated = "const A: u8 = 9;\nconst B: u8 = 2;\n";
+        let path = temp_file(&dir, "f.rs", original);
+        pre_read(&ctx, &path);
+        let output = Edit {
+            path: path.clone(),
+            old_string: "const A: u8 = 1;\\nconst B: u8 = 2;".into(),
+            new_string: "const A: u8 = 9;\\nconst B: u8 = 2;".into(),
+            replace_all: None,
+        }
+        .execute(&ctx)
+        .await
+        .unwrap();
 
-            let ToolOutput::Diff { before, after, .. } = output else {
-                panic!("expected Diff output");
-            };
-            assert_eq!(before, original);
-            assert_eq!(after, updated);
-            assert_eq!(fs::read_to_string(&path).unwrap(), updated);
-        });
+        let ToolOutput::Diff { before, after, .. } = output else {
+            panic!("expected Diff output");
+        };
+        assert_eq!(before, original);
+        assert_eq!(after, updated);
+        assert_eq!(fs::read_to_string(&path).unwrap(), updated);
     }
 }
+

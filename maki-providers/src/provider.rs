@@ -245,14 +245,11 @@ pub async fn from_model_async(
     let slug = model.dynamic_slug.clone();
     let kind = model.provider;
     let id = model.id.clone();
-    let provider = smol::unblock(move || {
-        if let Some(slug) = &slug {
-            dynamic::create(slug, timeouts)
-        } else {
-            kind.create(timeouts)
-        }
-    })
-    .await?;
+    let provider = if let Some(slug) = &slug {
+        dynamic::create(slug, timeouts)?
+    } else {
+        kind.create(timeouts)?
+    };
     debug!(provider = %kind, model = %id, "provider created");
     Ok(provider)
 }
@@ -263,17 +260,16 @@ pub struct ModelBatch {
 }
 
 pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
-    let (tx, rx) = flume::unbounded();
     let timeouts = Timeouts::default();
+    let mut futs = futures::stream::FuturesUnordered::new();
 
     for kind in ProviderKind::iter() {
-        let Ok(provider) = smol::unblock(move || kind.create(timeouts)).await else {
+        let Ok(provider) = kind.create(timeouts) else {
             warn!(provider = %kind, "failed to create provider, skipping");
             continue;
         };
-        let tx = tx.clone();
-        smol::spawn(async move {
-            let batch = match provider.list_models().await {
+        futs.push(async move {
+            match provider.list_models().await {
                 Ok(ids) => {
                     if kind.accepts_arbitrary_models() {
                         crate::tier_map::tier_map()
@@ -301,23 +297,20 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
                         )],
                     }
                 }
-            };
-            let _ = tx.send_async(batch).await;
-        })
-        .detach();
+            }
+        });
     }
 
     let dynamic_specs = dynamic::dynamic_model_specs();
     if !dynamic_specs.is_empty() {
-        let _ = tx.send(ModelBatch {
+        on_ready(ModelBatch {
             models: dynamic_specs,
             warnings: Vec::new(),
         });
     }
 
-    drop(tx);
-
-    while let Ok(batch) = rx.recv_async().await {
+    use futures::StreamExt;
+    while let Some(batch) = futs.next().await {
         on_ready(batch);
     }
 }

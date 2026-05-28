@@ -39,7 +39,7 @@ impl Write {
         let content = self.content.clone();
         let output = self.write_output(&path, ctx.config.max_output_lines);
         let file_tracker = ctx.file_tracker.clone();
-        smol::unblock(move || {
+        tokio::task::spawn_blocking(move || {
             let p = Path::new(&path);
             if p.exists() {
                 file_tracker.check_before_edit(p)?;
@@ -52,6 +52,7 @@ impl Write {
             Ok(output)
         })
         .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     pub fn start_header(&self) -> String {
@@ -100,64 +101,58 @@ mod tests {
 
     const ERR_NOT_READ: &str = "file must be read before editing";
 
-    #[test]
-    fn write_new_file_succeeds() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
-            let path = dir.path().join("new.txt").to_string_lossy().to_string();
+    #[tokio::test]
+    async fn write_new_file_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let path = dir.path().join("new.txt").to_string_lossy().to_string();
 
-            Write {
-                path: path.clone(),
-                content: "hello".into(),
-            }
-            .execute(&ctx)
-            .await
-            .unwrap();
+        Write {
+            path: path.clone(),
+            content: "hello".into(),
+        }
+        .execute(&ctx)
+        .await
+        .unwrap();
 
-            assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
-        });
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
     }
 
-    #[test]
-    fn write_existing_without_read_fails() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
-            let path = dir.path().join("existing.txt");
-            fs::write(&path, "original").unwrap();
+    #[tokio::test]
+    async fn write_existing_without_read_fails() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let path = dir.path().join("existing.txt");
+        fs::write(&path, "original").unwrap();
 
-            let err = Write {
-                path: path.to_string_lossy().to_string(),
-                content: "overwrite".into(),
-            }
-            .execute(&ctx)
-            .await
-            .unwrap_err();
+        let err = Write {
+            path: path.to_string_lossy().to_string(),
+            content: "overwrite".into(),
+        }
+        .execute(&ctx)
+        .await
+        .unwrap_err();
 
-            assert!(err.contains(ERR_NOT_READ));
-            assert_eq!(fs::read_to_string(&path).unwrap(), "original");
-        });
+        assert!(err.contains(ERR_NOT_READ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     }
 
-    #[test]
-    fn write_existing_after_read_succeeds() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
-            let path = dir.path().join("existing.txt");
-            fs::write(&path, "original").unwrap();
-            pre_read(&ctx, &path.to_string_lossy());
+    #[tokio::test]
+    async fn write_existing_after_read_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let path = dir.path().join("existing.txt");
+        fs::write(&path, "original").unwrap();
+        pre_read(&ctx, &path.to_string_lossy());
 
-            Write {
-                path: path.to_string_lossy().to_string(),
-                content: "overwrite".into(),
-            }
-            .execute(&ctx)
-            .await
-            .unwrap();
+        Write {
+            path: path.to_string_lossy().to_string(),
+            content: "overwrite".into(),
+        }
+        .execute(&ctx)
+        .await
+        .unwrap();
 
-            assert_eq!(fs::read_to_string(&path).unwrap(), "overwrite");
-        });
+        assert_eq!(fs::read_to_string(&path).unwrap(), "overwrite");
     }
 }

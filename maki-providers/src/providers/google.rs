@@ -2,10 +2,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flume::Sender;
-use futures_lite::io::{AsyncBufReadExt, BufReader};
-use isahc::{AsyncReadResponseExt, HttpClient, Request};
+use futures::io::{AsyncBufReadExt, BufReader};
+use futures::TryStreamExt;
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_util::io::StreamReader;
 use tracing::warn;
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
@@ -75,7 +78,7 @@ fn resolve_auth_from_key(key: &str) -> ResolvedAuth {
 }
 
 pub struct Google {
-    client: HttpClient,
+    client: Client,
     auth: Arc<Mutex<ResolvedAuth>>,
     key_pool: Option<KeyPool>,
     stream_timeout: Duration,
@@ -105,9 +108,9 @@ impl Google {
         }
     }
 
-    fn build_request(&self, method: &str, url: &str) -> isahc::http::request::Builder {
+    fn build_request(&self, method: &str, url: &str) -> reqwest::RequestBuilder {
         let auth = self.auth.lock().unwrap();
-        let mut builder = Request::builder().method(method).uri(url);
+        let mut builder = self.client.request(method.parse().unwrap(), url);
         for (key, value) in &auth.headers {
             builder = builder.header(key.as_str(), value.as_str());
         }
@@ -191,16 +194,21 @@ impl Google {
         let url = self.stream_url(&model.id);
         let json_body = serde_json::to_vec(&body)?;
 
-        let request = self
+        let response = self
             .build_request("POST", &url)
             .header("content-type", "application/json")
-            .body(json_body)?;
-
-        let response = self.client.send_async(request).await?;
+            .body(json_body)
+            .send()
+            .await?;
         let status = response.status().as_u16();
 
         if status == 200 {
-            parse_sse(response, event_tx, self.stream_timeout).await
+            let stream = response.bytes_stream();
+            let reader = StreamReader::new(
+                stream.map_err(std::io::Error::other),
+            );
+            let reader = BufReader::new(reader.compat());
+            parse_sse(reader, event_tx, self.stream_timeout).await
         } else {
             Err(AgentError::from_response(response).await)
         }
@@ -222,11 +230,9 @@ impl Provider for Google {
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        let url = self.models_url();
-        let request = self.build_request("GET", &url).body(()).unwrap();
-        let client = self.client.clone();
+        let request = self.build_request("GET", &self.models_url());
         Box::pin(async move {
-            let mut response = client.send_async(request).await?;
+            let response = request.send().await?;
             if response.status().as_u16() != 200 {
                 return Err(AgentError::from_response(response).await);
             }
@@ -465,11 +471,10 @@ struct ModelInfo {
 }
 
 async fn parse_sse(
-    response: isahc::Response<isahc::AsyncBody>,
+    reader: impl futures::io::AsyncBufRead + Unpin,
     event_tx: &Sender<ProviderEvent>,
     stream_timeout: Duration,
 ) -> Result<StreamResponse, AgentError> {
-    let reader = BufReader::new(response.into_body());
     let mut lines = reader.lines();
 
     let mut content_blocks: Vec<ContentBlock> = Vec::new();
@@ -830,17 +835,17 @@ mod tests {
         }
     }
 
-    fn mock_response(data: &'static [u8]) -> isahc::Response<isahc::AsyncBody> {
-        let body = isahc::AsyncBody::from_bytes_static(data);
-        isahc::Response::builder().status(200).body(body).unwrap()
+    fn mock_sse(data: &'static [u8]) -> futures::io::Cursor<&'static [u8]> {
+        futures::io::Cursor::new(data)
     }
 
-    #[test]
-    fn parse_sse_plain_text() {
+    #[tokio::test]
+    async fn parse_sse_plain_text() {
         let data = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":10}}\n\n";
-        let response = mock_response(data);
         let (tx, _rx) = flume::unbounded();
-        let result = smol::block_on(parse_sse(response, &tx, Duration::from_secs(30))).unwrap();
+        let result = parse_sse(mock_sse(data), &tx, Duration::from_secs(30))
+            .await
+            .unwrap();
         assert_eq!(result.stop_reason, Some(StopReason::EndTurn));
         assert_eq!(result.usage.input, 5);
         assert_eq!(result.usage.output, 10);
@@ -850,12 +855,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn parse_sse_thinking_part() {
+    #[tokio::test]
+    async fn parse_sse_thinking_part() {
         let data = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"thinking...\",\"thought\":true,\"thoughtSignature\":\"sig1\"}]}},{\"content\":{\"parts\":[{\"text\":\"answer\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":20}}\n\n";
-        let response = mock_response(data);
         let (tx, _rx) = flume::unbounded();
-        let result = smol::block_on(parse_sse(response, &tx, Duration::from_secs(30))).unwrap();
+        let result = parse_sse(mock_sse(data), &tx, Duration::from_secs(30))
+            .await
+            .unwrap();
         assert!(matches!(
             &result.message.content[0],
             ContentBlock::Thinking { thinking, signature } if thinking == "thinking..." && signature.as_deref() == Some("sig1")
@@ -866,12 +872,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn parse_sse_tool_call() {
+    #[tokio::test]
+    async fn parse_sse_tool_call() {
         let data = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"bash\",\"args\":{\"cmd\":\"ls\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":15}}\n\n";
-        let response = mock_response(data);
         let (tx, _rx) = flume::unbounded();
-        let result = smol::block_on(parse_sse(response, &tx, Duration::from_secs(30))).unwrap();
+        let result = parse_sse(mock_sse(data), &tx, Duration::from_secs(30))
+            .await
+            .unwrap();
         assert_eq!(result.stop_reason, Some(StopReason::ToolUse));
         assert!(matches!(
             &result.message.content[0],
@@ -879,12 +886,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn parse_sse_cached_tokens() {
+    #[tokio::test]
+    async fn parse_sse_cached_tokens() {
         let data = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":10,\"cachedContentTokenCount\":50}}\n\n";
-        let response = mock_response(data);
         let (tx, _rx) = flume::unbounded();
-        let result = smol::block_on(parse_sse(response, &tx, Duration::from_secs(30))).unwrap();
+        let result = parse_sse(mock_sse(data), &tx, Duration::from_secs(30))
+            .await
+            .unwrap();
         assert_eq!(result.usage.input, 100);
         assert_eq!(result.usage.output, 10);
         assert_eq!(result.usage.cache_read, 50);

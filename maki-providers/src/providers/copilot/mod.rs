@@ -3,10 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flume::Sender;
-use futures_lite::io::BufReader;
-use isahc::{AsyncReadResponseExt, HttpClient, Request};
+use futures::io::BufReader;
+use futures::TryStreamExt;
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 use super::openai::responses;
@@ -64,7 +67,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
 }
 
 pub struct Copilot {
-    client: HttpClient,
+    client: Client,
     stream_timeout: Duration,
     auth: Arc<Mutex<Option<CopilotAuth>>>,
     resolved_auth: Option<Arc<Mutex<super::ResolvedAuth>>>,
@@ -138,15 +141,12 @@ impl Copilot {
     async fn fetch_models(&self) -> Result<Vec<CopilotModel>, AgentError> {
         let auth = self.auth().await?;
         let request = copilot_request(
-            Request::builder()
-                .method("GET")
-                .uri(format!("{}{MODELS_PATH}", auth.endpoint)),
+            self.client.get(format!("{}{MODELS_PATH}", auth.endpoint)),
             &auth,
             None,
-        )
-        .body(())?;
+        );
 
-        let mut response = self.client.send_async(request).await?;
+        let response = request.send().await?;
         if !response.status().is_success() {
             return Err(AgentError::from_response(response).await);
         }
@@ -196,22 +196,22 @@ impl Copilot {
             body["tools"] = wire_tools;
         }
 
-        let request = self
+        let response = self
             .build_post(
                 &auth,
                 CHAT_COMPLETIONS_PATH,
                 Some("conversation-agent"),
                 &body,
             )?
-            .body(serde_json::to_vec(&body)?)?;
-        let response = self.client.send_async(request).await?;
+            .body(serde_json::to_vec(&body)?)
+            .send()
+            .await?;
         if response.status().is_success() {
-            openai_compat::parse_sse(
-                BufReader::new(response.into_body()),
-                event_tx,
-                self.stream_timeout,
-            )
-            .await
+            let stream = response.bytes_stream();
+            let reader = StreamReader::new(
+                stream.map_err(std::io::Error::other),
+            );
+            openai_compat::parse_sse(BufReader::new(reader.compat()), event_tx, self.stream_timeout).await
         } else {
             Err(AgentError::from_response(response).await)
         }
@@ -262,13 +262,18 @@ impl Copilot {
         });
         thinking.apply_to_body(&mut body);
 
-        let request = self
+        let response = self
             .build_post(&auth, MESSAGES_PATH, Some("conversation-agent"), &body)?
             .header("anthropic-version", "2023-06-01")
-            .body(serde_json::to_vec(&body)?)?;
-        let response = self.client.send_async(request).await?;
+            .body(serde_json::to_vec(&body)?)
+            .send()
+            .await?;
         if response.status().is_success() {
-            super::anthropic::parse_sse(response, event_tx, self.stream_timeout).await
+            let stream = response.bytes_stream();
+            let reader = StreamReader::new(
+                stream.map_err(std::io::Error::other),
+            );
+            super::anthropic::parse_sse(BufReader::new(reader.compat()), event_tx, self.stream_timeout).await
         } else {
             Err(AgentError::from_response(response).await)
         }
@@ -280,16 +285,14 @@ impl Copilot {
         path: &str,
         interaction_type: Option<&str>,
         body: &Value,
-    ) -> Result<isahc::http::request::Builder, AgentError> {
+    ) -> Result<reqwest::RequestBuilder, AgentError> {
         debug!(
             path,
             body_bytes = serde_json::to_vec(body)?.len(),
             "sending Copilot API request"
         );
         Ok(copilot_request(
-            Request::builder()
-                .method("POST")
-                .uri(format!("{}{path}", auth.endpoint)),
+            self.client.post(format!("{}{path}", auth.endpoint)),
             auth,
             interaction_type,
         ))
@@ -392,7 +395,7 @@ struct GraphQlCopilotEndpoints {
     api: String,
 }
 
-async fn discover_api_endpoint(client: &HttpClient, token: &str) -> String {
+async fn discover_api_endpoint(client: &Client, token: &str) -> String {
     match try_discover_api_endpoint(client, token).await {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -402,16 +405,15 @@ async fn discover_api_endpoint(client: &HttpClient, token: &str) -> String {
     }
 }
 
-async fn try_discover_api_endpoint(client: &HttpClient, token: &str) -> Result<String, AgentError> {
+async fn try_discover_api_endpoint(client: &Client, token: &str) -> Result<String, AgentError> {
     let body = json!({ "query": GRAPHQL_QUERY });
-    let request = Request::builder()
-        .method("POST")
-        .uri("https://api.github.com/graphql")
+    let response = client
+        .post("https://api.github.com/graphql")
         .header("authorization", format!("Bearer {token}"))
         .header("content-type", "application/json")
-        .body(serde_json::to_vec(&body)?)?;
-
-    let mut response = client.send_async(request).await?;
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .await?;
     if !response.status().is_success() {
         return Err(AgentError::from_response(response).await);
     }
@@ -426,16 +428,15 @@ async fn try_discover_api_endpoint(client: &HttpClient, token: &str) -> Result<S
 }
 
 fn copilot_request(
-    builder: isahc::http::request::Builder,
+    builder: reqwest::RequestBuilder,
     auth: &CopilotAuth,
     interaction_type: Option<&str>,
-) -> isahc::http::request::Builder {
+) -> reqwest::RequestBuilder {
     let builder = builder
         .header("authorization", format!("Bearer {}", auth.token))
         .header("content-type", "application/json")
         .header("editor-version", EDITOR_VERSION_HEADER)
         .header("x-github-api-version", API_VERSION_HEADER);
-
     if let Some(interaction_type) = interaction_type {
         builder
             .header("x-initiator", "agent")

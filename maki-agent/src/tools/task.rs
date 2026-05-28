@@ -87,7 +87,9 @@ impl Task {
 
         let mut system = vars.apply(prompt).into_owned();
         let cwd_owned = vars.apply("{cwd}").into_owned();
-        let text = smol::unblock(move || agent::load_instruction_text(&cwd_owned)).await;
+        let text = tokio::task::spawn_blocking(move || agent::load_instruction_text(&cwd_owned))
+            .await
+            .map_err(|e| format!("task failed: {e}"))?;
         system.push_str(&text);
         let snapshot = ToolRegistry::native().iter();
         let tool_names: Vec<String> = snapshot
@@ -111,7 +113,7 @@ impl Task {
         let sub_event_tx = EventSender::new(sub_tx, ctx.event_tx.run_id());
         let parent_tx = ctx.event_tx.clone();
         let (answer_tx, answer_rx) = flume::unbounded::<String>();
-        let answer_rx = Arc::new(async_lock::Mutex::new(answer_rx));
+        let answer_rx = Arc::new(tokio::sync::Mutex::new(answer_rx));
         let subagent_info = ctx.tool_use_id.as_ref().map(|id| SubagentInfo {
             parent_tool_use_id: id.to_owned(),
             name: self.description.clone(),
@@ -119,7 +121,7 @@ impl Task {
             model: Some(model.spec()),
             answer_tx: Some(answer_tx),
         });
-        smol::spawn(async move {
+        tokio::spawn(async move {
             while let Ok(mut envelope) = sub_rx.recv_async().await {
                 if matches!(
                     envelope.event,
@@ -134,8 +136,7 @@ impl Task {
                 envelope.subagent = subagent_info.clone();
                 let _ = parent_tx.send_envelope(envelope);
             }
-        })
-        .detach();
+        });
 
         let (child_trigger, child_cancel) = ctx.cancel.child();
         let input = AgentInput {

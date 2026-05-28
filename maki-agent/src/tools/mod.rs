@@ -185,7 +185,7 @@ pub struct ToolContext {
     pub event_tx: EventSender,
     pub mode: AgentMode,
     pub tool_use_id: Option<String>,
-    pub user_response_rx: Option<Arc<async_lock::Mutex<flume::Receiver<String>>>>,
+    pub user_response_rx: Option<Arc<tokio::sync::Mutex<flume::Receiver<String>>>>,
     pub loaded_instructions: LoadedInstructions,
     pub cancel: CancelToken,
     pub mcp: Option<McpHandle>,
@@ -587,7 +587,7 @@ pub(crate) fn interpreter_ctx(
     cancel: CancelToken,
     permissions: Arc<PermissionManager>,
     file_tracker: Arc<FileReadTracker>,
-    user_response_rx: Option<Arc<async_lock::Mutex<flume::Receiver<String>>>>,
+    user_response_rx: Option<Arc<tokio::sync::Mutex<flume::Receiver<String>>>>,
 ) -> ToolContext {
     static PROVIDER: LazyLock<Arc<dyn Provider>> = LazyLock::new(|| Arc::new(NullProvider));
     static MODEL: LazyLock<Arc<Model>> =
@@ -775,109 +775,99 @@ mod tests {
         assert!(result.ends_with("[truncated]"));
     }
 
-    #[test]
-    fn read_with_offset_and_limit() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("test.txt");
-            let content = (1..=10)
-                .map(|i| format!("line{i}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            fs::write(&path, &content).unwrap();
-            let path = path.to_string_lossy().to_string();
-            let ctx = stub_ctx(&AgentMode::Build);
+    #[tokio::test]
+    async fn read_with_offset_and_limit() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        let content = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, &content).unwrap();
+        let path = path.to_string_lossy().to_string();
+        let ctx = stub_ctx(&AgentMode::Build);
 
-            let r = read::Read::parse_input(&json!({"path": path})).unwrap();
-            let full = r.execute(&ctx).await.unwrap().as_text().to_string();
-            assert!(full.contains("1: line1"));
-            assert!(full.contains("10: line10"));
+        let r = read::Read::parse_input(&json!({"path": path})).unwrap();
+        let full = r.execute(&ctx).await.unwrap().as_text().to_string();
+        assert!(full.contains("1: line1"));
+        assert!(full.contains("10: line10"));
 
-            let r =
-                read::Read::parse_input(&json!({"path": path, "offset": 3, "limit": 2})).unwrap();
-            let slice = r.execute(&ctx).await.unwrap().as_text().to_string();
-            assert!(slice.contains("3: line3"));
-            assert!(slice.contains("4: line4"));
-            assert!(!slice.contains("5: line5"));
-        });
+        let r =
+            read::Read::parse_input(&json!({"path": path, "offset": 3, "limit": 2})).unwrap();
+        let slice = r.execute(&ctx).await.unwrap().as_text().to_string();
+        assert!(slice.contains("3: line3"));
+        assert!(slice.contains("4: line4"));
+        assert!(!slice.contains("5: line5"));
     }
 
-    #[test]
-    fn grep_finds_filters_and_misses() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            fs::write(dir.path().join("a.txt"), "hello world\ngoodbye world").unwrap();
-            fs::write(dir.path().join("b.rs"), "hello rust").unwrap();
-            let dir_str = dir.path().to_string_lossy().to_string();
-            let ctx = stub_ctx(&AgentMode::Build);
+    #[tokio::test]
+    async fn grep_finds_filters_and_misses() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), "hello world\ngoodbye world").unwrap();
+        fs::write(dir.path().join("b.rs"), "hello rust").unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let ctx = stub_ctx(&AgentMode::Build);
 
-            let g = grep::Grep::parse_input(&json!({"pattern": "hello", "path": dir_str})).unwrap();
-            let hit = g.execute(&ctx).await.unwrap().as_text().to_string();
-            assert!(hit.contains("a.txt"));
-            assert!(hit.contains("b.rs"));
+        let g = grep::Grep::parse_input(&json!({"pattern": "hello", "path": dir_str})).unwrap();
+        let hit = g.execute(&ctx).await.unwrap().as_text().to_string();
+        assert!(hit.contains("a.txt"));
+        assert!(hit.contains("b.rs"));
 
-            let g = grep::Grep::parse_input(
-                &json!({"pattern": "hello", "path": dir_str, "include": "*.rs"}),
-            )
+        let g = grep::Grep::parse_input(
+            &json!({"pattern": "hello", "path": dir_str, "include": "*.rs"}),
+        )
+        .unwrap();
+        let filtered = g.execute(&ctx).await.unwrap().as_text().to_string();
+        assert!(filtered.contains("b.rs"));
+        assert!(!filtered.contains("a.txt"));
+
+        let g = grep::Grep::parse_input(&json!({"pattern": "zzzznotfound", "path": dir_str}))
             .unwrap();
-            let filtered = g.execute(&ctx).await.unwrap().as_text().to_string();
-            assert!(filtered.contains("b.rs"));
-            assert!(!filtered.contains("a.txt"));
-
-            let g = grep::Grep::parse_input(&json!({"pattern": "zzzznotfound", "path": dir_str}))
-                .unwrap();
-            assert_eq!(g.execute(&ctx).await.unwrap().as_text(), NO_FILES_FOUND);
-        });
+        assert_eq!(g.execute(&ctx).await.unwrap().as_text(), NO_FILES_FOUND);
     }
 
-    #[test]
-    fn grep_single_file_preserves_filename() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let file = dir.path().join("demo.rs");
-            fs::write(&file, "fn main() {}\n").unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
+    #[tokio::test]
+    async fn grep_single_file_preserves_filename() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("demo.rs");
+        fs::write(&file, "fn main() {}\n").unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
 
-            let path = file.to_string_lossy().to_string();
-            let g = grep::Grep::parse_input(&json!({"pattern": "fn main", "path": path})).unwrap();
-            let out = g.execute(&ctx).await.unwrap();
-            let crate::ToolOutput::GrepResult { entries } = &out else {
-                panic!("expected GrepResult, got: {out:?}");
-            };
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].path, "demo.rs");
-        });
+        let path = file.to_string_lossy().to_string();
+        let g = grep::Grep::parse_input(&json!({"pattern": "fn main", "path": path})).unwrap();
+        let out = g.execute(&ctx).await.unwrap();
+        let crate::ToolOutput::GrepResult { entries } = &out else {
+            panic!("expected GrepResult, got: {out:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "demo.rs");
     }
 
-    #[test]
-    fn grep_skips_binary_files() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            fs::write(dir.path().join("text.txt"), "findme here").unwrap();
-            fs::write(dir.path().join("binary.bin"), b"findme \x00 binary content").unwrap();
-            let dir_str = dir.path().to_string_lossy().to_string();
-            let ctx = stub_ctx(&AgentMode::Build);
+    #[tokio::test]
+    async fn grep_skips_binary_files() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("text.txt"), "findme here").unwrap();
+        fs::write(dir.path().join("binary.bin"), b"findme \x00 binary content").unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let ctx = stub_ctx(&AgentMode::Build);
 
-            let g =
-                grep::Grep::parse_input(&json!({"pattern": "findme", "path": dir_str})).unwrap();
-            let out = g.execute(&ctx).await.unwrap().as_text().to_string();
-            assert!(out.contains("text.txt"));
-            assert!(!out.contains("binary.bin"));
-        });
+        let g =
+            grep::Grep::parse_input(&json!({"pattern": "findme", "path": dir_str})).unwrap();
+        let out = g.execute(&ctx).await.unwrap().as_text().to_string();
+        assert!(out.contains("text.txt"));
+        assert!(!out.contains("binary.bin"));
     }
 
-    #[test]
-    fn grep_invalid_regex_returns_error() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let dir_str = dir.path().to_string_lossy().to_string();
-            let ctx = stub_ctx(&AgentMode::Build);
+    #[tokio::test]
+    async fn grep_invalid_regex_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let ctx = stub_ctx(&AgentMode::Build);
 
-            let g =
-                grep::Grep::parse_input(&json!({"pattern": "[invalid", "path": dir_str})).unwrap();
-            let err = g.execute(&ctx).await.unwrap_err();
-            assert!(err.contains(grep::INVALID_REGEX), "got: {err}");
-        });
+        let g =
+            grep::Grep::parse_input(&json!({"pattern": "[invalid", "path": dir_str})).unwrap();
+        let err = g.execute(&ctx).await.unwrap_err();
+        assert!(err.contains(grep::INVALID_REGEX), "got: {err}");
     }
 
     /// Every registered tool, poked with four shapes of garbage, should come
@@ -966,54 +956,53 @@ mod tests {
     #[test_case("write",     |p: &str, _: &str| json!({"path": p, "content": "plan"})                          , |_: &str, o: &str| json!({"path": o, "content": "x"})                           ; "write")]
     #[test_case("edit",      |p: &str, _: &str| json!({"path": p, "old_string": "old", "new_string": "new"})  , |_: &str, o: &str| json!({"path": o, "old_string": "old", "new_string": "new"})  ; "edit")]
     #[test_case("multiedit", |p: &str, _: &str| json!({"path": p, "edits": [{"old_string": "old", "new_string": "new"}]}) , |_: &str, o: &str| json!({"path": o, "edits": [{"old_string": "old", "new_string": "new"}]}) ; "multiedit")]
-    fn plan_mode_restricts_mutations(
+    #[tokio::test]
+    async fn plan_mode_restricts_mutations(
         tool: &str,
         plan_input: fn(&str, &str) -> Value,
         other_input: fn(&str, &str) -> Value,
     ) {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let plan_path = dir.path().join("plan.md");
-            fs::write(&plan_path, "old").unwrap();
-            let other = dir.path().join("other.rs");
-            fs::write(&other, "old").unwrap();
-            let mode = AgentMode::Plan(plan_path.clone());
-            let ctx = stub_ctx(&mode);
+        let dir = TempDir::new().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        fs::write(&plan_path, "old").unwrap();
+        let other = dir.path().join("other.rs");
+        fs::write(&other, "old").unwrap();
+        let mode = AgentMode::Plan(plan_path.clone());
+        let ctx = stub_ctx(&mode);
 
-            let plan_str = plan_path.to_str().unwrap();
-            let other_str = other.to_str().unwrap();
+        let plan_str = plan_path.to_str().unwrap();
+        let other_str = other.to_str().unwrap();
 
-            ctx.file_tracker.record_read(Path::new(plan_str));
-            ctx.file_tracker.record_read(Path::new(other_str));
+        ctx.file_tracker.record_read(Path::new(plan_str));
+        ctx.file_tracker.record_read(Path::new(other_str));
 
-            let registry = ToolRegistry::native();
-            let blocked = tool_dispatch::run(
-                registry,
-                None,
-                "t1".into(),
-                tool,
-                &other_input(plan_str, other_str),
-                &ctx,
-                tool_dispatch::Emit::Silent,
-            )
-            .await;
-            assert!(
-                blocked.is_error,
-                "{tool} should be blocked on non-plan file"
-            );
+        let registry = ToolRegistry::native();
+        let blocked = tool_dispatch::run(
+            registry,
+            None,
+            "t1".into(),
+            tool,
+            &other_input(plan_str, other_str),
+            &ctx,
+            tool_dispatch::Emit::Silent,
+        )
+        .await;
+        assert!(
+            blocked.is_error,
+            "{tool} should be blocked on non-plan file"
+        );
 
-            let allowed = tool_dispatch::run(
-                registry,
-                None,
-                "t2".into(),
-                tool,
-                &plan_input(plan_str, other_str),
-                &ctx,
-                tool_dispatch::Emit::Silent,
-            )
-            .await;
-            assert!(!allowed.is_error, "{tool} should be allowed on plan file");
-        });
+        let allowed = tool_dispatch::run(
+            registry,
+            None,
+            "t2".into(),
+            tool,
+            &plan_input(plan_str, other_str),
+            &ctx,
+            tool_dispatch::Emit::Silent,
+        )
+        .await;
+        assert!(!allowed.is_error, "{tool} should be allowed on plan file");
     }
 
     #[test_case(

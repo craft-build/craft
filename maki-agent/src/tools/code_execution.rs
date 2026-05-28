@@ -21,9 +21,8 @@ use crate::cancel::CancelToken;
 use crate::permissions::PermissionManager;
 use crate::task_set::TaskSet;
 use crate::{AgentConfig, AgentEvent, AgentMode, EventSender, ToolInput, ToolOutput};
-use async_lock::Mutex;
+use tokio::sync::Mutex;
 
-use smol::future::block_on;
 
 use super::truncate_output;
 use super::{Deadline, FileReadTracker};
@@ -88,51 +87,55 @@ impl CodeExecution {
         // We race cancel against the blocking thread. If cancel wins, the Python thread
         // keeps running till it finishes. Threads can not be killed safely.
         ctx.cancel
-            .race(smol::unblock(move || {
-                let tools = build_tool_fns(&env);
-                let resolver = build_async_resolver(&env);
-                let code = format!("{PREAMBLE}{code}");
+            .race(async {
+                tokio::task::spawn_blocking(move || {
+                    let tools = build_tool_fns(&env);
+                    let resolver = build_async_resolver(&env);
+                    let code = format!("{PREAMBLE}{code}");
 
-                let result = if let Some(ref id) = tool_use_id {
-                    let mut pending = String::new();
-                    let mut last_flush = Instant::now();
-                    runner::run_streaming(&code, &tools, Some(&resolver), limits, &mut |line| {
-                        pending.push_str(line);
-                        if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL && !pending.is_empty() {
-                            env.event_tx.try_send(AgentEvent::ToolOutput {
-                                id: id.to_string(),
-                                content: pending.clone(),
-                            });
-                            pending.clear();
-                            last_flush = Instant::now();
-                        }
-                    })
-                } else {
-                    runner::run(&code, &tools, Some(&resolver), limits)
-                }
-                .map_err(|e| e.to_string())?;
+                    let result = if let Some(ref id) = tool_use_id {
+                        let mut pending = String::new();
+                        let mut last_flush = Instant::now();
+                        runner::run_streaming(&code, &tools, Some(&resolver), limits, &mut |line| {
+                            pending.push_str(line);
+                            if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL && !pending.is_empty() {
+                                env.event_tx.try_send(AgentEvent::ToolOutput {
+                                    id: id.to_string(),
+                                    content: pending.clone(),
+                                });
+                                pending.clear();
+                                last_flush = Instant::now();
+                            }
+                        })
+                    } else {
+                        runner::run(&code, &tools, Some(&resolver), limits)
+                    }
+                    .map_err(|e| e.to_string())?;
 
-                let mut output = String::new();
-                if !result.stdout.is_empty() {
-                    output.push_str(result.stdout.trim_end());
-                    output.push('\n');
-                }
-                if let Some(ref val) = result.output {
-                    if !output.is_empty() {
+                    let mut output = String::new();
+                    if !result.stdout.is_empty() {
+                        output.push_str(result.stdout.trim_end());
                         output.push('\n');
                     }
-                    let _ = write!(output, "return: {val}");
-                }
-                if output.is_empty() {
-                    output.push_str("(no output)");
-                }
+                    if let Some(ref val) = result.output {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        let _ = write!(output, "return: {val}");
+                    }
+                    if output.is_empty() {
+                        output.push_str("(no output)");
+                    }
 
-                Ok(ToolOutput::Plain(truncate_output(
-                    output,
-                    env.config.max_output_lines,
-                    env.config.max_output_bytes,
-                )))
-            }))
+                    Ok(ToolOutput::Plain(truncate_output(
+                        output,
+                        env.config.max_output_lines,
+                        env.config.max_output_bytes,
+                    )))
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking failed: {e}"))?
+            })
             .await?
     }
 
@@ -211,7 +214,7 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
                     );
                     inner_ctx.deadline = deadline;
                     inner_ctx.config = config.clone();
-                    let done = block_on(crate::agent::tool_dispatch::run(
+                    let done = tokio::runtime::Handle::current().block_on(crate::agent::tool_dispatch::run(
                         ToolRegistry::native(),
                         inner_ctx.mcp.as_ref(),
                         String::new(),
@@ -247,7 +250,7 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
         let config = config.clone();
         let file_tracker = Arc::clone(&file_tracker);
         let user_response_rx = user_response_rx.clone();
-        smol::future::block_on(async {
+        tokio::runtime::Handle::current().block_on(async {
             let call_ids: Vec<u32> = pending_calls.iter().map(|pc| pc.call_id).collect();
             let mut set = TaskSet::new();
             for pc in pending_calls {
@@ -351,22 +354,20 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn read_tool_via_interpreter() {
-        smol::block_on(async {
-            let dir = tempfile::TempDir::new().unwrap();
-            let path = dir.path().join("test.txt");
-            fs::write(&path, "line1\nline2\n").unwrap();
-            let path_str = path.to_string_lossy();
+    #[tokio::test]
+    async fn read_tool_via_interpreter() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "line1\nline2\n").unwrap();
+        let path_str = path.to_string_lossy();
 
-            let ctx = stub_ctx(&AgentMode::Build);
-            let ci = CodeExecution {
-                code: format!("result = await read(path='{path_str}')\nprint(result)"),
-                timeout: None,
-            };
-            let output = ci.execute(&ctx).await.unwrap().as_text();
-            assert!(output.contains("line1"));
-        });
+        let ctx = stub_ctx(&AgentMode::Build);
+        let ci = CodeExecution {
+            code: format!("result = await read(path='{path_str}')\nprint(result)"),
+            timeout: None,
+        };
+        let output = ci.execute(&ctx).await.unwrap().as_text();
+        assert!(output.contains("line1"));
     }
 
     #[test_case(&[], &[("path".into(), json!("/foo"))],  json!({"path": "/foo"}) ; "kwargs")]
@@ -376,19 +377,17 @@ mod tests {
         assert_eq!(build_tool_input(args, kwargs).unwrap(), expected);
     }
 
-    #[test]
-    fn cancel_returns_error() {
-        smol::block_on(async {
-            let (trigger, cancel) = crate::cancel::CancelToken::new();
-            let mut ctx = stub_ctx(&AgentMode::Build);
-            ctx.cancel = cancel;
-            let ci = CodeExecution {
-                code: "1 + 1".into(),
-                timeout: None,
-            };
-            trigger.cancel();
-            let result = ci.execute(&ctx).await;
-            assert!(result.is_err());
-        });
+    #[tokio::test]
+    async fn cancel_returns_error() {
+        let (trigger, cancel) = crate::cancel::CancelToken::new();
+        let mut ctx = stub_ctx(&AgentMode::Build);
+        ctx.cancel = cancel;
+        let ci = CodeExecution {
+            code: "1 + 1".into(),
+            timeout: None,
+        };
+        trigger.cancel();
+        let result = ci.execute(&ctx).await;
+        assert!(result.is_err());
     }
 }

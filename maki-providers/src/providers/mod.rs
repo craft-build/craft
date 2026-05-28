@@ -2,12 +2,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures_lite::StreamExt;
-use futures_lite::io::AsyncBufRead;
-use isahc::config::Configurable;
+use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::AgentError;
+
+pub(crate) fn block_on<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    rt.block_on(future)
+}
 
 pub(crate) mod anthropic;
 pub(crate) mod copilot;
@@ -21,8 +27,6 @@ pub(crate) mod openai;
 pub(crate) mod openai_compat;
 pub(crate) mod synthetic;
 pub(crate) mod zai;
-
-const LOW_SPEED_BYTES_PER_SEC: u32 = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timeouts {
@@ -118,32 +122,28 @@ impl SseErrorPayload {
     }
 }
 
-pub(crate) async fn next_sse_line<R: AsyncBufRead + Unpin>(
-    lines: &mut futures_lite::io::Lines<R>,
+pub(crate) async fn next_sse_line<R: futures::io::AsyncBufRead + Unpin>(
+    lines: &mut futures::io::Lines<R>,
     deadline: &mut Instant,
     stream_timeout: Duration,
 ) -> Result<Option<String>, AgentError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
-    let result = futures_lite::future::or(
-        async { lines.next().await.transpose().map_err(AgentError::from) },
-        async {
-            smol::Timer::after(remaining).await;
-            Err(AgentError::Timeout {
-                secs: stream_timeout.as_secs(),
-            })
-        },
-    )
-    .await;
+    let result = tokio::select! {
+        line = lines.next() => line.transpose().map_err(AgentError::from),
+        _ = tokio::time::sleep(remaining) => Err(AgentError::Timeout {
+            secs: stream_timeout.as_secs(),
+        }),
+    };
     if let Ok(Some(_)) = &result {
         *deadline = Instant::now() + stream_timeout;
     }
     result
 }
 
-pub(crate) fn http_client(timeouts: Timeouts) -> isahc::HttpClient {
-    isahc::HttpClient::builder()
+pub(crate) fn http_client(timeouts: Timeouts) -> reqwest::Client {
+    reqwest::Client::builder()
         .connect_timeout(timeouts.connect)
-        .low_speed_timeout(LOW_SPEED_BYTES_PER_SEC, timeouts.low_speed)
+        .timeout(timeouts.stream)
         .build()
         .expect("failed to build HTTP client")
 }
@@ -227,7 +227,7 @@ impl KeyPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_lite::io::AsyncBufReadExt;
+    use futures::io::AsyncBufReadExt;
     use test_case::test_case;
 
     #[test_case("a b", "a%20b" ; "space")]
@@ -239,7 +239,7 @@ mod tests {
 
     struct NeverReader;
 
-    impl futures_lite::io::AsyncRead for NeverReader {
+    impl futures::io::AsyncRead for NeverReader {
         fn poll_read(
             self: std::pin::Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
@@ -249,7 +249,7 @@ mod tests {
         }
     }
 
-    impl futures_lite::io::AsyncBufRead for NeverReader {
+    impl futures::io::AsyncBufRead for NeverReader {
         fn poll_fill_buf(
             self: std::pin::Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
@@ -260,17 +260,15 @@ mod tests {
         fn consume(self: std::pin::Pin<&mut Self>, _amt: usize) {}
     }
 
-    #[test]
-    fn next_sse_line_expired_deadline_returns_timeout() {
-        smol::block_on(async {
-            let mut lines = NeverReader.lines();
-            let mut past = Instant::now() - Duration::from_secs(1);
-            let stream_timeout = Duration::from_secs(300);
-            let err = next_sse_line(&mut lines, &mut past, stream_timeout)
-                .await
-                .unwrap_err();
-            assert!(matches!(err, AgentError::Timeout { .. }));
-        })
+    #[tokio::test]
+    async fn next_sse_line_expired_deadline_returns_timeout() {
+        let mut lines = NeverReader.lines();
+        let mut past = Instant::now() - Duration::from_secs(1);
+        let stream_timeout = Duration::from_secs(300);
+        let err = next_sse_line(&mut lines, &mut past, stream_timeout)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::Timeout { .. }));
     }
 
     #[test]

@@ -383,107 +383,95 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_batch_returns_error() {
-        smol::block_on(async {
-            let ctx = stub_ctx(&AgentMode::Build);
-            let batch = Batch::parse_input(&json!({"tool_calls": []})).unwrap();
-            assert!(batch.execute(&ctx).await.is_err());
-        });
+    #[tokio::test]
+    async fn empty_batch_returns_error() {
+        let ctx = stub_ctx(&AgentMode::Build);
+        let batch = Batch::parse_input(&json!({"tool_calls": []})).unwrap();
+        assert!(batch.execute(&ctx).await.is_err());
     }
 
-    #[test]
-    fn nested_batch_rejected() {
-        smol::block_on(async {
-            let (entries, _) = run_batch(json!({
-                "tool_calls": [{"tool": "batch", "parameters": {"tool_calls": []}}]
-            }))
-            .await;
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].status, BatchToolStatus::Error);
-            assert_eq!(entries[0].tool, "batch");
-        });
+    #[tokio::test]
+    async fn nested_batch_rejected() {
+        let (entries, _) = run_batch(json!({
+            "tool_calls": [{"tool": "batch", "parameters": {"tool_calls": []}}]
+        }))
+        .await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, BatchToolStatus::Error);
+        assert_eq!(entries[0].tool, "batch");
     }
 
-    #[test]
-    fn parallel_execution_with_mixed_results() {
-        smol::block_on(async {
-            let dir = tempfile::TempDir::new().unwrap();
-            let f = dir.path().join("a.txt");
-            std::fs::write(&f, "content").unwrap();
+    #[tokio::test]
+    async fn parallel_execution_with_mixed_results() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "content").unwrap();
 
-            let (entries, text) = run_batch(json!({
-                "tool_calls": [
-                    {"tool": "read", "parameters": {"path": f.to_str().unwrap()}},
-                    {"tool": "read", "parameters": {"path": "/nonexistent/path.txt"}}
-                ]
-            }))
-            .await;
-            assert_eq!(entries.len(), 2);
-            assert_eq!(entries[0].status, BatchToolStatus::Success);
-            assert_eq!(entries[1].status, BatchToolStatus::Error);
-            assert!(text.contains("content"));
-        });
+        let (entries, text) = run_batch(json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"path": f.to_str().unwrap()}},
+                {"tool": "read", "parameters": {"path": "/nonexistent/path.txt"}}
+            ]
+        }))
+        .await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].status, BatchToolStatus::Success);
+        assert_eq!(entries[1].status, BatchToolStatus::Error);
+        assert!(text.contains("content"));
     }
 
-    #[test]
-    fn cancel_stops_batch() {
-        smol::block_on(async {
-            let (trigger, cancel) = crate::cancel::CancelToken::new();
-            let mut ctx = stub_ctx(&AgentMode::Build);
-            ctx.cancel = cancel;
-            let batch = Batch::parse_input(&json!({
-                "tool_calls": [
-                    {"tool": "read", "parameters": {"path": "/dev/null"}}
-                ]
-            }))
-            .unwrap();
-            trigger.cancel();
-            let err = batch.execute(&ctx).await.unwrap_err();
-            assert!(err.contains("cancelled"));
-        });
+    #[tokio::test]
+    async fn cancel_stops_batch() {
+        let (trigger, cancel) = crate::cancel::CancelToken::new();
+        let mut ctx = stub_ctx(&AgentMode::Build);
+        ctx.cancel = cancel;
+        let batch = Batch::parse_input(&json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"path": "/dev/null"}}
+            ]
+        }))
+        .unwrap();
+        trigger.cancel();
+        let err = batch.execute(&ctx).await.unwrap_err();
+        assert!(err.contains("cancelled"));
     }
 
-    #[test]
-    fn exceeds_max_batch_size_discards_excess() {
-        smol::block_on(async {
-            let calls: Vec<Value> = (0..MAX_BATCH_SIZE + 2)
-                .map(|_| json!({"tool": "read", "parameters": {"path": "/tmp"}}))
-                .collect();
-            let (entries, _) = run_batch(json!({"tool_calls": calls})).await;
-            assert_eq!(entries.len(), MAX_BATCH_SIZE + 2);
-            let discarded: Vec<_> = entries[MAX_BATCH_SIZE..].iter().collect();
-            assert!(discarded.iter().all(|e| e.status == BatchToolStatus::Error));
-        });
+    #[tokio::test]
+    async fn exceeds_max_batch_size_discards_excess() {
+        let calls: Vec<Value> = (0..MAX_BATCH_SIZE + 2)
+            .map(|_| json!({"tool": "read", "parameters": {"path": "/tmp"}}))
+            .collect();
+        let (entries, _) = run_batch(json!({"tool_calls": calls})).await;
+        assert_eq!(entries.len(), MAX_BATCH_SIZE + 2);
+        let discarded: Vec<_> = entries[MAX_BATCH_SIZE..].iter().collect();
+        assert!(discarded.iter().all(|e| e.status == BatchToolStatus::Error));
     }
 
-    #[test]
-    fn inner_tool_emits_tool_done_event() {
+    #[tokio::test]
+    async fn inner_tool_emits_tool_done_event() {
         use crate::tools::test_support::stub_ctx_with;
         use crate::{Envelope, EventSender};
 
-        smol::block_on(async {
-            let dir = tempfile::TempDir::new().unwrap();
-            let f = dir.path().join("hello.txt");
-            std::fs::write(&f, "hello").unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("hello.txt");
+        std::fs::write(&f, "hello").unwrap();
 
-            let (tx, rx) = flume::unbounded::<Envelope>();
-            let event_tx = EventSender::new(tx, 0);
-            let ctx = stub_ctx_with(&AgentMode::Build, Some(&event_tx), None);
-            execute_batch(
-                &ctx,
-                json!({
-                    "tool_calls": [{"tool": "read", "parameters": {"path": f.to_str().unwrap()}}]
-                }),
-            )
-            .await;
+        let (tx, rx) = flume::unbounded::<Envelope>();
+        let event_tx = EventSender::new(tx, 0);
+        let ctx = stub_ctx_with(&AgentMode::Build, Some(&event_tx), None);
+        execute_batch(
+            &ctx,
+            json!({
+                "tool_calls": [{"tool": "read", "parameters": {"path": f.to_str().unwrap()}}]
+            }),
+        )
+        .await;
 
-            assert!(
-                rx.drain()
-                    .any(|env| matches!(&env.event, AgentEvent::ToolDone(done) if !done.is_error)),
-                "batch inner tool must emit ToolDone"
-            );
-        });
+        assert!(
+            rx.drain()
+                .any(|env| matches!(&env.event, AgentEvent::ToolDone(done) if !done.is_error)),
+            "batch inner tool must emit ToolDone"
+        );
     }
 
     #[test]
@@ -550,22 +538,20 @@ mod tests {
         assert!(Batch::parse_input(&empty).is_err());
     }
 
-    #[test]
-    fn flat_batch_entries_actually_execute() {
-        smol::block_on(async {
-            let dir = tempfile::TempDir::new().unwrap();
-            std::fs::write(dir.path().join("a.txt"), "hello world").unwrap();
-            let dir_str = dir.path().to_string_lossy().to_string();
+    #[tokio::test]
+    async fn flat_batch_entries_actually_execute() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello world").unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
 
-            let (entries, text) = run_batch(json!({
-                "tool_calls": [
-                    {"tool": "grep", "path": dir_str, "pattern": "hello"}
-                ]
-            }))
-            .await;
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].status, BatchToolStatus::Success);
-            assert!(text.contains("a.txt"));
-        });
+        let (entries, text) = run_batch(json!({
+            "tool_calls": [
+                {"tool": "grep", "path": dir_str, "pattern": "hello"}
+            ]
+        }))
+        .await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, BatchToolStatus::Success);
+        assert!(text.contains("a.txt"));
     }
 }

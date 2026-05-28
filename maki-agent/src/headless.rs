@@ -34,7 +34,7 @@ pub struct HeadlessHandle {
     pub tool_names: Vec<String>,
     pub session_id: String,
     pub cwd: String,
-    pub task: smol::Task<()>,
+    pub task: tokio::task::JoinHandle<()>,
 }
 
 pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
@@ -57,7 +57,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
 
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    let task = smol::spawn({
+    let task = tokio::spawn({
         let session_id = session_id.clone();
         let mcp_shutdown = params.mcp_handle.clone();
         let working_dir_path = params.initial_wd.clone();

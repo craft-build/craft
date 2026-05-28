@@ -1,11 +1,9 @@
-use std::io::Read;
-
-use isahc::HttpClient;
-use isahc::http::Request;
+use reqwest::Client;
 use serde::Deserialize;
 
 use super::OAuthError;
 
+#[expect(dead_code)]
 const MAX_RESPONSE_BODY: usize = 1_048_576;
 
 #[derive(Debug)]
@@ -117,7 +115,7 @@ pub fn validate_auth_server(meta: &AuthServerMetadata) -> Result<(), OAuthError>
 }
 
 pub async fn discover_resource_metadata(
-    client: &HttpClient,
+    client: &Client,
     server_url: &str,
     www_auth: Option<&WwwAuthenticateInfo>,
 ) -> Result<ResourceMetadata, OAuthError> {
@@ -136,7 +134,7 @@ pub async fn discover_resource_metadata(
 }
 
 pub async fn discover_auth_server(
-    client: &HttpClient,
+    client: &Client,
     issuer_url: &str,
 ) -> Result<AuthServerMetadata, OAuthError> {
     let parts = parse_url(issuer_url);
@@ -173,38 +171,28 @@ pub async fn discover_auth_server(
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(
-    client: &HttpClient,
+    client: &Client,
     url: &str,
 ) -> Result<T, OAuthError> {
-    let req = Request::get(url)
+    let response = client
+        .get(url)
         .header("Accept", "application/json")
-        .body(())
-        .map_err(|e| OAuthError::Other(e.to_string()))?;
+        .send()
+        .await
+        .map_err(|e| OAuthError::Network(e.to_string()))?;
 
-    let mut response = smol::unblock({
-        let client = client.clone();
-        move || {
-            client
-                .send(req)
-                .map_err(|e| OAuthError::Network(e.to_string()))
-        }
-    })
-    .await?;
-
-    if !response.status().is_success() {
-        let mut body = String::new();
-        let _ = response.body_mut().read_to_string(&mut body);
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
         return Err(OAuthError::ServerRejected {
-            status: response.status().as_u16(),
+            status: status.as_u16(),
             body,
         });
     }
 
-    let mut body = String::new();
-    response
-        .body_mut()
-        .take(MAX_RESPONSE_BODY as u64)
-        .read_to_string(&mut body)
+    let body = response
+        .text()
+        .await
         .map_err(|e| OAuthError::Network(e.to_string()))?;
     serde_json::from_str(&body).map_err(|e| OAuthError::InvalidResponse(e.to_string()))
 }

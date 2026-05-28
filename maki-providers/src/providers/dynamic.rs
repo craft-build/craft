@@ -463,7 +463,7 @@ impl DynamicProvider {
         Box::pin(async move {
             let script_path = self.script_path;
             let auth = self.auth.clone();
-            smol::unblock(move || {
+            tokio::task::spawn_blocking(move || {
                 let stdout = run_script(script_path, subcommand, SCRIPT_TIMEOUT)?;
                 let parsed: ScriptResolvedAuth =
                     serde_json::from_str(&stdout).map_err(|e| AgentError::Config {
@@ -476,6 +476,7 @@ impl DynamicProvider {
                 Ok(())
             })
             .await
+            .map_err(|e| AgentError::Config { message: e.to_string() })?
         })
     }
 }

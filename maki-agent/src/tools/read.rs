@@ -47,7 +47,7 @@ impl Read {
         let max_output_lines = ctx.config.max_output_lines;
         let max_line_bytes = ctx.config.max_line_bytes;
         let file_tracker = ctx.file_tracker.clone();
-        smol::unblock(move || {
+        tokio::task::spawn_blocking(move || {
             let cwd = std::env::current_dir().ok();
             let p = Path::new(&path);
             if p.is_dir() {
@@ -89,6 +89,7 @@ impl Read {
             })
         })
         .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     fn list_dir(

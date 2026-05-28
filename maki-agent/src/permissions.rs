@@ -308,7 +308,7 @@ impl PermissionManager {
         tool: &str,
         scopes: &crate::tools::PermissionScopes,
         event_tx: &EventSender,
-        user_response_rx: Option<&async_lock::Mutex<flume::Receiver<String>>>,
+        user_response_rx: Option<&tokio::sync::Mutex<flume::Receiver<String>>>,
         request_id: &str,
         cancel: &crate::CancelToken,
     ) -> Result<(), PermissionError> {

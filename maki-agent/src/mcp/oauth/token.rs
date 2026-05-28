@@ -1,14 +1,11 @@
-use std::io::Read;
-
-use isahc::HttpClient;
-use isahc::http::Request;
+use reqwest::Client;
 use maki_storage::auth::{OAuthTokens, now_millis};
 
 use super::OAuthError;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_code(
-    client: &HttpClient,
+    client: &Client,
     token_endpoint: &str,
     code: &str,
     redirect_uri: &str,
@@ -32,7 +29,7 @@ pub async fn exchange_code(
 }
 
 pub async fn refresh_token(
-    client: &HttpClient,
+    client: &Client,
     token_endpoint: &str,
     refresh_token: &str,
     client_id: &str,
@@ -52,7 +49,7 @@ pub async fn refresh_token(
 }
 
 async fn token_request(
-    client: &HttpClient,
+    client: &Client,
     token_endpoint: &str,
     params: &[(&str, &str)],
 ) -> Result<OAuthTokens, OAuthError> {
@@ -62,34 +59,26 @@ async fn token_request(
         .collect::<Vec<_>>()
         .join("&");
 
-    let req = Request::post(token_endpoint)
+    let response = client
+        .post(token_endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body.into_bytes())
-        .map_err(|e| OAuthError::Other(e.to_string()))?;
+        .send()
+        .await
+        .map_err(|e| OAuthError::Network(e.to_string()))?;
 
-    let mut response = smol::unblock({
-        let client = client.clone();
-        move || {
-            client
-                .send(req)
-                .map_err(|e| OAuthError::Network(e.to_string()))
-        }
-    })
-    .await?;
-
-    if !response.status().is_success() {
-        let mut body_str = String::new();
-        let _ = response.body_mut().read_to_string(&mut body_str);
+    let status = response.status();
+    if !status.is_success() {
+        let body_str = response.text().await.unwrap_or_default();
         return Err(OAuthError::ServerRejected {
-            status: response.status().as_u16(),
+            status: status.as_u16(),
             body: body_str,
         });
     }
 
-    let mut body_str = String::new();
-    response
-        .body_mut()
-        .read_to_string(&mut body_str)
+    let body_str = response
+        .text()
+        .await
         .map_err(|e| OAuthError::Network(e.to_string()))?;
 
     let resp: serde_json::Value =

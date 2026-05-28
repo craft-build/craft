@@ -1,8 +1,11 @@
 use std::time::{Duration, Instant};
 
 use flume::Sender;
-use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
-use isahc::{AsyncReadResponseExt, HttpClient, Request};
+use futures::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
+use futures::TryStreamExt;
+use reqwest::Client;
+use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_util::io::StreamReader;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{debug, warn};
@@ -23,7 +26,7 @@ pub(crate) struct OpenAiCompatConfig {
 }
 
 pub(crate) struct OpenAiCompatProvider {
-    client: HttpClient,
+    client: Client,
     config: &'static OpenAiCompatConfig,
     stream_timeout: Duration,
 }
@@ -37,7 +40,7 @@ impl OpenAiCompatProvider {
         }
     }
 
-    pub(crate) fn client(&self) -> &HttpClient {
+    pub(crate) fn client(&self) -> &Client {
         &self.client
     }
 
@@ -75,11 +78,9 @@ impl OpenAiCompatProvider {
         method: &str,
         path: &str,
         auth: &ResolvedAuth,
-    ) -> isahc::http::request::Builder {
+    ) -> reqwest::RequestBuilder {
         let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(format!("{base}{path}"));
+        let mut builder = self.client.request(method.parse().unwrap(), format!("{base}{path}"));
         for (key, value) in &auth.headers {
             builder = builder.header(key.as_str(), value.as_str());
         }
@@ -102,20 +103,22 @@ impl OpenAiCompatProvider {
             request = request.header(key.as_str(), value.as_str());
         }
 
-        let request = request.body(json_body)?;
-
         debug!(
             model = %model.id,
             provider = self.config.provider_name,
             "sending API request"
         );
 
-        let response = self.client.send_async(request).await?;
+        let response = request.body(json_body).send().await?;
         let status = response.status().as_u16();
 
         if status == 200 {
+            let stream = response.bytes_stream();
+            let reader = StreamReader::new(
+                stream.map_err(std::io::Error::other),
+            );
             parse_sse(
-                BufReader::new(response.into_body()),
+                BufReader::new(reader.compat()),
                 event_tx,
                 self.stream_timeout,
             )
@@ -126,8 +129,7 @@ impl OpenAiCompatProvider {
     }
 
     pub async fn do_list_models(&self, auth: &ResolvedAuth) -> Result<Vec<String>, AgentError> {
-        let request = self.build_request("GET", "/models", auth).body(())?;
-        let mut response = self.client.send_async(request).await?;
+        let response = self.build_request("GET", "/models", auth).send().await?;
         if response.status().as_u16() != 200 {
             return Err(AgentError::from_response(response).await);
         }
@@ -566,14 +568,13 @@ pub async fn parse_sse(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_lite::io::Cursor;
+    use futures::io::Cursor;
 
     const TEST_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
-    #[test]
-    fn parse_sse_text_and_usage() {
-        smol::block_on(async {
-            let sse = "\
+    #[tokio::test]
+    async fn parse_sse_text_and_usage() {
+        let sse = "\
 data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\
 \n\
 data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\
@@ -582,34 +583,31 @@ data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prom
 \n\
 data: [DONE]\n";
 
-            let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let (tx, rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
 
-            assert_eq!(resp.usage.input, 60);
-            assert_eq!(resp.usage.output, 10);
-            assert_eq!(resp.usage.cache_read, 40);
-            assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
-            assert!(
-                matches!(&resp.message.content[0], ContentBlock::Text { text } if text == "Hello world")
-            );
-            assert!(!resp.message.has_tool_calls());
+        assert_eq!(resp.usage.input, 60);
+        assert_eq!(resp.usage.cache_read, 40);
+        assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+        assert!(
+            matches!(&resp.message.content[0], ContentBlock::Text { text } if text == "Hello world")
+        );
+        assert!(!resp.message.has_tool_calls());
 
-            let mut deltas = Vec::new();
-            while let Ok(e) = rx.try_recv() {
-                if let ProviderEvent::TextDelta { text } = e {
-                    deltas.push(text);
-                }
+        let mut deltas = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let ProviderEvent::TextDelta { text } = e {
+                deltas.push(text);
             }
-            assert_eq!(deltas, vec!["Hello", " world"]);
-        })
+        }
+        assert_eq!(deltas, vec!["Hello", " world"]);
     }
 
-    #[test]
-    fn parse_sse_reasoning_and_content() {
-        smol::block_on(async {
-            let sse = "\
+    #[tokio::test]
+    async fn parse_sse_reasoning_and_content() {
+        let sse = "\
 data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me think\"}}]}\n\
 \n\
 data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"...\"}}]}\n\
@@ -620,30 +618,29 @@ data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prom
 \n\
 data: [DONE]\n";
 
-            let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let (tx, rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
 
-            assert!(
-                matches!(&resp.message.content[0], ContentBlock::Thinking { thinking, .. } if thinking == "Let me think...")
-            );
-            assert!(
-                matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello")
-            );
+        assert!(
+            matches!(&resp.message.content[0], ContentBlock::Thinking { thinking, .. } if thinking == "Let me think...")
+        );
+        assert!(
+            matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello")
+        );
 
-            let mut thinking = Vec::new();
-            let mut text_deltas = Vec::new();
-            while let Ok(e) = rx.try_recv() {
-                match e {
-                    ProviderEvent::ThinkingDelta { text } => thinking.push(text),
-                    ProviderEvent::TextDelta { text } => text_deltas.push(text),
-                    ProviderEvent::ToolUseStart { .. } => {}
-                }
+        let mut thinking = Vec::new();
+        let mut text_deltas = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            match e {
+                ProviderEvent::ThinkingDelta { text } => thinking.push(text),
+                ProviderEvent::TextDelta { text } => text_deltas.push(text),
+                ProviderEvent::ToolUseStart { .. } => {}
             }
-            assert_eq!(thinking, vec!["Let me think", "..."]);
-            assert_eq!(text_deltas, vec!["Hello"]);
-        })
+        }
+        assert_eq!(thinking, vec!["Let me think", "..."]);
+        assert_eq!(text_deltas, vec!["Hello"]);
     }
 
     #[test]
@@ -711,10 +708,9 @@ data: [DONE]\n";
         assert_eq!(tool["function"]["parameters"]["type"], "object");
     }
 
-    #[test]
-    fn parse_sse_multiple_parallel_tool_calls() {
-        smol::block_on(async {
-            let sse = "\
+    #[tokio::test]
+    async fn parse_sse_multiple_parallel_tool_calls() {
+        let sse = "\
 data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}\n\
 \n\
 data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\
@@ -727,82 +723,76 @@ data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{
 \n\
 data: [DONE]\n";
 
-            let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let (tx, rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
 
-            let tools: Vec<_> = resp.message.tool_uses().collect();
-            assert_eq!(tools.len(), 2);
-            assert_eq!(tools[0].0, "c1");
-            assert_eq!(tools[0].1, "bash");
-            assert_eq!(tools[0].2["command"], "ls");
-            assert_eq!(tools[1].0, "c2");
-            assert_eq!(tools[1].1, "read");
-            assert_eq!(tools[1].2["path"], "/tmp");
-            assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+        let tools: Vec<_> = resp.message.tool_uses().collect();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].0, "c1");
+        assert_eq!(tools[0].1, "bash");
+        assert_eq!(tools[0].2["command"], "ls");
+        assert_eq!(tools[1].0, "c2");
+        assert_eq!(tools[1].1, "read");
+        assert_eq!(tools[1].2["path"], "/tmp");
+        assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
 
-            let starts: Vec<_> = rx
-                .drain()
-                .filter_map(|e| match e {
-                    ProviderEvent::ToolUseStart { id, name } => Some((id, name)),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                starts,
-                vec![("c1".into(), "bash".into()), ("c2".into(), "read".into()),]
-            );
-        })
+        let starts: Vec<_> = rx
+            .drain()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolUseStart { id, name } => Some((id, name)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            vec![("c1".into(), "bash".into()), ("c2".into(), "read".into()),]
+        );
     }
 
-    #[test]
-    fn parse_sse_error_payload_returns_err() {
-        smol::block_on(async {
-            let sse = "\
+    #[tokio::test]
+    async fn parse_sse_error_payload_returns_err() {
+        let sse = "\
 data: {\"error\":{\"message\":\"Server overloaded\",\"type\":\"overloaded_error\"}}\n";
 
-            let (tx, _rx) = flume::unbounded();
-            let err = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap_err();
+        let (tx, _rx) = flume::unbounded();
+        let err = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap_err();
 
-            match err {
-                AgentError::Api { status, message } => {
-                    assert_eq!(status, 529);
-                    assert_eq!(message, "Server overloaded");
-                }
-                other => panic!("expected Api error, got: {other:?}"),
+        match err {
+            AgentError::Api { status, message } => {
+                assert_eq!(status, 529);
+                assert_eq!(message, "Server overloaded");
             }
-        })
+            other => panic!("expected Api error, got: {other:?}"),
+        }
     }
 
-    #[test]
-    fn parse_sse_empty_tool_id_and_name_get_placeholders() {
-        smol::block_on(async {
-            let sse = "\
+    #[tokio::test]
+    async fn parse_sse_empty_tool_id_and_name_get_placeholders() {
+        let sse = "\
 data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"tool_calls\\\":[{\\\"tool\\\":\\\"read\\\"}]}\"}}]}}]}\n\
 \n\
 data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\
 \n\
 data: [DONE]\n";
 
-            let (tx, _rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let (tx, _rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
 
-            let tools: Vec<_> = resp.message.tool_uses().collect();
-            assert_eq!(tools.len(), 1);
-            assert!(!tools[0].0.is_empty(), "id must be non-empty for Bedrock");
-            assert!(!tools[0].1.is_empty(), "name must be non-empty for Bedrock");
-        })
+        let tools: Vec<_> = resp.message.tool_uses().collect();
+        assert_eq!(tools.len(), 1);
+        assert!(!tools[0].0.is_empty(), "id must be non-empty for Bedrock");
+        assert!(!tools[0].1.is_empty(), "name must be non-empty for Bedrock");
     }
 
-    #[test]
-    fn parse_sse_malformed_tool_json_yields_empty_object() {
-        smol::block_on(async {
-            let sse = "\
+    #[tokio::test]
+    async fn parse_sse_malformed_tool_json_yields_empty_object() {
+        let sse = "\
 data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}\n\
 \n\
 data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{broken\"}}]}}]}\n\
@@ -811,16 +801,15 @@ data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{
 \n\
 data: [DONE]\n";
 
-            let (tx, _rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let (tx, _rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
 
-            let tools: Vec<_> = resp.message.tool_uses().collect();
-            assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0].1, "bash");
-            assert_eq!(*tools[0].2, Value::Object(Default::default()));
-        })
+        let tools: Vec<_> = resp.message.tool_uses().collect();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].1, "bash");
+        assert_eq!(*tools[0].2, Value::Object(Default::default()));
     }
 
     #[test]
@@ -890,25 +879,21 @@ data: [DONE]\n";
         assert_eq!(asst["content"], "");
     }
 
-    #[test]
-    fn parse_sse_empty_stream() {
-        smol::block_on(async {
-            let sse = "data: [DONE]\n";
-            let (tx, _rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
-            assert!(resp.message.content.is_empty());
-            assert_eq!(resp.usage, TokenUsage::default());
-            assert_eq!(resp.stop_reason, None);
-        })
+    #[tokio::test]
+    async fn parse_sse_empty_stream() {
+        let sse = "data: [DONE]\n";
+        let (tx, _rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(resp.message.content.is_empty());
+        assert_eq!(resp.usage, TokenUsage::default());
+        assert_eq!(resp.stop_reason, None);
     }
 
-    #[test]
-    fn parse_sse_content_as_array_with_thinking() {
-        smol::block_on(async {
-            // Test parsing content as an array with thinking blocks
-            let sse = "\
+    #[tokio::test]
+    async fn parse_sse_content_as_array_with_thinking() {
+        let sse = "\
 data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\",\"thinking\":[{\"type\":\"text\",\"text\":\"Let me think\"}]}]}}]}\n\
 \n\
 data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"thinking\",\"thinking\":[{\"type\":\"text\",\"text\":\"...\"}]}]}}]}\n\
@@ -917,32 +902,31 @@ data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\
 \n\
 data: [DONE]\n";
 
-            let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let (tx, rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
 
-            assert!(
-                matches!(&resp.message.content[0], ContentBlock::Thinking { thinking, .. } if thinking == "Let me think..."),
-                "{:?}",
-                resp.message.content[0],
-            );
-            assert!(
-                matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello")
-            );
+        assert!(
+            matches!(&resp.message.content[0], ContentBlock::Thinking { thinking, .. } if thinking == "Let me think..."),
+            "{:?}",
+            resp.message.content[0],
+        );
+        assert!(
+            matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello")
+        );
 
-            let mut thinking_deltas = Vec::new();
-            let mut text_deltas = Vec::new();
-            while let Ok(e) = rx.try_recv() {
-                match e {
-                    ProviderEvent::ThinkingDelta { text } => thinking_deltas.push(text),
-                    ProviderEvent::TextDelta { text } => text_deltas.push(text),
-                    _ => {}
-                }
+        let mut thinking_deltas = Vec::new();
+        let mut text_deltas = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            match e {
+                ProviderEvent::ThinkingDelta { text } => thinking_deltas.push(text),
+                ProviderEvent::TextDelta { text } => text_deltas.push(text),
+                _ => {}
             }
+        }
 
-            assert_eq!(text_deltas, vec!["Hello"]);
-            assert_eq!(thinking_deltas, vec!["Let me think", "..."]);
-        })
+        assert_eq!(text_deltas, vec!["Hello"]);
+        assert_eq!(thinking_deltas, vec!["Let me think", "..."]);
     }
 }

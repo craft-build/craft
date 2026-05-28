@@ -389,63 +389,57 @@ mod tests {
         assert_eq!(recent_calls(&entries).is_doom_loop(name, &input), expected);
     }
 
-    #[test]
-    fn unknown_tool_returns_error_event() {
-        smol::block_on(async {
-            let ctx = crate::tools::test_support::stub_ctx(&AgentMode::Build);
-            let done = run(
-                ToolRegistry::native(),
-                None,
-                "t1".into(),
-                "nonexistent__tool",
-                &serde_json::json!({}),
-                &ctx,
-                Emit::Silent,
-            )
-            .await;
-            assert!(done.is_error);
-            assert_eq!(done.tool.as_ref(), UNKNOWN_MCP);
-            let text = done.output.as_text();
-            assert!(text.starts_with(UNKNOWN_TOOL_PREFIX));
-            assert!(text.contains("nonexistent__tool"));
-        });
+    #[tokio::test]
+    async fn unknown_tool_returns_error_event() {
+        let ctx = crate::tools::test_support::stub_ctx(&AgentMode::Build);
+        let done = run(
+            ToolRegistry::native(),
+            None,
+            "t1".into(),
+            "nonexistent__tool",
+            &serde_json::json!({}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(done.is_error);
+        assert_eq!(done.tool.as_ref(), UNKNOWN_MCP);
+        let text = done.output.as_text();
+        assert!(text.starts_with(UNKNOWN_TOOL_PREFIX));
+        assert!(text.contains("nonexistent__tool"));
     }
 
-    #[test]
-    fn mcp_tool_blocked_in_plan_mode() {
-        smol::block_on(async {
-            let result = dispatch_mcp(
-                &crate::tools::test_support::stub_ctx(&AgentMode::Plan(PathBuf::from(
-                    "/tmp/plan.md",
-                ))),
-                "t1",
-                "myserver__mytool",
-                &serde_json::json!({}),
-            )
-            .await;
-            assert!(result.is_error);
-            assert_eq!(result.output.as_text(), MCP_BLOCKED_IN_PLAN);
-        });
+    #[tokio::test]
+    async fn mcp_tool_blocked_in_plan_mode() {
+        let result = dispatch_mcp(
+            &crate::tools::test_support::stub_ctx(&AgentMode::Plan(PathBuf::from(
+                "/tmp/plan.md",
+            ))),
+            "t1",
+            "myserver__mytool",
+            &serde_json::json!({}),
+        )
+        .await;
+        assert!(result.is_error);
+        assert_eq!(result.output.as_text(), MCP_BLOCKED_IN_PLAN);
     }
 
-    #[test]
-    fn mcp_tool_errors_without_mcp_manager() {
-        smol::block_on(async {
-            let result = dispatch_mcp(
-                &crate::tools::test_support::stub_ctx(&AgentMode::Build),
-                "t1",
-                "myserver__mytool",
-                &serde_json::json!({}),
-            )
-            .await;
-            assert!(result.is_error);
-            assert!(result.output.as_text().contains("not available"));
-        });
+    #[tokio::test]
+    async fn mcp_tool_errors_without_mcp_manager() {
+        let result = dispatch_mcp(
+            &crate::tools::test_support::stub_ctx(&AgentMode::Build),
+            "t1",
+            "myserver__mytool",
+            &serde_json::json!({}),
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.output.as_text().contains("not available"));
     }
 
     /// Denies write and verifies the marker file is never created.
-    #[test]
-    fn permission_denial_short_circuits_execute() {
+    #[tokio::test]
+    async fn permission_denial_short_circuits_execute() {
         use std::sync::Arc;
 
         use maki_config::{Effect, PermissionRule, PermissionsConfig};
@@ -453,46 +447,44 @@ mod tests {
 
         use crate::permissions::{PERMISSION_DENIED_PREFIX, PermissionManager};
 
-        smol::block_on(async {
-            let deny_all_write = PermissionsConfig {
-                allow_all: false,
-                rules: vec![PermissionRule {
-                    tool: crate::tools::WRITE_TOOL_NAME.into(),
-                    scope: None,
-                    effect: Effect::Deny,
-                }],
-            };
-            let dir = TempDir::new().unwrap();
-            let permissions = Arc::new(PermissionManager::new(
-                deny_all_write,
-                dir.path().to_path_buf(),
-            ));
-            let ctx = crate::tools::test_support::stub_ctx_with_permissions(
-                &AgentMode::Build,
-                permissions,
-            );
+        let deny_all_write = PermissionsConfig {
+            allow_all: false,
+            rules: vec![PermissionRule {
+                tool: crate::tools::WRITE_TOOL_NAME.into(),
+                scope: None,
+                effect: Effect::Deny,
+            }],
+        };
+        let dir = TempDir::new().unwrap();
+        let permissions = Arc::new(PermissionManager::new(
+            deny_all_write,
+            dir.path().to_path_buf(),
+        ));
+        let ctx = crate::tools::test_support::stub_ctx_with_permissions(
+            &AgentMode::Build,
+            permissions,
+        );
 
-            let marker = dir.path().join("should_never_exist");
-            let marker_str = marker.to_str().unwrap();
+        let marker = dir.path().join("should_never_exist");
+        let marker_str = marker.to_str().unwrap();
 
-            let done = run(
-                ToolRegistry::native(),
-                None,
-                "t1".into(),
-                crate::tools::WRITE_TOOL_NAME,
-                &serde_json::json!({ "path": marker_str, "content": "x" }),
-                &ctx,
-                Emit::Silent,
-            )
-            .await;
+        let done = run(
+            ToolRegistry::native(),
+            None,
+            "t1".into(),
+            crate::tools::WRITE_TOOL_NAME,
+            &serde_json::json!({ "path": marker_str, "content": "x" }),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
 
-            assert!(done.is_error, "permission denial must produce error event");
-            assert!(!marker.exists(), "tool executed despite permission denial");
-            assert!(
-                done.output.as_text().starts_with(PERMISSION_DENIED_PREFIX),
-                "error should be the permission-denied message, got: {}",
-                done.output.as_text()
-            );
-        });
+        assert!(done.is_error, "permission denial must produce error event");
+        assert!(!marker.exists(), "tool executed despite permission denial");
+        assert!(
+            done.output.as_text().starts_with(PERMISSION_DENIED_PREFIX),
+            "error should be the permission-denied message, got: {}",
+            done.output.as_text()
+        );
     }
 }

@@ -14,7 +14,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Auth { action }) => {
             let storage = StateDir::resolve().context("resolve data directory")?;
             match action {
-                AuthAction::Login { provider } => subcmd::auth_login(&provider, &storage)?,
+                AuthAction::Login { provider } => subcmd::auth_login(&provider, &storage).await?,
                 AuthAction::Logout { provider } => subcmd::auth_logout(&provider, &storage)?,
             }
         }

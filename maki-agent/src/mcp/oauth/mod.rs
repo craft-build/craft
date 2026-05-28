@@ -18,8 +18,7 @@ pub enum OAuthError {
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use isahc::HttpClient;
-use isahc::config::Configurable;
+use reqwest::Client;
 use maki_storage::StateDir;
 use maki_storage::auth::{McpAuthData, load_mcp_auth, save_mcp_auth};
 use tracing::{info, warn};
@@ -188,7 +187,7 @@ pub async fn authenticate(
 }
 
 async fn discover_auth_server_for(
-    client: &HttpClient,
+    client: &Client,
     server_url: &str,
     www_auth: Option<&discovery::WwwAuthenticateInfo>,
 ) -> Result<discovery::AuthServerMetadata, OAuthError> {
@@ -201,8 +200,8 @@ async fn discover_auth_server_for(
     discovery::discover_auth_server(client, &auth_server_url).await
 }
 
-fn build_http_client() -> Result<HttpClient, isahc::Error> {
-    HttpClient::builder()
+fn build_http_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
 }

@@ -1,8 +1,6 @@
 use std::time::Duration;
 use std::{env, thread};
 
-use isahc::ReadResponseExt;
-use isahc::config::Configurable;
 use maki_storage::StateDir;
 use maki_storage::auth::{OAuthTokens, delete_tokens, load_tokens, now_millis, save_tokens};
 use serde::Deserialize;
@@ -45,8 +43,8 @@ struct TokenResponse {
     expires_in: Option<u64>,
 }
 
-fn http_client(timeout: Duration) -> Result<isahc::HttpClient, AgentError> {
-    isahc::HttpClient::builder()
+fn http_client(timeout: Duration) -> Result<reqwest::Client, AgentError> {
+    reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(timeout)
         .build()
@@ -93,33 +91,33 @@ fn extract_account_id_from_tokens(resp: &TokenResponse) -> Option<String> {
     extract_account_id(&resp.access_token)
 }
 
-fn request_device_code() -> Result<DeviceCodeResponse, AgentError> {
+async fn request_device_code() -> Result<DeviceCodeResponse, AgentError> {
     let client = http_client(TOKEN_EXCHANGE_TIMEOUT)?;
     let body = serde_json::json!({"client_id": CLIENT_ID});
     let json_body = serde_json::to_vec(&body)?;
 
-    let request = isahc::Request::builder()
-        .method("POST")
-        .uri(DEVICE_CODE_URL)
+    let resp = client
+        .post(DEVICE_CODE_URL)
         .header("content-type", "application/json")
-        .body(json_body)?;
-
-    let mut resp = client.send(request).map_err(|e| AgentError::Config {
-        message: format!("device code request: {e}"),
-    })?;
+        .body(json_body)
+        .send()
+        .await
+        .map_err(|e| AgentError::Config {
+            message: format!("device code request: {e}"),
+        })?;
 
     if resp.status().as_u16() != 200 {
-        let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
+        let body_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
         return Err(AgentError::Config {
             message: format!("device code request failed: {body_text}"),
         });
     }
 
-    let body_text = resp.text()?;
+    let body_text = resp.text().await?;
     serde_json::from_str(&body_text).map_err(Into::into)
 }
 
-fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenResponse, AgentError> {
+async fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenResponse, AgentError> {
     let client = http_client(POLL_TIMEOUT)?;
     let interval_secs = device.interval.parse::<u64>().unwrap_or(5).max(1);
     let poll_interval = Duration::from_secs(interval_secs) + POLL_SAFETY_MARGIN;
@@ -140,24 +138,24 @@ fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenResponse,
 
         thread::sleep(poll_interval);
 
-        let request = isahc::Request::builder()
-            .method("POST")
-            .uri(DEVICE_TOKEN_URL)
+        let resp = client
+            .post(DEVICE_TOKEN_URL)
             .header("content-type", "application/json")
-            .body(json_body.clone())?;
-
-        let mut resp = client.send(request).map_err(|e| AgentError::Config {
-            message: format!("device token poll: {e}"),
-        })?;
+            .body(json_body.clone())
+            .send()
+            .await
+            .map_err(|e| AgentError::Config {
+                message: format!("device token poll: {e}"),
+            })?;
 
         if resp.status().as_u16() == 200 {
-            let body_text = resp.text()?;
+            let body_text = resp.text().await?;
             return serde_json::from_str(&body_text).map_err(Into::into);
         }
 
         let status = resp.status().as_u16();
         if status != 403 && status != 404 {
-            let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
+            let body_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
             return Err(AgentError::Config {
                 message: format!("device token poll failed ({status}): {body_text}"),
             });
@@ -165,7 +163,7 @@ fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenResponse,
     }
 }
 
-fn exchange_device_token(device_token: &DeviceTokenResponse) -> Result<TokenResponse, AgentError> {
+async fn exchange_device_token(device_token: &DeviceTokenResponse) -> Result<TokenResponse, AgentError> {
     let client = http_client(TOKEN_EXCHANGE_TIMEOUT)?;
 
     let form_body = format!(
@@ -180,24 +178,24 @@ fn exchange_device_token(device_token: &DeviceTokenResponse) -> Result<TokenResp
         urlenc(&device_token.code_verifier),
     );
 
-    let request = isahc::Request::builder()
-        .method("POST")
-        .uri(OAUTH_TOKEN_URL)
+    let resp = client
+        .post(OAUTH_TOKEN_URL)
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(form_body.into_bytes())?;
-
-    let mut resp = client.send(request).map_err(|e| AgentError::Config {
-        message: format!("token exchange: {e}"),
-    })?;
+        .body(form_body.into_bytes())
+        .send()
+        .await
+        .map_err(|e| AgentError::Config {
+            message: format!("token exchange: {e}"),
+        })?;
 
     if resp.status().as_u16() != 200 {
-        let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
+        let body_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
         return Err(AgentError::Config {
             message: format!("token exchange failed: {body_text}"),
         });
     }
 
-    let body_text = resp.text()?;
+    let body_text = resp.text().await?;
     serde_json::from_str(&body_text).map_err(Into::into)
 }
 
@@ -212,7 +210,7 @@ fn into_oauth_tokens(resp: TokenResponse) -> OAuthTokens {
     }
 }
 
-pub(crate) fn refresh_tokens(tokens: &OAuthTokens) -> Result<OAuthTokens, AgentError> {
+pub(crate) async fn refresh_tokens(tokens: &OAuthTokens) -> Result<OAuthTokens, AgentError> {
     let expired = tokens.is_expired();
     debug!(expired, "refreshing OpenAI OAuth tokens");
 
@@ -223,24 +221,24 @@ pub(crate) fn refresh_tokens(tokens: &OAuthTokens) -> Result<OAuthTokens, AgentE
         urlenc(CLIENT_ID),
     );
 
-    let request = isahc::Request::builder()
-        .method("POST")
-        .uri(OAUTH_TOKEN_URL)
+    let resp = client
+        .post(OAUTH_TOKEN_URL)
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(form_body.into_bytes())?;
-
-    let mut resp = client.send(request).map_err(|e| AgentError::Config {
-        message: format!("OpenAI token refresh: {e}"),
-    })?;
+        .body(form_body.into_bytes())
+        .send()
+        .await
+        .map_err(|e| AgentError::Config {
+            message: format!("OpenAI token refresh: {e}"),
+        })?;
 
     if resp.status().as_u16() != 200 {
-        let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
+        let body_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
         return Err(AgentError::Config {
             message: format!("OpenAI token refresh failed: {body_text}"),
         });
     }
 
-    let body_text = resp.text()?;
+    let body_text = resp.text().await?;
     let token_resp: TokenResponse = serde_json::from_str(&body_text)?;
     Ok(into_oauth_tokens(token_resp))
 }
@@ -269,13 +267,13 @@ pub(crate) fn is_oauth(dir: &StateDir) -> bool {
     load_tokens(dir, PROVIDER).is_some()
 }
 
-pub fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
+pub async fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
     if let Some(tokens) = load_tokens(dir, PROVIDER) {
         if !tokens.is_expired() {
             debug!("using OpenAI OAuth authentication");
             return Ok(build_oauth_resolved(&tokens));
         }
-        match refresh_tokens(&tokens) {
+        match refresh_tokens(&tokens).await {
             Ok(fresh) => {
                 save_tokens(dir, PROVIDER, &fresh)?;
                 debug!("using OpenAI OAuth authentication (refreshed)");
@@ -301,19 +299,19 @@ pub fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
     })
 }
 
-pub fn login(dir: &StateDir) -> Result<(), AgentError> {
-    let device = request_device_code()?;
+pub async fn login(dir: &StateDir) -> Result<(), AgentError> {
+    let device = request_device_code().await?;
 
     println!("Open this URL in your browser:\n\n  {DEVICE_AUTH_URL}\n");
     println!("Enter code: {}\n", device.user_code);
     println!("Waiting for authorization...");
 
-    let device_token = poll_device_token(&device).map_err(|e| {
+    let device_token = poll_device_token(&device).await.map_err(|e| {
         error!(error = %e, "OpenAI device authorization failed");
         e
     })?;
 
-    let token_resp = exchange_device_token(&device_token).map_err(|e| {
+    let token_resp = exchange_device_token(&device_token).await.map_err(|e| {
         error!(error = %e, "OpenAI token exchange failed");
         e
     })?;

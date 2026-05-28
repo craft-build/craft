@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use futures_lite::AsyncWriteExt;
-use smol::net::TcpListener;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 
 const PREFERRED_PORT: u16 = 19876;
 const MAX_HEADER_SIZE: usize = 8192;
@@ -38,14 +38,13 @@ impl CallbackServer {
     }
 
     pub async fn wait_for_callback(self, expected_state: &str) -> Result<CallbackResult, String> {
-        futures_lite::future::race(self.accept_loop(expected_state), async {
-            smol::Timer::after(TIMEOUT).await;
-            Err("OAuth callback timed out after 5 minutes".into())
-        })
-        .await
+        tokio::select! {
+            result = self.accept_loop(expected_state) => result,
+            _ = tokio::time::sleep(TIMEOUT) => Err("OAuth callback timed out after 5 minutes".into()),
+        }
     }
 
-    async fn accept_loop(self, expected_state: &str) -> Result<CallbackResult, String> {
+            async fn accept_loop(self, expected_state: &str) -> Result<CallbackResult, String> {
         loop {
             let (mut stream, _) = self
                 .listener
@@ -56,7 +55,7 @@ impl CallbackServer {
             let mut buf = Vec::with_capacity(1024);
             let mut tmp = [0u8; 1024];
             loop {
-                let n = futures_lite::AsyncReadExt::read(&mut stream, &mut tmp)
+                let n = tokio::io::AsyncReadExt::read(&mut stream, &mut tmp)
                     .await
                     .map_err(|e| format!("read failed: {e}"))?;
                 if n == 0 {
@@ -155,7 +154,7 @@ fn hex_val(b: u8) -> u8 {
 }
 
 async fn respond(
-    stream: &mut smol::net::TcpStream,
+    stream: &mut tokio::net::TcpStream,
     status: u16,
     body: &str,
 ) -> Result<(), std::io::Error> {
@@ -192,15 +191,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn callback_receives_code() {
-        smol::block_on(async {
+    #[tokio::test]
+    async fn callback_receives_code() {
             let server = CallbackServer::bind().await.unwrap();
             let port = server.port;
 
-            let handle = smol::spawn(async move { server.wait_for_callback("test-state").await });
+            let handle = tokio::spawn(async move { server.wait_for_callback("test-state").await });
 
-            let mut stream = smol::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
                 .await
                 .unwrap();
             let req = format!(
@@ -208,8 +206,7 @@ mod tests {
             );
             stream.write_all(req.as_bytes()).await.unwrap();
 
-            let result = handle.await.unwrap();
-            assert_eq!(result.code, "auth-code");
-        });
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.code, "auth-code");
     }
 }

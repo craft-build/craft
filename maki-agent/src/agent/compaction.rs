@@ -187,9 +187,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compact_replaces_history_with_summary() {
-        smol::block_on(async {
+    #[tokio::test]
+    async fn compact_replaces_history_with_summary() {
             let provider: std::sync::Arc<dyn Provider> =
                 std::sync::Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
             let model = default_model();
@@ -214,11 +213,10 @@ mod tests {
             .await
             .unwrap();
 
-            let msgs = history.as_slice();
-            assert_eq!(msgs.len(), 2);
-            assert!(matches!(msgs[0].role, Role::User));
-            assert!(matches!(msgs[1].role, Role::Assistant));
-        });
+        let msgs = history.as_slice();
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(msgs[0].role, Role::User));
+        assert!(matches!(msgs[1].role, Role::Assistant));
     }
 
     #[test_case(179_999, 0,       0,       0,      200_000, 20_000, false ; "below_threshold")]

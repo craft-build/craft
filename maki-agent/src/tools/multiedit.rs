@@ -64,7 +64,7 @@ impl MultiEdit {
         let path = super::resolve_path(&self.path)?;
         let this = self.clone();
         let file_tracker = ctx.file_tracker.clone();
-        smol::unblock(move || {
+        tokio::task::spawn_blocking(move || {
             let p = Path::new(&path);
             file_tracker.check_before_edit(p)?;
 
@@ -86,6 +86,7 @@ impl MultiEdit {
             })
         })
         .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     pub fn start_header(&self) -> String {
@@ -103,9 +104,6 @@ super::impl_tool!(
 impl super::ToolInvocation for MultiEdit {
     fn start_header(&self) -> super::HeaderFuture {
         super::HeaderFuture::Ready(super::HeaderResult::plain(MultiEdit::start_header(self)))
-    }
-    fn start_annotation(&self) -> Option<String> {
-        Some(self.edit_count_label())
     }
     fn mutable_path(&self) -> Option<&Path> {
         Some(Path::new(&self.path))
@@ -140,62 +138,56 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
-    #[test]
-    fn sequential_edits_compose() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
-            let path = temp_file(&dir, "f.rs", "fn alpha() {}\nfn beta() {}");
-            pre_read(&ctx, &path);
-            let tool = MultiEdit::parse_input(&json!({
-                "path": path,
-                "edits": [
-                    { "old_string": "fn alpha() {}", "new_string": "fn one() {}" },
-                    { "old_string": "fn beta() {}", "new_string": "fn two() {}" }
-                ]
-            }))
-            .unwrap();
-            let msg = tool.execute(&ctx).await.unwrap().as_text().to_string();
-            assert!(msg.contains("2 edits"));
-            assert_eq!(
-                fs::read_to_string(&path).unwrap(),
-                "fn one() {}\nfn two() {}"
-            );
-        });
+    #[tokio::test]
+    async fn sequential_edits_compose() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let path = temp_file(&dir, "f.rs", "fn alpha() {}\nfn beta() {}");
+        pre_read(&ctx, &path);
+        let tool = MultiEdit::parse_input(&json!({
+            "path": path,
+            "edits": [
+                { "old_string": "fn alpha() {}", "new_string": "fn one() {}" },
+                { "old_string": "fn beta() {}", "new_string": "fn two() {}" }
+            ]
+        }))
+        .unwrap();
+        let msg = tool.execute(&ctx).await.unwrap().as_text().to_string();
+        assert!(msg.contains("2 edits"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "fn one() {}\nfn two() {}"
+        );
     }
 
-    #[test]
-    fn failure_leaves_file_unchanged() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
-            let original = "let a = 1;\nlet b = 2;";
-            let path = temp_file(&dir, "f.rs", original);
-            pre_read(&ctx, &path);
-            let tool = MultiEdit::parse_input(&json!({
-                "path": path,
-                "edits": [
-                    { "old_string": "let a = 1;", "new_string": "let a = 9;" },
-                    { "old_string": "MISSING", "new_string": "x" }
-                ]
-            }))
-            .unwrap();
-            let err = tool.execute(&ctx).await.unwrap_err();
-            assert!(err.contains("edit 1"));
-            assert!(err.contains(fuzzy_replace::NO_MATCH));
-            assert_eq!(fs::read_to_string(&path).unwrap(), original);
-        });
+    #[tokio::test]
+    async fn failure_leaves_file_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let original = "let a = 1;\nlet b = 2;";
+        let path = temp_file(&dir, "f.rs", original);
+        pre_read(&ctx, &path);
+        let tool = MultiEdit::parse_input(&json!({
+            "path": path,
+            "edits": [
+                { "old_string": "let a = 1;", "new_string": "let a = 9;" },
+                { "old_string": "MISSING", "new_string": "x" }
+            ]
+        }))
+        .unwrap();
+        let err = tool.execute(&ctx).await.unwrap_err();
+        assert!(err.contains("edit 1"));
+        assert!(err.contains(fuzzy_replace::NO_MATCH));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
-    #[test]
-    fn empty_edits_rejected() {
-        smol::block_on(async {
-            let dir = TempDir::new().unwrap();
-            let ctx = stub_ctx(&AgentMode::Build);
-            let path = temp_file(&dir, "f.rs", "content");
-            pre_read(&ctx, &path);
-            let tool = MultiEdit::parse_input(&json!({ "path": path, "edits": [] })).unwrap();
-            assert_eq!(tool.execute(&ctx).await.unwrap_err(), EMPTY_ERR);
-        });
+    #[tokio::test]
+    async fn empty_edits_rejected() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let path = temp_file(&dir, "f.rs", "content");
+        pre_read(&ctx, &path);
+        let tool = MultiEdit::parse_input(&json!({ "path": path, "edits": [] })).unwrap();
+        assert_eq!(tool.execute(&ctx).await.unwrap_err(), EMPTY_ERR);
     }
 }

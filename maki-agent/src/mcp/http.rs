@@ -1,14 +1,10 @@
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use async_lock::Mutex;
-use isahc::HttpClient;
-use isahc::config::Configurable;
-use isahc::http::header::{ACCEPT, CONTENT_TYPE};
-use isahc::http::{Method, Request, StatusCode, header::HeaderMap};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
+use tokio::sync::Mutex;
 use serde_json::Value;
 
 use super::error::McpError;
@@ -24,7 +20,7 @@ const ACCEPT_VALUE: &str = "application/json, text/event-stream";
 pub struct HttpTransport {
     name: Arc<str>,
     url: String,
-    client: HttpClient,
+    client: reqwest::Client,
     headers: HashMap<String, String>,
     session_id: Mutex<Option<String>>,
     next_id: AtomicU64,
@@ -38,10 +34,10 @@ impl HttpTransport {
         timeout: Duration,
     ) -> Result<Self, McpError> {
         let client =
-            HttpClient::builder()
+            reqwest::Client::builder()
                 .timeout(timeout)
                 .build()
-                .map_err(|e: isahc::Error| McpError::StartFailed {
+                .map_err(|e| McpError::StartFailed {
                     server: name.into(),
                     reason: e.to_string(),
                 })?;
@@ -62,12 +58,12 @@ impl HttpTransport {
 
     fn build_request(
         &self,
+        method: reqwest::Method,
         body: Vec<u8>,
         session_id: Option<&str>,
-    ) -> Result<Request<Vec<u8>>, McpError> {
-        let mut builder = Request::builder()
-            .method(Method::POST)
-            .uri(&self.url)
+    ) -> reqwest::Request {
+        let mut builder = self.client
+            .request(method, &self.url)
             .header(CONTENT_TYPE, CT_JSON)
             .header(ACCEPT, ACCEPT_VALUE);
 
@@ -79,37 +75,25 @@ impl HttpTransport {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
-        builder.body(body).map_err(|e| McpError::InvalidResponse {
-            server: self.server(),
-            reason: e.to_string(),
-        })
+        builder.body(body).build().expect("request builder is valid")
     }
 
     async fn send_http(
         &self,
-        http_req: Request<Vec<u8>>,
-    ) -> Result<(StatusCode, HeaderMap, String), McpError> {
+        http_req: reqwest::Request,
+    ) -> Result<(reqwest::StatusCode, HeaderMap, String), McpError> {
         let server = self.server();
-        smol::unblock({
-            let client = self.client.clone();
-            move || {
-                let mut response = client.send(http_req).map_err(|e| McpError::WriteFailed {
-                    server: server.clone(),
-                    reason: e.to_string(),
-                })?;
-                let status = response.status();
-                let headers = response.headers().clone();
-                let mut body = String::new();
-                response.body_mut().read_to_string(&mut body).map_err(|e| {
-                    McpError::InvalidResponse {
-                        server,
-                        reason: e.to_string(),
-                    }
-                })?;
-                Ok((status, headers, body))
-            }
-        })
-        .await
+        let response = self.client.execute(http_req).await.map_err(|e| McpError::WriteFailed {
+            server: server.clone(),
+            reason: e.to_string(),
+        })?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.text().await.map_err(|e| McpError::InvalidResponse {
+            server,
+            reason: e.to_string(),
+        })?;
+        Ok((status, headers, body))
     }
 
     fn parse_rpc_response(&self, body_str: &str, content_type: &str) -> Result<Value, McpError> {
@@ -170,13 +154,13 @@ impl McpTransport for HttpTransport {
             })?;
 
             let session_id = self.session_id.lock().await;
-            let http_req = self.build_request(body, session_id.as_deref())?;
+            let http_req = self.build_request(reqwest::Method::POST, body, session_id.as_deref());
             drop(session_id);
 
             let (status, headers, body_str) = self.send_http(http_req).await?;
 
             if !status.is_success() {
-                let reason = if status == StatusCode::UNAUTHORIZED {
+                let reason = if status == reqwest::StatusCode::UNAUTHORIZED {
                     headers
                         .get("www-authenticate")
                         .and_then(|v| v.to_str().ok())
@@ -218,12 +202,12 @@ impl McpTransport for HttpTransport {
             })?;
 
             let session_id = self.session_id.lock().await;
-            let http_req = self.build_request(body, session_id.as_deref())?;
+            let http_req = self.build_request(reqwest::Method::POST, body, session_id.as_deref());
             drop(session_id);
 
             let (status, _, _) = self.send_http(http_req).await?;
 
-            if !status.is_success() && status != StatusCode::ACCEPTED {
+            if !status.is_success() && status != reqwest::StatusCode::ACCEPTED {
                 return Err(McpError::HttpError {
                     server: self.server(),
                     status: status.as_u16(),
@@ -240,16 +224,8 @@ impl McpTransport for HttpTransport {
             let session_id = self.session_id.lock().await.clone();
             let Some(sid) = session_id else { return };
 
-            let req = Request::builder()
-                .method(Method::DELETE)
-                .uri(&self.url)
-                .header(SESSION_HEADER, &sid)
-                .body(Vec::new());
-
-            let Ok(req) = req else { return };
-
-            let client = self.client.clone();
-            let _ = smol::unblock(move || client.send(req)).await;
+            let http_req = self.build_request(reqwest::Method::DELETE, Vec::new(), Some(&sid));
+            let _ = self.client.execute(http_req).await;
         })
     }
 

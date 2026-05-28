@@ -2,8 +2,6 @@
 //! Retryable: 429, 5xx, IO, HTTP transport. Non-retryable: other 4xx, JSON parse, config,
 //! channel closed, user cancel. `user_message()` returns human-readable text for each variant.
 
-use isahc::AsyncReadResponseExt;
-
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("API error ({status}): {message}")]
@@ -15,9 +13,7 @@ pub enum AgentError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("http: {0}")]
-    Http(#[from] isahc::Error),
-    #[error("http request: {0}")]
-    HttpRequest(#[from] isahc::http::Error),
+    Http(#[from] reqwest::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("channel send failed")]
@@ -32,13 +28,13 @@ impl AgentError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Api { status, .. } => *status == 429 || *status >= 500,
-            Self::Io(_) | Self::Http(_) | Self::Timeout { .. } => true,
+            Self::Http(e) => e.is_connect() || e.is_timeout() || e.is_body() || e.is_decode(),
+            Self::Io(_) | Self::Timeout { .. } => true,
             Self::Config { .. }
             | Self::Tool { .. }
             | Self::Channel
             | Self::Json(_)
-            | Self::Cancelled
-            | Self::HttpRequest(_) => false,
+            | Self::Cancelled => false,
         }
     }
 
@@ -64,14 +60,13 @@ impl AgentError {
             Self::Io(e) => format!("I/O error: {e}"),
             Self::Http(_) => "connection error, check your network".into(),
             Self::Timeout { .. } => "stream timed out, retrying".into(),
-            Self::HttpRequest(e) => format!("request error: {e}"),
             Self::Json(_) => "received an invalid response from the API".into(),
             Self::Channel => "internal error, try again".into(),
             Self::Cancelled => "cancelled".into(),
         }
     }
 
-    pub async fn from_response(mut response: isahc::Response<isahc::AsyncBody>) -> Self {
+    pub async fn from_response(response: reqwest::Response) -> Self {
         let status = response.status().as_u16();
         let message = response
             .text()

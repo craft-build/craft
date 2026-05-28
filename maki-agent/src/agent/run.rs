@@ -59,7 +59,7 @@ pub struct Agent {
     event_tx: EventSender,
     tools: Value,
     mode: AgentMode,
-    user_response_rx: Option<Arc<async_lock::Mutex<flume::Receiver<String>>>>,
+    user_response_rx: Option<Arc<tokio::sync::Mutex<flume::Receiver<String>>>>,
     interrupt_source: Option<Arc<dyn InterruptSource>>,
     cancel: CancelToken,
     total_usage: TokenUsage,
@@ -117,7 +117,7 @@ impl Agent {
 
     pub fn with_user_response_rx(
         mut self,
-        rx: Arc<async_lock::Mutex<flume::Receiver<String>>>,
+        rx: Arc<tokio::sync::Mutex<flume::Receiver<String>>>,
     ) -> Self {
         self.user_response_rx = Some(rx);
         self
@@ -265,11 +265,10 @@ impl Agent {
         warn!(error = %err, attempt = self.reauth_attempts, "auth error, waiting for re-authentication");
         self.event_tx.send(AgentEvent::AuthRequired)?;
         let rx = rx.lock().await;
-        match futures_lite::future::race(rx.recv_async(), async {
-            self.cancel.cancelled().await;
-            Err(flume::RecvError::Disconnected)
-        })
-        .await
+        match tokio::select! {
+            r = rx.recv_async() => r.map_err(|_| flume::RecvError::Disconnected),
+            _ = self.cancel.cancelled() => Err(flume::RecvError::Disconnected),
+        }
         {
             Ok(_) => {
                 self.provider.refresh_auth().await?;
@@ -590,64 +589,62 @@ mod tests {
     #[test_case(&[StopReason::EndTurn],                                                     1, Some(StopReason::EndTurn)  ; "end_turn_completes")]
     #[test_case(&[StopReason::MaxTokens, StopReason::EndTurn],                                 2, Some(StopReason::EndTurn)  ; "max_tokens_continues")]
     #[test_case(&[StopReason::MaxTokens, StopReason::MaxTokens, StopReason::MaxTokens, StopReason::MaxTokens], 4, Some(StopReason::MaxTokens) ; "max_tokens_gives_up_after_limit")]
-    fn turn_counting(stops: &[StopReason], expected_turns: u32, expected_stop: Option<StopReason>) {
-        smol::block_on(async {
-            let responses: Vec<_> = stops.iter().map(|s| text_response(*s)).collect();
-            let provider = MockProvider::new(responses);
-            let (turns, stop_reason) = run_agent(provider).await;
-            assert_eq!(turns, expected_turns);
-            assert_eq!(stop_reason, expected_stop);
-        });
+    #[tokio::test]
+    async fn turn_counting(stops: &[StopReason], expected_turns: u32, expected_stop: Option<StopReason>) {
+        let responses: Vec<_> = stops.iter().map(|s| text_response(*s)).collect();
+        let provider = MockProvider::new(responses);
+        let (turns, stop_reason) = run_agent(provider).await;
+        assert_eq!(turns, expected_turns);
+        assert_eq!(stop_reason, expected_stop);
     }
 
     #[test_case(Some(true),  true,  true  ; "after_tool_use_turn")]
     #[test_case(Some(false), true,  true  ; "after_text_only_turn")]
     #[test_case(None,        false, false ; "channel_empty")]
-    fn interrupt_handling(queued: Option<bool>, expect_consumed: bool, expect_injected: bool) {
-        smol::block_on(async {
-            let source = if queued.is_some() {
-                Some(MockInterruptSource::new(vec![ExtractedCommand::Interrupt(
-                    default_input(),
-                    0,
-                )]))
-            } else {
-                None
-            };
+    #[tokio::test]
+    async fn interrupt_handling(queued: Option<bool>, expect_consumed: bool, expect_injected: bool) {
+        let source = if queued.is_some() {
+            Some(MockInterruptSource::new(vec![ExtractedCommand::Interrupt(
+                default_input(),
+                0,
+            )]))
+        } else {
+            None
+        };
 
-            let tool_use = queued.unwrap_or(true);
-            let responses = if tool_use {
-                vec![
-                    tool_call_response("glob", "t1"),
-                    text_response(StopReason::EndTurn),
-                ]
-            } else {
-                vec![
-                    text_response(StopReason::EndTurn),
-                    text_response(StopReason::EndTurn),
-                ]
-            };
+        let tool_use = queued.unwrap_or(true);
+        let responses = if tool_use {
+            vec![
+                tool_call_response("glob", "t1"),
+                text_response(StopReason::EndTurn),
+            ]
+        } else {
+            vec![
+                text_response(StopReason::EndTurn),
+                text_response(StopReason::EndTurn),
+            ]
+        };
 
-            let (agent, event_rx) =
-                make_agent(MockProvider::new(responses), History::new(Vec::new()));
-            let agent = match source {
-                Some(s) => agent.with_interrupt_source(s),
-                None => agent,
-            };
-            let outcome = agent.run(default_input()).await;
-            let events = drain_events(&event_rx);
+        let (agent, event_rx) =
+            make_agent(MockProvider::new(responses), History::new(Vec::new()));
+        let agent = match source {
+            Some(s) => agent.with_interrupt_source(s),
+            None => agent,
+        };
+        let outcome = agent.run(default_input()).await;
+        let events = drain_events(&event_rx);
 
-            assert_eq!(
-                has_event(&events, |e| matches!(
-                    e,
-                    AgentEvent::QueueItemConsumed { .. }
-                )),
-                expect_consumed,
-            );
-            assert_eq!(
-                has_interrupt_in_history(outcome.history.as_slice()),
-                expect_injected
-            );
-        });
+        assert_eq!(
+            has_event(&events, |e| matches!(
+                e,
+                AgentEvent::QueueItemConsumed { .. }
+            )),
+            expect_consumed,
+        );
+        assert_eq!(
+            has_interrupt_in_history(outcome.history.as_slice()),
+            expect_injected
+        );
     }
 
     #[test_case(
@@ -656,118 +653,114 @@ mod tests {
         vec![tool_call_response("glob", "t1"), text_response(StopReason::EndTurn), text_response(StopReason::EndTurn)]
         ; "compaction_via_interrupt_source"
     )]
-    fn compaction_through_interrupt(
+    #[tokio::test]
+    async fn compaction_through_interrupt(
         prior: Vec<Message>,
         commands: Vec<ExtractedCommand>,
         responses: Vec<StreamResponse>,
     ) {
-        smol::block_on(async {
-            let source = MockInterruptSource::new(commands);
+        let source = MockInterruptSource::new(commands);
 
-            let (agent, _event_rx) = make_agent(MockProvider::new(responses), History::new(prior));
-            let outcome = agent
-                .with_interrupt_source(source)
-                .run(default_input())
-                .await;
+        let (agent, _event_rx) = make_agent(MockProvider::new(responses), History::new(prior));
+        let outcome = agent
+            .with_interrupt_source(source)
+            .run(default_input())
+            .await;
 
-            assert!(outcome.result.is_ok());
-        });
+        assert!(outcome.result.is_ok());
     }
 
     #[test_case(true,  900, true  ; "enabled_and_over_threshold")]
     #[test_case(true,  100, false ; "enabled_but_below_threshold")]
     #[test_case(false, 900, false ; "disabled_even_over_threshold")]
-    fn try_auto_compact_behavior(enabled: bool, total_input: u32, expected: bool) {
-        smol::block_on(async {
-            let responses = if expected {
-                vec![text_response(StopReason::EndTurn)]
-            } else {
-                vec![]
-            };
-            let (mut agent, event_rx) = make_agent(
-                MockProvider::new(responses),
-                History::new(vec![Message::user("go".into())]),
-            );
-            agent.model = Arc::new(small_context_model(1000, 200));
-            agent.auto_compact = enabled;
+    #[tokio::test]
+    async fn try_auto_compact_behavior(enabled: bool, total_input: u32, expected: bool) {
+        let responses = if expected {
+            vec![text_response(StopReason::EndTurn)]
+        } else {
+            vec![]
+        };
+        let (mut agent, event_rx) = make_agent(
+            MockProvider::new(responses),
+            History::new(vec![Message::user("go".into())]),
+        );
+        agent.model = Arc::new(small_context_model(1000, 200));
+        agent.auto_compact = enabled;
 
-            let usage = TokenUsage {
-                input: total_input,
-                ..Default::default()
-            };
-            let result = agent.try_auto_compact(&usage).await.unwrap();
+        let usage = TokenUsage {
+            input: total_input,
+            ..Default::default()
+        };
+        let result = agent.try_auto_compact(&usage).await.unwrap();
 
-            assert_eq!(result, expected);
-            drop(agent);
-            assert_eq!(
-                has_event(&drain_events(&event_rx), |e| matches!(
-                    e,
-                    AgentEvent::AutoCompacting
-                )),
-                expected,
-            );
-        });
+        assert_eq!(result, expected);
+        drop(agent);
+        assert_eq!(
+            has_event(&drain_events(&event_rx), |e| matches!(
+                e,
+                AgentEvent::AutoCompacting
+            )),
+            expected,
+        );
     }
 
-    #[test]
-    fn cancel_token_aborts_during_api_call() {
-        smol::block_on(async {
-            struct HangingProvider;
-            impl Provider for HangingProvider {
-                fn stream_message<'a>(
-                    &'a self,
-                    _: &'a Model,
-                    _: &'a [Message],
-                    _: &'a str,
-                    _: &'a Value,
-                    _: &'a flume::Sender<ProviderEvent>,
-                    _: ThinkingConfig,
-                    _: Option<&'a str>,
-                ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-                    Box::pin(async {
-                        futures_lite::future::pending::<()>().await;
-                        unreachable!()
-                    })
-                }
-                fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-                    Box::pin(async { unimplemented!() })
-                }
+    #[tokio::test]
+    async fn cancel_token_aborts_during_api_call() {
+        struct HangingProvider;
+        impl Provider for HangingProvider {
+            fn stream_message<'a>(
+                &'a self,
+                _: &'a Model,
+                _: &'a [Message],
+                _: &'a str,
+                _: &'a Value,
+                _: &'a flume::Sender<ProviderEvent>,
+                _: ThinkingConfig,
+                _: Option<&'a str>,
+            ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+                Box::pin(async {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                })
             }
+            fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
+                Box::pin(async { unimplemented!() })
+            }
+        }
 
-            let (trigger, cancel) = CancelToken::new();
-            trigger.cancel();
+        let (trigger, cancel) = CancelToken::new();
+        trigger.cancel();
 
-            let (raw_tx, _rx) = flume::unbounded();
-            let agent = Agent::new(
-                AgentParams {
-                    provider: Arc::new(HangingProvider),
-                    model: default_model(),
-                    config: AgentConfig::default(),
-                    tool_output_lines: ToolOutputLines::default(),
-                    permissions: Arc::new(PermissionManager::new(
-                        maki_config::PermissionsConfig {
-                            allow_all: true,
-                            rules: vec![],
-                        },
-                        std::path::PathBuf::from("/tmp"),
-                    )),
-                    session_id: None,
-                    timeouts: maki_providers::Timeouts::default(),
-                    file_tracker: FileReadTracker::fresh(),
-                },
-                AgentRunParams {
-                    history: History::new(Vec::new()),
-                    system: "system".into(),
-                    event_tx: EventSender::new(raw_tx, 0),
-                    tools: serde_json::json!([]),
-                },
-            )
-            .with_cancel(cancel);
+        let (raw_tx, _rx) = flume::unbounded();
+        let agent = Agent::new(
+            AgentParams {
+                provider: Arc::new(HangingProvider),
+                model: default_model(),
+                config: AgentConfig::default(),
+                tool_output_lines: ToolOutputLines::default(),
+                permissions: Arc::new(PermissionManager::new(
+                    maki_config::PermissionsConfig {
+                        allow_all: true,
+                        rules: vec![],
+                    },
+                    std::path::PathBuf::from("/tmp"),
+                )),
+                session_id: None,
+                timeouts: maki_providers::Timeouts::default(),
+                file_tracker: FileReadTracker::fresh(),
+            },
+            AgentRunParams {
+                history: History::new(Vec::new()),
+                system: "system".into(),
+                event_tx: EventSender::new(raw_tx, 0),
+                tools: serde_json::json!([]),
+            },
+        )
+        .with_cancel(cancel);
 
-            let outcome = agent.run(default_input()).await;
-            assert!(matches!(outcome.result, Err(AgentError::Cancelled)));
-            assert_ends_with_cancel_marker(&outcome.history);
-        });
+        let outcome = agent.run(default_input()).await;
+        assert!(matches!(outcome.result, Err(AgentError::Cancelled)));
+        assert_ends_with_cancel_marker(&outcome.history);
     }
 
     #[test_case(
@@ -780,17 +773,16 @@ mod tests {
         "t3"
         ; "doom_loop"
     )]
-    fn error_emits_tool_done_event(responses: Vec<StreamResponse>, expected_error_id: &str) {
-        smol::block_on(async {
-            let (agent, event_rx) =
-                make_agent(MockProvider::new(responses), History::new(Vec::new()));
-            let _ = agent.run(default_input()).await;
-            let events = drain_events(&event_rx);
+    #[tokio::test]
+    async fn error_emits_tool_done_event(responses: Vec<StreamResponse>, expected_error_id: &str) {
+        let (agent, event_rx) =
+            make_agent(MockProvider::new(responses), History::new(Vec::new()));
+        let _ = agent.run(default_input()).await;
+        let events = drain_events(&event_rx);
 
-            assert!(has_event(&events, |e| matches!(
-                e,
-                AgentEvent::ToolDone(done) if done.is_error && done.id == expected_error_id
-            )));
-        });
+        assert!(has_event(&events, |e| matches!(
+            e,
+            AgentEvent::ToolDone(done) if done.is_error && done.id == expected_error_id
+        )));
     }
 }

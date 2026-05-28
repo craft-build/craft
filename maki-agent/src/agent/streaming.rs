@@ -35,18 +35,14 @@ pub(crate) async fn stream_with_retry(
     let mut retry = RetryState::new();
     loop {
         let (ptx, prx) = flume::unbounded();
-        let forwarder = smol::spawn({
+        let forwarder = tokio::spawn({
             let event_tx = event_tx.clone();
             async move { forward_provider_events(prx, &event_tx).await }
         });
-        let result = futures_lite::future::race(
-            provider.stream_message(model, messages, system, tools, &ptx, thinking, session_id),
-            async {
-                cancel.cancelled().await;
-                Err(AgentError::Cancelled)
-            },
-        )
-        .await;
+        let result = tokio::select! {
+            r = provider.stream_message(model, messages, system, tools, &ptx, thinking, session_id) => r,
+            _ = cancel.cancelled() => Err(AgentError::Cancelled),
+        };
         drop(ptx);
         let _ = forwarder.await;
         match result {
@@ -69,13 +65,10 @@ pub(crate) async fn stream_with_retry(
                     message: e.retry_message(),
                     delay_ms,
                 })?;
-                futures_lite::future::race(
-                    async {
-                        smol::Timer::after(delay).await;
-                    },
-                    cancel.cancelled(),
-                )
-                .await;
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = cancel.cancelled() => {}
+                }
                 if cancel.is_cancelled() {
                     return Err(AgentError::Cancelled);
                 }

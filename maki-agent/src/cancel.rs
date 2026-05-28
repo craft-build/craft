@@ -1,8 +1,3 @@
-//! Cooperative cancellation with parent-to-child propagation.
-//!
-//! `CancelTrigger` fires on Drop, so cleanup happens even if the trigger is forgotten.
-//! `cancelled()` uses a double-check around the listener to close the TOCTOU window between flag read and listener registration.
-
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,11 +45,10 @@ impl CancelToken {
         if self.is_cancelled() {
             return Err("cancelled".into());
         }
-        futures_lite::future::race(async { Ok(future.await) }, async {
-            self.cancelled().await;
-            Err("cancelled".into())
-        })
-        .await
+        tokio::select! {
+            result = async { Ok(future.await) } => result,
+            _ = self.cancelled() => Err("cancelled".into()),
+        }
     }
 
     pub async fn cancelled(&self) {
@@ -74,11 +68,10 @@ impl CancelToken {
         let (child_trigger, child_token) = Self::new();
         let parent = self.clone();
         let child_shared = Arc::clone(&child_token.0);
-        smol::spawn(async move {
+        tokio::spawn(async move {
             parent.cancelled().await;
             child_shared.fire();
-        })
-        .detach();
+        });
         (child_trigger, child_token)
     }
 }
@@ -99,76 +92,62 @@ impl Drop for CancelTrigger {
 mod tests {
     use super::*;
 
-    #[test]
-    fn trigger_wakes_token() {
-        smol::block_on(async {
-            let (trigger, token) = CancelToken::new();
-            assert!(!token.is_cancelled());
-            trigger.cancel();
-            token.cancelled().await;
-            assert!(token.is_cancelled());
-        });
+    #[tokio::test]
+    async fn trigger_wakes_token() {
+        let (trigger, token) = CancelToken::new();
+        assert!(!token.is_cancelled());
+        trigger.cancel();
+        token.cancelled().await;
+        assert!(token.is_cancelled());
     }
 
-    #[test]
-    fn child_cancelled_by_parent() {
-        smol::block_on(async {
-            let (parent_trigger, parent_token) = CancelToken::new();
-            let (_child_trigger, child_token) = parent_token.child();
-            parent_trigger.cancel();
-            child_token.cancelled().await;
-            assert!(child_token.is_cancelled());
-        });
+    #[tokio::test]
+    async fn child_cancelled_by_parent() {
+        let (parent_trigger, parent_token) = CancelToken::new();
+        let (_child_trigger, child_token) = parent_token.child();
+        parent_trigger.cancel();
+        child_token.cancelled().await;
+        assert!(child_token.is_cancelled());
     }
 
-    #[test]
-    fn child_cancelled_by_own_trigger() {
-        smol::block_on(async {
-            let (_parent_trigger, parent_token) = CancelToken::new();
-            let (child_trigger, child_token) = parent_token.child();
-            child_trigger.cancel();
-            child_token.cancelled().await;
-            assert!(child_token.is_cancelled());
-            assert!(!parent_token.is_cancelled());
-        });
+    #[tokio::test]
+    async fn child_cancelled_by_own_trigger() {
+        let (_parent_trigger, parent_token) = CancelToken::new();
+        let (child_trigger, child_token) = parent_token.child();
+        child_trigger.cancel();
+        child_token.cancelled().await;
+        assert!(child_token.is_cancelled());
+        assert!(!parent_token.is_cancelled());
     }
 
-    #[test]
-    fn drop_trigger_also_cancels() {
-        smol::block_on(async {
-            let (trigger, token) = CancelToken::new();
-            drop(trigger);
-            token.cancelled().await;
-            assert!(token.is_cancelled());
-        });
+    #[tokio::test]
+    async fn drop_trigger_also_cancels() {
+        let (trigger, token) = CancelToken::new();
+        drop(trigger);
+        token.cancelled().await;
+        assert!(token.is_cancelled());
     }
 
-    #[test]
-    fn race_returns_value_when_not_cancelled() {
-        smol::block_on(async {
-            let (_trigger, token) = CancelToken::new();
-            let result = token.race(async { 42 }).await;
-            assert_eq!(result.unwrap(), 42);
-        });
+    #[tokio::test]
+    async fn race_returns_value_when_not_cancelled() {
+        let (_trigger, token) = CancelToken::new();
+        let result = token.race(async { 42 }).await;
+        assert_eq!(result.unwrap(), 42);
     }
 
-    #[test]
-    fn race_returns_error_when_already_cancelled() {
-        smol::block_on(async {
-            let (trigger, token) = CancelToken::new();
-            trigger.cancel();
-            let result = token.race(std::future::pending::<()>()).await;
-            assert!(result.unwrap_err().contains("cancelled"));
-        });
+    #[tokio::test]
+    async fn race_returns_error_when_already_cancelled() {
+        let (trigger, token) = CancelToken::new();
+        trigger.cancel();
+        let result = token.race(std::future::pending::<()>()).await;
+        assert!(result.unwrap_err().contains("cancelled"));
     }
 
-    #[test]
-    fn race_interrupted_by_concurrent_cancel() {
-        smol::block_on(async {
-            let (trigger, token) = CancelToken::new();
-            smol::spawn(async move { trigger.cancel() }).detach();
-            let result = token.race(std::future::pending::<()>()).await;
-            assert!(result.is_err());
-        });
+    #[tokio::test]
+    async fn race_interrupted_by_concurrent_cancel() {
+        let (trigger, token) = CancelToken::new();
+        tokio::spawn(async move { trigger.cancel() });
+        let result = token.race(std::future::pending::<()>()).await;
+        assert!(result.is_err());
     }
 }

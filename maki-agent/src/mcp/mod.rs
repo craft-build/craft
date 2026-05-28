@@ -281,17 +281,14 @@ impl McpHandle {
     pub async fn shutdown(&self) {
         let (ack_tx, ack_rx) = flume::bounded(1);
         self.send(McpCommand::Shutdown { ack: ack_tx });
-        let finished = futures_lite::future::or(
-            async {
-                let _ = ack_rx.recv_async().await;
+        let finished =         tokio::select! {
+            _ = ack_rx.recv_async() => {
                 true
-            },
-            async {
-                smol::Timer::after(MCP_SHUTDOWN_TIMEOUT).await;
+            }
+            _ = tokio::time::sleep(MCP_SHUTDOWN_TIMEOUT) => {
                 false
-            },
-        )
-        .await;
+            }
+        };
         if !finished {
             warn!("MCP shutdown timed out after {MCP_SHUTDOWN_TIMEOUT:?}");
         }
@@ -301,7 +298,10 @@ impl McpHandle {
 pub async fn start(cwd: &Path) -> (Option<McpHandle>, McpConfigErrors) {
     tracing::info!(cwd = %cwd.display(), "starting MCP");
     let cwd = cwd.to_owned();
-    let (config, config_errors) = smol::unblock(move || load_config(&cwd)).await;
+    let (config, config_errors) = tokio::task::spawn_blocking(move || load_config(&cwd)).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to load config");
+        (McpConfig::default(), McpConfigErrors::new(PathBuf::new()))
+    });
     let handle = start_with_config(config).await;
     (handle, config_errors)
 }
@@ -337,7 +337,7 @@ pub async fn start_with_config(config: McpConfig) -> Option<McpHandle> {
         "MCP servers initialized"
     );
 
-    smol::spawn(run(inner, index, snapshot, cmd_rx)).detach();
+    tokio::spawn(run(inner, index, snapshot, cmd_rx));
     Some(handle)
 }
 
@@ -578,11 +578,11 @@ async fn start_enabled(inner: &mut McpManagerInner) {
         .enumerate()
         .filter(|(_, e)| e.status == McpServerStatus::Connecting)
         .filter_map(|(i, e)| e.config.clone().map(|c| (i, c)))
-        .map(|(i, cfg)| smol::spawn(async move { (i, start_server(&cfg).await) }))
+        .map(|(i, cfg)| tokio::spawn(async move { (i, start_server(&cfg).await) }))
         .collect();
 
     for task in tasks {
-        let (i, result) = task.await;
+        let (i, result) = task.await.unwrap();
         let _ = apply_start_result(&mut inner.entries[i], result, "start");
     }
 }
@@ -685,13 +685,14 @@ fn transport_url(transport: &Transport) -> Option<String> {
 
 fn spawn_persist_enabled(path: PathBuf, name: String, enabled: bool) {
     let log_name = name.clone();
-    smol::spawn(async move {
-        if let Err(e) = smol::unblock(move || config::persist_enabled(&path, &name, enabled)).await
+    tokio::spawn(async move {
+        if let Err(e) = tokio::task::spawn_blocking(move || config::persist_enabled(&path, &name, enabled))
+            .await
+            .unwrap_or_else(|e| Err(McpError::Config(format!("spawn_blocking failed: {e}"))))
         {
             warn!(error = %e, server = %log_name, "failed to persist MCP toggle");
         }
-    })
-    .detach();
+    });
 }
 
 #[cfg(unix)]
@@ -723,7 +724,7 @@ fn intern(name: String) -> Arc<str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_lock::Mutex as AsyncMutex;
+    use tokio::sync::Mutex as AsyncMutex;
     use config::{RawServerConfig, RawStdioFields, RawTransport};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -864,133 +865,123 @@ mod tests {
         (inner, handle)
     }
 
-    #[test]
-    fn start_with_config_produces_terminal_statuses() {
-        smol::block_on(async {
-            let handle = start_with_config(McpConfig::default()).await;
-            assert!(handle.is_none());
+    #[tokio::test]
+    async fn start_with_config_produces_terminal_statuses() {
+        let handle = start_with_config(McpConfig::default()).await;
+        assert!(handle.is_none());
 
-            let mut disabled = stdio_raw(&["unused-disabled-cmd"]);
-            disabled.enabled = false;
-            let config = make_config(vec![
-                ("disabled-srv", disabled),
-                ("bad-srv", stdio_raw(&[])),
-            ]);
-            let handle = start_with_config(config).await;
-            let handle = handle.unwrap();
-            let infos = handle.reader().load().infos.clone();
+        let mut disabled = stdio_raw(&["unused-disabled-cmd"]);
+        disabled.enabled = false;
+        let config = make_config(vec![
+            ("disabled-srv", disabled),
+            ("bad-srv", stdio_raw(&[])),
+        ]);
+        let handle = start_with_config(config).await;
+        let handle = handle.unwrap();
+        let infos = handle.reader().load().infos.clone();
 
-            let bad = infos.iter().find(|i| i.name == "bad-srv").unwrap();
-            assert!(matches!(bad.status, McpServerStatus::Failed(_)));
-            assert_eq!(bad.tool_count, 0);
+        let bad = infos.iter().find(|i| i.name == "bad-srv").unwrap();
+        assert!(matches!(bad.status, McpServerStatus::Failed(_)));
+        assert_eq!(bad.tool_count, 0);
 
-            let disabled = infos.iter().find(|i| i.name == "disabled-srv").unwrap();
-            assert_eq!(disabled.status, McpServerStatus::Disabled);
-        });
+        let disabled = infos.iter().find(|i| i.name == "disabled-srv").unwrap();
+        assert_eq!(disabled.status, McpServerStatus::Disabled);
     }
 
     /// If a refresh fails, the entry must end up empty. A zombie tool left behind would be
     /// handed to the model on the next turn and then try to call into a dead transport.
-    #[test]
-    fn failed_refresh_clears_entry() {
-        smol::block_on(async {
-            let t = FakeTransport::new();
-            let (mut inner, _) = setup(vec![fake_entry("srv", Arc::clone(&t) as _)]);
-            inner.entries[0].config = Some(bad_stdio_config("srv"));
+    #[tokio::test]
+    async fn failed_refresh_clears_entry() {
+        let t = FakeTransport::new();
+        let (mut inner, _) = setup(vec![fake_entry("srv", Arc::clone(&t) as _)]);
+        inner.entries[0].config = Some(bad_stdio_config("srv"));
 
-            assert!(refresh_server(&mut inner, "srv", None).await.is_err());
+        assert!(refresh_server(&mut inner, "srv", None).await.is_err());
 
-            let entry = &inner.entries[0];
-            assert_eq!(t.shutdowns(), 1);
-            assert!(entry.tools.is_empty());
-            assert!(entry.prompts.is_empty());
-            assert!(entry.transport.is_none());
-            assert!(matches!(entry.status, McpServerStatus::Failed(_)));
-        });
+        let entry = &inner.entries[0];
+        assert_eq!(t.shutdowns(), 1);
+        assert!(entry.tools.is_empty());
+        assert!(entry.prompts.is_empty());
+        assert!(entry.transport.is_none());
+        assert!(matches!(entry.status, McpServerStatus::Failed(_)));
     }
 
-    #[test]
-    fn disable_purges_entry_and_published_view() {
-        smol::block_on(async {
-            let t = FakeTransport::new();
-            let (mut inner, handle) = setup(vec![fake_entry("srv", Arc::clone(&t) as _)]);
+    #[tokio::test]
+    async fn disable_purges_entry_and_published_view() {
+        let t = FakeTransport::new();
+        let (mut inner, handle) = setup(vec![fake_entry("srv", Arc::clone(&t) as _)]);
 
-            assert!(handle.has_tool(TOOL_NAME));
-            let mut tools = json!([]);
-            handle.extend_tools(&mut tools);
-            assert_eq!(tools[0]["name"], TOOL_NAME);
+        assert!(handle.has_tool(TOOL_NAME));
+        let mut tools = json!([]);
+        handle.extend_tools(&mut tools);
+        assert_eq!(tools[0]["name"], TOOL_NAME);
 
-            handle_toggle(&mut inner, "srv", false).await;
-            publish(&inner, &handle.index, &handle.snapshot);
+        handle_toggle(&mut inner, "srv", false).await;
+        publish(&inner, &handle.index, &handle.snapshot);
 
-            let entry = &inner.entries[0];
-            assert_eq!(t.shutdowns(), 1);
-            assert!(entry.tools.is_empty());
-            assert!(entry.transport.is_none());
-            assert_eq!(entry.status, McpServerStatus::Disabled);
-            assert!(!handle.has_tool(TOOL_NAME));
-            let mut tools = json!([]);
-            handle.extend_tools(&mut tools);
-            assert!(tools.as_array().unwrap().is_empty());
-        });
+        let entry = &inner.entries[0];
+        assert_eq!(t.shutdowns(), 1);
+        assert!(entry.tools.is_empty());
+        assert!(entry.transport.is_none());
+        assert_eq!(entry.status, McpServerStatus::Disabled);
+        assert!(!handle.has_tool(TOOL_NAME));
+        let mut tools = json!([]);
+        handle.extend_tools(&mut tools);
+        assert!(tools.as_array().unwrap().is_empty());
     }
 
     /// Regression: the lock-free refactor fixed a case where `call_tool` held the inner read
     /// lock across the transport await, so any in-flight call blocked every publish behind it.
     /// The rendezvous here stays deterministic: the call signals on `call_entered`, the test
     /// waits for that signal, then calls `publish` while the call is still parked on `call_gate`.
-    #[test]
-    fn slow_tool_call_does_not_block_publish() {
-        smol::block_on(async {
-            let t = FakeTransport::new();
-            let (mut inner, handle) = setup(vec![fake_entry("srv", Arc::clone(&t) as _)]);
+    #[tokio::test]
+    async fn slow_tool_call_does_not_block_publish() {
+        let t = FakeTransport::new();
+        let (mut inner, handle) = setup(vec![fake_entry("srv", Arc::clone(&t) as _)]);
 
-            let held = t.call_gate.lock().await;
-            let entered = t.call_entered_rx.clone();
-            let call_handle = {
-                let handle = handle.clone();
-                smol::spawn(async move { handle.call_tool(TOOL_NAME, &json!({})).await.unwrap() })
-            };
+        let held = t.call_gate.lock().await;
+        let entered = t.call_entered_rx.clone();
+        let call_handle = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.call_tool(TOOL_NAME, &json!({})).await.unwrap() })
+        };
 
-            entered.recv_async().await.unwrap();
-            inner.generation += 1;
-            publish(&inner, &handle.index, &handle.snapshot);
-            assert_eq!(handle.snapshot.load().generation, 1);
+        entered.recv_async().await.unwrap();
+        inner.generation += 1;
+        publish(&inner, &handle.index, &handle.snapshot);
+        assert_eq!(handle.snapshot.load().generation, 1);
 
-            drop(held);
-            call_handle.await;
-        });
+        drop(held);
+        call_handle.await.unwrap();
     }
 
-    #[test]
-    fn shutdown_command_drains_and_acks() {
-        smol::block_on(async {
-            let (t1, t2) = (FakeTransport::new(), FakeTransport::new());
-            let inner = McpManagerInner {
-                entries: vec![
-                    fake_entry("a", Arc::clone(&t1) as _),
-                    fake_entry("b", Arc::clone(&t2) as _),
-                ],
-                generation: 0,
-            };
-            let index = Arc::new(ArcSwap::from_pointee(ToolIndex::default()));
-            let snapshot = Arc::new(ArcSwap::from_pointee(McpSnapshot::default()));
-            let (cmd_tx, cmd_rx) = flume::unbounded();
-            let loop_task = smol::spawn(run(
-                inner,
-                Arc::clone(&index),
-                Arc::clone(&snapshot),
-                cmd_rx,
-            ));
+    #[tokio::test]
+    async fn shutdown_command_drains_and_acks() {
+        let (t1, t2) = (FakeTransport::new(), FakeTransport::new());
+        let inner = McpManagerInner {
+            entries: vec![
+                fake_entry("a", Arc::clone(&t1) as _),
+                fake_entry("b", Arc::clone(&t2) as _),
+            ],
+            generation: 0,
+        };
+        let index = Arc::new(ArcSwap::from_pointee(ToolIndex::default()));
+        let snapshot = Arc::new(ArcSwap::from_pointee(McpSnapshot::default()));
+        let (cmd_tx, cmd_rx) = flume::unbounded();
+        let loop_task = tokio::spawn(run(
+            inner,
+            Arc::clone(&index),
+            Arc::clone(&snapshot),
+            cmd_rx,
+        ));
 
-            let (ack_tx, ack_rx) = flume::bounded(1);
-            cmd_tx.send(McpCommand::Shutdown { ack: ack_tx }).unwrap();
-            ack_rx.recv_async().await.unwrap();
-            loop_task.await;
+        let (ack_tx, ack_rx) = flume::bounded(1);
+        cmd_tx.send(McpCommand::Shutdown { ack: ack_tx }).unwrap();
+        ack_rx.recv_async().await.unwrap();
+        loop_task.await.unwrap();
 
-            assert_eq!(t1.shutdowns(), 1);
-            assert_eq!(t2.shutdowns(), 1);
-            assert!(snapshot.load().infos.iter().all(|i| i.tool_count == 0));
-        });
+        assert_eq!(t1.shutdowns(), 1);
+        assert_eq!(t2.shutdowns(), 1);
+        assert!(snapshot.load().infos.iter().all(|i| i.tool_count == 0));
     }
 }

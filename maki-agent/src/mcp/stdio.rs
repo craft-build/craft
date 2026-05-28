@@ -5,19 +5,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use async_lock::Mutex;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
 
-use futures_lite::io::BufReader;
-use futures_lite::{AsyncBufReadExt, AsyncWriteExt};
 use serde_json::Value;
-use smol::channel;
 use tracing::{debug, info, warn};
 
 use super::error::McpError;
 use super::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use super::transport::{BoxFuture, McpTransport};
 
-type PendingMap = HashMap<u64, channel::Sender<Result<Value, McpError>>>;
+type PendingMap = HashMap<u64, flume::Sender<Result<Value, McpError>>>;
 
 const LINE_DELIMITER: u8 = b'\n';
 
@@ -25,13 +23,13 @@ use crate::ChildGuard;
 
 pub struct StdioTransport {
     name: Arc<str>,
-    stdin: Mutex<async_process::ChildStdin>,
+    stdin: Mutex<tokio::process::ChildStdin>,
     pending: Arc<Mutex<PendingMap>>,
     next_id: AtomicU64,
     timeout: Duration,
     alive: Arc<AtomicBool>,
-    _reader_task: smol::Task<()>,
-    _stderr_task: smol::Task<()>,
+    _reader_task: tokio::task::JoinHandle<()>,
+    _stderr_task: tokio::task::JoinHandle<()>,
     _child: ChildGuard,
 }
 
@@ -54,10 +52,10 @@ impl StdioTransport {
             });
         }
 
-        let mut cmd: async_process::Command = std_cmd.into();
-        cmd.stdin(async_process::Stdio::piped())
-            .stdout(async_process::Stdio::piped())
-            .stderr(async_process::Stdio::piped());
+        let mut cmd: tokio::process::Command = std_cmd.into();
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| McpError::StartFailed {
             server: name.into(),
             reason: e.to_string(),
@@ -84,7 +82,7 @@ impl StdioTransport {
             let name = Arc::clone(&name);
             let alive = Arc::clone(&alive);
             let pending = Arc::clone(&pending);
-            smol::spawn(async move {
+            tokio::spawn(async move {
                 let result = Self::reader_loop(&name, &mut BufReader::new(stdout), &pending).await;
                 if let Err(e) = &result {
                     warn!(server = &*name, error = %e, "MCP reader loop ended");
@@ -92,7 +90,7 @@ impl StdioTransport {
                 alive.store(false, Ordering::Release);
                 for (_, sender) in pending.lock().await.drain() {
                     let _ = sender
-                        .send(Err(McpError::ServerDied {
+                        .send_async(Err(McpError::ServerDied {
                             server: (*name).into(),
                         }))
                         .await;
@@ -102,7 +100,7 @@ impl StdioTransport {
 
         let stderr_task = {
             let name = Arc::clone(&name);
-            smol::spawn(async move {
+            tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr);
                 let mut line = String::new();
                 loop {
@@ -172,7 +170,7 @@ impl StdioTransport {
                             } else {
                                 Ok(resp.result.unwrap_or(Value::Null))
                             };
-                            let _ = sender.send(result).await;
+                            let _ = sender.send_async(result).await;
                         } else {
                             debug!(server = &**name, id, "response for unknown request id");
                         }
@@ -237,7 +235,7 @@ impl McpTransport for StdioTransport {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let req = JsonRpcRequest::new(id, method, params);
 
-            let (tx, rx) = smol::channel::bounded(1);
+            let (tx, rx) = flume::bounded(1);
             self.pending.lock().await.insert(id, tx);
 
             if let Err(e) = self.write_line(&self.serialize(&req)?).await {
@@ -245,17 +243,15 @@ impl McpTransport for StdioTransport {
                 return Err(e);
             }
 
-            let result = futures_lite::future::race(
-                async { rx.recv().await.unwrap_or(Err(self.server_died())) },
-                async {
-                    async_io::Timer::after(self.timeout).await;
+            let result = tokio::select! {
+                r = async { rx.recv_async().await.unwrap_or(Err(self.server_died())) } => r,
+                _ = tokio::time::sleep(self.timeout) => {
                     Err(McpError::Timeout {
                         server: self.server(),
                         timeout_ms: self.timeout.as_millis() as u64,
                     })
-                },
-            )
-            .await;
+                }
+            };
 
             if result.is_err() {
                 self.pending.lock().await.remove(&id);
@@ -280,10 +276,6 @@ impl McpTransport for StdioTransport {
 
     fn shutdown<'a>(&'a self) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            // Flip `alive` so any in-flight reader or writer gives up with a clean error.
-            // We deliberately do not signal the child here: the transport lives behind an
-            // Arc, and once the last clone goes away `ChildGuard::drop` takes care of
-            // killing the whole process group. Doing it twice just raced with itself.
             self.alive.store(false, Ordering::Release);
         })
     }
@@ -304,14 +296,14 @@ impl McpTransport for StdioTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_lite::io::Cursor;
+    use std::io::Cursor;
     use test_case::test_case;
 
     async fn read_single_response(input: &str) -> Result<Value, McpError> {
         let pending: Mutex<PendingMap> = Mutex::new(HashMap::new());
         let name: Arc<str> = Arc::from("test");
 
-        let (tx, rx) = channel::bounded(1);
+        let (tx, rx) = flume::bounded(1);
         pending.lock().await.insert(1, tx);
 
         let mut reader = BufReader::new(Cursor::new(input.as_bytes().to_vec()));
@@ -327,21 +319,18 @@ mod tests {
     #[test_case("  {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}  \n" ; "whitespace_padded")]
     #[test_case("\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n" ; "blank_lines_before")]
     #[test_case("not json\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n" ; "invalid_json_before")]
-    fn reader_parses_valid_response(input: &str) {
-        smol::block_on(async {
-            assert!(read_single_response(input).await.is_ok());
-        });
+    #[tokio::test]
+    async fn reader_parses_valid_response(input: &str) {
+        assert!(read_single_response(input).await.is_ok());
     }
 
-    #[test]
-    fn reader_returns_rpc_error() {
+    #[tokio::test]
+    async fn reader_returns_rpc_error() {
         let input =
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32600,\"message\":\"bad\"}}\n";
-        smol::block_on(async {
-            assert!(matches!(
-                read_single_response(input).await,
-                Err(McpError::RpcError { code: -32600, .. })
-            ));
-        });
+        assert!(matches!(
+            read_single_response(input).await,
+            Err(McpError::RpcError { code: -32600, .. })
+        ));
     }
 }

@@ -38,7 +38,7 @@ pub struct OpenAi {
 impl OpenAi {
     pub fn new(timeouts: crate::providers::Timeouts) -> Result<Self, AgentError> {
         let storage = StateDir::resolve()?;
-        let resolved = auth::resolve(&storage)?;
+        let resolved = crate::providers::block_on(auth::resolve(&storage))?;
         let compat = OpenAiCompatProvider::new(&CONFIG, timeouts);
         Ok(Self {
             compat,
@@ -77,27 +77,24 @@ impl OpenAi {
         let storage = self.storage.clone().ok_or_else(|| AgentError::Config {
             message: "OAuth refresh not available for externally-managed auth".into(),
         })?;
-        let resolved = smol::unblock(move || {
-            let tokens =
-                maki_storage::auth::load_tokens(&storage, auth::PROVIDER).ok_or_else(|| {
-                    AgentError::Api {
-                        status: 401,
-                        message: "OpenAI OAuth tokens not found on disk".into(),
-                    }
-                })?;
-            match auth::refresh_tokens(&tokens) {
-                Ok(fresh) => {
-                    maki_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)?;
-                    Ok(auth::build_oauth_resolved(&fresh))
+        let tokens =
+            maki_storage::auth::load_tokens(&storage, auth::PROVIDER).ok_or_else(|| {
+                AgentError::Api {
+                    status: 401,
+                    message: "OpenAI OAuth tokens not found on disk".into(),
                 }
-                Err(e) => {
-                    warn!(error = %e, "OpenAI OAuth refresh failed, clearing stale tokens");
-                    let _ = maki_storage::auth::delete_tokens(&storage, auth::PROVIDER);
-                    Err(e)
-                }
+            })?;
+        let resolved = match auth::refresh_tokens(&tokens).await {
+            Ok(fresh) => {
+                maki_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)?;
+                auth::build_oauth_resolved(&fresh)
             }
-        })
-        .await?;
+            Err(e) => {
+                warn!(error = %e, "OpenAI OAuth refresh failed, clearing stale tokens");
+                let _ = maki_storage::auth::delete_tokens(&storage, auth::PROVIDER);
+                return Err(e);
+            }
+        };
         *self.auth.lock().unwrap() = resolved;
         debug!("refreshed OpenAI OAuth token");
         Ok(())
@@ -213,7 +210,7 @@ impl Provider for OpenAi {
             let Some(storage) = self.storage.clone() else {
                 return Ok(());
             };
-            let resolved = smol::unblock(move || auth::resolve(&storage)).await?;
+            let resolved = auth::resolve(&storage).await?;
             *self.auth.lock().unwrap() = resolved;
             debug!("reloaded OpenAI auth from storage");
             Ok(())

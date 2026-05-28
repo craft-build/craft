@@ -13,9 +13,9 @@ use maki_providers::provider::fetch_all_models;
 use maki_providers::{copilot_auth, dynamic, openai_auth};
 use maki_storage::StateDir;
 
-pub fn auth_login(provider: &str, storage: &StateDir) -> Result<()> {
+pub async fn auth_login(provider: &str, storage: &StateDir) -> Result<()> {
     match provider {
-        "openai" => openai_auth::login(storage)?,
+        "openai" => openai_auth::login(storage).await?,
         "copilot" => copilot_auth::login()?,
         slug => dynamic::login(slug)?,
     }
@@ -32,7 +32,8 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
 }
 
 pub fn models() {
-    smol::block_on(fetch_all_models(|batch| {
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    rt.block_on(fetch_all_models(|batch| {
         for model in batch.models {
             println!("{model}");
         }

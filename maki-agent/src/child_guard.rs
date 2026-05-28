@@ -2,7 +2,7 @@ use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use async_process::Child;
+use tokio::process::Child;
 
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -13,8 +13,9 @@ pub struct ChildGuard {
 
 impl ChildGuard {
     pub fn new(child: Child) -> Self {
+        let pid = child.id().expect("child was polled");
         Self {
-            pid: child.id(),
+            pid,
             child: Some(child),
         }
     }
@@ -26,7 +27,7 @@ impl ChildGuard {
     pub async fn status(&mut self) -> io::Result<ExitStatus> {
         match self.child.as_mut() {
             Some(child) => {
-                let result = child.status().await;
+                let result = child.wait().await;
                 if result.is_ok() {
                     self.child = None;
                 }
@@ -42,15 +43,10 @@ impl ChildGuard {
     pub async fn kill_and_reap(&mut self) {
         self.signal_kill();
         if let Some(mut child) = self.child.take() {
-            futures_lite::future::or(
-                async {
-                    let _ = child.status().await;
-                },
-                async {
-                    async_io::Timer::after(REAP_TIMEOUT).await;
-                },
-            )
-            .await;
+            tokio::select! {
+                _ = child.wait() => {}
+                _ = tokio::time::sleep(REAP_TIMEOUT) => {}
+            }
         }
     }
 
@@ -66,14 +62,10 @@ impl ChildGuard {
     #[cfg(not(unix))]
     fn signal_kill(&mut self) {
         if let Some(child) = &mut self.child {
-            let _ = child.kill();
+            let _ = child.kill().await;
         }
     }
 
-    // Best-effort non-blocking reap after SIGKILL to prevent zombie accumulation.
-    // All normal paths call .status() or .kill_and_reap() first, so this only
-    // fires on unexpected drops (panics, early returns). Uses WNOHANG to never
-    // block the async executor.
     #[cfg(unix)]
     fn reap_nonblocking(&mut self) {
         if self.child.take().is_some() {
@@ -86,7 +78,7 @@ impl ChildGuard {
     #[cfg(not(unix))]
     fn reap_nonblocking(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.try_status();
+            let _ = child.try_wait();
         }
     }
 }
@@ -105,7 +97,7 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::time::{Duration, Instant};
 
-    use async_process::Child;
+    use tokio::process::Child;
 
     use super::ChildGuard;
 
@@ -118,7 +110,7 @@ mod tests {
                 Ok(())
             });
         }
-        let mut cmd: async_process::Command = std_cmd.into();
+        let mut cmd: tokio::process::Command = std_cmd.into();
         cmd.spawn().expect("failed to spawn sleep")
     }
 
@@ -137,34 +129,30 @@ mod tests {
         panic!("process {pid} still alive after 2s");
     }
 
-    #[test]
-    fn drop_kills_child_process() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_kills_child_process() {
         let child = spawn_sleep();
-        let pid = child.id();
+        let pid = child.id().expect("child was polled");
         assert!(is_alive(pid));
         drop(ChildGuard::new(child));
         wait_for_death(pid);
     }
 
-    #[test]
-    fn kill_and_reap_kills_process() {
-        smol::block_on(async {
-            let child = spawn_sleep();
-            let pid = child.id();
-            assert!(is_alive(pid));
-            let mut guard = ChildGuard::new(child);
-            guard.kill_and_reap().await;
-            wait_for_death(pid);
-        });
+    #[tokio::test(flavor = "multi_thread")]
+    async fn kill_and_reap_kills_process() {
+        let child = spawn_sleep();
+        let pid = child.id().expect("child was polled");
+        assert!(is_alive(pid));
+        let mut guard = ChildGuard::new(child);
+        guard.kill_and_reap().await;
+        wait_for_death(pid);
     }
 
-    #[test]
-    fn status_after_reap_returns_error() {
-        smol::block_on(async {
-            let child = spawn_sleep();
-            let mut guard = ChildGuard::new(child);
-            guard.kill_and_reap().await;
-            assert!(guard.status().await.is_err());
-        });
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_after_reap_returns_error() {
+        let child = spawn_sleep();
+        let mut guard = ChildGuard::new(child);
+        guard.kill_and_reap().await;
+        assert!(guard.status().await.is_err());
     }
 }

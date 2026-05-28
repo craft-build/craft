@@ -1,15 +1,8 @@
-//! Panic-catching concurrent task set for tool execution.
-//!
-//! Tool panics must not crash the agent; every spawned task is wrapped in `catch_unwind` and returns `Err(String)` instead.
-
 use std::backtrace::Backtrace;
 use std::future::Future;
-use std::panic::AssertUnwindSafe;
-
-use futures_lite::FutureExt;
 
 pub(crate) struct TaskSet<T> {
-    tasks: Vec<smol::Task<Result<T, String>>>,
+    tasks: Vec<tokio::task::JoinHandle<Result<T, String>>>,
 }
 
 impl<T: Send + 'static> TaskSet<T> {
@@ -21,18 +14,33 @@ impl<T: Send + 'static> TaskSet<T> {
     where
         F: Future<Output = T> + Send + 'static,
     {
-        self.tasks.push(smol::spawn(async move {
-            AssertUnwindSafe(future)
-                .catch_unwind()
-                .await
-                .map_err(panic_to_string)
+        self.tasks.push(tokio::spawn(async move {
+            match tokio::spawn(future).await {
+                Ok(result) => Ok(result),
+                Err(e) => {
+                    if e.is_panic() {
+                        Err(panic_to_string(e.into_panic()))
+                    } else {
+                        Err("task was cancelled".into())
+                    }
+                }
+            }
         }));
     }
 
     pub async fn join_all(self) -> Vec<Result<T, String>> {
         let mut results = Vec::with_capacity(self.tasks.len());
         for task in self.tasks {
-            results.push(task.await);
+            results.push(match task.await {
+                Ok(inner) => inner,
+                Err(e) => {
+                    if e.is_panic() {
+                        Err(panic_to_string(e.into_panic()))
+                    } else {
+                        Err("task was cancelled".into())
+                    }
+                }
+            });
         }
         results
     }
@@ -54,20 +62,18 @@ fn panic_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mixed_panic_and_ok() {
-        smol::block_on(async {
-            let mut set: TaskSet<i32> = TaskSet::new();
-            set.spawn(async { 42 });
-            set.spawn(async { panic!("oops") });
-            set.spawn(async { 7 });
-            let results = set.join_all().await;
-            assert_eq!(results.len(), 3);
-            assert_eq!(results[0].as_ref().unwrap(), &42);
-            let err = results[1].as_ref().unwrap_err();
-            assert!(err.starts_with("oops"), "unexpected error: {err}");
-            assert!(err.contains("Backtrace:"), "missing backtrace in: {err}");
-            assert_eq!(results[2].as_ref().unwrap(), &7);
-        });
+    #[tokio::test]
+    async fn mixed_panic_and_ok() {
+        let mut set: TaskSet<i32> = TaskSet::new();
+        set.spawn(async { 42 });
+        set.spawn(async { panic!("oops") });
+        set.spawn(async { 7 });
+        let results = set.join_all().await;
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), &42);
+        let err = results[1].as_ref().unwrap_err();
+        assert!(err.starts_with("oops"), "unexpected error: {err}");
+        assert!(err.contains("Backtrace:"), "missing backtrace in: {err}");
+        assert_eq!(results[2].as_ref().unwrap(), &7);
     }
 }
