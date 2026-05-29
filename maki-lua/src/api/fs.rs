@@ -104,7 +104,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
         "read",
         lua.create_async_function(|_, path: String| async move {
             let abs = make_absolute(&path)?;
-            smol::fs::read_to_string(&abs).await.map_err(|e| {
+            tokio::fs::read_to_string(&abs).await.map_err(|e| {
                 if e.kind() == ErrorKind::InvalidData {
                     mlua::Error::runtime("non-utf8 content; use read_bytes")
                 } else {
@@ -118,7 +118,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
         "read_bytes",
         lua.create_async_function(|lua, path: String| async move {
             let abs = make_absolute(&path)?;
-            let bytes = smol::fs::read(&abs)
+            let bytes = tokio::fs::read(&abs)
                 .await
                 .map_err(|e| mlua::Error::runtime(format!("fs.read_bytes({path}): {e}")))?;
             lua.create_buffer(bytes)
@@ -129,7 +129,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
         "metadata",
         lua.create_async_function(|lua, path: String| async move {
             let abs = make_absolute(&path)?;
-            match smol::fs::metadata(&abs).await {
+            match tokio::fs::metadata(&abs).await {
                 Ok(meta) => {
                     let tbl = lua.create_table()?;
                     tbl.set("size", meta.len())?;
@@ -237,7 +237,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
                 }
             };
 
-            smol::unblock(move || {
+            tokio::task::spawn_blocking(move || {
                 let start = Path::new(&source);
                 let start = if start.is_file() || !start.exists() {
                     start.parent().unwrap_or(start)
@@ -259,6 +259,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
                 }
             })
             .await
+            .map_err(|e| mlua::Error::runtime(format!("task failed: {e}")))?
         })?,
     )?;
 
@@ -304,7 +305,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
                 None => 1,
             };
 
-            let entries = smol::unblock(move || {
+            let entries = tokio::task::spawn_blocking(move || {
                 if !abs.exists() {
                     return Vec::new();
                 }
@@ -313,7 +314,8 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
                 collect_dir_entries(&abs, &abs, 1, max_depth, &mut visited, &mut out);
                 out
             })
-            .await;
+            .await
+            .map_err(|e| mlua::Error::runtime(format!("task failed: {e}")))?;
 
             let result = lua.create_table()?;
             for (i, (name, typ)) in entries.iter().enumerate() {
@@ -330,7 +332,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
         "write",
         lua.create_async_function(|lua, (path, content): (String, String)| async move {
             let abs = make_absolute(&path)?;
-            let result = smol::fs::write(&abs, content).await;
+            let result = tokio::fs::write(&abs, content).await;
             io_result(&lua, result)
         })?,
     )?;
@@ -339,7 +341,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
         "rm",
         lua.create_async_function(|lua, path: String| async move {
             let abs = make_absolute(&path)?;
-            let result = smol::fs::remove_file(&abs).await;
+            let result = tokio::fs::remove_file(&abs).await;
             io_result(&lua, result)
         })?,
     )?;
@@ -353,9 +355,9 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
                 .and_then(|t| t.get::<bool>("parents").ok())
                 .unwrap_or(false);
             let result = if parents {
-                smol::fs::create_dir_all(&abs).await
+                tokio::fs::create_dir_all(&abs).await
             } else {
-                smol::fs::create_dir(&abs).await
+                tokio::fs::create_dir(&abs).await
             };
             io_result(&lua, result)
         })?,
@@ -390,7 +392,7 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
                 let sort = opts.as_ref().and_then(|t| t.get::<String>("sort").ok());
                 let sort_mtime = sort.as_deref() == Some("mtime");
 
-                let results = smol::unblock(move || {
+                let results = tokio::task::spawn_blocking(move || {
                     let root = maki_agent::tools::resolve_search_path(path.as_deref())
                         .map_err(mlua::Error::runtime)?;
                     let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
@@ -429,7 +431,8 @@ pub(crate) fn create_fs_table(lua: &Lua) -> LuaResult<Table> {
 
                     Ok::<_, mlua::Error>(paths)
                 })
-                .await?;
+                .await
+                .map_err(|e| mlua::Error::runtime(format!("task failed: {e}")))??;
 
                 let tbl = lua.create_table()?;
                 for (i, path) in results.iter().enumerate() {
@@ -451,8 +454,8 @@ mod tests {
     use mlua::Lua;
     use tempfile::TempDir;
 
-    #[test]
-    fn read_file_ok() {
+    #[tokio::test]
+    async fn read_file_ok() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("hello.txt");
         std::fs::write(&file, "world").unwrap();
@@ -460,12 +463,12 @@ mod tests {
         let lua = Lua::new();
         let tbl = create_fs_table(&lua).unwrap();
         let read: mlua::Function = tbl.get("read").unwrap();
-        let result: String = smol::block_on(read.call_async(file.to_str().unwrap())).unwrap();
+        let result: String = read.call_async(file.to_str().unwrap()).await.unwrap();
         assert_eq!(result, "world");
     }
 
-    #[test]
-    fn dir_lists_entries() {
+    #[tokio::test]
+    async fn dir_lists_entries() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
@@ -474,7 +477,7 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let dir: mlua::Function = tbl.get("dir").unwrap();
         let result: Table =
-            smol::block_on(dir.call_async::<Table>(tmp.path().to_str().unwrap())).unwrap();
+            dir.call_async::<Table>(tmp.path().to_str().unwrap()).await.unwrap();
 
         let mut names: Vec<String> = Vec::new();
         let mut types: Vec<String> = Vec::new();
@@ -489,8 +492,8 @@ mod tests {
         assert!(types.contains(&"directory".to_owned()));
     }
 
-    #[test]
-    fn dir_recursive() {
+    #[tokio::test]
+    async fn dir_recursive() {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join("d")).unwrap();
         std::fs::write(tmp.path().join("d/nested.txt"), "").unwrap();
@@ -503,7 +506,7 @@ mod tests {
         opts.set("depth", 2).unwrap();
 
         let result: Table =
-            smol::block_on(dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts))).unwrap();
+            dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts)).await.unwrap();
 
         let mut names: Vec<String> = Vec::new();
         for i in 1..=result.len().unwrap() {
@@ -515,20 +518,20 @@ mod tests {
         assert!(names.iter().any(|n| n.contains("nested.txt")));
     }
 
-    #[test]
-    fn dir_nonexistent_returns_empty() {
+    #[tokio::test]
+    async fn dir_nonexistent_returns_empty() {
         let tmp = TempDir::new().unwrap();
         let lua = Lua::new();
         let tbl = create_fs_table(&lua).unwrap();
         let dir: mlua::Function = tbl.get("dir").unwrap();
         let missing = tmp.path().join("does_not_exist");
         let result: Table =
-            smol::block_on(dir.call_async::<Table>(missing.to_str().unwrap())).unwrap();
+            dir.call_async::<Table>(missing.to_str().unwrap()).await.unwrap();
         assert_eq!(result.len().unwrap(), 0);
     }
 
-    #[test]
-    fn metadata_file_dir_and_missing() {
+    #[tokio::test]
+    async fn metadata_file_dir_and_missing() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("probe.txt");
         std::fs::write(&file, "hello").unwrap();
@@ -538,25 +541,25 @@ mod tests {
         let metadata: mlua::Function = tbl.get("metadata").unwrap();
 
         let f: Table =
-            smol::block_on(metadata.call_async::<Table>(file.to_str().unwrap())).unwrap();
+            metadata.call_async::<Table>(file.to_str().unwrap()).await.unwrap();
         assert!(f.get::<bool>("is_file").unwrap());
         assert!(!f.get::<bool>("is_dir").unwrap());
         assert_eq!(f.get::<u64>("size").unwrap(), 5);
 
         let d: Table =
-            smol::block_on(metadata.call_async::<Table>(tmp.path().to_str().unwrap())).unwrap();
+            metadata.call_async::<Table>(tmp.path().to_str().unwrap()).await.unwrap();
         assert!(!d.get::<bool>("is_file").unwrap());
         assert!(d.get::<bool>("is_dir").unwrap());
 
         let missing = tmp.path().join("nope");
         let nil: mlua::Value =
-            smol::block_on(metadata.call_async(missing.to_str().unwrap())).unwrap();
+            metadata.call_async(missing.to_str().unwrap()).await.unwrap();
         assert!(matches!(nil, mlua::Value::Nil));
     }
 
     #[cfg(unix)]
-    #[test]
-    fn dir_follows_symlinks() {
+    #[tokio::test]
+    async fn dir_follows_symlinks() {
         let tmp = TempDir::new().unwrap();
         let real_dir = tmp.path().join("real");
         std::fs::create_dir(&real_dir).unwrap();
@@ -571,7 +574,7 @@ mod tests {
         opts.set("depth", 2u32).unwrap();
 
         let result: Table =
-            smol::block_on(dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts))).unwrap();
+            dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts)).await.unwrap();
 
         let mut names: Vec<String> = Vec::new();
         let mut types: Vec<String> = Vec::new();
@@ -587,8 +590,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn dir_dangling_symlink() {
+    #[tokio::test]
+    async fn dir_dangling_symlink() {
         let tmp = TempDir::new().unwrap();
         std::os::unix::fs::symlink("/nonexistent_target_xyz", tmp.path().join("broken")).unwrap();
 
@@ -597,7 +600,7 @@ mod tests {
         let dir: mlua::Function = tbl.get("dir").unwrap();
 
         let result: Table =
-            smol::block_on(dir.call_async::<Table>(tmp.path().to_str().unwrap())).unwrap();
+            dir.call_async::<Table>(tmp.path().to_str().unwrap()).await.unwrap();
 
         let mut found = false;
         for i in 1..=result.len().unwrap() {
@@ -613,8 +616,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn dir_symlink_cycle_does_not_loop() {
+    #[tokio::test]
+    async fn dir_symlink_cycle_does_not_loop() {
         let tmp = TempDir::new().unwrap();
         let child = tmp.path().join("child");
         std::fs::create_dir(&child).unwrap();
@@ -628,7 +631,7 @@ mod tests {
         opts.set("depth", 10u32).unwrap();
 
         let result: Table =
-            smol::block_on(dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts))).unwrap();
+            dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts)).await.unwrap();
 
         let len = result.len().unwrap();
         assert!(
@@ -637,8 +640,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_creates_file() {
+    #[tokio::test]
+    async fn write_creates_file() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("new.txt");
 
@@ -646,7 +649,7 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let write: mlua::Function = tbl.get("write").unwrap();
         let (ok, err): (mlua::Value, mlua::Value) =
-            smol::block_on(write.call_async((file.to_str().unwrap(), "hello world"))).unwrap();
+            write.call_async((file.to_str().unwrap(), "hello world")).await.unwrap();
         assert!(
             matches!(ok, mlua::Value::Boolean(true)),
             "write should succeed"
@@ -655,8 +658,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello world");
     }
 
-    #[test]
-    fn write_overwrites_existing() {
+    #[tokio::test]
+    async fn write_overwrites_existing() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("overwrite.txt");
         std::fs::write(&file, "old").unwrap();
@@ -664,15 +667,15 @@ mod tests {
         let lua = Lua::new();
         let tbl = create_fs_table(&lua).unwrap();
         let write: mlua::Function = tbl.get("write").unwrap();
-        smol::block_on(
-            write.call_async::<(mlua::Value, mlua::Value)>((file.to_str().unwrap(), "new")),
-        )
-        .unwrap();
+        write
+            .call_async::<(mlua::Value, mlua::Value)>((file.to_str().unwrap(), "new"))
+            .await
+            .unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
     }
 
-    #[test]
-    fn write_to_nonexistent_parent_returns_error() {
+    #[tokio::test]
+    async fn write_to_nonexistent_parent_returns_error() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("no_parent/deep/file.txt");
 
@@ -680,7 +683,7 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let write: mlua::Function = tbl.get("write").unwrap();
         let (ok, err): (mlua::Value, mlua::Value) =
-            smol::block_on(write.call_async((file.to_str().unwrap(), "data"))).unwrap();
+            write.call_async((file.to_str().unwrap(), "data")).await.unwrap();
         assert!(matches!(ok, mlua::Value::Nil), "should fail");
         assert!(
             matches!(err, mlua::Value::String(_)),
@@ -688,8 +691,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rm_deletes_file() {
+    #[tokio::test]
+    async fn rm_deletes_file() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("doomed.txt");
         std::fs::write(&file, "bye").unwrap();
@@ -698,13 +701,13 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let rm: mlua::Function = tbl.get("rm").unwrap();
         let (ok, _): (mlua::Value, mlua::Value) =
-            smol::block_on(rm.call_async(file.to_str().unwrap())).unwrap();
+            rm.call_async(file.to_str().unwrap()).await.unwrap();
         assert!(matches!(ok, mlua::Value::Boolean(true)));
         assert!(!file.exists());
     }
 
-    #[test]
-    fn rm_nonexistent_returns_error() {
+    #[tokio::test]
+    async fn rm_nonexistent_returns_error() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("ghost.txt");
 
@@ -712,7 +715,7 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let rm: mlua::Function = tbl.get("rm").unwrap();
         let (ok, err): (mlua::Value, mlua::Value) =
-            smol::block_on(rm.call_async(file.to_str().unwrap())).unwrap();
+            rm.call_async(file.to_str().unwrap()).await.unwrap();
         assert!(
             matches!(ok, mlua::Value::Nil),
             "should fail for nonexistent"
@@ -720,8 +723,8 @@ mod tests {
         assert!(matches!(err, mlua::Value::String(_)));
     }
 
-    #[test]
-    fn mkdir_creates_single_dir() {
+    #[tokio::test]
+    async fn mkdir_creates_single_dir() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("newdir");
 
@@ -729,13 +732,13 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let mkdir: mlua::Function = tbl.get("mkdir").unwrap();
         let (ok, _): (mlua::Value, mlua::Value) =
-            smol::block_on(mkdir.call_async(dir.to_str().unwrap())).unwrap();
+            mkdir.call_async(dir.to_str().unwrap()).await.unwrap();
         assert!(matches!(ok, mlua::Value::Boolean(true)));
         assert!(dir.is_dir());
     }
 
-    #[test]
-    fn mkdir_without_parents_fails_on_deep_path() {
+    #[tokio::test]
+    async fn mkdir_without_parents_fails_on_deep_path() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("a/b/c");
 
@@ -743,7 +746,7 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let mkdir: mlua::Function = tbl.get("mkdir").unwrap();
         let (ok, err): (mlua::Value, mlua::Value) =
-            smol::block_on(mkdir.call_async(dir.to_str().unwrap())).unwrap();
+            mkdir.call_async(dir.to_str().unwrap()).await.unwrap();
         assert!(
             matches!(ok, mlua::Value::Nil),
             "should fail without parents option"
@@ -751,8 +754,8 @@ mod tests {
         assert!(matches!(err, mlua::Value::String(_)));
     }
 
-    #[test]
-    fn mkdir_with_parents_creates_nested() {
+    #[tokio::test]
+    async fn mkdir_with_parents_creates_nested() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("x/y/z");
 
@@ -762,13 +765,13 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("parents", true).unwrap();
         let (ok, _): (mlua::Value, mlua::Value) =
-            smol::block_on(mkdir.call_async((dir.to_str().unwrap(), opts))).unwrap();
+            mkdir.call_async((dir.to_str().unwrap(), opts)).await.unwrap();
         assert!(matches!(ok, mlua::Value::Boolean(true)));
         assert!(dir.is_dir());
     }
 
-    #[test]
-    fn mkdir_already_exists_returns_error() {
+    #[tokio::test]
+    async fn mkdir_already_exists_returns_error() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("exists");
         std::fs::create_dir(&dir).unwrap();
@@ -777,7 +780,7 @@ mod tests {
         let tbl = create_fs_table(&lua).unwrap();
         let mkdir: mlua::Function = tbl.get("mkdir").unwrap();
         let (ok, err): (mlua::Value, mlua::Value) =
-            smol::block_on(mkdir.call_async(dir.to_str().unwrap())).unwrap();
+            mkdir.call_async(dir.to_str().unwrap()).await.unwrap();
         assert!(
             matches!(ok, mlua::Value::Nil),
             "creating existing dir should fail"
@@ -785,8 +788,8 @@ mod tests {
         assert!(matches!(err, mlua::Value::String(_)));
     }
 
-    #[test]
-    fn mkdir_with_parents_idempotent() {
+    #[tokio::test]
+    async fn mkdir_with_parents_idempotent() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("idem");
         std::fs::create_dir(&dir).unwrap();
@@ -797,15 +800,15 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("parents", true).unwrap();
         let (ok, _): (mlua::Value, mlua::Value) =
-            smol::block_on(mkdir.call_async((dir.to_str().unwrap(), opts))).unwrap();
+            mkdir.call_async((dir.to_str().unwrap(), opts)).await.unwrap();
         assert!(
             matches!(ok, mlua::Value::Boolean(true)),
             "parents=true should be idempotent"
         );
     }
 
-    #[test]
-    fn glob_finds_matching_files() {
+    #[tokio::test]
+    async fn glob_finds_matching_files() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.rs"), "fn main(){}").unwrap();
         std::fs::write(tmp.path().join("b.txt"), "hello").unwrap();
@@ -818,7 +821,7 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("path", dir_str.as_str()).unwrap();
 
-        let result: Table = smol::block_on(glob.call_async::<Table>(("*.rs", opts))).unwrap();
+        let result: Table = glob.call_async::<Table>(("*.rs", opts)).await.unwrap();
 
         let mut paths: Vec<String> = Vec::new();
         for i in 1..=result.len().unwrap() {
@@ -828,8 +831,8 @@ mod tests {
         assert!(paths[0].ends_with("a.rs"));
     }
 
-    #[test]
-    fn glob_multiple_patterns_union() {
+    #[tokio::test]
+    async fn glob_multiple_patterns_union() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.rs"), "").unwrap();
         std::fs::write(tmp.path().join("b.txt"), "").unwrap();
@@ -846,7 +849,7 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("path", tmp.path().to_str().unwrap()).unwrap();
 
-        let result: Table = smol::block_on(glob.call_async::<Table>((patterns, opts))).unwrap();
+        let result: Table = glob.call_async::<Table>((patterns, opts)).await.unwrap();
 
         let mut paths: Vec<String> = Vec::new();
         for i in 1..=result.len().unwrap() {
@@ -858,8 +861,8 @@ mod tests {
         assert!(paths[1].ends_with("b.txt"));
     }
 
-    #[test]
-    fn glob_limit_caps_results() {
+    #[tokio::test]
+    async fn glob_limit_caps_results() {
         let tmp = TempDir::new().unwrap();
         for i in 0..5 {
             std::fs::write(tmp.path().join(format!("f{i}.rs")), "").unwrap();
@@ -873,12 +876,12 @@ mod tests {
         opts.set("path", tmp.path().to_str().unwrap()).unwrap();
         opts.set("limit", 2).unwrap();
 
-        let result: Table = smol::block_on(glob.call_async::<Table>(("*.rs", opts))).unwrap();
+        let result: Table = glob.call_async::<Table>(("*.rs", opts)).await.unwrap();
         assert_eq!(result.len().unwrap(), 2);
     }
 
-    #[test]
-    fn glob_no_matches_returns_empty_table() {
+    #[tokio::test]
+    async fn glob_no_matches_returns_empty_table() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.rs"), "").unwrap();
 
@@ -889,17 +892,19 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("path", tmp.path().to_str().unwrap()).unwrap();
 
-        let result: Table = smol::block_on(glob.call_async::<Table>(("*.nope", opts))).unwrap();
+        let result: Table = glob.call_async::<Table>(("*.nope", opts)).await.unwrap();
         assert_eq!(result.len().unwrap(), 0);
     }
 
-    #[test]
-    fn glob_invalid_pattern_type_errors() {
+    #[tokio::test]
+    async fn glob_invalid_pattern_type_errors() {
         let lua = Lua::new();
         let tbl = create_fs_table(&lua).unwrap();
         let glob: mlua::Function = tbl.get("glob").unwrap();
 
-        let err = smol::block_on(glob.call_async::<Table>((mlua::Value::Integer(42), mlua::Nil)))
+        let err = glob
+            .call_async::<Table>((mlua::Value::Integer(42), mlua::Nil))
+            .await
             .unwrap_err();
         assert!(
             err.to_string()
@@ -907,8 +912,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn glob_mtime_sort_newest_first() {
+    #[tokio::test]
+    async fn glob_mtime_sort_newest_first() {
         let tmp = TempDir::new().unwrap();
         let old_path = tmp.path().join("old.rs");
         let new_path = tmp.path().join("new.rs");
@@ -934,7 +939,7 @@ mod tests {
         opts.set("path", tmp.path().to_str().unwrap()).unwrap();
         opts.set("sort", "mtime").unwrap();
 
-        let result: Table = smol::block_on(glob.call_async::<Table>(("*.rs", opts))).unwrap();
+        let result: Table = glob.call_async::<Table>(("*.rs", opts)).await.unwrap();
 
         let first: String = result.get(1).unwrap();
         let second: String = result.get(2).unwrap();
@@ -942,18 +947,18 @@ mod tests {
         assert!(second.ends_with("old.rs"));
     }
 
-    #[test]
-    fn glob_no_opts_uses_cwd() {
+    #[tokio::test]
+    async fn glob_no_opts_uses_cwd() {
         let lua = Lua::new();
         let tbl = create_fs_table(&lua).unwrap();
         let glob: mlua::Function = tbl.get("glob").unwrap();
 
-        let result = smol::block_on(glob.call_async::<Table>(("*.rs", mlua::Nil)));
+        let result = glob.call_async::<Table>(("*.rs", mlua::Nil)).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn glob_path_option_scopes_to_directory() {
+    #[tokio::test]
+    async fn glob_path_option_scopes_to_directory() {
         let tmp = TempDir::new().unwrap();
         let sub = tmp.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
@@ -967,7 +972,7 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("path", sub.to_str().unwrap()).unwrap();
 
-        let result: Table = smol::block_on(glob.call_async::<Table>(("*.rs", opts))).unwrap();
+        let result: Table = glob.call_async::<Table>(("*.rs", opts)).await.unwrap();
 
         let mut paths: Vec<String> = Vec::new();
         for i in 1..=result.len().unwrap() {

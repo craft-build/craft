@@ -1,9 +1,7 @@
 use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
-use futures_lite::io::AsyncReadExt;
-use isahc::config::{Configurable, RedirectPolicy};
-use isahc::{AsyncBody, HttpClient, Request};
+use reqwest::Client;
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -110,46 +108,56 @@ fn extract_request_params(url: &str, opts: Option<&Table>) -> Result<RequestPara
 }
 
 fn build_request(
+    client: &Client,
     url: &str,
     user_agent: &str,
     method: &str,
     headers: &[(String, String)],
     body: Vec<u8>,
-) -> Result<Request<AsyncBody>, String> {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(url)
+) -> Result<reqwest::Request, String> {
+    let mut builder = client
+        .request(
+            method
+                .parse::<reqwest::Method>()
+                .map_err(|e| format!("invalid method: {e}"))?,
+            url,
+        )
         .header("User-Agent", user_agent);
 
     for (k, v) in headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
 
+    if !body.is_empty() {
+        builder = builder.body(body);
+    }
+
     builder
-        .body(AsyncBody::from(body))
+        .build()
         .map_err(|e| format!("request build error: {e}"))
 }
 
 async fn do_request(params: RequestParams) -> Result<ResponseData, String> {
-    let client = HttpClient::builder()
+    let client = Client::builder()
         .timeout(params.timeout)
-        .redirect_policy(RedirectPolicy::Follow)
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|e| format!("client error: {e}"))?;
 
     let is_get = params.method.eq_ignore_ascii_case("GET");
     let mut last_err = String::new();
 
-    let mut response = 'retry: {
+    let response = 'retry: {
         for attempt in 0..=params.retries {
             let req = build_request(
+                &client,
                 &params.url,
                 USER_AGENT,
                 &params.method,
                 &params.headers,
                 params.body.clone(),
             )?;
-            match client.send_async(req).await {
+            match client.execute(req).await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let is_cf_challenge = status == 403
@@ -161,13 +169,14 @@ async fn do_request(params: RequestParams) -> Result<ResponseData, String> {
 
                     if is_cf_challenge && is_get {
                         let req = build_request(
+                            &client,
                             &params.url,
                             FALLBACK_USER_AGENT,
                             &params.method,
                             &params.headers,
                             params.body.clone(),
                         )?;
-                        match client.send_async(req).await {
+                        match client.execute(req).await {
                             Ok(resp) => break 'retry resp,
                             Err(e) => last_err = format!("request failed: {e}"),
                         }
@@ -203,14 +212,10 @@ async fn do_request(params: RequestParams) -> Result<ResponseData, String> {
         return Err(format!("response too large: {len} bytes"));
     }
 
-    let mut bytes = Vec::new();
-    response
-        .body_mut()
-        .take((params.max_bytes + 1) as u64)
-        .read_to_end(&mut bytes)
+    let bytes = response
+        .bytes()
         .await
         .map_err(|e| format!("read error: {e}"))?;
-
     if bytes.len() > params.max_bytes {
         return Err(format!("response too large: {} bytes", bytes.len()));
     }
@@ -358,11 +363,15 @@ mod tests {
         assert_eq!(extract_host(url), expected);
     }
 
+    fn test_client() -> Client {
+        Client::new()
+    }
+
     #[test]
     fn build_request_get_no_opts() {
-        let req = build_request("https://example.com", "agent", "GET", &[], vec![]).unwrap();
+        let req = build_request(&test_client(), "https://example.com", "agent", "GET", &[], vec![]).unwrap();
         assert_eq!(req.method(), "GET");
-        assert_eq!(req.body().len(), Some(0));
+        assert!(req.body().is_none());
         assert_eq!(req.headers()["User-Agent"], "agent");
     }
 
@@ -370,6 +379,7 @@ mod tests {
     fn build_request_post_with_body_and_headers() {
         let headers = vec![("Content-Type".to_string(), "application/json".to_string())];
         let req = build_request(
+            &test_client(),
             "https://example.com",
             "agent",
             "POST",
@@ -378,7 +388,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(req.method(), "POST");
-        assert_eq!(req.body().len(), Some(b"hello world".len() as u64));
+        assert!(req.body().is_some());
         assert_eq!(req.headers()["Content-Type"], "application/json");
     }
 
@@ -388,14 +398,14 @@ mod tests {
             ("Accept".to_string(), "text/html".to_string()),
             ("X-Custom".to_string(), "foo".to_string()),
         ];
-        let req = build_request("https://example.com", "agent", "GET", &headers, vec![]).unwrap();
+        let req = build_request(&test_client(), "https://example.com", "agent", "GET", &headers, vec![]).unwrap();
         assert_eq!(req.headers()["Accept"], "text/html");
         assert_eq!(req.headers()["X-Custom"], "foo");
     }
 
     #[test]
     fn build_request_invalid_uri_errors() {
-        let result = build_request("not a valid uri \x00", "agent", "GET", &[], vec![]);
+        let result = build_request(&test_client(), "not a valid uri \x00", "agent", "GET", &[], vec![]);
         assert!(result.is_err());
     }
 

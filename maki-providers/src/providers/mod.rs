@@ -7,14 +7,6 @@ use serde::Deserialize;
 
 use crate::AgentError;
 
-pub(crate) fn block_on<F, T>(future: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    rt.block_on(future)
-}
-
 pub(crate) mod anthropic;
 pub(crate) mod copilot;
 pub(crate) mod deepseek;

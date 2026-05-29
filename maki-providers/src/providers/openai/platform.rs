@@ -36,9 +36,9 @@ pub struct OpenAi {
 }
 
 impl OpenAi {
-    pub fn new(timeouts: crate::providers::Timeouts) -> Result<Self, AgentError> {
+    pub async fn new(timeouts: crate::providers::Timeouts) -> Result<Self, AgentError> {
         let storage = StateDir::resolve()?;
-        let resolved = crate::providers::block_on(auth::resolve(&storage))?;
+        let resolved = auth::resolve(&storage).await?;
         let compat = OpenAiCompatProvider::new(&CONFIG, timeouts);
         Ok(Self {
             compat,

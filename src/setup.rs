@@ -20,7 +20,7 @@ const PROVIDER_PRIORITY: &[ProviderKind] = &[
     ProviderKind::DeepSeek,
 ];
 
-pub fn resolve_model(
+pub async fn resolve_model(
     explicit: Option<&str>,
     provider_config: &maki_config::ProviderConfig,
     storage: &StateDir,
@@ -39,17 +39,17 @@ pub fn resolve_model(
     if let Some(spec) = provider_config.default_model.as_deref() {
         return Model::from_spec(spec).context("invalid default_model in config");
     }
-    auto_detect_model().ok_or_else(|| {
+    auto_detect_model().await.ok_or_else(|| {
         color_eyre::eyre::eyre!(
             "no provider available - set an API key (e.g. ANTHROPIC_API_KEY), run `maki auth login`, or use -m to specify a model\n\nSee https://maki.sh/docs/providers/ for setup instructions"
         )
     })
 }
 
-fn auto_detect_model() -> Option<Model> {
+async fn auto_detect_model() -> Option<Model> {
     for tier in [ModelTier::Strong, ModelTier::Medium] {
         for &provider in PROVIDER_PRIORITY {
-            if provider.is_available()
+            if provider.is_available().await
                 && let Ok(model) = Model::from_tier(provider, tier)
             {
                 return Some(model);

@@ -300,18 +300,15 @@ pub(crate) fn create_fn_table(lua: &Lua) -> LuaResult<Table> {
                 .ok_or_else(|| mlua::Error::runtime("unknown job id or already waited"))?;
 
             let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
-            let deadline = smol::Timer::after(timeout);
-            futures_lite::pin!(deadline);
 
             let mut stdout_lines = Vec::new();
             let mut stderr_lines = Vec::new();
 
             let exit_code = loop {
-                let event = futures_lite::future::or(async { rx.recv_async().await.ok() }, async {
-                    (&mut deadline).await;
-                    None
-                })
-                .await;
+                let event = tokio::select! {
+                    event = rx.recv_async() => event.ok(),
+                    _ = tokio::time::sleep(timeout) => None,
+                };
 
                 match event {
                     None => return Ok(mlua::Value::Nil),

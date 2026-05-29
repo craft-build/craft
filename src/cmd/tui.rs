@@ -60,7 +60,7 @@ fn read_initial_prompt(cli_prompt: Option<String>) -> Result<Option<String>> {
     }
 }
 
-pub fn run(cli: Cli) -> Result<()> {
+pub async fn run(cli: Cli) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     maki_providers::tier_map::load_from_storage(&storage);
 
@@ -108,7 +108,7 @@ pub fn run(cli: Cli) -> Result<()> {
         stream: config.provider.stream_timeout,
     };
 
-    let model = setup::resolve_model(cli.model.as_deref(), &config.provider, &storage)?;
+    let model = setup::resolve_model(cli.model.as_deref(), &config.provider, &storage).await?;
 
     setup::init_logging(&storage, &config.storage);
     setup::install_panic_log_hook();
@@ -126,6 +126,7 @@ pub fn run(cli: Cli) -> Result<()> {
             timeouts,
             plugin_host.event_handle(),
         )
+        .await
         .context("run print mode")?;
     } else {
         let cwd_str = cwd.to_string_lossy().into_owned();
@@ -142,36 +143,39 @@ pub fn run(cli: Cli) -> Result<()> {
             Model::from_spec(&session.model).unwrap_or(model)
         };
         let initial_prompt = read_initial_prompt(cli.prompt)?;
-        let (session_id, exit_code) = maki_ui::run(
-            maki_ui::EventLoopParams {
-                model,
-                commands,
-                session,
-                storage,
-                config: config.agent,
-                ui_config: config.ui,
-                input_history_size: config.storage.input_history_size,
-                permissions: Arc::new(maki_agent::permissions::PermissionManager::new(
-                    config.permissions,
-                    cwd.clone(),
-                )),
-                timeouts,
-                exit_on_done: cli.exit_on_done,
-                lua_command_reader,
-                ui_action_rx,
-                lua_event_handle: plugin_host.event_handle(),
-                buf_click: plugin_host.event_handle().map(|eh| {
-                    Arc::new(
-                        move |tool_id: &str, row: u32| -> Option<maki_lua::ClickReply> {
-                            eh.fire_click(tool_id, row)
-                        },
-                    ) as maki_ui::BufClickHandler
-                }),
-                #[cfg(feature = "demo")]
-                demo: cli.demo,
-            },
-            initial_prompt,
-        )
+        let handle = tokio::runtime::Handle::current();
+        let params = maki_ui::EventLoopParams {
+            model,
+            commands,
+            session,
+            storage,
+            config: config.agent,
+            ui_config: config.ui,
+            input_history_size: config.storage.input_history_size,
+            permissions: Arc::new(maki_agent::permissions::PermissionManager::new(
+                config.permissions,
+                cwd.clone(),
+            )),
+            timeouts,
+            exit_on_done: cli.exit_on_done,
+            lua_command_reader,
+            ui_action_rx,
+            lua_event_handle: plugin_host.event_handle(),
+            buf_click: plugin_host.event_handle().map(|eh| {
+                Arc::new(
+                    move |tool_id: &str, row: u32| -> Option<maki_lua::ClickReply> {
+                        eh.fire_click(tool_id, row)
+                    },
+                ) as maki_ui::BufClickHandler
+            }),
+            #[cfg(feature = "demo")]
+            demo: cli.demo,
+        };
+        let (session_id, exit_code) = tokio::task::spawn_blocking(move || {
+            maki_ui::run(handle, params, initial_prompt)
+        })
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("UI thread panicked: {e}"))?
         .context("run UI")?;
         if let Some(session_id) = session_id {
             eprintln!("session: {session_id}");

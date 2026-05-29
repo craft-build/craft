@@ -230,11 +230,10 @@ impl ToolInvocation for LuaToolInvocation {
             let recv = async { Some(reply_rx.recv_async().await) };
             let result = match effective_secs {
                 Some(secs) => {
-                    futures_lite::future::race(recv, async move {
-                        smol::Timer::after(Duration::from_secs(secs)).await;
-                        None
-                    })
-                    .await
+                    tokio::select! {
+                        result = recv => result,
+                        _ = tokio::time::sleep(Duration::from_secs(secs)) => None,
+                    }
                 }
                 None => recv.await,
             };
@@ -680,7 +679,8 @@ mod tests {
         let inv = tool
             .parse(&serde_json::json!({"url": "https://example.com"}))
             .unwrap();
-        let scopes = smol::block_on(inv.permission_scopes());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let scopes = rt.block_on(inv.permission_scopes());
         assert_eq!(
             scopes.unwrap().scopes,
             vec!["https://example.com".to_string()]
@@ -692,12 +692,12 @@ mod tests {
         let absent = make_lua_tool(Some(PermissionScopeKind::Field(Arc::from("format"))))
             .parse(&serde_json::json!({"url": "https://example.com"}))
             .unwrap();
-        assert!(smol::block_on(absent.permission_scopes()).is_none());
+        assert!(tokio::runtime::Runtime::new().unwrap().block_on(absent.permission_scopes()).is_none());
 
         let unconfigured = make_lua_tool(None)
             .parse(&serde_json::json!({"url": "https://example.com"}))
             .unwrap();
-        assert!(smol::block_on(unconfigured.permission_scopes()).is_none());
+        assert!(tokio::runtime::Runtime::new().unwrap().block_on(unconfigured.permission_scopes()).is_none());
     }
 
     #[test]
@@ -764,7 +764,7 @@ mod tests {
             permission_state: PermissionState::NeedsCompute,
             timeout: None,
         };
-        let scopes = smol::block_on(inv.permission_scopes()).expect("should fallback");
+        let scopes = tokio::runtime::Runtime::new().unwrap().block_on(inv.permission_scopes()).expect("should fallback");
         assert!(scopes.force_prompt);
         assert!(!scopes.scopes.is_empty());
 
@@ -784,7 +784,7 @@ mod tests {
                 let _ = reply.send(None);
             }
         });
-        let scopes2 = smol::block_on(inv2.permission_scopes()).expect("should fallback");
+        let scopes2 = tokio::runtime::Runtime::new().unwrap().block_on(inv2.permission_scopes()).expect("should fallback");
         assert!(scopes2.force_prompt);
     }
 
@@ -808,7 +808,7 @@ mod tests {
                 }));
             }
         });
-        let result = smol::block_on(inv.permission_scopes());
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(inv.permission_scopes());
         let scopes = result.unwrap();
         assert_eq!(scopes.scopes, vec!["cargo", "test"]);
         assert!(!scopes.force_prompt);
@@ -837,7 +837,7 @@ mod tests {
             timeout: Some(Duration::from_secs(60)),
         };
         let inv = tool.parse(&serde_json::json!({"count": 42})).unwrap();
-        assert!(smol::block_on(inv.permission_scopes()).is_none());
+        assert!(tokio::runtime::Runtime::new().unwrap().block_on(inv.permission_scopes()).is_none());
     }
 
     fn timeout_spec(lua: &Lua, value: LuaValue) -> Table {

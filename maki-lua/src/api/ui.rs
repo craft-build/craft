@@ -37,7 +37,9 @@ pub(crate) fn create_ui_table(
         "highlight",
         lua.create_async_function(|lua, (code, lang): (String, String)| async move {
             let segments =
-                smol::unblock(move || maki_highlight::highlight_code(&lang, &code)).await;
+                tokio::task::spawn_blocking(move || maki_highlight::highlight_code(&lang, &code))
+                    .await
+                    .map_err(|e| mlua::Error::runtime(format!("highlight task failed: {e}")))?;
             segments_to_lua_lines(&lua, &segments)
         })?,
     )?;
@@ -55,7 +57,9 @@ pub(crate) fn create_ui_table(
     t.set(
         "markdown",
         lua.create_async_function(|lua, (text, width): (String, u16)| async move {
-            let lines = smol::unblock(move || maki_markdown::render::render(&text, width)).await;
+            let lines = tokio::task::spawn_blocking(move || maki_markdown::render::render(&text, width))
+                .await
+                .map_err(|e| mlua::Error::runtime(format!("markdown task failed: {e}")))?;
             markdown_lines_to_lua(&lua, &lines)
         })?,
     )?;

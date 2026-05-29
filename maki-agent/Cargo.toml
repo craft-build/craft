@@ -31,7 +31,6 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
-# isahc removed — migrated to reqwest
 libc = { workspace = true }
 open = { workspace = true }
 sha2 = { workspace = true }

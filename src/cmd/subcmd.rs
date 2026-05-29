@@ -31,19 +31,19 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
-pub fn models() {
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    rt.block_on(fetch_all_models(|batch| {
+pub async fn models() {
+    fetch_all_models(|batch| {
         for model in batch.models {
             println!("{model}");
         }
         for warning in batch.warnings {
             eprintln!("warning: {warning}");
         }
-    }));
+    })
+    .await;
 }
 
-pub fn index(path: &str, no_plugins: bool) -> Result<()> {
+pub async fn index(path: &str, no_plugins: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
@@ -75,8 +75,7 @@ pub fn index(path: &str, no_plugins: bool) -> Result<()> {
         .parse(&input)
         .map_err(|e| color_eyre::eyre::eyre!("parse index input: {e}"))?;
     let ctx = maki_agent::tools::cli_tool_ctx();
-    let result: Result<maki_agent::ToolOutput, String> =
-        smol::block_on(async { inv.execute(&ctx).await });
+    let result: Result<maki_agent::ToolOutput, String> = inv.execute(&ctx).await.map_err(|e| e.to_string());
     match result {
         Ok(output) => print!("{}", output.as_text()),
         Err(e) => bail!("index failed: {e}"),
@@ -84,22 +83,20 @@ pub fn index(path: &str, no_plugins: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn mcp_auth(server: &str, storage: &StateDir) -> Result<()> {
-    smol::block_on(async {
-        let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
-        let (config, _) = mcp_config::load_config(&cwd);
-        let raw = config
-            .mcp
-            .get(server)
-            .ok_or_else(|| color_eyre::eyre::eyre!("unknown MCP server: {server}"))?;
-        let url = match mcp_config::parse_server(server.to_owned(), raw.clone())?.transport {
-            mcp_config::Transport::Http { url, .. } => url,
-            _ => color_eyre::eyre::bail!("server '{server}' is not an HTTP transport"),
-        };
-        mcp_oauth::authenticate(server, &url, None, storage).await?;
-        eprintln!("Successfully authenticated with MCP server '{server}'");
-        Ok(())
-    })
+pub async fn mcp_auth(server: &str, storage: &StateDir) -> Result<()> {
+    let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
+    let (config, _) = mcp_config::load_config(&cwd);
+    let raw = config
+        .mcp
+        .get(server)
+        .ok_or_else(|| color_eyre::eyre::eyre!("unknown MCP server: {server}"))?;
+    let url = match mcp_config::parse_server(server.to_owned(), raw.clone())?.transport {
+        mcp_config::Transport::Http { url, .. } => url,
+        _ => color_eyre::eyre::bail!("server '{server}' is not an HTTP transport"),
+    };
+    mcp_oauth::authenticate(server, &url, None, storage).await?;
+    eprintln!("Successfully authenticated with MCP server '{server}'");
+    Ok(())
 }
 
 pub fn mcp_logout(server: &str, storage: &StateDir) -> Result<()> {

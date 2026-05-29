@@ -69,7 +69,7 @@ impl Task {
                     ctx.model.dynamic_slug.as_deref(),
                 )
                 .map_err(|e| e.to_string())?;
-                let resolved_provider = provider::from_model_async(&resolved_model, ctx.timeouts)
+                let resolved_provider = provider::from_model(&resolved_model, ctx.timeouts)
                     .await
                     .map_err(|e| e.to_string())?;
                 (resolved_model, Arc::from(resolved_provider))

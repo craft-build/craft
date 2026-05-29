@@ -57,7 +57,7 @@ pub(crate) fn is_enabled() -> bool {
     env::var("CLAUDE_CODE_USE_BEDROCK").is_ok_and(|v| v == "1")
 }
 
-fn resolve_bedrock_auth() -> Result<BedrockAuth, AgentError> {
+async fn resolve_bedrock_auth() -> Result<BedrockAuth, AgentError> {
     let region = env::var("AWS_REGION").map_err(|_| AgentError::Config {
         message: "AWS_REGION must be set when using Bedrock".into(),
     })?;
@@ -82,7 +82,7 @@ fn resolve_bedrock_auth() -> Result<BedrockAuth, AgentError> {
         }
     } else if let Ok(url) = env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
         let (access_key, secret_key, session_token, expires_at) =
-            super::super::block_on(fetch_container_credentials(&url))?;
+            fetch_container_credentials(&url).await?;
         debug!("using Bedrock SigV4 auth from container credentials endpoint");
         AuthKind::SigV4 {
             access_key,
@@ -481,11 +481,8 @@ pub(crate) struct Bedrock {
 }
 
 impl Bedrock {
-    pub fn new(timeouts: super::super::Timeouts) -> Result<Self, AgentError> {
-        // is_available() upstream calls new().is_ok() and discards the error,
-        // so the user sees a generic "no provider available" message. Surface
-        // the real reason here before that happens.
-        let auth = resolve_bedrock_auth().inspect_err(|e| {
+    pub async fn new(timeouts: super::super::Timeouts) -> Result<Self, AgentError> {
+        let auth = resolve_bedrock_auth().await.inspect_err(|e| {
             warn!(error = %e, "Bedrock auth resolution failed");
         })?;
         let base_url = env::var("ANTHROPIC_BEDROCK_BASE_URL").ok();
@@ -669,7 +666,7 @@ impl Provider for Bedrock {
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async {
-            let new_auth = resolve_bedrock_auth()?;
+            let new_auth = resolve_bedrock_auth().await?;
             *self.auth.lock().unwrap() = new_auth;
             debug!("reloaded Bedrock auth from env");
             Ok(())

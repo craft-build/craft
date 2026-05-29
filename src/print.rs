@@ -118,7 +118,7 @@ impl VerboseOutput {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn run(
+pub async fn run(
     model: &Model,
     prompt_arg: Option<String>,
     format: OutputFormat,
@@ -143,7 +143,7 @@ pub fn run(
         .unwrap_or_default();
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let (mcp_handle, mcp_config_errors) = smol::block_on(maki_agent::mcp::start(&cwd));
+    let (mcp_handle, mcp_config_errors) = maki_agent::mcp::start(&cwd).await;
     if !mcp_config_errors.is_empty() {
         eprintln!("MCP config error: {mcp_config_errors}");
     }
@@ -192,7 +192,7 @@ pub fn run(
     let mut usage = TokenUsage::default();
     let mut stop_reason: Option<StopReason> = None;
 
-    while let Ok(envelope) = smol::block_on(event_rx.recv_async()) {
+    while let Ok(envelope) = event_rx.recv_async().await {
         let Envelope {
             ref event,
             ref subagent,
@@ -283,12 +283,10 @@ pub fn run(
             }
         }
     }
-    smol::block_on(async {
-        futures_lite::future::or(task, async {
-            smol::Timer::after(AGENT_SHUTDOWN_TIMEOUT).await;
-        })
-        .await;
-    });
+    tokio::select! {
+        _ = task => {},
+        _ = tokio::time::sleep(AGENT_SHUTDOWN_TIMEOUT) => {},
+    }
 
     let duration_ms = start.elapsed().as_millis();
     let total_cost_usd = usage.cost(&model.pricing);

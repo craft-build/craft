@@ -64,7 +64,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         async move {
             let event_tx = EventSender::new(raw_tx, 0);
             let provider: Arc<dyn Provider> =
-                match provider::from_model_async(&params.model, params.timeouts).await {
+                match provider::from_model(&params.model, params.timeouts).await {
                     Ok(p) => Arc::from(p),
                     Err(e) => {
                         error!(error = %e, "provider error");

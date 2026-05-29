@@ -178,8 +178,11 @@ impl<'t> EventLoop<'t> {
         let initial_history = session.messages.clone();
         let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
 
-        let provider: Arc<dyn Provider> =
-            Arc::from(from_model(&model, timeouts).context("create provider")?);
+        let provider: Arc<dyn Provider> = Arc::from(
+            tokio::runtime::Handle::current()
+                .block_on(from_model(&model, timeouts))
+                .context("create provider")?,
+        );
         let model_slot = Arc::new(ArcSwap::from_pointee(ModelSlot {
             model: model.clone(),
             provider,
@@ -447,7 +450,8 @@ impl<'t> EventLoop<'t> {
                 let loaded = *loaded;
                 if loaded.model_spec != self.model_slot.load().model.spec()
                     && let Ok(new_model) = Model::from_spec(&loaded.model_spec)
-                    && let Ok(new_provider) = from_model(&new_model, self.timeouts)
+                    && let Ok(new_provider) = tokio::runtime::Handle::current()
+                        .block_on(from_model(&new_model, self.timeouts))
                 {
                     self.model_slot.store(Arc::new(ModelSlot {
                         model: new_model,
@@ -516,7 +520,9 @@ impl<'t> EventLoop<'t> {
 
     fn change_model(&mut self, spec: String) {
         match Model::from_spec(&spec) {
-            Ok(new_model) => match from_model(&new_model, self.timeouts) {
+            Ok(new_model) => match tokio::runtime::Handle::current()
+                .block_on(from_model(&new_model, self.timeouts))
+            {
                 Ok(new_provider) => {
                     self.app.update_model(&new_model);
                     self.model_slot.store(Arc::new(ModelSlot {

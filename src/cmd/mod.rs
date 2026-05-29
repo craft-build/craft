@@ -19,15 +19,15 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Index { path }) => {
-            subcmd::index(&path, cli.no_plugins)?;
+            subcmd::index(&path, cli.no_plugins).await?;
         }
         Some(Command::Models) => {
-            subcmd::models();
+            subcmd::models().await;
         }
         Some(Command::Mcp { action }) => {
             let storage = StateDir::resolve().context("resolve data directory")?;
             match action {
-                McpAction::Auth { server } => subcmd::mcp_auth(&server, &storage)?,
+                McpAction::Auth { server } => subcmd::mcp_auth(&server, &storage).await?,
                 McpAction::Logout { server } => subcmd::mcp_logout(&server, &storage)?,
             }
         }
@@ -38,7 +38,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             update::rollback().map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
         }
         None => {
-            tui::run(cli)?;
+            tui::run(cli).await?;
         }
     }
     Ok(())

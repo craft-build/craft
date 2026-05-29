@@ -39,11 +39,11 @@ pub(crate) use agent::AgentCommand;
 pub use event_loop::{BufClickHandler, EventLoopParams};
 
 pub fn run(
+    handle: tokio::runtime::Handle,
     params: EventLoopParams,
     initial_prompt: Option<String>,
 ) -> Result<(Option<String>, i32)> {
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    let _guard = rt.enter();
+    let _guard = handle.enter();
     let (_guard, mut terminal) = terminal::TerminalGuard::init()?;
     let el = event_loop::EventLoop::new(&mut terminal, params)?;
     el.run(initial_prompt)

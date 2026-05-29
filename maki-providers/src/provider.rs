@@ -170,16 +170,16 @@ impl ProviderKind {
         }
     }
 
-    pub fn create(self, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+    pub async fn create(self, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
         match self {
             Self::Anthropic => {
                 if bedrock::is_enabled() {
-                    Ok(Box::new(bedrock::Bedrock::new(timeouts)?))
+                    Ok(Box::new(bedrock::Bedrock::new(timeouts).await?))
                 } else {
                     Ok(Box::new(Anthropic::new(timeouts)?))
                 }
             }
-            Self::OpenAi => Ok(Box::new(OpenAi::new(timeouts)?)),
+            Self::OpenAi => Ok(Box::new(OpenAi::new(timeouts).await?)),
             Self::Google => Ok(Box::new(Google::new(timeouts)?)),
             Self::Copilot => Ok(Box::new(Copilot::new(timeouts)?)),
             Self::Ollama => Ok(Box::new(Ollama::new(timeouts)?)),
@@ -192,8 +192,8 @@ impl ProviderKind {
         }
     }
 
-    pub fn is_available(self) -> bool {
-        self.create(Timeouts::default()).is_ok()
+    pub async fn is_available(self) -> bool {
+        self.create(Timeouts::default()).await.is_ok()
     }
 }
 
@@ -227,30 +227,14 @@ pub trait Provider: Send + Sync {
     }
 }
 
-pub fn from_model(model: &Model, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+pub async fn from_model(model: &Model, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
     if let Some(slug) = &model.dynamic_slug {
         let provider = dynamic::create(slug, timeouts)?;
         debug!(slug, model = %model.id, "dynamic provider created");
         return Ok(provider);
     }
-    let provider = model.provider.create(timeouts)?;
+    let provider = model.provider.create(timeouts).await?;
     debug!(provider = %model.provider, model = %model.id, "provider created");
-    Ok(provider)
-}
-
-pub async fn from_model_async(
-    model: &Model,
-    timeouts: Timeouts,
-) -> Result<Box<dyn Provider>, AgentError> {
-    let slug = model.dynamic_slug.clone();
-    let kind = model.provider;
-    let id = model.id.clone();
-    let provider = if let Some(slug) = &slug {
-        dynamic::create(slug, timeouts)?
-    } else {
-        kind.create(timeouts)?
-    };
-    debug!(provider = %kind, model = %id, "provider created");
     Ok(provider)
 }
 
@@ -264,7 +248,7 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
     let mut futs = futures::stream::FuturesUnordered::new();
 
     for kind in ProviderKind::iter() {
-        let Ok(provider) = kind.create(timeouts) else {
+        let Ok(provider) = kind.create(timeouts).await else {
             warn!(provider = %kind, "failed to create provider, skipping");
             continue;
         };

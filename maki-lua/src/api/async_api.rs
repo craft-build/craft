@@ -148,37 +148,36 @@ mod tests {
     #[test_case(r#"return async_tbl.await(0, function() end)"#, ERR_ARGC_GE_1 ; "argc_below_one")]
     #[test_case(r#"return async_tbl.await(nil, function() end)"#, ERR_ARGC_INTEGER ; "argc_non_integer")]
     #[test_case(r#"return async_tbl.await(1, 42)"#, ERR_SECOND_ARG_FN ; "second_arg_not_fn")]
-    fn await_validation(code: &str, expected_err: &str) {
-        smol::block_on(async {
-            let (lua, _tbl) = setup();
-            let err = lua.load(code).eval_async::<Value>().await.unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                msg.contains(expected_err),
-                "expected error containing {expected_err:?}, got: {msg}"
-            );
-        });
+    #[tokio::test]
+    async fn await_validation(code: &str, expected_err: &str) {
+        let (lua, _tbl) = setup();
+        let err = lua.load(code).eval_async::<Value>().await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expected_err),
+            "expected error containing {expected_err:?}, got: {msg}"
+        );
     }
 
     #[test_case(1, &[], 0 ; "no_extra_args")]
     #[test_case(3, &["a", "b"], 2 ; "with_extra_args")]
-    fn await_callback_insertion_position(argc: usize, extra: &[&str], expected_pos: usize) {
-        smol::block_on(async {
-            let (lua, _tbl) = setup();
+    #[tokio::test]
+    async fn await_callback_insertion_position(argc: usize, extra: &[&str], expected_pos: usize) {
+        let (lua, _tbl) = setup();
 
-            let extra_str = extra
-                .iter()
-                .map(|s| format!(r#""{s}""#))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let trailing = if extra_str.is_empty() {
-                String::new()
-            } else {
-                format!(", {extra_str}")
-            };
+        let extra_str = extra
+            .iter()
+            .map(|s| format!(r#""{s}""#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let trailing = if extra_str.is_empty() {
+            String::new()
+        } else {
+            format!(", {extra_str}")
+        };
 
-            let code = format!(
-                r#"
+        let code = format!(
+            r#"
                 local pos = -1
                 local function target(...)
                     local args = {{...}}
@@ -193,45 +192,40 @@ mod tests {
                 async_tbl.await({argc}, target{trailing})
                 return pos
                 "#
-            );
+        );
 
-            let result = lua.load(&code).eval_async::<i64>().await.unwrap();
-            assert_eq!(result, expected_pos as i64);
-        });
+        let result = lua.load(&code).eval_async::<i64>().await.unwrap();
+        assert_eq!(result, expected_pos as i64);
     }
 
-    #[test]
-    fn await_returns_multivalue_from_callback() {
-        smol::block_on(async {
-            let (lua, _tbl) = setup();
-            let code = r#"
+    #[tokio::test]
+    async fn await_returns_multivalue_from_callback() {
+        let (lua, _tbl) = setup();
+        let code = r#"
                 local function producer(cb)
                     cb("hello", 42, true)
                 end
                 return async_tbl.await(1, producer)
             "#;
-            let results = lua.load(code).eval_async::<MultiValue>().await.unwrap();
-            let vals: Vec<Value> = results.into_vec();
-            assert_eq!(vals.len(), 3);
-            assert_eq!(vals[0].as_string().unwrap().to_string_lossy(), "hello");
-            assert_eq!(vals[1].as_integer().unwrap(), 42);
-            assert!(vals[2].as_boolean().unwrap());
-        });
+        let results = lua.load(code).eval_async::<MultiValue>().await.unwrap();
+        let vals: Vec<Value> = results.into_vec();
+        assert_eq!(vals.len(), 3);
+        assert_eq!(vals[0].as_string().unwrap().to_string_lossy(), "hello");
+        assert_eq!(vals[1].as_integer().unwrap(), 42);
+        assert!(vals[2].as_boolean().unwrap());
     }
 
-    #[test]
-    fn wrap_creates_callable_wrapper() {
-        smol::block_on(async {
-            let (lua, _tbl) = setup();
-            let code = r#"
+    #[tokio::test]
+    async fn wrap_creates_callable_wrapper() {
+        let (lua, _tbl) = setup();
+        let code = r#"
                 local function async_add(a, b, cb)
                     cb(a + b)
                 end
                 local wrapped = async_tbl.wrap(3, async_add)
                 return wrapped(10, 32)
             "#;
-            let result = lua.load(code).eval_async::<i64>().await.unwrap();
-            assert_eq!(result, 42);
-        });
+        let result = lua.load(code).eval_async::<i64>().await.unwrap();
+        assert_eq!(result, 42);
     }
 }

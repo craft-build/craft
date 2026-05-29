@@ -376,7 +376,7 @@ pub(crate) struct PendingAsyncTask {
 
 pub(crate) type SpawnQueue = RefCell<Vec<PendingAsyncTask>>;
 
-fn drain_spawn_queue(lua: &Lua, ex: &Rc<smol::LocalExecutor<'_>>, gate: &Rc<InflightGate>) {
+fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
     let tasks: Vec<PendingAsyncTask> = {
         let Some(queue) = lua.app_data_ref::<SpawnQueue>() else {
             return;
@@ -396,9 +396,8 @@ fn drain_spawn_queue(lua: &Lua, ex: &Rc<smol::LocalExecutor<'_>>, gate: &Rc<Infl
 
         let lua = lua.clone();
         let g = Rc::clone(gate);
-        let ex2 = Rc::clone(ex);
 
-        ex.spawn(async move {
+        tokio::task::spawn_local(async move {
             let _gate_guard = GateGuard::new(&g);
 
             let scope = TaskScope::new(
@@ -411,11 +410,12 @@ fn drain_spawn_queue(lua: &Lua, ex: &Rc<smol::LocalExecutor<'_>>, gate: &Rc<Infl
                 let async_thread = thread.into_async::<LuaValue>(())?;
                 match task.deadline {
                     Some(dl) => {
-                        futures_lite::future::race(async_thread, async {
-                            smol::Timer::at(dl).await;
-                            Err(mlua::Error::runtime("timeout"))
-                        })
-                        .await
+                        tokio::select! {
+                            result = async_thread => result,
+                            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(dl)) => {
+                                Err(mlua::Error::runtime("timeout"))
+                            }
+                        }
                     }
                     None => async_thread.await,
                 }
@@ -437,9 +437,8 @@ fn drain_spawn_queue(lua: &Lua, ex: &Rc<smol::LocalExecutor<'_>>, gate: &Rc<Infl
 
             drop(scope);
             lua.remove_registry_value(task.work_fn).ok();
-            drain_spawn_queue(&lua, &ex2, &g);
-        })
-        .detach();
+            drain_spawn_queue(&lua, &g);
+        });
     }
 }
 
@@ -1100,7 +1099,7 @@ async fn dispatch_async(
 
     if !has_jobs {
         lua.gc_collect().ok();
-        smol::Timer::after(DISPATCH_POLL_INTERVAL).await;
+        tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
         return match finish_rx.try_recv() {
             Ok(reply) => reply,
             _ => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
@@ -1136,13 +1135,13 @@ async fn dispatch_async(
         if event_buf.is_empty() {
             let has_alive = lock_cell(&handle).jobs.has_alive_jobs();
             if !has_alive {
-                smol::Timer::after(DISPATCH_POLL_INTERVAL).await;
+                tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
                 return match finish_rx.try_recv() {
                     Ok(reply) => reply,
                     _ => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
                 };
             }
-            smol::Timer::after(DISPATCH_POLL_INTERVAL).await;
+            tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
             continue;
         }
 
@@ -1269,11 +1268,12 @@ async fn run_tool_call(
             let deadline = lock_cell(&handle).deadline.get();
             match deadline {
                 Some(dl) => {
-                    futures_lite::future::race(async_thread, async {
-                        smol::Timer::at(dl).await;
-                        Err(mlua::Error::runtime("timeout"))
-                    })
-                    .await
+                    tokio::select! {
+                        result = async_thread => result,
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(dl)) => {
+                            Err(mlua::Error::runtime("timeout"))
+                        }
+                    }
                 }
                 None => async_thread.await,
             }
@@ -1320,7 +1320,7 @@ pub(crate) struct LuaThread {
     pub ui_action_rx: flume::Receiver<UiAction>,
 }
 
-/// Lua gets its own OS thread so nothing needs a Mutex. `smol::block_on`
+/// Lua gets its own OS thread so nothing needs a Mutex. `LocalSet::block_on`
 /// drives cooperative async, and load/clear requests wait for in-flight tools.
 pub fn spawn(
     registry: Arc<ToolRegistry>,
@@ -1355,10 +1355,14 @@ pub fn spawn(
                 }
             };
 
-            let ex = Rc::new(smol::LocalExecutor::new());
+            let local = tokio::task::LocalSet::new();
+            let tokio_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build lua runtime");
             let gate = Rc::new(InflightGate::new(rt.lua.clone()));
 
-            smol::block_on(ex.run(async {
+            local.block_on(&tokio_rt, async {
                 loop {
                     let msg = match rx.recv_async().await {
                         Ok(m) => m,
@@ -1390,9 +1394,8 @@ pub fn spawn(
                             let plugins = Rc::clone(&rt.plugins);
                             let shutdown_ref = Arc::clone(&rt.shutdown);
                             let g = Rc::clone(&gate);
-                            let ex_ref = Rc::clone(&ex);
 
-                            ex.spawn(async move {
+                            tokio::task::spawn_local(async move {
                                 let _gate_guard = GateGuard::new(&g);
                                 let res = run_tool_call(
                                     lua.clone(),
@@ -1406,10 +1409,9 @@ pub fn spawn(
                                     shutdown_ref,
                                 )
                                 .await;
-                                drain_spawn_queue(&lua, &ex_ref, &g);
+                                drain_spawn_queue(&lua, &g);
                                 let _ = reply.send(res);
-                            })
-                            .detach();
+                            });
                         }
                         Request::ClearPlugin { plugin, reply } => {
                             gate.drain().await;
@@ -1425,9 +1427,8 @@ pub fn spawn(
                                 });
                             if let Some((func, buf)) = entry {
                                 let lua = rt.lua.clone();
-                                let ex_ref = Rc::clone(&ex);
                                 let g = Rc::clone(&gate);
-                                ex.spawn(async move {
+                                tokio::task::spawn_local(async move {
                                     let Ok(data) = lua.create_table() else {
                                         let _ = reply.send(None);
                                         return;
@@ -1442,13 +1443,12 @@ pub fn spawn(
                                         tracing::warn!(tool_id, error = %e, "click handler failed");
                                     }
                                     drop(scope);
-                                    drain_spawn_queue(&lua, &ex_ref, &g);
+                                    drain_spawn_queue(&lua, &g);
                                     let _ = reply.send(Some(ClickReply {
                                         snapshot: buf.take(),
                                         live_buf: buf,
                                     }));
-                                })
-                                .detach();
+                                });
                             } else {
                                 let _ = reply.send(None);
                             }
@@ -1465,9 +1465,8 @@ pub fn spawn(
                                 });
                             if let Some(func) = handler_fn {
                                 let lua = rt.lua.clone();
-                                let ex_ref = Rc::clone(&ex);
                                 let g = Rc::clone(&gate);
-                                ex.spawn(async move {
+                                tokio::task::spawn_local(async move {
                                     let scope = TaskScope::new(
                                         &lua,
                                         TaskCell::new(CancelToken::none(), None, None),
@@ -1481,9 +1480,8 @@ pub fn spawn(
                                         tracing::warn!(plugin = %plugin, command = %command, error = %e, "command handler failed");
                                     }
                                     drop(scope);
-                                    drain_spawn_queue(&lua, &ex_ref, &g);
-                                })
-                                .detach();
+                                    drain_spawn_queue(&lua, &g);
+                                });
                             }
                         }
                         Request::ComputeHeader {
@@ -1528,12 +1526,12 @@ pub fn spawn(
                         reply,
                     } => {
                         let res = rt.restore_tool(&tool, &tool_use_id, &output, input, is_error, tool_output_lines).await;
-                        drain_spawn_queue(&rt.lua, &ex, &gate);
+                        drain_spawn_queue(&rt.lua, &gate);
                         let _ = reply.send(res);
                     }
                     }
                 }
-            }));
+            });
         })
         .map_err(|e| PluginError::Io {
             path: PathBuf::from("lua-thread"),
@@ -1669,38 +1667,46 @@ mod tests {
 
     #[test]
     fn inflight_gate_drain_requires_all_decrements() {
-        let ex = smol::LocalExecutor::new();
-        smol::block_on(ex.run(async {
+        let local = tokio::task::LocalSet::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        local.block_on(&rt, async {
             let g = Rc::new(gate());
             g.increment();
             g.increment();
             let g2 = Rc::clone(&g);
-            let waiter = ex.spawn(async move { g2.drain().await });
-            smol::future::yield_now().await;
+            let waiter = tokio::task::spawn_local(async move { g2.drain().await });
+            tokio::task::yield_now().await;
             assert!(!waiter.is_finished());
             g.decrement();
-            smol::future::yield_now().await;
+            tokio::task::yield_now().await;
             assert!(!waiter.is_finished());
             g.decrement();
-            waiter.await;
-        }));
+            let _ = waiter.await;
+        });
     }
 
     #[test]
     fn inflight_gate_blocks_at_max_capacity() {
-        let ex = smol::LocalExecutor::new();
-        smol::block_on(ex.run(async {
+        let local = tokio::task::LocalSet::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        local.block_on(&rt, async {
             let g = Rc::new(gate());
             for _ in 0..MAX_INFLIGHT_TOOLS {
                 g.increment();
             }
             let g2 = Rc::clone(&g);
-            let waiter = ex.spawn(async move { g2.wait_below(MAX_INFLIGHT_TOOLS).await });
-            smol::future::yield_now().await;
+            let waiter = tokio::task::spawn_local(async move { g2.wait_below(MAX_INFLIGHT_TOOLS).await });
+            tokio::task::yield_now().await;
             assert!(!waiter.is_finished());
             g.decrement();
-            waiter.await;
-        }));
+            let _ = waiter.await;
+        });
     }
 
     #[test]
@@ -1831,24 +1837,32 @@ mod tests {
 
     #[test]
     fn drain_spawn_queue_skips_cancelled_tasks() {
-        let ex = Rc::new(smol::LocalExecutor::new());
-        smol::block_on(ex.run(async {
+        let local = tokio::task::LocalSet::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        local.block_on(&rt, async {
             let lua = enqueue_test_lua();
             let (trigger, token) = CancelToken::new();
             trigger.cancel();
             push_pending_task(&lua, token, None);
 
             let g = Rc::new(gate());
-            drain_spawn_queue(&lua, &ex, &g);
-            smol::future::yield_now().await;
+            drain_spawn_queue(&lua, &g);
+            tokio::task::yield_now().await;
             assert_eq!(g.count.get(), 0);
-        }));
+        });
     }
 
     #[test]
     fn drain_spawn_queue_runs_and_decrements_gate() {
-        let ex = Rc::new(smol::LocalExecutor::new());
-        smol::block_on(ex.run(async {
+        let local = tokio::task::LocalSet::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        local.block_on(&rt, async {
             let lua = enqueue_test_lua();
             push_pending_task(
                 &lua,
@@ -1857,15 +1871,15 @@ mod tests {
             );
 
             let g = Rc::new(gate());
-            drain_spawn_queue(&lua, &ex, &g);
+            drain_spawn_queue(&lua, &g);
 
             for _ in 0..10 {
-                smol::future::yield_now().await;
+                tokio::task::yield_now().await;
                 if g.count.get() == 0 {
                     return;
                 }
             }
             panic!("gate count never reached 0 after draining");
-        }));
+        });
     }
 }
