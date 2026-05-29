@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn empty_slots_emit_template_and_native_efficient_line() {
         let out = assemble(PromptId::System, &ResolvedSlots::default(), "");
-        assert!(out.starts_with("You are Maki"));
+        assert!(out.starts_with("You are Craft"));
         assert!(
             !out.contains("{{"),
             "unfilled marker left in output:\n{out}"

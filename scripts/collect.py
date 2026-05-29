@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coding agent analytics collector - runs Maki, Claude Code, or OpenCode headless, appends to CSV."""
+"""Coding agent analytics collector - runs Craft, Claude Code, or OpenCode headless, appends to CSV."""
 
 import argparse
 import csv
@@ -9,26 +9,90 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-AGENTS = ("maki", "claude-code", "opencode")
+AGENTS = ("craft", "claude-code", "opencode")
 
 PER_MILLION = 1_000_000
 
 # Pricing per million tokens (must match model.rs tiers).
 PRICING = {
-    "claude-3-haiku":    {"input": 0.25, "output": 1.25, "cache_write": 0.30, "cache_read": 0.03},
-    "claude-3-5-haiku":  {"input": 0.80, "output": 4.00, "cache_write": 1.00, "cache_read": 0.08},
-    "claude-haiku-4-5":  {"input": 0.80, "output": 4.00, "cache_write": 1.00, "cache_read": 0.08},
-    "claude-3-sonnet":   {"input": 3.00, "output": 15.00, "cache_write": 0.30, "cache_read": 0.30},
-    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
-    "claude-3-7-sonnet": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
-    "claude-sonnet-4":   {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
-    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
-    "claude-opus-4-5":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "claude-opus-4-6":   {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
-    "claude-3-opus":     {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
-    "claude-opus-4-0":   {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
-    "claude-opus-4-1":   {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+    "claude-3-haiku": {
+        "input": 0.25,
+        "output": 1.25,
+        "cache_write": 0.30,
+        "cache_read": 0.03,
+    },
+    "claude-3-5-haiku": {
+        "input": 0.80,
+        "output": 4.00,
+        "cache_write": 1.00,
+        "cache_read": 0.08,
+    },
+    "claude-haiku-4-5": {
+        "input": 0.80,
+        "output": 4.00,
+        "cache_write": 1.00,
+        "cache_read": 0.08,
+    },
+    "claude-3-sonnet": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 0.30,
+        "cache_read": 0.30,
+    },
+    "claude-3-5-sonnet": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
+    },
+    "claude-3-7-sonnet": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
+    },
+    "claude-sonnet-4": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
+    },
+    "claude-sonnet-4-5": {
+        "input": 3.00,
+        "output": 15.00,
+        "cache_write": 3.75,
+        "cache_read": 0.30,
+    },
+    "claude-opus-4-5": {
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
+    },
+    "claude-opus-4-6": {
+        "input": 5.00,
+        "output": 25.00,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
+    },
+    "claude-3-opus": {
+        "input": 15.00,
+        "output": 75.00,
+        "cache_write": 18.75,
+        "cache_read": 1.50,
+    },
+    "claude-opus-4-0": {
+        "input": 15.00,
+        "output": 75.00,
+        "cache_write": 18.75,
+        "cache_read": 1.50,
+    },
+    "claude-opus-4-1": {
+        "input": 15.00,
+        "output": 75.00,
+        "cache_write": 18.75,
+        "cache_read": 1.50,
+    },
 }
 
 
@@ -58,8 +122,8 @@ def compute_cost(usage, pricing):
 RESET = "\033[0m"
 AGENT_COLORS = {
     "claude-code": "\033[38;5;172m",
-    "maki":        "\033[35m",
-    "opencode":    "\033[34m",
+    "craft": "\033[35m",
+    "opencode": "\033[34m",
 }
 
 
@@ -82,9 +146,11 @@ def _log(msg):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Run coding agent with analytics collection")
+    p = argparse.ArgumentParser(
+        description="Run coding agent with analytics collection"
+    )
     p.add_argument("prompt", help="Prompt to send")
-    p.add_argument("--agent", choices=AGENTS, default="maki")
+    p.add_argument("--agent", choices=AGENTS, default="craft")
     p.add_argument("--model", default=None)
     p.add_argument("--max-turns", type=int, default=None)
     p.add_argument("--max-budget-usd", type=float, default=None)
@@ -96,7 +162,11 @@ def parse_args():
 
 def build_cmd_maki(args):
     cmd = [
-        "maki", "-p", "--verbose", "--output-format", "stream-json",
+        "craft",
+        "-p",
+        "--verbose",
+        "--output-format",
+        "stream-json",
         args.prompt,
     ]
     if args.model:
@@ -108,8 +178,13 @@ def build_cmd_maki(args):
 
 def build_cmd_claude(args):
     cmd = [
-        "claude", "-p", "--verbose", "--output-format", "stream-json",
-        "--dangerously-skip-permissions", args.prompt,
+        "claude",
+        "-p",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions",
+        args.prompt,
     ]
     if args.model:
         cmd += ["--model", args.model]
@@ -128,9 +203,13 @@ def build_cmd_opencode(args):
 
 
 TOOL_DISPLAY_KEY = {
-    "Read": "file_path", "Write": "file_path", "Edit": "file_path",
-    "Glob": "pattern", "Grep": "pattern",
-    "Bash": "command", "mcp_bash": "command",
+    "Read": "file_path",
+    "Write": "file_path",
+    "Edit": "file_path",
+    "Glob": "pattern",
+    "Grep": "pattern",
+    "Bash": "command",
+    "mcp_bash": "command",
 }
 
 MAX_TOOL_PREVIEW_LINES = 5
@@ -185,11 +264,13 @@ def process_assistant(msg, turn_index, turn_usage, all_tool_calls):
     for b in content:
         btype = b.get("type")
         if btype == "tool_use":
-            all_tool_calls.append({
-                "turn": turn_index,
-                "name": b.get("name"),
-                "input": b.get("input", {}),
-            })
+            all_tool_calls.append(
+                {
+                    "turn": turn_index,
+                    "name": b.get("name"),
+                    "input": b.get("input", {}),
+                }
+            )
             parts.append(f"tool_use {format_tool_summary(b)}")
             detail = format_tool_detail(b)
             if detail:
@@ -233,8 +314,12 @@ def process_opencode_stream(proc, meta):
     all_tool_calls = []
     turn_index = -1
     result_text = ""
-    total_tokens = {"input_tokens": 0, "output_tokens": 0,
-                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    total_tokens = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
     first_ts = None
     last_ts = None
 
@@ -263,11 +348,13 @@ def process_opencode_stream(proc, meta):
         elif msg_type == "tool_use":
             state = part.get("state", {})
             inp = state.get("input", {})
-            all_tool_calls.append({
-                "turn": turn_index,
-                "name": part.get("tool", ""),
-                "input": inp,
-            })
+            all_tool_calls.append(
+                {
+                    "turn": turn_index,
+                    "name": part.get("tool", ""),
+                    "input": inp,
+                }
+            )
             _log(f"[turn {turn_index + 1}] tool_use {part.get('tool', '?')}")
 
         elif msg_type == "text":
@@ -299,11 +386,26 @@ def process_opencode_stream(proc, meta):
 
 
 CSV_FIELDS = [
-    "timestamp", "agent", "session_id", "tag", "model", "prompt",
-    "run_cost_usd", "run_duration_ms", "run_num_turns",
-    "run_input_tokens", "run_output_tokens", "run_cache_read", "run_cache_write",
-    "turn", "tool_name", "tool_input",
-    "turn_input_tokens", "turn_output_tokens", "turn_cache_read", "turn_cache_write",
+    "timestamp",
+    "agent",
+    "session_id",
+    "tag",
+    "model",
+    "prompt",
+    "run_cost_usd",
+    "run_duration_ms",
+    "run_num_turns",
+    "run_input_tokens",
+    "run_output_tokens",
+    "run_cache_read",
+    "run_cache_write",
+    "turn",
+    "tool_name",
+    "tool_input",
+    "turn_input_tokens",
+    "turn_output_tokens",
+    "turn_cache_read",
+    "turn_cache_write",
 ]
 
 
@@ -335,23 +437,34 @@ def append_csv(csv_path, meta, summary, turn_usage, tool_calls):
     if tool_calls:
         # Count tool calls per turn to split usage evenly (avoid double-counting).
         from collections import Counter
+
         calls_per_turn = Counter(tc.get("turn", 0) for tc in tool_calls)
 
         for tc in tool_calls:
             turn_idx = tc.get("turn", 0)
             raw = turn_usage.get(turn_idx, {})
             n = calls_per_turn[turn_idx]
-            split = {k: v // n for k, v in raw.items() if isinstance(v, (int, float))} if n > 1 else raw
+            split = (
+                {k: v // n for k, v in raw.items() if isinstance(v, (int, float))}
+                if n > 1
+                else raw
+            )
             turn_fields = usage_fields(split, "turn")
-            rows.append({
-                **run_base,
-                "turn": turn_idx,
-                "tool_name": tc.get("name", ""),
-                "tool_input": json.dumps(tc.get("input", {}), separators=(",", ":")),
-                **turn_fields,
-            })
+            rows.append(
+                {
+                    **run_base,
+                    "turn": turn_idx,
+                    "tool_name": tc.get("name", ""),
+                    "tool_input": json.dumps(
+                        tc.get("input", {}), separators=(",", ":")
+                    ),
+                    **turn_fields,
+                }
+            )
     else:
-        rows.append({**run_base, "turn": 0, "tool_name": "", "tool_input": "", **empty_turn})
+        rows.append(
+            {**run_base, "turn": 0, "tool_name": "", "tool_input": "", **empty_turn}
+        )
 
     write_header = not csv_path.exists()
     with open(csv_path, "a", newline="") as f:
@@ -397,7 +510,7 @@ def process_claude_stream(proc, meta):
 
 
 STREAM_PROCESSORS = {
-    "maki": (build_cmd_maki, process_claude_stream),
+    "craft": (build_cmd_maki, process_claude_stream),
     "claude-code": (build_cmd_claude, process_claude_stream),
     "opencode": (build_cmd_opencode, process_opencode_stream),
 }

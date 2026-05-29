@@ -1,6 +1,6 @@
 <img src="./banner.png">
 
-**Craft** is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik — an AI coding agent optimized for minimal use of context tokens, while providing a great user experience.
+**Craft** is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik — an AI coding agent optimized for minimal use of context tokens, while providing a great user experience. This fork ported the original project to use tokio and reqwest instead of smol and isahc.
 
 Full attribution and thanks to the original project: [github.com/tontinton/maki](https://github.com/tontinton/maki.git)
 

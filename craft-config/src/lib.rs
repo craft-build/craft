@@ -1354,9 +1354,9 @@ mod tests {
 
     #[test]
     fn env_file_precedence() {
-        const GLOBAL_ONLY: &str = "TEST_MAKI_GLOBAL_ONLY";
-        const PROJECT_SHADOWS: &str = "TEST_MAKI_PROJECT_SHADOWS";
-        const PROCESS_WINS: &str = "TEST_MAKI_PROCESS_WINS";
+        const GLOBAL_ONLY: &str = "TEST_CRAFT_GLOBAL_ONLY";
+        const PROJECT_SHADOWS: &str = "TEST_CRAFT_PROJECT_SHADOWS";
+        const PROCESS_WINS: &str = "TEST_CRAFT_PROCESS_WINS";
 
         let dir = TempDir::new().unwrap();
         let global = global_config_dir(dir.path());

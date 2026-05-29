@@ -184,7 +184,7 @@ pub fn generate() -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "Maki ships with {total} built-in tools. This is the full reference."
+        "Craft ships with {total} built-in tools. This is the full reference."
     )
     .unwrap();
 

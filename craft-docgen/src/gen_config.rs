@@ -182,7 +182,7 @@ craft.setup({{
     writeln!(out, "## Validation\n").unwrap();
     writeln!(
         out,
-        "If a value is below its minimum, Maki shows a `ConfigError` with the field name, \
+        "If a value is below its minimum, Craft shows a `ConfigError` with the field name, \
          value, and minimum."
     )
     .unwrap();
@@ -192,7 +192,7 @@ craft.setup({{
         "
 ## Directory layout
 
-Maki uses XDG directories on Linux and macOS:
+Craft uses XDG directories on Linux and macOS:
 
 | Purpose | Path |
 |---------|------|

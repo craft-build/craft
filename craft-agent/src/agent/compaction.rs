@@ -107,7 +107,7 @@ fn strip_thinking(messages: &mut [Message]) {
 }
 
 pub(super) fn auto_compact_enabled() -> bool {
-    env::var("MAKI_DISABLE_AUTOCOMPACT")
+    env::var("CRAFT_DISABLE_AUTOCOMPACT")
         .map(|v| v != "1" && v != "true")
         .unwrap_or(true)
 }
@@ -118,8 +118,8 @@ mod tests {
 
     use craft_providers::provider::{BoxFuture, Provider};
     use craft_providers::{
-        ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason, StreamResponse,
-        TokenUsage,
+        ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason,
+        StreamResponse, TokenUsage,
     };
     use serde_json::Value;
     use test_case::test_case;
@@ -189,29 +189,29 @@ mod tests {
 
     #[tokio::test]
     async fn compact_replaces_history_with_summary() {
-            let provider: std::sync::Arc<dyn Provider> =
-                std::sync::Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
-            let model = default_model();
-            let (raw_tx, _rx) = flume::unbounded();
-            let mut history = History::new(vec![
-                Message::user("first".into()),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: "reply".into(),
-                    }],
-                    ..Default::default()
-                },
-            ]);
+        let provider: std::sync::Arc<dyn Provider> =
+            std::sync::Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
+        let model = default_model();
+        let (raw_tx, _rx) = flume::unbounded();
+        let mut history = History::new(vec![
+            Message::user("first".into()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "reply".into(),
+                }],
+                ..Default::default()
+            },
+        ]);
 
-            compact(
-                &*provider,
-                &model,
-                &mut history,
-                &EventSender::new(raw_tx, 0),
-            )
-            .await
-            .unwrap();
+        compact(
+            &*provider,
+            &model,
+            &mut history,
+            &EventSender::new(raw_tx, 0),
+        )
+        .await
+        .unwrap();
 
         let msgs = history.as_slice();
         assert_eq!(msgs.len(), 2);

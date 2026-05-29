@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flume::Sender;
-use futures::io::BufReader;
 use futures::TryStreamExt;
+use futures::io::BufReader;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,7 +23,7 @@ pub mod auth;
 const DEFAULT_API_ENDPOINT: &str = "https://api.githubcopilot.com";
 const GRAPHQL_QUERY: &str = "query { viewer { copilotEndpoints { api } } }";
 const API_VERSION_HEADER: &str = "2025-10-01";
-const EDITOR_VERSION_HEADER: &str = concat!("Maki/", env!("CARGO_PKG_VERSION"));
+const EDITOR_VERSION_HEADER: &str = concat!("Craft/", env!("CARGO_PKG_VERSION"));
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const RESPONSES_PATH: &str = "/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
@@ -211,10 +211,13 @@ impl Copilot {
             .await?;
         if response.status().is_success() {
             let stream = response.bytes_stream();
-            let reader = StreamReader::new(
-                stream.map_err(std::io::Error::other),
-            );
-            openai_compat::parse_sse(BufReader::new(reader.compat()), event_tx, self.stream_timeout).await
+            let reader = StreamReader::new(stream.map_err(std::io::Error::other));
+            openai_compat::parse_sse(
+                BufReader::new(reader.compat()),
+                event_tx,
+                self.stream_timeout,
+            )
+            .await
         } else {
             Err(AgentError::from_response(response).await)
         }
@@ -273,10 +276,13 @@ impl Copilot {
             .await?;
         if response.status().is_success() {
             let stream = response.bytes_stream();
-            let reader = StreamReader::new(
-                stream.map_err(std::io::Error::other),
-            );
-            super::anthropic::parse_sse(BufReader::new(reader.compat()), event_tx, self.stream_timeout).await
+            let reader = StreamReader::new(stream.map_err(std::io::Error::other));
+            super::anthropic::parse_sse(
+                BufReader::new(reader.compat()),
+                event_tx,
+                self.stream_timeout,
+            )
+            .await
         } else {
             Err(AgentError::from_response(response).await)
         }

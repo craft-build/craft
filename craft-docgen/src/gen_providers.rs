@@ -14,13 +14,13 @@ const TIER_PICKER_NOTE: &str = r#"Open the model picker with `/model` and press 
 
 const AUTH_RELOADING: &str = r#"## Auth Reloading
 
-Maki re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `craft auth login` in another terminal or change an env var, the next session picks it up without a restart.
+Craft re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `craft auth login` in another terminal or change an env var, the next session picks it up without a restart.
 
 You can set multiple API keys in one env var (`ANTHROPIC_API_KEY=sk-1,sk-2,sk-3`) and they rotate automatically on rate-limit or auth errors."#;
 
 const BEDROCK_NOTE: &str = r#"#### Amazon Bedrock
 
-If you already use Claude through AWS Bedrock, you can point Maki at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Maki will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
+If you already use Claude through AWS Bedrock, you can point Craft at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Craft will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
 
 You will need `AWS_REGION` and one of the following for auth:
 
@@ -276,7 +276,7 @@ fn write_section(out: &mut String, section: &ProviderSection) {
         );
         let _ = writeln!(
             out,
-            "Maki asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.craft/model-tiers`."
+            "Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.craft/model-tiers`."
         );
     } else {
         write_model_table(out, section.entries);
@@ -294,7 +294,7 @@ pub fn generate() -> String {
     let _ = writeln!(out, "# Providers\n");
     let _ = writeln!(
         out,
-        "Maki talks to LLM providers over their HTTP APIs. \
+        "Craft talks to LLM providers over their HTTP APIs. \
          Models are split into three tiers: **weak** (cheap and fast), \
          **medium** (balanced), and **strong** (highest capability, highest cost).\n"
     );

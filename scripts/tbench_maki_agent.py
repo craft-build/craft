@@ -1,5 +1,5 @@
 """
-Harbor agent wrapper for running maki on Terminal-Bench with analytics collection.
+Harbor agent wrapper for running craft on Terminal-Bench with analytics collection.
 
 Requires: uv tool install harbor
 
@@ -7,12 +7,12 @@ Setup:
     harbor dataset download terminal-bench/terminal-bench-2
 
 Run a single task:
-    MOUNTS='["/usr/local/bin/maki:/mnt/maki:ro", "~/.maki/auth:/mnt/maki-auth:ro", "~/.maki/providers:/mnt/maki-providers:ro"]'
+    MOUNTS='["/usr/local/bin/craft:/mnt/craft:ro", "~/.craft/auth:/mnt/craft-auth:ro", "~/.craft/providers:/mnt/craft-providers:ro"]'
 
     harbor run \
       -t terminal-bench/fix-git \
       -m anthropic/claude-sonnet-4-6 \
-      --agent-import-path tbench_maki_agent:MakiAgent \
+      --agent-import-path tbench_craft_agent:CraftAgent \
       --mounts-json "$MOUNTS" \
       -n 1 -y
 
@@ -20,7 +20,7 @@ Run the full suite:
     harbor run \
       -d terminal-bench/terminal-bench-2 \
       -m anthropic/claude-sonnet-4-6 \
-      --agent-import-path tbench_maki_agent:MakiAgent \
+      --agent-import-path tbench_craft_agent:CraftAgent \
       --mounts-json "$MOUNTS" \
       -n 4 -y
 
@@ -43,16 +43,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collect import append_csv, compute_cost, lookup_pricing
-from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template  # ty: ignore[unresolved-import]
+from harbor.agents.installed.base import (  # ty: ignore[unresolved-import]
+    BaseInstalledAgent,
+    with_prompt_template,
+)
 from harbor.environments.base import BaseEnvironment  # ty: ignore[unresolved-import]
 from harbor.models.agent.context import AgentContext  # ty: ignore[unresolved-import]
 
-AGENT_LOG_FILE = "maki.txt"
+AGENT_LOG_FILE = "craft.txt"
 AGENT_LOG_PATH = f"/logs/agent/{AGENT_LOG_FILE}"
 
 
 def parse_stream_json(log_text: str) -> tuple[dict, dict[int, dict], list[dict]]:
-    """Parse maki --verbose --output-format stream-json output.
+    """Parse craft --verbose --output-format stream-json output.
 
     Returns (result_summary, per_turn_usage, tool_calls) matching collect.py's format.
     """
@@ -96,11 +99,13 @@ def parse_stream_json(log_text: str) -> tuple[dict, dict[int, dict], list[dict]]
             turn_usage[idx] = usage
             for block in content:
                 if block.get("type") == "tool_use":
-                    tool_calls.append({
-                        "turn": idx,
-                        "name": block.get("name"),
-                        "input": block.get("input", {}),
-                    })
+                    tool_calls.append(
+                        {
+                            "turn": idx,
+                            "name": block.get("name"),
+                            "input": block.get("input", {}),
+                        }
+                    )
 
         elif msg_type == "result":
             session_id = msg.get("session_id", session_id)
@@ -122,28 +127,28 @@ def parse_stream_json(log_text: str) -> tuple[dict, dict[int, dict], list[dict]]
     return result, turn_usage, tool_calls
 
 
-class MakiAgent(BaseInstalledAgent):
+class CraftAgent(BaseInstalledAgent):
     _last_instruction: str = ""
 
     @staticmethod
     def name() -> str:
-        return "maki"
+        return "craft"
 
     def get_version_command(self) -> str | None:
-        return "maki --version"
+        return "craft --version"
 
     async def install(self, environment: BaseEnvironment) -> None:
         await self.exec_as_root(
             environment,
-            command="cp /mnt/maki /usr/local/bin/maki && chmod +x /usr/local/bin/maki && maki --version",
+            command="cp /mnt/craft /usr/local/bin/craft && chmod +x /usr/local/bin/craft && craft --version",
         )
         await self.exec_as_root(
             environment,
-            command="if [ -d /mnt/maki-auth ]; then mkdir -p /root/.maki/auth && cp /mnt/maki-auth/* /root/.maki/auth/; fi",
+            command="if [ -d /mnt/craft-auth ]; then mkdir -p /root/.craft/auth && cp /mnt/craft-auth/* /root/.craft/auth/; fi",
         )
         await self.exec_as_root(
             environment,
-            command="if [ -d /mnt/maki-providers ]; then mkdir -p /root/.maki/providers && cp /mnt/maki-providers/* /root/.maki/providers/ && chmod +x /root/.maki/providers/*; fi",
+            command="if [ -d /mnt/craft-providers ]; then mkdir -p /root/.craft/providers && cp /mnt/craft-providers/* /root/.craft/providers/ && chmod +x /root/.craft/providers/*; fi",
         )
 
     @with_prompt_template
@@ -161,7 +166,7 @@ class MakiAgent(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             command=(
-                f"maki --print --yolo --verbose --output-format stream-json --model {self.model_name} "
+                f"craft --print --yolo --verbose --output-format stream-json --model {self.model_name} "
                 f"-- {escaped} 2>&1 </dev/null | tee {AGENT_LOG_PATH}"
             ),
         )
@@ -169,12 +174,12 @@ class MakiAgent(BaseInstalledAgent):
     def populate_context_post_run(self, context: AgentContext) -> None:
         log_path = self.logs_dir / AGENT_LOG_FILE
         if not log_path.exists():
-            print(f"No maki log found at {log_path}")
+            print(f"No craft log found at {log_path}")
             return
 
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
         if not log_text.strip():
-            print("Maki log is empty")
+            print("Craft log is empty")
             return
 
         result, turn_usage, tool_calls = parse_stream_json(log_text)
@@ -206,7 +211,7 @@ class MakiAgent(BaseInstalledAgent):
         csv_path = Path(os.environ.get("TBENCH_CSV", "tbench_runs.csv"))
         meta = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "agent": "maki",
+            "agent": "craft",
             "session_id": result.get("session_id", ""),
             "tag": "tbench",
             "model": result.get("model", ""),
