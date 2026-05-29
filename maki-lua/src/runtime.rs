@@ -1362,6 +1362,8 @@ pub fn spawn(
                 .expect("failed to build lua runtime");
             let gate = Rc::new(InflightGate::new(rt.lua.clone()));
 
+            // LocalSet::block_on is the idiomatic tokio pattern for !Send types (Lua uses Rc/RefCell).
+            // This dedicated thread exists precisely because Lua state cannot be sent across threads.
             local.block_on(&tokio_rt, async {
                 loop {
                     let msg = match rx.recv_async().await {
@@ -1665,14 +1667,9 @@ mod tests {
         InflightGate::new(Lua::new())
     }
 
-    #[test]
-    fn inflight_gate_drain_requires_all_decrements() {
-        let local = tokio::task::LocalSet::new();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        local.block_on(&rt, async {
+    #[tokio::test]
+    async fn inflight_gate_drain_requires_all_decrements() {
+        tokio::task::LocalSet::new().run_until(async {
             let g = Rc::new(gate());
             g.increment();
             g.increment();
@@ -1685,17 +1682,12 @@ mod tests {
             assert!(!waiter.is_finished());
             g.decrement();
             let _ = waiter.await;
-        });
+        }).await;
     }
 
-    #[test]
-    fn inflight_gate_blocks_at_max_capacity() {
-        let local = tokio::task::LocalSet::new();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        local.block_on(&rt, async {
+    #[tokio::test]
+    async fn inflight_gate_blocks_at_max_capacity() {
+        tokio::task::LocalSet::new().run_until(async {
             let g = Rc::new(gate());
             for _ in 0..MAX_INFLIGHT_TOOLS {
                 g.increment();
@@ -1706,7 +1698,7 @@ mod tests {
             assert!(!waiter.is_finished());
             g.decrement();
             let _ = waiter.await;
-        });
+        }).await;
     }
 
     #[test]
@@ -1835,14 +1827,9 @@ mod tests {
             });
     }
 
-    #[test]
-    fn drain_spawn_queue_skips_cancelled_tasks() {
-        let local = tokio::task::LocalSet::new();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        local.block_on(&rt, async {
+    #[tokio::test]
+    async fn drain_spawn_queue_skips_cancelled_tasks() {
+        tokio::task::LocalSet::new().run_until(async {
             let lua = enqueue_test_lua();
             let (trigger, token) = CancelToken::new();
             trigger.cancel();
@@ -1852,17 +1839,12 @@ mod tests {
             drain_spawn_queue(&lua, &g);
             tokio::task::yield_now().await;
             assert_eq!(g.count.get(), 0);
-        });
+        }).await;
     }
 
-    #[test]
-    fn drain_spawn_queue_runs_and_decrements_gate() {
-        let local = tokio::task::LocalSet::new();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        local.block_on(&rt, async {
+    #[tokio::test]
+    async fn drain_spawn_queue_runs_and_decrements_gate() {
+        tokio::task::LocalSet::new().run_until(async {
             let lua = enqueue_test_lua();
             push_pending_task(
                 &lua,
@@ -1880,6 +1862,6 @@ mod tests {
                 }
             }
             panic!("gate count never reached 0 after draining");
-        });
+        }).await;
     }
 }

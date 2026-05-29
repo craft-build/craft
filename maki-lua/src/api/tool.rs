@@ -673,31 +673,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn permission_scope_extracted_at_parse_time() {
+    #[tokio::test]
+    async fn permission_scope_extracted_at_parse_time() {
         let tool = make_lua_tool(Some(PermissionScopeKind::Field(Arc::from("url"))));
         let inv = tool
             .parse(&serde_json::json!({"url": "https://example.com"}))
             .unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let scopes = rt.block_on(inv.permission_scopes());
+        let scopes = inv.permission_scopes().await;
         assert_eq!(
             scopes.unwrap().scopes,
             vec!["https://example.com".to_string()]
         );
     }
 
-    #[test]
-    fn permission_scope_none_when_field_absent_or_unconfigured() {
+    #[tokio::test]
+    async fn permission_scope_none_when_field_absent_or_unconfigured() {
         let absent = make_lua_tool(Some(PermissionScopeKind::Field(Arc::from("format"))))
             .parse(&serde_json::json!({"url": "https://example.com"}))
             .unwrap();
-        assert!(tokio::runtime::Runtime::new().unwrap().block_on(absent.permission_scopes()).is_none());
+        assert!(absent.permission_scopes().await.is_none());
 
         let unconfigured = make_lua_tool(None)
             .parse(&serde_json::json!({"url": "https://example.com"}))
             .unwrap();
-        assert!(tokio::runtime::Runtime::new().unwrap().block_on(unconfigured.permission_scopes()).is_none());
+        assert!(unconfigured.permission_scopes().await.is_none());
     }
 
     #[test]
@@ -750,8 +749,8 @@ mod tests {
         assert_eq!(extract_format(&t), LuaOutputFormat::Plain);
     }
 
-    #[test]
-    fn needs_compute_fallback_on_failure() {
+    #[tokio::test]
+    async fn needs_compute_fallback_on_failure() {
         // Closed channel → fallback to force_prompt
         let (tx, rx) = flume::bounded(0);
         drop(rx);
@@ -764,7 +763,7 @@ mod tests {
             permission_state: PermissionState::NeedsCompute,
             timeout: None,
         };
-        let scopes = tokio::runtime::Runtime::new().unwrap().block_on(inv.permission_scopes()).expect("should fallback");
+        let scopes = inv.permission_scopes().await.expect("should fallback");
         assert!(scopes.force_prompt);
         assert!(!scopes.scopes.is_empty());
 
@@ -784,12 +783,12 @@ mod tests {
                 let _ = reply.send(None);
             }
         });
-        let scopes2 = tokio::runtime::Runtime::new().unwrap().block_on(inv2.permission_scopes()).expect("should fallback");
+        let scopes2 = inv2.permission_scopes().await.expect("should fallback");
         assert!(scopes2.force_prompt);
     }
 
-    #[test]
-    fn needs_compute_returns_callback_result() {
+    #[tokio::test]
+    async fn needs_compute_returns_callback_result() {
         let (tx, rx) = flume::bounded(1);
         let inv = LuaToolInvocation {
             tool: Arc::from("bash"),
@@ -808,14 +807,14 @@ mod tests {
                 }));
             }
         });
-        let result = tokio::runtime::Runtime::new().unwrap().block_on(inv.permission_scopes());
+        let result = inv.permission_scopes().await;
         let scopes = result.unwrap();
         assert_eq!(scopes.scopes, vec!["cargo", "test"]);
         assert!(!scopes.force_prompt);
     }
 
-    #[test]
-    fn permission_scope_field_non_string_value_returns_none() {
+    #[tokio::test]
+    async fn permission_scope_field_non_string_value_returns_none() {
         let schema = try_from_json(&serde_json::json!({
             "type": "object",
             "properties": {
@@ -837,7 +836,7 @@ mod tests {
             timeout: Some(Duration::from_secs(60)),
         };
         let inv = tool.parse(&serde_json::json!({"count": 42})).unwrap();
-        assert!(tokio::runtime::Runtime::new().unwrap().block_on(inv.permission_scopes()).is_none());
+        assert!(inv.permission_scopes().await.is_none());
     }
 
     fn timeout_spec(lua: &Lua, value: LuaValue) -> Table {

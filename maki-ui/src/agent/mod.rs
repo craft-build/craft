@@ -5,12 +5,10 @@ pub(crate) mod shared_queue;
 
 use std::collections::HashMap;
 use std::mem;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use maki_agent::mcp;
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     AgentConfig, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle, McpSnapshotReader,
@@ -62,12 +60,12 @@ impl AgentHandles {
         config: AgentConfig,
         tool_output_lines: ToolOutputLines,
         permissions: &Arc<PermissionManager>,
-        cwd: PathBuf,
         session_id: Option<String>,
         timeouts: maki_providers::Timeouts,
         lua_handle: Option<EventHandle>,
+        mcp_handle: Option<McpHandle>,
+        mcp_config_errors: McpConfigErrors,
     ) -> Self {
-        let (mcp_handle, mcp_config_errors) = tokio::runtime::Handle::current().block_on(mcp::start(&cwd));
         spawn_agent_internal(
             model_slot,
             initial_history,
@@ -97,8 +95,12 @@ impl AgentHandles {
         app.queue.set_shared(self.queue.clone());
     }
 
-    pub(crate) fn cancel(self) {
+    pub(crate) fn send_cancel_all(&self) {
         let _ = self.cmd_tx.try_send(AgentCommand::CancelAll);
+    }
+
+    pub(crate) fn cancel(self) {
+        self.send_cancel_all();
     }
 
     pub(crate) fn send_mcp(&self, cmd: McpCommand) {
@@ -119,9 +121,12 @@ impl AgentHandles {
         lua_handle: Option<EventHandle>,
     ) {
         let slot = model_slot.load();
-        if let Err(e) = tokio::runtime::Handle::current().block_on(slot.provider.reload_auth()) {
-            warn!(error = %e, "failed to reload auth, continuing with existing credentials");
-        }
+        let provider = Arc::clone(&slot.provider);
+        tokio::spawn(async move {
+            if let Err(e) = provider.reload_auth().await {
+                warn!(error = %e, "failed to reload auth, continuing with existing credentials");
+            }
+        });
         let new = spawn_agent_internal(
             model_slot,
             history,
@@ -141,25 +146,23 @@ impl AgentHandles {
         old.cancel();
     }
 
-    pub(crate) fn shutdown(self, timeout: Duration) {
-        let _ = self.cmd_tx.try_send(AgentCommand::CancelAll);
+    pub(crate) async fn shutdown(self, timeout: Duration) {
+        self.send_cancel_all();
         let mcp_handle = self.mcp_handle;
         let mut task = self.task;
         drop((self.cmd_tx, self.agent_rx, self.answer_tx, self.queue));
         info!("waiting for agent to finish (timeout {timeout:?})");
-        tokio::runtime::Handle::current().block_on(async {
-            let finished = tokio::select! {
-                _ = &mut task => true,
-                _ = tokio::time::sleep(timeout) => false,
-            };
-            if !finished {
-                warn!("agent did not finish within {timeout:?}, forcing shutdown");
-            }
+        let finished = tokio::select! {
+            _ = &mut task => true,
+            _ = tokio::time::sleep(timeout) => false,
+        };
+        if !finished {
+            warn!("agent did not finish within {timeout:?}, forcing shutdown");
+        }
 
-            if let Some(ref handle) = mcp_handle {
-                handle.shutdown().await;
-            }
-        });
+        if let Some(ref handle) = mcp_handle {
+            handle.shutdown().await;
+        }
     }
 }
 

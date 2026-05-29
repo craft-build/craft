@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use maki_agent::AgentInput;
 use maki_agent::{BufferSnapshot, ToolInput, ToolOutput};
+use maki_providers::provider::Provider;
 use maki_providers::{Message, ModelTier};
 use ratatui::text::{Line, Span};
 
@@ -195,6 +196,11 @@ pub enum Action {
     Btw(String),
     Suspend,
     Quit,
+    ProviderReady {
+        model_spec: String,
+        provider: Result<Arc<dyn Provider>, String>,
+        pending_load_session: Option<Box<LoadedSession>>,
+    },
 }
 
 const ERROR_DISPLAY: Duration = Duration::from_secs(5);

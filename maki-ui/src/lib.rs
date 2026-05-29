@@ -42,7 +42,7 @@ pub fn run(
     handle: tokio::runtime::Handle,
     params: EventLoopParams,
     initial_prompt: Option<String>,
-) -> Result<(Option<String>, i32)> {
+) -> Result<event_loop::ShutdownResult> {
     let _guard = handle.enter();
     let (_guard, mut terminal) = terminal::TerminalGuard::init()?;
     let el = event_loop::EventLoop::new(&mut terminal, params)?;

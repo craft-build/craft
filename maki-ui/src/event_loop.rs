@@ -3,14 +3,13 @@ use std::time::Duration;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use color_eyre::Result;
-use color_eyre::eyre::Context;
 
 use crossterm::event::{
     self, Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
-use maki_agent::{AgentConfig, CancelToken, McpCommand};
+use maki_agent::{AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle};
 use maki_config::UiConfig;
 use maki_lua::{EventHandle, LuaCommandReader, UiAction};
 use maki_providers::Timeouts;
@@ -38,6 +37,35 @@ const IDLE_POLL_INTERVAL_MS: u64 = 100;
 
 pub type BufClickHandler = Arc<dyn Fn(&str, u32) -> Option<maki_lua::ClickReply> + Send + Sync>;
 
+pub struct ShutdownResult {
+    session_id: Option<String>,
+    exit_code: i32,
+    handles: AgentHandles,
+    storage_writer: Arc<StorageWriter>,
+}
+
+impl ShutdownResult {
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+
+    pub async fn cleanup(self) {
+        self.handles.shutdown(Duration::from_secs(3)).await;
+        match Arc::try_unwrap(self.storage_writer) {
+            Ok(writer) => writer.shutdown(Duration::from_secs(3)),
+            Err(_) => {
+                warn!("storage writer has outstanding references, skipping graceful shutdown")
+            }
+        }
+    }
+}
+
+type RunResult = Result<ShutdownResult>;
+
 pub struct EventLoopParams {
     pub model: Model,
     pub commands: Vec<CustomCommand>,
@@ -53,6 +81,9 @@ pub struct EventLoopParams {
     pub ui_action_rx: Option<flume::Receiver<UiAction>>,
     pub lua_event_handle: Option<EventHandle>,
     pub buf_click: Option<BufClickHandler>,
+    pub provider: Arc<dyn Provider>,
+    pub mcp_handle: Option<McpHandle>,
+    pub mcp_config_errors: McpConfigErrors,
     #[cfg(feature = "demo")]
     pub demo: bool,
 }
@@ -70,6 +101,8 @@ pub(crate) struct EventLoop<'t> {
     storage_writer: Arc<StorageWriter>,
     timeouts: Timeouts,
     ui_action_rx: Option<flume::Receiver<UiAction>>,
+    action_rx: flume::Receiver<Action>,
+    action_tx: flume::Sender<Action>,
     _model_fetch_task: tokio::task::JoinHandle<()>,
 }
 
@@ -163,6 +196,9 @@ impl<'t> EventLoop<'t> {
             ui_action_rx,
             lua_event_handle,
             buf_click,
+            provider,
+            mcp_handle,
+            mcp_config_errors,
             #[cfg(feature = "demo")]
             demo,
         } = params;
@@ -173,16 +209,11 @@ impl<'t> EventLoop<'t> {
         let bg = spawn_model_fetch();
         let storage_writer = Arc::new(StorageWriter::new(storage.clone()));
         let (shell_tx, shell_rx) = flume::unbounded::<ShellEvent>();
+        let (action_tx, action_rx) = flume::unbounded::<Action>();
 
         let resumed = !session.messages.is_empty();
         let initial_history = session.messages.clone();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
 
-        let provider: Arc<dyn Provider> = Arc::from(
-            tokio::runtime::Handle::current()
-                .block_on(from_model(&model, timeouts))
-                .context("create provider")?,
-        );
         let model_slot = Arc::new(ArcSwap::from_pointee(ModelSlot {
             model: model.clone(),
             provider,
@@ -193,10 +224,11 @@ impl<'t> EventLoop<'t> {
             config.clone(),
             ui_config.tool_output_lines,
             &permissions,
-            cwd,
             Some(session.id.clone()),
             timeouts,
             lua_event_handle.clone(),
+            mcp_handle,
+            mcp_config_errors.clone(),
         );
 
         let custom_commands: Arc<[CustomCommand]> = Arc::from(commands);
@@ -246,11 +278,13 @@ impl<'t> EventLoop<'t> {
             storage_writer,
             timeouts,
             ui_action_rx,
+            action_rx,
+            action_tx,
             _model_fetch_task: bg.task,
         })
     }
 
-    pub(crate) fn run(mut self, initial_prompt: Option<String>) -> Result<(Option<String>, i32)> {
+    pub(crate) fn run(mut self, initial_prompt: Option<String>) -> RunResult {
         if let Some(prompt) = initial_prompt {
             let sub = Submission {
                 text: prompt,
@@ -340,6 +374,10 @@ impl<'t> EventLoop<'t> {
                     }
                 }
             }
+        }
+
+        while let Ok(action) = self.action_rx.try_recv() {
+            self.handle_action(action);
         }
 
         had_agent_msg
@@ -448,22 +486,32 @@ impl<'t> EventLoop<'t> {
             }
             Action::LoadSession(loaded) => {
                 let loaded = *loaded;
-                if loaded.model_spec != self.model_slot.load().model.spec()
-                    && let Ok(new_model) = Model::from_spec(&loaded.model_spec)
-                    && let Ok(new_provider) = tokio::runtime::Handle::current()
-                        .block_on(from_model(&new_model, self.timeouts))
-                {
-                    self.model_slot.store(Arc::new(ModelSlot {
-                        model: new_model,
-                        provider: Arc::from(new_provider),
-                    }));
+                let model_spec = loaded.model_spec.clone();
+                if model_spec != self.model_slot.load().model.spec() {
+                    let timeouts = self.timeouts;
+                    let tx = self.action_tx.clone();
+                    tokio::spawn(async move {
+                        let result = match Model::from_spec(&model_spec) {
+                            Ok(model) => from_model(&model, timeouts)
+                                .await
+                                .map(|p| Arc::from(p) as Arc<dyn Provider>)
+                                .map_err(|e| e.to_string()),
+                            Err(e) => Err(e.to_string()),
+                        };
+                        let _ = tx.send(Action::ProviderReady {
+                            model_spec,
+                            provider: result,
+                            pending_load_session: Some(Box::new(loaded)),
+                        });
+                    });
+                } else {
+                    self.respawn_agent(loaded.messages);
+                    *self
+                        .handles
+                        .tool_outputs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = loaded.tool_outputs;
                 }
-                self.respawn_agent(loaded.messages);
-                *self
-                    .handles
-                    .tool_outputs
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = loaded.tool_outputs;
             }
             Action::ChangeModel(spec) => self.change_model(spec),
             Action::AssignTier(spec, tier) => {
@@ -515,28 +563,58 @@ impl<'t> EventLoop<'t> {
             }
             Action::Suspend => terminal::suspend(self.terminal),
             Action::Quit => {}
+            Action::ProviderReady { model_spec, provider, pending_load_session } => {
+                match provider {
+                    Ok(new_provider) => {
+                        if let Ok(new_model) = Model::from_spec(&model_spec) {
+                            self.app.update_model(&new_model);
+                            self.model_slot.store(Arc::new(ModelSlot {
+                                model: new_model,
+                                provider: new_provider,
+                            }));
+                        }
+                    }
+                    Err(e) => self.app.flash(format!("Failed to create provider: {e}")),
+                }
+                if let Some(loaded) = pending_load_session {
+                    let loaded = *loaded;
+                    self.respawn_agent(loaded.messages);
+                    *self
+                        .handles
+                        .tool_outputs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = loaded.tool_outputs;
+                }
+            }
         }
     }
 
     fn change_model(&mut self, spec: String) {
         match Model::from_spec(&spec) {
-            Ok(new_model) => match tokio::runtime::Handle::current()
-                .block_on(from_model(&new_model, self.timeouts))
-            {
-                Ok(new_provider) => {
-                    self.app.update_model(&new_model);
-                    self.model_slot.store(Arc::new(ModelSlot {
-                        model: new_model,
-                        provider: Arc::from(new_provider),
-                    }));
+            Ok(new_model) => {
+                let model_spec = new_model.spec();
+                if model_spec == self.model_slot.load().model.spec() {
+                    return;
                 }
-                Err(e) => self.app.flash(format!("Failed to create provider: {e}")),
-            },
+                let timeouts = self.timeouts;
+                let tx = self.action_tx.clone();
+                tokio::spawn(async move {
+                    let result = from_model(&new_model, timeouts)
+                        .await
+                        .map(|p| Arc::from(p) as Arc<dyn Provider>)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(Action::ProviderReady {
+                        model_spec,
+                        provider: result,
+                        pending_load_session: None,
+                    });
+                });
+            }
             Err(e) => self.app.flash(format!("Invalid model: {e}")),
         }
     }
 
-    fn shutdown(mut self) -> (Option<String>, i32) {
+    fn shutdown(mut self) -> ShutdownResult {
         let exit_code = self.app.exit_request.code();
         let session_id = self
             .app
@@ -546,14 +624,13 @@ impl<'t> EventLoop<'t> {
         self.app.cmd_tx = None;
         self.app.answer_tx = None;
         drop(self.app);
-        self.handles.shutdown(Duration::from_secs(3));
-        match Arc::try_unwrap(self.storage_writer) {
-            Ok(writer) => writer.shutdown(Duration::from_secs(3)),
-            Err(_) => {
-                warn!("storage writer has outstanding references, skipping graceful shutdown")
-            }
+        self.handles.send_cancel_all();
+        ShutdownResult {
+            session_id,
+            exit_code,
+            handles: self.handles,
+            storage_writer: self.storage_writer,
         }
-        (session_id, exit_code)
     }
 }
 

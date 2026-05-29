@@ -9,14 +9,13 @@ fn fresh_registry() -> Arc<ToolRegistry> {
     Arc::new(ToolRegistry::new())
 }
 
-fn exec_tool(reg: &ToolRegistry, name: &str, input: serde_json::Value) -> Result<String, String> {
+async fn exec_tool(reg: &ToolRegistry, name: &str, input: serde_json::Value) -> Result<String, String> {
     let entry = reg
         .get(name)
         .unwrap_or_else(|| panic!("tool {name} not registered"));
     let inv = entry.tool.parse(&input).expect("parse failed");
     let ctx = maki_agent::tools::test_support::stub_ctx(&maki_agent::AgentMode::Build);
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async { inv.execute(&ctx).await }).map(|out| match out {
+    inv.execute(&ctx).await.map(|out| match out {
         maki_agent::ToolOutput::Plain(s) => s,
         other => panic!("unexpected output: {other:?}"),
     })
@@ -90,8 +89,8 @@ fn dangerous_globals_blocked() {
     }
 }
 
-#[test]
-fn register_echo_tool() {
+#[tokio::test]
+async fn register_echo_tool() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     host.load_source("echo_plugin", ECHO_PLUGIN).unwrap();
@@ -102,7 +101,7 @@ fn register_echo_tool() {
         matches!(entry.source, ToolSource::Lua { ref plugin } if plugin.as_ref() == "echo_plugin"),
     );
 
-    let out = exec_tool(&reg, "echo_", serde_json::json!({"msg": "hello"})).unwrap();
+    let out = exec_tool(&reg, "echo_", serde_json::json!({"msg": "hello"})).await.unwrap();
     assert_eq!(out, "hello");
 }
 
@@ -185,8 +184,8 @@ fn permission_scope_valid_string_field_accepted() {
     assert!(reg.has("ok_scope"));
 }
 
-#[test]
-fn interrupt_kills_infinite_loop_and_vm_recovers() {
+#[tokio::test]
+async fn interrupt_kills_infinite_loop_and_vm_recovers() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
 
@@ -215,12 +214,11 @@ maki.api.register_tool({{
     let mut ctx = maki_agent::tools::test_support::stub_ctx(&maki_agent::AgentMode::Build);
     ctx.deadline = maki_agent::tools::Deadline::after(std::time::Duration::from_secs(5));
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async { inv.execute(&ctx).await });
+    let result = inv.execute(&ctx).await;
 
     assert!(result.is_err(), "expected error from timed-out loop");
 
-    let ok = exec_tool(&reg, "noop_after_loop", serde_json::json!({}));
+    let ok = exec_tool(&reg, "noop_after_loop", serde_json::json!({})).await;
     assert!(ok.is_ok(), "VM poisoned after interrupt: {ok:?}");
 }
 
@@ -270,8 +268,8 @@ error("plugin blew up after register")
     assert!(reg.has("echo_"));
 }
 
-#[test]
-fn is_error_propagated_as_error() {
+#[tokio::test]
+async fn is_error_propagated_as_error() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
 
@@ -288,12 +286,12 @@ fn is_error_propagated_as_error() {
     );
     host.load_source("err_plugin", &src).unwrap();
 
-    let err = exec_tool(&reg, "returns_error", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "returns_error", serde_json::json!({})).await.unwrap_err();
     assert_eq!(err, "boom");
 }
 
-#[test]
-fn handler_bad_return_type_is_error() {
+#[tokio::test]
+async fn handler_bad_return_type_is_error() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -307,12 +305,12 @@ fn handler_bad_return_type_is_error() {
     );
     host.load_source("bad_ret", &src).unwrap();
 
-    let err = exec_tool(&reg, "bad_ret_num", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "bad_ret_num", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains("must return string"), "got: {err}");
 }
 
-#[test]
-fn handler_nil_without_jobs_is_error() {
+#[tokio::test]
+async fn handler_nil_without_jobs_is_error() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = r#"maki.api.register_tool({
@@ -323,12 +321,12 @@ fn handler_nil_without_jobs_is_error() {
         handler = function() return nil end
     })"#;
     host.load_source("nil_no_jobs", src).unwrap();
-    let err = exec_tool(&reg, "nil_no_jobs", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "nil_no_jobs", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains(NIL_WITHOUT_JOBS_ERR), "got: {err}");
 }
 
-#[test]
-fn handler_lua_error_surfaces_as_tool_error() {
+#[tokio::test]
+async fn handler_lua_error_surfaces_as_tool_error() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
 
@@ -343,7 +341,7 @@ fn handler_lua_error_surfaces_as_tool_error() {
     );
     host.load_source("thrower_plugin", &src).unwrap();
 
-    let err = exec_tool(&reg, "thrower", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "thrower", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains("intentional kaboom"), "got: {err}");
 }
 
@@ -613,8 +611,8 @@ fn conflict_from_different_plugin_preserves_original() {
     assert!(matches!(entry.source, ToolSource::Lua { ref plugin } if plugin.as_ref() == "keeper"),);
 }
 
-#[test]
-fn ctx_finish_called_twice_is_error() {
+#[tokio::test]
+async fn ctx_finish_called_twice_is_error() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -630,12 +628,12 @@ fn ctx_finish_called_twice_is_error() {
         }})"#,
     );
     host.load_source("double_finish", &src).unwrap();
-    let err = exec_tool(&reg, "double_finish", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "double_finish", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains(FINISH_CALLED_TWICE_ERR), "got: {err}");
 }
 
-#[test]
-fn ctx_finish_with_is_error_propagates() {
+#[tokio::test]
+async fn ctx_finish_with_is_error_propagates() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -650,12 +648,12 @@ fn ctx_finish_with_is_error_propagates() {
         }})"#,
     );
     host.load_source("finish_err", &src).unwrap();
-    let err = exec_tool(&reg, "finish_err", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "finish_err", serde_json::json!({})).await.unwrap_err();
     assert_eq!(err, "async boom");
 }
 
-#[test]
-fn async_job_on_exit_receives_exit_code() {
+#[tokio::test]
+async fn async_job_on_exit_receives_exit_code() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -674,12 +672,12 @@ fn async_job_on_exit_receives_exit_code() {
         }})"#,
     );
     host.load_source("job_exit_code", &src).unwrap();
-    let out = exec_tool(&reg, "job_exit_code", serde_json::json!({})).unwrap();
+    let out = exec_tool(&reg, "job_exit_code", serde_json::json!({})).await.unwrap();
     assert_eq!(out, "code=42");
 }
 
-#[test]
-fn async_job_exits_without_finish_is_error() {
+#[tokio::test]
+async fn async_job_exits_without_finish_is_error() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -696,12 +694,12 @@ fn async_job_exits_without_finish_is_error() {
         }})"#,
     );
     host.load_source("job_no_finish", &src).unwrap();
-    let err = exec_tool(&reg, "job_no_finish", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "job_no_finish", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains(NIL_WITHOUT_JOBS_ERR), "got: {err}");
 }
 
-#[test]
-fn async_job_callback_error_surfaces() {
+#[tokio::test]
+async fn async_job_callback_error_surfaces() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -720,12 +718,12 @@ fn async_job_callback_error_surfaces() {
         }})"#,
     );
     host.load_source("job_cb_err", &src).unwrap();
-    let err = exec_tool(&reg, "job_cb_err", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "job_cb_err", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains("callback exploded"), "got: {err}");
 }
 
-#[test]
-fn jobstop_kills_running_job() {
+#[tokio::test]
+async fn jobstop_kills_running_job() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -745,12 +743,12 @@ fn jobstop_kills_running_job() {
         }})"#,
     );
     host.load_source("job_stop", &src).unwrap();
-    let out = exec_tool(&reg, "job_stop", serde_json::json!({})).unwrap();
+    let out = exec_tool(&reg, "job_stop", serde_json::json!({})).await.unwrap();
     assert_eq!(out, "killed=true");
 }
 
-#[test]
-fn vm_recovers_after_async_job_tool() {
+#[tokio::test]
+async fn vm_recovers_after_async_job_tool() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -776,9 +774,9 @@ maki.api.register_tool({{
 "#,
     );
     host.load_source("recovery", &src).unwrap();
-    let out1 = exec_tool(&reg, "async_first", serde_json::json!({})).unwrap();
+    let out1 = exec_tool(&reg, "async_first", serde_json::json!({})).await.unwrap();
     assert_eq!(out1, "ok1");
-    let out2 = exec_tool(&reg, "sync_after", serde_json::json!({})).unwrap();
+    let out2 = exec_tool(&reg, "sync_after", serde_json::json!({})).await.unwrap();
     assert_eq!(out2, "ok2");
 }
 
@@ -1002,8 +1000,8 @@ fn unload_clears_commands() {
     assert_eq!(host.command_reader().load().commands.len(), 0);
 }
 
-#[test]
-fn job_callback_finishes_after_handler_returns_nil() {
+#[tokio::test]
+async fn job_callback_finishes_after_handler_returns_nil() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -1023,12 +1021,12 @@ fn job_callback_finishes_after_handler_returns_nil() {
         }})"#,
     );
     host.load_source("job_after_return", &src).unwrap();
-    let out = exec_tool(&reg, "job_after_return", serde_json::json!({})).unwrap();
+    let out = exec_tool(&reg, "job_after_return", serde_json::json!({})).await.unwrap();
     assert_eq!(out, "exit=0");
 }
 
-#[test]
-fn ctx_set_deadline_times_out() {
+#[tokio::test]
+async fn ctx_set_deadline_times_out() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -1047,12 +1045,12 @@ fn ctx_set_deadline_times_out() {
         }})"#,
     );
     host.load_source("deadline_test", &src).unwrap();
-    let err = exec_tool(&reg, "deadline_test", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "deadline_test", serde_json::json!({})).await.unwrap_err();
     assert_eq!(err, DEADLINE_TIMEOUT_MSG);
 }
 
-#[test]
-fn ctx_set_deadline_twice_errors() {
+#[tokio::test]
+async fn ctx_set_deadline_twice_errors() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg)).unwrap();
     let src = format!(
@@ -1068,19 +1066,19 @@ fn ctx_set_deadline_twice_errors() {
         }})"#,
     );
     host.load_source("deadline_twice", &src).unwrap();
-    let err = exec_tool(&reg, "deadline_twice", serde_json::json!({})).unwrap_err();
+    let err = exec_tool(&reg, "deadline_twice", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains(DEADLINE_ALREADY_SET_ERR), "got: {err}");
 }
 
-#[test]
-fn bash_timeout_round_trip() {
+#[tokio::test]
+async fn bash_timeout_round_trip() {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
     host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
         .unwrap();
 
     let input = serde_json::json!({"command": "sleep 30", "timeout": 1});
-    let err = exec_tool(&reg, "bash", input.clone()).unwrap_err();
+    let err = exec_tool(&reg, "bash", input.clone()).await.unwrap_err();
     assert_eq!(err, BASH_TIMEOUT_MSG);
 
     let handle = host.event_handle().expect("event handle available");

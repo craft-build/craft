@@ -143,6 +143,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             Model::from_spec(&session.model).unwrap_or(model)
         };
         let initial_prompt = read_initial_prompt(cli.prompt)?;
+        let cwd_for_mcp = cwd.clone();
+        let (mcp_handle, mcp_config_errors) = maki_agent::mcp::start(&cwd_for_mcp).await;
+        let provider: Arc<dyn maki_providers::provider::Provider> = Arc::from(
+            maki_providers::provider::from_model(&model, timeouts)
+                .await
+                .context("create provider")?,
+        );
         let handle = tokio::runtime::Handle::current();
         let params = maki_ui::EventLoopParams {
             model,
@@ -168,15 +175,21 @@ pub async fn run(cli: Cli) -> Result<()> {
                     },
                 ) as maki_ui::BufClickHandler
             }),
+            provider,
+            mcp_handle,
+            mcp_config_errors,
             #[cfg(feature = "demo")]
             demo: cli.demo,
         };
-        let (session_id, exit_code) = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             maki_ui::run(handle, params, initial_prompt)
         })
         .await
         .map_err(|e| color_eyre::eyre::eyre!("UI thread panicked: {e}"))?
         .context("run UI")?;
+        let session_id = result.session_id().map(|s| s.to_owned());
+        let exit_code = result.exit_code();
+        result.cleanup().await;
         if let Some(session_id) = session_id {
             eprintln!("session: {session_id}");
         }
