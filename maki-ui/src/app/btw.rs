@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use flume::Sender;
-use futures_lite::future;
+
 use maki_providers::provider::Provider;
 use maki_providers::{Message, Model, ProviderEvent, ThinkingConfig};
 use serde_json::Value;
@@ -30,7 +30,7 @@ impl App {
         messages.push(Message::user(question));
 
         let session_id = self.state.session.id.clone();
-        smol::spawn(run_btw(provider, model, messages, tx, Some(session_id))).detach();
+        tokio::spawn(run_btw(provider, model, messages, tx, Some(session_id)));
     }
 }
 
@@ -66,7 +66,7 @@ async fn run_btw(
         }
     };
 
-    let (result, _) = future::zip(stream_fut, forward_fut).await;
+    let (result, _) = tokio::join!(stream_fut, forward_fut);
 
     match result {
         Ok(_) => {

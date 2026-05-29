@@ -70,20 +70,20 @@ pub(crate) struct EventLoop<'t> {
     storage_writer: Arc<StorageWriter>,
     timeouts: Timeouts,
     ui_action_rx: Option<flume::Receiver<UiAction>>,
-    _model_fetch_task: smol::Task<()>,
+    _model_fetch_task: tokio::task::JoinHandle<()>,
 }
 
 struct BackgroundModels {
     available: Arc<ArcSwapOption<Vec<String>>>,
     warn_rx: flume::Receiver<String>,
-    task: smol::Task<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 fn spawn_model_fetch() -> BackgroundModels {
     let available: Arc<ArcSwapOption<Vec<String>>> = Arc::new(ArcSwapOption::empty());
     let bg = Arc::clone(&available);
     let (warn_tx, warn_rx) = flume::unbounded::<String>();
-    let task = smol::spawn(async move {
+    let task = tokio::spawn(async move {
         let warn_tx = warn_tx;
         fetch_all_models(|batch| {
             for w in batch.warnings {

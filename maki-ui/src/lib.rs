@@ -1,4 +1,4 @@
-//! Single-threaded ratatui event loop; the agent runs on smol tasks in a separate thread.
+//! Single-threaded ratatui event loop; the agent runs on tokio tasks.
 //! `AgentHandles` bundles all flume channels to the agent. `dispatch()` processes
 //! `Action`s returned by `App::update()`. Scroll and drag events are coalesced from
 //! the queue to avoid jank.
@@ -42,6 +42,8 @@ pub fn run(
     params: EventLoopParams,
     initial_prompt: Option<String>,
 ) -> Result<(Option<String>, i32)> {
+    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let _guard = rt.enter();
     let (_guard, mut terminal) = terminal::TerminalGuard::init()?;
     let el = event_loop::EventLoop::new(&mut terminal, params)?;
     el.run(initial_prompt)

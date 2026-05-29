@@ -49,7 +49,7 @@ pub(crate) struct AgentHandles {
     pub(crate) mcp_config_errors: McpConfigErrors,
     pub(crate) queue: QueueSender,
     pub(crate) timeouts: maki_providers::Timeouts,
-    task: smol::Task<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl AgentHandles {
@@ -67,7 +67,7 @@ impl AgentHandles {
         timeouts: maki_providers::Timeouts,
         lua_handle: Option<EventHandle>,
     ) -> Self {
-        let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start(&cwd));
+        let (mcp_handle, mcp_config_errors) = tokio::runtime::Handle::current().block_on(mcp::start(&cwd));
         spawn_agent_internal(
             model_slot,
             initial_history,
@@ -119,7 +119,7 @@ impl AgentHandles {
         lua_handle: Option<EventHandle>,
     ) {
         let slot = model_slot.load();
-        if let Err(e) = smol::block_on(slot.provider.reload_auth()) {
+        if let Err(e) = tokio::runtime::Handle::current().block_on(slot.provider.reload_auth()) {
             warn!(error = %e, "failed to reload auth, continuing with existing credentials");
         }
         let new = spawn_agent_internal(
@@ -144,21 +144,14 @@ impl AgentHandles {
     pub(crate) fn shutdown(self, timeout: Duration) {
         let _ = self.cmd_tx.try_send(AgentCommand::CancelAll);
         let mcp_handle = self.mcp_handle;
-        let task = self.task;
+        let mut task = self.task;
         drop((self.cmd_tx, self.agent_rx, self.answer_tx, self.queue));
         info!("waiting for agent to finish (timeout {timeout:?})");
-        smol::block_on(async {
-            let finished = futures_lite::future::or(
-                async {
-                    task.await;
-                    true
-                },
-                async {
-                    smol::Timer::after(timeout).await;
-                    false
-                },
-            )
-            .await;
+        tokio::runtime::Handle::current().block_on(async {
+            let finished = tokio::select! {
+                _ = &mut task => true,
+                _ = tokio::time::sleep(timeout) => false,
+            };
             if !finished {
                 warn!("agent did not finish within {timeout:?}, forcing shutdown");
             }
@@ -215,7 +208,7 @@ fn spawn_agent_internal(
         lua_handle,
     );
 
-    let task = smol::spawn(agent_loop.run());
+    let task = tokio::spawn(agent_loop.run());
 
     AgentHandles {
         cmd_tx,

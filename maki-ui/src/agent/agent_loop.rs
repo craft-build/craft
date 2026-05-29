@@ -39,7 +39,7 @@ pub(super) struct AgentLoop {
     file_tracker: Arc<FileReadTracker>,
     min_run_id: u64,
     agent_tx: flume::Sender<Envelope>,
-    answer_rx: Arc<async_lock::Mutex<flume::Receiver<String>>>,
+    answer_rx: Arc<tokio::sync::Mutex<flume::Receiver<String>>>,
     queue: Arc<QueueReceiver>,
     session_id: Option<String>,
     timeouts: maki_providers::Timeouts,
@@ -81,7 +81,7 @@ impl AgentLoop {
             file_tracker: FileReadTracker::fresh(),
             min_run_id: 0,
             agent_tx,
-            answer_rx: Arc::new(async_lock::Mutex::new(answer_rx)),
+            answer_rx: Arc::new(tokio::sync::Mutex::new(answer_rx)),
             queue,
             session_id,
             timeouts,
@@ -271,7 +271,12 @@ impl AgentLoop {
 
     async fn reload_instructions(&mut self) {
         let cwd = self.vars.apply("{cwd}").into_owned();
-        self.instructions = smol::unblock(move || agent::load_instructions(&cwd)).await;
+        self.instructions = tokio::task::spawn_blocking(move || agent::load_instructions(&cwd))
+            .await
+            .unwrap_or_else(|e| {
+                error!(error = %e, "spawn_blocking panicked");
+                Instructions::default()
+            });
     }
 
     fn sync_shared_history(&self) {
@@ -332,7 +337,7 @@ fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
         let server_name = info.name.clone();
         let server_url = server_url.clone();
         let www_auth = url.clone();
-        smol::spawn(async move {
+        tokio::spawn(async move {
             let storage = match maki_storage::StateDir::resolve() {
                 Ok(s) => s,
                 Err(e) => {
@@ -363,7 +368,6 @@ fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
                 token: tokens.access.clone(),
             });
             tracing::info!(server = %server_name, "MCP server authenticated via OAuth");
-        })
-        .detach();
+        });
     }
 }

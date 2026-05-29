@@ -7,7 +7,7 @@ pub(super) fn spawn_command_router(
     cmd_rx: flume::Receiver<AgentCommand>,
     cancel_map: Arc<Mutex<CancelMap>>,
 ) {
-    smol::spawn(async move {
+    tokio::spawn(async move {
         while let Ok(cmd) = cmd_rx.recv_async().await {
             let mut map = cancel_map.lock().unwrap_or_else(|e| e.into_inner());
             match cmd {
@@ -15,6 +15,5 @@ pub(super) fn spawn_command_router(
                 AgentCommand::CancelAll => map.cancel_all(),
             }
         }
-    })
-    .detach();
+    });
 }
