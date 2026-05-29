@@ -1,5 +1,5 @@
-local truncate = require("maki.truncate")
-local ToolView = require("maki.tool_view")
+local truncate = require("craft.truncate")
+local ToolView = require("craft.tool_view")
 
 local failures = {}
 
@@ -257,7 +257,7 @@ case("tool_view_append_after_toggle_still_works", function()
   eq(view.all_lines[6], "line6")
 end)
 
-local TextInput = require("maki.text_input")
+local TextInput = require("craft.text_input")
 
 case("text_input_insert_and_value", function()
   local input = TextInput.new()
@@ -923,7 +923,7 @@ case("text_input_trace_cases", function()
   end
 end)
 
-local ListPicker = require("maki.list_picker")
+local ListPicker = require("craft.list_picker")
 
 case("set_highlight_number_width_scales", function()
   local buf = mock_buf()

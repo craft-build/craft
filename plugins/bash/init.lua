@@ -1,5 +1,5 @@
-local truncate = require("maki.truncate")
-local ToolView = require("maki.tool_view")
+local truncate = require("craft.truncate")
+local ToolView = require("craft.tool_view")
 
 local RTK_REWRITE_TIMEOUT_MS = 2000
 local RTK_UNSUPPORTED_FLAGS = {
@@ -39,7 +39,7 @@ local function resolve_command(input)
 end
 
 local function relative_path(p)
-  local cwd = maki.uv.cwd()
+  local cwd = craft.uv.cwd()
   if cwd and p:sub(1, #cwd + 1) == cwd .. "/" then
     local rel = p:sub(#cwd + 2)
     return rel == "" and "." or rel
@@ -47,7 +47,7 @@ local function relative_path(p)
   if cwd and p == cwd then
     return "."
   end
-  local home = maki.uv.os_homedir()
+  local home = craft.uv.os_homedir()
   if home and p:sub(1, #home + 1) == home .. "/" then
     local rel = p:sub(#home + 2)
     return rel == "" and "~" or "~/" .. rel
@@ -57,7 +57,7 @@ end
 
 local function build_header_lines(command)
   local header = {}
-  local highlighted = maki.ui.highlight(command, "bash")
+  local highlighted = craft.ui.highlight(command, "bash")
   if highlighted then
     for _, line in ipairs(highlighted) do
       header[#header + 1] = line
@@ -88,12 +88,12 @@ local function rtk_rewrite(command, ctx)
   end
 
   if rtk_available == nil then
-    local id = maki.fn.jobstart("rtk --version")
-    local result = maki.fn.jobwait(id, RTK_REWRITE_TIMEOUT_MS)
+    local id = craft.fn.jobstart("rtk --version")
+    local result = craft.fn.jobwait(id, RTK_REWRITE_TIMEOUT_MS)
     if result then
       rtk_available = (result.exit_code == 0)
     else
-      maki.fn.jobstop(id)
+      craft.fn.jobstop(id)
       rtk_available = false
     end
   end
@@ -107,10 +107,10 @@ local function rtk_rewrite(command, ctx)
     return nil
   end
 
-  local id = maki.fn.jobstart("rtk rewrite " .. shell_quote(command))
-  local result = maki.fn.jobwait(id, RTK_REWRITE_TIMEOUT_MS)
+  local id = craft.fn.jobstart("rtk rewrite " .. shell_quote(command))
+  local result = craft.fn.jobwait(id, RTK_REWRITE_TIMEOUT_MS)
   if not result then
-    maki.fn.jobstop(id)
+    craft.fn.jobstop(id)
     return nil
   end
 
@@ -137,7 +137,7 @@ end
 
 local function create_bash_view(command, ctx)
   local tol = ctx:tool_output_lines()
-  local buf = maki.ui.buf()
+  local buf = craft.ui.buf()
   local view = ToolView.new(buf, {
     max_lines = (tol and tol.bash) or 5,
     keep = "tail",
@@ -149,7 +149,7 @@ local function create_bash_view(command, ctx)
   return buf, view
 end
 
-local cwd = maki.uv.cwd() or "."
+local cwd = craft.uv.cwd() or "."
 
 local COMPLEX_TYPES = {
   command_substitution = true,
@@ -197,14 +197,14 @@ local function collect_commands(node, source)
   elseif kind == "pipeline" then
     for child in node:iter_children() do
       if child:named() then
-        local text = maki.treesitter.get_node_text(child, source):match("^%s*(.-)%s*$")
+        local text = craft.treesitter.get_node_text(child, source):match("^%s*(.-)%s*$")
         if text ~= "" then
           out[#out + 1] = text
         end
       end
     end
   elseif LEAF_COMMAND_TYPES[kind] then
-    local text = maki.treesitter.get_node_text(node, source):match("^%s*(.-)%s*$")
+    local text = craft.treesitter.get_node_text(node, source):match("^%s*(.-)%s*$")
     if text ~= "" then
       out[#out + 1] = text
     end
@@ -223,7 +223,7 @@ Commands run in ]] .. cwd .. [[ by default.
 - Output truncated beyond 2000 lines or 50KB.
 - Interactive commands (sudo, ssh prompts) fail immediately.]]
 
-maki.api.register_tool({
+craft.api.register_tool({
   name = "bash",
   description = description,
   schema = {
@@ -241,7 +241,7 @@ maki.api.register_tool({
       return nil
     end
 
-    local ok, parser = pcall(maki.treesitter.get_parser, command, "bash")
+    local ok, parser = pcall(craft.treesitter.get_parser, command, "bash")
     if not ok then
       return { scopes = { command }, force_prompt = true }
     end
@@ -265,8 +265,8 @@ maki.api.register_tool({
       s = s .. " in " .. relative_path(workdir)
     end
     if input.timeout then
-      local buf = maki.ui.buf()
-      buf:line({ { s }, { " (" .. maki.ui.humantime(input.timeout) .. " timeout)", "dim" } })
+      local buf = craft.ui.buf()
+      buf:line({ { s }, { " (" .. craft.ui.humantime(input.timeout) .. " timeout)", "dim" } })
       return buf
     end
     return s
@@ -358,7 +358,7 @@ maki.api.register_tool({
 
     view:append({ { "Waiting for output...", "dim" } })
 
-    maki.fn.jobstart(command, {
+    craft.fn.jobstart(command, {
       cwd = workdir,
       env = { GIT_TERMINAL_PROMPT = "0" },
       on_stdout = function(_, line)

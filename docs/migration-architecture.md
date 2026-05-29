@@ -1,6 +1,8 @@
 # Architecture Migration: smol → tokio & isahc → reqwest
 
-This document provides a complete reference for migrating the maki codebase from the smol async runtime to tokio, and from isahc to reqwest for HTTP. It is structured so that an implementing agent can execute the migration in phases, one crate at a time, with full context at each step.
+> **Note**: Craft is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik. This architecture document was originally written for the maki codebase and has been updated for craft. Crate names reference `craft-*` equivalents where applicable.
+
+This document provides a complete reference for migrating the craft codebase (originally maki) from the smol async runtime to tokio, and from isahc to reqwest for HTTP. It is structured so that an implementing agent can execute the migration in phases, one crate at a time, with full context at each step.
 
 ## Motivation
 

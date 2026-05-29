@@ -4,7 +4,7 @@ mod tui;
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 
-use maki_storage::StateDir;
+use craft_storage::StateDir;
 
 use crate::cli::{AuthAction, Cli, Command, McpAction};
 use crate::update;

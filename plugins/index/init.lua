@@ -1,6 +1,6 @@
 local indexer = require("indexer")
-local ToolView = require("maki.tool_view")
-local shorten_path = require("maki.shorten_path")
+local ToolView = require("craft.tool_view")
+local shorten_path = require("craft.shorten_path")
 
 local KEYWORDS = {
   pub = true,
@@ -85,7 +85,7 @@ local function render_skeleton(view, text)
 end
 
 local function render_header(path, line_count)
-  local buf = maki.ui.buf()
+  local buf = craft.ui.buf()
   local spans = { { shorten_path(path), "path" } }
   if line_count then
     spans[#spans + 1] = { " (" .. line_count .. " lines)", "dim" }
@@ -96,7 +96,7 @@ end
 
 local function render_index(skeleton, path, ctx)
   local tol = ctx:tool_output_lines()
-  local buf = maki.ui.buf()
+  local buf = craft.ui.buf()
   local view = ToolView.new(buf, {
     max_lines = (tol and tol.index) or 5,
     keep = "head",
@@ -110,7 +110,7 @@ local function render_index(skeleton, path, ctx)
   return buf, render_header(path, line_count)
 end
 
-maki.api.register_tool({
+craft.api.register_tool({
   name = "index",
   description = [[
 Return a compact overview of a source file: imports, type definitions, function signatures, and structure with their line numbers surrounded by []. ~70-90% more efficient than reading the full file.
@@ -138,7 +138,7 @@ Return a compact overview of a source file: imports, type definitions, function 
       return "error: path is required"
     end
 
-    local meta = maki.fs.metadata(path)
+    local meta = craft.fs.metadata(path)
     if meta and meta.is_dir then
       return {
         llm_output = "Path is a directory. Use index on files or use the read or glob tool to list directories.",
@@ -171,7 +171,7 @@ Return a compact overview of a source file: imports, type definitions, function 
         .. "). Use read with offset/limit instead."
     end
 
-    local ok, source = pcall(maki.fs.read, path)
+    local ok, source = pcall(craft.fs.read, path)
     if not ok then
       return "error: " .. tostring(source)
     end

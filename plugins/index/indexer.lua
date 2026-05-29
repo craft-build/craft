@@ -64,7 +64,7 @@ local function parser_name(lang)
 end
 
 local function get_text(node, source)
-  return maki.treesitter.get_node_text(node, source)
+  return craft.treesitter.get_node_text(node, source)
 end
 
 local function line_start(node)
@@ -786,7 +786,7 @@ local function index_source(source, lang_name)
     return nil, "unsupported language: " .. tostring(lang_name)
   end
   local pname = parser_name(lang_name)
-  local parser = maki.treesitter.get_parser(source, pname)
+  local parser = craft.treesitter.get_parser(source, pname)
   local root = parser:parse()[1]:root()
   return extractor(source, root)
 end

@@ -7,7 +7,7 @@ group = "Reference"
 
 # Permissions
 
-Maki uses a permission system to decide what each tool is allowed to do and when to ask you first.
+Craft uses a permission system to decide what each tool is allowed to do and when to ask you first.
 
 Rules come from three layers, checked in this order:
 
@@ -19,7 +19,7 @@ First match wins.
 
 ## Check Flow
 
-For every tool call, Maki resolves permission like this:
+For every tool call, Craft resolves permission like this:
 
 1. If any **deny** rule matches, denied. Full stop.
 2. If **YOLO** is active, allowed.
@@ -47,8 +47,8 @@ Container tools like `batch` and `code_execution` prompt for each inner tool ind
 
 There are two permission files:
 
-- **Global**: `~/.config/maki/permissions.toml`
-- **Project**: `.maki/permissions.toml` (takes precedence over global)
+- **Global**: `~/.config/craft/permissions.toml`
+- **Project**: `.craft/permissions.toml` (takes precedence over global)
 
 ```toml
 allow_all = false
@@ -81,14 +81,14 @@ Each tool gets its own section with `allow` and `deny` arrays. Values are glob-l
 
 ## Permission Prompts
 
-When a tool needs permission, Maki asks you. Here are the keys:
+When a tool needs permission, Craft asks you. Here are the keys:
 
 | Key | Action |
 |-----|--------|
 | `y` | Allow once |
 | `s` | Allow for this session |
-| `a` | Always allow (project, saved to `.maki/permissions.toml`) |
-| `A` | Always allow (global, saved to `~/.config/maki/permissions.toml`) |
+| `a` | Always allow (project, saved to `.craft/permissions.toml`) |
+| `A` | Always allow (global, saved to `~/.config/craft/permissions.toml`) |
 | `n` | Deny once |
 | `d` | Deny always (project) |
 | `D` | Deny always (global) |
@@ -110,8 +110,8 @@ To skip all prompts, toggle YOLO with the `/yolo` command, or run with `--yolo`.
 To start in YOLO mode every time:
 
 ```lua
--- ~/.config/maki/init.lua
-maki.setup({
+-- ~/.config/craft/init.lua
+craft.setup({
     always_yolo = true,
 })
 ```

@@ -256,7 +256,7 @@ local function find_span_with_text(lines, text)
 end
 
 case("question_md_falls_back_to_plain_text_on_invalid_markdown_return", function()
-  local original = maki.ui.markdown
+  local original = craft.ui.markdown
   local mocks = {
     {
       name = "error",
@@ -278,9 +278,9 @@ case("question_md_falls_back_to_plain_text_on_invalid_markdown_return", function
     },
   }
   for _, m in ipairs(mocks) do
-    maki.ui.markdown = m.fn
+    craft.ui.markdown = m.fn
     local ok, r = pcall(QuestionForm._render, selecting_single(), 80)
-    maki.ui.markdown = original
+    craft.ui.markdown = original
     assert(ok, m.name .. ": render must not propagate markdown errors")
     local span = find_span_with_text(r.lines, "Pick one")
     assert(span, m.name .. ": fallback must surface the question text")
@@ -289,22 +289,22 @@ case("question_md_falls_back_to_plain_text_on_invalid_markdown_return", function
 end)
 
 case("confirming_view_renders_all_question_lines_at_inline_width", function()
-  local original = maki.ui.markdown
-  maki.ui.markdown = function(_text, _width)
+  local original = craft.ui.markdown
+  craft.ui.markdown = function(_text, _width)
     return { { { "first", "" } }, { { "second", "" } } }
   end
   local s = confirming_multi()
   local r = QuestionForm._render(s, 80)
-  maki.ui.markdown = original
+  craft.ui.markdown = original
   eq(s.mode, MODE.CONFIRMING)
   assert(find_span_with_text(r.lines, "first"), "confirming row must include first markdown line")
   assert(find_span_with_text(r.lines, "second"), "confirming row must also include subsequent markdown lines")
 end)
 
 case("question_md_cache_invalidates_on_width_change", function()
-  local original = maki.ui.markdown
+  local original = craft.ui.markdown
   local calls = 0
-  maki.ui.markdown = function(_text, width)
+  craft.ui.markdown = function(_text, width)
     calls = calls + 1
     return { { { "w=" .. tostring(width), "" } } }
   end
@@ -314,7 +314,7 @@ case("question_md_cache_invalidates_on_width_change", function()
   QuestionForm._render(s, 80)
   eq(calls, calls_after_80, "same width must reuse cache")
   QuestionForm._render(s, 60)
-  maki.ui.markdown = original
+  craft.ui.markdown = original
   assert(calls > calls_after_80, "width change must invalidate cache and re-render")
 end)
 

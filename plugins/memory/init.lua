@@ -1,32 +1,32 @@
-local ToolView = require("maki.tool_view")
+local ToolView = require("craft.tool_view")
 local helpers = require("memory_helpers")
-local ListPicker = require("maki.list_picker")
+local ListPicker = require("craft.list_picker")
 
 local function memories_path_suffix()
-  local cwd = maki.uv.cwd()
-  local root = maki.fs.root(cwd, ".git") or cwd
+  local cwd = craft.uv.cwd()
+  local root = craft.fs.root(cwd, ".git") or cwd
   return "projects/" .. helpers.project_id(root) .. "/memories"
 end
 
 local function resolve_dir(check_legacy)
   if check_legacy then
-    local legacy = maki.env.legacy_dir()
+    local legacy = craft.env.legacy_dir()
     if legacy then
-      local dir = maki.fs.joinpath(legacy, memories_path_suffix())
-      local meta = maki.fs.metadata(dir)
+      local dir = craft.fs.joinpath(legacy, memories_path_suffix())
+      local meta = craft.fs.metadata(dir)
       if meta and meta.is_dir then
         return dir
       end
     end
   end
-  local state = maki.env.state_dir()
+  local state = craft.env.state_dir()
   if not state then
     return nil, "cannot resolve state dir"
   end
-  return maki.fs.joinpath(state, memories_path_suffix())
+  return craft.fs.joinpath(state, memories_path_suffix())
 end
 
-maki.api.register_system_prompt_extra(function()
+craft.api.register_system_prompt_extra(function()
   local dir = resolve_dir(true)
   if not dir then
     return nil
@@ -46,7 +46,7 @@ maki.api.register_system_prompt_extra(function()
 end)
 
 local function render_content(content, path, ctx)
-  local buf = maki.ui.buf()
+  local buf = craft.ui.buf()
   local tol = ctx:tool_output_lines()
   local view = ToolView.new(buf, {
     max_lines = (tol and tol.other) or 20,
@@ -74,7 +74,7 @@ local function cmd_view(path, dir, ctx)
   if not file_path then
     return nil, err
   end
-  local ok, content = pcall(maki.fs.read, file_path)
+  local ok, content = pcall(craft.fs.read, file_path)
   if not ok then
     return nil, "read error: " .. tostring(content)
   end
@@ -93,13 +93,13 @@ local function cmd_write(path, content, dir, ctx)
   if not file_path then
     return nil, err
   end
-  local meta = maki.fs.metadata(file_path)
+  local meta = craft.fs.metadata(file_path)
   local existing_size = meta and meta.size or 0
   if helpers.dir_total_bytes(dir) - existing_size + #content > helpers.MAX_DIR_BYTES then
     return nil, "memory directory would exceed " .. helpers.MAX_DIR_BYTES .. " byte limit; delete stale entries first"
   end
-  maki.fs.mkdir(dir, { parents = true })
-  local ok, write_err = maki.fs.write(file_path, content)
+  craft.fs.mkdir(dir, { parents = true })
+  local ok, write_err = craft.fs.write(file_path, content)
   if not ok then
     return nil, "write error: " .. tostring(write_err)
   end
@@ -114,17 +114,17 @@ local function cmd_delete(path, dir)
   if not file_path then
     return nil, err
   end
-  if not maki.fs.metadata(file_path) then
+  if not craft.fs.metadata(file_path) then
     return nil, "'" .. path .. "' does not exist"
   end
-  local ok, rm_err = maki.fs.rm(file_path)
+  local ok, rm_err = craft.fs.rm(file_path)
   if not ok then
     return nil, "delete error: " .. tostring(rm_err)
   end
   return "deleted " .. path
 end
 
-maki.api.register_tool({
+craft.api.register_tool({
   name = "memory",
   description = "Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.\n\n"
     .. "- Save important context before compaction or to build up project knowledge.\n"
@@ -183,19 +183,19 @@ maki.api.register_tool({
   end,
 })
 
-maki.api.register_command({
+craft.api.register_command({
   name = "/memory",
   description = "View, edit, and delete memory files",
   handler = function()
     local dir = resolve_dir(true)
     if not dir then
-      maki.ui.flash("Cannot resolve memory directory")
+      craft.ui.flash("Cannot resolve memory directory")
       return
     end
 
     local entries = helpers.collect_file_entries(dir)
     if #entries == 0 then
-      maki.ui.flash("No memory files yet")
+      craft.ui.flash("No memory files yet")
       return
     end
     table.sort(entries, function(a, b)
@@ -231,10 +231,10 @@ maki.api.register_command({
       if event.type == "choice" then
         local item = entries[event.index]
         if item then
-          local path = maki.fs.joinpath(dir, item[1])
-          local code = maki.ui.open_editor(path)
+          local path = craft.fs.joinpath(dir, item[1])
+          local code = craft.ui.open_editor(path)
           if code == 0 then
-            local meta = maki.fs.metadata(path)
+            local meta = craft.fs.metadata(path)
             if meta then
               item[2] = meta.size
             end
@@ -242,9 +242,9 @@ maki.api.register_command({
         end
       elseif event.type == "delete" then
         local item = entries[event.index]
-        local ok, err = maki.fs.rm(maki.fs.joinpath(dir, item[1]))
+        local ok, err = craft.fs.rm(craft.fs.joinpath(dir, item[1]))
         if ok then
-          maki.ui.flash("Deleted " .. item[1])
+          craft.ui.flash("Deleted " .. item[1])
           table.remove(entries, event.index)
           if #entries == 0 then
             break
@@ -253,7 +253,7 @@ maki.api.register_command({
             last_cursor = #entries
           end
         else
-          maki.ui.flash("Delete failed: " .. tostring(err))
+          craft.ui.flash("Delete failed: " .. tostring(err))
         end
       else
         break

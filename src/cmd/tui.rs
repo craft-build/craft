@@ -5,13 +5,13 @@ use std::sync::Arc;
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 
-use maki_agent::command::{self, CustomCommand};
-use maki_agent::tools::ToolRegistry;
-use maki_config::{load_env_files, load_permissions};
-use maki_lua::PluginHost;
-use maki_providers::model::Model;
-use maki_storage::StateDir;
-use maki_ui::AppSession;
+use craft_agent::command::{self, CustomCommand};
+use craft_agent::tools::ToolRegistry;
+use craft_config::{load_env_files, load_permissions};
+use craft_lua::PluginHost;
+use craft_providers::model::Model;
+use craft_storage::StateDir;
+use craft_ui::AppSession;
 
 use crate::cli::{Cli, normalize_tool_name};
 use crate::setup;
@@ -62,7 +62,7 @@ fn read_initial_prompt(cli_prompt: Option<String>) -> Result<Option<String>> {
 
 pub async fn run(cli: Cli) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
-    maki_providers::tier_map::load_from_storage(&storage);
+    craft_providers::tier_map::load_from_storage(&storage);
 
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
 
@@ -102,7 +102,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     let lua_command_reader = plugin_host.command_reader();
     let ui_action_rx = plugin_host.ui_action_rx();
 
-    let timeouts = maki_providers::Timeouts {
+    let timeouts = craft_providers::Timeouts {
         connect: config.provider.connect_timeout,
         low_speed: config.provider.low_speed_timeout,
         stream: config.provider.stream_timeout,
@@ -144,14 +144,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         };
         let initial_prompt = read_initial_prompt(cli.prompt)?;
         let cwd_for_mcp = cwd.clone();
-        let (mcp_handle, mcp_config_errors) = maki_agent::mcp::start(&cwd_for_mcp).await;
-        let provider: Arc<dyn maki_providers::provider::Provider> = Arc::from(
-            maki_providers::provider::from_model(&model, timeouts)
+        let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd_for_mcp).await;
+        let provider: Arc<dyn craft_providers::provider::Provider> = Arc::from(
+            craft_providers::provider::from_model(&model, timeouts)
                 .await
                 .context("create provider")?,
         );
         let handle = tokio::runtime::Handle::current();
-        let params = maki_ui::EventLoopParams {
+        let params = craft_ui::EventLoopParams {
             model,
             commands,
             session,
@@ -159,7 +159,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             config: config.agent,
             ui_config: config.ui,
             input_history_size: config.storage.input_history_size,
-            permissions: Arc::new(maki_agent::permissions::PermissionManager::new(
+            permissions: Arc::new(craft_agent::permissions::PermissionManager::new(
                 config.permissions,
                 cwd.clone(),
             )),
@@ -170,10 +170,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             lua_event_handle: plugin_host.event_handle(),
             buf_click: plugin_host.event_handle().map(|eh| {
                 Arc::new(
-                    move |tool_id: &str, row: u32| -> Option<maki_lua::ClickReply> {
+                    move |tool_id: &str, row: u32| -> Option<craft_lua::ClickReply> {
                         eh.fire_click(tool_id, row)
                     },
-                ) as maki_ui::BufClickHandler
+                ) as craft_ui::BufClickHandler
             }),
             provider,
             mcp_handle,
@@ -182,7 +182,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             demo: cli.demo,
         };
         let result = tokio::task::spawn_blocking(move || {
-            maki_ui::run(handle, params, initial_prompt)
+            craft_ui::run(handle, params, initial_prompt)
         })
         .await
         .map_err(|e| color_eyre::eyre::eyre!("UI thread panicked: {e}"))?
@@ -202,14 +202,14 @@ pub async fn run(cli: Cli) -> Result<()> {
 
 fn warn_stale_config_toml(cwd: &std::path::Path) {
     let stale_paths = [
-        maki_config::global_config_dir().map(|d| d.join("config.toml")),
-        Some(cwd.join(".maki/config.toml")),
+        craft_config::global_config_dir().map(|d| d.join("config.toml")),
+        Some(cwd.join(".craft/config.toml")),
     ];
     for path in stale_paths.into_iter().flatten() {
         if path.is_file() {
             tracing::warn!(
                 path = %path.display(),
-                "config.toml found but no longer used. Migrate to init.lua. See https://maki.sh/docs/configuration/"
+                "config.toml found but no longer used. Migrate to init.lua."
             );
         }
     }

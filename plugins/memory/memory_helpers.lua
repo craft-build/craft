@@ -36,7 +36,7 @@ function M.count_lines(s)
 end
 
 function M.project_id(path)
-  local base = maki.fs.basename(path) or "root"
+  local base = craft.fs.basename(path) or "root"
   return base .. "-" .. M.fnv1a_64(path)
 end
 
@@ -49,8 +49,8 @@ function M.safe_resolve(memories_dir, relative)
   if relative:find("\0") or relative:sub(1, 1) == "/" then
     return nil, "path must be relative"
   end
-  local resolved = maki.fs.normalize(maki.fs.joinpath(memories_dir, relative))
-  local norm_base = maki.fs.normalize(memories_dir)
+  local resolved = craft.fs.normalize(craft.fs.joinpath(memories_dir, relative))
+  local norm_base = craft.fs.normalize(memories_dir)
   local prefix = norm_base .. "/"
   if resolved:sub(1, #prefix) ~= prefix then
     return nil, "path traversal outside memories directory is not allowed"
@@ -59,14 +59,14 @@ function M.safe_resolve(memories_dir, relative)
 end
 
 function M.collect_file_entries(dir)
-  local entries = maki.fs.dir(dir)
+  local entries = craft.fs.dir(dir)
   if not entries then
     return {}
   end
   local files = {}
   for _, entry in ipairs(entries) do
     if entry[2] == "file" then
-      local meta = maki.fs.metadata(maki.fs.joinpath(dir, entry[1]))
+      local meta = craft.fs.metadata(craft.fs.joinpath(dir, entry[1]))
       if meta then
         files[#files + 1] = { entry[1], meta.size }
       end

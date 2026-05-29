@@ -1,6 +1,6 @@
-local truncate = require("maki.truncate")
-local ToolView = require("maki.tool_view")
-local shorten_path = require("maki.shorten_path")
+local truncate = require("craft.truncate")
+local ToolView = require("craft.tool_view")
+local shorten_path = require("craft.shorten_path")
 
 local DEFAULT_SEARCH_LIMIT = 100
 local NO_FILES_FOUND = "No files found"
@@ -10,7 +10,7 @@ local function glob_view_opts(ctx)
   return { max_lines = (tol and tol.other) or 3, keep = "head" }
 end
 
-maki.api.register_tool({
+craft.api.register_tool({
   name = "glob",
   description = [[Find files by glob pattern.
 
@@ -27,7 +27,7 @@ maki.api.register_tool({
   },
 
   header = function(input)
-    local buf = maki.ui.buf()
+    local buf = craft.ui.buf()
     local spans = { { shorten_path(input.pattern or ""), "tool" } }
     if input.path then
       spans[#spans + 1] = { " in ", "dim" }
@@ -52,7 +52,7 @@ maki.api.register_tool({
     local max_lines = (config and config.max_output_lines) or 2000
     local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
 
-    local files = maki.fs.glob(pattern, {
+    local files = craft.fs.glob(pattern, {
       path = input.path,
       gitignore = true,
       sort = "mtime",
@@ -70,7 +70,7 @@ maki.api.register_tool({
     local text = table.concat(lines, "\n")
     local llm_output = truncate(text, max_lines, max_bytes)
 
-    local buf = maki.ui.buf()
+    local buf = craft.ui.buf()
     local view = ToolView.new(buf, glob_view_opts(ctx))
     for _, line in ipairs(lines) do
       view:append(line)

@@ -5,13 +5,13 @@ use std::sync::Arc;
 use color_eyre::Result;
 use color_eyre::eyre::{Context, bail};
 
-use maki_agent::mcp::{config as mcp_config, oauth as mcp_oauth};
-use maki_agent::tools::ToolRegistry;
-use maki_config::{load_env_files, load_permissions};
-use maki_lua::PluginHost;
-use maki_providers::provider::fetch_all_models;
-use maki_providers::{copilot_auth, dynamic, openai_auth};
-use maki_storage::StateDir;
+use craft_agent::mcp::{config as mcp_config, oauth as mcp_oauth};
+use craft_agent::tools::ToolRegistry;
+use craft_config::{load_env_files, load_permissions};
+use craft_lua::PluginHost;
+use craft_providers::provider::fetch_all_models;
+use craft_providers::{copilot_auth, dynamic, openai_auth};
+use craft_storage::StateDir;
 
 pub async fn auth_login(provider: &str, storage: &StateDir) -> Result<()> {
     match provider {
@@ -74,8 +74,8 @@ pub async fn index(path: &str, no_plugins: bool) -> Result<()> {
         .tool
         .parse(&input)
         .map_err(|e| color_eyre::eyre::eyre!("parse index input: {e}"))?;
-    let ctx = maki_agent::tools::cli_tool_ctx();
-    let result: Result<maki_agent::ToolOutput, String> = inv.execute(&ctx).await.map_err(|e| e.to_string());
+    let ctx = craft_agent::tools::cli_tool_ctx();
+    let result: Result<craft_agent::ToolOutput, String> = inv.execute(&ctx).await.map_err(|e| e.to_string());
     match result {
         Ok(output) => print!("{}", output.as_text()),
         Err(e) => bail!("index failed: {e}"),
@@ -100,7 +100,7 @@ pub async fn mcp_auth(server: &str, storage: &StateDir) -> Result<()> {
 }
 
 pub fn mcp_logout(server: &str, storage: &StateDir) -> Result<()> {
-    let deleted = maki_storage::auth::delete_mcp_auth(storage, server)?;
+    let deleted = craft_storage::auth::delete_mcp_auth(storage, server)?;
     if deleted {
         eprintln!("Removed OAuth credentials for MCP server '{server}'");
     } else {

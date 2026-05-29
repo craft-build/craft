@@ -12,7 +12,7 @@ Rules:
 - Answers returned as arrays of labels. Set `multiple: true` for multi-select.
 - Put recommended option first with "(Recommended)" suffix.]]
 
-maki.api.register_tool({
+craft.api.register_tool({
   name = "question",
   description = DESCRIPTION,
   schema = {

@@ -1,4 +1,4 @@
-//! Non-interactive (headless) mode: `maki "prompt" --print`.
+//! Non-interactive (headless) mode: `craft "prompt" --print`.
 //!
 //! Wire format intentionally matches Claude Code so existing scripts work
 //! unchanged. Keep `PrintResult` fields a strict subset of theirs. `StreamJson`
@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 use clap::ValueEnum;
 use color_eyre::Result;
 use color_eyre::eyre::Context;
-use maki_agent::headless::{HeadlessHandle, HeadlessParams};
-use maki_agent::tools::QUESTION_TOOL_NAME;
-use maki_agent::{AgentConfig, AgentEvent, Envelope, PermissionsConfig};
-use maki_lua::EventHandle;
-use maki_providers::model::Model;
-use maki_providers::{StopReason, TokenUsage};
+use craft_agent::headless::{HeadlessHandle, HeadlessParams};
+use craft_agent::tools::QUESTION_TOOL_NAME;
+use craft_agent::{AgentConfig, AgentEvent, Envelope, PermissionsConfig};
+use craft_lua::EventHandle;
+use craft_providers::model::Model;
+use craft_providers::{StopReason, TokenUsage};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -125,7 +125,7 @@ pub async fn run(
     verbose: bool,
     config: AgentConfig,
     permissions_config: PermissionsConfig,
-    timeouts: maki_providers::Timeouts,
+    timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
 ) -> Result<()> {
     let prompt = match prompt_arg {
@@ -143,12 +143,12 @@ pub async fn run(
         .unwrap_or_default();
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let (mcp_handle, mcp_config_errors) = maki_agent::mcp::start(&cwd).await;
+    let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd).await;
     if !mcp_config_errors.is_empty() {
         eprintln!("MCP config error: {mcp_config_errors}");
     }
 
-    let handle = maki_agent::headless::spawn(HeadlessParams {
+    let handle = craft_agent::headless::spawn(HeadlessParams {
         model: model.clone(),
         config,
         permissions_config,
@@ -324,7 +324,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maki_providers::TokenUsage;
+    use craft_providers::TokenUsage;
 
     const PRINT_RESULT_FIELDS: &[&str] = &[
         "type",

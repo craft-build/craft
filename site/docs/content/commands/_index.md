@@ -35,12 +35,12 @@ You can define your own slash commands as Markdown files.
 
 ### Project commands
 
-Place `.md` files in `.maki/commands/` in your project root.
+Place `.md` files in `.craft/commands/` in your project root.
 They appear in the palette as `/project:<filename>`.
 
 ### User commands
 
-Place `.md` files in `~/.maki/commands/`.
+Place `.md` files in `~/.craft/commands/`.
 They appear in the palette as `/user:<filename>`.
 
 Project commands override user commands with the same name.

@@ -1,31 +1,30 @@
 [package]
-name = "maki"
+name = "craft"
 version.workspace = true
 edition = "2024"
 authors = ["Tony Solomonik <tony.solomonik@gmail.com>"]
 description = "AI coding agent. Native Rust TUI. Immediate startup, 60 FPS, low memory."
 license = "MIT"
-repository = "https://github.com/tontinton/maki"
-homepage = "https://maki.sh"
+repository = "https://gitlab.com/craft-build/craft"
 readme = "README.md"
 keywords = ["ai", "agent", "cli", "tui", "coding"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.85"
 
 [[bin]]
-name = "maki"
+name = "craft"
 path = "src/main.rs"
 
 [features]
-demo = ["maki-ui/demo"]
+demo = ["craft-ui/demo"]
 
 [dependencies]
-maki-ui = { workspace = true }
-maki-agent = { workspace = true }
-maki-config = { workspace = true }
-maki-providers = { workspace = true }
-maki-storage = { workspace = true }
-maki-lua = { workspace = true }
+craft-ui = { workspace = true }
+craft-agent = { workspace = true }
+craft-config = { workspace = true }
+craft-providers = { workspace = true }
+craft-storage = { workspace = true }
+craft-lua = { workspace = true }
 clap = { workspace = true }
 color-eyre = { workspace = true }
 serde = { workspace = true }
@@ -43,18 +42,18 @@ test-case = { workspace = true }
 
 [workspace]
 members = [
-  "maki-agent",
-  "maki-config",
-  "maki-docgen",
-  "maki-highlight",
-  "maki-interpreter",
-  "maki-lua",
-  "maki-markdown",
-  "maki-providers",
-  "maki-storage",
-  "maki-tool-macro",
-  "maki-config-macro",
-  "maki-ui",
+  "craft-agent",
+  "craft-config",
+  "craft-docgen",
+  "craft-highlight",
+  "craft-interpreter",
+  "craft-lua",
+  "craft-markdown",
+  "craft-providers",
+  "craft-storage",
+  "craft-tool-macro",
+  "craft-config-macro",
+  "craft-ui",
 ]
 resolver = "3"
 
@@ -63,21 +62,21 @@ version = "0.3.8"
 edition = "2024"
 authors = ["Tony Solomonik <tony.solomonik@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/tontinton/maki"
+repository = "https://gitlab.com/craft-build/craft"
 rust-version = "1.85"
 
 [workspace.dependencies]
-maki-agent = { path = "maki-agent" }
-maki-config = { path = "maki-config" }
-maki-interpreter = { path = "maki-interpreter" }
-maki-providers = { path = "maki-providers" }
-maki-storage = { path = "maki-storage" }
-maki-ui = { path = "maki-ui" }
-maki-lua = { path = "maki-lua" }
-maki-tool-macro = { path = "maki-tool-macro" }
-maki-config-macro = { path = "maki-config-macro" }
-maki-highlight = { path = "maki-highlight" }
-maki-markdown = { path = "maki-markdown" }
+craft-agent = { path = "craft-agent" }
+craft-config = { path = "craft-config" }
+craft-interpreter = { path = "craft-interpreter" }
+craft-providers = { path = "craft-providers" }
+craft-storage = { path = "craft-storage" }
+craft-ui = { path = "craft-ui" }
+craft-lua = { path = "craft-lua" }
+craft-tool-macro = { path = "craft-tool-macro" }
+craft-config-macro = { path = "craft-config-macro" }
+craft-highlight = { path = "craft-highlight" }
+craft-markdown = { path = "craft-markdown" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 uuid = { version = "1", default-features = false, features = ["v4"] }

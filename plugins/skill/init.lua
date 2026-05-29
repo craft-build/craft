@@ -1,33 +1,33 @@
 local SKILL_FILE = "SKILL.md"
 local NOT_FOUND = "skill not found: "
-local shorten_path = require("maki.shorten_path")
-local ToolView = require("maki.tool_view")
+local shorten_path = require("craft.shorten_path")
+local ToolView = require("craft.tool_view")
 local helpers = require("skill_helpers")
 local parse_frontmatter = helpers.parse_frontmatter
 local build_skill_list = helpers.build_skill_list
 
 local PROJECT_SKILL_DIRS = {
-  ".maki/skills",
+  ".craft/skills",
   ".claude/skills",
   ".opencode/skills",
   ".agents/skills",
 }
 local GLOBAL_SKILL_DIRS = {
-  ".maki/skills",
+  ".craft/skills",
   ".claude/skills",
   ".config/opencode/skills",
   ".agents/skills",
 }
 
 local function scan_skill_dir(dir, skills)
-  local entries = maki.fs.dir(dir)
+  local entries = craft.fs.dir(dir)
   if not entries then
     return
   end
   for _, entry in ipairs(entries) do
     if entry[2] == "directory" then
-      local skill_path = maki.fs.joinpath(dir, entry[1], SKILL_FILE)
-      local ok, content = pcall(maki.fs.read, skill_path)
+      local skill_path = craft.fs.joinpath(dir, entry[1], SKILL_FILE)
+      local ok, content = pcall(craft.fs.read, skill_path)
       if ok and content then
         local fm, body = parse_frontmatter(content)
         if body and #body > 0 then
@@ -45,12 +45,12 @@ local function scan_skill_dir(dir, skills)
 end
 
 local function find_project_ancestors()
-  local cwd = maki.uv.cwd()
+  local cwd = craft.uv.cwd()
   local dirs = { cwd }
-  for _, parent in ipairs(maki.fs.parents(cwd)) do
+  for _, parent in ipairs(craft.fs.parents(cwd)) do
     dirs[#dirs + 1] = parent
-    local git = maki.fs.joinpath(parent, ".git")
-    if maki.fs.metadata(git) then
+    local git = craft.fs.joinpath(parent, ".git")
+    if craft.fs.metadata(git) then
       break
     end
   end
@@ -59,17 +59,17 @@ end
 
 local function discover_skills()
   local skills = {}
-  local home = maki.uv.os_homedir()
+  local home = craft.uv.os_homedir()
 
   if home then
     for _, rel in ipairs(GLOBAL_SKILL_DIRS) do
-      scan_skill_dir(maki.fs.joinpath(home, rel), skills)
+      scan_skill_dir(craft.fs.joinpath(home, rel), skills)
     end
   end
 
   for _, ancestor in ipairs(find_project_ancestors()) do
     for _, rel in ipairs(PROJECT_SKILL_DIRS) do
-      scan_skill_dir(maki.fs.joinpath(ancestor, rel), skills)
+      scan_skill_dir(craft.fs.joinpath(ancestor, rel), skills)
     end
   end
 
@@ -80,7 +80,7 @@ local boot_skills = discover_skills()
 local description = "Load a skill that provides instructions and workflows for specific tasks."
   .. build_skill_list(boot_skills)
 
-maki.api.register_tool({
+craft.api.register_tool({
   name = "skill",
   description = description,
 
@@ -115,7 +115,7 @@ maki.api.register_tool({
     end
     local formatted = skill.location .. "\n" .. table.concat(lines, "\n")
 
-    local buf = maki.ui.buf()
+    local buf = craft.ui.buf()
     local tol = ctx:tool_output_lines()
     local view = ToolView.new(buf, {
       max_lines = (tol and tol.skill) or 20,
@@ -134,7 +134,7 @@ maki.api.register_tool({
     view:finish()
 
     local short = shorten_path(skill.location)
-    local header_buf = maki.ui.buf()
+    local header_buf = craft.ui.buf()
     header_buf:line({ { short, "path" } })
 
     return {

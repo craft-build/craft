@@ -2,12 +2,12 @@ use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use color_eyre::eyre::bail;
 
-use maki_agent::tools::{all_builtin_tool_names, is_builtin_tool};
+use craft_agent::tools::{all_builtin_tool_names, is_builtin_tool};
 
 use crate::print::OutputFormat;
 
 #[derive(Parser)]
-#[command(name = "maki", version, about = "AI coding agent for the terminal")]
+#[command(name = "craft", version, about = "AI coding agent for the terminal")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -40,7 +40,7 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
 
-    /// Skip loading custom commands from .maki/commands, .claude/commands, etc.
+    /// Skip loading custom commands from .craft/commands, .claude/commands, etc.
     #[arg(long)]
     pub no_commands: bool,
 
@@ -84,7 +84,7 @@ pub enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
-    /// Update maki to the latest version
+    /// Update craft to the latest version
     Update {
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]

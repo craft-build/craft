@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-REPO="tontinton/maki"
-BINARY="maki"
-INSTALL_DIR="${MAKI_INSTALL_DIR:-/usr/local/bin}"
+REPO="craft-build/craft"
+BINARY="craft"
+INSTALL_DIR="${CRAFT_INSTALL_DIR:-/usr/local/bin}"
 
 main() {
     need_cmd curl
@@ -22,11 +22,11 @@ main() {
 
     target="${arch}-${os}"
 
-    tag="${1:-$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep '"tag_name"' | cut -d'"' -f4)}"
+    tag="${1:-$(curl -fsSL "https://gitlab.com/api/v4/projects/craft-build%2Fcraft/releases" \
+        | grep '"tag_name"' | head -1 | cut -d'"' -f4)}"
     [ -n "${tag}" ] || err "failed to determine latest release tag"
 
-    url="https://github.com/${REPO}/releases/download/${tag}/${BINARY}-${tag}-${target}.tar.gz"
+    url="https://gitlab.com/craft-build/craft/-/releases/${tag}/downloads/${BINARY}-${tag}-${target}.tar.gz"
     tmp="$(mktemp -d)"
     trap 'rm -rf "${tmp}"' EXIT
 

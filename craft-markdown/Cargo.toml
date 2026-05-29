@@ -1,0 +1,17 @@
+[package]
+name = "craft-markdown"
+description = "Theme-free markdown parser and width-aware renderer shared by craft-ui and the craft-lua bridge."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+craft-highlight = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+test-case = { workspace = true }
+fastrand = { workspace = true }

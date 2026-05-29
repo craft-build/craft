@@ -7,14 +7,14 @@ group = "Reference"
 
 # MCP (Model Context Protocol)
 
-Maki connects to external tool servers over MCP. Both **stdio** and **HTTP** transports are supported.
+Craft connects to external tool servers over MCP. Both **stdio** and **HTTP** transports are supported.
 
 ## Configuration
 
 Add servers under `[mcp.*]` in your MCP config:
 
-- **Global**: `~/.config/maki/mcp.toml`
-- **Project**: `.maki/mcp.toml` (project config wins when both set a value)
+- **Global**: `~/.config/craft/mcp.toml`
+- **Project**: `.craft/mcp.toml` (project config wins when both set a value)
 
 ### Stdio
 
@@ -72,16 +72,16 @@ If one server fails, the rest still work.
 
 ## OAuth
 
-Some HTTP servers need auth. When that happens, Maki opens your browser to log in. Other servers keep working while you authenticate. Tokens refresh on their own. If you change the server URL, you log in again.
+Some HTTP servers need auth. When that happens, Craft opens your browser to log in. Other servers keep working while you authenticate. Tokens refresh on their own. If you change the server URL, you log in again.
 
 ```bash
-maki mcp auth <server-name>     # manually trigger auth
-maki mcp logout <server-name>   # remove stored tokens
+craft mcp auth <server-name>     # manually trigger auth
+craft mcp logout <server-name>   # remove stored tokens
 ```
 
 ## Prompts
 
-MCP servers can expose prompts (reusable message templates). Maki shows them as slash commands in the command palette: `/server:prompt-name`. Type `/` to filter.
+MCP servers can expose prompts (reusable message templates). Craft shows them as slash commands in the command palette: `/server:prompt-name`. Type `/` to filter.
 
 ```
 /github:create-pr           # no arguments
@@ -89,4 +89,4 @@ MCP servers can expose prompts (reusable message templates). Maki shows them as 
 /review:code src tests      # multiple, positional
 ```
 
-Skip a required argument and Maki shows a usage hint. Prompts are fetched at startup and on reconnect, so new ones need a restart. Only text content is supported.
+Skip a required argument and Craft shows a usage hint. Prompts are fetched at startup and on reconnect, so new ones need a restart. Only text content is supported.

@@ -29,10 +29,10 @@ pylint:
     ty check scripts/
 
 gen-docs:
-    cargo run -p maki-docgen
+    cargo run -p craft-docgen
 
 gen-docs-check:
-    cargo run -p maki-docgen -- --check
+    cargo run -p craft-docgen -- --check
 
 # Full CI check
 ci: fmt-check lint pylint test gen-docs-check

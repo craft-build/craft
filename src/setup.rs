@@ -3,11 +3,11 @@ use std::sync::Mutex;
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 
-use maki_providers::model::{Model, ModelTier};
-use maki_providers::provider::ProviderKind;
-use maki_storage::StateDir;
-use maki_storage::log::RotatingFileWriter;
-use maki_storage::model::{persist_model, read_model};
+use craft_providers::model::{Model, ModelTier};
+use craft_providers::provider::ProviderKind;
+use craft_storage::StateDir;
+use craft_storage::log::RotatingFileWriter;
+use craft_storage::model::{persist_model, read_model};
 use tracing_subscriber::EnvFilter;
 
 const PROVIDER_PRIORITY: &[ProviderKind] = &[
@@ -22,7 +22,7 @@ const PROVIDER_PRIORITY: &[ProviderKind] = &[
 
 pub async fn resolve_model(
     explicit: Option<&str>,
-    provider_config: &maki_config::ProviderConfig,
+    provider_config: &craft_config::ProviderConfig,
     storage: &StateDir,
 ) -> Result<Model> {
     if let Some(spec) = explicit {
@@ -41,7 +41,7 @@ pub async fn resolve_model(
     }
     auto_detect_model().await.ok_or_else(|| {
         color_eyre::eyre::eyre!(
-            "no provider available - set an API key (e.g. ANTHROPIC_API_KEY), run `maki auth login`, or use -m to specify a model\n\nSee https://maki.sh/docs/providers/ for setup instructions"
+            "no provider available - set an API key (e.g. ANTHROPIC_API_KEY), run `craft auth login`, or use -m to specify a model"
         )
     })
 }
@@ -79,7 +79,7 @@ pub fn install_panic_log_hook() {
     }));
 }
 
-pub fn init_logging(storage: &StateDir, storage_config: &maki_config::StorageConfig) {
+pub fn init_logging(storage: &StateDir, storage_config: &craft_config::StorageConfig) {
     let Ok(writer) = RotatingFileWriter::new(
         storage,
         storage_config.max_log_bytes,

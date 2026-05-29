@@ -4,7 +4,7 @@ This document is a guide for AI agents porting patches from the old smol/isahc c
 
 ## Context
 
-The maki codebase is migrating from:
+The craft codebase (a fork of [maki](https://github.com/tontinton/maki)) is migrating from:
 - **smol** async runtime to **tokio**
 - **isahc** HTTP client to **reqwest**
 - **futures-lite** / **async-process** / **async-lock** / **async-io** to tokio equivalents
@@ -226,8 +226,8 @@ let result = tokio::select! {
 
 If the patch touches any of these especially complex areas, ask a human for review:
 
-- `maki-lua/src/runtime.rs` (LocalExecutor / LocalSet)
-- `maki-agent/src/mcp/stdio.rs` (process I/O + channels)
+- `craft-lua/src/runtime.rs` (LocalExecutor / LocalSet)
+- `craft-agent/src/mcp/stdio.rs` (process I/O + channels)
 - SSE streaming in any provider
-- OAuth callback server (`maki-agent/src/mcp/oauth/callback.rs`)
+- OAuth callback server (`craft-agent/src/mcp/oauth/callback.rs`)
 - `cancel.rs` (cancellation tokens with racing)

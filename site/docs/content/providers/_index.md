@@ -9,11 +9,11 @@ group = "Reference"
 
 Maki talks to LLM providers over their HTTP APIs. Models are split into three tiers: **weak** (cheap and fast), **medium** (balanced), and **strong** (highest capability, highest cost).
 
-Open the model picker with `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it to strong, medium, or weak. Your overrides are saved to `~/.maki/model-tiers` and apply across sessions.
+Open the model picker with `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it to strong, medium, or weak. Your overrides are saved to `~/.craft/model-tiers` and apply across sessions.
 
 ## Auth Reloading
 
-Maki re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `maki auth login` in another terminal or change an env var, the next session picks it up without a restart.
+Maki re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `craft auth login` in another terminal or change an env var, the next session picks it up without a restart.
 
 You can set multiple API keys in one env var (`ANTHROPIC_API_KEY=sk-1,sk-2,sk-3`) and they rotate automatically on rate-limit or auth errors.
 
@@ -97,7 +97,7 @@ Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
 
 This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
 
-Maki asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.maki/model-tiers`.
+Maki asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.craft/model-tiers`.
 
 ### LlamaCpp
 
@@ -107,7 +107,7 @@ Maki asks the server for the list of installed models, so there's no built-in ca
 
 This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
 
-Maki asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.maki/model-tiers`.
+Maki asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.craft/model-tiers`.
 
 ### Mistral
 
@@ -178,7 +178,7 @@ If the model name is unique across providers, the prefix can be omitted.
 
 ## Dynamic Providers
 
-To add a custom provider or proxy, drop an executable script into `~/.maki/providers/`. The script must handle these subcommands:
+To add a custom provider or proxy, drop an executable script into `~/.craft/providers/`. The script must handle these subcommands:
 
 | Subcommand | Timeout | What it does |
 |------------|---------|--------|

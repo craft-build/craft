@@ -1,5 +1,7 @@
 # Migration Implementation Plan
 
+> **Note**: Craft is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik. This migration plan was originally written for the maki codebase and has been updated for craft. All crate names reference `craft-*` equivalents.
+
 This document defines the phased execution plan for the smol→tokio and isahc→reqwest migration. Each phase is designed to be independently compilable and testable.
 
 ## Guiding Principles

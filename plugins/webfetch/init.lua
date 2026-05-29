@@ -60,15 +60,15 @@ local function strip_html(html)
   return result:match("^%s*(.-)%s*$")
 end
 
-local truncate = require("maki.truncate")
-local ToolView = require("maki.tool_view")
+local truncate = require("craft.truncate")
+local ToolView = require("craft.tool_view")
 
 local function web_view_opts(ctx)
   local tol = ctx:tool_output_lines()
   return { max_lines = (tol and tol.web) or 3, keep = "head" }
 end
 
-maki.api.register_tool({
+craft.api.register_tool({
   name = "webfetch",
   description = [[Fetch a URL and return its contents.
 
@@ -115,7 +115,7 @@ maki.api.register_tool({
     local max_lines = (config and config.max_output_lines) or 2000
     local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
 
-    local resp, err = maki.net.request(url, {
+    local resp, err = craft.net.request(url, {
       timeout = input.timeout or 30,
       max_bytes = max_response,
       headers = {
@@ -139,7 +139,7 @@ maki.api.register_tool({
     local is_html = ct:find("text/html") ~= nil
 
     if fmt == "markdown" and is_html then
-      local ok, converted = pcall(maki.text.html_to_markdown, body)
+      local ok, converted = pcall(craft.text.html_to_markdown, body)
       body = ok and converted or body
     elseif fmt == "text" and is_html then
       body = strip_html(body)

@@ -3,11 +3,11 @@ use std::ffi::CString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use maki_storage::version::{self, VersionError};
-use maki_storage::{StateDir, StorageError};
+use craft_storage::version::{self, VersionError};
+use craft_storage::{StateDir, StorageError};
 
-const INSTALL_SCRIPT_URL: &str = "https://maki.sh/install.sh";
-const BACKUP_FILENAME: &str = "maki_backup";
+const INSTALL_SCRIPT_URL: &str = "https://gitlab.com/craft-build/craft/-/releases";
+const BACKUP_FILENAME: &str = "craft_backup";
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
@@ -117,7 +117,7 @@ fn restore_backup(backup_path: &Path, exe_path: &Path) -> Result<(), UpdateError
         source: e,
     };
 
-    let tmp = exe_path.with_extension("maki_tmp");
+    let tmp = exe_path.with_extension("craft_tmp");
     if needs_sudo(exe_path) {
         println!("Restoring to {} (requires sudo)...", exe_path.display());
         let status = std::process::Command::new("sudo")
@@ -171,7 +171,7 @@ pub async fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateErro
     if no_color {
         println!("{script}");
     } else {
-        println!("{}", maki_ui::highlight_ansi("bash", &script));
+        println!("{}", craft_ui::highlight_ansi("bash", &script));
     }
 
     if !skip_confirm && !prompt_yes() {
@@ -186,7 +186,7 @@ pub async fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateErro
     println!();
     println!("Updated successfully.");
     println!("Previous version saved to: {}", backup_path.display());
-    println!("To restore: maki rollback");
+    println!("To restore: craft rollback");
 
     Ok(())
 }

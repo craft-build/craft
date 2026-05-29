@@ -1,0 +1,213 @@
+local ToolView = {}
+ToolView.__index = ToolView
+
+local function format_line_nr(fmt, idx)
+  return { string.format(fmt, idx), "line_nr" }
+end
+
+local function line_nr_fmt(count)
+  local w = math.max(1, math.floor(math.log(count, 10)) + 1)
+  return "%" .. w .. "d "
+end
+
+local function build_highlighted_lines(highlighted, fmt, start_idx)
+  local result = {}
+  for idx, hl_line in ipairs(highlighted) do
+    local spans = { format_line_nr(fmt, start_idx + idx - 1) }
+    for _, seg in ipairs(hl_line) do
+      spans[#spans + 1] = seg
+    end
+    result[#result + 1] = spans
+  end
+  return result
+end
+
+function ToolView.new(buf, opts)
+  local self = setmetatable({}, ToolView)
+  self.buf = buf
+  self.max = (opts and opts.max_lines) or 80
+  self.keep = (opts and opts.keep) or "tail"
+  self.max_expand_lines = (opts and opts.max_expand_lines) or 2000
+  self.header = {}
+  self.ring = {}
+  self.ring_start = 1
+  self.ring_count = 0
+  self.skipped = 0
+  self.all_lines = {}
+  self.all_skipped = 0
+  self.expanded = false
+  return self
+end
+
+function ToolView:set_header(lines)
+  self.header = lines
+  self:flush()
+end
+
+function ToolView:clear()
+  self.ring = {}
+  self.ring_start = 1
+  self.ring_count = 0
+  self.skipped = 0
+  self.all_lines = {}
+  self.all_skipped = 0
+  self._hl = nil
+  self:flush()
+end
+
+function ToolView:append(line)
+  if #self.all_lines < self.max_expand_lines then
+    self.all_lines[#self.all_lines + 1] = line
+  else
+    self.all_skipped = self.all_skipped + 1
+  end
+
+  if self.keep == "head" then
+    if self.ring_count < self.max then
+      self.ring_count = self.ring_count + 1
+      self.ring[self.ring_count] = line
+      self:flush()
+    else
+      self.skipped = self.skipped + 1
+    end
+  else
+    if self.ring_count < self.max then
+      self.ring_count = self.ring_count + 1
+      self.ring[self.ring_count] = line
+    else
+      self.ring[self.ring_start] = line
+      self.ring_start = (self.ring_start % self.max) + 1
+      self.skipped = self.skipped + 1
+    end
+    self:flush()
+  end
+end
+
+function ToolView:set_highlight(content, ext)
+  ext = ext or "md"
+  if content:sub(-1) == "\n" then
+    content = content:sub(1, -2)
+  end
+  local lines = {}
+  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = line
+  end
+  if #lines == 0 then
+    return false
+  end
+
+  self._hl = {
+    content = content,
+    ext = ext,
+    line_count = #lines,
+    expanded_done = false,
+  }
+
+  local fmt = line_nr_fmt(#lines)
+  for idx, line in ipairs(lines) do
+    self:append({ format_line_nr(fmt, idx), { line } })
+  end
+
+  local visible_count = math.min(#lines, self.max)
+  local visible_start = self.keep == "head" and 1 or (#lines - visible_count + 1)
+  local visible_content = table.concat(lines, "\n", visible_start, visible_start + visible_count - 1)
+
+  craft.async.run(function()
+    local highlighted = craft.ui.highlight(visible_content, ext)
+    if not highlighted then
+      return
+    end
+    local hl_lines = build_highlighted_lines(highlighted, fmt, visible_start)
+    self.ring = {}
+    self.ring_start = 1
+    self.ring_count = #hl_lines
+    for i, l in ipairs(hl_lines) do
+      self.ring[i] = l
+    end
+    self:flush()
+  end)
+
+  return true
+end
+
+function ToolView:toggle()
+  self.expanded = not self.expanded
+  if self.expanded and self._hl and not self._hl.expanded_done then
+    self:_highlight_full()
+  else
+    self:flush()
+  end
+end
+
+function ToolView:_highlight_full()
+  self:flush()
+  local hl = self._hl
+  craft.async.run(function()
+    local highlighted = craft.ui.highlight(hl.content, hl.ext)
+    if not highlighted then
+      return
+    end
+    hl.expanded_done = true
+    local fmt = line_nr_fmt(hl.line_count)
+    self.all_lines = build_highlighted_lines(highlighted, fmt, 1)
+    self:flush()
+  end)
+end
+
+function ToolView:flush()
+  local lines = {}
+
+  for _, h in ipairs(self.header) do
+    lines[#lines + 1] = h
+  end
+
+  if self.expanded then
+    for _, line in ipairs(self.all_lines) do
+      lines[#lines + 1] = line
+    end
+    if self.all_skipped > 0 then
+      lines[#lines + 1] = { { self.all_skipped .. " lines omitted", "dim" } }
+    end
+  else
+    local hidden = self.skipped
+    local notice = hidden >= 2 and { { "... (" .. hidden .. " lines) (click to expand)", "dim" } }
+      or hidden == 1 and self.all_lines[self.keep == "tail" and 1 or self.ring_count + 1]
+      or nil
+
+    if self.keep == "tail" and notice then
+      lines[#lines + 1] = notice
+    end
+
+    for i = 0, self.ring_count - 1 do
+      local idx = ((self.ring_start - 1 + i) % self.max) + 1
+      lines[#lines + 1] = self.ring[idx]
+    end
+
+    if self.keep == "head" and notice then
+      lines[#lines + 1] = notice
+    end
+  end
+
+  self.buf:set_lines(lines)
+end
+
+function ToolView:finish()
+  if self.keep == "head" and self.skipped > 0 then
+    self:flush()
+  end
+end
+
+function ToolView.restore(output, opts)
+  local buf = craft.ui.buf()
+  local view = ToolView.new(buf, opts)
+  for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+    view:append(line)
+  end
+  view:finish()
+  buf:on("click", function()
+    view:toggle()
+  end)
+  return buf
+end
+
+return ToolView

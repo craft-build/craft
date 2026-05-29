@@ -7,19 +7,19 @@ group = "Getting Started"
 
 # Configuration
 
-Settings go in `init.lua`, a Lua script that calls `maki.setup()`. Same language as plugins.
+Settings go in `init.lua`, a Lua script that calls `craft.setup()`. Same language as plugins.
 
 Two places, both optional:
 
-- **Global**: `~/.config/maki/init.lua`
-- **Project**: `.maki/init.lua` (relative to your working directory)
+- **Global**: `~/.config/craft/init.lua`
+- **Project**: `.craft/init.lua` (relative to your working directory)
 
 When both exist, project settings override global ones. Neither file is required.
 
 ## Example
 
 ```lua
-maki.setup({
+craft.setup({
     ui = {
         splash_animation = true,
         mouse_scroll_lines = 5,
@@ -46,7 +46,7 @@ maki.setup({
 
 All fields are optional. Typos in field names cause an error right away.
 
-`maki.setup()` can only be called once per init.lua.
+`craft.setup()` can only be called once per init.lua.
 
 ## Full Reference
 
@@ -125,7 +125,7 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 The `tools` table lets you turn tools on or off. By default `index`, `webfetch`, and `websearch` are on. `bash` is off by default.
 
 ```lua
-maki.setup({
+craft.setup({
     tools = {
         bash = { enabled = true },
         websearch = { enabled = false },
@@ -143,19 +143,19 @@ Maki uses XDG directories on Linux and macOS:
 
 | Purpose | Path |
 |---------|------|
-| Config | `~/.config/maki/` (init.lua, permissions.toml, mcp.toml) |
-| Data | `~/.local/share/maki/` |
-| Logs | `~/.local/logs/maki/` |
-| State | `~/.local/state/maki/` |
+| Config | `~/.config/craft/` (init.lua, permissions.toml, mcp.toml) |
+| Data | `~/.local/share/craft/` |
+| Logs | `~/.local/logs/craft/` |
+| State | `~/.local/state/craft/` |
 
-`~/.maki/` is checked as a legacy fallback.
+`~/.craft/` is checked as a legacy fallback.
 
 ## Personal Instructions
 
 On top of `AGENTS.md`, you can add your own instructions in two places:
 
 - `AGENTS.local.md` at project root for per-project preferences (gitignored)
-- `~/.config/maki/AGENTS.md` for preferences that apply to all projects
+- `~/.config/craft/AGENTS.md` for preferences that apply to all projects
 
 Both are added to the system prompt at the start of every session.
 
@@ -166,11 +166,11 @@ Still have a `config.toml`? Here is how to switch over.
 **Rename your config files:**
 
 ```
-~/.config/maki/config.toml  ->  ~/.config/maki/init.lua
-.maki/config.toml           ->  .maki/init.lua
+~/.config/craft/config.toml  ->  ~/.config/craft/init.lua
+.craft/config.toml           ->  .craft/init.lua
 ```
 
-**Wrap the content in `maki.setup()`:**
+**Wrap the content in `craft.setup()`:**
 
 Before:
 
@@ -182,7 +182,7 @@ bash_timeout_secs = 180
 After:
 
 ```lua
-maki.setup({
+craft.setup({
     agent = { bash_timeout_secs = 180 },
 })
 ```
@@ -191,8 +191,8 @@ Same field names, just Lua syntax instead of TOML.
 
 **Move MCP sections to `mcp.toml`.**
 
-- `~/.config/maki/mcp.toml` (global)
-- `.maki/mcp.toml` (per-project)
+- `~/.config/craft/mcp.toml` (global)
+- `.craft/mcp.toml` (per-project)
 
 Same format, just a different file. See [MCP](/docs/mcp/).
 

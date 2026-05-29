@@ -1,4 +1,4 @@
-local TextInput = require("maki.text_input")
+local TextInput = require("craft.text_input")
 
 local QuestionForm = {}
 
@@ -149,7 +149,7 @@ local function question_md(state, idx, width)
     return hit
   end
   local text = state.questions[idx].question
-  local ok, lines = pcall(maki.ui.markdown, text, width)
+  local ok, lines = pcall(craft.ui.markdown, text, width)
   if not ok or type(lines) ~= "table" or #lines == 0 then
     lines = { { { text, "" } } }
   end
@@ -587,10 +587,10 @@ QuestionForm.MODE = MODE
 
 function QuestionForm.open(questions)
   local state = initial_state(questions)
-  local buf = maki.ui.buf()
-  local max_h = math.floor(maki.ui.terminal_size().rows * MAX_HEIGHT_RATIO)
+  local buf = craft.ui.buf()
+  local max_h = math.floor(craft.ui.terminal_size().rows * MAX_HEIGHT_RATIO)
 
-  local win = maki.ui.open_win(buf, {
+  local win = craft.ui.open_win(buf, {
     title = " Question ",
     height = max_h,
     width = "100%",
@@ -619,7 +619,7 @@ function QuestionForm.open(questions)
 
     if ev.type == "resize" then
       width = ev.width
-      max_h = math.floor(maki.ui.terminal_size().rows * MAX_HEIGHT_RATIO)
+      max_h = math.floor(craft.ui.terminal_size().rows * MAX_HEIGHT_RATIO)
     elseif ev.type == "paste" and state.mode == MODE.EDITING_CUSTOM then
       state.custom_input:insert_text(ev.text)
     elseif ev.type == "key" then
