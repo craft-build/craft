@@ -10,7 +10,7 @@ use craft_agent::template;
 use craft_agent::template::Vars;
 use craft_agent::tools::{DescriptionContext, FileReadTracker, ToolFilter, ToolRegistry};
 use craft_agent::{
-    Agent, AgentConfig, AgentEvent, AgentInput, AgentParams, AgentRunParams, CancelToken,
+    Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelToken,
     CancelTrigger, Envelope, EventSender, History, Instructions, McpCommand, PromptRole,
     ToolOutputLines,
 };
@@ -44,6 +44,7 @@ pub(super) struct AgentLoop {
     session_id: Option<String>,
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
+    btw_system: Arc<ArcSwap<String>>,
 }
 
 impl AgentLoop {
@@ -64,6 +65,7 @@ impl AgentLoop {
         session_id: Option<String>,
         timeouts: craft_providers::Timeouts,
         lua_handle: Option<EventHandle>,
+        btw_system: Arc<ArcSwap<String>>,
     ) -> Self {
         Self {
             model_slot,
@@ -86,6 +88,7 @@ impl AgentLoop {
             session_id,
             timeouts,
             lua_handle,
+            btw_system,
         }
     }
 
@@ -132,6 +135,7 @@ impl AgentLoop {
     async fn initialize(&mut self) -> bool {
         self.vars = template::env_vars();
         self.reload_instructions().await;
+        self.publish_btw_system(&craft_agent::prompt::ResolvedSlots::default());
         if self.init_cancel.is_cancelled() {
             return false;
         }
@@ -202,16 +206,18 @@ impl AgentLoop {
 
         self.sync_shared_history_with_pending(&input);
 
-        let prompt_extras = match self.lua_handle.as_ref() {
-            Some(h) => h.collect_prompt_extras_async().await,
-            None => Vec::new(),
+        let prompt_slots = match self.lua_handle.as_ref() {
+            Some(h) => h.collect_prompt_slots_async().await,
+            None => craft_agent::prompt::ResolvedSlots::default(),
         };
         let system = agent::build_system_prompt(
             &self.vars,
             &input.mode,
             &self.instructions.text,
-            &prompt_extras,
+            &prompt_slots,
         );
+
+        self.publish_btw_system(&prompt_slots);
         let (trigger, cancel) = CancelToken::new();
         self.set_cancel_trigger(run_id, trigger);
 
@@ -227,6 +233,7 @@ impl AgentLoop {
                 session_id: self.session_id.clone(),
                 timeouts: self.timeouts,
                 file_tracker: Arc::clone(&self.file_tracker),
+                prompt_slots: std::sync::Arc::new(prompt_slots),
             },
             AgentRunParams {
                 history: mem::replace(&mut self.history, History::new(Vec::new())),
@@ -302,6 +309,16 @@ impl AgentLoop {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(run_id);
+    }
+
+    fn publish_btw_system(&self, slots: &craft_agent::prompt::ResolvedSlots) {
+        let system = agent::build_system_prompt(
+            &self.vars,
+            &AgentMode::Build,
+            &self.instructions.text,
+            slots,
+        );
+        self.btw_system.store(Arc::new(system));
     }
 
     fn emit_error(&self, run_id: u64, error: AgentError) {

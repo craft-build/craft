@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crossterm::event::KeyEvent;
 use craft_agent::{SharedBuf, SnapshotLine};
-use craft_lua::{Anchor, Border, FloatConfig, TitlePos, WinCommand, WinEvent};
+use craft_lua::{Anchor, Border, FloatConfig, Split, TitlePos, WinCommand, WinEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -152,6 +152,8 @@ impl FloatManager {
         let id = self.next_id;
         self.next_id += 1;
 
+        let is_split_below = config.split == Split::Below;
+
         let win = FloatWindow {
             id,
             buf,
@@ -165,11 +167,27 @@ impl FloatManager {
             cmd_rx,
         };
 
+        if is_split_below {
+            self.evict_split_below(id);
+        }
+
         self.windows.push(win);
         self.windows.sort_by_key(|w| w.config.zindex);
 
         if focus {
             self.focused_id = Some(id);
+        }
+    }
+
+    fn evict_split_below(&mut self, keep_id: u32) {
+        let to_remove: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|w| w.id != keep_id && w.config.split == Split::Below)
+            .map(|w| w.id)
+            .collect();
+        if !to_remove.is_empty() {
+            self.remove_windows(&to_remove);
         }
     }
 
@@ -245,153 +263,17 @@ impl FloatManager {
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         let mut union = Rect::default();
-        let t = theme::current();
 
         for win in &mut self.windows {
+            if win.config.split == Split::Below {
+                continue;
+            }
             let popup = resolve_rect(&win.config, area);
             if popup.width == 0 || popup.height == 0 {
                 continue;
             }
-
             frame.render_widget(Clear, popup);
-
-            let border_type = match win.config.border {
-                Border::None => None,
-                Border::Single => Some(BorderType::Plain),
-                Border::Double => Some(BorderType::Double),
-                Border::Rounded => Some(BorderType::Rounded),
-            };
-
-            let block = if let Some(bt) = border_type {
-                let mut b = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(bt)
-                    .border_style(t.panel_border)
-                    .style(ratatui::style::Style::new().bg(t.background));
-
-                if !win.config.title.is_empty() {
-                    let alignment = match win.config.title_pos {
-                        TitlePos::Left => ratatui::layout::Alignment::Left,
-                        TitlePos::Center => ratatui::layout::Alignment::Center,
-                        TitlePos::Right => ratatui::layout::Alignment::Right,
-                    };
-                    b = b
-                        .title(win.config.title.as_str())
-                        .title_alignment(alignment)
-                        .title_style(t.panel_title);
-                }
-                b
-            } else {
-                Block::default().style(ratatui::style::Style::new().bg(t.background))
-            };
-
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let footer_h = u16::from(!win.config.footer.is_empty());
-            let content_area = if footer_h > 0 && inner.height > footer_h {
-                let footer_rect = Rect {
-                    x: inner.x,
-                    y: inner.y + inner.height - footer_h,
-                    width: inner.width,
-                    height: footer_h,
-                };
-                frame.render_widget(hint_line(&win.config.footer), footer_rect);
-                Rect {
-                    x: inner.x,
-                    y: inner.y,
-                    width: inner.width,
-                    height: inner.height - footer_h,
-                }
-            } else {
-                inner
-            };
-
-            if win.last_content != content_area {
-                let _ = win.event_tx.try_send(WinEvent::Resize {
-                    width: content_area.width,
-                    height: content_area.height,
-                });
-                win.last_content = content_area;
-            }
-
-            let layout = win.layout();
-            let reserved_top_h = layout.reserved_top as u16;
-            let reserved_bot_h = layout.reserved_bot as u16;
-            let chrome_h = reserved_top_h + reserved_bot_h;
-
-            let (pinned_top_area, scroll_area, pinned_bot_area) =
-                if chrome_h > 0 && content_area.height > chrome_h {
-                    let top_area = (layout.reserved_top > 0).then_some(Rect {
-                        x: content_area.x,
-                        y: content_area.y,
-                        width: content_area.width,
-                        height: reserved_top_h,
-                    });
-                    let sa = Rect {
-                        x: content_area.x,
-                        y: content_area.y + reserved_top_h,
-                        width: content_area.width,
-                        height: content_area.height - chrome_h,
-                    };
-                    let bot_area = (layout.reserved_bot > 0).then_some(Rect {
-                        x: content_area.x,
-                        y: sa.y + sa.height,
-                        width: content_area.width,
-                        height: reserved_bot_h,
-                    });
-                    (top_area, sa, bot_area)
-                } else {
-                    (None, content_area, None)
-                };
-
-            win.refresh_layout(scroll_area.height);
-            let top = layout.reserved_top;
-            let scrollable = layout.scrollable;
-
-            let vh = win.viewport_h as usize;
-            let end = (top + win.scroll_offset + vh).min(top + scrollable);
-            let visible = &win.cached_lines[top + win.scroll_offset..end];
-
-            let lines: Vec<Line<'_>> = visible
-                .iter()
-                .enumerate()
-                .map(|(i, sline)| {
-                    let mut line = snapshot_to_line(sline);
-                    if win.config.cursor_line && top + win.scroll_offset + i == win.cursor {
-                        line = line.style(t.cmd_selected);
-                    }
-                    line
-                })
-                .collect();
-
-            frame.render_widget(Paragraph::new(lines), scroll_area);
-
-            if let Some(pa) = pinned_top_area {
-                let pinned: Vec<Line<'_>> = win.cached_lines[..top]
-                    .iter()
-                    .map(snapshot_to_line)
-                    .collect();
-                frame.render_widget(Paragraph::new(pinned), pa);
-            }
-
-            if let Some(pa) = pinned_bot_area {
-                let pinned: Vec<Line<'_>> = win.cached_lines[top + scrollable..]
-                    .iter()
-                    .map(snapshot_to_line)
-                    .collect();
-                frame.render_widget(Paragraph::new(pinned), pa);
-            }
-
-            if scrollable as u16 > win.viewport_h {
-                render_vertical_scrollbar(
-                    frame,
-                    scroll_area,
-                    scrollable as u16,
-                    win.scroll_offset as u16,
-                );
-            }
-
+            render_window(frame, win, popup);
             if Some(win.id) == self.focused_id {
                 self.focused_rect = Some(popup);
             }
@@ -420,12 +302,196 @@ impl FloatManager {
     }
 
     pub fn close_all(&mut self) {
-        for win in &self.windows {
-            let _ = win.event_tx.try_send(WinEvent::Close);
+        let ids: Vec<u32> = self.windows.iter().map(|w| w.id).collect();
+        self.remove_windows(&ids);
+    }
+
+    pub fn bottom_split_height(&self) -> u16 {
+        self.windows
+            .iter()
+            .find(|w| w.config.split == Split::Below)
+            .map(|w| w.config.height.resolve(0))
+            .unwrap_or(0)
+    }
+
+    pub fn view_bottom_split(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(idx) = self.split_window_idx() else {
+            return;
+        };
+        let win = &mut self.windows[idx];
+        let config = FloatConfig {
+            row: Some(0),
+            col: Some(0),
+            split: Split::None,
+            ..win.config.clone()
+        };
+        win.config = config;
+        render_window(frame, win, area);
+        if Some(win.id) == self.focused_id {
+            self.focused_rect = Some(area);
         }
-        self.windows.clear();
-        self.focused_id = None;
-        self.focused_rect = None;
+    }
+
+    fn split_window_idx(&self) -> Option<usize> {
+        self.windows
+            .iter()
+            .position(|w| w.config.split == Split::Below)
+    }
+
+    fn remove_windows(&mut self, ids: &[u32]) {
+        for win in &mut self.windows {
+            if ids.contains(&win.id) {
+                let _ = win.event_tx.try_send(WinEvent::Close);
+            }
+        }
+        self.windows.retain(|w| !ids.contains(&w.id));
+        if let Some(fid) = self.focused_id
+            && !self.windows.iter().any(|w| w.id == fid)
+        {
+            self.focused_id = self.windows.last().map(|w| w.id);
+            self.focused_rect = None;
+        }
+    }
+}
+
+fn render_window(frame: &mut Frame, win: &mut FloatWindow, popup: Rect) {
+    let t = theme::current();
+
+    let border_type = match win.config.border {
+        Border::None => None,
+        Border::Single => Some(BorderType::Plain),
+        Border::Double => Some(BorderType::Double),
+        Border::Rounded => Some(BorderType::Rounded),
+    };
+
+    let block = if let Some(bt) = border_type {
+        let mut b = Block::default()
+            .borders(Borders::ALL)
+            .border_type(bt)
+            .border_style(t.panel_border)
+            .style(ratatui::style::Style::new().bg(t.background));
+
+        if !win.config.title.is_empty() {
+            let alignment = match win.config.title_pos {
+                TitlePos::Left => ratatui::layout::Alignment::Left,
+                TitlePos::Center => ratatui::layout::Alignment::Center,
+                TitlePos::Right => ratatui::layout::Alignment::Right,
+            };
+            b = b
+                .title(win.config.title.as_str())
+                .title_alignment(alignment)
+                .title_style(t.panel_title);
+        }
+        b
+    } else {
+        Block::default().style(ratatui::style::Style::new().bg(t.background))
+    };
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let footer_h = u16::from(!win.config.footer.is_empty());
+    let content_area = if footer_h > 0 && inner.height > footer_h {
+        let footer_rect = Rect {
+            x: inner.x,
+            y: inner.y + inner.height - footer_h,
+            width: inner.width,
+            height: footer_h,
+        };
+        frame.render_widget(hint_line(&win.config.footer), footer_rect);
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: inner.height - footer_h,
+        }
+    } else {
+        inner
+    };
+
+    if win.last_content != content_area {
+        let _ = win.event_tx.try_send(WinEvent::Resize {
+            width: content_area.width,
+            height: content_area.height,
+        });
+        win.last_content = content_area;
+    }
+
+    let layout = win.layout();
+    let reserved_top_h = layout.reserved_top as u16;
+    let reserved_bot_h = layout.reserved_bot as u16;
+    let chrome_h = reserved_top_h + reserved_bot_h;
+
+    let (pinned_top_area, scroll_area, pinned_bot_area) =
+        if chrome_h > 0 && content_area.height > chrome_h {
+            let top_area = (layout.reserved_top > 0).then_some(Rect {
+                x: content_area.x,
+                y: content_area.y,
+                width: content_area.width,
+                height: reserved_top_h,
+            });
+            let sa = Rect {
+                x: content_area.x,
+                y: content_area.y + reserved_top_h,
+                width: content_area.width,
+                height: content_area.height - chrome_h,
+            };
+            let bot_area = (layout.reserved_bot > 0).then_some(Rect {
+                x: content_area.x,
+                y: sa.y + sa.height,
+                width: content_area.width,
+                height: reserved_bot_h,
+            });
+            (top_area, sa, bot_area)
+        } else {
+            (None, content_area, None)
+        };
+
+    win.refresh_layout(scroll_area.height);
+    let top = layout.reserved_top;
+    let scrollable = layout.scrollable;
+
+    let vh = win.viewport_h as usize;
+    let end = (top + win.scroll_offset + vh).min(top + scrollable);
+    let visible = &win.cached_lines[top + win.scroll_offset..end];
+
+    let lines: Vec<Line<'_>> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, sline)| {
+            let mut line = snapshot_to_line(sline);
+            if win.config.cursor_line && top + win.scroll_offset + i == win.cursor {
+                line = line.style(t.cmd_selected);
+            }
+            line
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), scroll_area);
+
+    if let Some(pa) = pinned_top_area {
+        let pinned: Vec<Line<'_>> = win.cached_lines[..top]
+            .iter()
+            .map(snapshot_to_line)
+            .collect();
+        frame.render_widget(Paragraph::new(pinned), pa);
+    }
+
+    if let Some(pa) = pinned_bot_area {
+        let pinned: Vec<Line<'_>> = win.cached_lines[top + scrollable..]
+            .iter()
+            .map(snapshot_to_line)
+            .collect();
+        frame.render_widget(Paragraph::new(pinned), pa);
+    }
+
+    if scrollable as u16 > win.viewport_h {
+        render_vertical_scrollbar(
+            frame,
+            scroll_area,
+            scrollable as u16,
+            win.scroll_offset as u16,
+        );
     }
 }
 

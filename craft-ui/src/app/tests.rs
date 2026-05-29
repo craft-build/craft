@@ -2411,3 +2411,66 @@ fn has_content(messages: bool, ephemeral: bool) -> bool {
     }
     app.has_content()
 }
+
+fn set_opus_model(app: &mut App) {
+    app.state.model = craft_providers::Model::from_spec("anthropic/claude-opus-4-8").unwrap();
+}
+
+#[test]
+fn fast_toggle_on_off_on_opus() {
+    let mut app = test_app();
+    set_opus_model(&mut app);
+    assert!(!app.state.fast);
+
+    app.execute_command(cmd("/fast"));
+    assert!(app.state.fast);
+    assert_eq!(app.status_bar.flash_text(), Some(FAST_ON_MSG));
+
+    app.execute_command(cmd("/fast"));
+    assert!(!app.state.fast);
+    assert_eq!(app.status_bar.flash_text(), Some(FAST_OFF_MSG));
+}
+
+#[test_case("anthropic/claude-sonnet-4-5" ; "non_opus_anthropic")]
+#[test_case("openai/gpt-5.5" ; "non_anthropic")]
+fn fast_flashes_error_on_ineligible_model(spec: &str) {
+    let mut app = test_app();
+    app.state.model = craft_providers::Model::from_spec(spec).unwrap();
+
+    app.execute_command(cmd("/fast"));
+    assert!(!app.state.fast);
+    assert_eq!(app.status_bar.flash_text(), Some(FAST_UNSUPPORTED_MSG));
+}
+
+#[test]
+fn fast_restored_from_session_meta() {
+    let tmp = TempDir::new().unwrap();
+    let storage = StateDir::from_path(tmp.path().to_path_buf());
+    let mut session = AppSession::new("anthropic/claude-opus-4-8", "/tmp/test");
+    session.meta.fast = true;
+
+    let state = SessionState::from_session(session, &test_model(), &storage);
+    assert!(state.fast);
+}
+
+#[test]
+fn fast_normalized_off_when_restored_onto_ineligible_model() {
+    let tmp = TempDir::new().unwrap();
+    let storage = StateDir::from_path(tmp.path().to_path_buf());
+    let mut session = AppSession::new("anthropic/claude-sonnet-4-5", "/tmp/test");
+    session.meta.fast = true;
+
+    let state = SessionState::from_session(session, &test_model(), &storage);
+    assert!(!state.fast);
+}
+
+#[test]
+fn update_model_to_ineligible_resets_fast() {
+    let mut app = test_app();
+    set_opus_model(&mut app);
+    app.state.fast = true;
+
+    let sonnet = craft_providers::Model::from_spec("anthropic/claude-sonnet-4-5").unwrap();
+    app.state.update_model(&sonnet);
+    assert!(!app.state.fast);
+}

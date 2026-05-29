@@ -47,6 +47,7 @@ pub(crate) struct AgentHandles {
     pub(crate) mcp_config_errors: McpConfigErrors,
     pub(crate) queue: QueueSender,
     pub(crate) timeouts: craft_providers::Timeouts,
+    pub(crate) btw_system: Arc<ArcSwap<String>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -93,6 +94,7 @@ impl AgentHandles {
         app.shared_history = Some(Arc::clone(&self.history));
         app.shared_tool_outputs = Some(Arc::clone(&self.tool_outputs));
         app.queue.set_shared(self.queue.clone());
+        app.btw_system = Some(Arc::clone(&self.btw_system));
     }
 
     pub(crate) fn send_cancel_all(&self) {
@@ -191,6 +193,8 @@ fn spawn_agent_internal(
     let (init_trigger, init_cancel) = CancelToken::new();
     let cancel_map = Arc::new(Mutex::new(CancelMap::new(0, init_trigger)));
 
+    let btw_system: Arc<ArcSwap<String>> = Arc::new(ArcSwap::from_pointee(String::new()));
+
     spawn_command_router(cmd_rx, Arc::clone(&cancel_map));
 
     let agent_loop = AgentLoop::new(
@@ -209,6 +213,7 @@ fn spawn_agent_internal(
         session_id,
         timeouts,
         lua_handle,
+        Arc::clone(&btw_system),
     );
 
     let task = tokio::spawn(agent_loop.run());
@@ -223,6 +228,7 @@ fn spawn_agent_internal(
         mcp_config_errors,
         queue: queue_tx,
         timeouts,
+        btw_system,
         task,
     }
 }

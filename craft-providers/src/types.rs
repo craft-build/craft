@@ -319,6 +319,12 @@ impl From<ThinkingConfig> for StoredThinking {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestOptions {
+    pub thinking: ThinkingConfig,
+    pub fast: bool,
+}
+
 #[derive(Debug)]
 pub struct StreamResponse {
     pub message: Message,

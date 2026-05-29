@@ -15,7 +15,7 @@ use craft_agent::tools::{
     HeaderResult, PermissionScopes, RegistryError, Tool, ToolRegistry, ToolSource,
 };
 use craft_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
-use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Value as LuaValue, VmState};
+use mlua::{Function, Lua, RegistryKey, Value as LuaValue, VmState};
 use serde_json::Value;
 
 use craft_config::RawConfig;
@@ -24,6 +24,7 @@ use crate::api::buf::{BufHandle, BufferStore};
 use crate::api::command::{CommandHandlerMap, publish_command_snapshot};
 use crate::api::command::{LuaCommandReader, LuaCommandWriter, UiAction};
 use crate::api::create_craft_global;
+use crate::api::json_to_lua;
 use crate::api::ctx::LuaCtx;
 use crate::api::fn_api::{JobEvent, JobStore};
 use crate::api::setup::ConfigStore;
@@ -41,7 +42,18 @@ const INTERRUPT_CANCEL_CHECK_INTERVAL: u32 = 128;
 const ASYNC_RUN_DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
 
 pub type LoadResult = Result<(), PluginError>;
-pub(crate) type PromptExtraCallbacks = BTreeMap<Arc<str>, RegistryKey>;
+pub(crate) enum HintContent {
+    Static(String),
+    Callback(RegistryKey),
+}
+
+pub(crate) struct PromptHintRegistration {
+    pub(crate) prompts: Option<Vec<craft_agent::prompt::PromptId>>,
+    pub(crate) slot: craft_agent::prompt::Slot,
+    pub(crate) content: HintContent,
+}
+
+pub(crate) type PromptHintCallbacks = BTreeMap<Arc<str>, Vec<PromptHintRegistration>>;
 
 /// Load and clear requests drain in-flight tools first so we never
 /// mutate a plugin environment while a tool call is still running.
@@ -93,8 +105,8 @@ pub enum Request {
         command: Arc<str>,
         args: String,
     },
-    CollectPromptExtras {
-        reply: flume::Sender<Vec<String>>,
+    CollectPromptSlots {
+        reply: flume::Sender<craft_agent::prompt::ResolvedSlots>,
     },
     Shutdown,
     RestoreTool {
@@ -521,7 +533,7 @@ impl LuaRuntime {
         lua.set_app_data(CommandHandlerMap::new());
         lua.set_app_data(SpawnQueue::default());
         lua.set_app_data(command_writer);
-        lua.set_app_data(PromptExtraCallbacks::default());
+        lua.set_app_data(PromptHintCallbacks::default());
 
         Ok(Self {
             lua,
@@ -569,49 +581,119 @@ impl LuaRuntime {
                 }
             }
         }
-        if let Some(mut extras) = self.lua.app_data_mut::<PromptExtraCallbacks>() {
-            if let Some(key) = extras.remove(name) {
-                if let Err(e) = self.lua.remove_registry_value(key) {
-                    tracing::warn!(plugin = name, error = %e, "failed to drop prompt extra key");
+        if let Some(mut hints) = self.lua.app_data_mut::<PromptHintCallbacks>() {
+            if let Some(regs) = hints.remove(name) {
+                for reg in regs {
+                    if let HintContent::Callback(key) = reg.content {
+                        if let Err(e) = self.lua.remove_registry_value(key) {
+                            tracing::warn!(plugin = name, error = %e, "failed to drop prompt hint callback key");
+                        }
+                    }
                 }
             }
         }
     }
 
-    async fn collect_prompt_extras(&self) -> Vec<String> {
-        let callbacks: Vec<(Arc<str>, Function)> = {
-            let Some(map) = self.lua.app_data_ref::<PromptExtraCallbacks>() else {
-                return Vec::new();
+    async fn collect_prompt_slots(&self) -> craft_agent::prompt::ResolvedSlots {
+        use craft_agent::prompt::{PromptId, Slot, SlotEntry};
+
+        enum ResolvedContent {
+            Static(String),
+            Callback(Function),
+        }
+
+        struct ResolvedItem {
+            plugin: Arc<str>,
+            prompts: Option<Vec<PromptId>>,
+            slot: Slot,
+            content: ResolvedContent,
+        }
+
+        let items: Vec<ResolvedItem> = {
+            let Some(map) = self.lua.app_data_ref::<PromptHintCallbacks>() else {
+                return craft_agent::prompt::ResolvedSlots::default();
             };
             map.iter()
-                .filter_map(|(plugin, key)| {
-                    let func = self.lua.registry_value::<Function>(key).ok()?;
-                    Some((Arc::clone(plugin), func))
+                .flat_map(|(plugin, regs)| {
+                    regs.iter().filter_map(|reg| {
+                        let content = match &reg.content {
+                            HintContent::Static(s) => ResolvedContent::Static(s.clone()),
+                            HintContent::Callback(key) => {
+                                let func = self.lua.registry_value::<Function>(key).ok()?;
+                                ResolvedContent::Callback(func)
+                            }
+                        };
+                        Some(ResolvedItem {
+                            plugin: Arc::clone(plugin),
+                            prompts: reg.prompts.clone(),
+                            slot: reg.slot,
+                            content,
+                        })
+                    })
                 })
                 .collect()
         };
-        let mut extras = Vec::new();
-        for (plugin, func) in &callbacks {
-            let scope = TaskScope::new(&self.lua, TaskCell::new(CancelToken::none(), None, None));
-            let result: mlua::Result<LuaValue> = scope
-                .scope_future(async {
-                    let thread = self.lua.create_thread(func.clone())?;
-                    thread.into_async::<LuaValue>(())?.await
-                })
-                .await;
-            drop(scope);
-            match result {
-                Ok(LuaValue::String(s)) => extras.push(s.to_string_lossy()),
-                Ok(LuaValue::Nil) => {}
-                Ok(_) => {
-                    tracing::warn!(plugin = %plugin, "prompt extra callback returned non-string")
+
+        let mut slots = craft_agent::prompt::ResolvedSlots::default();
+        for item in items {
+            let content = match item.content {
+                ResolvedContent::Static(s) => s,
+                ResolvedContent::Callback(func) => {
+                    let scope = TaskScope::new(
+                        &self.lua,
+                        TaskCell::new(CancelToken::none(), None, None),
+                    );
+                    let result: mlua::Result<LuaValue> = scope
+                        .scope_future(async {
+                            let thread = self.lua.create_thread(func)?;
+                            thread.into_async::<LuaValue>(())?.await
+                        })
+                        .await;
+                    drop(scope);
+                    match result {
+                        Ok(LuaValue::String(s)) => s.to_string_lossy().to_string(),
+                        Ok(LuaValue::Nil) => continue,
+                        Ok(_) => {
+                            tracing::warn!(plugin = %item.plugin, "prompt hint callback returned non-string");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(plugin = %item.plugin, error = %e, "prompt hint callback failed");
+                            continue;
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(plugin = %plugin, error = %e, "prompt extra callback failed")
+            };
+
+            if content.is_empty() {
+                continue;
+            }
+
+            let target_prompts: &[PromptId] = match &item.prompts {
+                Some(ids) => ids,
+                None => PromptId::ALL,
+            };
+
+            for &pid in target_prompts {
+                if !pid.has_slot(item.slot) {
+                    if item.prompts.is_some() {
+                        tracing::warn!(
+                            plugin = %item.plugin,
+                            prompt = ?pid,
+                            slot = ?item.slot,
+                            "hint targets prompt that lacks this slot"
+                        );
+                    }
+                    continue;
                 }
+                slots.insert(pid, item.slot, SlotEntry {
+                    plugin: Arc::clone(&item.plugin),
+                    content: content.clone(),
+                });
             }
         }
-        extras
+
+        slots
     }
 
     fn drain_pending(&self) -> Vec<PendingTool> {
@@ -884,7 +966,7 @@ impl LuaRuntime {
                 return HeaderResult::plain(tool.to_string());
             }
         };
-        let input_lua = match self.lua.to_value(&input) {
+        let input_lua = match json_to_lua(&self.lua, &input) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(plugin, tool, error = %e, "header fn input serialization failed");
@@ -928,7 +1010,7 @@ impl LuaRuntime {
             let key = tk.restore.as_ref()?;
             self.lua.registry_value::<Function>(key).ok()?
         };
-        let input_lua = self.lua.to_value(&input).ok()?;
+        let input_lua = json_to_lua(&self.lua, &input).ok()?;
         let thread = self.lua.create_thread(func).ok()?;
 
         let (dummy_tx, _) = flume::unbounded();
@@ -977,7 +1059,7 @@ impl LuaRuntime {
                 return None;
             }
         };
-        let lua_input = match self.lua.to_value(&input) {
+        let lua_input = match json_to_lua(&self.lua, &input) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(plugin, tool, error = %e, "failed to convert input for permission_scopes");
@@ -1242,7 +1324,7 @@ async fn run_tool_call(
     ctx.finish_tx = Some(finish_tx);
     let cancel = ctx.cancel.clone();
 
-    let input_lua = match lua.to_value(&input) {
+    let input_lua = match json_to_lua(&lua, &input) {
         Ok(v) => v,
         Err(e) => return ToolCallReply::err(e.to_string()),
     };
@@ -1514,9 +1596,9 @@ pub fn spawn(
                             let res = rt.run_init_lua(&source, &source_name, plugin_dir);
                             let _ = reply.send(res);
                         }
-                        Request::CollectPromptExtras { reply } => {
-                            let extras = rt.collect_prompt_extras().await;
-                            let _ = reply.send(extras);
+                        Request::CollectPromptSlots { reply } => {
+                            let slots = rt.collect_prompt_slots().await;
+                            let _ = reply.send(slots);
                         }
                     Request::RestoreTool {
                         tool,

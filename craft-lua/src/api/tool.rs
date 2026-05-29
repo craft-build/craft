@@ -20,7 +20,7 @@ use crate::api::command::{
     CommandEntry, CommandHandlerMap, LuaCommandWriter, publish_command_snapshot,
 };
 use crate::api::ctx::LuaCtx;
-use crate::runtime::{LiveCtx, PromptExtraCallbacks, Request};
+use crate::runtime::{HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, Request};
 
 const TOOL_NAME_MAX: usize = 64;
 const TOOL_HANDLER_RETURN_ERR: &str =
@@ -295,15 +295,51 @@ pub(crate) fn create_api_table(
     {
         let plugin = Arc::clone(&plugin);
         t.set(
-            "register_system_prompt_extra",
-            lua.create_function(move |lua, callback: Function| {
-                let key = lua.create_registry_value(callback)?;
+            "register_prompt_hint",
+            lua.create_function(move |lua, spec: Table| {
+                let slot_str: String = spec
+                    .get("slot")
+                    .map_err(|_| mlua::Error::runtime("register_prompt_hint: missing 'slot'"))?;
+                let slot: craft_agent::prompt::Slot =
+                    slot_str.parse().map_err(|_| {
+                        mlua::Error::runtime(format!(
+                            "register_prompt_hint: invalid slot '{slot_str}'"
+                        ))
+                    })?;
+
+                let prompts = parse_prompt_targets(&spec)?;
+
+                let content_val: LuaValue = spec
+                    .get("content")
+                    .map_err(|_| mlua::Error::runtime("register_prompt_hint: missing 'content'"))?;
+                let content = match content_val {
+                    LuaValue::String(s) => HintContent::Static(s.to_string_lossy().to_string()),
+                    LuaValue::Function(f) => {
+                        let key = lua.create_registry_value(f)?;
+                        HintContent::Callback(key)
+                    }
+                    LuaValue::Nil => {
+                        return Err(mlua::Error::runtime(
+                            "register_prompt_hint: missing 'content'",
+                        ));
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "register_prompt_hint: 'content' must be string or function",
+                        ));
+                    }
+                };
+
                 let mut map = lua
-                    .app_data_mut::<PromptExtraCallbacks>()
+                    .app_data_mut::<PromptHintCallbacks>()
                     .ok_or_else(|| mlua::Error::runtime("not initialized"))?;
-                if let Some(old) = map.insert(Arc::clone(&plugin), key) {
-                    lua.remove_registry_value(old)?;
-                }
+                map.entry(Arc::clone(&plugin))
+                    .or_default()
+                    .push(PromptHintRegistration {
+                        prompts,
+                        slot,
+                        content,
+                    });
                 Ok(())
             })?,
         )?;
@@ -317,6 +353,43 @@ pub(crate) fn create_api_table(
     )?;
 
     Ok(t)
+}
+
+fn parse_prompt_targets(spec: &Table) -> LuaResult<Option<Vec<craft_agent::prompt::PromptId>>> {
+    let val: LuaValue = spec.get("prompt").unwrap_or(LuaValue::Nil);
+    match val {
+        LuaValue::Nil => Ok(None),
+        LuaValue::String(s) => {
+            let pid = s.to_str()?.parse().map_err(|_| {
+                mlua::Error::runtime(format!(
+                    "register_prompt_hint: invalid prompt '{}'",
+                    s.to_string_lossy()
+                ))
+            })?;
+            Ok(Some(vec![pid]))
+        }
+        LuaValue::Table(t) => {
+            let mut ids = Vec::new();
+            for item in t.sequence_values::<String>() {
+                let s = item?;
+                let pid = s.parse().map_err(|_| {
+                    mlua::Error::runtime(format!(
+                        "register_prompt_hint: invalid prompt '{s}'"
+                    ))
+                })?;
+                ids.push(pid);
+            }
+            if ids.is_empty() {
+                return Err(mlua::Error::runtime(
+                    "register_prompt_hint: 'prompt' list must be non-empty",
+                ));
+            }
+            Ok(Some(ids))
+        }
+        _ => Err(mlua::Error::runtime(
+            "register_prompt_hint: 'prompt' must be string or list of strings",
+        )),
+    }
 }
 
 fn is_valid_tool_name(name: &str) -> bool {

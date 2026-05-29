@@ -189,3 +189,13 @@ Return a compact overview of a source file: imports, type definitions, function 
     }
   end,
 })
+
+craft.api.register_prompt_hint({
+  slot = "tool_usage",
+  content = "- Use **index** before **read**.",
+})
+
+craft.api.register_prompt_hint({
+  slot = "efficient_tools",
+  content = "index",
+})

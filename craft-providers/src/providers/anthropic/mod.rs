@@ -19,13 +19,14 @@ use tracing::debug;
 
 use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
-use crate::{AgentError, Message, ProviderEvent, StreamResponse, ThinkingConfig};
+use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::KeyPool;
 
 const API_VERSION: &str = "2023-06-01";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=1000";
+const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 
@@ -35,6 +36,22 @@ fn resolve_auth_from_key(key: &str) -> super::ResolvedAuth {
     super::ResolvedAuth {
         base_url: Some("https://api.anthropic.com/v1/messages".into()),
         headers: vec![("x-api-key".into(), key.to_string())],
+    }
+}
+
+fn apply_fast_mode(body: &mut Value, fast: bool) {
+    if !fast {
+        return;
+    }
+    let betas = body
+        .as_object_mut()
+        .unwrap()
+        .entry("anthropic_beta")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(arr) = betas.as_array_mut()
+        && !arr.iter().any(|v| v.as_str() == Some(FAST_MODE_BETA))
+    {
+        arr.push(Value::String(FAST_MODE_BETA.to_string()));
     }
 }
 
@@ -95,14 +112,16 @@ impl Anthropic {
         &self,
         body: &Value,
         event_tx: &Sender<ProviderEvent>,
+        fast: bool,
     ) -> Result<StreamResponse, AgentError> {
         let json_body = serde_json::to_vec(body)?;
-        let response = self
+        let mut req = self
             .build_request("POST", None)
-            .header("content-type", "application/json")
-            .body(json_body)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+        if fast {
+            req = req.header("anthropic-beta", FAST_MODE_BETA);
+        }
+        let response = req.body(json_body).send().await?;
         let status = response.status().as_u16();
 
         if status == 200 {
@@ -154,10 +173,12 @@ impl Provider for Anthropic {
         system: &'a str,
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
-        thinking: ThinkingConfig,
+        opts: RequestOptions,
         _session_id: Option<&str>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
+            let fast = opts.fast && model.supports_fast();
+            let thinking = opts.thinking;
             let system_blocks = if let Some(prefix) = &self.system_prefix {
                 vec![
                     shared::SystemBlock {
@@ -188,9 +209,10 @@ impl Provider for Anthropic {
             );
             body["model"] = json!(model.id);
             body["stream"] = json!(true);
+            apply_fast_mode(&mut body, fast);
 
-            debug!(model = %model.id, num_messages = messages.len(), ?thinking, "sending API request");
-            self.do_stream_request(&body, event_tx).await
+            debug!(model = %model.id, num_messages = messages.len(), ?thinking, fast, "sending API request");
+            self.do_stream_request(&body, event_tx, fast).await
         })
     }
 
@@ -568,5 +590,39 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
         assert!(
             matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hi")
         );
+    }
+
+    #[test]
+    fn apply_fast_mode_adds_beta_when_fast() {
+        let mut body = json!({"model": "claude-opus-4-8"});
+        apply_fast_mode(&mut body, true);
+        let betas = body["anthropic_beta"].as_array().unwrap();
+        assert!(betas.iter().any(|v| v.as_str() == Some(FAST_MODE_BETA)));
+    }
+
+    #[test]
+    fn apply_fast_mode_noop_when_not_fast() {
+        let mut body = json!({"model": "claude-opus-4-8"});
+        apply_fast_mode(&mut body, false);
+        assert!(body.get("anthropic_beta").is_none());
+    }
+
+    #[test]
+    fn apply_fast_mode_appends_to_existing_betas() {
+        let mut body = json!({"anthropic_beta": ["existing-beta"]});
+        apply_fast_mode(&mut body, true);
+        let betas = body["anthropic_beta"].as_array().unwrap();
+        assert_eq!(betas.len(), 2);
+        assert!(betas.iter().any(|v| v.as_str() == Some("existing-beta")));
+        assert!(betas.iter().any(|v| v.as_str() == Some(FAST_MODE_BETA)));
+    }
+
+    #[test]
+    fn apply_fast_mode_idempotent() {
+        let mut body = json!({});
+        apply_fast_mode(&mut body, true);
+        apply_fast_mode(&mut body, true);
+        let betas = body["anthropic_beta"].as_array().unwrap();
+        assert_eq!(betas.len(), 1);
     }
 }

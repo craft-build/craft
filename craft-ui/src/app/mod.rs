@@ -75,6 +75,9 @@ use session_state::SessionState;
 const CANCEL_MSG: &str = "Cancelled.";
 const FLASH_CANCEL: &str = "Press esc again to stop...";
 const FLASH_REWIND: &str = "Press esc again to rewind...";
+const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
+const FAST_ON_MSG: &str = "Fast mode: on";
+const FAST_OFF_MSG: &str = "Fast mode: off";
 const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `craft auth login` in another terminal, then press Enter to retry.";
 const FLASH_NO_PLAN: &str = "No plan file";
@@ -159,6 +162,7 @@ pub struct App {
     pub(crate) storage: StateDir,
     pub(crate) shared_history: Option<Arc<ArcSwap<Vec<Message>>>>,
     pub(crate) shared_tool_outputs: Option<Arc<Mutex<HashMap<String, ToolOutput>>>>,
+    pub(crate) btw_system: Option<Arc<ArcSwap<String>>>,
     pub(crate) image_paste_rx: Vec<flume::Receiver<Result<ImageSource, String>>>,
     storage_writer: Arc<StorageWriter>,
     pub(crate) shell: shell::ShellState,
@@ -229,6 +233,7 @@ impl App {
             storage,
             shared_history: None,
             shared_tool_outputs: None,
+            btw_system: None,
             image_paste_rx: vec![],
             storage_writer,
             shell: shell::ShellState::default(),
@@ -1079,6 +1084,22 @@ impl App {
                     }
                     Err(msg) => self.flash(msg.into()),
                 }
+                vec![]
+            }
+            "/fast" => {
+                if !self.state.model.supports_fast() {
+                    self.flash(FAST_UNSUPPORTED_MSG.into());
+                    return vec![];
+                }
+                self.state.fast = !self.state.fast;
+                self.flash(
+                    if self.state.fast {
+                        FAST_ON_MSG
+                    } else {
+                        FAST_OFF_MSG
+                    }
+                    .into(),
+                );
                 vec![]
             }
             "/exit" => self.quit(),

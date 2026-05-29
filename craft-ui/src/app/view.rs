@@ -18,6 +18,7 @@ struct ViewLayout {
     queue_area: Rect,
     todo_area: Rect,
     input_area: Rect,
+    split_area: Rect,
 }
 
 impl App {
@@ -33,6 +34,9 @@ impl App {
         self.render_background(frame);
         self.render_messages(frame, &layout, render_chat);
         self.render_bottom_panel(frame, &layout);
+        if layout.split_area.height > 0 {
+            self.float_mgr.view_bottom_split(frame, layout.split_area);
+        }
         let mut overlay_rect = self.render_picker_overlays(frame, &layout);
         self.render_status_bar(frame, layout.status_area, render_chat);
         overlay_rect = self.render_top_modals(frame, overlay_rect);
@@ -42,6 +46,10 @@ impl App {
 
     fn compute_layout(&self, frame: &Frame, form_visible: bool) -> ViewLayout {
         let area = frame.area();
+
+        let split_h = self.float_mgr.bottom_split_height();
+        let split_active = split_h > 0 && !form_visible;
+
         let bottom_height = if form_visible {
             let max = area.height.saturating_sub(3);
             if self.permission_prompt.is_open() {
@@ -50,35 +58,53 @@ impl App {
                 self.plan_form.height().min(max)
             }
         } else if self.is_main_chat() {
-            queue_panel::height(self.queue.panel_len())
+            let base = queue_panel::height(self.queue.panel_len())
                 + self.chats[self.active_chat].todo_panel.height()
-                + self.input_box.height(area.width)
+                + self.input_box.height(area.width);
+            if split_active { 0 } else { base }
         } else {
             let todo_h = self.chats[self.active_chat].todo_panel.height();
             if todo_h > 0 { todo_h + 1 } else { 1 }
         };
 
+        let total_bottom = bottom_height + split_h;
         let [msg_area, bottom_area, status_area] = Layout::vertical([
             Constraint::Min(1),
-            Constraint::Length(bottom_height),
+            Constraint::Length(total_bottom),
             Constraint::Length(1),
         ])
         .areas(area);
 
-        let queue_height = queue_panel::height(self.queue.panel_len());
-        let todo_h = if form_visible {
+        let queue_height = if split_active {
+            0
+        } else {
+            queue_panel::height(self.queue.panel_len())
+        };
+        let todo_h = if form_visible || split_active {
             0
         } else {
             self.chats[self.active_chat].todo_panel.height()
         };
-        let input_height = bottom_area.height.saturating_sub(queue_height + todo_h);
+        let input_height = if split_active {
+            0
+        } else {
+            bottom_area.height.saturating_sub(queue_height + todo_h + split_h)
+        };
+
+        let (rest, split_area): (Rect, Rect) = if split_active {
+            let [a, b] = Layout::vertical([Constraint::Min(0), Constraint::Length(split_h)])
+                .areas(bottom_area);
+            (a, b)
+        } else {
+            (bottom_area, Rect::default())
+        };
 
         let [queue_area, todo_area, input_area] = Layout::vertical([
             Constraint::Length(queue_height),
             Constraint::Length(todo_h),
             Constraint::Length(input_height),
         ])
-        .areas(bottom_area);
+        .areas(rest);
 
         ViewLayout {
             msg_area,
@@ -87,6 +113,7 @@ impl App {
             queue_area,
             todo_area,
             input_area,
+            split_area,
         }
     }
 
@@ -247,6 +274,7 @@ impl App {
             chat_name,
             retry_info: self.retry_info.as_ref(),
             thinking_label: self.state.thinking.status_label(),
+            fast: self.state.fast,
         };
         self.status_bar.view(frame, status_area, &ctx);
     }

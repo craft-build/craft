@@ -18,7 +18,7 @@ pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
 pub mod command;
 pub mod diff;
 pub mod permissions;
-pub(crate) mod prompt;
+pub mod prompt;
 pub mod template;
 pub mod tools;
 pub use tools::ToolFilter;
@@ -66,5 +66,6 @@ pub struct AgentInput {
     pub images: Vec<ImageSource>,
     pub preamble: Vec<Message>,
     pub thinking: ThinkingConfig,
+    pub fast: bool,
     pub prompt: Option<Box<McpPromptRef>>,
 }

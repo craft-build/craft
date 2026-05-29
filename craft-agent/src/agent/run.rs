@@ -4,7 +4,7 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use craft_providers::provider::Provider;
-use craft_providers::{Message, Model, StopReason, StreamResponse, ThinkingConfig, TokenUsage};
+use craft_providers::{Message, Model, RequestOptions, StopReason, StreamResponse, TokenUsage};
 
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
 use super::history::{History, sanitize_cancelled_history};
@@ -42,6 +42,7 @@ pub struct AgentParams {
     pub session_id: Option<String>,
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
+    pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
 }
 
 pub struct AgentRunParams {
@@ -73,10 +74,11 @@ pub struct Agent {
     tool_output_lines: ToolOutputLines,
     reauth_attempts: u32,
     permissions: Arc<PermissionManager>,
-    thinking: ThinkingConfig,
+    opts: RequestOptions,
     session_id: Option<String>,
     timeouts: craft_providers::Timeouts,
     file_tracker: Arc<FileReadTracker>,
+    prompt_slots: Arc<crate::prompt::ResolvedSlots>,
 }
 
 impl Agent {
@@ -104,9 +106,10 @@ impl Agent {
             rollback_len: 0,
             mcp: None,
             reauth_attempts: 0,
-            thinking: ThinkingConfig::Off,
+            opts: RequestOptions::default(),
             session_id: params.session_id,
             file_tracker: params.file_tracker,
+            prompt_slots: params.prompt_slots,
         }
     }
 
@@ -143,7 +146,10 @@ impl Agent {
         let msg = Message::user_with_images(input.message.clone(), input.images);
         self.history.push(msg);
         self.mode = input.mode;
-        self.thinking = input.thinking;
+        self.opts = RequestOptions {
+            thinking: input.thinking,
+            fast: input.fast,
+        };
 
         info!(
             model = %self.model.id,
@@ -188,7 +194,7 @@ impl Agent {
             &self.tools,
             &self.event_tx,
             &self.cancel,
-            self.thinking,
+            self.opts,
             self.session_id.as_deref(),
         )
         .await
@@ -332,6 +338,7 @@ impl Agent {
             permissions: Arc::clone(&self.permissions),
             timeouts: self.timeouts,
             file_tracker: Arc::clone(&self.file_tracker),
+            prompt_slots: Arc::clone(&self.prompt_slots),
         }
     }
 
@@ -400,8 +407,8 @@ mod tests {
 
     use craft_providers::provider::{BoxFuture, Provider};
     use craft_providers::{
-        ContentBlock, Message, Model, ProviderEvent, Role, StopReason, StreamResponse,
-        ThinkingConfig, TokenUsage,
+        ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason, StreamResponse,
+        TokenUsage,
     };
     use serde_json::Value;
     use test_case::test_case;
@@ -448,7 +455,7 @@ mod tests {
             _: &'a str,
             _: &'a Value,
             _: &'a flume::Sender<ProviderEvent>,
-            _: ThinkingConfig,
+            _: RequestOptions,
             _: Option<&str>,
         ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
             Box::pin(async {
@@ -499,6 +506,7 @@ mod tests {
                 session_id: None,
                 timeouts: craft_providers::Timeouts::default(),
                 file_tracker: FileReadTracker::fresh(),
+                prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
             },
             AgentRunParams {
                 history,
@@ -715,7 +723,7 @@ mod tests {
                 _: &'a str,
                 _: &'a Value,
                 _: &'a flume::Sender<ProviderEvent>,
-                _: ThinkingConfig,
+                _: RequestOptions,
                 _: Option<&'a str>,
             ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
                 Box::pin(async {
@@ -748,6 +756,7 @@ mod tests {
                 session_id: None,
                 timeouts: craft_providers::Timeouts::default(),
                 file_tracker: FileReadTracker::fresh(),
+                prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
             },
             AgentRunParams {
                 history: History::new(Vec::new()),

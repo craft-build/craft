@@ -162,6 +162,22 @@ impl TitlePos {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Split {
+    #[default]
+    None,
+    Below,
+}
+
+impl Split {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "below" => Self::Below,
+            _ => Self::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatConfig {
     pub width: Dimension,
@@ -177,6 +193,7 @@ pub struct FloatConfig {
     pub cursor_line: bool,
     pub reserved_bottom: usize,
     pub reserved_top: usize,
+    pub split: Split,
 }
 
 impl Default for FloatConfig {
@@ -195,6 +212,7 @@ impl Default for FloatConfig {
             cursor_line: false,
             reserved_bottom: 0,
             reserved_top: 0,
+            split: Split::default(),
         }
     }
 }
@@ -222,7 +240,8 @@ impl FloatConfig {
             zindex,
             cursor_line,
             reserved_bottom,
-            reserved_top
+            reserved_top,
+            split
         );
     }
 }
@@ -242,6 +261,7 @@ pub struct FloatConfigPatch {
     pub cursor_line: Option<bool>,
     pub reserved_bottom: Option<usize>,
     pub reserved_top: Option<usize>,
+    pub split: Option<Split>,
 }
 
 pub enum WinEvent {

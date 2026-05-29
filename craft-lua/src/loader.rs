@@ -283,15 +283,15 @@ impl EventHandle {
         });
     }
 
-    pub fn collect_prompt_extras(&self) -> Vec<String> {
+    pub fn collect_prompt_slots(&self) -> craft_agent::prompt::ResolvedSlots {
         let (tx, rx) = flume::bounded(1);
-        let _ = self.tx.send(Request::CollectPromptExtras { reply: tx });
+        let _ = self.tx.send(Request::CollectPromptSlots { reply: tx });
         rx.recv().unwrap_or_default()
     }
 
-    pub async fn collect_prompt_extras_async(&self) -> Vec<String> {
+    pub async fn collect_prompt_slots_async(&self) -> craft_agent::prompt::ResolvedSlots {
         let (tx, rx) = flume::bounded(1);
-        let _ = self.tx.send(Request::CollectPromptExtras { reply: tx });
+        let _ = self.tx.send(Request::CollectPromptSlots { reply: tx });
         rx.recv_async().await.unwrap_or_default()
     }
 
@@ -431,117 +431,259 @@ mod tests {
     }
 
     #[test]
-    fn prompt_extra_callback_string_is_collected() {
+    fn callback_string_lands_in_targeted_prompt_only() {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::new(Arc::clone(&reg)).unwrap();
         host.load_source(
-            "test_extra",
+            "test_hint",
             r#"
-            craft.api.register_system_prompt_extra(function()
-                return "\n\nfrom test_extra"
-            end)
+            craft.api.register_prompt_hint({
+                slot = "tool_usage",
+                prompt = "general",
+                content = function()
+                    return "ONLY_GENERAL"
+                end,
+            })
             "#,
         )
         .unwrap();
         let handle = host.event_handle().unwrap();
-        let extras = handle.collect_prompt_extras();
-        assert_eq!(extras.len(), 1);
-        assert_eq!(extras[0], "\n\nfrom test_extra");
+        let slots = handle.collect_prompt_slots();
+        let general = slots.get(
+            craft_agent::prompt::PromptId::General,
+            craft_agent::prompt::Slot::ToolUsage,
+        );
+        let system = slots.get(
+            craft_agent::prompt::PromptId::System,
+            craft_agent::prompt::Slot::ToolUsage,
+        );
+        assert_eq!(general.len(), 1);
+        assert_eq!(general[0].content, "ONLY_GENERAL");
+        assert!(system.is_empty());
     }
 
     #[test]
-    fn prompt_extra_non_string_returns_are_skipped() {
+    fn callback_returning_nil_contributes_nothing() {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::new(Arc::clone(&reg)).unwrap();
         host.load_source(
-            "nil_extra",
+            "nil_hint",
             r#"
-            craft.api.register_system_prompt_extra(function()
-                return nil
-            end)
+            craft.api.register_prompt_hint({
+                slot = "tool_usage",
+                content = function()
+                    return nil
+                end,
+            })
             "#,
         )
         .unwrap();
         let handle = host.event_handle().unwrap();
-        assert!(handle.collect_prompt_extras().is_empty());
+        assert!(handle.collect_prompt_slots()
+            .get(
+                craft_agent::prompt::PromptId::System,
+                craft_agent::prompt::Slot::ToolUsage,
+            )
+            .is_empty());
     }
 
     #[test]
-    fn prompt_extra_multiple_plugins_ordered_by_name() {
+    fn static_no_prompt_lands_on_all_prompts_with_slot() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        host.load_source(
+            "broad_hint",
+            r#"
+            craft.api.register_prompt_hint({
+                slot = "tool_usage",
+                content = "BROAD",
+            })
+            "#,
+        )
+        .unwrap();
+        let handle = host.event_handle().unwrap();
+        let slots = handle.collect_prompt_slots();
+        for &pid in craft_agent::prompt::PromptId::ALL {
+            if pid.has_slot(craft_agent::prompt::Slot::ToolUsage) {
+                assert_eq!(
+                    slots.get(pid, craft_agent::prompt::Slot::ToolUsage).len(),
+                    1,
+                    "tool_usage hint should land on {:?}",
+                    pid
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_hint_skips_prompts_lacking_the_slot() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        host.load_source(
+            "conv_hint",
+            r#"
+            craft.api.register_prompt_hint({
+                slot = "conventions",
+                content = "SHOULD_SKIP_RESEARCH",
+            })
+            "#,
+        )
+        .unwrap();
+        let handle = host.event_handle().unwrap();
+        let slots = handle.collect_prompt_slots();
+        assert!(slots.get(
+            craft_agent::prompt::PromptId::Research,
+            craft_agent::prompt::Slot::Conventions,
+        ).is_empty());
+        assert_eq!(slots.get(
+            craft_agent::prompt::PromptId::System,
+            craft_agent::prompt::Slot::Conventions,
+        ).len(), 1);
+    }
+
+    #[test]
+    fn explicit_prompt_without_slot_is_dropped() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        host.load_source(
+            "bad_target",
+            r#"
+            craft.api.register_prompt_hint({
+                slot = "after_instructions",
+                prompt = "research",
+                content = "DROPPED",
+            })
+            "#,
+        )
+        .unwrap();
+        let handle = host.event_handle().unwrap();
+        let slots = handle.collect_prompt_slots();
+        assert!(slots.get(
+            craft_agent::prompt::PromptId::Research,
+            craft_agent::prompt::Slot::AfterInstructions,
+        ).is_empty());
+    }
+
+    #[test]
+    fn prompt_list_targets_each_listed_prompt() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        host.load_source(
+            "multi_prompt",
+            r#"
+            craft.api.register_prompt_hint({
+                slot = "tool_usage",
+                prompt = { "system", "research" },
+                content = "MULTI",
+            })
+            "#,
+        )
+        .unwrap();
+        let handle = host.event_handle().unwrap();
+        let slots = handle.collect_prompt_slots();
+        assert_eq!(slots.get(
+            craft_agent::prompt::PromptId::System,
+            craft_agent::prompt::Slot::ToolUsage,
+        ).len(), 1);
+        assert_eq!(slots.get(
+            craft_agent::prompt::PromptId::Research,
+            craft_agent::prompt::Slot::ToolUsage,
+        ).len(), 1);
+        assert!(slots.get(
+            craft_agent::prompt::PromptId::General,
+            craft_agent::prompt::Slot::ToolUsage,
+        ).is_empty());
+    }
+
+    #[test]
+    fn multiple_plugins_sorted_by_plugin_name() {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::new(Arc::clone(&reg)).unwrap();
         host.load_source(
             "zzz_plugin",
             r#"
-            craft.api.register_system_prompt_extra(function()
-                return "from_zzz"
-            end)
+            craft.api.register_prompt_hint({
+                slot = "tool_usage",
+                content = "from_zzz",
+            })
             "#,
         )
         .unwrap();
         host.load_source(
             "aaa_plugin",
             r#"
-            craft.api.register_system_prompt_extra(function()
-                return "from_aaa"
-            end)
+            craft.api.register_prompt_hint({
+                slot = "tool_usage",
+                content = "from_aaa",
+            })
             "#,
         )
         .unwrap();
         let handle = host.event_handle().unwrap();
-        let extras = handle.collect_prompt_extras();
-        assert_eq!(extras.len(), 2);
-        assert_eq!(extras[0], "from_aaa", "BTreeMap should sort by plugin name");
-        assert_eq!(extras[1], "from_zzz");
+        let slots = handle.collect_prompt_slots();
+        let entries = slots.get(
+            craft_agent::prompt::PromptId::System,
+            craft_agent::prompt::Slot::ToolUsage,
+        );
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].content, "from_aaa", "BTreeMap should sort by plugin name");
+        assert_eq!(entries[1].content, "from_zzz");
     }
 
     #[test]
-    fn prompt_extra_unload_cleans_up_callback() {
+    fn unload_clears_all_hints_from_plugin() {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::new(Arc::clone(&reg)).unwrap();
         host.load_source(
             "temp_plugin",
             r#"
-            craft.api.register_system_prompt_extra(function()
-                return "temporary"
-            end)
+            craft.api.register_prompt_hint({
+                slot = "tool_usage",
+                content = "temporary",
+            })
             "#,
         )
         .unwrap();
         let handle = host.event_handle().unwrap();
-        assert_eq!(handle.collect_prompt_extras().len(), 1);
+        assert_eq!(
+            handle
+                .collect_prompt_slots()
+                .get(
+                    craft_agent::prompt::PromptId::System,
+                    craft_agent::prompt::Slot::ToolUsage,
+                )
+                .len(),
+            1
+        );
 
         host.unload("temp_plugin").unwrap();
-        assert!(handle.collect_prompt_extras().is_empty());
+        assert!(handle.collect_prompt_slots()
+            .get(
+                craft_agent::prompt::PromptId::System,
+                craft_agent::prompt::Slot::ToolUsage,
+            )
+            .is_empty());
     }
 
-    #[test]
-    fn prompt_extra_re_register_replaces_old_callback() {
+    #[test_case::test_case(
+        r#"craft.api.register_prompt_hint({ slot = "bad_slot", content = "x" })"#,
+        "invalid slot" ; "invalid_slot"
+    )]
+    #[test_case::test_case(
+        r#"craft.api.register_prompt_hint({ slot = "tool_usage", prompt = "bad_prompt", content = "x" })"#,
+        "invalid prompt" ; "invalid_prompt"
+    )]
+    #[test_case::test_case(
+        r#"craft.api.register_prompt_hint({ slot = "tool_usage" })"#,
+        "missing content" ; "missing_content"
+    )]
+    #[test_case::test_case(
+        r#"craft.api.register_prompt_hint({ content = "x" })"#,
+        "missing slot" ; "missing_slot"
+    )]
+    fn invalid_hint_spec_is_rejected(lua_code: &str, _label: &str) {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::new(Arc::clone(&reg)).unwrap();
-        host.load_source(
-            "evolving",
-            r#"
-            craft.api.register_system_prompt_extra(function()
-                return "v1"
-            end)
-            "#,
-        )
-        .unwrap();
-        let handle = host.event_handle().unwrap();
-        assert_eq!(handle.collect_prompt_extras(), vec!["v1"]);
-
-        host.load_source(
-            "evolving",
-            r#"
-            craft.api.register_system_prompt_extra(function()
-                return "v2"
-            end)
-            "#,
-        )
-        .unwrap();
-        let extras = handle.collect_prompt_extras();
-        assert_eq!(extras.len(), 1, "should have exactly one, not two");
-        assert_eq!(extras[0], "v2");
+        assert!(host.load_source("bad_hint", lua_code).is_err());
     }
 }

@@ -20,7 +20,7 @@ use crate::providers::ollama::Ollama;
 use crate::providers::openai::OpenAi;
 use crate::providers::synthetic::Synthetic;
 use crate::providers::zai::{Zai, ZaiPlan};
-use crate::{AgentError, Message, ProviderEvent, StreamResponse, ThinkingConfig};
+use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
 #[strum(serialize_all = "kebab-case")]
@@ -208,7 +208,7 @@ pub trait Provider: Send + Sync {
         system: &'a str,
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
-        thinking: ThinkingConfig,
+        opts: RequestOptions,
         session_id: Option<&'a str>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>>;
 
@@ -245,14 +245,15 @@ pub struct ModelBatch {
 
 pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
     let timeouts = Timeouts::default();
-    let mut futs = futures::stream::FuturesUnordered::new();
+    let mut futs: futures::stream::FuturesUnordered<BoxFuture<'static, ModelBatch>> =
+        futures::stream::FuturesUnordered::new();
 
     for kind in ProviderKind::iter() {
         let Ok(provider) = kind.create(timeouts).await else {
             warn!(provider = %kind, "failed to create provider, skipping");
             continue;
         };
-        futs.push(async move {
+        futs.push(Box::pin(async move {
             match provider.list_models().await {
                 Ok(ids) => {
                     if kind.accepts_arbitrary_models() {
@@ -282,15 +283,34 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
                     }
                 }
             }
-        });
+        }));
     }
 
-    let dynamic_specs = dynamic::dynamic_model_specs();
-    if !dynamic_specs.is_empty() {
-        on_ready(ModelBatch {
-            models: dynamic_specs,
-            warnings: Vec::new(),
-        });
+    for slug in dynamic::discovered_slugs() {
+        let slug = slug.to_string();
+        futs.push(Box::pin(async move {
+            let static_fallback = |reason: String| {
+                warn!(
+                    slug,
+                    error = reason,
+                    "dynamic model listing failed, using static fallback"
+                );
+                ModelBatch {
+                    models: dynamic::dynamic_model_specs_for(&slug),
+                    warnings: vec![format!("{slug}: {reason} (using static fallback)")],
+                }
+            };
+            match dynamic::create(&slug, timeouts) {
+                Ok(provider) => match provider.list_models().await {
+                    Ok(ids) => ModelBatch {
+                        models: ids.into_iter().map(|id| format!("{slug}/{id}")).collect(),
+                        warnings: Vec::new(),
+                    },
+                    Err(e) => static_fallback(e.to_string()),
+                },
+                Err(e) => static_fallback(e.to_string()),
+            }
+        }));
     }
 
     use futures::StreamExt;

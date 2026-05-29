@@ -195,6 +195,7 @@ pub struct ToolContext {
     pub permissions: Arc<PermissionManager>,
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
+    pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -558,7 +559,7 @@ pub fn all_builtin_tool_names() -> Vec<&'static str> {
         .collect()
 }
 
-use craft_providers::{Message, ProviderEvent, StreamResponse, ThinkingConfig};
+use craft_providers::{Message, ProviderEvent, RequestOptions, StreamResponse};
 
 struct NullProvider;
 
@@ -570,7 +571,7 @@ impl Provider for NullProvider {
         _: &'a str,
         _: &'a Value,
         _: &'a flume::Sender<ProviderEvent>,
-        _: ThinkingConfig,
+        _: RequestOptions,
         _: Option<&str>,
     ) -> BoxFuture<'a, Result<StreamResponse, crate::AgentError>> {
         Box::pin(async { unimplemented!() })
@@ -608,6 +609,7 @@ pub(crate) fn interpreter_ctx(
         permissions,
         timeouts: craft_providers::Timeouts::default(),
         file_tracker,
+        prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
     }
 }
 

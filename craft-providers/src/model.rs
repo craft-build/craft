@@ -97,6 +97,7 @@ pub struct ModelEntry {
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
+    pub fast_capable: bool,
 }
 
 fn lookup_entry<'a>(
@@ -144,12 +145,58 @@ pub struct Model {
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
+    pub fast_capable: bool,
 }
 
 impl Model {
+    fn from_base(provider: ProviderKind, model_id: &str, dynamic_slug: Option<&str>) -> Self {
+        let static_entry = lookup_entry(models_for_provider(provider), model_id).ok();
+        let spec = match dynamic_slug {
+            Some(slug) => format!("{slug}/{model_id}"),
+            None => format!("{provider}/{model_id}"),
+        };
+        let tier = crate::tier_map::tier_map().read().unwrap().tier_for(
+            &spec,
+            provider,
+            static_entry.map(|e| e.tier),
+        );
+        let (family, pricing, max_output_tokens, context_window, fast_capable) = match static_entry {
+            Some(e) => (
+                e.family,
+                e.pricing.clone(),
+                e.max_output_tokens,
+                e.context_window,
+                e.fast_capable,
+            ),
+            None => (
+                provider.family(),
+                ModelPricing::ZERO,
+                provider.fallback_max_output(),
+                provider.fallback_context_window(),
+                false,
+            ),
+        };
+        Self {
+            id: model_id.to_string(),
+            provider,
+            dynamic_slug: dynamic_slug.map(str::to_string),
+            tier,
+            family,
+            supports_tool_examples_override: None,
+            pricing,
+            max_output_tokens,
+            context_window,
+            fast_capable,
+        }
+    }
+
     pub fn supports_tool_examples(&self) -> bool {
         self.supports_tool_examples_override
             .unwrap_or_else(|| self.family.supports_tool_examples())
+    }
+
+    pub fn supports_fast(&self) -> bool {
+        self.fast_capable && self.provider == ProviderKind::Anthropic
     }
 
     pub fn spec(&self) -> String {
@@ -197,56 +244,14 @@ impl Model {
         let (provider_str, model_id) = spec.split_once('/').ok_or(ModelError::InvalidFormat)?;
 
         if let Ok(provider) = ProviderKind::from_str(provider_str) {
-            let static_entry = lookup_entry(models_for_provider(provider), model_id).ok();
-            let tier = crate::tier_map::tier_map().read().unwrap().tier_for(
-                spec,
-                provider,
-                static_entry.map(|e| e.tier),
-            );
-            let (family, pricing, max_output_tokens, context_window) = match static_entry {
-                Some(e) => (
-                    e.family,
-                    e.pricing.clone(),
-                    e.max_output_tokens,
-                    e.context_window,
-                ),
-                None => (
-                    provider.family(),
-                    ModelPricing::ZERO,
-                    provider.fallback_max_output(),
-                    provider.fallback_context_window(),
-                ),
-            };
-            return Ok(Self {
-                id: model_id.to_string(),
-                provider,
-                dynamic_slug: None,
-                tier,
-                family,
-                supports_tool_examples_override: None,
-                pricing,
-                max_output_tokens,
-                context_window,
-            });
+            return Ok(Self::from_base(provider, model_id, None));
         }
 
         if let Some(base) = dynamic::base_for_slug(provider_str) {
             if let Some(model) = dynamic::lookup_model(provider_str, model_id) {
                 return Ok(model);
             }
-            let entries = models_for_provider(base);
-            let entry = lookup_entry(entries, model_id)?;
-            return Ok(Self {
-                id: model_id.to_string(),
-                provider: base,
-                dynamic_slug: Some(provider_str.to_string()),
-                tier: entry.tier,
-                family: entry.family,
-                supports_tool_examples_override: None,
-                pricing: entry.pricing.clone(),
-                max_output_tokens: entry.max_output_tokens,
-                context_window: entry.context_window,
-            });
+            return Ok(Self::from_base(base, model_id, Some(provider_str)));
         }
 
         Err(ModelError::UnsupportedProvider(provider_str.to_string()))
@@ -420,5 +425,52 @@ mod tests {
         assert_eq!(model.provider, expected_provider);
         assert_eq!(model.id, expected_id);
         assert_eq!(model.family, expected_provider.family());
+    }
+
+    #[test]
+    fn from_base_dynamic_unknown_model_uses_provider_fallbacks() {
+        let base = ProviderKind::Anthropic;
+        let model = Model::from_base(base, "claude-nonexistent-99", Some("anthropic-oauth"));
+        assert_eq!(model.provider, base);
+        assert_eq!(model.id, "claude-nonexistent-99");
+        assert_eq!(model.dynamic_slug.as_deref(), Some("anthropic-oauth"));
+        assert_eq!(model.spec(), "anthropic-oauth/claude-nonexistent-99");
+        assert_eq!(model.family, base.family());
+        assert_eq!(model.max_output_tokens, base.fallback_max_output());
+        assert_eq!(model.context_window, base.fallback_context_window());
+        let p = &model.pricing;
+        assert_eq!(
+            (p.input, p.output, p.cache_write, p.cache_read),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+    }
+
+    #[test_case("claude-opus-4-6" ; "opus_4_6")]
+    #[test_case("claude-opus-4-7" ; "opus_4_7")]
+    #[test_case("claude-opus-4-8" ; "opus_4_8")]
+    fn supports_fast_true_for_anthropic_opus(model_id: &str) {
+        let model = Model::from_base(ProviderKind::Anthropic, model_id, None);
+        assert!(model.supports_fast());
+    }
+
+    #[test_case("claude-sonnet-4-5" ; "sonnet")]
+    #[test_case("claude-haiku-4-5" ; "haiku")]
+    #[test_case("claude-opus-4-5" ; "opus_4_5")]
+    fn supports_fast_false_for_other_anthropic_models(model_id: &str) {
+        let model = Model::from_base(ProviderKind::Anthropic, model_id, None);
+        assert!(!model.supports_fast());
+    }
+
+    #[test]
+    fn supports_fast_false_for_unknown_anthropic_model() {
+        let model = Model::from_base(ProviderKind::Anthropic, "claude-opus-99", None);
+        assert!(!model.supports_fast());
+    }
+
+    #[test]
+    fn supports_fast_false_for_non_anthropic_even_if_fast_capable() {
+        let mut model = Model::from_base(ProviderKind::Google, "gemini-2.5-pro", None);
+        model.fast_capable = true;
+        assert!(!model.supports_fast());
     }
 }
