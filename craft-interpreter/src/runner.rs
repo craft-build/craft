@@ -22,8 +22,11 @@ const DEFAULT_MAX_MEMORY: usize = 50 * 1024 * 1024;
 const DEFAULT_MAX_RECURSION: usize = 100;
 const SCRIPT_NAME: &str = "agent.py";
 
+/// Synchronous tool callback: receives (name, positional_args, keyword_args).
+/// Returns the JSON result or an error message.
 pub type ToolFn = Box<dyn Fn(&str, Vec<Value>, Vec<(String, Value)>) -> Result<Value, String>>;
 
+/// A pending tool call waiting for async resolution.
 pub struct PendingCall {
     pub call_id: u32,
     pub name: String,
@@ -31,9 +34,11 @@ pub struct PendingCall {
     pub kwargs: Vec<(String, Value)>,
 }
 
+/// Batch-resolves pending async tool calls and returns (call_id, result) pairs.
 pub type AsyncResolver =
     Box<dyn Fn(Vec<PendingCall>) -> Result<Vec<(u32, Result<Value, String>)>, InterpreterError>>;
 
+/// Output of a completed interpreter run.
 #[derive(Debug)]
 pub struct InterpreterResult {
     pub output: Option<Value>,
@@ -62,6 +67,7 @@ impl PrintWriterCallback for StreamingWriter<'_> {
     }
 }
 
+/// Runs code without streaming stdout. Collects all output into `result.stdout`.
 pub fn run(
     code: &str,
     tools: &HashMap<String, ToolFn>,
@@ -74,6 +80,7 @@ pub fn run(
     Ok(InterpreterResult { output, stdout })
 }
 
+/// Runs code with streaming stdout. `on_output` is called for each line.
 pub fn run_streaming(
     code: &str,
     tools: &HashMap<String, ToolFn>,
@@ -222,10 +229,12 @@ fn run_inner(
     }
 }
 
+/// Returns default resource limits (30s timeout, 50MB memory, 100 recursion depth).
 pub fn default_limits() -> ResourceLimits {
     limits_with_timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
 }
 
+/// Returns resource limits with a custom timeout and default memory/recursion.
 pub fn limits_with_timeout(timeout: Duration) -> ResourceLimits {
     ResourceLimits::new()
         .max_duration(timeout)
@@ -233,11 +242,9 @@ pub fn limits_with_timeout(timeout: Duration) -> ResourceLimits {
         .max_recursion_depth(Some(DEFAULT_MAX_RECURSION))
 }
 
+/// Returns resource limits with custom timeout and memory, using default recursion depth.
 pub fn limits(timeout: Duration, max_memory: usize) -> ResourceLimits {
-    ResourceLimits::new()
-        .max_duration(timeout)
-        .max_memory(max_memory)
-        .max_recursion_depth(Some(DEFAULT_MAX_RECURSION))
+    limits_with_timeout(timeout).max_memory(max_memory)
 }
 
 #[cfg(test)]

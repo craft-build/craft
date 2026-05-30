@@ -4,6 +4,7 @@
 
 use monty::MontyObject;
 use serde_json::Value;
+use tracing::debug;
 
 pub fn json_to_monty(value: Value) -> MontyObject {
     match value {
@@ -13,7 +14,10 @@ pub fn json_to_monty(value: Value) -> MontyObject {
             if let Some(i) = n.as_i64() {
                 MontyObject::Int(i)
             } else {
-                MontyObject::Float(n.as_f64().unwrap_or(0.0))
+                MontyObject::Float(
+                    n.as_f64()
+                        .expect("serde_json Number is always i64 or f64"),
+                )
             }
         }
         Value::String(s) => MontyObject::String(s),
@@ -62,7 +66,10 @@ pub fn monty_to_json(obj: &MontyObject) -> Value {
             }
         }
         MontyObject::Repr(s) => Value::String(s.clone()),
-        _ => Value::String(obj.py_repr()),
+        _ => {
+            debug!(ty = %std::any::type_name_of_val(obj), "monty_to_json: unknown MontyObject variant, falling back to repr");
+            Value::String(obj.py_repr())
+        }
     }
 }
 

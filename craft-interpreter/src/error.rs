@@ -1,3 +1,5 @@
+//! Error types for the craft-interpreter crate.
+
 #[derive(Debug, thiserror::Error)]
 pub enum InterpreterError {
     #[error("parse error: {0}")]
