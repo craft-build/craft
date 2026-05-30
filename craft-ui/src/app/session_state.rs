@@ -10,6 +10,7 @@ use craft_providers::{Message, Model, ThinkingConfig, TokenUsage};
 use craft_storage::StateDir;
 use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
 
+use crate::agent::shared_queue::lock;
 use crate::AppSession;
 
 use super::mode::{Mode, PlanState};
@@ -91,7 +92,7 @@ impl SessionState {
             self.session.messages = Vec::clone(&history.load());
         }
         if let Some(outputs) = shared_tool_outputs {
-            self.session.tool_outputs = outputs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            self.session.tool_outputs = lock(outputs).clone();
         }
         self.session.token_usage = self.token_usage;
         self.session.meta.context_size = self.context_size;

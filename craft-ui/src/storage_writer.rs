@@ -8,10 +8,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use color_eyre::Result;
 use craft_storage::StateDir;
 use craft_storage::sessions::{SESSIONS_DIR, SessionError, SessionLog};
 use tracing::warn;
 
+use crate::agent::shared_queue::lock;
 use crate::AppSession;
 
 pub struct StorageWriter {
@@ -21,7 +23,7 @@ pub struct StorageWriter {
 }
 
 impl StorageWriter {
-    pub fn new(dir: StateDir) -> Self {
+    pub fn new(dir: StateDir) -> Result<Self> {
         let latest: Arc<Mutex<Option<Box<AppSession>>>> = Arc::new(Mutex::new(None));
         let writer_latest = Arc::clone(&latest);
         let (notify, notify_rx) = flume::bounded::<()>(1);
@@ -33,7 +35,7 @@ impl StorageWriter {
                 let mut log: Option<SessionLog> = None;
 
                 while notify_rx.recv().is_ok() {
-                    let session = writer_latest.lock().unwrap().take();
+                    let session = lock(&writer_latest).take();
                     let Some(session) = session else { continue };
                     let sessions_dir = match dir.ensure_subdir(SESSIONS_DIR) {
                         Ok(d) => d,
@@ -53,7 +55,7 @@ impl StorageWriter {
                             }
                         }
                     }
-                    let l = log.as_mut().unwrap();
+                    let Some(l) = log.as_mut() else { continue };
                     match l.append(&*session) {
                         Ok(()) => {}
                         Err(SessionError::CursorAhead { .. }) => {
@@ -70,17 +72,17 @@ impl StorageWriter {
                 }
                 let _ = done_tx.send(());
             })
-            .expect("failed to spawn storage writer thread");
+            .map_err(|e| color_eyre::eyre::eyre!("failed to spawn storage-writer thread: {e}"))?;
 
-        Self {
+        Ok(Self {
             latest,
             notify,
             done_rx,
-        }
+        })
     }
 
     pub fn send(&self, session: Box<AppSession>) {
-        *self.latest.lock().unwrap() = Some(session);
+        *lock(&self.latest) = Some(session);
         let _ = self.notify.try_send(());
     }
 
@@ -118,7 +120,7 @@ mod tests {
     #[test]
     fn shutdown_drains_pending_session() {
         let dir = StateDir::from_path(env::temp_dir().join("craft-test-sw"));
-        let writer = StorageWriter::new(dir);
+        let writer = StorageWriter::new(dir).unwrap();
         writer.send(Box::new(AppSession::new("test-model", "/tmp")));
         writer.shutdown(Duration::from_secs(2));
     }

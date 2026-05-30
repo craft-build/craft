@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::AppSession;
+use crate::agent::shared_queue::lock;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
@@ -171,6 +172,17 @@ pub struct App {
     pub(super) buf_click: Option<BufClickHandler>,
     pub(crate) lua_event_handle: Option<EventHandle>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+}
+
+macro_rules! define_overlays {
+    ($($field:ident),+ $(,)?) => {
+        fn overlays(&self) -> Vec<&dyn Overlay> {
+            vec![$(&self.$field,)+]
+        }
+        fn overlays_mut(&mut self) -> Vec<&mut dyn Overlay> {
+            vec![$(&mut self.$field,)+]
+        }
+    };
 }
 
 impl App {
@@ -869,10 +881,7 @@ impl App {
                 self.transition_plan(PlanTrigger::WriteDone);
             }
             if let Some(ref outputs) = self.shared_tool_outputs {
-                outputs
-                    .lock()
-                    .unwrap()
-                    .insert(e.id.clone(), e.output.clone());
+                lock(outputs).insert(e.id.clone(), e.output.clone());
             }
             if let ToolOutput::TodoList(ref items) = e.output {
                 self.chats[chat_idx].todo_panel.on_todowrite(items);
@@ -1128,7 +1137,10 @@ impl App {
     }
 
     fn execute_mcp_prompt(&mut self, name: &str, args: &str) -> Vec<Action> {
-        let prompt = self.command_palette.find_mcp_prompt(name).unwrap().clone();
+        let Some(prompt) = self.command_palette.find_mcp_prompt(name) else {
+            return vec![];
+        };
+        let prompt = prompt.clone();
 
         let arguments = Self::parse_prompt_args(&prompt, args);
         let missing: Vec<_> = prompt
@@ -1240,39 +1252,11 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 12] {
-        [
-            &self.help_modal,
-            &self.btw_modal,
-            &self.float_mgr,
-            &self.search_modal,
-            &self.file_picker,
-            &self.task_picker,
-            &self.session_picker,
-            &self.rewind_picker,
-            &self.theme_picker,
-            &self.model_picker,
-            &self.mcp_picker,
-            &self.permission_prompt,
-        ]
-    }
-
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 12] {
-        [
-            &mut self.help_modal,
-            &mut self.btw_modal,
-            &mut self.float_mgr,
-            &mut self.search_modal,
-            &mut self.file_picker,
-            &mut self.task_picker,
-            &mut self.session_picker,
-            &mut self.rewind_picker,
-            &mut self.theme_picker,
-            &mut self.model_picker,
-            &mut self.mcp_picker,
-            &mut self.permission_prompt,
-        ]
-    }
+    define_overlays!(
+        help_modal, btw_modal, float_mgr, search_modal,
+        file_picker, task_picker, session_picker, rewind_picker,
+        theme_picker, model_picker, mcp_picker, permission_prompt,
+    );
 
     pub fn any_overlay_open(&self) -> bool {
         self.overlays().iter().any(|o| o.is_open())

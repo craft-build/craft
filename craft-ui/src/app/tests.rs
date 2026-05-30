@@ -32,7 +32,7 @@ fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
 }
 
 fn test_app() -> App {
-    let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir())));
+    let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir())).unwrap());
     let permissions = Arc::new(PermissionManager::new(
         PermissionsConfig {
             allow_all: false,
@@ -477,7 +477,7 @@ fn load_session_clears_plan() {
     let dir = StateDir::from_path(tmp.path().to_path_buf());
     let writer = Arc::new(StorageWriter::new(StateDir::from_path(
         tmp.path().to_path_buf(),
-    )));
+    )).unwrap());
     let model = test_model();
     let mut app = App::new(
         &model,

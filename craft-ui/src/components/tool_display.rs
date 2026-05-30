@@ -107,7 +107,7 @@ pub(crate) fn tool_output_annotation(output: &ToolOutput) -> Option<String> {
 
 fn extract_path_suffix(s: &str) -> Option<(&str, &str)> {
     let i = s.rfind(" in ")?;
-    let path = s[i + 4..].split('"').next().unwrap();
+    let path = s[i + 4..].split('"').next()?;
     Some((&s[..i], path))
 }
 

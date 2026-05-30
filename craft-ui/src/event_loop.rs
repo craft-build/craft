@@ -19,13 +19,13 @@ use craft_storage::StateDir;
 use tracing::warn;
 
 use crate::AppSession;
-use crate::agent::{AgentCommand, AgentHandles, ModelSlot, shared_queue::QueueItem};
+use crate::agent::{AgentCommand, AgentHandles, ModelSlot, shared_queue::{QueueItem, lock}};
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg};
 #[cfg(feature = "demo")]
 use crate::components;
 use crate::components::input::Submission;
-use crate::components::{Action, ExitRequest, Status};
+use crate::components::{Action, ExitRequest, LoadedSession, Status};
 
 #[cfg(feature = "demo")]
 use crate::mock;
@@ -207,7 +207,7 @@ impl<'t> EventLoop<'t> {
         crate::update::spawn_check();
 
         let bg = spawn_model_fetch();
-        let storage_writer = Arc::new(StorageWriter::new(storage.clone()));
+        let storage_writer = Arc::new(StorageWriter::new(storage.clone())?);
         let (shell_tx, shell_rx) = flume::unbounded::<ShellEvent>();
         let (action_tx, action_rx) = flume::unbounded::<Action>();
 
@@ -448,6 +448,11 @@ impl<'t> EventLoop<'t> {
         }
     }
 
+    fn respawn_with_tool_outputs(&mut self, loaded: LoadedSession) {
+        self.respawn_agent(loaded.messages);
+        *lock(&self.handles.tool_outputs) = loaded.tool_outputs;
+    }
+
     fn respawn_agent(&mut self, history: Vec<Message>) {
         let lua_handle = self.app.lua_event_handle.clone();
         self.handles.respawn(
@@ -505,12 +510,7 @@ impl<'t> EventLoop<'t> {
                         });
                     });
                 } else {
-                    self.respawn_agent(loaded.messages);
-                    *self
-                        .handles
-                        .tool_outputs
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = loaded.tool_outputs;
+                    self.respawn_with_tool_outputs(loaded);
                 }
             }
             Action::ChangeModel(spec) => self.change_model(spec),
@@ -577,13 +577,7 @@ impl<'t> EventLoop<'t> {
                     Err(e) => self.app.flash(format!("Failed to create provider: {e}")),
                 }
                 if let Some(loaded) = pending_load_session {
-                    let loaded = *loaded;
-                    self.respawn_agent(loaded.messages);
-                    *self
-                        .handles
-                        .tool_outputs
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = loaded.tool_outputs;
+                    self.respawn_with_tool_outputs(*loaded);
                 }
             }
         }
