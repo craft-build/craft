@@ -1,0 +1,176 @@
+metadata:
+  name: "Carmack Naming Conventions"
+  version: "1.0.0"
+  description: "Naming conventions derived from John Carmack's id Software codebases"
+  language: "language-agnostic"
+  category: "naming"
+
+description: |
+  Carmack's naming is systematic and prefix-based, making subsystem ownership 
+  and data flow immediately clear. The goal is to eliminate ambiguity about 
+  what code owns what data.
+
+rules:
+  - id: "SUBSYSTEM-PREFIX"
+    name: "Use subsystem prefixes for functions"
+    description: |
+      Functions should use lowercase prefixes indicating their subsystem.
+      This makes ownership and responsibility immediately clear when reading code.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "R_RenderScene() // Renderer subsystem"
+        - "S_StartSound() // Sound subsystem"
+        - "CL_ReadPackets() // Client subsystem"
+        - "SV_Frame() // Server subsystem"
+      bad:
+        - "RenderScene() // No prefix, unclear ownership"
+        - "startSound() // No prefix"
+    tags:
+      - "functions"
+      - "organization"
+      - "clarity"
+
+  - id: "CLASS-PREFIX"
+    name: "Use namespace prefix for classes/types"
+    description: |
+      Classes and types should use a consistent lowercase prefix followed by 
+      PascalCase. This prevents naming collisions and makes code origin obvious.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "idStr // id Software string class"
+        - "idVec3 // id Software 3D vector"
+        - "idEntity // id Software entity class"
+      bad:
+        - "String // Generic, collision-prone"
+        - "Vec3 // No namespace"
+    tags:
+      - "classes"
+      - "types"
+      - "namespacing"
+
+  - id: "STRUCT-SUFFIX"
+    name: "Use _t suffix for structs and typedefs"
+    description: |
+      Struct types and typedefs should end with _t to clearly distinguish 
+      them from other identifiers.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "renderEntity_t"
+        - "trace_t"
+        - "memblock_t"
+      bad:
+        - "RenderEntity // No suffix"
+        - "trace // Could be function or variable"
+    tags:
+      - "structs"
+      - "typedefs"
+      - "clarity"
+
+  - id: "DESCRIPTIVE-NAMES"
+    name: "Use descriptive names over abbreviations"
+    description: |
+      Variable and function names should be descriptive and self-documenting.
+      Clarity is more important than brevity.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "entityNumber"
+        - "frameNumber"
+        - "currentFrameIndex"
+        - "shadowVolume"
+      bad:
+        - "idx // Too abbreviated"
+        - "n // Unclear meaning"
+        - "tmp // Lazy naming"
+    tags:
+      - "variables"
+      - "readability"
+      - "clarity"
+
+  - id: "NO-HUNGARIAN"
+    name: "Avoid Hungarian notation"
+    description: |
+      Do not prefix variables with type information. Modern IDEs show types,
+      and type prefixes add noise without value.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "entityCount"
+        - "position"
+        - "isValid"
+      bad:
+        - "iEntityCount // Type prefix"
+        - "pPosition // Pointer prefix"
+        - "bIsValid // Boolean prefix"
+    tags:
+      - "variables"
+      - "antipattern"
+
+  - id: "CONST-NAMING"
+    name: "Use SCREAMING_SNAKE_CASE for constants"
+    description: |
+      Constants and macro definitions should use uppercase with underscores
+      to clearly distinguish them from variables.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "MAX_ENTITIES"
+        - "ZONEID"
+        - "STR_ALLOC_GRAN"
+      bad:
+        - "maxEntities // Looks like variable"
+        - "Zoneid // Inconsistent case"
+    tags:
+      - "constants"
+      - "macros"
+      - "conventions"
+
+  - id: "CAMEL-CASE-LOCALS"
+    name: "Use camelCase for local variables and members"
+    description: |
+      Local variables and class members should use camelCase starting with 
+      lowercase letter.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "entityNumber"
+        - "frameCount"
+        - "deltaTime"
+      bad:
+        - "EntityNumber // PascalCase for local"
+        - "entity_number // snake_case"
+    tags:
+      - "variables"
+      - "members"
+      - "conventions"
+
+  - id: "BOOL-PREDICATES"
+    name: "Use is/has/can prefix for boolean predicates"
+    description: |
+      Boolean functions and variables should start with is, has, can, or 
+      similar predicates to make their return type obvious.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "isValid()"
+        - "hasChildren()"
+        - "canMove()"
+        - "shouldRender"
+      bad:
+        - "valid() // Ambiguous"
+        - "children() // Unclear return type"
+    tags:
+      - "booleans"
+      - "functions"
+      - "clarity"

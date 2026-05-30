@@ -1,0 +1,157 @@
+metadata:
+  name: "Carmack Code Organization"
+  version: "1.0.0"
+  description: "Code organization and file structure patterns from id Software"
+  language: "language-agnostic"
+  category: "organization"
+
+description: |
+  Carmack's code organization emphasizes clear subsystem boundaries, 
+  predictable file structure, and minimal dependencies. The goal is to make
+  the codebase navigable and understandable.
+
+rules:
+  - id: "ONE-SUBSYSTEM-PER-FILE"
+    name: "Each file handles one subsystem"
+    description: |
+      Files should be focused on a single subsystem or logical component.
+      Header and implementation should be paired with matching names.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Entity.h / Entity.cpp"
+        - "Heap.h / Heap.cpp"
+        - "Renderer.h / Renderer.cpp"
+      bad:
+        - "Utils.cpp // Too generic"
+        - "Misc.cpp // Unclear purpose"
+    tags:
+      - "files"
+      - "organization"
+      - "modularity"
+
+  - id: "SUBSYSTEM-DIRECTORIES"
+    name: "Organize by subsystem in directories"
+    description: |
+      Major subsystems should have their own directories. Directory structure
+      should reflect architectural boundaries.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "renderer/ - Graphics subsystem"
+        - "sound/ - Audio subsystem"
+        - "game/ - Game logic"
+        - "platform/ - OS abstraction"
+      bad:
+        - "src/ - Everything in one folder"
+        - "lib/ - Mixed purposes"
+    tags:
+      - "directories"
+      - "architecture"
+      - "organization"
+
+  - id: "MINIMIZE-DEPENDENCIES"
+    name: "Minimize file dependencies"
+    description: |
+      Reduce coupling between files. Use forward declarations where possible
+      instead of includes. This improves compile times and modularity.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Forward declare instead of include\nclass Entity;\nvoid Process(Entity* e);"
+      bad:
+        - "#include \"Everything.h\" // Kitchen sink include"
+    tags:
+      - "dependencies"
+      - "compilation"
+      - "modularity"
+
+  - id: "CALLEE-BEFORE-CALLER"
+    name: "Order functions with callees before callers"
+    description: |
+      Functions should be ordered so called functions appear before calling
+      functions. This eliminates forward declarations and makes dependency
+      flow obvious when reading top-to-bottom.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Helper appears first\nvoid Helper() {}\n// Caller appears after\nvoid Main() { Helper(); }"
+      bad:
+        - "// Forward declaration needed\nvoid Main();\nvoid Helper() {}\nvoid Main() { Helper(); }"
+    tags:
+      - "functions"
+      - "ordering"
+      - "readability"
+
+  - id: "LIMIT-FILE-SIZE"
+    name: "Keep files to reasonable size"
+    description: |
+      While Carmack accepts long functions when appropriate, files should
+      remain manageable. Split files when they exceed ~2000-3000 lines or
+      handle multiple unrelated concerns.
+    priority: "hint"
+    enabled: true
+    tags:
+      - "files"
+      - "maintainability"
+
+  - id: "CONSISTENT-INDENTATION"
+    name: "Use consistent indentation"
+    description: |
+      Use consistent indentation throughout the codebase. Tabs or spaces
+      are acceptable, but be consistent. id Software traditionally uses tabs.
+    priority: "error"
+    enabled: true
+    tags:
+      - "formatting"
+      - "consistency"
+
+  - id: "MINIMIZE-NESTING"
+    name: "Minimize nesting depth"
+    description: |
+      Keep nesting depth low by using early returns and reducing the 'area
+      under ifs'. Deeply nested code is harder to reason about.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "if (!IsValid(entity)) {\n    return;\n}\n// Rest of function at base level"
+      bad:
+        - "if (IsValid(entity)) {\n    // 50 lines of nested code\n}"
+    tags:
+      - "control-flow"
+      - "readability"
+      - "complexity"
+
+  - id: "RELATED-CODE-TOGETHER"
+    name: "Group related code together"
+    description: |
+      Keep related functions, types, and data structures near each other
+      in the file. Don't scatter related code across the file.
+    priority: "info"
+    enabled: true
+    tags:
+      - "organization"
+      - "cohesion"
+      - "readability"
+
+  - id: "EXPLICIT-SCOPE"
+    name: "Make scope explicit"
+    description: |
+      Use explicit scope delimiters (braces) even for single-line blocks
+      when it improves clarity or prevents future bugs.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if (condition) {\n    DoSomething();\n}"
+      bad:
+        - "if (condition)\n    DoSomething();\n    DoSomethingElse(); // Bug waiting to happen"
+    tags:
+      - "scope"
+      - "safety"
+      - "clarity"

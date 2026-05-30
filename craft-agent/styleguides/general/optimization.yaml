@@ -1,0 +1,216 @@
+metadata:
+  name: "Carmack Optimization Patterns"
+  version: "1.0.0"
+  description: "Performance optimization philosophy and patterns"
+  language: "language-agnostic"
+  category: "optimization"
+
+description: |
+  Carmack's optimization philosophy: profile first, optimize hot paths,
+  prioritize worst-case performance over average case, and make problems
+  easier to optimize. Performance matters, but measured performance.
+
+rules:
+  - id: "PROFILE-FIRST"
+    name: "Profile before optimizing"
+    description: |
+      Always profile to find actual bottlenecks before optimizing. Don't
+      guess. Optimization based on intuition often targets wrong code.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Profiled, this function is 40% of frame time\n// Now optimize"
+      bad:
+        - "// This looks slow, let me optimize\n// (Actually 0.1% of runtime)"
+    tags:
+      - "profiling"
+      - "measurement"
+      - "data-driven"
+
+  - id: "WORST-CASE-MATTERS"
+    name: "Optimize worst-case over average-case"
+    description: |
+      For real-time applications (60fps target), worst-case performance
+      matters more than average case. Avoid highly variable performance.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Consistent 14ms frame time"
+      bad:
+        - "// Average 10ms, spikes to 40ms (frame drops)"
+    tags:
+      - "real-time"
+      - "consistency"
+      - "framerate"
+
+  - id: "CHANGE-PROBLEM"
+    name: "The secret: change the problem to make it easier to optimize"
+    description: |
+      Often the best optimization is restructuring the problem itself.
+      Don't just optimize existing approach; consider different approaches.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Instead of: iterate all entities checking visibility\n// Do: spatial partitioning, check only nearby"
+      bad:
+        - "// Micro-optimizing the slow iteration"
+    tags:
+      - "algorithmic"
+      - "restructuring"
+      - "big-picture"
+
+  - id: "INLINE-HOT-PATHS"
+    name: "Inline strategically on hot paths"
+    description: |
+      Use inline for small, frequently-called functions in performance
+      critical code. Don't over-inline; measure the impact.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "inline float Vec3::Length() const // Called millions of times"
+      bad:
+        - "inline void LoadLevel() // Large, called once"
+    tags:
+      - "inlining"
+      - "hot-path"
+      - "micro-optimization"
+
+  - id: "DATA-ORIENTED-LAYOUT"
+    name: "Organize data for cache efficiency"
+    description: |
+      Structure data for how it's accessed. Keep hot data together,
+      use Structure of Arrays when iterating one field, pad to cache lines.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// All positions contiguous for iteration\nfloat positions[N * 3];"
+      bad:
+        - "// Scattered: position[i], skip, position[i+1], skip...\nstruct Entity { pos; other[100]; };"
+    tags:
+      - "cache"
+      - "dod"
+      - "memory-layout"
+
+  - id: "SIMD-WHEN-MEASURED"
+    name: "Use SIMD only for measured hot spots"
+    description: |
+      SIMD optimization should target profiled hot paths, not be applied
+      speculatively. SIMD adds complexity; ensure payoff is real.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Profiled: vector math is 25% of time\n// Now add SSE version"
+      bad:
+        - "// Let's SIMD everything! (No measurement)"
+    tags:
+      - "simd"
+      - "vectorization"
+      - "measurement"
+
+  - id: "AVOID-PREMATURE-ABSTRACTION"
+    name: "Don't prematurely optimize for flexibility"
+    description: |
+      You can prematurely optimize maintainability, flexibility, security,
+      and robustness just like performance. Don't add abstractions 'in case'.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Simple, direct code\nvoid Process(Entity* e) { e->x += 1; }"
+      bad:
+        - "// Over-engineered for hypothetical future\ntemplate<Policy, Traits> AbstractProcessor..."
+    tags:
+      - "complexity"
+      - "yagni"
+      - "abstraction"
+
+  - id: "BRANCH-PREDICTION"
+    name: "Consider branch prediction patterns"
+    description: |
+      Structure conditionals to favor the common path. Modern CPUs predict
+      branches; help them predict correctly. Consistent execution is fast.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if (likely_condition) { /* common path */ }"
+      bad:
+        - "if (rare_error) { /* rare branch */ } else { /* common path */ }"
+    tags:
+      - "branches"
+      - "cpu"
+      - "prediction"
+
+  - id: "MEASURE-DONT-ASSUME"
+    name: "Measure actual performance, don't assume"
+    description: |
+      Modern CPUs are complex. What seems faster may be slower. Always
+      measure with real data and real hardware.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Tested both approaches, version A is 2x faster"
+      bad:
+        - "// This should be faster (never measured)"
+    tags:
+      - "measurement"
+      - "validation"
+      - "evidence"
+
+  - id: "ALGORITHMIC-FIRST"
+    name: "Algorithmic optimization before micro-optimization"
+    description: |
+      Better algorithms beat micro-optimizations. O(n²) → O(n log n) is
+      more valuable than shaving cycles from inner loop.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Use hash table O(1) instead of linear search O(n)"
+      bad:
+        - "// Micro-optimize the O(n²) loop"
+    tags:
+      - "algorithms"
+      - "complexity"
+      - "big-o"
+
+  - id: "AVOID-ALLOCATIONS-HOT-PATH"
+    name: "Avoid allocation in hot paths"
+    description: |
+      Memory allocation is expensive. Pre-allocate or use stack allocation
+      for performance-critical code executed every frame.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Pre-allocated buffer reused each frame\nstatic char buffer[4096];"
+      bad:
+        - "// Allocate every frame\nchar* buffer = malloc(4096);"
+    tags:
+      - "allocation"
+      - "hot-path"
+      - "performance"
+
+  - id: "LOCK-FREE-WHEN-PROVEN"
+    name: "Use lock-free structures only when proven necessary"
+    description: |
+      Lock-free data structures are complex and easy to get wrong. Use
+      simple locks unless profiling shows lock contention is a real issue.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Simple mutex, measured overhead is acceptable"
+      bad:
+        - "// Complex lock-free structure (no contention measured)"
+    tags:
+      - "concurrency"
+      - "locks"
+      - "complexity"

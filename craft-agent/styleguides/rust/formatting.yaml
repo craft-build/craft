@@ -1,0 +1,84 @@
+metadata:
+  name: "Rust Formatting Style Guide"
+  version: "1.0.0"
+  description: "Formatting and whitespace conventions for Rust"
+  language: "rust"
+  category: "formatting"
+
+description: "Formatting and whitespace conventions"
+
+rules:
+  - id: "INDENT-SPACES"
+    name: "Use spaces for indentation"
+    description: "Use spaces, not tabs. All indentation must be a multiple of 4 spaces."
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn main() {\n    let x = 5;\n}"
+      bad:
+        - "fn main() {\n\tlet x = 5;\n}"
+    tags: ["formatting", "whitespace"]
+
+  - id: "INDENT-LEVEL"
+    name: "4 spaces per indentation level"
+    description: "Each indentation level must be exactly 4 spaces."
+    priority: "error"
+    enabled: true
+    tags: ["formatting", "whitespace"]
+
+  - id: "LINE-WIDTH"
+    name: "Maximum line width 100 characters"
+    description: "Lines should not exceed 100 characters in width."
+    priority: "warning"
+    enabled: true
+    tags: ["formatting", "line-length"]
+
+  - id: "BLOCK-INDENT"
+    name: "Prefer block indent over visual indent"
+    description: "Use block indentation rather than visual indentation for smaller diffs and less rightward drift."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "a_function_call(\n    foo,\n    bar,\n);"
+      bad:
+        - "a_function_call(foo,\n                bar);"
+    tags: ["formatting", "indentation"]
+
+  - id: "TRAILING-COMMAS"
+    name: "Use trailing commas"
+    description: "Include trailing commas in comma-separated lists when followed by newlines for easier code movement and smaller diffs."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "let array = [\n    element,\n    another_element,\n];"
+      bad:
+        - "let array = [\n    element,\n    another_element\n];"
+    tags: ["formatting", "punctuation"]
+
+  - id: "BLANK-LINES"
+    name: "Use zero or one blank lines"
+    description: "Separate items and statements with zero or one blank lines (one or two newlines total)."
+    priority: "info"
+    enabled: true
+    tags: ["formatting", "whitespace"]
+
+  - id: "NO-TRAILING-WHITESPACE"
+    name: "No trailing whitespace"
+    description: "Do not include trailing whitespace on any line, including code, comments, blank lines, and string literals."
+    priority: "error"
+    enabled: true
+    tags: ["formatting", "whitespace"]
+
+  - id: "SMALL-ITEM-FORMAT"
+    name: "Format small items inline"
+    description: "Small constructs (simple, short expressions) can be formatted on a single line. Tools use heuristics based on character count and complexity."
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "Foo { f1, f2 }"
+        - "Foo {\n    f1: complex_expression(),\n    f2: another_expression(),\n}"
+    tags: ["formatting", "organization"]

@@ -1,0 +1,219 @@
+metadata:
+  name: "Carmack Abstraction Principles"
+  version: "1.0.0"
+  description: "Guidelines on abstraction, complexity, and over-engineering"
+  language: "language-agnostic"
+  category: "abstraction"
+
+description: |
+  Carmack advocates restraint with abstraction. Kill unnecessary abstractions.
+  The cost of abstraction can outweigh benefits. Prefer concrete, simple
+  code over generic, complex code unless generality is proven necessary.
+
+rules:
+  - id: "KILL-ABSTRACTIONS"
+    name: "Remove unnecessary abstractions"
+    description: |
+      It is not uncommon for the cost of an abstraction to outweigh the
+      benefit it delivers. Look for opportunities to simplify by removing
+      layers of indirection.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Direct, simple\nvoid Process(Entity* e) { e->x += 1; }"
+      bad:
+        - "// Over-abstracted\nEntityProcessor<DefaultPolicy, HeapAllocator>::Process()"
+    tags:
+      - "simplicity"
+      - "abstraction"
+      - "complexity"
+
+  - id: "CONCRETE-OVER-GENERIC"
+    name: "Prefer concrete code over generic templates"
+    description: |
+      Generic code is harder to read and debug. Use generics sparingly,
+      only when the abstraction provides clear value across multiple uses.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Concrete, clear\nvoid ProcessEntities(Entity* entities, int count)"
+      bad:
+        - "// Over-generic\ntemplate<typename T, typename Policy, typename... Args>\nvoid Process()"
+    tags:
+      - "generics"
+      - "templates"
+      - "clarity"
+
+  - id: "TEMPLATES-UTILITY-ONLY"
+    name: "Limit templates to low-level utilities"
+    description: |
+      Templates are appropriate for containers, math types, and low-level
+      utilities. Avoid in business logic where concrete types are clearer.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "template<class T> class Array { }; // Container"
+        - "template<typename T> T Max(T a, T b); // Utility"
+      bad:
+        - "template<typename Policy> class GameLogic { }; // Wrong level"
+    tags:
+      - "templates"
+      - "scope"
+      - "appropriateness"
+
+  - id: "YAGNI"
+    name: "You Aren't Gonna Need It (YAGNI)"
+    description: |
+      Don't add features, flexibility, or abstractions for hypothetical
+      future needs. Build what's needed now, refactor when needs change.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Simple, meets current needs\nstruct Config { int width; int height; };"
+      bad:
+        - "// Over-engineered for 'maybe someday'\nclass Config {\n    PluginSystem plugins;\n    EventBus events;\n    ...\n};"
+    tags:
+      - "yagni"
+      - "simplicity"
+      - "future-proofing"
+
+  - id: "PREMATURE-OPTIMIZATION-FLEXIBILITY"
+    name: "Don't prematurely optimize for flexibility"
+    description: |
+      You can prematurely optimize maintainability, flexibility, security,
+      and robustness just like you can performance. Add complexity only
+      when justified.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Simple, works\nvoid LoadConfig(const char* path)"
+      bad:
+        - "// Over-flexible for no reason\nConfigLoader<FileSystem, Parser, Validator, Cache>()"
+    tags:
+      - "premature-optimization"
+      - "flexibility"
+      - "complexity"
+
+  - id: "INTERFACES-PROVEN-NEED"
+    name: "Create interfaces only when polymorphism is needed"
+    description: |
+      Don't create interfaces 'just in case'. Add polymorphism when you
+      have multiple concrete implementations that need to be swappable.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Two real implementations\nclass IRenderer { };\nclass D3DRenderer : IRenderer { };\nclass VulkanRenderer : IRenderer { };"
+      bad:
+        - "// Only one implementation, no need for interface\nclass IGameManager { };\nclass GameManager : IGameManager { };"
+    tags:
+      - "interfaces"
+      - "polymorphism"
+      - "abstraction"
+
+  - id: "LAYER-COUNT-MINIMIZE"
+    name: "Minimize layers of indirection"
+    description: |
+      Each layer of indirection makes code harder to understand. Keep the
+      number of layers small. Don't build frameworks on frameworks.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Direct: 1-2 layers\napp -> renderer -> graphics API"
+      bad:
+        - "// Too many layers: 5+ layers\napp -> facade -> adapter -> wrapper -> bridge -> API"
+    tags:
+      - "layers"
+      - "indirection"
+      - "complexity"
+
+  - id: "COMPOSITION-OVER-INHERITANCE"
+    name: "Prefer composition over deep inheritance"
+    description: |
+      Deep inheritance hierarchies are brittle and hard to modify. Prefer
+      composition and simple inheritance hierarchies (1-2 levels).
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Composition\nclass Entity {\n    RenderComponent render;\n    PhysicsComponent physics;\n};"
+      bad:
+        - "// Deep inheritance\nObject -> Actor -> Character -> Enemy -> FlyingEnemy -> Boss"
+    tags:
+      - "composition"
+      - "inheritance"
+      - "design"
+
+  - id: "AVOID-PATTERN-OVERUSE"
+    name: "Don't overuse design patterns"
+    description: |
+      Design patterns solve specific problems. Don't apply patterns because
+      they're patterns. Apply them when they solve a real problem.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Simple factory when needed\nEntity* CreateEntity(type)"
+      bad:
+        - "// Unnecessary pattern application\nAbstractFactoryBuilderStrategyProxy..."
+    tags:
+      - "patterns"
+      - "design"
+      - "complexity"
+
+  - id: "DUPLICATION-VS-ABSTRACTION"
+    name: "Some duplication is better than wrong abstraction"
+    description: |
+      Don't create abstractions prematurely to avoid duplication. Wait until
+      you have 3+ similar cases, then abstract. Early abstraction often wrong.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Duplicate twice, then abstract on third occurrence"
+      bad:
+        - "// Abstract after seeing pattern once (often wrong)"
+    tags:
+      - "duplication"
+      - "abstraction"
+      - "timing"
+
+  - id: "SIMPLE-DATA-STRUCTURES"
+    name: "Prefer simple data structures"
+    description: |
+      Use the simplest data structure that meets needs. Array often beats
+      complex tree or graph. Simple is fast, debuggable, and maintainable.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Simple array, linear search\nEntity entities[MAX_ENTITIES];"
+      bad:
+        - "// Complex structure for 10 items\nBalancedTreeMapWithCustomComparator..."
+    tags:
+      - "data-structures"
+      - "simplicity"
+      - "performance"
+
+  - id: "READABLE-OVER-CLEVER"
+    name: "Prioritize readability over cleverness"
+    description: |
+      Clever code is impressive but unmaintainable. Write code that future
+      you (or teammates) can understand at 3am debugging a crash.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Clear\nif (x > 0 && x < max) { ... }"
+      bad:
+        - "// Clever\nif ((unsigned)x < (unsigned)max) { ... }"
+    tags:
+      - "readability"
+      - "cleverness"
+      - "maintenance"

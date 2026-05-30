@@ -1,0 +1,222 @@
+metadata:
+  name: "Rust Functional Patterns (Carmack's FP Philosophy)"
+  version: "1.0.0"
+  description: "Functional programming patterns following Carmack's evolution toward pure functions"
+  language: "rust"
+  category: "functional"
+
+description: |
+  Carmack evolved toward functional style: "I have gotten much more bullish
+  about pure functional programming." Rust's iterators, immutability by default,
+  and expression-oriented design align perfectly with this philosophy.
+
+rules:
+  - id: "ITERATOR-CHAINS"
+    name: "Prefer iterator chains over manual loops"
+    description: |
+      Iterator combinators (map, filter, fold) are more declarative,
+      composable, and often optimize better than manual loops.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "let alive: Vec<_> = entities.iter()\n    .filter(|e| e.is_alive())\n    .filter(|e| e.in_range(player))\n    .take(MAX_TRACKED)\n    .collect();"
+      bad:
+        - "let mut alive = Vec::new();\nfor e in &entities {\n    if e.is_alive() && e.in_range(player) {\n        if alive.len() < MAX_TRACKED {\n            alive.push(e);\n        }\n    }\n}"
+    tags: ["functional", "iterators", "carmack"]
+
+  - id: "EXPRESSIONS-OVER-STATEMENTS"
+    name: "Prefer expressions over statements"
+    description: |
+      Rust is expression-oriented. Use expressions (if, match, blocks)
+      that return values instead of statements with side effects.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "let status = if health > 0.0 {\n    Status::Alive\n} else {\n    Status::Dead\n};"
+      bad:
+        - "let mut status;\nif health > 0.0 {\n    status = Status::Alive;\n} else {\n    status = Status::Dead;\n}"
+    tags: ["functional", "expressions", "immutability"]
+
+  - id: "IMMUTABLE-UPDATE"
+    name: "Use immutable updates with struct update syntax"
+    description: |
+      Rather than mutating, create new values with struct update syntax.
+      This makes data flow clear.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let updated = Player {\n    health: player.health - damage,\n    last_hit: now,\n    ..player\n};"
+      bad:
+        - "player.health -= damage;\nplayer.last_hit = now;\n// Mutation hides data flow"
+    tags: ["functional", "immutability", "carmack"]
+
+  - id: "MAP-FILTER-FOLD"
+    name: "Use map/filter/fold patterns"
+    description: |
+      Collection transformations should use functional patterns:
+      map to transform, filter to select, fold to aggregate.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "let total_damage: f32 = projectiles.iter()\n    .filter_map(|p| p.hit_result())\n    .map(|hit| hit.damage)\n    .sum();"
+      bad:
+        - "let mut total = 0.0;\nfor p in &projectiles {\n    if let Some(hit) = p.hit_result() {\n        total += hit.damage;\n    }\n}"
+    tags: ["functional", "patterns", "carmack"]
+
+  - id: "CLOSURE-COMPOSITION"
+    name: "Compose operations with closures"
+    description: |
+      Build complex operations by composing small, pure closures.
+      Each closure does one thing.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let transform = |v: Vec3| v.normalized();\nlet scale = |v: Vec3| v * 2.0;\nlet result = entities.iter()\n    .map(|e| e.position)\n    .map(transform)\n    .map(scale);"
+      bad:
+        - "let result = entities.iter()\n    .map(|e| {\n        let v = e.position;\n        let norm = v.normalized();\n        norm * 2.0\n    });"
+    tags: ["functional", "closures", "composition"]
+
+  - id: "OPTION-RESULT-CHAINS"
+    name: "Chain Option/Result operations"
+    description: |
+      Use map, and_then, or_else to chain operations on Option/Result.
+      This creates clean pipelines without nested matches.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn parse_config(input: &str) -> Option<Config> {\n    tokenize(input)\n        .and_then(|tokens| validate(&tokens))\n        .and_then(|valid| build_config(valid))\n}"
+      bad:
+        - "fn parse_config(input: &str) -> Option<Config> {\n    match tokenize(input) {\n        Some(tokens) => match validate(&tokens) {\n            Some(valid) => build_config(valid),\n            None => None,\n        },\n        None => None,\n    }\n}"
+    tags: ["functional", "option", "result", "chaining"]
+
+  - id: "PURE-FUNCTIONS"
+    name: "Write pure functions when possible"
+    description: |
+      Functions that only read inputs and return outputs are easier to
+      test, reason about, and parallelize. No side effects.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn normalized(v: Vec3) -> Vec3 {\n    let len = v.length();\n    Vec3 { x: v.x/len, y: v.y/len, z: v.z/len }\n}"
+      bad:
+        - "fn normalize(v: &mut Vec3) {\n    let len = v.length();\n    v.x /= len; v.y /= len; v.z /= len;\n}"
+    tags: ["functional", "purity", "carmack"]
+
+  - id: "SIDE-EFFECTS-AT-EDGES"
+    name: "Isolate side effects to system boundaries"
+    description: |
+      Keep I/O, mutations, and side effects at system edges. Core
+      logic should be pure transformations.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Pure core\nfn process_data(data: &Data) -> Result { ... }\n\n// Side effects at edge\nfn main() {\n    let data = read_file().unwrap();\n    let result = process_data(&data);\n    write_file(&result).unwrap();\n}"
+      bad:
+        - "fn process_data(data: &Data) -> Result {\n    log_event(\"Processing\"); // Side effect mixed with logic\n    let result = transform(data);\n    update_global_state(result); // Side effect\n    result\n}"
+    tags: ["functional", "side-effects", "architecture", "carmack"]
+
+  - id: "COLLECT-EXPLICITLY"
+    name: "Explicitly collect when consuming iterators"
+    description: |
+      Make it clear when you're materializing an iterator into a
+      collection with .collect().
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let results: Vec<_> = items.iter()\n    .map(|x| x * 2)\n    .collect();"
+      bad:
+        - "let results = items.iter().map(|x| x * 2); // Returns iterator, not collection"
+    tags: ["functional", "iterators", "clarity"]
+
+  - id: "TRY-FOLD-COMPLEX-AGGREGATION"
+    name: "Use try_fold for early-exit aggregation"
+    description: |
+      When aggregating with possible failure, try_fold combines
+      folding with error handling cleanly.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "items.iter().try_fold(initial, |acc, item| {\n    let value = item.validate()?;\n    Ok(acc + value)\n})?"
+      bad:
+        - "let mut acc = initial;\nfor item in items {\n    let value = item.validate()?;\n    acc += value;\n}"
+    tags: ["functional", "fold", "error-handling"]
+
+  - id: "CONST-GENERICS-PURE"
+    name: "Use const generics for compile-time guarantees"
+    description: |
+      Const generics enable type-level programming for pure, zero-cost
+      abstractions with compile-time guarantees.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "struct Array<T, const N: usize> {\n    data: [T; N],\n}\nimpl<T, const N: usize> Array<T, N> {\n    fn len(&self) -> usize { N } // Compile-time constant\n}"
+      bad:
+        - "struct Array<T> {\n    data: Vec<T>,\n    len: usize, // Runtime value\n}"
+    tags: ["functional", "const-generics", "type-level"]
+
+  - id: "BUILDER-PATTERN-IMMUTABLE"
+    name: "Use builder pattern for complex construction"
+    description: |
+      Complex object construction should use builder pattern for
+      immutable, readable initialization.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let config = ConfigBuilder::new()\n    .with_width(1920)\n    .with_height(1080)\n    .with_vsync(true)\n    .build();"
+      bad:
+        - "let mut config = Config::default();\nconfig.width = 1920;\nconfig.height = 1080;\nconfig.vsync = true;"
+    tags: ["functional", "builder", "construction"]
+
+  - id: "AVOID-GLOBAL-MUTABLE-STATE"
+    name: "Avoid global mutable state"
+    description: |
+      Carmack principle: Global mutable state makes functions impure.
+      Pass state explicitly through parameters.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn update(state: &mut GameState, dt: f32) { ... }"
+      bad:
+        - "static mut GAME_STATE: GameState = ...;\nfn update(dt: f32) {\n    unsafe { GAME_STATE.update(dt); }\n}"
+    tags: ["functional", "state", "globals", "carmack"]
+
+  - id: "STATELESS-FUNCTIONS"
+    name: "Make functions stateless when possible"
+    description: |
+      Functions that don't need state shouldn't maintain it. Stateless
+      operations are easier to test and parallelize.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "fn distance(a: Vec3, b: Vec3) -> f32 { ... }"
+      bad:
+        - "struct DistanceCalc {\n    last_a: Vec3,\n    last_b: Vec3,\n}\nimpl DistanceCalc {\n    fn calc(&mut self, a: Vec3, b: Vec3) -> f32 { ... }\n}"
+    tags: ["functional", "stateless", "carmack"]
+
+  - id: "PARTITION-POINT-BINARY"
+    name: "Use partition_point for binary search patterns"
+    description: |
+      For sorted data, partition_point provides clean binary search
+      without manual index management.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let index = sorted.partition_point(|x| x < &target);"
+      bad:
+        - "let mut low = 0;\nlet mut high = sorted.len();\nwhile low < high {\n    let mid = (low + high) / 2;\n    // Manual binary search\n}"
+    tags: ["functional", "search", "algorithms"]

@@ -1,0 +1,184 @@
+metadata:
+  name: "Carmack Commenting Style"
+  version: "1.0.0"
+  description: "Documentation and commenting patterns from id Software codebases"
+  language: "language-agnostic"
+  category: "comments"
+
+description: |
+  Carmack's code achieves exceptional comment density (30% in Doom 3).
+  Comments explain WHY, not WHAT. The code itself should be clear enough
+  to show what it does.
+
+rules:
+  - id: "BANNER-FUNCTION-DOCS"
+    name: "Use banner-style function documentation"
+    description: |
+      Functions should have banner-style block comments with consistent
+      delimiter width. Include function name and purpose.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/*\n================\nFormatNumber\n\nFormats a number with\nthousand separators.\n================\n*/"
+      bad:
+        - "// FormatNumber - formats numbers"
+        - "/* Quick comment */"
+    tags:
+      - "documentation"
+      - "functions"
+      - "style"
+
+  - id: "EXPLAIN-WHY"
+    name: "Comment the WHY, not the WHAT"
+    description: |
+      Comments should explain the reasoning behind code, not describe what
+      the code obviously does. Trust the reader to understand basic syntax.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Initialize endian conversion before anything else\nSwap_Init();"
+        - "// Workaround for driver bug on AMD GPUs"
+      bad:
+        - "// Set x to 5\nx = 5;"
+        - "// Loop through entities\nfor (entity in entities)"
+    tags:
+      - "content"
+      - "clarity"
+      - "intent"
+
+  - id: "COMMENT-ALGORITHMS"
+    name: "Document non-obvious algorithms"
+    description: |
+      Complex or non-obvious algorithms should be commented. Include
+      references to papers or sources when applicable.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Fast inverse square root from Quake III\n// See: https://..."
+        - "// Binary space partitioning as described in Foley & van Dam"
+      bad:
+        - "// Math stuff\nresult = ComplexCalculation();"
+    tags:
+      - "algorithms"
+      - "documentation"
+      - "references"
+
+  - id: "PLATFORM-SPECIFIC-NOTES"
+    name: "Document platform-specific behavior"
+    description: |
+      When code has platform-specific behavior or workarounds, document
+      why and what platforms are affected.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Windows requires backslashes in paths\npath = path.replace('/', '\\\\');"
+        - "// Linux-specific: case-sensitive filesystem"
+      bad:
+        - "// Special case\nif (PLATFORM_WINDOWS)"
+    tags:
+      - "platform"
+      - "portability"
+      - "documentation"
+
+  - id: "WORKAROUND-DOCUMENTATION"
+    name: "Document workarounds and their reasons"
+    description: |
+      If code works around a bug in external code, hardware, or drivers,
+      document what the bug is and what version/platform it affects.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Workaround for NVIDIA driver 387.x bug with texture binding\n// Can be removed once driver version > 400"
+      bad:
+        - "// Hack\nif (weird_condition)"
+    tags:
+      - "workarounds"
+      - "bugs"
+      - "maintenance"
+
+  - id: "COMMENT-DENSITY"
+    name: "Maintain healthy comment density"
+    description: |
+      Aim for 20-30% comment ratio by lines. Not every line needs a comment,
+      but every function should have documentation and complex sections
+      should have explanatory comments.
+    priority: "info"
+    enabled: true
+    tags:
+      - "density"
+      - "documentation"
+      - "maintainability"
+
+  - id: "UPDATE-STALE-COMMENTS"
+    name: "Keep comments synchronized with code"
+    description: |
+      When code changes, update comments. Stale comments are worse than
+      no comments as they mislead future readers.
+    priority: "error"
+    enabled: true
+    examples:
+      bad:
+        - "// Returns true if valid\nreturn entity; // Returns entity, not bool"
+    tags:
+      - "maintenance"
+      - "accuracy"
+      - "hygiene"
+
+  - id: "AVOID-OBVIOUS-COMMENTS"
+    name: "Don't comment obvious code"
+    description: |
+      Don't add comments that merely restate what the code clearly does.
+      This adds noise without value.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "count++; // No comment needed, obvious"
+      bad:
+        - "count++; // Increment count"
+        - "return true; // Return true"
+    tags:
+      - "noise"
+      - "clarity"
+      - "antipattern"
+
+  - id: "COMMENT-INVARIANTS"
+    name: "Document invariants and assumptions"
+    description: |
+      Document invariants that must hold, preconditions, and postconditions.
+      This helps future maintainers understand constraints.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Invariant: entityList is always sorted by ID"
+        - "// Precondition: buffer must be at least 256 bytes"
+      bad:
+        - "// Does stuff\nProcessBuffer(buffer);"
+    tags:
+      - "invariants"
+      - "contracts"
+      - "safety"
+
+  - id: "TODO-WITH-CONTEXT"
+    name: "TODO comments should have context"
+    description: |
+      TODO comments should include who, when, and why. Include issue
+      tracker references when applicable.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// TODO(carmack, 2023-05-15): Optimize this for SSE4\n// See issue #1234"
+      bad:
+        - "// TODO: fix this"
+        - "// HACK"
+    tags:
+      - "todo"
+      - "maintenance"
+      - "tracking"

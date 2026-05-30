@@ -1,0 +1,250 @@
+metadata:
+  name: "Rust Optimization (Carmack's Performance Philosophy)"
+  version: "1.0.0"
+  description: "Performance optimization adapted from Carmack's profile-first approach"
+  language: "rust"
+  category: "optimization"
+
+description: |
+  Rust optimization following Carmack's principles: profile first, optimize
+  hot paths, prioritize worst-case performance, and use zero-cost abstractions
+  appropriately.
+
+rules:
+  - id: "PROFILE-FIRST"
+    name: "Always profile before optimizing"
+    description: |
+      Carmack principle: Never optimize without profiling. Use cargo bench,
+      flamegraph, perf, or other profilers to find actual bottlenecks.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Profiled: this function is 40% of frame time\n// Now optimize"
+      bad:
+        - "// This looks slow, optimizing without measurement"
+    tags: ["optimization", "profiling", "carmack"]
+
+  - id: "INLINE-HOT-PATHS"
+    name: "Use #[inline] for hot path functions"
+    description: |
+      Small, frequently-called functions should use #[inline] or
+      #[inline(always)] when profiling shows benefit.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "#[inline]\nfn dot(a: Vec3, b: Vec3) -> f32 {\n    a.x * b.x + a.y * b.y + a.z * b.z\n}"
+      bad:
+        - "#[inline(always)]\nfn load_level() -> Level { ... } // Large, cold function"
+    tags: ["optimization", "inline", "carmack"]
+
+  - id: "RELEASE-PROFILE-TUNING"
+    name: "Tune release profile for performance"
+    description: |
+      Configure Cargo.toml release profile for optimal performance:
+      lto, codegen-units=1, opt-level=3 for final builds.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "[profile.release]\nlto = true\ncodegen-units = 1\nopt-level = 3"
+      bad:
+        - "# Using default release profile for performance-critical code"
+    tags: ["optimization", "configuration", "build"]
+
+  - id: "SIMD-WHEN-MEASURED"
+    name: "Use SIMD only for measured hot spots"
+    description: |
+      SIMD (portable_simd, wide crate) should target profiled hot paths.
+      Measure impact; SIMD isn't always faster.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Profiled: vector math is 25% of time\nuse std::simd::f32x4;\nfn process_batch(data: &[f32x4])"
+      bad:
+        - "// Let's SIMD everything! (no measurement)"
+    tags: ["optimization", "simd", "carmack"]
+
+  - id: "WORST-CASE-MATTERS"
+    name: "Optimize worst-case over average-case"
+    description: |
+      For real-time applications (games, audio, video), worst-case
+      performance matters more than average. Avoid variable performance.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Consistent 14ms frame time\nfn update(&mut self) { ... }"
+      bad:
+        - "// Average 10ms, spikes to 40ms (dropped frames)"
+    tags: ["optimization", "real-time", "carmack"]
+
+  - id: "BOUNDS-CHECK-ELIMINATION"
+    name: "Help compiler eliminate bounds checks"
+    description: |
+      When you've proven bounds are correct, use iterators or get_unchecked
+      to eliminate redundant checks. Document safety.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Bounds checked in outer loop\nfor chunk in data.chunks_exact(4) {\n    unsafe {\n        // SAFETY: chunks_exact guarantees len == 4\n        process_four(chunk.get_unchecked(0..4));\n    }\n}"
+      bad:
+        - "// Redundant checks in tight loop\nfor i in 0..len {\n    data[i]; data[i+1]; data[i+2]; data[i+3];\n}"
+    tags: ["optimization", "bounds-checks", "unsafe"]
+
+  - id: "ITERATOR-CHAINS"
+    name: "Use iterator chains for compiler optimization"
+    description: |
+      Iterator chains often optimize better than manual loops. Compiler
+      can inline, vectorize, and eliminate bounds checks.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "entities.iter()\n    .filter(|e| e.is_alive())\n    .map(|e| e.position())\n    .collect()"
+      bad:
+        - "let mut result = Vec::new();\nfor e in &entities {\n    if e.is_alive() {\n        result.push(e.position());\n    }\n}"
+    tags: ["optimization", "iterators", "compiler"]
+
+  - id: "AVOID-ALLOCATIONS-HOT-PATH"
+    name: "Minimize allocations in hot paths"
+    description: |
+      Allocation is expensive. Reuse buffers, use stack allocation, or
+      pre-allocate for performance-critical code.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Pre-allocated, reused each frame\nstruct FrameState {\n    buffer: Vec<u8>,\n}\nimpl FrameState {\n    fn reset(&mut self) { self.buffer.clear(); }\n}"
+      bad:
+        - "fn process_frame() {\n    let buffer = vec![0; 4096]; // Allocate every frame\n}"
+    tags: ["optimization", "allocations", "carmack"]
+
+  - id: "BRANCH-PREDICTION"
+    name: "Help branch prediction with likely paths"
+    description: |
+      Structure conditionals so the common case is first. Modern CPUs
+      predict branches; help them predict correctly.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if likely_condition {\n    // Common hot path\n} else {\n    // Rare cold path\n}"
+      bad:
+        - "if rare_error {\n    // Rare branch first\n} else {\n    // Common path nested\n}"
+    tags: ["optimization", "branches", "cpu"]
+
+  - id: "CACHE-FRIENDLY-LAYOUT"
+    name: "Organize data for cache efficiency"
+    description: |
+      Structure data for how it's accessed. Keep hot data together,
+      use #[repr(C)] for predictable layout, consider struct-of-arrays.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Structure-of-arrays: all positions contiguous\nstruct Entities {\n    positions: Vec<Vec3>,\n    velocities: Vec<Vec3>,\n}"
+      bad:
+        - "// Array-of-structures: positions scattered\nstruct Entity {\n    position: Vec3,\n    // ... 100 other fields\n}\nlet entities: Vec<Entity>;"
+    tags: ["optimization", "cache", "dod", "carmack"]
+
+  - id: "CONST-FN-COMPILE-TIME"
+    name: "Use const fn for compile-time computation"
+    description: |
+      Computation that can happen at compile time should use const fn.
+      This moves work from runtime to compile time.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "const fn compute_table_size(max: usize) -> usize {\n    max * 2 + 1\n}\nconst TABLE_SIZE: usize = compute_table_size(1024);"
+      bad:
+        - "fn compute_table_size(max: usize) -> usize {\n    max * 2 + 1\n}\nlet table_size = compute_table_size(1024); // Runtime"
+    tags: ["optimization", "const", "compile-time"]
+
+  - id: "LAZY-STATIC-GLOBALS"
+    name: "Use LazyLock for computed global constants"
+    description: |
+      Global constants that require computation should use LazyLock
+      (Rust 1.80+) for initialization on first access.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "use std::sync::LazyLock;\nstatic CONFIG: LazyLock<Config> = LazyLock::new(|| {\n    Config::from_file(\"config.toml\")\n});"
+      bad:
+        - "static mut CONFIG: Option<Config> = None; // Unsafe, awkward"
+    tags: ["optimization", "globals", "initialization"]
+
+  - id: "AVOID-FORMAT-HOT-PATH"
+    name: "Avoid string formatting in hot paths"
+    description: |
+      String formatting (format!, println!) is expensive. Avoid in
+      performance-critical code or use faster alternatives.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Format once, reuse\nlet msg = format!(\"Error: {}\", error);\nfor _ in 0..1000 { log(&msg); }"
+      bad:
+        - "for _ in 0..1000 {\n    log(&format!(\"Error: {}\", error)); // Format in loop\n}"
+    tags: ["optimization", "strings", "formatting"]
+
+  - id: "MEASURE-DONT-ASSUME"
+    name: "Measure actual performance, don't assume"
+    description: |
+      Carmack principle: Modern CPUs are complex. What seems faster may
+      be slower. Always measure with real data and hardware.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "#[bench]\nfn bench_approach_a(b: &mut Bencher) { ... }\n// Measured: A is 2x faster"
+      bad:
+        - "// This should be faster (never measured)"
+    tags: ["optimization", "measurement", "carmack"]
+
+  - id: "ALGORITHMIC-FIRST"
+    name: "Algorithmic optimization before micro-optimization"
+    description: |
+      Better algorithms beat micro-optimizations. O(n²) → O(n log n) is
+      more valuable than shaving cycles from inner loop.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Use HashMap O(1) instead of Vec linear search O(n)\nlet entities: HashMap<EntityId, Entity>;"
+      bad:
+        - "// Micro-optimize the O(n²) loop instead of using better algorithm"
+    tags: ["optimization", "algorithms", "carmack"]
+
+  - id: "PARALLEL-WHEN-PROVEN"
+    name: "Use parallelism only when profiling shows benefit"
+    description: |
+      Rayon for parallel iteration is powerful but has overhead. Profile
+      to ensure benefit exceeds cost.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Profiled: 100k+ items, CPU-bound\nuse rayon::prelude::*;\nentities.par_iter().for_each(|e| process(e));"
+      bad:
+        - "// Parallelize 10 items (overhead exceeds benefit)\nsmall_vec.par_iter().for_each(|x| process(x));"
+    tags: ["optimization", "parallelism", "profiling"]
+
+  - id: "UNSAFE-MEASURED-BENEFIT"
+    name: "Use unsafe only with measured performance benefit"
+    description: |
+      Unsafe for optimization should show clear, measured benefit.
+      Document the speedup and why it's worth the risk.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// PERF: Measured 3x speedup by eliminating bounds checks\n// Safe because: outer loop guarantees index < len\nunsafe { data.get_unchecked(i) }"
+      bad:
+        - "// Assumed faster, never measured\nunsafe { ... }"
+    tags: ["optimization", "unsafe", "measurement"]

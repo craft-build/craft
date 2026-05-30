@@ -1,0 +1,201 @@
+metadata:
+  name: "Carmack Functional Patterns"
+  version: "1.0.0"
+  description: "Functional programming principles in imperative languages"
+  language: "language-agnostic"
+  category: "functional_patterns"
+
+description: |
+  Carmack evolved toward functional style over his career. Even in C/C++,
+  functional patterns reduce bugs by minimizing mutable state and making
+  data flow explicit. Pure functions are easier to test and reason about.
+
+rules:
+  - id: "PURE-FUNCTIONS"
+    name: "Prefer pure functions"
+    description: |
+      Functions should only read inputs and return outputs without side
+      effects. No global state access. Pure functions are predictable,
+      testable, and thread-safe.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Pure: only inputs affect output\nVector3 Normalized(const Vector3& v) {\n    float len = Length(v);\n    return Vector3(v.x/len, v.y/len, v.z/len);\n}"
+      bad:
+        - "// Impure: modifies input\nvoid Normalize(Vector3& v) {\n    float len = Length(v);\n    v.x /= len; v.y /= len; v.z /= len;\n}"
+    tags:
+      - "purity"
+      - "side-effects"
+      - "testability"
+
+  - id: "MINIMIZE-MUTABLE-STATE"
+    name: "Minimize mutable state"
+    description: |
+      The real enemy addressed by inlining is unexpected dependency and
+      mutation of state. Functional programming solves this more directly.
+      Reduce mutable state where possible.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "const result = Transform(input); // New value"
+      bad:
+        - "Transform(&input); // Mutation in place"
+    tags:
+      - "immutability"
+      - "state"
+      - "clarity"
+
+  - id: "EXECUTE-AND-INHIBIT"
+    name: "Execute-and-inhibit over branching"
+    description: |
+      Rather than branching on whether to execute code, execute consistently
+      and use flags to control effects. This creates predictable execution.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "result = Compute(input);\nif (shouldApply) { Apply(result); }"
+      bad:
+        - "if (shouldCompute) {\n    result = Compute(input);\n    Apply(result);\n}"
+    tags:
+      - "control-flow"
+      - "consistency"
+      - "predictability"
+
+  - id: "SMALL-PURE-FUNCTIONS"
+    name: "Small pure functions compose well"
+    description: |
+      Break complex operations into small, pure functions that compose.
+      Each function does one thing without side effects.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "result = Normalize(Transform(Filter(input)));"
+      bad:
+        - "void DoEverything(Input& input) {\n    // 200 lines mutating input\n}"
+    tags:
+      - "composition"
+      - "modularity"
+      - "purity"
+
+  - id: "AVOID-GLOBAL-STATE"
+    name: "Avoid global mutable state"
+    description: |
+      Global mutable state makes functions impure and code harder to test.
+      Pass state explicitly through parameters instead.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "void Update(GameState* state, float dt)"
+      bad:
+        - "GameState g_state; // Global\nvoid Update(float dt) { /* mutates global */ }"
+    tags:
+      - "globals"
+      - "state"
+      - "testability"
+
+  - id: "RETURN-NEW-VALUES"
+    name: "Return new values instead of mutating"
+    description: |
+      When transforming data, return a new value instead of mutating the
+      input. This makes data flow clear and prevents bugs.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Entity updated = ApplyDamage(entity, damage);"
+      bad:
+        - "ApplyDamage(&entity, damage); // Mutates in place"
+    tags:
+      - "immutability"
+      - "data-flow"
+      - "clarity"
+
+  - id: "MAP-FILTER-REDUCE"
+    name: "Use map/filter/reduce patterns"
+    description: |
+      Collection operations should use functional patterns: map to transform,
+      filter to select, reduce to aggregate. Avoid manual loops when possible.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "active = Filter(entities, IsActive);\npositions = Map(active, GetPosition);\ntotal = Reduce(positions, Sum);"
+      bad:
+        - "for (each entity) {\n    if (IsActive(entity)) {\n        pos = GetPosition(entity);\n        total += pos;\n    }\n}"
+    tags:
+      - "collections"
+      - "patterns"
+      - "declarative"
+
+  - id: "AVOID-OUTPUT-PARAMS"
+    name: "Return outputs instead of output parameters"
+    description: |
+      Functions should return results rather than writing to output
+      parameters. This makes data flow obvious and enables composition.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Result r = Process(input); // Clear data flow"
+      bad:
+        - "void Process(Input in, Output* out); // Hidden flow"
+    tags:
+      - "parameters"
+      - "data-flow"
+      - "composition"
+
+  - id: "STATELESS-OPERATIONS"
+    name: "Make operations stateless when possible"
+    description: |
+      Operations that don't need state shouldn't maintain it. Stateless
+      operations are easier to test, parallelize, and reuse.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "float Distance(Vector3 a, Vector3 b) // Stateless"
+      bad:
+        - "class DistanceCalculator {\n    Vector3 lastA, lastB;\n    float Calculate(Vector3 a, Vector3 b);\n} // Unnecessary state"
+    tags:
+      - "stateless"
+      - "simplicity"
+      - "reusability"
+
+  - id: "SIDE-EFFECT-ISOLATION"
+    name: "Isolate side effects to boundaries"
+    description: |
+      Keep side effects (I/O, global state changes) at system boundaries.
+      Core logic should be pure functions that transform data.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Pure core\nResult Process(Data d) { ... }\n// Side effects at boundary\nvoid Main() {\n    data = ReadFile();\n    result = Process(data);\n    WriteFile(result);\n}"
+      bad:
+        - "Result Process(Data d) {\n    // Mixed I/O with logic\n    WriteLog();\n    ... logic ...\n    UpdateGlobal();\n}"
+    tags:
+      - "side-effects"
+      - "architecture"
+      - "purity"
+
+  - id: "IMMUTABLE-DATA"
+    name: "Prefer immutable data structures"
+    description: |
+      When language supports it, use immutable data structures. They
+      prevent entire classes of bugs and enable safe sharing.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "const Config config = LoadConfig(); // Immutable"
+      bad:
+        - "Config config = LoadConfig(); // Mutable, anyone can change"
+    tags:
+      - "immutability"
+      - "safety"
+      - "concurrency"

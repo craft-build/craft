@@ -1,0 +1,222 @@
+metadata:
+  name: "Rust Control Flow (Carmack's Linear Execution)"
+  version: "1.0.0"
+  description: "Control flow patterns adapted from Carmack's emphasis on linear, obvious execution"
+  language: "rust"
+  category: "control_flow"
+
+description: |
+  Rust control flow incorporating Carmack's principles: minimize nesting,
+  early returns, linear execution paths, and making control flow obvious.
+
+rules:
+  - id: "EARLY-RETURN-GUARDS"
+    name: "Use early returns for guard conditions"
+    description: |
+      Carmack principle: Check error conditions early and return.
+      Keeps happy path at main indentation level.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn process(entity: &Entity) -> Result<()> {\n    if !entity.is_valid() {\n        return Err(Error::Invalid);\n    }\n    // Happy path at base level\n}"
+      bad:
+        - "fn process(entity: &Entity) -> Result<()> {\n    if entity.is_valid() {\n        // Happy path nested\n    } else {\n        Err(Error::Invalid)\n    }\n}"
+    tags: ["control-flow", "readability", "carmack"]
+
+  - id: "QUESTION-MARK-EARLY"
+    name: "Use ? operator for early error returns"
+    description: |
+      The ? operator implements early return pattern cleanly.
+      Use it to propagate errors and keep happy path linear.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn load() -> Result<Data, Error> {\n    let file = open_file()?;\n    let content = read_file(file)?;\n    parse(content)\n}"
+      bad:
+        - "fn load() -> Result<Data, Error> {\n    match open_file() {\n        Ok(file) => match read_file(file) { ... }\n    }\n}"
+    tags: ["control-flow", "errors", "readability"]
+
+  - id: "MATCH-OVER-IF-LET-CHAIN"
+    name: "Use match for multiple conditions"
+    description: |
+      When checking multiple conditions, match is clearer than
+      nested if-let chains.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "match (option_a, option_b) {\n    (Some(a), Some(b)) => process(a, b),\n    _ => default(),\n}"
+      bad:
+        - "if let Some(a) = option_a {\n    if let Some(b) = option_b {\n        process(a, b);\n    }\n}"
+    tags: ["control-flow", "pattern-matching", "clarity"]
+
+  - id: "LIMIT-NESTING-DEPTH"
+    name: "Limit nesting depth to 3-4 levels"
+    description: |
+      Carmack principle: Deep nesting is hard to reason about.
+      Use early returns or extract functions to reduce nesting.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Max 3 levels\nif a {\n    if b {\n        if c { return; }\n    }\n}"
+      bad:
+        - "// Too deep\nif a { if b { if c { if d { if e { ... } } } } }"
+    tags: ["control-flow", "nesting", "carmack"]
+
+  - id: "LET-ELSE-GUARDS"
+    name: "Use let-else for guard patterns"
+    description: |
+      Rust 1.65+ let-else enables clean guard patterns with
+      early return for None/Err.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "fn process(id: EntityId) -> Result<()> {\n    let Some(entity) = find_entity(id) else {\n        return Err(Error::NotFound);\n    };\n    // Use entity\n}"
+      bad:
+        - "fn process(id: EntityId) -> Result<()> {\n    match find_entity(id) {\n        Some(entity) => { /* nested */ },\n        None => return Err(Error::NotFound),\n    }\n}"
+    tags: ["control-flow", "pattern-matching", "rust-2021"]
+
+  - id: "EXHAUSTIVE-MATCH"
+    name: "Prefer exhaustive match over wildcard"
+    description: |
+      Exhaustive matching catches when new enum variants are added.
+      Avoid catch-all _ when you want to handle all cases.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "match state {\n    State::Init => { ... }\n    State::Running => { ... }\n    State::Stopped => { ... }\n}"
+      bad:
+        - "match state {\n    State::Running => { ... }\n    _ => {} // Hides new variants\n}"
+    tags: ["control-flow", "pattern-matching", "safety"]
+
+  - id: "CONSISTENT-EXECUTION-PATHS"
+    name: "Prefer consistent execution paths"
+    description: |
+      Carmack principle: Code that executes the same path most of
+      the time is easier to understand and optimize.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let result = compute();\nif should_apply {\n    apply(result);\n}"
+      bad:
+        - "if should_compute {\n    let result = compute();\n    apply(result);\n}"
+    tags: ["control-flow", "consistency", "carmack"]
+
+  - id: "AVOID-EMPTY-BRANCHES"
+    name: "Avoid empty else branches"
+    description: |
+      If the else branch is empty, restructure or remove it.
+      Empty branches add noise.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if condition {\n    do_something();\n}"
+      bad:
+        - "if condition {\n    do_something();\n} else {\n    // Do nothing\n}"
+    tags: ["control-flow", "clarity", "carmack"]
+
+  - id: "LOOP-LABELS"
+    name: "Use labels for breaking nested loops"
+    description: |
+      When breaking out of nested loops, use loop labels to
+      make intent clear.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "'outer: for x in 0..10 {\n    for y in 0..10 {\n        if found { break 'outer; }\n    }\n}"
+      bad:
+        - "let mut done = false;\nfor x in 0..10 {\n    for y in 0..10 {\n        if found { done = true; break; }\n    }\n    if done { break; }\n}"
+    tags: ["control-flow", "loops", "clarity"]
+
+  - id: "WHILE-LET-ITERATION"
+    name: "Use while let for iterator consumption"
+    description: |
+      When consuming an iterator that returns Option, while let
+      is clearer than loop + match.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "while let Some(item) = iter.next() {\n    process(item);\n}"
+      bad:
+        - "loop {\n    match iter.next() {\n        Some(item) => process(item),\n        None => break,\n    }\n}"
+    tags: ["control-flow", "iterators", "idiom"]
+
+  - id: "IF-LET-SINGLE-VARIANT"
+    name: "Use if let for single variant matching"
+    description: |
+      When matching a single variant and ignoring others, if let
+      is more concise than match.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if let Some(value) = option {\n    process(value);\n}"
+      bad:
+        - "match option {\n    Some(value) => process(value),\n    None => {},\n}"
+    tags: ["control-flow", "pattern-matching", "conciseness"]
+
+  - id: "RANGE-PATTERNS"
+    name: "Use range patterns in match"
+    description: |
+      Range patterns make numeric matching clearer and more
+      maintainable than multiple conditions.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "match score {\n    0..=59 => Grade::F,\n    60..=69 => Grade::D,\n    70..=79 => Grade::C,\n    80..=89 => Grade::B,\n    90..=100 => Grade::A,\n    _ => panic!(\"Invalid score\"),\n}"
+      bad:
+        - "if score < 60 { Grade::F }\nelse if score < 70 { Grade::D }\n..."
+    tags: ["control-flow", "pattern-matching", "clarity"]
+
+  - id: "OPTION-COMBINATORS"
+    name: "Use Option combinators over explicit matching"
+    description: |
+      map, and_then, unwrap_or reduce nesting compared to explicit
+      match statements for simple transformations.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let name = config.name.unwrap_or(\"default\");"
+        - "let doubled = option.map(|x| x * 2);"
+      bad:
+        - "let name = match config.name {\n    Some(n) => n,\n    None => \"default\",\n};"
+    tags: ["control-flow", "option", "functional"]
+
+  - id: "AVOID-BOOL-FLAGS"
+    name: "Avoid complex boolean flag logic"
+    description: |
+      Complex boolean flags make control flow hard to follow.
+      Use enums to represent state explicitly.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "enum State { Init, Running, Paused, Stopped }\nmatch state { ... }"
+      bad:
+        - "let running = true;\nlet paused = false;\nlet stopped = false;\nif running && !paused && !stopped { ... }"
+    tags: ["control-flow", "state", "clarity", "carmack"]
+
+  - id: "LINEAR-OVER-BRANCHED"
+    name: "Prefer linear flow over heavy branching"
+    description: |
+      Carmack principle: Linear code is easier to read and optimize.
+      Structure code to minimize branching when possible.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let valid = validate();\nlet result = compute();\nif valid { apply(result); }"
+      bad:
+        - "if validate() {\n    let result = compute();\n    apply(result);\n} // Variable execution"
+    tags: ["control-flow", "linearity", "carmack"]

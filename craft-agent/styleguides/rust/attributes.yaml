@@ -1,0 +1,70 @@
+metadata:
+  name: "Rust Attributes Style Guide"
+  version: "1.0.0"
+  description: "Attribute formatting and organization for Rust"
+  language: "rust"
+  category: "attributes"
+
+description: "Attribute formatting and organization"
+
+rules:
+  - id: "ATTR-ONE-PER-LINE"
+    name: "One attribute per line"
+    description: "Each attribute should be on its own line, indented to the item's level."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "#[repr(C)]\n#[derive(Debug)]\nstruct Foo {}"
+      bad:
+        - "#[repr(C)] #[derive(Debug)]\nstruct Foo {}"
+    tags: ["attributes", "formatting"]
+
+  - id: "INNER-ATTR-INDENT"
+    name: "Indent inner attributes"
+    description: "Inner attributes (#!) should be indented to the inside of the item level."
+    priority: "warning"
+    enabled: true
+    tags: ["attributes", "indentation"]
+
+  - id: "PREFER-OUTER-ATTRS"
+    name: "Prefer outer attributes"
+    description: "Use outer attributes where possible instead of inner attributes."
+    priority: "info"
+    enabled: true
+    tags: ["attributes", "style"]
+
+  - id: "ATTR-FORMAT-LIKE-FN"
+    name: "Format attributes like functions"
+    description: "Attributes with argument lists should be formatted like function calls."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "#[foo(foo, bar)]"
+        - "#[long_attribute(\n    split,\n    across,\n)]"
+    tags: ["attributes", "formatting"]
+
+  - id: "ATTR-EQUALS-SPACING"
+    name: "Space around equals in attributes"
+    description: "Use single space before and after equals signs in attributes."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "#[foo = 42]"
+      bad:
+        - "#[foo=42]"
+    tags: ["attributes", "spacing"]
+
+  - id: "SINGLE-DERIVE"
+    name: "One derive attribute per item"
+    description: "Use only one derive attribute per item, combining multiple derives into a single attribute."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "#[derive(Debug, Clone, Copy)]"
+      bad:
+        - "#[derive(Debug)]\n#[derive(Clone)]\n#[derive(Copy)]"
+    tags: ["attributes", "derive"]

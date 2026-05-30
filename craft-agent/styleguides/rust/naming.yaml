@@ -1,0 +1,236 @@
+metadata:
+  name: "Rust Naming Conventions (Carmack-Enhanced)"
+  version: "1.0.0"
+  description: "Rust naming conventions combining official style guide with Carmack patterns"
+  language: "rust"
+  category: "naming"
+
+description: |
+  Rust naming conventions that follow the official Rust style guide (RFC 430)
+  while incorporating Carmack's emphasis on descriptive names and clear
+  subsystem organization through module namespacing.
+
+rules:
+  - id: "SNAKE-CASE-VARS"
+    name: "Use snake_case for variables and functions"
+    description: "Variables, functions, methods, and modules should use snake_case naming."
+    priority: "error"
+    enabled: true
+    pattern: "^[a-z][a-z0-9_]*$"
+    examples:
+      good:
+        - "let my_variable = 5;"
+        - "fn calculate_sum() {}"
+        - "mod render_system;"
+      bad:
+        - "let MyVariable = 5;"
+        - "fn CalculateSum() {}"
+    tags: ["naming", "convention", "official"]
+
+  - id: "UPPER-CAMEL-TYPES"
+    name: "Use UpperCamelCase for types"
+    description: "Types, traits, and enums should use UpperCamelCase (PascalCase)."
+    priority: "error"
+    enabled: true
+    pattern: "^[A-Z][A-Za-z0-9]*$"
+    examples:
+      good:
+        - "struct MyStruct {}"
+        - "enum ErrorType {}"
+        - "trait Renderable {}"
+      bad:
+        - "struct my_struct {}"
+        - "enum error_type {}"
+    tags: ["naming", "convention", "official"]
+
+  - id: "SCREAMING-SNAKE-CONSTANTS"
+    name: "Use SCREAMING_SNAKE_CASE for constants"
+    description: "Constants and static variables should use SCREAMING_SNAKE_CASE."
+    priority: "error"
+    enabled: true
+    pattern: "^[A-Z][A-Z0-9_]*$"
+    examples:
+      good:
+        - "const MAX_ENTITIES: usize = 1024;"
+        - "const FRAME_BUDGET_MS: f32 = 16.67;"
+        - "static GLOBAL_ALLOCATOR: Arena = Arena::new();"
+      bad:
+        - "const maxEntities: usize = 1024;"
+        - "const max_entities: usize = 1024;"
+    tags: ["naming", "convention", "official", "carmack"]
+
+  - id: "UPPER-CAMEL-ENUM-VARIANTS"
+    name: "Use UpperCamelCase for enum variants"
+    description: "Enum variants should use UpperCamelCase."
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "enum Status { Success, Failure, Pending }"
+        - "enum RenderPass { Shadow, Opaque, Transparent }"
+      bad:
+        - "enum Status { success, failure }"
+    tags: ["naming", "convention", "official"]
+
+  - id: "DESCRIPTIVE-OVER-SHORT"
+    name: "Use descriptive names over abbreviations"
+    description: |
+      Carmack principle: Variable and function names should be descriptive
+      and self-documenting. Clarity is more important than brevity.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "let entity_count = entities.len();"
+        - "let frame_delta_time = current - last;"
+        - "fn compute_visible_entities() {}"
+      bad:
+        - "let cnt = entities.len();"
+        - "let dt = current - last;"
+        - "fn calc() {}"
+    tags: ["naming", "carmack", "readability"]
+
+  - id: "MODULE-AS-SUBSYSTEM-PREFIX"
+    name: "Use modules for subsystem organization (not function prefixes)"
+    description: |
+      In Rust, Carmack's subsystem prefixes (R_, S_, CL_) become module
+      namespacing. Group related functions in modules instead of prefixes.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "mod renderer;\nrenderer::render_scene(&state);"
+        - "mod sound;\nsound::start_sound(channel, id);"
+        - "mod client;\nclient::read_packets(&mut conn);"
+      bad:
+        - "fn r_render_scene() {} // Don't use C-style prefixes in Rust"
+        - "fn s_start_sound() {}"
+    tags: ["naming", "carmack", "modules", "organization"]
+
+  - id: "BOOL-PREDICATES"
+    name: "Use is_/has_/can_ prefix for boolean functions"
+    description: |
+      Boolean-returning functions should use predicate prefixes to make
+      their return type obvious.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn is_valid(&self) -> bool"
+        - "fn has_children(&self) -> bool"
+        - "fn can_move(&self) -> bool"
+        - "let should_render = true;"
+      bad:
+        - "fn valid(&self) -> bool // Ambiguous"
+        - "fn children(&self) -> bool // Looks like getter"
+    tags: ["naming", "carmack", "booleans", "clarity"]
+
+  - id: "GETTER-WITHOUT-GET-PREFIX"
+    name: "Omit 'get_' prefix for simple getters"
+    description: |
+      Rust convention: simple field getters don't need 'get_' prefix.
+      Use the field name directly.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn name(&self) -> &str { &self.name }"
+        - "fn health(&self) -> f32 { self.health }"
+      bad:
+        - "fn get_name(&self) -> &str { &self.name }"
+        - "fn get_health(&self) -> f32 { self.health }"
+    tags: ["naming", "convention", "getters", "official"]
+
+  - id: "SETTER-WITH-SET-PREFIX"
+    name: "Use 'set_' prefix for setters"
+    description: |
+      Setters should use 'set_' prefix to distinguish from getters.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn set_health(&mut self, value: f32)"
+        - "fn set_position(&mut self, pos: Vec3)"
+      bad:
+        - "fn health(&mut self, value: f32) // Ambiguous"
+    tags: ["naming", "convention", "setters", "official"]
+
+  - id: "CONSUMING-WITH-INTO"
+    name: "Use 'into_' prefix for consuming conversions"
+    description: |
+      Methods that consume self and return a different type should use
+      'into_' prefix.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn into_raw(self) -> *mut T"
+        - "fn into_inner(self) -> T"
+        - "fn into_bytes(self) -> Vec<u8>"
+      bad:
+        - "fn raw(self) -> *mut T // Should be into_raw"
+    tags: ["naming", "convention", "ownership", "official"]
+
+  - id: "BORROWING-WITH-AS"
+    name: "Use 'as_' prefix for borrowing conversions"
+    description: |
+      Methods that borrow and convert to a different type should use
+      'as_' prefix.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn as_bytes(&self) -> &[u8]"
+        - "fn as_str(&self) -> &str"
+        - "fn as_mut_ptr(&mut self) -> *mut T"
+      bad:
+        - "fn bytes(&self) -> &[u8] // Should be as_bytes"
+    tags: ["naming", "convention", "borrowing", "official"]
+
+  - id: "ITER-NAMING"
+    name: "Standard iterator method names"
+    description: |
+      Use standard names for iterator methods: iter(), iter_mut(), into_iter().
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn iter(&self) -> Iter<T>"
+        - "fn iter_mut(&mut self) -> IterMut<T>"
+        - "fn into_iter(self) -> IntoIter<T>"
+      bad:
+        - "fn iterator(&self) -> Iter<T>"
+        - "fn get_iter(&self) -> Iter<T>"
+    tags: ["naming", "iterators", "official"]
+
+  - id: "TYPE-PARAMETERS-DESCRIPTIVE"
+    name: "Use descriptive type parameter names when appropriate"
+    description: |
+      Single-letter type parameters (T, U, V) are fine for generic utilities.
+      Use descriptive names when the parameter has specific meaning.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "struct Array<T> {} // Generic, T is fine"
+        - "struct EntityManager<Entity, Component> {} // Specific, descriptive"
+        - "fn transform<Input, Output>(data: Input) -> Output"
+      bad:
+        - "struct EntityManager<T, U> {} // Too generic for specific types"
+    tags: ["naming", "generics", "clarity", "carmack"]
+
+  - id: "AVOID-STUTTERING"
+    name: "Avoid stuttering in names"
+    description: |
+      Don't repeat the module or type name in function/field names when
+      the context is clear.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "mod renderer;\nimpl Renderer { fn clear(&mut self) }"
+        - "struct Entity { health: f32 }"
+      bad:
+        - "mod renderer;\nimpl Renderer { fn renderer_clear(&mut self) }"
+        - "struct Entity { entity_health: f32 }"
+    tags: ["naming", "clarity", "official"]

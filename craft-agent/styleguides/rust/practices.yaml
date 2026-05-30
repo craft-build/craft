@@ -1,0 +1,319 @@
+metadata:
+  name: "Rust Best Practices (Carmack-Enhanced)"
+  version: "1.0.0"
+  description: "Development practices combining Rust ecosystem with Carmack's discipline"
+  language: "rust"
+  category: "practices"
+
+description: |
+  Rust development practices that combine ecosystem best practices
+  (rustfmt, clippy) with Carmack's emphasis on static analysis,
+  assertions, and code quality.
+
+rules:
+  - id: "USE-RUSTFMT"
+    name: "Use rustfmt for consistent formatting"
+    description: |
+      Run rustfmt on all code. Configure in rustfmt.toml if needed.
+      Formatting should be automated, not debated.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "cargo fmt --all"
+      bad:
+        - "# Manual formatting, inconsistent style"
+    tags: ["practices", "formatting", "official"]
+
+  - id: "CLIPPY-MANDATORY"
+    name: "Clippy is mandatory"
+    description: |
+      Carmack: 'It is irresponsible not to use static analysis.' Run
+      clippy and fix all warnings. Use clippy::pedantic for stricter checks.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "cargo clippy --all-targets --all-features -- -D warnings"
+      bad:
+        - "# Never run clippy"
+    tags: ["practices", "static-analysis", "carmack"]
+
+  - id: "ZERO-WARNINGS-POLICY"
+    name: "Maintain zero warnings"
+    description: |
+      Code should compile with zero warnings. Fix warnings immediately,
+      don't let them accumulate.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "# Build output: 0 warnings"
+      bad:
+        - "# 234 warnings (what's one more?)"
+    tags: ["practices", "warnings", "carmack"]
+
+  - id: "DENY-WARNINGS-CI"
+    name: "Deny warnings in CI"
+    description: |
+      CI should fail on warnings. Add RUSTFLAGS=\"-D warnings\" to
+      prevent merging code with warnings.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "# .github/workflows/ci.yml\nRUSTFLAGS: -D warnings"
+      bad:
+        - "# CI allows warnings to pass"
+    tags: ["practices", "ci", "enforcement"]
+
+  - id: "CARGO-TEST-ALWAYS"
+    name: "Run cargo test before committing"
+    description: |
+      Always run tests before committing. Consider using a pre-commit
+      hook to enforce this.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "cargo test --all-features"
+      bad:
+        - "# Commit without testing"
+    tags: ["practices", "testing"]
+
+  - id: "MIRI-FOR-UNSAFE"
+    name: "Use Miri to test unsafe code"
+    description: |
+      All unsafe code should be tested with Miri to catch undefined
+      behavior. Miri is a Rust interpreter that detects UB.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "cargo +nightly miri test"
+      bad:
+        - "# Unsafe code never tested with Miri"
+    tags: ["practices", "unsafe", "testing", "carmack"]
+
+  - id: "CARGO-DENY"
+    name: "Use cargo-deny for dependency auditing"
+    description: |
+      Use cargo-deny to check for security vulnerabilities, license
+      issues, and unmaintained dependencies.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "cargo deny check"
+      bad:
+        - "# No dependency auditing"
+    tags: ["practices", "security", "dependencies"]
+
+  - id: "CARGO-OUTDATED"
+    name: "Check for outdated dependencies regularly"
+    description: |
+      Use cargo-outdated to find dependency updates. Keep dependencies
+      reasonably current.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "cargo outdated"
+      bad:
+        - "# Dependencies not updated in years"
+    tags: ["practices", "maintenance", "dependencies"]
+
+  - id: "REDUCE-COGNITIVE-LOAD"
+    name: "Write code that reduces cognitive load"
+    description: |
+      Code should be easy to understand and reason about. Avoid clever
+      tricks that make code hard to read.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Clear intent\nif entity.is_valid() && entity.is_alive() { ... }"
+      bad:
+        - "// Clever but obscure\nif entity.0 & 0x8000 != 0 && entity.1 > 0 { ... }"
+    tags: ["practices", "readability", "carmack"]
+
+  - id: "PATTERN-MATCHING-EXHAUSTIVE"
+    name: "Use exhaustive pattern matching"
+    description: |
+      Leverage Rust's exhaustive pattern matching. Don't use wildcards
+      when you want to handle all cases explicitly.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "match state {\n    State::Init => { ... }\n    State::Running => { ... }\n    State::Stopped => { ... }\n}"
+      bad:
+        - "match state {\n    State::Running => { ... }\n    _ => {} // Hides new variants\n}"
+    tags: ["practices", "pattern-matching", "official"]
+
+  - id: "COMMUNITY-STANDARDS"
+    name: "Follow community standards"
+    description: |
+      Use idiomatic Rust patterns that the community expects.
+      This makes code more maintainable.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Idiomatic error handling\nfn load() -> Result<Data, Error> { ... }"
+      bad:
+        - "// Non-idiomatic\nfn load() -> (Data, bool) // tuple for errors"
+    tags: ["practices", "idioms", "official"]
+
+  - id: "DOCUMENT-PUBLIC-API"
+    name: "Document all public APIs"
+    description: |
+      Every public item should have doc comments. Use cargo doc to
+      generate and review documentation.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "/// Renders the scene.\npub fn render(&self) { ... }"
+      bad:
+        - "pub fn render(&self) { ... } // No docs"
+    tags: ["practices", "documentation"]
+
+  - id: "BENCHMARK-CRITICAL-PATHS"
+    name: "Benchmark performance-critical code"
+    description: |
+      Carmack: profile first. Use criterion for benchmarking critical
+      code paths. Track performance over time.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// benches/my_benchmark.rs\nuse criterion::{criterion_group, Criterion};\nfn bench_render(c: &mut Criterion) { ... }"
+      bad:
+        - "# No benchmarks for critical code"
+    tags: ["practices", "benchmarking", "carmack"]
+
+  - id: "SANITIZERS-IN-CI"
+    name: "Run sanitizers in CI"
+    description: |
+      Enable address sanitizer (ASAN) and other sanitizers in CI to
+      catch memory errors and undefined behavior.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "RUSTFLAGS=\"-Z sanitizer=address\" cargo test"
+      bad:
+        - "# No sanitizers in CI"
+    tags: ["practices", "testing", "sanitizers", "carmack"]
+
+  - id: "MINIMAL-VERSIONS-TEST"
+    name: "Test with minimal dependency versions"
+    description: |
+      Use cargo-minimal-versions to test with oldest allowed dependency
+      versions. Ensures version constraints are correct.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "cargo +nightly minimal-versions check"
+      bad:
+        - "# Only test with latest versions"
+    tags: ["practices", "dependencies", "testing"]
+
+  - id: "COVERAGE-TRACKING"
+    name: "Track code coverage"
+    description: |
+      Use cargo-tarpaulin or cargo-llvm-cov to measure test coverage.
+      Aim for high coverage of critical paths.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "cargo tarpaulin --out Html"
+      bad:
+        - "# No coverage measurement"
+    tags: ["practices", "testing", "coverage"]
+
+  - id: "README-BADGES"
+    name: "Include status badges in README"
+    description: |
+      Library READMEs should include badges for CI status, docs.rs,
+      crates.io version, and license.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "![CI](badge) ![docs](badge) ![crates.io](badge)"
+      bad:
+        - "# No status information visible"
+    tags: ["practices", "documentation", "visibility"]
+
+  - id: "CHANGELOG"
+    name: "Maintain CHANGELOG.md"
+    description: |
+      Keep a changelog following Keep a Changelog format. Document
+      all user-visible changes.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "# Changelog\n## [1.2.0] - 2024-12-17\n### Added\n- New feature X"
+      bad:
+        - "# No changelog, users don't know what changed"
+    tags: ["practices", "documentation", "releases"]
+
+  - id: "SEMVER-ADHERENCE"
+    name: "Follow semantic versioning"
+    description: |
+      Version numbers should follow semver: major.minor.patch.
+      Breaking changes increment major version.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "0.1.0 -> 0.2.0 (new features)\n1.0.0 -> 2.0.0 (breaking changes)"
+      bad:
+        - "1.0.0 -> 1.1.0 (but has breaking changes)"
+    tags: ["practices", "versioning", "semver"]
+
+  - id: "CI-ON-MULTIPLE-PLATFORMS"
+    name: "Test on multiple platforms"
+    description: |
+      CI should test on Linux, macOS, and Windows. Platform-specific
+      bugs are common.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "matrix:\n  os: [ubuntu-latest, macos-latest, windows-latest]"
+      bad:
+        - "# Only test on Linux"
+    tags: ["practices", "ci", "portability"]
+
+  - id: "MSRV-POLICY"
+    name: "Document minimum supported Rust version"
+    description: |
+      Document MSRV in Cargo.toml and README. Test against it in CI.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "[package]\nrust-version = \"1.70\""
+      bad:
+        - "# MSRV unknown, breaks for users with older Rust"
+    tags: ["practices", "compatibility", "versioning"]
+
+  - id: "NO-UNWRAP-IN-PROD"
+    name: "Avoid .unwrap() in production code paths"
+    description: |
+      Production code should handle errors gracefully. Use ? or
+      .expect() with context instead of .unwrap().
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "let value = option.expect(\"config must be initialized\");"
+      bad:
+        - "let value = option.unwrap(); // Production panic"
+    tags: ["practices", "errors", "robustness"]

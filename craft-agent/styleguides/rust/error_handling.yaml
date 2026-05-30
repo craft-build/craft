@@ -1,0 +1,229 @@
+metadata:
+  name: "Rust Error Handling (Carmack's Assertion Philosophy)"
+  version: "1.0.0"
+  description: "Error handling combining Result/Option with assertion-heavy debugging"
+  language: "rust"
+  category: "error_handling"
+
+description: |
+  Rust error handling that maps Carmack's assertion-heavy approach to
+  Result/Option for expected failures and panic!/assert! for programmer errors.
+
+rules:
+  - id: "RESULT-FOR-EXPECTED-ERRORS"
+    name: "Use Result<T, E> for expected failures"
+    description: |
+      Operations that can fail for expected reasons (I/O, parsing, network)
+      should return Result<T, E>, not panic.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn load_level(path: &Path) -> Result<Level, LoadError>"
+        - "fn parse_config(data: &str) -> Result<Config, ParseError>"
+      bad:
+        - "fn load_level(path: &Path) -> Level // What if file missing?"
+    tags: ["errors", "result", "expected-failures"]
+
+  - id: "OPTION-FOR-ABSENCE"
+    name: "Use Option<T> for optional values"
+    description: |
+      When a value might be absent (not an error, just not present),
+      use Option<T> instead of Result.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn find_entity(&self, id: EntityId) -> Option<&Entity>"
+        - "fn get_cached(&self, key: &Key) -> Option<&Value>"
+      bad:
+        - "fn find_entity(&self, id: EntityId) -> Result<&Entity, Error> // Not an error to not find"
+    tags: ["errors", "option", "absence"]
+
+  - id: "PANIC-FOR-PROGRAMMER-ERRORS"
+    name: "Panic for programmer errors and violated invariants"
+    description: |
+      Carmack's assertions map to panic! in Rust. Use panic! or assert!
+      for bugs and invariant violations, not for expected failures.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "assert!(entity_count <= MAX_ENTITIES, \"Entity limit exceeded\");"
+        - "if index >= len { panic!(\"Index out of bounds\"); }"
+      bad:
+        - "// Don't panic for expected errors\nif file_missing { panic!(\"File not found\"); }"
+    tags: ["errors", "panic", "assertions", "carmack"]
+
+  - id: "ASSERT-INVARIANTS"
+    name: "Assert invariants liberally with assert!"
+    description: |
+      Carmack principle: Assert invariants everywhere. Use assert! for
+      conditions that must hold. Panics in debug, optimized out in release.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "assert!(position.x.is_finite());"
+        - "assert!(health >= 0.0 && health <= max_health);"
+        - "assert!(!entities.is_empty(), \"Must have at least one entity\");"
+      bad:
+        - "// Missing assertion\nif health < 0.0 { health = 0.0; } // Hiding bug"
+    tags: ["errors", "assertions", "invariants", "carmack"]
+
+  - id: "DEBUG-ASSERT-EXPENSIVE"
+    name: "Use debug_assert! for expensive checks"
+    description: |
+      Expensive validation should use debug_assert! to run only in debug
+      builds. Critical safety checks use assert! (always runs).
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "debug_assert!(is_sorted(&array)); // Expensive check"
+        - "assert!(!ptr.is_null()); // Critical safety check"
+      bad:
+        - "assert!(is_sorted(&array)); // Expensive, runs in release"
+    tags: ["assertions", "debug", "performance"]
+
+  - id: "PRECONDITION-ASSERTIONS"
+    name: "Assert function preconditions"
+    description: |
+      Every function should assert its preconditions at the start. This
+      catches contract violations immediately.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn process(entity: &Entity) {\n    assert!(!entity.is_dead());\n    assert!(entity.health > 0.0);\n    // ...\n}"
+      bad:
+        - "fn process(entity: &Entity) {\n    // Hope entity is valid\n}"
+    tags: ["assertions", "preconditions", "contracts", "carmack"]
+
+  - id: "UNREACHABLE-EXPLICIT"
+    name: "Use unreachable! for impossible states"
+    description: |
+      When code paths are provably impossible, use unreachable!() with
+      explanation. Better than silent panic or undefined behavior.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "match state {\n    State::Running => { ... }\n    State::Stopped => unreachable!(\"tick() called on stopped game\")\n}"
+      bad:
+        - "match state {\n    State::Running => { ... }\n    // Missing stopped case, silent UB\n}"
+    tags: ["errors", "unreachable", "safety"]
+
+  - id: "EXPECT-WITH-CONTEXT"
+    name: "Use .expect() with descriptive messages"
+    description: |
+      When unwrapping Results/Options that shouldn't fail, use .expect()
+      with a message explaining why it can't fail.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "let config = CONFIG.get().expect(\"Config must be initialized in main\");"
+        - "let first = slice.first().expect(\"Array validated to be non-empty\");"
+      bad:
+        - "let config = CONFIG.get().unwrap(); // Why is this safe?"
+    tags: ["errors", "expect", "documentation"]
+
+  - id: "QUESTION-MARK-PROPAGATION"
+    name: "Use ? operator for error propagation"
+    description: |
+      Use the ? operator to propagate errors up the call stack cleanly.
+      This is more readable than manual match/if-let chains.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn load_game() -> Result<GameState, Error> {\n    let save = load_save()?;\n    let level = load_level(&save.level)?;\n    Ok(GameState::new(save, level))\n}"
+      bad:
+        - "fn load_game() -> Result<GameState, Error> {\n    match load_save() {\n        Ok(save) => match load_level(&save.level) {...}\n    }\n}"
+    tags: ["errors", "result", "propagation"]
+
+  - id: "ERROR-TYPES-SPECIFIC"
+    name: "Use specific error types"
+    description: |
+      Create specific error types for different failure modes. Avoid
+      generic String errors that lose type information.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "#[derive(Debug)]\nenum LoadError {\n    IoError(io::Error),\n    ParseError(String),\n    VersionMismatch { expected: u32, found: u32 }\n}"
+      bad:
+        - "fn load() -> Result<Data, String> // Lost type info"
+    tags: ["errors", "types", "design"]
+
+  - id: "AVOID-UNWRAP-IN-LIBRARY"
+    name: "Avoid .unwrap() in library code"
+    description: |
+      Library code should not panic except for clear programmer errors.
+      Return Results and let callers decide how to handle errors.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "pub fn parse(input: &str) -> Result<Ast, ParseError> { ... }"
+      bad:
+        - "pub fn parse(input: &str) -> Ast {\n    input.parse().unwrap() // Panics on bad input\n}"
+    tags: ["errors", "libraries", "api-design"]
+
+  - id: "PANIC-WITH-MESSAGE"
+    name: "Always provide panic messages"
+    description: |
+      When using panic!, always include a descriptive message. Helps
+      debugging by explaining what went wrong.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "panic!(\"Entity ID {} not found in registry\", id);"
+      bad:
+        - "panic!(); // No information about failure"
+    tags: ["panic", "debugging", "messages"]
+
+  - id: "VALIDATE-EXTERNAL-INPUT"
+    name: "Validate all external input"
+    description: |
+      Never trust external data (files, network, user input). Validate
+      thoroughly and return Result for invalid input.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn parse_size(input: &str) -> Result<usize, ParseError> {\n    let size = input.parse()?;\n    if size > MAX_SIZE {\n        return Err(ParseError::TooLarge);\n    }\n    Ok(size)\n}"
+      bad:
+        - "fn parse_size(input: &str) -> usize {\n    input.parse().unwrap() // Can panic on bad input\n}"
+    tags: ["validation", "security", "safety", "carmack"]
+
+  - id: "STATIC-ASSERTIONS"
+    name: "Use compile-time assertions for static properties"
+    description: |
+      Properties that can be checked at compile time should use const
+      assertions, not runtime checks.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "const _: () = assert!(std::mem::size_of::<Entity>() <= 64);"
+        - "const _: () = assert!(std::mem::align_of::<Vec3>() == 16);"
+      bad:
+        - "// Runtime check for static property\nassert!(std::mem::size_of::<Entity>() <= 64);"
+    tags: ["assertions", "compile-time", "static"]
+
+  - id: "EARLY-RETURN-ERRORS"
+    name: "Use early returns for error conditions"
+    description: |
+      Check for error conditions at function start and return early.
+      Keeps happy path at main indentation level.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn process(entity: &Entity) -> Result<(), Error> {\n    if !entity.is_valid() {\n        return Err(Error::InvalidEntity);\n    }\n    // Happy path\n}"
+      bad:
+        - "fn process(entity: &Entity) -> Result<(), Error> {\n    if entity.is_valid() {\n        // Happy path nested\n    } else {\n        Err(Error::InvalidEntity)\n    }\n}"
+    tags: ["errors", "control-flow", "readability", "carmack"]

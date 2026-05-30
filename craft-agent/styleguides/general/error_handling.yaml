@@ -1,0 +1,210 @@
+metadata:
+  name: "Carmack Error Handling"
+  version: "1.0.0"
+  description: "Error handling, assertions, and failure management patterns"
+  language: "language-agnostic"
+  category: "error_handling"
+
+description: |
+  Carmack's error handling emphasizes assertions for programmer errors,
+  explicit error codes for expected failures, and minimal use of exceptions.
+  The goal is to catch bugs early in development and handle expected failures
+  gracefully.
+
+rules:
+  - id: "ASSERT-INVARIANTS"
+    name: "Assert invariants liberally"
+    description: |
+      Use assertions to validate invariants and catch programmer errors.
+      Assertions should be plentiful in debug builds to catch bugs early.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "assert(entity != NULL);"
+        - "assert(index < array.size());"
+        - "assert(count >= 0 && count <= MAX_COUNT);"
+      bad:
+        - "// No assertion, assumes entity is valid\nentity->Update();"
+    tags:
+      - "assertions"
+      - "invariants"
+      - "safety"
+
+  - id: "ASSERT-PRECONDITIONS"
+    name: "Assert function preconditions"
+    description: |
+      Every function should assert its preconditions at the start. This
+      catches contract violations immediately at the call site.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "void Process(Entity* entity) {\n    assert(entity != NULL);\n    assert(entity->IsValid());\n}"
+      bad:
+        - "void Process(Entity* entity) {\n    // Hope entity is valid\n    entity->Update();\n}"
+    tags:
+      - "assertions"
+      - "preconditions"
+      - "contracts"
+
+  - id: "MAGIC-NUMBER-VALIDATION"
+    name: "Validate memory with magic numbers"
+    description: |
+      For memory blocks and critical structures, use magic number patterns
+      to detect corruption. Assert these in debug builds.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "assert(block->magic == 0xDEADBEEF);"
+        - "assert(block->id[0] == 0x11111111 && block->id[1] == 0x22222222);"
+      bad:
+        - "// Just trust the memory is valid"
+    tags:
+      - "memory"
+      - "validation"
+      - "debugging"
+
+  - id: "AVOID-EXCEPTIONS"
+    name: "Minimize exception usage"
+    description: |
+      Exceptions should be reserved for truly exceptional circumstances.
+      Prefer explicit error returns for expected failure cases.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Result<Data> LoadFile(path) // Explicit error return"
+        - "bool TryConnect(address) // Boolean success"
+      bad:
+        - "Data LoadFile(path) // Throws on any error"
+    tags:
+      - "exceptions"
+      - "control-flow"
+      - "performance"
+
+  - id: "ERROR-SEVERITY-LEVELS"
+    name: "Use explicit error severity levels"
+    description: |
+      Distinguish between warning (recoverable), error (serious), and fatal
+      error (unrecoverable). Make severity explicit in logging.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Warning('Missing optional config');"
+        - "Error('Failed to load critical asset');"
+        - "FatalError('Out of memory');"
+      bad:
+        - "Log('Something went wrong'); // Unclear severity"
+    tags:
+      - "logging"
+      - "severity"
+      - "diagnostics"
+
+  - id: "FAIL-FAST"
+    name: "Fail fast on programmer errors"
+    description: |
+      Programmer errors (assertion failures, invalid states) should
+      terminate immediately in debug builds. Don't try to recover.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "assert(ptr != NULL); // Crashes in debug if null"
+        - "if (!invariant_holds()) { abort(); }"
+      bad:
+        - "if (ptr == NULL) { ptr = &default; } // Hiding bug"
+    tags:
+      - "debugging"
+      - "correctness"
+      - "safety"
+
+  - id: "ERROR-RETURNS-EXPLICIT"
+    name: "Make error returns explicit and documented"
+    description: |
+      Functions that can fail should make this obvious in return type and
+      documentation. Don't hide failure modes.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Returns NULL on failure\nEntity* FindEntity(int id);"
+        - "// Returns error code, 0 on success\nint Connect(address);"
+      bad:
+        - "Entity* FindEntity(int id); // What if not found?"
+    tags:
+      - "errors"
+      - "documentation"
+      - "contracts"
+
+  - id: "CHECK-RETURN-VALUES"
+    name: "Always check error return values"
+    description: |
+      Don't ignore return values from functions that can fail. Either check
+      the return or explicitly document why it's safe to ignore.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "if (!Connect(addr)) {\n    HandleError();\n}"
+        - "(void)Write(data); // Explicitly ignoring, documented why"
+      bad:
+        - "Connect(addr); // Ignoring potential failure"
+    tags:
+      - "errors"
+      - "safety"
+      - "correctness"
+
+  - id: "VALIDATE-EXTERNAL-DATA"
+    name: "Validate all external input"
+    description: |
+      Never trust external data (files, network, user input). Validate
+      thoroughly before use.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "if (size > MAX_SIZE || size < 0) {\n    return ERROR_INVALID;\n}"
+      bad:
+        - "buffer = malloc(size); // No validation of size"
+    tags:
+      - "validation"
+      - "security"
+      - "safety"
+
+  - id: "DEBUG-VS-RELEASE-CHECKS"
+    name: "Different checks for debug vs release"
+    description: |
+      Expensive validation should be debug-only (assertions). Critical
+      safety checks should be release-enabled (explicit if checks).
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "assert(ValidateComplexInvariant()); // Debug only"
+        - "if (ptr == NULL) return ERROR; // Always checked"
+      bad:
+        - "#ifdef DEBUG\nif (ptr == NULL) return ERROR;\n#endif // Safety check should always run"
+    tags:
+      - "performance"
+      - "safety"
+      - "debugging"
+
+  - id: "SINGLE-EXIT-POINT"
+    name: "Consider single exit point for cleanup"
+    description: |
+      For functions with cleanup needs, consider using single exit point
+      with goto or RAII patterns to ensure cleanup always happens.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if (error) goto cleanup;\n...\ncleanup:\n    FreeResources();\n    return result;"
+      bad:
+        - "if (error) return; // Forgot to free resources"
+    tags:
+      - "cleanup"
+      - "resources"
+      - "safety"

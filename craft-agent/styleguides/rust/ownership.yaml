@@ -1,0 +1,215 @@
+metadata:
+  name: "Rust Ownership & Borrowing (Carmack's Const Discipline)"
+  version: "1.0.0"
+  description: "Ownership system as formalization of Carmack's const correctness"
+  language: "rust"
+  category: "ownership"
+
+description: |
+  Rust's ownership system formalizes what Carmack enforced through const
+  discipline. The borrow checker makes state management explicit and catches
+  bugs at compile time that even expert C++ programmers miss.
+
+rules:
+  - id: "IMMUTABLE-BY-DEFAULT"
+    name: "Variables are immutable by default"
+    description: |
+      Rust enforces Carmack's 'const everything' principle. Variables are
+      immutable unless explicitly marked mut. Only add mut when necessary.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "let count = entities.len(); // Immutable by default"
+        - "let mut position = Vec3::ZERO; // Explicit mutability"
+      bad:
+        - "// Don't add mut unnecessarily\nlet mut count = entities.len(); // Never modified"
+    tags: ["ownership", "immutability", "carmack"]
+
+  - id: "SHARED-BORROW-DEFAULT"
+    name: "Prefer shared borrows (&T) for read-only access"
+    description: |
+      Use shared borrows (&T) for read-only access. This is Rust's
+      enforcement of Carmack's const parameters.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn process_entity(entity: &Entity, config: &Config)"
+        - "fn distance(a: &Vec3, b: &Vec3) -> f32"
+      bad:
+        - "fn process_entity(entity: &mut Entity) // Doesn't need mut"
+    tags: ["ownership", "borrowing", "carmack"]
+
+  - id: "EXCLUSIVE-BORROW-INTENT"
+    name: "Use &mut only when mutation is needed"
+    description: |
+      Exclusive borrows (&mut T) should only be used when the function
+      actually modifies the data. This makes mutation explicit.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "fn update_position(entity: &mut Entity, delta: Vec3)"
+        - "fn apply_damage(health: &mut f32, amount: f32)"
+      bad:
+        - "fn get_name(entity: &mut Entity) -> &str // Doesn't mutate"
+    tags: ["ownership", "borrowing", "mutation"]
+
+  - id: "NO-INOUT-BY-DESIGN"
+    name: "Rust prevents in-out parameters by design"
+    description: |
+      Carmack's 'no in-out parameters' rule is enforced by ownership.
+      Parameters are either borrowed (&T, &mut T) or owned (T).
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "fn transform(input: Vec3) -> Vec3 // Takes and returns ownership"
+        - "fn update(state: &mut GameState) // Clearly mutable"
+      bad:
+        - "// C++ in-out pattern doesn't exist in Rust\n// fn transform(inout: &mut Vec3) // Clear if reading or writing"
+    tags: ["ownership", "parameters", "carmack", "design"]
+
+  - id: "OWNERSHIP-TRANSFER-EXPLICIT"
+    name: "Ownership transfer is explicit"
+    description: |
+      When a function takes ownership (parameter type T), the transfer
+      is explicit. Document when ownership is transferred.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// Takes ownership of the entity\nfn consume_entity(entity: Entity)"
+        - "/// Returns owned data\nfn create_buffer() -> Vec<u8>"
+      bad:
+        - "fn process(entity: Entity) // No doc about ownership"
+    tags: ["ownership", "documentation", "clarity"]
+
+  - id: "CLONE-EXPLICIT"
+    name: "Make cloning explicit with .clone()"
+    description: |
+      Rust requires explicit .clone() calls. This makes expensive operations
+      visible, preventing hidden performance issues.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "let copy = original.clone(); // Explicit"
+      bad:
+        - "// C++ copy: Entity copy = original; // Hidden in Rust"
+    tags: ["ownership", "performance", "explicitness"]
+
+  - id: "BORROW-LIFETIME-CLEAR"
+    name: "Keep borrow lifetimes clear and minimal"
+    description: |
+      Keep the scope of borrows as small as possible. Release borrows
+      before they're no longer needed.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "{\n    let data = mutex.lock().unwrap();\n    process(&data);\n} // Lock released\nother_work();"
+      bad:
+        - "let data = mutex.lock().unwrap();\nprocess(&data);\n// Long scope, lock held\nother_work();"
+    tags: ["ownership", "lifetimes", "scope"]
+
+  - id: "AVOID-LIFETIME-COMPLEXITY"
+    name: "Avoid complex lifetime annotations"
+    description: |
+      If lifetime annotations get complex, consider restructuring.
+      Simpler ownership patterns are easier to maintain.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn process(data: &Data) -> Result // Simple"
+      bad:
+        - "fn complex<'a, 'b: 'a, 'c>(a: &'a T, b: &'b U, c: &'c V) -> &'a W\n// Too complex"
+    tags: ["ownership", "lifetimes", "complexity", "carmack"]
+
+  - id: "INTERIOR-MUTABILITY-RARE"
+    name: "Use interior mutability sparingly"
+    description: |
+      Cell, RefCell, Mutex provide interior mutability. Use only when
+      truly needed (global state, caches). Document why.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Cache: needs interior mutability\nstruct Cache {\n    data: RefCell<HashMap<Key, Value>>\n}"
+      bad:
+        - "// Don't use RefCell to avoid borrow checker\nstruct Entity {\n    health: RefCell<f32> // Just use &mut\n}"
+    tags: ["ownership", "interior-mutability", "patterns"]
+
+  - id: "STATIC-LIFETIME-JUSTIFICATION"
+    name: "Justify 'static lifetime requirements"
+    description: |
+      'static lifetime means data lives for entire program. Only use when
+      truly necessary (string literals, leaked allocations, globals).
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "const NAME: &'static str = \"Entity\"; // Literal, fine"
+        - "fn spawn_thread<F: FnOnce() + Send + 'static>(f: F) // Thread needs 'static"
+      bad:
+        - "// Don't require 'static unnecessarily\nfn process(data: &'static [u8]) // Overly restrictive"
+    tags: ["ownership", "lifetimes", "static"]
+
+  - id: "MOVE-SEMANTICS-CLEAR"
+    name: "Make move semantics clear in names"
+    description: |
+      When a function moves a value, consider naming that makes this clear
+      (into_*, take_*, consume_*).
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "fn into_inner(self) -> T // Clear: consumes self"
+        - "fn take_buffer(self) -> Vec<u8> // Clear: moves out buffer"
+      bad:
+        - "fn inner(self) -> T // Unclear that self is consumed"
+    tags: ["ownership", "naming", "clarity"]
+
+  - id: "BORROW-CHECKER-FRIEND"
+    name: "Work with the borrow checker, not against it"
+    description: |
+      If fighting the borrow checker, restructure code rather than using
+      unsafe or complex patterns. The checker catches real bugs.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Split borrows cleanly\nlet (first, rest) = slice.split_first_mut().unwrap();"
+      bad:
+        - "// Don't use unsafe to bypass borrow checker without justification\nunsafe { &mut *ptr } // Why?"
+    tags: ["ownership", "safety", "philosophy", "carmack"]
+
+  - id: "COPY-TRAIT-SMALL-TYPES"
+    name: "Implement Copy for small, simple types"
+    description: |
+      Small types (primitives, small aggregates) should implement Copy
+      when appropriate. Makes usage more ergonomic.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "#[derive(Copy, Clone)]\nstruct Vec3 { x: f32, y: f32, z: f32 }"
+      bad:
+        - "// Vec3 without Copy requires .clone() everywhere"
+    tags: ["ownership", "copy", "ergonomics"]
+
+  - id: "DOCUMENT-OWNERSHIP-CONTRACTS"
+    name: "Document ownership contracts in APIs"
+    description: |
+      Public APIs should clearly document ownership expectations,
+      especially when they're non-obvious.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// Takes ownership of `data` and manages its lifetime.\n/// The data will be freed when the manager is dropped.\nfn register(data: Data)"
+      bad:
+        - "fn register(data: Data) // What happens to data?"
+    tags: ["ownership", "documentation", "api"]

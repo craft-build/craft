@@ -1,0 +1,223 @@
+metadata:
+  name: "Rust Code Organization (Carmack-Enhanced)"
+  version: "1.0.0"
+  description: "Module and file organization combining official Rust style with Carmack's subsystem patterns"
+  language: "rust"
+  category: "organization"
+
+description: |
+  Rust code organization that uses modules for Carmack's subsystem boundaries
+  while following Rust conventions for file structure and visibility.
+
+rules:
+  - id: "MODULE-PER-SUBSYSTEM"
+    name: "Organize modules by subsystem"
+    description: |
+      Carmack's subsystem organization translates to Rust modules. Major
+      subsystems should be separate modules with clear responsibilities.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "src/\n  renderer/\n    mod.rs\n    backend.rs\n  audio/\n    mod.rs\n  game/\n    mod.rs"
+      bad:
+        - "src/\n  utils.rs\n  misc.rs\n  stuff.rs"
+    tags: ["organization", "modules", "carmack"]
+
+  - id: "FILE-MATCHES-MODULE"
+    name: "File names match module names"
+    description: |
+      File names should use snake_case and match their module name.
+      Each module should be in its own file or directory.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "entity_manager.rs → mod entity_manager"
+        - "render_system.rs → mod render_system"
+      bad:
+        - "EntityManager.rs // Wrong case"
+        - "rendersystem.rs // Missing underscore"
+    tags: ["organization", "files", "official"]
+
+  - id: "MOD-RS-FOR-DIRECTORIES"
+    name: "Use mod.rs for module directories"
+    description: |
+      When a module has submodules, create a directory with mod.rs.
+      Submodules go in separate files in that directory.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "renderer/\n  mod.rs // Public API\n  backend.rs\n  frontend.rs"
+      bad:
+        - "renderer.rs // Can't have submodules"
+    tags: ["organization", "modules", "official"]
+
+  - id: "PUBLIC-API-MOD-RS"
+    name: "mod.rs defines public API"
+    description: |
+      The mod.rs file should define the public interface of a module,
+      re-exporting items and organizing submodules.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// renderer/mod.rs\nmod backend;\nmod frontend;\n\npub use frontend::{RenderScene, RenderState};\npub(crate) use backend::GpuContext;"
+      bad:
+        - "// mod.rs with no organization, everything public"
+    tags: ["organization", "api", "visibility"]
+
+  - id: "VISIBILITY-INTENTIONAL"
+    name: "Make visibility intentional"
+    description: |
+      Use pub, pub(crate), pub(super) intentionally. Default (private)
+      for implementation details, pub for public API.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "pub fn render() { ... } // Public API\npub(crate) fn internal_helper() { ... } // Crate-internal\nfn private_impl() { ... } // Private"
+      bad:
+        - "pub fn everything() { ... } // Everything public by default"
+    tags: ["organization", "visibility", "api"]
+
+  - id: "FLAT-OVER-DEEP"
+    name: "Prefer flat module structure"
+    description: |
+      Avoid deep nesting (more than 3 levels). Flat structure is easier
+      to navigate and refactor.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "src/\n  renderer/\n  audio/\n  game/"
+      bad:
+        - "src/\n  systems/\n    graphics/\n      rendering/\n        backend/\n          vulkan/"
+    tags: ["organization", "structure", "carmack"]
+
+  - id: "PRELUDE-FOR-COMMON-IMPORTS"
+    name: "Use prelude module for common imports"
+    description: |
+      Create a prelude module for commonly used types and traits.
+      Users can import with use crate::prelude::*.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// prelude.rs\npub use crate::{\n    Entity, Component,\n    Result, Error,\n};"
+      bad:
+        - "// Users import each type individually from deep paths"
+    tags: ["organization", "prelude", "ergonomics"]
+
+  - id: "VERSION-SORT-DEPS"
+    name: "Sort dependencies alphabetically"
+    description: |
+      In Cargo.toml, sort dependencies alphabetically for easy scanning
+      and merge conflict reduction.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "[dependencies]\nanyhow = \"1.0\"\nserde = \"1.0\"\ntokio = \"1.0\""
+      bad:
+        - "[dependencies]\ntokio = \"1.0\"\nanyhow = \"1.0\"\nserde = \"1.0\""
+    tags: ["organization", "dependencies", "official"]
+
+  - id: "FEATURE-FLAGS-ORGANIZED"
+    name: "Organize feature flags logically"
+    description: |
+      Group related feature flags, use descriptive names, and document
+      what each feature enables.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "[features]\ndefault = [\"std\"]\n# Rendering backends\nvulkan = [\"ash\"]\nopengl = [\"gl\"]"
+      bad:
+        - "[features]\nfeature1 = []\nfeature2 = []\nmy_thing = []"
+    tags: ["organization", "features", "cargo"]
+
+  - id: "LIB-RS-ROOT"
+    name: "lib.rs as library root"
+    description: |
+      Library crates should have lib.rs as the root, organizing
+      modules and defining the public API.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// lib.rs\npub mod renderer;\npub mod audio;\n\npub use renderer::Renderer;"
+      bad:
+        - "// No lib.rs, unclear entry point"
+    tags: ["organization", "library", "official"]
+
+  - id: "MAIN-RS-BINARY"
+    name: "main.rs for binary entry point"
+    description: |
+      Binary crates have main.rs with main function. Keep it thin,
+      delegate to library code.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// main.rs\nfn main() -> Result<()> {\n    myapp::run()\n}"
+      bad:
+        - "// main.rs with 1000 lines of logic"
+    tags: ["organization", "binary", "official"]
+
+  - id: "TESTS-BESIDE-CODE"
+    name: "Place tests beside code they test"
+    description: |
+      Unit tests go in #[cfg(test)] modules in the same file. Integration
+      tests go in tests/ directory.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// entity.rs\nimpl Entity { ... }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn test_entity() { ... }\n}"
+      bad:
+        - "// All tests in separate test file"
+    tags: ["organization", "testing", "official"]
+
+  - id: "EXAMPLES-DIRECTORY"
+    name: "Provide examples in examples/ directory"
+    description: |
+      Library crates should provide usage examples in examples/
+      directory. Each example is a separate binary.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "examples/\n  basic.rs\n  advanced.rs"
+      bad:
+        - "// No examples for library users"
+    tags: ["organization", "examples", "documentation"]
+
+  - id: "ONE-STRUCT-PER-FILE-COMPLEX"
+    name: "One major type per file for complex types"
+    description: |
+      Complex types (100+ lines) should get their own file. Simple
+      related types can share a file.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "entity.rs // Just Entity\nentity_manager.rs // Just EntityManager"
+      bad:
+        - "stuff.rs // Entity, EntityManager, Component, System all mixed"
+    tags: ["organization", "files", "carmack"]
+
+  - id: "RELATED-CODE-TOGETHER"
+    name: "Group related code together"
+    description: |
+      Carmack principle: Keep related functions, types, and implementations
+      near each other in the file.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// All Vec3 code together\nstruct Vec3 { ... }\nimpl Vec3 { ... }\nimpl Add for Vec3 { ... }"
+      bad:
+        - "// Vec3 scattered across file"
+    tags: ["organization", "cohesion", "carmack"]

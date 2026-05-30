@@ -1,0 +1,225 @@
+metadata:
+  name: "Rust Memory Management (Carmack's Allocator Philosophy)"
+  version: "1.0.0"
+  description: "Memory patterns translating Carmack's custom allocators to Rust"
+  language: "rust"
+  category: "memory"
+
+description: |
+  Carmack's custom allocator philosophy adapted to Rust: arena allocators
+  for frame-based allocation, explicit ownership, zero-cost abstractions,
+  and careful consideration of allocation patterns.
+
+rules:
+  - id: "ARENA-ALLOCATORS"
+    name: "Use arena allocators for frame/scope-based allocation"
+    description: |
+      Carmack's frame allocators translate directly to Rust arena patterns.
+      Use bumpalo or typed-arena for temporary, scope-based allocations.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "use bumpalo::Bump;\n\nlet arena = Bump::new();\nlet temp_data = arena.alloc_slice_copy(slice);\n// All arena allocations freed when arena drops"
+      bad:
+        - "let temp_data = vec![0; size]; // Heap allocation for temp data"
+    tags: ["memory", "allocators", "carmack", "performance"]
+
+  - id: "TYPED-ARENAS-HOMOGENEOUS"
+    name: "Use typed arenas for same-type collections"
+    description: |
+      When allocating many instances of the same type with the same
+      lifetime, use typed-arena for optimal performance.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "use typed_arena::Arena;\n\nlet entity_arena = Arena::new();\nlet entity = entity_arena.alloc(Entity::new());\n// All entities freed together"
+      bad:
+        - "let mut entities = Vec::new();\nfor _ in 0..1000 {\n    entities.push(Box::new(Entity::new()));\n}"
+    tags: ["memory", "allocators", "performance"]
+
+  - id: "ALLOCATION-CONSCIOUS"
+    name: "Be conscious of allocation patterns"
+    description: |
+      Understand where allocations happen. Minimize allocations in hot paths.
+      Reuse buffers when possible.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Reuse buffer across frames\nstruct FrameData {\n    temp_buffer: Vec<u8>,\n}\nimpl FrameData {\n    fn reset(&mut self) {\n        self.temp_buffer.clear(); // Reuse capacity\n    }\n}"
+      bad:
+        - "// Allocate every frame\nfn process_frame() {\n    let buffer = vec![0; 4096]; // New allocation\n}"
+    tags: ["memory", "performance", "carmack"]
+
+  - id: "STACK-OVER-HEAP"
+    name: "Prefer stack allocation when size is known"
+    description: |
+      When size is known at compile time and reasonable, use stack
+      allocation (arrays) instead of heap (Vec).
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "let buffer = [0u8; 256]; // Stack allocation"
+        - "let small_vec = smallvec![1, 2, 3]; // Stack up to threshold"
+      bad:
+        - "let buffer = vec![0u8; 256]; // Heap allocation for small buffer"
+    tags: ["memory", "stack", "performance"]
+
+  - id: "SMALLVEC-SMALL-COLLECTIONS"
+    name: "Use SmallVec for small collections"
+    description: |
+      For collections that are usually small, use SmallVec to avoid
+      allocations for the common case.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "use smallvec::SmallVec;\n// Usually has 0-4 items\ntype SmallEntityVec = SmallVec<[Entity; 4]>;"
+      bad:
+        - "type EntityVec = Vec<Entity>; // Always heap allocates"
+    tags: ["memory", "optimization", "collections"]
+
+  - id: "CAPACITY-HINTS"
+    name: "Provide capacity hints when size is known"
+    description: |
+      When you know approximate collection size, use with_capacity to
+      avoid reallocation.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "let mut entities = Vec::with_capacity(entity_count);"
+        - "let mut map = HashMap::with_capacity(expected_size);"
+      bad:
+        - "let mut entities = Vec::new(); // Will reallocate during push"
+    tags: ["memory", "performance", "allocations"]
+
+  - id: "COPY-SMALL-TYPES"
+    name: "Implement Copy for small types"
+    description: |
+      Small types (primitives, small aggregates <= 16 bytes) should
+      implement Copy when appropriate for ergonomics and performance.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "#[derive(Copy, Clone)]\nstruct Vec3 { x: f32, y: f32, z: f32 }"
+        - "#[derive(Copy, Clone)]\nstruct EntityId(u32);"
+      bad:
+        - "// Vec3 without Copy requires .clone() everywhere\nstruct Vec3 { x: f32, y: f32, z: f32 }"
+    tags: ["memory", "copy", "ergonomics"]
+
+  - id: "AVOID-RC-WHEN-POSSIBLE"
+    name: "Avoid Rc/Arc unless shared ownership is necessary"
+    description: |
+      Reference counting has runtime overhead. Use only when multiple
+      owners truly need shared ownership.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Clear ownership\nstruct Game {\n    entities: Vec<Entity>, // Game owns entities\n}"
+      bad:
+        - "// Unnecessary shared ownership\nstruct Game {\n    entities: Vec<Rc<Entity>>, // Why shared?\n}"
+    tags: ["memory", "ownership", "performance"]
+
+  - id: "BOX-LARGE-TYPES"
+    name: "Box large types to avoid stack overflow"
+    description: |
+      Types larger than a few KB should be boxed to avoid stack issues
+      and reduce move costs.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "struct Large([u8; 1_000_000]);\nlet large = Box::new(Large([0; 1_000_000]));"
+      bad:
+        - "let large = Large([0; 1_000_000]); // Stack overflow risk"
+    tags: ["memory", "stack", "safety"]
+
+  - id: "MANUAL-DROP-ORDER"
+    name: "Use ManuallyDrop for specific drop order"
+    description: |
+      When drop order matters, use ManuallyDrop to control when resources
+      are freed.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "use std::mem::ManuallyDrop;\nstruct System {\n    resource: ManuallyDrop<Resource>,\n}\nimpl Drop for System {\n    fn drop(&mut self) {\n        // Custom cleanup before resource drops\n        unsafe { ManuallyDrop::drop(&mut self.resource); }\n    }\n}"
+      bad:
+        - "// Unpredictable drop order in struct fields"
+    tags: ["memory", "drop", "resources"]
+
+  - id: "ALLOCATION-TRACKING-DEBUG"
+    name: "Use allocator tracking in debug builds"
+    description: |
+      In debug builds, consider using allocator instrumentation to track
+      allocation patterns and find leaks.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "#[cfg(debug_assertions)]\nuse tracking_allocator::AllocationTracker;"
+      bad:
+        - "// No allocation tracking, harder to find leaks"
+    tags: ["memory", "debugging", "carmack"]
+
+  - id: "SLICE-OVER-VEC"
+    name: "Accept &[T] instead of &Vec<T>"
+    description: |
+      Functions that only read a collection should accept &[T], not &Vec<T>.
+      This is more flexible and communicates intent.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn process_entities(entities: &[Entity])"
+      bad:
+        - "fn process_entities(entities: &Vec<Entity>) // Too specific"
+    tags: ["memory", "api-design", "flexibility"]
+
+  - id: "STRING-SLICE-PARAMS"
+    name: "Accept &str instead of &String for parameters"
+    description: |
+      Functions that only read strings should accept &str, not &String.
+      This works with String, &str, and string literals.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "fn load_file(path: &str) -> Result<Data, Error>"
+      bad:
+        - "fn load_file(path: &String) -> Result<Data, Error> // Too specific"
+    tags: ["memory", "strings", "api-design"]
+
+  - id: "ZERO-COPY-PARSING"
+    name: "Use zero-copy parsing when appropriate"
+    description: |
+      When parsing structured data, consider zero-copy approaches that
+      borrow from the input rather than allocating.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Borrows from input, no allocation\nstruct Token<'a> { text: &'a str }"
+      bad:
+        - "// Allocates copy of every token\nstruct Token { text: String }"
+    tags: ["memory", "parsing", "performance"]
+
+  - id: "MEM-ALIGN-SIMD"
+    name: "Align data structures for SIMD when beneficial"
+    description: |
+      Data processed with SIMD should be appropriately aligned. Use
+      repr(align(N)) for guaranteed alignment.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "#[repr(align(16))]\nstruct Vec4 { x: f32, y: f32, z: f32, w: f32 }"
+      bad:
+        - "struct Vec4 { x: f32, y: f32, z: f32, w: f32 } // May be misaligned"
+    tags: ["memory", "alignment", "simd", "carmack"]

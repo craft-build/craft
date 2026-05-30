@@ -1,0 +1,287 @@
+metadata:
+  name: "Rust Comments & Documentation (Carmack-Enhanced)"
+  version: "1.0.0"
+  description: "Rust documentation combining official style with Carmack's 30% comment philosophy"
+  language: "rust"
+  category: "comments"
+
+description: |
+  Rust comment style combining official Rust conventions with Carmack's
+  philosophy: explain WHY not WHAT, maintain high comment density (20-30%),
+  and make code obvious through documentation.
+
+rules:
+  - id: "LINE-COMMENTS"
+    name: "Prefer line comments over block comments"
+    description: "Use // for comments instead of /* ... */."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// This is a comment"
+        - "// Multi-line comments\n// use multiple line comments"
+      bad:
+        - "/* This is a comment */"
+    tags: ["comments", "style", "official"]
+
+  - id: "COMMENT-SPACE"
+    name: "Single space after comment delimiter"
+    description: "Put a single space after the opening // in line comments."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Good comment"
+      bad:
+        - "//Bad comment"
+    tags: ["comments", "spacing", "official"]
+
+  - id: "BLOCK-COMMENT-FORMAT"
+    name: "Format block comments correctly"
+    description: |
+      Single-line block comments should have spaces after /* and before */.
+      Multi-line block comments should have newlines after /* and before */.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/* single space */"
+        - "/*\n * Multi-line\n * comment\n */"
+      bad:
+        - "/*no spaces*/"
+    tags: ["comments", "formatting", "official"]
+
+  - id: "STANDALONE-COMMENTS"
+    name: "Prefer standalone comments"
+    description: |
+      Comments should be on their own line rather than following code
+      on the same line. Exceptions for very short clarifications.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Process each entity\nfor entity in entities {"
+      bad:
+        - "for entity in entities { // Process each entity"
+    tags: ["comments", "placement", "official"]
+
+  - id: "DOC-COMMENT-STYLE"
+    name: "Prefer line doc comments (///)"
+    description: "Use /// for doc comments instead of /** ... */."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// Renders the scene with the given configuration.\nfn render_scene(&self, config: &Config)"
+      bad:
+        - "/** Renders the scene */"
+    tags: ["documentation", "comments", "official"]
+
+  - id: "OUTER-DOC-COMMENTS"
+    name: "Prefer outer doc comments"
+    description: |
+      Use outer doc comments (///) instead of inner doc comments (//!),
+      except for module/crate-level documentation.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// Outer doc comment for function\nfn process() {}"
+        - "//! Module-level documentation at top of file"
+      bad:
+        - "fn process() {\n    //! Wrong: inner doc in function\n}"
+    tags: ["documentation", "comments", "official"]
+
+  - id: "DOC-BEFORE-ATTRS"
+    name: "Doc comments before attributes"
+    description: "Doc comments should be placed before attributes."
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// Documentation\n#[inline]\nfn process() {}"
+      bad:
+        - "#[inline]\n/// Documentation\nfn process()"
+    tags: ["documentation", "attributes", "official"]
+
+  - id: "EXPLAIN-WHY-NOT-WHAT"
+    name: "Comment the WHY, not the WHAT"
+    description: |
+      Carmack principle: Comments should explain reasoning, not describe
+      what the code obviously does. Trust the reader to understand syntax.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Initialize endian conversion before any string operations\nSwap::init();"
+        - "// Workaround for driver bug on NVIDIA 4xx series\nif needs_workaround { ... }"
+      bad:
+        - "// Set x to 5\nx = 5;"
+        - "// Loop through entities\nfor entity in entities { ... }"
+    tags: ["comments", "content", "carmack"]
+
+  - id: "COMMENT-DENSITY"
+    name: "Aim for 20-30% comment ratio"
+    description: |
+      Carmack's Doom 3 achieved 30% comments. Not every line needs comments,
+      but every function should have documentation and complex sections
+      should have explanatory comments.
+    priority: "info"
+    enabled: true
+    tags: ["comments", "density", "carmack"]
+
+  - id: "DOC-FUNCTION-PURPOSE"
+    name: "Document function purpose and behavior"
+    description: |
+      Every public function should have doc comments explaining what it does,
+      its parameters, return value, and any important behavior.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "/// Computes the distance between two points.\n///\n/// # Arguments\n/// * `a` - First point\n/// * `b` - Second point\n///\n/// # Returns\n/// The Euclidean distance as f32\nfn distance(a: Vec3, b: Vec3) -> f32"
+      bad:
+        - "fn distance(a: Vec3, b: Vec3) -> f32 // No documentation"
+    tags: ["documentation", "functions", "carmack"]
+
+  - id: "DOC-EXAMPLES"
+    name: "Include examples in documentation"
+    description: |
+      Complex or non-obvious functions should include usage examples in
+      doc comments using code blocks.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// Parses configuration from TOML.\n///\n/// # Example\n/// ```\n/// let config = Config::from_toml(data)?;\n/// assert_eq!(config.width, 1920);\n/// ```"
+      bad:
+        - "/// Parses configuration. // No example of how to use"
+    tags: ["documentation", "examples"]
+
+  - id: "COMMENT-ALGORITHMS"
+    name: "Document non-obvious algorithms"
+    description: |
+      Complex algorithms or optimizations should be commented with
+      explanation and references when applicable.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Fast inverse square root (Quake III algorithm)\n// See: https://en.wikipedia.org/wiki/Fast_inverse_square_root\nlet magic = 0x5f3759df - (i >> 1);"
+      bad:
+        - "// Math stuff\nlet result = complex_calculation();"
+    tags: ["comments", "algorithms", "carmack"]
+
+  - id: "UNSAFE-JUSTIFICATION"
+    name: "Document why unsafe is safe"
+    description: |
+      Every unsafe block must have a SAFETY comment explaining why the
+      invariants are upheld and the operation is actually safe.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "unsafe {\n    // SAFETY: ptr is valid for cap bytes (ensured in new()),\n    // len < cap (checked above), and u8 has no alignment requirements\n    std::ptr::write(ptr.add(len), byte);\n}"
+      bad:
+        - "unsafe {\n    std::ptr::write(ptr.add(len), byte); // No safety comment\n}"
+    tags: ["unsafe", "safety", "documentation"]
+
+  - id: "TODO-WITH-CONTEXT"
+    name: "TODO comments include context"
+    description: |
+      TODO comments should include who, when, why, and issue tracker
+      references when applicable.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// TODO(username, 2024-12-17): Optimize for SIMD\n// See issue #1234"
+        - "// TODO: Add support for HDR rendering (blocked on #456)"
+      bad:
+        - "// TODO: fix this"
+        - "// HACK"
+    tags: ["todo", "maintenance", "carmack"]
+
+  - id: "WORKAROUND-DOCUMENTATION"
+    name: "Document workarounds explicitly"
+    description: |
+      If code works around a bug in external code, document what the bug
+      is, what version it affects, and when it can be removed.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Workaround for wgpu 0.18 bug with texture binding on Metal\n// Can be removed once wgpu > 0.19\nif cfg!(target_os = \"macos\") { ... }"
+      bad:
+        - "// Hack for Mac\nif cfg!(target_os = \"macos\") { ... }"
+    tags: ["workarounds", "documentation", "carmack"]
+
+  - id: "PANIC-JUSTIFICATION"
+    name: "Document why panics are acceptable"
+    description: |
+      Functions that can panic should document when and why. If a panic
+      represents a programmer error, say so.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// # Panics\n/// Panics if index is out of bounds. This is a programmer error;\n/// callers must ensure index < len.\nfn get_unchecked(&self, index: usize) -> &T"
+      bad:
+        - "fn get_unchecked(&self, index: usize) -> &T // Can panic, not documented"
+    tags: ["documentation", "panics", "safety"]
+
+  - id: "INVARIANT-DOCUMENTATION"
+    name: "Document invariants and assumptions"
+    description: |
+      Document invariants that must hold, preconditions, postconditions,
+      and assumptions. This helps maintainers understand constraints.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "/// Invariant: self.entities is always sorted by ID\nstruct EntityManager { ... }"
+        - "/// Precondition: buffer must be at least 256 bytes\nfn process_buffer(buffer: &mut [u8])"
+      bad:
+        - "fn process_buffer(buffer: &mut [u8]) // Size requirements?"
+    tags: ["invariants", "contracts", "carmack"]
+
+  - id: "AVOID-OBVIOUS-COMMENTS"
+    name: "Don't comment obvious code"
+    description: |
+      Don't add comments that merely restate what the code clearly does.
+      This adds noise without value.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "count += 1; // No comment needed"
+      bad:
+        - "count += 1; // Increment count"
+        - "return true; // Return true"
+    tags: ["comments", "noise", "carmack"]
+
+  - id: "MODULE-LEVEL-DOCS"
+    name: "Include module-level documentation"
+    description: |
+      Every module should have module-level docs (//!) explaining its
+      purpose and how it fits into the system.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "//! Renderer subsystem.\n//!\n//! Handles all rendering operations including scene setup,\n//! culling, and GPU command submission.\n"
+      bad:
+        - "// renderer.rs with no module docs"
+    tags: ["documentation", "modules", "organization"]
+
+  - id: "UPDATE-STALE-COMMENTS"
+    name: "Keep comments synchronized with code"
+    description: |
+      When code changes, update comments. Stale comments are worse than
+      no comments as they mislead future readers.
+    priority: "error"
+    enabled: true
+    examples:
+      bad:
+        - "/// Returns true if valid\nfn check_entity(&self) -> &Entity // Returns entity, not bool!"
+    tags: ["maintenance", "accuracy", "carmack"]

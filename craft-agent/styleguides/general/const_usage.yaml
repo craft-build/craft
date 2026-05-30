@@ -1,0 +1,184 @@
+metadata:
+  name: "Carmack Const Discipline"
+  version: "1.0.0"
+  description: "Const correctness patterns - everything const unless it cannot be"
+  language: "language-agnostic"
+  category: "const_usage"
+
+description: |
+  Carmack describes himself as a 'full const nazi' - everything should be
+  const/immutable unless it cannot be. This makes data flow explicit and
+  catches bugs at compile time.
+
+rules:
+  - id: "CONST-BY-DEFAULT"
+    name: "Make everything const by default"
+    description: |
+      Every variable, parameter, and return value should be const/immutable
+      unless there is a specific reason for mutability. Opt into mutability,
+      don't opt into immutability.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "const int count = entities.size();"
+        - "const Entity* GetEntity(const int id) const;"
+      bad:
+        - "int count = entities.size(); // Never modified"
+        - "Entity* GetEntity(int id); // Should be const"
+    tags:
+      - "immutability"
+      - "safety"
+      - "correctness"
+
+  - id: "CONST-PARAMETERS"
+    name: "Mark input parameters as const"
+    description: |
+      All input parameters that won't be modified should be marked const.
+      This documents intent and prevents accidental modification.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "void Process(const Entity* entity, const Vector3& position)"
+      bad:
+        - "void Process(Entity* entity, Vector3& position) // Unclear if modified"
+    tags:
+      - "parameters"
+      - "intent"
+      - "safety"
+
+  - id: "CONST-METHODS"
+    name: "Mark non-mutating methods as const"
+    description: |
+      Methods that don't modify object state should be marked const. This
+      enables use with const references and documents behavior.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "const char* GetName() const;"
+        - "float GetHealth() const;"
+      bad:
+        - "const char* GetName(); // Should be const method"
+    tags:
+      - "methods"
+      - "classes"
+      - "correctness"
+
+  - id: "NO-INOUT-PARAMS"
+    name: "Separate input and output parameters"
+    description: |
+      Parameters should be either input (const) or output (non-const), never
+      both. This makes data flow explicit and obvious.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "void Transform(const Vector3* input, Vector3* output);"
+      bad:
+        - "void Transform(Vector3* inOut); // Unclear direction"
+    tags:
+      - "parameters"
+      - "data-flow"
+      - "clarity"
+
+  - id: "CONST-LOCALS"
+    name: "Use const for local variables when possible"
+    description: |
+      Local variables that aren't modified should be const. This prevents
+      accidental modification and makes intent clear.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "const int numEntities = entities.size();"
+        - "const float deltaTime = currentTime - lastTime;"
+      bad:
+        - "int numEntities = entities.size(); // Never modified"
+    tags:
+      - "variables"
+      - "locals"
+      - "safety"
+
+  - id: "CONST-RETURN-VALUES"
+    name: "Return const values when appropriate"
+    description: |
+      Return const pointers or references when the caller should not modify
+      the returned data.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "const Entity* FindEntity(int id) const;"
+        - "const Config& GetConfig() const;"
+      bad:
+        - "Entity* FindEntity(int id) const; // Should return const*"
+    tags:
+      - "return-values"
+      - "safety"
+      - "intent"
+
+  - id: "CONST-ITERATORS"
+    name: "Use const iterators for read-only traversal"
+    description: |
+      When iterating over a collection without modifying it, use const
+      iterators to prevent accidental modification.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "for (const auto& entity : entities)"
+        - "const_iterator it = entities.begin();"
+      bad:
+        - "for (auto& entity : entities) // Not modifying, should be const"
+    tags:
+      - "iteration"
+      - "collections"
+      - "safety"
+
+  - id: "CONST-CORRECTNESS-REFACTOR"
+    name: "Retrofit const correctness to existing code"
+    description: |
+      When touching existing code, add const correctness even if not
+      originally present. Gradually improve the codebase.
+    priority: "info"
+    enabled: true
+    tags:
+      - "refactoring"
+      - "improvement"
+      - "maintenance"
+
+  - id: "CONST-AT-INTERFACE"
+    name: "Const correctness at API boundaries"
+    description: |
+      Public APIs should be especially rigorous about const correctness as
+      it becomes part of the contract with callers.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Public API with clear const contract\nconst char* GetName() const;"
+      bad:
+        - "// Unclear mutability contract\nchar* GetName();"
+    tags:
+      - "api"
+      - "interfaces"
+      - "contracts"
+
+  - id: "DOCUMENT-CONST-CAST"
+    name: "Document why const is cast away"
+    description: |
+      If const must be cast away (const_cast or similar), document why this
+      is necessary and safe. This should be rare.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// SAFE: Legacy API requires non-const but doesn't modify\nLegacyFunc(const_cast<char*>(str));"
+      bad:
+        - "LegacyFunc(const_cast<char*>(str)); // No explanation"
+    tags:
+      - "const-cast"
+      - "safety"
+      - "documentation"

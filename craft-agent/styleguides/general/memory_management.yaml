@@ -1,0 +1,225 @@
+metadata:
+  name: "Carmack Memory Management"
+  version: "1.0.0"
+  description: "Memory allocation, ownership, and management patterns"
+  language: "language-agnostic"
+  category: "memory_management"
+
+description: |
+  Carmack's memory management emphasizes custom allocators, clear ownership,
+  and deterministic deallocation. Never rely on system allocators for game
+  allocations. Track everything.
+
+rules:
+  - id: "CUSTOM-ALLOCATORS"
+    name: "Use custom allocators for game allocations"
+    description: |
+      Never use system malloc/free directly for game allocations. Use
+      custom allocators appropriate for allocation patterns and lifetimes.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "entity = Mem_Alloc(sizeof(Entity), TAG_ENTITY);"
+        - "temp = FrameAlloc(size); // Per-frame allocator"
+      bad:
+        - "entity = malloc(sizeof(Entity)); // System allocator"
+    tags:
+      - "allocation"
+      - "performance"
+      - "tracking"
+
+  - id: "TIERED-ALLOCATORS"
+    name: "Use tiered allocation strategy"
+    description: |
+      Different size classes should use different allocators optimized
+      for that size range (small, medium, large).
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Small: pool allocator\n// Medium: block allocator\n// Large: direct allocation"
+      bad:
+        - "// One allocator for everything"
+    tags:
+      - "allocation"
+      - "performance"
+      - "optimization"
+
+  - id: "MEMORY-TAGGING"
+    name: "Tag allocations by purpose"
+    description: |
+      Every allocation should be tagged with its purpose for debugging
+      and profiling. Track who allocated what.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Mem_Alloc(size, TAG_MODEL);"
+        - "Mem_Alloc(size, TAG_IMAGE);"
+        - "Mem_Alloc(size, TAG_ENTITY);"
+      bad:
+        - "Mem_Alloc(size); // No tag"
+    tags:
+      - "debugging"
+      - "profiling"
+      - "tracking"
+
+  - id: "FRAME-ALLOCATORS"
+    name: "Use frame allocators for temporary data"
+    description: |
+      Per-frame temporary allocations should use fast bump allocators
+      that reset entirely each frame. No individual frees needed.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "temp = FrameAlloc(size); // Freed at frame end"
+        - "FrameAllocator.Reset(); // O(1) clear"
+      bad:
+        - "temp = malloc(size);\n...\nfree(temp); // Per-allocation overhead"
+    tags:
+      - "allocation"
+      - "performance"
+      - "temporary"
+
+  - id: "ALLOCATION-TRACKING"
+    name: "Track allocation sources in debug"
+    description: |
+      Debug builds should track file and line number of every allocation
+      for leak detection and debugging.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Mem_Alloc_Debug(size, __FILE__, __LINE__);"
+        - "#define Mem_Alloc(s) Mem_Alloc_Debug(s, __FILE__, __LINE__)"
+      bad:
+        - "// No tracking of allocation source"
+    tags:
+      - "debugging"
+      - "tracking"
+      - "leaks"
+
+  - id: "OWNERSHIP-CLEAR"
+    name: "Make ownership explicit"
+    description: |
+      Every allocation should have clear ownership. Document who is
+      responsible for freeing memory.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "// Returns owned pointer, caller must free\nEntity* CreateEntity();"
+        - "// Borrowed pointer, don't free\nvoid Process(const Entity* entity);"
+      bad:
+        - "Entity* GetEntity(); // Who owns this?"
+    tags:
+      - "ownership"
+      - "documentation"
+      - "safety"
+
+  - id: "ALIGN-CRITICAL-DATA"
+    name: "Align performance-critical data"
+    description: |
+      Allocate SIMD and cache-sensitive data with appropriate alignment.
+      Provide aligned allocation variants.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Mem_Alloc16(size); // 16-byte aligned for SSE"
+        - "Mem_AllocAligned(size, 64); // Cache line aligned"
+      bad:
+        - "Mem_Alloc(size); // Wrong alignment for SIMD"
+    tags:
+      - "alignment"
+      - "performance"
+      - "simd"
+
+  - id: "POOL-ALLOCATORS"
+    name: "Use pool allocators for same-sized objects"
+    description: |
+      Objects of the same size allocated frequently should use pool
+      allocators for minimal fragmentation and fast allocation.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "EntityPool* pool = CreatePool(sizeof(Entity), 1024);\nentity = PoolAlloc(pool);"
+      bad:
+        - "entity = malloc(sizeof(Entity)); // General allocator"
+    tags:
+      - "allocation"
+      - "performance"
+      - "fragmentation"
+
+  - id: "AVOID-FRAGMENTATION"
+    name: "Design allocation patterns to minimize fragmentation"
+    description: |
+      Allocate long-lived objects separately from short-lived. Use
+      appropriate allocators for lifetime patterns.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "// Persistent data: permanent allocator\n// Per-level: level allocator\n// Per-frame: frame allocator"
+      bad:
+        - "// Everything mixed in one heap"
+    tags:
+      - "fragmentation"
+      - "lifetime"
+      - "performance"
+
+  - id: "NULL-CHECK-BEFORE-FREE"
+    name: "Check NULL before freeing (or make free handle NULL)"
+    description: |
+      Either check for NULL before calling free, or make your free
+      function handle NULL gracefully (like standard free).
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if (ptr != NULL) { Free(ptr); }"
+        - "// Or: Free(ptr); // Free handles NULL"
+      bad:
+        - "Free(ptr); // Crashes if NULL"
+    tags:
+      - "safety"
+      - "defensive"
+      - "null"
+
+  - id: "CLEAR-FREED-POINTERS"
+    name: "Clear pointers after freeing"
+    description: |
+      Set pointers to NULL after freeing to prevent use-after-free bugs
+      and double-free errors.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "Free(ptr);\nptr = NULL;"
+        - "#define SAFE_FREE(p) do { Free(p); (p) = NULL; } while(0)"
+      bad:
+        - "Free(ptr); // Dangling pointer"
+    tags:
+      - "safety"
+      - "use-after-free"
+      - "double-free"
+
+  - id: "MEMORY-BUDGETS"
+    name: "Establish and enforce memory budgets"
+    description: |
+      Each subsystem should have a memory budget. Track usage and warn
+      when approaching limits.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if (textureMemory > TEXTURE_BUDGET) {\n    Warning('Texture budget exceeded');\n}"
+      bad:
+        - "// No tracking of memory usage"
+    tags:
+      - "budgets"
+      - "tracking"
+      - "constraints"

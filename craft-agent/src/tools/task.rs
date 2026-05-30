@@ -249,6 +249,11 @@ mod tests {
         let expected: BTreeMap<&str, ToolAudience> = BTreeMap::from([
             (super::super::READ_TOOL_NAME, all),
             (super::super::GREP_TOOL_NAME, all),
+            (super::super::STYLEGUIDE_LIST_TOOL_NAME, all),
+            (super::super::STYLEGUIDE_SEARCH_TOOL_NAME, all),
+            (super::super::STYLEGUIDE_GET_TOOL_NAME, all),
+            (super::super::REPORT_FINDING_TOOL_NAME, MAIN | RES),
+            (super::super::REVIEW_TOOL_NAME, MAIN),
             (super::super::WRITE_TOOL_NAME, MAIN | GEN | INT),
             (super::super::EDIT_TOOL_NAME, MAIN | GEN | INT),
             (super::super::MULTIEDIT_TOOL_NAME, MAIN | GEN | INT),

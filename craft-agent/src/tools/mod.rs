@@ -16,6 +16,9 @@ mod multiedit;
 mod read;
 pub mod registry;
 pub mod schema;
+mod report_finding;
+mod review;
+mod styleguide;
 mod task;
 mod todowrite;
 mod write;
@@ -123,6 +126,11 @@ pub const GREP_TOOL_NAME: &str = grep::Grep::NAME;
 pub const MULTIEDIT_TOOL_NAME: &str = multiedit::MultiEdit::NAME;
 pub const QUESTION_TOOL_NAME: &str = "question";
 pub const READ_TOOL_NAME: &str = read::Read::NAME;
+pub const REVIEW_TOOL_NAME: &str = review::Review::NAME;
+pub const REPORT_FINDING_TOOL_NAME: &str = report_finding::ReportFinding::NAME;
+pub const STYLEGUIDE_LIST_TOOL_NAME: &str = styleguide::StyleguideList::NAME;
+pub const STYLEGUIDE_SEARCH_TOOL_NAME: &str = styleguide::StyleguideSearch::NAME;
+pub const STYLEGUIDE_GET_TOOL_NAME: &str = styleguide::StyleguideGet::NAME;
 pub const TASK_TOOL_NAME: &str = task::Task::NAME;
 pub const TODOWRITE_TOOL_NAME: &str = todowrite::TodoWrite::NAME;
 pub const WRITE_TOOL_NAME: &str = write::Write::NAME;
@@ -545,6 +553,11 @@ register_tools! {
     task::Task,
     batch::Batch,
     code_execution::CodeExecution,
+    styleguide::StyleguideList,
+    styleguide::StyleguideSearch,
+    styleguide::StyleguideGet,
+    report_finding::ReportFinding,
+    review::Review,
 }
 
 pub fn is_builtin_tool(name: &str) -> bool {

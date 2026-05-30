@@ -1,0 +1,223 @@
+metadata:
+  name: "Carmack Static Analysis"
+  version: "1.0.0"
+  description: "Static analysis mandate and code quality principles"
+  language: "language-agnostic"
+  category: "static_analysis"
+
+description: |
+  Carmack considers static analysis morally obligatory. It is irresponsible
+  not to use it. Every new analyzer rule will find something in a large
+  codebase. Code quality is statistical - minimize defect density.
+
+rules:
+  - id: "STATIC-ANALYSIS-MANDATORY"
+    name: "Static analysis is mandatory"
+    description: |
+      It is irresponsible to not use static analysis. Run analyzers
+      continuously, not just occasionally. Treat warnings as errors.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "# CI pipeline runs static analysis\n# Build fails on new warnings"
+      bad:
+        - "# No static analysis\n# Warnings ignored"
+    tags:
+      - "static-analysis"
+      - "quality"
+      - "mandatory"
+
+  - id: "NULL-POINTER-PRIORITY"
+    name: "NULL pointer dereferences are top priority"
+    description: |
+      NULL pointer dereferences are the biggest problem in C/C++. Static
+      analysis should catch these. Fix all NULL pointer warnings.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "if (ptr == NULL) return ERROR;\nptr->field = value; // Safe"
+      bad:
+        - "ptr->field = value; // Analyzer warns: possible NULL"
+    tags:
+      - "null-pointers"
+      - "safety"
+      - "crashes"
+
+  - id: "FORMAT-STRING-ERRORS"
+    name: "Format string errors are second priority"
+    description: |
+      Format string mismatches are the second most common issue. Use
+      static analysis to catch printf-style format errors.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "printf(\"%d\", intValue); // Matches"
+      bad:
+        - "printf(\"%s\", intValue); // Analyzer catches mismatch"
+    tags:
+      - "format-strings"
+      - "printf"
+      - "safety"
+
+  - id: "COPY-PASTE-DETECTION"
+    name: "Use tools to detect copy-paste errors"
+    description: |
+      Carmack was surprised how often copy-paste-modify resulted in bugs.
+      Use static analysis to find suspicious duplicated code.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "# Analyzer finds:\n# entity1->x = value;\n# entity1->y = value; // Should be entity2?"
+      bad:
+        - "# Copy-paste bug undetected"
+    tags:
+      - "copy-paste"
+      - "duplication"
+      - "bugs"
+
+  - id: "ENABLE-ALL-WARNINGS"
+    name: "Enable all compiler warnings"
+    description: |
+      Turn on maximum warning levels (-Wall -Wextra or equivalent).
+      Every warning is a potential bug. Fix, don't suppress.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "gcc -Wall -Wextra -Werror"
+      bad:
+        - "gcc # Default warnings only"
+    tags:
+      - "compiler"
+      - "warnings"
+      - "strictness"
+
+  - id: "ZERO-WARNINGS-POLICY"
+    name: "Maintain zero warnings policy"
+    description: |
+      Codebase should have zero warnings. Fix new warnings immediately.
+      Don't let warnings accumulate - they hide real problems.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "# 0 warnings in build output"
+      bad:
+        - "# 2,453 warnings (what's 1 more?)"
+    tags:
+      - "warnings"
+      - "discipline"
+      - "hygiene"
+
+  - id: "MULTIPLE-ANALYZERS"
+    name: "Use multiple static analysis tools"
+    description: |
+      Different analyzers catch different issues. Use multiple tools
+      for comprehensive coverage (compiler, linters, specialized analyzers).
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "# Using: GCC warnings, Clang analyzer, PVS-Studio"
+      bad:
+        - "# Using: only basic compiler warnings"
+    tags:
+      - "tools"
+      - "coverage"
+      - "redundancy"
+
+  - id: "ANALYZER-IN-CI"
+    name: "Run static analysis in CI pipeline"
+    description: |
+      Static analysis should be part of continuous integration. Block
+      merges that introduce new warnings or issues.
+    priority: "error"
+    enabled: true
+    examples:
+      good:
+        - "# CI runs analyzers\n# PR blocked on new issues"
+      bad:
+        - "# Manual analysis only\n# Easy to skip"
+    tags:
+      - "ci"
+      - "automation"
+      - "enforcement"
+
+  - id: "STATISTICAL-VIEW-QUALITY"
+    name: "View code quality statistically"
+    description: |
+      In a large project, quality is statistical. Flaws exist everywhere.
+      Minimize defect density through systematic practices and tools.
+    priority: "info"
+    enabled: true
+    tags:
+      - "quality"
+      - "statistics"
+      - "philosophy"
+
+  - id: "NEW-ANALYZER-RULES"
+    name: "Every new analyzer rule finds bugs"
+    description: |
+      When you enable a new analyzer rule or get a new tool, it will
+      find issues in existing code. This is expected and valuable.
+    priority: "info"
+    enabled: true
+    tags:
+      - "discovery"
+      - "improvement"
+      - "continuous"
+
+  - id: "SANITIZERS-IN-TESTING"
+    name: "Use runtime sanitizers in testing"
+    description: |
+      Enable address sanitizer, undefined behavior sanitizer, etc. in
+      test builds. These catch bugs static analysis misses.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "# Test build with ASAN, UBSAN, TSAN"
+      bad:
+        - "# Plain test builds only"
+    tags:
+      - "sanitizers"
+      - "runtime"
+      - "testing"
+
+  - id: "CODE-REVIEW-QUALITY"
+    name: "Code review focuses on logic, not style"
+    description: |
+      Use static analysis and automated tools for style and common bugs.
+      Reserve human code review for algorithmic correctness and design.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "# Reviewers focus on: algorithm, edge cases, design\n# Automation checks: style, common bugs"
+      bad:
+        - "# Reviewers argue about: formatting, naming\n# No automation"
+    tags:
+      - "code-review"
+      - "automation"
+      - "efficiency"
+
+  - id: "FIX-ROOT-CAUSE"
+    name: "Fix root causes, not symptoms"
+    description: |
+      When static analysis finds a bug, investigate why the pattern
+      exists. Often reveals systemic issues that need broader fixes.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "# Bug: missing NULL check\n# Fix: add NULL check + audit all similar code"
+      bad:
+        - "# Bug: missing NULL check\n# Fix: add NULL check (done, move on)"
+    tags:
+      - "root-cause"
+      - "systemic"
+      - "thoroughness"

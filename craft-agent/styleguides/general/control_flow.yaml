@@ -1,0 +1,216 @@
+metadata:
+  name: "Carmack Control Flow"
+  version: "1.0.0"
+  description: "Control flow patterns and principles for clarity and correctness"
+  language: "language-agnostic"
+  category: "control_flow"
+
+description: |
+  Carmack's control flow patterns emphasize linear, predictable execution
+  paths. The goal is to minimize the 'area under ifs' and make control
+  flow obvious when reading code top to bottom.
+
+rules:
+  - id: "MINIMIZE-AREA-UNDER-IFS"
+    name: "Minimize scope of conditional code"
+    description: |
+      Reduce the amount of code under conditionals. Use early returns to
+      keep the main path at base indentation. Don't nest deeply.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "if (!IsValid(entity)) {\n    return;\n}\n// Main logic at base level\nProcess(entity);"
+      bad:
+        - "if (IsValid(entity)) {\n    // 50 lines nested\n    Process(entity);\n}"
+    tags:
+      - "conditionals"
+      - "nesting"
+      - "readability"
+
+  - id: "EARLY-RETURN"
+    name: "Use early returns for error conditions"
+    description: |
+      Check for error conditions at the start of functions and return early.
+      This keeps the happy path at the main indentation level.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "if (entity == NULL) return ERROR;\nif (!entity->IsValid()) return ERROR;\n// Happy path"
+      bad:
+        - "if (entity != NULL) {\n    if (entity->IsValid()) {\n        // Happy path nested\n    }\n}"
+    tags:
+      - "errors"
+      - "returns"
+      - "clarity"
+
+  - id: "CONSISTENT-EXECUTION-PATHS"
+    name: "Prefer consistent execution paths"
+    description: |
+      Code that executes the same path most of the time is easier to
+      understand and optimize. Avoid highly branched execution.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Same path every time\nresult = Compute();\nif (shouldApply) Apply(result);"
+      bad:
+        - "// Different paths, hard to predict\nif (cond1) { if (cond2) { ... } else { ... } }"
+    tags:
+      - "consistency"
+      - "predictability"
+      - "optimization"
+
+  - id: "EXPLICIT-LOOPS"
+    name: "Use explicit loops over clever constructs"
+    description: |
+      After tracking bugs, Carmack found copy-paste-modify caused issues.
+      Prefer explicit loops for clarity, let compiler optimize.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "for (int i = 0; i < 4; i++) {\n    Process(items[i]);\n}"
+      bad:
+        - "Process(items[0]); Process(items[1]); // Copy-paste bugs"
+    tags:
+      - "loops"
+      - "clarity"
+      - "bugs"
+
+  - id: "LIMIT-NESTING-DEPTH"
+    name: "Limit nesting depth to 3-4 levels"
+    description: |
+      Deeply nested code is hard to reason about. If nesting exceeds 3-4
+      levels, refactor to use early returns or extract functions.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "if (a) { if (b) { if (c) { return; } } } // 3 levels max"
+      bad:
+        - "if (a) { if (b) { if (c) { if (d) { if (e) { ... } } } } } // Too deep"
+    tags:
+      - "nesting"
+      - "complexity"
+      - "readability"
+
+  - id: "SINGLE-LEVEL-BREAKS"
+    name: "Avoid multi-level break/continue"
+    description: |
+      Breaking out of multiple loop levels makes control flow hard to follow.
+      Use flags, restructure, or extract to functions instead.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "bool found = false;\nfor (...) {\n    if (match) { found = true; break; }\n}\nif (found) ..."
+      bad:
+        - "goto escape; // Breaking multiple loops"
+    tags:
+      - "loops"
+      - "control-flow"
+      - "clarity"
+
+  - id: "GOTO-FOR-CLEANUP"
+    name: "Consider goto for cleanup paths"
+    description: |
+      For C-style cleanup, using goto to a single cleanup label is clearer
+      than duplicated cleanup code or complex error handling.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if (error) goto cleanup;\n...\ncleanup:\n    Free(resources);\n    return result;"
+      bad:
+        - "if (error) { Free(r1); Free(r2); return; }\n...\nFree(r1); Free(r2); // Duplicated"
+    tags:
+      - "goto"
+      - "cleanup"
+      - "error-handling"
+
+  - id: "AVOID-EMPTY-ELSE"
+    name: "Avoid empty else blocks"
+    description: |
+      If the else block is empty or just a comment, restructure the
+      condition or remove the else entirely.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "if (condition) {\n    DoSomething();\n}"
+      bad:
+        - "if (condition) {\n    DoSomething();\n} else {\n    // Do nothing\n}"
+    tags:
+      - "conditionals"
+      - "clarity"
+      - "noise"
+
+  - id: "SWITCH-FALLTHROUGH-COMMENT"
+    name: "Document intentional switch fallthrough"
+    description: |
+      If switch cases intentionally fall through, document with explicit
+      comment. This distinguishes intentional from accidental.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "case A:\n    DoA();\n    // Fallthrough\ncase B:\n    DoB();"
+      bad:
+        - "case A:\n    DoA();\ncase B: // Accidental or intentional?"
+    tags:
+      - "switch"
+      - "fallthrough"
+      - "clarity"
+
+  - id: "DEFAULT-CASE-ALWAYS"
+    name: "Always include default case in switch"
+    description: |
+      Every switch should have a default case, even if it's just an
+      assertion or error. This catches unexpected values.
+    priority: "warning"
+    enabled: true
+    examples:
+      good:
+        - "switch (state) {\n    case A: ...\n    case B: ...\n    default: assert(false);\n}"
+      bad:
+        - "switch (state) {\n    case A: ...\n    case B: ...\n} // Missing default"
+    tags:
+      - "switch"
+      - "completeness"
+      - "safety"
+
+  - id: "TERNARY-FOR-SIMPLE-CASES"
+    name: "Use ternary for simple value selection"
+    description: |
+      Ternary operator is fine for simple value selection. Don't use for
+      complex expressions or side effects.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "result = (count > 0) ? count : 1; // Simple"
+      bad:
+        - "result = (a > b) ? (c < d ? e : (f > g ? h : i)) : j; // Too complex"
+    tags:
+      - "ternary"
+      - "conditionals"
+      - "clarity"
+
+  - id: "LINEAR-FLOW-PREFERRED"
+    name: "Prefer linear flow over branching"
+    description: |
+      When possible, structure code to flow linearly rather than branching
+      heavily. This improves readability and performance.
+    priority: "info"
+    enabled: true
+    examples:
+      good:
+        - "// Linear with flags\nenabled = CheckEnabled();\nresult = Process();\nif (enabled) Apply(result);"
+      bad:
+        - "// Heavy branching\nif (enabled) { result = Process(); Apply(result); }"
+    tags:
+      - "linearity"
+      - "flow"
+      - "performance"
