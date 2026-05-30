@@ -8,7 +8,7 @@ use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig};
 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use super::{KeyPool, ResolvedAuth};
+use super::{KeyPool, ResolvedAuth, lock_unpoison};
 
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     api_key_env: "MISTRAL_API_KEY",
@@ -79,20 +79,20 @@ impl Mistral {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
         let pool = KeyPool::from_env(CONFIG.api_key_env)?;
         Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
             key_pool: Some(pool),
             system_prefix: None,
         })
     }
 
-    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
-        Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Result<Self, AgentError> {
+        Ok(Self {
+            compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth,
             key_pool: None,
             system_prefix: None,
-        }
+        })
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -114,7 +114,7 @@ impl Provider for Mistral {
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let thinking = opts.thinking;
-            let auth = self.auth.lock().unwrap().clone();
+            let auth = lock_unpoison(&self.auth).clone();
             let mut buf = String::new();
             let system = super::with_prefix(&self.system_prefix, system, &mut buf);
             let mut body = self.compat.build_body(model, messages, system, tools);
@@ -135,7 +135,7 @@ impl Provider for Mistral {
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
         Box::pin(async move {
-            let auth = self.auth.lock().unwrap().clone();
+            let auth = lock_unpoison(&self.auth).clone();
             self.compat.do_list_models(&auth).await
         })
     }

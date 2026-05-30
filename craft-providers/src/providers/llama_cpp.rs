@@ -8,7 +8,7 @@ use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use super::{KeyPool, ResolvedAuth};
+use super::{KeyPool, ResolvedAuth, lock_unpoison};
 
 const HOST_ENV: &str = "LLAMA_CPP_HOST";
 const API_KEY_ENV: &str = "LLAMA_CPP_API_KEY";
@@ -39,13 +39,13 @@ impl LlamaCpp {
         Self::from_env(timeouts, key_pool, std::env::var(HOST_ENV).ok())
     }
 
-    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
-        Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Result<Self, AgentError> {
+        Ok(Self {
+            compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth,
             key_pool: None,
             system_prefix: None,
-        }
+        })
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -71,7 +71,7 @@ impl LlamaCpp {
             None => Vec::new(),
         };
         Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth: Arc::new(Mutex::new(ResolvedAuth {
                 base_url: Some(base_url),
                 headers,
@@ -94,7 +94,7 @@ impl Provider for LlamaCpp {
         _session_id: Option<&str>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
-            let auth = self.auth.lock().unwrap().clone();
+            let auth = lock_unpoison(&self.auth).clone();
             let mut buf = String::new();
             let system = super::with_prefix(&self.system_prefix, system, &mut buf);
             let body = self.compat.build_body(model, messages, system, tools);
@@ -106,7 +106,7 @@ impl Provider for LlamaCpp {
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
         Box::pin(async move {
-            let auth = self.auth.lock().unwrap().clone();
+            let auth = lock_unpoison(&self.auth).clone();
             self.compat.do_list_models(&auth).await
         })
     }
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn from_env_with_host_builds_auth() {
         let llama = LlamaCpp::from_env(TEST_TIMEOUTS, None, Some("http://x:1234".into())).unwrap();
-        let auth = llama.auth.lock().unwrap();
+        let auth = lock_unpoison(&llama.auth);
         assert_eq!(auth.base_url.as_deref(), Some("http://x:1234/v1"));
         assert!(auth.headers.is_empty());
     }
@@ -154,7 +154,7 @@ mod tests {
         let pool = KeyPool::from_keys(vec!["test-key".into()]);
         let llama = LlamaCpp::from_env(TEST_TIMEOUTS, Some(pool), Some("http://local:1234".into()))
             .unwrap();
-        let auth = llama.auth.lock().unwrap();
+        let auth = lock_unpoison(&llama.auth);
         assert_eq!(auth.base_url.as_deref(), Some("http://local:1234/v1"));
         assert_eq!(auth.headers.len(), 1);
         assert_eq!(auth.headers[0].1, "Bearer test-key");

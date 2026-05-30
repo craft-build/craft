@@ -17,6 +17,7 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::ResolvedAuth;
 use super::anthropic::Anthropic;
+use super::lock_unpoison;
 use super::copilot::Copilot;
 use super::deepseek::DeepSeek;
 use super::google::Google;
@@ -345,44 +346,44 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
 
     let inner: Box<dyn Provider> = match meta.base {
         ProviderKind::Anthropic => Box::new(
-            Anthropic::with_auth(auth.clone(), timeouts)
+            Anthropic::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::OpenAi => Box::new(
-            OpenAi::with_auth(auth.clone(), timeouts)
+            OpenAi::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::Google => Box::new(Google::with_auth(auth.clone(), timeouts)),
+        ProviderKind::Google => Box::new(Google::with_auth(auth.clone(), timeouts)?),
         ProviderKind::Copilot => Box::new(
-            Copilot::with_auth(auth.clone(), timeouts)
+            Copilot::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::Ollama => Box::new(
-            Ollama::with_auth(auth.clone(), timeouts)
+            Ollama::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::LlamaCpp => Box::new(
-            LlamaCpp::with_auth(auth.clone(), timeouts)
+            LlamaCpp::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::Mistral => Box::new(
-            Mistral::with_auth(auth.clone(), timeouts)
+            Mistral::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::Zai => Box::new(
-            Zai::with_auth(ZaiPlan::Standard, auth.clone(), timeouts)
+            Zai::with_auth(ZaiPlan::Standard, auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::ZaiCodingPlan => Box::new(
-            Zai::with_auth(ZaiPlan::Coding, auth.clone(), timeouts)
+            Zai::with_auth(ZaiPlan::Coding, auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::Synthetic => Box::new(
-            Synthetic::with_auth(auth.clone(), timeouts)
+            Synthetic::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::DeepSeek => Box::new(
-            DeepSeek::with_auth(auth.clone(), timeouts)
+            DeepSeek::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
     };
@@ -478,7 +479,7 @@ impl DynamicProvider {
                             script_path.display()
                         ),
                     })?;
-                *auth.lock().unwrap() = parsed.into();
+                *lock_unpoison(&auth) = parsed.into();
                 Ok(())
             })
             .await

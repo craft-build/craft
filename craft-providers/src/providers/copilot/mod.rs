@@ -12,8 +12,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
-use super::openai::responses;
-use super::openai_compat;
+use super::{MIME_JSON, lock_unpoison, openai::responses, openai_compat};
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig};
@@ -82,7 +81,7 @@ impl Copilot {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
         auth::load_token()?;
         Ok(Self {
-            client: super::http_client(timeouts),
+            client: super::http_client(timeouts)?,
             stream_timeout: timeouts.stream,
             auth: Arc::default(),
             resolved_auth: None,
@@ -94,15 +93,15 @@ impl Copilot {
     pub(crate) fn with_auth(
         auth: Arc<Mutex<super::ResolvedAuth>>,
         timeouts: super::Timeouts,
-    ) -> Self {
-        Self {
-            client: super::http_client(timeouts),
+    ) -> Result<Self, AgentError> {
+        Ok(Self {
+            client: super::http_client(timeouts)?,
             stream_timeout: timeouts.stream,
             auth: Arc::default(),
             resolved_auth: Some(auth),
             system_prefix: None,
             models: Arc::default(),
-        }
+        })
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -112,27 +111,27 @@ impl Copilot {
 
     async fn auth(&self) -> Result<CopilotAuth, AgentError> {
         if let Some(auth) = &self.resolved_auth {
-            return copilot_auth_from_resolved(&auth.lock().unwrap());
+            return copilot_auth_from_resolved(&lock_unpoison(auth));
         }
 
-        if let Some(auth) = self.auth.lock().unwrap().clone() {
+        if let Some(auth) = lock_unpoison(&self.auth).clone() {
             return Ok(auth);
         }
 
         let token = auth::load_token()?;
         let endpoint = discover_api_endpoint(&self.client, &token).await;
         let auth = CopilotAuth { token, endpoint };
-        *self.auth.lock().unwrap() = Some(auth.clone());
+        *lock_unpoison(&self.auth) = Some(auth.clone());
         Ok(auth)
     }
 
     async fn model_endpoint(&self, model_id: &str) -> Result<Endpoint, AgentError> {
-        if let Some(model) = self.models.lock().unwrap().get(model_id).cloned() {
+        if let Some(model) = lock_unpoison(&self.models).get(model_id).cloned() {
             return Ok(model.endpoint());
         }
 
         let models = self.fetch_models().await?;
-        let mut guard = self.models.lock().unwrap();
+        let mut guard = lock_unpoison(&self.models);
         guard.clear();
         guard.extend(models.into_iter().map(|model| (model.id.clone(), model)));
         Ok(guard
@@ -419,7 +418,7 @@ async fn try_discover_api_endpoint(client: &Client, token: &str) -> Result<Strin
     let response = client
         .post("https://api.github.com/graphql")
         .header("authorization", format!("Bearer {token}"))
-        .header("content-type", "application/json")
+        .header("content-type", MIME_JSON)
         .body(serde_json::to_vec(&body)?)
         .send()
         .await?;
@@ -443,7 +442,7 @@ fn copilot_request(
 ) -> reqwest::RequestBuilder {
     let builder = builder
         .header("authorization", format!("Bearer {}", auth.token))
-        .header("content-type", "application/json")
+        .header("content-type", MIME_JSON)
         .header("editor-version", EDITOR_VERSION_HEADER)
         .header("x-github-api-version", API_VERSION_HEADER);
     if let Some(interaction_type) = interaction_type {
@@ -459,7 +458,7 @@ fn copilot_request(
 fn copilot_headers(auth: &CopilotAuth, interaction_type: Option<&str>) -> Vec<(String, String)> {
     let mut headers = vec![
         ("authorization".into(), format!("Bearer {}", auth.token)),
-        ("content-type".into(), "application/json".into()),
+        ("content-type".into(), MIME_JSON.into()),
         ("editor-version".into(), EDITOR_VERSION_HEADER.into()),
         ("x-github-api-version".into(), API_VERSION_HEADER.into()),
     ];
@@ -557,7 +556,7 @@ impl Provider for Copilot {
                 .iter()
                 .map(|model| model.id.clone())
                 .collect::<Vec<_>>();
-            let mut guard = self.models.lock().unwrap();
+            let mut guard = lock_unpoison(&self.models);
             guard.clear();
             guard.extend(models.into_iter().map(|model| (model.id.clone(), model)));
             Ok(ids)
@@ -566,8 +565,8 @@ impl Provider for Copilot {
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async {
-            *self.auth.lock().unwrap() = None;
-            self.models.lock().unwrap().clear();
+            *lock_unpoison(&self.auth) = None;
+            lock_unpoison(&self.models).clear();
             Ok(())
         })
     }

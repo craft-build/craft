@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
-use super::ResolvedAuth;
+use super::{MIME_JSON, ResolvedAuth};
 use crate::{
     AgentError, ContentBlock, Message, ProviderEvent, Role, StopReason, StreamResponse, TokenUsage,
 };
@@ -32,12 +32,12 @@ pub(crate) struct OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(config: &'static OpenAiCompatConfig, timeouts: super::Timeouts) -> Self {
-        Self {
-            client: super::http_client(timeouts),
+    pub fn new(config: &'static OpenAiCompatConfig, timeouts: super::Timeouts) -> Result<Self, AgentError> {
+        Ok(Self {
+            client: super::http_client(timeouts)?,
             config,
             stream_timeout: timeouts.stream,
-        }
+        })
     }
 
     pub(crate) fn client(&self) -> &Client {
@@ -98,7 +98,7 @@ impl OpenAiCompatProvider {
         let json_body = serde_json::to_vec(body)?;
         let mut request = self
             .build_request("POST", "/chat/completions", auth)
-            .header("content-type", "application/json");
+            .header("content-type", MIME_JSON);
         for (key, value) in extra_headers {
             request = request.header(key.as_str(), value.as_str());
         }

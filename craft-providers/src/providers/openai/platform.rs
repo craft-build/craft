@@ -10,6 +10,7 @@ use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::auth;
+use super::super::lock_unpoison;
 use crate::providers::ResolvedAuth;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
@@ -39,7 +40,7 @@ impl OpenAi {
     pub async fn new(timeouts: crate::providers::Timeouts) -> Result<Self, AgentError> {
         let storage = StateDir::resolve()?;
         let resolved = auth::resolve(&storage).await?;
-        let compat = OpenAiCompatProvider::new(&CONFIG, timeouts);
+        let compat = OpenAiCompatProvider::new(&CONFIG, timeouts)?;
         Ok(Self {
             compat,
             auth: Arc::new(Mutex::new(resolved)),
@@ -51,13 +52,13 @@ impl OpenAi {
     pub(crate) fn with_auth(
         auth: Arc<Mutex<ResolvedAuth>>,
         timeouts: crate::providers::Timeouts,
-    ) -> Self {
-        Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+    ) -> Result<Self, AgentError> {
+        Ok(Self {
+            compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth,
             storage: None,
             system_prefix: None,
-        }
+        })
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -66,7 +67,7 @@ impl OpenAi {
     }
 
     fn current_auth(&self) -> ResolvedAuth {
-        self.auth.lock().unwrap().clone()
+        lock_unpoison(&self.auth).clone()
     }
 
     fn is_oauth(&self) -> bool {
@@ -95,7 +96,7 @@ impl OpenAi {
                 return Err(e);
             }
         };
-        *self.auth.lock().unwrap() = resolved;
+        *lock_unpoison(&self.auth) = resolved;
         debug!("refreshed OpenAI OAuth token");
         Ok(())
     }
@@ -211,7 +212,7 @@ impl Provider for OpenAi {
                 return Ok(());
             };
             let resolved = auth::resolve(&storage).await?;
-            *self.auth.lock().unwrap() = resolved;
+            *lock_unpoison(&self.auth) = resolved;
             debug!("reloaded OpenAI auth from storage");
             Ok(())
         })

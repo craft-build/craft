@@ -10,7 +10,7 @@ use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use super::{KeyPool, ResolvedAuth};
+use super::{KeyPool, ResolvedAuth, lock_unpoison};
 
 static CONFIG_STANDARD: OpenAiCompatConfig = OpenAiCompatConfig {
     api_key_env: "ZHIPU_API_KEY",
@@ -27,6 +27,9 @@ static CONFIG_CODING: OpenAiCompatConfig = OpenAiCompatConfig {
     include_stream_usage: false,
     provider_name: "Z.AI Coding",
 };
+
+const INSUFFICIENT_FUNDS_CODE: &str = "1113";
+const INSUFFICIENT_FUNDS_MARKER: &str = "nsufficien";
 
 pub(crate) fn models() -> &'static [ModelEntry] {
     &[
@@ -159,7 +162,7 @@ impl Zai {
         };
         let pool = KeyPool::from_env(config.api_key_env)?;
         Ok(Self {
-            compat: OpenAiCompatProvider::new(config, timeouts),
+            compat: OpenAiCompatProvider::new(config, timeouts)?,
             auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
             key_pool: Some(pool),
             system_prefix: None,
@@ -170,17 +173,17 @@ impl Zai {
         plan: ZaiPlan,
         auth: Arc<Mutex<ResolvedAuth>>,
         timeouts: super::Timeouts,
-    ) -> Self {
+    ) -> Result<Self, AgentError> {
         let config = match plan {
             ZaiPlan::Standard => &CONFIG_STANDARD,
             ZaiPlan::Coding => &CONFIG_CODING,
         };
-        Self {
-            compat: OpenAiCompatProvider::new(config, timeouts),
+        Ok(Self {
+            compat: OpenAiCompatProvider::new(config, timeouts)?,
             auth,
             key_pool: None,
             system_prefix: None,
-        }
+        })
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -201,7 +204,7 @@ impl Provider for Zai {
         _session_id: Option<&str>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
-            let auth = self.auth.lock().unwrap().clone();
+            let auth = lock_unpoison(&self.auth).clone();
             let mut buf = String::new();
             let system = super::with_prefix(&self.system_prefix, system, &mut buf);
             let body = self.compat.build_body(model, messages, system, tools);
@@ -212,7 +215,7 @@ impl Provider for Zai {
             {
                 Err(AgentError::Api { status, message })
                     if (status == 429 || status >= 500)
-                        && (message.contains("1113") || message.contains("nsufficien")) =>
+                        && (message.contains(INSUFFICIENT_FUNDS_CODE) || message.contains(INSUFFICIENT_FUNDS_MARKER)) =>
                 {
                     warn!(status, "insufficient funds, bailing out");
                     Err(AgentError::Api {
@@ -227,7 +230,7 @@ impl Provider for Zai {
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
         Box::pin(async move {
-            let auth = self.auth.lock().unwrap().clone();
+            let auth = lock_unpoison(&self.auth).clone();
             self.compat.do_list_models(&auth).await
         })
     }

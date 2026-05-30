@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tracing::{debug, error, warn};
 
 use crate::AgentError;
-use crate::providers::{ResolvedAuth, urlenc};
+use crate::providers::{MIME_FORM, MIME_JSON, ResolvedAuth, urlenc};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const PROVIDER: &str = "openai";
@@ -98,7 +98,7 @@ async fn request_device_code() -> Result<DeviceCodeResponse, AgentError> {
 
     let resp = client
         .post(DEVICE_CODE_URL)
-        .header("content-type", "application/json")
+        .header("content-type", MIME_JSON)
         .body(json_body)
         .send()
         .await
@@ -140,7 +140,7 @@ async fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenRes
 
         let resp = client
             .post(DEVICE_TOKEN_URL)
-            .header("content-type", "application/json")
+            .header("content-type", MIME_JSON)
             .body(json_body.clone())
             .send()
             .await
@@ -180,7 +180,7 @@ async fn exchange_device_token(device_token: &DeviceTokenResponse) -> Result<Tok
 
     let resp = client
         .post(OAUTH_TOKEN_URL)
-        .header("content-type", "application/x-www-form-urlencoded")
+        .header("content-type", MIME_FORM)
         .body(form_body.into_bytes())
         .send()
         .await
@@ -223,7 +223,7 @@ pub(crate) async fn refresh_tokens(tokens: &OAuthTokens) -> Result<OAuthTokens, 
 
     let resp = client
         .post(OAUTH_TOKEN_URL)
-        .header("content-type", "application/x-www-form-urlencoded")
+        .header("content-type", MIME_FORM)
         .body(form_body.into_bytes())
         .send()
         .await

@@ -18,7 +18,7 @@ use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
-use super::shared;
+use super::{shared, MIME_JSON, lock_unpoison};
 
 const BEDROCK_API_VERSION: &str = "bedrock-2023-05-31";
 const MIN_EVENTSTREAM_FRAME: usize = 16;
@@ -487,14 +487,14 @@ impl Bedrock {
         })?;
         let base_url = env::var("ANTHROPIC_BEDROCK_BASE_URL").ok();
         Ok(Self {
-            client: super::super::http_client(timeouts),
+            client: super::super::http_client(timeouts)?,
             auth: Arc::new(Mutex::new(auth)),
             base_url,
         })
     }
 
     fn needs_refresh(&self) -> bool {
-        let auth = self.auth.lock().unwrap();
+        let auth = lock_unpoison(&self.auth);
         match &auth.kind {
             AuthKind::SigV4 {
                 expires_at: Some(exp),
@@ -528,7 +528,7 @@ impl Provider for Bedrock {
                 debug!("Bedrock creds near expiry, refreshing before request");
                 self.reload_auth().await?;
             }
-            let auth = self.auth.lock().unwrap().clone();
+            let auth = lock_unpoison(&self.auth).clone();
             let model_id = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| model.id.clone());
 
             let mut body = shared::build_request_body_with_system(
@@ -563,7 +563,7 @@ impl Provider for Bedrock {
 
             let (host, _, _) = parse_url(&url);
             let host = host.to_string();
-            let extra_headers = vec![("content-type", "application/json"), ("host", &host)];
+            let extra_headers = vec![("content-type", MIME_JSON), ("host", &host)];
 
             let timestamp = now_timestamp();
             let signing_headers = match &auth.kind {
@@ -668,7 +668,7 @@ impl Provider for Bedrock {
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async {
             let new_auth = resolve_bedrock_auth().await?;
-            *self.auth.lock().unwrap() = new_auth;
+            *lock_unpoison(&self.auth) = new_auth;
             debug!("reloaded Bedrock auth from env");
             Ok(())
         })
@@ -747,7 +747,7 @@ mod tests {
             "POST",
             url,
             &[
-                ("content-type", "application/json"),
+                ("content-type", MIME_JSON),
                 ("host", "bedrock-runtime.us-east-1.amazonaws.com"),
             ],
             b"{}",
@@ -778,7 +778,7 @@ mod tests {
             "POST",
             "https://bedrock-runtime.us-east-1.amazonaws.com/model/test/invoke",
             &[
-                ("content-type", "application/json"),
+                ("content-type", MIME_JSON),
                 ("host", "bedrock-runtime.us-east-1.amazonaws.com"),
             ],
             b"{}",

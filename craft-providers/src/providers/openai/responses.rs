@@ -9,7 +9,7 @@ use tokio_util::io::StreamReader;
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
-use crate::providers::ResolvedAuth;
+use crate::providers::{MIME_JSON, ResolvedAuth};
 use crate::{
     AgentError, ContentBlock, Message, ProviderEvent, Role, StopReason, StreamResponse, TokenUsage,
 };
@@ -154,7 +154,7 @@ pub(crate) async fn do_stream(
 
     let mut builder = client
         .post(format!("{base}{RESPONSES_PATH}"))
-        .header("content-type", "application/json");
+        .header("content-type", MIME_JSON);
     for (key, value) in &auth.headers {
         builder = builder.header(key.as_str(), value.as_str());
     }

@@ -21,7 +21,7 @@ use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
-use super::KeyPool;
+use super::{KeyPool, MIME_JSON, lock_unpoison};
 
 const API_VERSION: &str = "2023-06-01";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -69,7 +69,7 @@ impl Anthropic {
         let resolved = resolve_auth_from_key(pool.current());
         debug!(keys = pool.len(), "using API key authentication");
         Ok(Self {
-            client: super::http_client(timeouts),
+            client: super::http_client(timeouts)?,
             auth: Arc::new(Mutex::new(resolved)),
             key_pool: Some(pool),
             system_prefix: None,
@@ -80,14 +80,14 @@ impl Anthropic {
     pub(crate) fn with_auth(
         auth: Arc<Mutex<super::ResolvedAuth>>,
         timeouts: super::Timeouts,
-    ) -> Self {
-        Self {
-            client: super::http_client(timeouts),
+    ) -> Result<Self, AgentError> {
+        Ok(Self {
+            client: super::http_client(timeouts)?,
             auth,
             key_pool: None,
             system_prefix: None,
             stream_timeout: timeouts.stream,
-        }
+        })
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -96,7 +96,7 @@ impl Anthropic {
     }
 
     fn build_request(&self, method: &str, url: Option<&str>) -> reqwest::RequestBuilder {
-        let auth = self.auth.lock().unwrap();
+        let auth = lock_unpoison(&self.auth);
         let url = url.unwrap_or_else(|| auth.base_url.as_deref().unwrap_or(MESSAGES_URL));
         let mut builder = self
             .client
@@ -117,7 +117,7 @@ impl Anthropic {
         let json_body = serde_json::to_vec(body)?;
         let mut req = self
             .build_request("POST", None)
-            .header("content-type", "application/json");
+            .header("content-type", MIME_JSON);
         if fast {
             req = req.header("anthropic-beta", FAST_MODE_BETA);
         }
@@ -223,7 +223,7 @@ impl Provider for Anthropic {
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async {
             let pool = KeyPool::from_env(ENV_VAR)?;
-            *self.auth.lock().unwrap() = resolve_auth_from_key(pool.current());
+            *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
             debug!("reloaded Anthropic auth from env");
             Ok(())
         })

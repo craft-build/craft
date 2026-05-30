@@ -18,7 +18,7 @@ use crate::{
     ThinkingConfig, RequestOptions, TokenUsage,
 };
 
-use super::{KeyPool, ResolvedAuth, http_client, next_sse_line};
+use super::{KeyPool, MIME_JSON, ResolvedAuth, http_client, lock_unpoison, next_sse_line};
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const ENV_VAR: &str = "GEMINI_API_KEY";
@@ -92,7 +92,7 @@ impl Google {
         let pool = KeyPool::from_env(ENV_VAR)?;
         let resolved = resolve_auth_from_key(pool.current());
         Ok(Self {
-            client: http_client(timeouts),
+            client: http_client(timeouts)?,
             auth: Arc::new(Mutex::new(resolved)),
             key_pool: Some(pool),
             stream_timeout: timeouts.stream,
@@ -102,17 +102,17 @@ impl Google {
     pub(crate) fn with_auth(
         auth: Arc<Mutex<super::ResolvedAuth>>,
         timeouts: super::Timeouts,
-    ) -> Self {
-        Self {
-            client: http_client(timeouts),
+    ) -> Result<Self, AgentError> {
+        Ok(Self {
+            client: http_client(timeouts)?,
             auth,
             key_pool: None,
             stream_timeout: timeouts.stream,
-        }
+        })
     }
 
     fn build_request(&self, method: &str, url: &str) -> reqwest::RequestBuilder {
-        let auth = self.auth.lock().unwrap();
+        let auth = lock_unpoison(&self.auth);
         let mut builder = self.client.request(method.parse().unwrap(), url);
         for (key, value) in &auth.headers {
             builder = builder.header(key.as_str(), value.as_str());
@@ -121,7 +121,7 @@ impl Google {
     }
 
     fn api_key(&self) -> String {
-        let auth = self.auth.lock().unwrap();
+        let auth = lock_unpoison(&self.auth);
         auth.headers
             .iter()
             .find(|(k, _)| k == "x-goog-api-key")
@@ -131,7 +131,7 @@ impl Google {
 
     fn stream_url(&self, model_id: &str) -> String {
         let base = {
-            let auth = self.auth.lock().unwrap();
+            let auth = lock_unpoison(&self.auth);
             auth.base_url.as_deref().unwrap_or(BASE_URL).to_string()
         };
         let encoded = super::urlenc(model_id);
@@ -140,11 +140,11 @@ impl Google {
 
     fn models_url(&self) -> String {
         let base = {
-            let auth = self.auth.lock().unwrap();
+            let auth = lock_unpoison(&self.auth);
             auth.base_url.as_deref().unwrap_or(BASE_URL).to_string()
         };
         let key = self.api_key();
-        format!("{base}/models?key={key}&pageSize=1000")
+        format!("{base}/models?key={}&pageSize=1000", super::urlenc(&key))
     }
 
     fn build_body(
@@ -199,7 +199,7 @@ impl Google {
 
         let response = self
             .build_request("POST", &url)
-            .header("content-type", "application/json")
+            .header("content-type", MIME_JSON)
             .body(json_body)
             .send()
             .await?;
@@ -264,7 +264,7 @@ impl Provider for Google {
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async {
             let pool = KeyPool::from_env(ENV_VAR)?;
-            *self.auth.lock().unwrap() = resolve_auth_from_key(pool.current());
+            *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
             Ok(())
         })
     }
@@ -513,7 +513,7 @@ async fn parse_sse(
 
         for candidate in candidates {
             if let Some(reason) = candidate.finish_reason {
-                stop_reason = Some(StopReason::from_google(&reason)).or(stop_reason);
+                stop_reason = stop_reason.or(Some(StopReason::from_google(&reason)));
             }
 
             let Some(content) = candidate.content else {
@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn google_build_body_basic() {
-        let google = Google::with_auth(test_auth(), test_timeouts());
+        let google = Google::with_auth(test_auth(), test_timeouts()).unwrap();
         let model = Model {
             id: "gemini-2.5-flash".into(),
             provider: crate::provider::ProviderKind::Google,
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn google_build_body_thinking_adaptive() {
-        let google = Google::with_auth(test_auth(), test_timeouts());
+        let google = Google::with_auth(test_auth(), test_timeouts()).unwrap();
         let model = Model {
             id: "gemini-2.5-flash".into(),
             provider: crate::provider::ProviderKind::Google,
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn google_build_body_thinking_budget() {
-        let google = Google::with_auth(test_auth(), test_timeouts());
+        let google = Google::with_auth(test_auth(), test_timeouts()).unwrap();
         let model = Model {
             id: "gemini-2.5-flash".into(),
             provider: crate::provider::ProviderKind::Google,

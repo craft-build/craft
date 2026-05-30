@@ -1,11 +1,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::AgentError;
+
+pub(crate) fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub(crate) mod anthropic;
 pub(crate) mod copilot;
@@ -19,6 +23,9 @@ pub(crate) mod openai;
 pub(crate) mod openai_compat;
 pub(crate) mod synthetic;
 pub(crate) mod zai;
+
+pub(crate) const MIME_JSON: &str = "application/json";
+pub(crate) const MIME_FORM: &str = "application/x-www-form-urlencoded";
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timeouts {
@@ -132,12 +139,14 @@ pub(crate) async fn next_sse_line<R: futures::io::AsyncBufRead + Unpin>(
     result
 }
 
-pub(crate) fn http_client(timeouts: Timeouts) -> reqwest::Client {
+pub(crate) fn http_client(timeouts: Timeouts) -> Result<reqwest::Client, AgentError> {
     reqwest::Client::builder()
         .connect_timeout(timeouts.connect)
         .timeout(timeouts.stream)
         .build()
-        .expect("failed to build HTTP client")
+        .map_err(|e| AgentError::Config {
+            message: format!("http client: {e}"),
+        })
 }
 
 #[derive(Clone)]
@@ -195,7 +204,7 @@ impl KeyPool {
         if !self.rotate() {
             return false;
         }
-        *auth.lock().unwrap() = build(self.current());
+        *lock_unpoison(auth) = build(self.current());
         true
     }
 
@@ -207,7 +216,7 @@ impl KeyPool {
         if !self.rotate() {
             return false;
         }
-        auth.lock().unwrap().headers = build(self.current());
+        lock_unpoison(auth).headers = build(self.current());
         true
     }
 
