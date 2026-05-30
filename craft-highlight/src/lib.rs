@@ -10,6 +10,7 @@ use syntect::util::LinesWithEndings;
 
 const TOKEN_ALIASES: &[(&str, &str)] = &[("jsx", "js")];
 pub const TAB_SPACES: &str = "  ";
+const FALLBACK_FG: (u8, u8, u8) = (204, 204, 204);
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<RwLock<Arc<Theme>>> = OnceLock::new();
@@ -164,7 +165,7 @@ impl StyledSegment {
     fn fallback(text: String) -> Self {
         Self {
             text,
-            fg: (204, 204, 204),
+            fg: FALLBACK_FG,
             bold: false,
             italic: false,
             underline: false,
@@ -198,7 +199,12 @@ pub fn highlight_ansi(lang: &str, code: &str, bg: (u8, u8, u8)) -> String {
     out
 }
 
+/// Incremental code highlighter for streaming input.
+///
+/// Processes completed lines once (using syntect parse/checkpoint state)
+/// and re-highlights the trailing partial line on each call.
 pub struct CodeHighlighter {
+    syntax: &'static SyntaxReference,
     checkpoint_parse: ParseState,
     checkpoint_highlight: HighlightState,
     completed_lines: usize,
@@ -209,13 +215,23 @@ impl CodeHighlighter {
     pub fn new(lang: &str) -> Self {
         let syntax = syntax_for_token(lang);
         let t = theme();
-        let highlighter = SynHighlighter::new(&t);
+        let syn_hl = SynHighlighter::new(&t);
         Self {
+            syntax,
             checkpoint_parse: ParseState::new(syntax),
-            checkpoint_highlight: HighlightState::new(&highlighter, ScopeStack::new()),
+            checkpoint_highlight: HighlightState::new(&syn_hl, ScopeStack::new()),
             completed_lines: 0,
             cached_segments: Vec::new(),
         }
+    }
+
+    fn reset_checkpoints(&mut self) {
+        let t = theme();
+        let syn_hl = SynHighlighter::new(&t);
+        self.checkpoint_parse = ParseState::new(self.syntax);
+        self.checkpoint_highlight = HighlightState::new(&syn_hl, ScopeStack::new());
+        self.completed_lines = 0;
+        self.cached_segments.clear();
     }
 
     fn set_or_push(&mut self, index: usize, segments: Vec<StyledSegment>) {
@@ -240,6 +256,10 @@ impl CodeHighlighter {
         } else {
             total - 1
         };
+
+        if new_completed < self.completed_lines {
+            self.reset_checkpoints();
+        }
 
         if new_completed > self.completed_lines {
             let mut hl = Highlighter::from_state(
@@ -359,6 +379,21 @@ mod tests {
         ch.update("let a = 1;\nlet b = 2;\nlet c = 3;\n");
         let segs = ch.update("let a = 1;\n");
         assert_eq!(segs.len(), 1);
+        assert_eq!(segments_text(&segs[0]), "let a = 1;");
+    }
+
+    #[test]
+    fn code_highlighter_shrink_then_regrow() {
+        warmup();
+        let mut ch = CodeHighlighter::new("rust");
+        ch.update("let a = 1;\nlet b = 2;\n");
+        let segs = ch.update("let a = 1;\n");
+        assert_eq!(segs.len(), 1);
+        let segs = ch.update("let a = 1;\nlet b = 2;\nlet c = 3;\n");
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segments_text(&segs[0]), "let a = 1;");
+        assert_eq!(segments_text(&segs[1]), "let b = 2;");
+        assert_eq!(segments_text(&segs[2]), "let c = 3;");
     }
 
     #[test]
