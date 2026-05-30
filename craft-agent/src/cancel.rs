@@ -9,6 +9,8 @@ struct Shared {
     event: Event,
 }
 
+const CANCELLED: &str = "cancelled";
+
 impl Shared {
     fn fire(&self) {
         self.cancelled.store(true, Ordering::Release);
@@ -43,11 +45,11 @@ impl CancelToken {
 
     pub async fn race<T>(&self, future: impl Future<Output = T>) -> Result<T, String> {
         if self.is_cancelled() {
-            return Err("cancelled".into());
+            return Err(CANCELLED.into());
         }
         tokio::select! {
             result = async { Ok(future.await) } => result,
-            _ = self.cancelled() => Err("cancelled".into()),
+            _ = self.cancelled() => Err(CANCELLED.into()),
         }
     }
 
@@ -69,8 +71,10 @@ impl CancelToken {
         let parent = self.clone();
         let child_shared = Arc::clone(&child_token.0);
         tokio::spawn(async move {
-            parent.cancelled().await;
-            child_shared.fire();
+            tokio::select! {
+                _ = parent.cancelled() => child_shared.fire(),
+                _ = child_shared.event.listen() => {}
+            }
         });
         (child_trigger, child_token)
     }

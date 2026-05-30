@@ -1,6 +1,8 @@
 use std::backtrace::Backtrace;
 use std::future::Future;
 
+const CANCELLED: &str = "task was cancelled";
+
 pub(crate) struct TaskSet<T> {
     tasks: Vec<tokio::task::JoinHandle<Result<T, String>>>,
 }
@@ -21,7 +23,7 @@ impl<T: Send + 'static> TaskSet<T> {
                     if e.is_panic() {
                         Err(panic_to_string(e.into_panic()))
                     } else {
-                        Err("task was cancelled".into())
+                        Err(CANCELLED.into())
                     }
                 }
             }
@@ -37,7 +39,7 @@ impl<T: Send + 'static> TaskSet<T> {
                     if e.is_panic() {
                         Err(panic_to_string(e.into_panic()))
                     } else {
-                        Err("task was cancelled".into())
+                        Err(CANCELLED.into())
                     }
                 }
             });

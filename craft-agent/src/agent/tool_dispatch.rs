@@ -23,6 +23,7 @@ const DOOM_LOOP_THRESHOLD: usize = 3;
 const DOOM_LOOP_MESSAGE: &str = "You have called this tool with identical input 3 times in a row. You are stuck in a loop. Break out and try a different approach.";
 const MCP_BLOCKED_IN_PLAN: &str = "MCP tools are not available in plan mode";
 const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
+const MCP_SCOPE_PREVIEW_BYTES: usize = 200;
 
 pub(super) struct RecentCalls(VecDeque<(String, u64)>);
 
@@ -222,8 +223,10 @@ async fn execute_mcp_tool(
     let perm_tool = format!("mcp:{tool_name}");
     let perm_scope = {
         let json = input.to_string();
-        if json.len() > 200 {
-            format!("{}\u{2026}", &json[..200])
+        let end = json.len().min(MCP_SCOPE_PREVIEW_BYTES);
+        let end = json.floor_char_boundary(end);
+        if end < json.len() {
+            format!("{}…", &json[..end])
         } else {
             json
         }
@@ -255,7 +258,7 @@ async fn execute_mcp_tool(
     }
 }
 
-/// Deduplicates doom-loop repeats, then runs remaining calls in parallel.
+/// Skips doom-loop repeats (emitting errors instead), runs remaining tool calls in parallel.
 pub(super) async fn process_tool_calls(
     response: craft_providers::StreamResponse,
     recent_calls: &mut RecentCalls,
