@@ -1,3 +1,5 @@
+//! User configuration loading, validation, and permissions management.
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -113,6 +115,23 @@ pub const INDEX_FIELDS: &[ConfigField] = &[ConfigField {
     min: Some(MIN_MAX_FILE_SIZE_MB),
     description: "Max file size for indexing (MB)",
 }];
+
+/// Error type for permission file operations.
+#[derive(Debug, Error)]
+pub enum PermissionError {
+    #[error("cannot determine home directory")]
+    NoHomeDir,
+    #[error("failed to parse permissions: {0}")]
+    Parse(#[source] toml_edit::TomlError),
+    #[error("[{tool}] is not a table")]
+    NotATable { tool: String },
+    #[error("[{tool}].{key} is not an array")]
+    NotAnArray { tool: String, key: String },
+    #[error("cannot create config dir: {0}")]
+    CreateDir(#[source] std::io::Error),
+    #[error("cannot write permissions: {0}")]
+    Write(#[source] std::io::Error),
+}
 
 #[derive(Debug, Error)]
 #[error("invalid config: {section}.{field} = {value} is below minimum ({min})")]
@@ -351,6 +370,15 @@ struct PermissionsFileConfig {
     tools: HashMap<String, ToolPermissions>,
 }
 
+impl PermissionsFileConfig {
+    fn merge(&mut self, overlay: PermissionsFileConfig) {
+        if overlay.allow_all.is_some() {
+            self.allow_all = overlay.allow_all;
+        }
+        self.tools.extend(overlay.tools);
+    }
+}
+
 impl<'de> Deserialize<'de> for PermissionsFileConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let table = toml::Table::deserialize(deserializer)?;
@@ -362,6 +390,8 @@ impl<'de> Deserialize<'de> for PermissionsFileConfig {
             }
             if let Ok(tp) = v.clone().try_into::<ToolPermissions>() {
                 tools.insert(k.clone(), tp);
+            } else {
+                warn!(key = k, "invalid permission entry, skipping");
             }
         }
         Ok(Self { allow_all, tools })
@@ -755,7 +785,6 @@ impl StorageConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct PluginsConfig {
-    pub enabled: bool,
     pub tools: Vec<String>,
 }
 
@@ -777,10 +806,7 @@ impl PluginsConfig {
         extra.sort();
         all.extend(extra.into_iter().cloned());
 
-        Self {
-            enabled: true,
-            tools: all,
-        }
+        Self { tools: all }
     }
 }
 
@@ -840,8 +866,12 @@ fn build_permissions(
     PermissionsConfig { allow_all, rules }
 }
 
-fn global_dir() -> Option<PathBuf> {
+pub fn global_config_dir() -> Option<PathBuf> {
     paths::config_dir().ok()
+}
+
+pub fn global_config_dirs() -> Vec<PathBuf> {
+    config_search_dirs(global_config_dir().as_deref())
 }
 
 fn config_search_dirs(global: Option<&Path>) -> Vec<PathBuf> {
@@ -866,7 +896,7 @@ fn load_env_files_with_global(cwd: &Path, global: Option<&Path>) {
 
     for (key, value) in vars {
         if std::env::var_os(&key).is_none() {
-            // SAFETY: single-threaded at startup, before any async runtime
+            // SAFETY: caller guarantees single-threaded execution (before async runtime)
             unsafe { std::env::set_var(&key, &value) };
         }
     }
@@ -881,12 +911,19 @@ fn collect_env_vars(path: &Path, vars: &mut HashMap<String, String>) {
     }
 }
 
+/// Loads `.env` files from global and project config dirs, setting environment variables
+/// for any keys not already set in the process.
+///
+/// # Safety (caller requirement)
+///
+/// Must be called before spawning any threads or the async runtime.
+/// `std::env::set_var` is unsafe when concurrent access to the environment exists.
 pub fn load_env_files(cwd: &Path) {
-    load_env_files_with_global(cwd, global_dir().as_deref());
+    load_env_files_with_global(cwd, global_config_dir().as_deref());
 }
 
 pub fn load_permissions(cwd: &Path) -> PermissionsConfig {
-    let global_dirs = config_search_dirs(global_dir().as_deref());
+    let global_dirs = config_search_dirs(global_config_dir().as_deref());
     load_permissions_inner(cwd, &global_dirs)
 }
 
@@ -894,7 +931,7 @@ fn load_permissions_inner(cwd: &Path, global_dirs: &[PathBuf]) -> PermissionsCon
     let mut global_perms = PermissionsFileConfig::default();
     for dir in global_dirs {
         if let Some(p) = read_permissions_file(&dir.join(PERMISSIONS_FILE)) {
-            global_perms = p;
+            global_perms.merge(p);
         }
     }
 
@@ -915,21 +952,13 @@ fn read_permissions_file(path: &Path) -> Option<PermissionsFileConfig> {
     }
 }
 
-pub fn global_config_dir() -> Option<PathBuf> {
-    global_dir()
-}
-
-pub fn global_config_dirs() -> Vec<PathBuf> {
-    config_search_dirs(global_dir().as_deref())
-}
-
 pub fn append_permission_rule(
     tool: &str,
     scope: Option<&str>,
     effect: Effect,
     target: &PermissionTarget,
-) -> Result<(), String> {
-    let dir = config_search_dirs(global_dir().as_deref())
+) -> Result<(), PermissionError> {
+    let dir = config_search_dirs(global_config_dir().as_deref())
         .into_iter()
         .last();
     append_permission_rule_with_global(tool, scope, effect, target, dir)
@@ -941,7 +970,7 @@ fn append_permission_rule_with_global(
     effect: Effect,
     target: &PermissionTarget,
     global: Option<PathBuf>,
-) -> Result<(), String> {
+) -> Result<(), PermissionError> {
     match target {
         PermissionTarget::Global => append_global_permission(tool, scope, effect, global),
         PermissionTarget::Project(cwd) => append_project_permission(tool, scope, effect, cwd),
@@ -953,21 +982,21 @@ fn append_global_permission(
     scope: Option<&str>,
     effect: Effect,
     global: Option<PathBuf>,
-) -> Result<(), String> {
+) -> Result<(), PermissionError> {
     let path = global
-        .ok_or_else(|| "cannot determine home directory".to_string())?
+        .ok_or(PermissionError::NoHomeDir)?
         .join(PERMISSIONS_FILE);
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = content
         .parse()
-        .map_err(|e| format!("failed to parse permissions: {e}"))?;
+        .map_err(PermissionError::Parse)?;
 
     insert_permission_entry(&mut doc, tool, scope, effect)?;
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create config dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(PermissionError::CreateDir)?;
     }
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("cannot write permissions: {e}"))?;
+    std::fs::write(&path, doc.to_string()).map_err(PermissionError::Write)?;
     Ok(())
 }
 
@@ -976,20 +1005,19 @@ fn append_project_permission(
     scope: Option<&str>,
     effect: Effect,
     cwd: &Path,
-) -> Result<(), String> {
+) -> Result<(), PermissionError> {
     let path = cwd.join(PROJECT_DIR).join(PERMISSIONS_FILE);
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = content
         .parse()
-        .map_err(|e| format!("failed to parse .craft/{PERMISSIONS_FILE}: {e}"))?;
+        .map_err(PermissionError::Parse)?;
 
     insert_permission_entry(&mut doc, tool, scope, effect)?;
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create .craft dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(PermissionError::CreateDir)?;
     }
-    std::fs::write(&path, doc.to_string())
-        .map_err(|e| format!("cannot write .craft/{PERMISSIONS_FILE}: {e}"))?;
+    std::fs::write(&path, doc.to_string()).map_err(PermissionError::Write)?;
     Ok(())
 }
 
@@ -998,7 +1026,7 @@ fn insert_permission_entry(
     tool: &str,
     scope: Option<&str>,
     effect: Effect,
-) -> Result<(), String> {
+) -> Result<(), PermissionError> {
     let key = match effect {
         Effect::Allow => "allow",
         Effect::Deny => "deny",
@@ -1009,7 +1037,9 @@ fn insert_permission_entry(
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
     let tool_table = tool_table
         .as_table_mut()
-        .ok_or_else(|| format!("[{tool}] is not a table"))?;
+        .ok_or_else(|| PermissionError::NotATable {
+            tool: tool.to_string(),
+        })?;
 
     match scope {
         Some(s) => {
@@ -1018,7 +1048,10 @@ fn insert_permission_entry(
             });
             let arr = arr
                 .as_array_mut()
-                .ok_or_else(|| format!("[{tool}].{key} is not an array"))?;
+                .ok_or_else(|| PermissionError::NotAnArray {
+                    tool: tool.to_string(),
+                    key: key.to_string(),
+                })?;
             let already_exists = arr
                 .iter()
                 .any(|v| v.as_str().is_some_and(|existing| existing == s));
@@ -1478,7 +1511,6 @@ mod tests {
         let plugins = PluginsConfig::from_tools(HashMap::new());
         let expected: Vec<String> = DEFAULT_BUILTINS.iter().map(|s| s.to_string()).collect();
         assert_eq!(plugins.tools, expected);
-        assert!(plugins.enabled);
     }
 
     #[test]
@@ -1548,7 +1580,6 @@ mod tests {
         }
         let plugins = PluginsConfig::from_tools(tools);
         assert!(plugins.tools.is_empty());
-        assert!(plugins.enabled);
     }
 
     #[test]

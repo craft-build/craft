@@ -57,6 +57,7 @@ pub async fn index(path: &str, no_plugins: bool) -> Result<()> {
     let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
 
     let mut config = raw_config.unwrap_or_default().into_config(false);
+    config.validate()?;
     config.permissions = load_permissions(&cwd);
 
     host.load_builtins(&config.plugins)
