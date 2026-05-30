@@ -11,6 +11,7 @@ const LIST_INDENT_STEP: usize = 2;
 const MAX_HEADING_LEVEL: u8 = 6;
 const FENCE_MIN: usize = 3;
 
+/// Composite emphasis flags for inline text (bold, italic, strikethrough, underline).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Emphasis {
     pub bold: bool,
@@ -65,12 +66,14 @@ impl Emphasis {
     }
 }
 
+/// Whether an inline span is regular text or an inline code fence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpanKind {
     Text,
     Code,
 }
 
+/// A parsed inline element with its kind and emphasis.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineSpan {
     pub text: String,
@@ -96,6 +99,7 @@ impl InlineSpan {
     }
 }
 
+/// Line-level classification produced by the block parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlockKind {
     Paragraph,
@@ -106,13 +110,14 @@ pub enum BlockKind {
 }
 
 /// Inline delimiters are kept intact here. Emphasis and code parsing is
-/// deferred to `parse_inline` so callers can wrap before deciding styles.
+/// deferred to [`parse_inline`] so callers can wrap before deciding styles.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LineBlock {
     pub kind: BlockKind,
     pub inline: String,
 }
 
+/// Top-level block produced by [`parse`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Block {
     Lines(Vec<LineBlock>),
@@ -126,6 +131,7 @@ pub enum Block {
     },
 }
 
+/// Parse markdown text into a list of blocks (lines, code fences, tables).
 pub fn parse(text: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut rest = text;
@@ -148,6 +154,50 @@ pub fn parse(text: &str) -> Vec<Block> {
     blocks
 }
 
+fn try_extract_table(
+    lines_with_offsets: &[(usize, &str)],
+    i: usize,
+) -> Option<(usize, Block)> {
+    let (_, line) = lines_with_offsets[i];
+    if !is_table_row(line) {
+        return None;
+    }
+
+    let table_start = i;
+    let header_cols = parse_table_cells(line).len();
+    let mut sep_idx = None;
+    let mut j = i;
+    while j < lines_with_offsets.len() && is_table_row(lines_with_offsets[j].1) {
+        if sep_idx.is_none()
+            && is_separator_row(lines_with_offsets[j].1)
+            && parse_table_cells(lines_with_offsets[j].1).len() >= header_cols
+        {
+            sep_idx = Some(j - table_start);
+        }
+        j += 1;
+    }
+
+    let si = sep_idx?;
+    if j - table_start < 2 {
+        return None;
+    }
+
+    let mut rows = Vec::new();
+    for (k, &(_, row_line)) in lines_with_offsets[table_start..j]
+        .iter()
+        .enumerate()
+    {
+        if k != si {
+            rows.push(parse_table_cells(row_line));
+        }
+    }
+
+    Some((j, Block::Table {
+        rows,
+        header_end: si,
+    }))
+}
+
 fn split_normal_blocks(text: &str) -> Vec<Block> {
     let mut lines_with_offsets: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0;
@@ -161,58 +211,18 @@ fn split_normal_blocks(text: &str) -> Vec<Block> {
     let mut i = 0;
 
     while i < lines_with_offsets.len() {
-        let (_, line) = lines_with_offsets[i];
-        if is_table_row(line) {
-            let table_start = i;
-            let header_cols = parse_table_cells(line).len();
-            let mut sep_idx = None;
-            let mut j = i;
-            while j < lines_with_offsets.len() && is_table_row(lines_with_offsets[j].1) {
-                if sep_idx.is_none()
-                    && is_separator_row(lines_with_offsets[j].1)
-                    && parse_table_cells(lines_with_offsets[j].1).len() >= header_cols
-                {
-                    sep_idx = Some(j - table_start);
+        if let Some((table_end, block)) = try_extract_table(&lines_with_offsets, i) {
+            if let Some(ns) = normal_start.take() {
+                let start = lines_with_offsets[ns].0;
+                let end = lines_with_offsets[i].0;
+                let slice = text[start..end].trim_matches('\n');
+                if !slice.is_empty() {
+                    blocks.push(Block::Lines(lines_to_blocks(slice)));
                 }
-                j += 1;
             }
-            if let Some(si) = sep_idx
-                && j - table_start >= 2
-            {
-                if let Some(ns) = normal_start.take() {
-                    let start = lines_with_offsets[ns].0;
-                    let end = lines_with_offsets[table_start].0;
-                    let slice = text[start..end].trim_matches('\n');
-                    if !slice.is_empty() {
-                        blocks.push(Block::Lines(lines_to_blocks(slice)));
-                    }
-                }
-
-                let table_end = if j < lines_with_offsets.len()
-                    && j == lines_with_offsets.len() - 1
-                    && lines_with_offsets[j].1.trim_start().starts_with('|')
-                {
-                    j + 1
-                } else {
-                    j
-                };
-
-                let mut rows = Vec::new();
-                for (k, &(_, line)) in lines_with_offsets[table_start..table_end]
-                    .iter()
-                    .enumerate()
-                {
-                    if k != si {
-                        rows.push(parse_table_cells(line));
-                    }
-                }
-                blocks.push(Block::Table {
-                    rows,
-                    header_end: si,
-                });
-                i = table_end;
-                continue;
-            }
+            blocks.push(block);
+            i = table_end;
+            continue;
         }
 
         if normal_start.is_none() {
@@ -276,6 +286,7 @@ fn classify_line(line: &str) -> LineBlock {
     }
 }
 
+/// Return the visual prefix (bullet, number, indent) for a list item kind.
 pub fn block_prefix(kind: &BlockKind) -> Option<String> {
     match kind {
         BlockKind::UnorderedListItem { depth } => {
@@ -470,6 +481,7 @@ fn find_code_fence(text: &str) -> Option<CodeFence<'_>> {
 
 /// Emphasis composes additively. Code spans are atomic and carry the
 /// surrounding emphasis as a separate modifier.
+/// Parse inline markdown (bold, italic, code, strikethrough) into typed spans.
 pub fn parse_inline(text: &str) -> Vec<InlineSpan> {
     parse_inline_impl(text, Emphasis::default(), ParseMode::WithCode)
 }
@@ -1176,6 +1188,20 @@ mod tests {
         assert_eq!(spans[1].kind, SpanKind::Code);
         assert_eq!(spans[1].text, "x|y*z");
         assert!(spans[1].emphasis.is_empty());
+    }
+
+    #[test]
+    fn table_does_not_consume_trailing_pipe_paragraph() {
+        let blocks = parse("| H |\n| --- |\n| d |\n|not a table row");
+        assert_eq!(blocks.len(), 2);
+        let Block::Table { rows, .. } = &blocks[0] else {
+            panic!("expected Table")
+        };
+        assert_eq!(rows.len(), 2);
+        let Block::Lines(lines) = &blocks[1] else {
+            panic!("expected Lines")
+        };
+        assert_eq!(lines[0].inline, "|not a table row");
     }
 
     #[test]

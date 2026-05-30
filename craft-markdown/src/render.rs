@@ -15,7 +15,9 @@ use crate::{
     Block, BlockKind, Emphasis, InlineSpan, LineBlock, SpanKind, block_prefix, parse, parse_inline,
 };
 
+/// Prefix for the first line of a code block.
 pub const CODE_BAR: &str = "│ ";
+/// Prefix for wrapped continuation lines of a code block.
 pub const CODE_BAR_WRAP: &str = "│";
 /// Lines longer than this get truncated with `...` to protect the parser
 /// and terminal from runaway output.
@@ -45,6 +47,7 @@ pub enum StyleToken {
     HorizontalRule,
 }
 
+/// A rendered span of text with its style and emphasis.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Span {
     pub text: String,
@@ -70,6 +73,7 @@ impl Span {
     }
 }
 
+/// Kind of a rendered line.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LineKind {
     Paragraph,
@@ -82,6 +86,7 @@ pub enum LineKind {
     Blank,
 }
 
+/// A rendered line consisting of styled spans.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Line {
     pub kind: LineKind,
@@ -105,6 +110,7 @@ impl Line {
     }
 }
 
+/// Convenience wrapper around [`Renderer::render`] for one-shot use.
 pub fn render(text: &str, width: u16) -> Vec<Line> {
     Renderer::new().render(text, width, 0)
 }
@@ -336,7 +342,7 @@ fn render_line_block(lb: &LineBlock, lines: &mut Vec<Line>, ctx: &RenderCtx) {
         (marker, indent, width - marker_width)
     };
 
-    let wrapped = wrap_spans(content_spans, content_width);
+    let wrapped = wrap_spans_impl(content_spans, content_width, content_width, true, true);
 
     if wrapped.is_empty() {
         if let Some(m) = first_row_marker {
@@ -425,68 +431,24 @@ fn split_line_with_bar(line: Line, width: usize) -> Vec<Line> {
     }
 
     let bar_span = line.spans[0].clone();
-    let content_spans = &line.spans[1..];
+    let content_spans: Vec<Span> = line.spans[1..].to_vec();
     let first_avail = width.saturating_sub(CODE_BAR.width());
     let cont_avail = width.saturating_sub(CODE_BAR_WRAP.width());
 
+    let rows = wrap_spans_impl(content_spans, first_avail, cont_avail, false, false);
+
     let mut result: Vec<Line> = Vec::new();
-    let mut current_spans: Vec<Span> = vec![bar_span];
-    let mut remaining = first_avail;
-
-    for span in content_spans {
-        let mut text = span.text.as_str();
-        let style = span.style.clone();
-        let emphasis = span.emphasis;
-
-        while !text.is_empty() {
-            let fits = fit_width(text, remaining);
-            if fits == 0 {
-                if current_spans.len() > 1 {
-                    result.push(Line {
-                        kind: LineKind::Code,
-                        spans: mem::take(&mut current_spans),
-                    });
-                    current_spans = vec![Span::new(CODE_BAR_WRAP, StyleToken::CodeBar)];
-                    remaining = cont_avail;
-                    continue;
-                }
-                let ch_len = text.chars().next().map_or(1, char::len_utf8);
-                current_spans.push(Span::with_emphasis(
-                    text[..ch_len].to_owned(),
-                    style.clone(),
-                    emphasis,
-                ));
-                text = &text[ch_len..];
-                result.push(Line {
-                    kind: LineKind::Code,
-                    spans: mem::take(&mut current_spans),
-                });
-                current_spans = vec![Span::new(CODE_BAR_WRAP, StyleToken::CodeBar)];
-                remaining = cont_avail;
-                continue;
-            }
-            current_spans.push(Span::with_emphasis(
-                text[..fits].to_owned(),
-                style.clone(),
-                emphasis,
-            ));
-            remaining -= text[..fits].width();
-            text = &text[fits..];
-            if !text.is_empty() {
-                result.push(Line {
-                    kind: LineKind::Code,
-                    spans: mem::take(&mut current_spans),
-                });
-                current_spans = vec![Span::new(CODE_BAR_WRAP, StyleToken::CodeBar)];
-                remaining = cont_avail;
-            }
+    for (i, mut row) in rows.into_iter().enumerate() {
+        let mut spans = Vec::with_capacity(row.len() + 1);
+        if i == 0 {
+            spans.push(bar_span.clone());
+        } else {
+            spans.push(Span::new(CODE_BAR_WRAP, StyleToken::CodeBar));
         }
-    }
-
-    if current_spans.len() > 1 || result.is_empty() {
+        spans.append(&mut row);
         result.push(Line {
             kind: LineKind::Code,
-            spans: current_spans,
+            spans,
         });
     }
 
@@ -523,14 +485,24 @@ fn constrain_col_widths(col_widths: &mut [usize], available: usize) {
     }
 }
 
-/// Soft-break on spaces, hard-break on char boundaries for long runs.
-fn wrap_spans(spans: Vec<Span>, max_width: usize) -> Vec<Vec<Span>> {
-    if max_width == 0 {
+/// Core span-wrapping algorithm shared by paragraph wrapping and code-bar wrapping.
+///
+/// `first_width` / `cont_width` allow different available widths for the first
+/// line versus continuations. `soft_break` enables space-based soft breaks;
+/// `strip_space` strips leading spaces after a forced line break.
+fn wrap_spans_impl(
+    spans: Vec<Span>,
+    first_width: usize,
+    cont_width: usize,
+    soft_break: bool,
+    strip_space: bool,
+) -> Vec<Vec<Span>> {
+    if first_width == 0 {
         return vec![spans];
     }
     let mut result: Vec<Vec<Span>> = Vec::new();
     let mut current: Vec<Span> = Vec::new();
-    let mut remaining = max_width;
+    let mut remaining = first_width;
 
     for span in spans {
         let mut text = span.text.as_str();
@@ -540,21 +512,26 @@ fn wrap_spans(spans: Vec<Span>, max_width: usize) -> Vec<Vec<Span>> {
         while !text.is_empty() {
             let fits = fit_width(text, remaining);
             if fits == 0 {
-                if current.is_empty() {
-                    let ch_len = text.chars().next().map_or(1, char::len_utf8);
-                    current.push(Span::with_emphasis(
-                        text[..ch_len].to_owned(),
-                        style.clone(),
-                        emphasis,
-                    ));
-                    text = &text[ch_len..];
+                if !current.is_empty() {
+                    result.push(mem::take(&mut current));
+                    remaining = cont_width;
+                    if strip_space {
+                        text = text.strip_prefix(' ').unwrap_or(text);
+                    }
+                    continue;
                 }
+                let ch_len = text.chars().next().map_or(1, char::len_utf8);
+                current.push(Span::with_emphasis(
+                    text[..ch_len].to_owned(),
+                    style.clone(),
+                    emphasis,
+                ));
+                text = &text[ch_len..];
                 result.push(mem::take(&mut current));
-                remaining = max_width;
-                text = text.strip_prefix(' ').unwrap_or(text);
+                remaining = cont_width;
                 continue;
             }
-            let (take, skip) = if fits < text.len() {
+            let (take, skip) = if soft_break && fits < text.len() {
                 match text[..fits].rfind(' ') {
                     Some(sp) if sp > 0 => (sp, sp + 1),
                     _ => (fits, fits),
@@ -569,9 +546,9 @@ fn wrap_spans(spans: Vec<Span>, max_width: usize) -> Vec<Vec<Span>> {
             ));
             remaining -= text[..take].width();
             text = &text[skip..];
-            if take < fits && !text.is_empty() {
+            if !text.is_empty() && (!soft_break || take < fits) {
                 result.push(mem::take(&mut current));
-                remaining = max_width;
+                remaining = cont_width;
             }
         }
     }
@@ -668,7 +645,7 @@ fn render_table(
         let wrapped_cells: Vec<Vec<Vec<Span>>> = (0..col_count)
             .map(|c| {
                 let cell = row.get(c).map(String::as_str).unwrap_or("");
-                wrap_spans(cell_spans(cell, header), col_widths[c])
+                wrap_spans_impl(cell_spans(cell, header), col_widths[c], col_widths[c], true, true)
             })
             .collect();
 
@@ -762,7 +739,7 @@ fn render_table_compact(rows: &[Vec<String>], header_end: usize, width: u16) -> 
             }
             spans.extend(cell_spans(cell, header));
         }
-        for row_spans in wrap_spans(spans, width as usize) {
+        for row_spans in wrap_spans_impl(spans, width as usize, width as usize, true, true) {
             lines.push(Line {
                 kind: LineKind::TableRow,
                 spans: row_spans,
@@ -1268,7 +1245,7 @@ mod tests {
         let long_word = "x".repeat(30);
         let spans = vec![Span::new(long_word.clone(), StyleToken::Text)];
         let max_width: usize = 10;
-        let wrapped = wrap_spans(spans, max_width);
+        let wrapped = wrap_spans_impl(spans, max_width, max_width, true, true);
         assert!(
             wrapped.len() >= 3,
             "30 chars at width 10 must produce at least 3 rows, got {}",
