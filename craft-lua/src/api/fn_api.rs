@@ -59,7 +59,10 @@ impl JobStore {
             use std::os::unix::process::CommandExt;
             unsafe {
                 command.pre_exec(|| {
-                    libc::setsid();
+                    let ret = libc::setsid();
+                    if ret == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     Ok(())
                 });
             }

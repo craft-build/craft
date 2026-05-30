@@ -1,13 +1,14 @@
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use reqwest::Client;
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const MAX_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
+const MAX_TIMEOUT_SECS: f64 = 120.0;
 const DEFAULT_MAX_BYTES: usize = 5 * 1024 * 1024;
 const MAX_RETRIES: u32 = 3;
+const MAX_REDIRECTS: usize = 10;
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const CF_MITIGATED: &str = "cf-mitigated";
 const CF_CHALLENGE: &str = "challenge";
@@ -60,7 +61,6 @@ pub(crate) fn create_net_table(lua: &Lua) -> LuaResult<Table> {
 
 fn extract_request_params(url: &str, opts: Option<&Table>) -> Result<RequestParams, String> {
     let url = validate_and_upgrade_url(url)?;
-    check_ssrf(&url)?;
 
     let method = opts
         .and_then(|o| o.get::<String>("method").ok())
@@ -82,8 +82,8 @@ fn extract_request_params(url: &str, opts: Option<&Table>) -> Result<RequestPara
         .map(|s| s.into_bytes())
         .unwrap_or_default();
 
-    let timeout = Duration::from_secs(
-        opts.and_then(|o| o.get::<u64>("timeout").ok())
+    let timeout = Duration::from_secs_f64(
+        opts.and_then(|o| o.get::<f64>("timeout").ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .min(MAX_TIMEOUT_SECS),
     );
@@ -138,9 +138,12 @@ fn build_request(
 }
 
 async fn do_request(params: RequestParams) -> Result<ResponseData, String> {
+    let (host, resolved) = resolve_and_check_ssrf(&params.url)?;
+
     let client = Client::builder()
+        .resolve_to_addrs(&host, &resolved)
         .timeout(params.timeout)
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
         .build()
         .map_err(|e| format!("client error: {e}"))?;
 
@@ -240,28 +243,56 @@ fn extract_host(url: &str) -> Option<&str> {
     }
 }
 
-fn check_ssrf(url: &str) -> Result<(), String> {
+fn extract_port(url: &str) -> Option<u16> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host_port = rest.split('/').next()?;
+    if host_port.starts_with('[') {
+        let closing = host_port.find(']')?;
+        host_port
+            .get(closing + 1..)
+            .and_then(|s| s.strip_prefix(':'))
+            .and_then(|p| p.parse().ok())
+    } else {
+        host_port
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+    }
+}
+
+fn resolve_and_check_ssrf(url: &str) -> Result<(String, Vec<SocketAddr>), String> {
     let host = extract_host(url).ok_or("cannot extract host from URL")?;
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_ip(&ip) {
             return Err(format!("blocked: {ip} is a private/metadata address"));
         }
-        return Ok(());
+        let port = extract_port(url).unwrap_or(443);
+        return Ok((host.to_string(), vec![SocketAddr::new(ip, port)]));
     }
 
-    let addr = format!("{host}:443");
-    if let Ok(addrs) = addr.to_socket_addrs() {
-        for sa in addrs {
-            if is_private_ip(&sa.ip()) {
-                return Err(format!(
-                    "blocked: {host} resolves to private address {}",
-                    sa.ip()
-                ));
-            }
+    let port = extract_port(url).unwrap_or(443);
+    let addr = format!("{host}:{port}");
+    let addrs: Vec<_> = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("no addresses found for {host}"));
+    }
+
+    for sa in &addrs {
+        if is_private_ip(&sa.ip()) {
+            return Err(format!(
+                "blocked: {host} resolves to private address {}",
+                sa.ip()
+            ));
         }
     }
-    Ok(())
+
+    Ok((host.to_string(), addrs))
 }
 
 fn is_private_ip(ip: &IpAddr) -> bool {
@@ -331,10 +362,10 @@ mod tests {
     #[test_case("https://[::ffff:127.0.0.1]", Err(()) ; "ipv4_mapped_loopback_blocked")]
     #[test_case("https://0.0.0.0", Err(()) ; "unspecified_blocked")]
     #[test_case("https://[::ffff:169.254.169.254]", Err(()) ; "ipv4_mapped_metadata_blocked")]
-    fn check_ssrf_cases(url: &str, expected: Result<(), ()>) {
+    fn resolve_and_check_ssrf_cases(url: &str, expected: Result<(), ()>) {
         match expected {
-            Ok(()) => assert!(check_ssrf(url).is_ok(), "{url} should be allowed"),
-            Err(()) => assert!(check_ssrf(url).is_err(), "{url} should be blocked"),
+            Ok(()) => assert!(resolve_and_check_ssrf(url).is_ok(), "{url} should be allowed"),
+            Err(()) => assert!(resolve_and_check_ssrf(url).is_err(), "{url} should be blocked"),
         }
     }
 
@@ -361,6 +392,16 @@ mod tests {
     #[test_case("not-a-url", None ; "no_scheme")]
     fn extract_host_cases(url: &str, expected: Option<&str>) {
         assert_eq!(extract_host(url), expected);
+    }
+
+    #[test_case("https://example.com", None ; "no_port")]
+    #[test_case("https://example.com:8080/path", Some(8080) ; "domain_port")]
+    #[test_case("https://192.168.1.1:443", Some(443) ; "ipv4_port")]
+    #[test_case("https://[::1]/path", None ; "ipv6_no_port")]
+    #[test_case("https://[::1]:9090/path", Some(9090) ; "ipv6_port")]
+    #[test_case("http://example.com:3000", Some(3000) ; "http_port")]
+    fn extract_port_cases(url: &str, expected: Option<u16>) {
+        assert_eq!(extract_port(url), expected);
     }
 
     fn test_client() -> Client {
@@ -432,7 +473,7 @@ mod tests {
         assert_eq!(params.method, "GET");
         assert!(params.headers.is_empty());
         assert!(params.body.is_empty());
-        assert_eq!(params.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(params.timeout, Duration::from_secs_f64(DEFAULT_TIMEOUT_SECS));
         assert_eq!(params.max_bytes, DEFAULT_MAX_BYTES);
         assert_eq!(params.retries, MAX_RETRIES);
     }
@@ -441,9 +482,18 @@ mod tests {
     fn extract_params_timeout_clamped_to_max() {
         let lua = Lua::new();
         let opts = lua.create_table().unwrap();
-        opts.set("timeout", MAX_TIMEOUT_SECS + 100).unwrap();
+        opts.set("timeout", MAX_TIMEOUT_SECS + 100.0).unwrap();
         let params = extract_request_params("https://example.com", Some(&opts)).unwrap();
-        assert_eq!(params.timeout, Duration::from_secs(MAX_TIMEOUT_SECS));
+        assert_eq!(params.timeout, Duration::from_secs_f64(MAX_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn extract_params_subsecond_timeout() {
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("timeout", 0.5).unwrap();
+        let params = extract_request_params("https://example.com", Some(&opts)).unwrap();
+        assert_eq!(params.timeout, Duration::from_millis(500));
     }
 
     #[test]

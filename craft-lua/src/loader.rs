@@ -107,9 +107,6 @@ impl PluginHost {
 
         for global_dir in craft_config::global_config_dirs() {
             self.run_init_file(&global_dir.join("init.lua"), "global/init.lua", &mut merged)?;
-            if merged.is_some() {
-                break;
-            }
         }
         self.run_init_file(&cwd.join(".craft/init.lua"), "project/init.lua", &mut merged)?;
 
@@ -238,7 +235,11 @@ impl PluginHost {
             source: e,
         })?;
         let plugin_dir = path.parent().map(Path::to_path_buf);
-        self.send_load(Arc::from("user"), source, plugin_dir)
+        let name: Arc<str> = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map_or_else(|| Arc::from("user"), Arc::from);
+        self.send_load(name, source, plugin_dir)
     }
 
     pub fn event_handle(&self) -> Option<EventHandle> {
