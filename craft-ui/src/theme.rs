@@ -259,7 +259,7 @@ pub fn load_by_name(name: &str) -> Result<Theme, String> {
 
 pub fn persist_theme(name: &str) {
     if let Ok(dir) = StateDir::resolve() {
-        craft_storage::theme::persist_theme_name(&dir, name);
+        craft_storage::theme::persist_theme_name(&dir, name).ok();
     }
 }
 

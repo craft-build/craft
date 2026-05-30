@@ -115,3 +115,53 @@ pub fn user_config_dirs(home: Option<&Path>, subdir: &str) -> Vec<PathBuf> {
     let xdg = config_dir().ok().map(|d| d.join(subdir));
     [legacy, xdg].into_iter().flatten().collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xdg_sibling_normal_path() {
+        let data = PathBuf::from("/home/user/.local/share/craft");
+        let result = xdg_sibling(&data, "state");
+        assert_eq!(result, PathBuf::from("/home/user/.local/state/craft"));
+    }
+
+    #[test]
+    fn xdg_sibling_logs() {
+        let data = PathBuf::from("/home/user/.local/share/craft");
+        let result = xdg_sibling(&data, "logs");
+        assert_eq!(result, PathBuf::from("/home/user/.local/logs/craft"));
+    }
+
+    #[test]
+    fn xdg_sibling_short_path_falls_back() {
+        let data = PathBuf::from("/craft");
+        let result = xdg_sibling(&data, "state");
+        assert_eq!(result, PathBuf::from("/craft/state"));
+    }
+
+    #[test]
+    fn xdg_sibling_no_parent() {
+        let data = PathBuf::from("craft");
+        let result = xdg_sibling(&data, "state");
+        assert_eq!(result, PathBuf::from("craft/state"));
+    }
+
+    #[test]
+    fn user_config_dirs_with_explicit_home() {
+        let home = PathBuf::from("/tmp/testhome");
+        let dirs = user_config_dirs(Some(&home), "plugins");
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0], PathBuf::from("/tmp/testhome/.craft/plugins"));
+    }
+
+    #[test]
+    fn ensure_creates_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("a/b/c");
+        let result = ensure(&target).unwrap();
+        assert!(target.is_dir());
+        assert_eq!(result, target);
+    }
+}

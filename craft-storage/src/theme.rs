@@ -1,11 +1,11 @@
 use std::fs;
 
-use crate::StateDir;
+use crate::{StateDir, StorageError, atomic_write};
 
 const THEME_FILE: &str = "theme";
 
-pub fn persist_theme_name(dir: &StateDir, name: &str) {
-    let _ = fs::write(dir.path().join(THEME_FILE), name);
+pub fn persist_theme_name(dir: &StateDir, name: &str) -> Result<(), StorageError> {
+    atomic_write(&dir.path().join(THEME_FILE), name.as_bytes())
 }
 
 pub fn read_theme_name(dir: &StateDir) -> Option<String> {
@@ -26,7 +26,7 @@ mod tests {
 
         assert!(read_theme_name(&dir).is_none());
 
-        persist_theme_name(&dir, "gruvbox");
+        persist_theme_name(&dir, "gruvbox").unwrap();
         assert_eq!(read_theme_name(&dir).as_deref(), Some("gruvbox"));
 
         fs::write(dir.path().join(THEME_FILE), "  \n").unwrap();

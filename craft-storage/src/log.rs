@@ -3,6 +3,7 @@ use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 use crate::StateDir;
 
@@ -22,6 +23,8 @@ fn file_path(dir: &Path, index: u32) -> PathBuf {
 #[cfg(unix)]
 fn flock_exclusive(file: &File) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
+    // SAFETY: libc::flock is a simple syscall that acquires an advisory lock on the
+    // file descriptor. The fd is valid and owned by the passed File reference.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
@@ -92,7 +95,7 @@ impl RotatingFileWriter {
                 if src.exists() {
                     let dst = file_path(&self.dir, i + 1);
                     if let Err(e) = fs::rename(&src, &dst) {
-                        eprintln!("craft: log rotate rename {src:?} -> {dst:?}: {e}");
+                        warn!(src = %src.display(), dst = %dst.display(), error = %e, "log rotate rename failed");
                     }
                 }
             }
@@ -113,7 +116,7 @@ impl Write for RotatingFileWriter {
         if self.written >= self.max_bytes
             && let Err(e) = self.rotate()
         {
-            eprintln!("craft: log rotation failed: {e}");
+            warn!(error = %e, "log rotation failed");
         }
         let n = self.file.write(buf)?;
         self.written += n as u64;

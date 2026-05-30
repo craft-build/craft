@@ -49,7 +49,7 @@ fn parse_tag(bytes: &[u8]) -> Result<String, VersionError> {
 pub async fn fetch_latest() -> Result<String, VersionError> {
     let resp = client()?
         .get(RELEASES_URL)
-        .header("Accept", "application/vnd.github+json")
+        .header("Accept", "application/json")
         .header("User-Agent", "craft")
         .send()
         .await?;

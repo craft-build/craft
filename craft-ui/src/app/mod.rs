@@ -255,7 +255,7 @@ impl App {
 
     pub(crate) fn update_model(&mut self, model: &Model) {
         self.state.update_model(model);
-        persist_model(&self.storage, &self.state.session.model);
+        persist_model(&self.storage, &self.state.session.model).ok();
     }
 
     pub(crate) fn flash(&mut self, msg: String) {

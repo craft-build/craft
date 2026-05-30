@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::{StateDir, StorageError, atomic_write_permissions};
+pub use crate::now_millis;
 
 const AUTH_DIR: &str = "auth";
 const AUTH_FILE_MODE: u32 = 0o600;
@@ -40,13 +40,6 @@ pub struct McpAuthData {
     pub client_secret_expires_at: Option<u64>,
     #[serde(default)]
     pub redirect_uri: Option<String>,
-}
-
-pub fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn auth_path(dir: &StateDir, filename: &str) -> PathBuf {

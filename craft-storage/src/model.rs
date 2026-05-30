@@ -1,11 +1,11 @@
 use std::fs;
 
-use crate::{StateDir, atomic_write};
+use crate::{StateDir, StorageError, atomic_write};
 
 const MODEL_FILE: &str = "model";
 
-pub fn persist_model(dir: &StateDir, spec: &str) {
-    let _ = atomic_write(&dir.path().join(MODEL_FILE), spec.as_bytes());
+pub fn persist_model(dir: &StateDir, spec: &str) -> Result<(), StorageError> {
+    atomic_write(&dir.path().join(MODEL_FILE), spec.as_bytes())
 }
 
 pub fn read_model(dir: &StateDir) -> Option<String> {
@@ -26,13 +26,13 @@ mod tests {
 
         assert!(read_model(&dir).is_none());
 
-        persist_model(&dir, "anthropic/claude-sonnet-4");
+        persist_model(&dir, "anthropic/claude-sonnet-4").unwrap();
         assert_eq!(
             read_model(&dir).as_deref(),
             Some("anthropic/claude-sonnet-4")
         );
 
-        persist_model(&dir, "openai/gpt-5.4-nano");
+        persist_model(&dir, "openai/gpt-5.4-nano").unwrap();
         assert_eq!(read_model(&dir).as_deref(), Some("openai/gpt-5.4-nano"));
     }
 

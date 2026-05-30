@@ -27,7 +27,7 @@ pub async fn resolve_model(
 ) -> Result<Model> {
     if let Some(spec) = explicit {
         let model = Model::from_spec(spec).context("invalid --model spec")?;
-        persist_model(storage, &model.spec());
+        persist_model(storage, &model.spec()).ok();
         return Ok(model);
     }
     if let Some(spec) = read_model(storage) {

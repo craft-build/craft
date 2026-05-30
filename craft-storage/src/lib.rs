@@ -84,9 +84,16 @@ pub(crate) fn atomic_write_permissions(
     Ok(())
 }
 
-pub fn now_epoch() -> u64 {
+fn now_since_epoch() -> std::time::Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+}
+
+pub fn now_epoch() -> u64 {
+    now_since_epoch().as_secs()
+}
+
+pub fn now_millis() -> u64 {
+    now_since_epoch().as_millis() as u64
 }
