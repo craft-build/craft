@@ -2,9 +2,11 @@ use crate::components::Overlay;
 #[cfg(test)]
 use crate::components::keybindings::KeybindContext;
 use crate::components::queue_panel;
+use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
 use crate::components::status_bar::{StatusBarContext, UsageStats};
 use crate::selection::{self, SelectableZone, SelectionZone};
 use crate::theme;
+use craft_lua::Split;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Widget};
@@ -18,7 +20,7 @@ struct ViewLayout {
     queue_area: Rect,
     todo_area: Rect,
     input_area: Rect,
-    split_area: Rect,
+    splits: SplitLayout,
 }
 
 impl App {
@@ -34,9 +36,7 @@ impl App {
         self.render_background(frame);
         self.render_messages(frame, &layout, render_chat);
         self.render_bottom_panel(frame, &layout);
-        if layout.split_area.height > 0 {
-            self.float_mgr.view_bottom_split(frame, layout.split_area);
-        }
+        self.render_splits(frame, &layout);
         let mut overlay_rect = self.render_picker_overlays(frame, &layout);
         self.render_status_bar(frame, layout.status_area, render_chat);
         overlay_rect = self.render_top_modals(frame, overlay_rect);
@@ -45,58 +45,54 @@ impl App {
     }
 
     fn compute_layout(&self, frame: &Frame, form_visible: bool) -> ViewLayout {
-        let area = frame.area();
+        self.compute_layout_raw(frame.area(), form_visible)
+    }
 
-        let split_h = self.float_mgr.bottom_split_height();
-        let split_active = split_h > 0 && !form_visible;
+    fn compute_layout_raw(&self, area: Rect, form_visible: bool) -> ViewLayout {
+        let permission_open = self.permission_prompt.is_open();
 
-        let bottom_height = if form_visible {
-            let max = area.height.saturating_sub(3);
-            if self.permission_prompt.is_open() {
-                self.permission_prompt.height(area.width).min(max)
-            } else {
-                self.plan_form.height().min(max)
-            }
+        let [content, status_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+
+        let reqs: Vec<_> = self
+            .float_mgr
+            .split_reqs(content)
+            .into_iter()
+            .filter(|r| !(permission_open && r.split == Split::Below))
+            .collect();
+        let splits = carve(content, &reqs);
+        let inner = splits.inner;
+
+        let below_active = splits.rect(Split::Below).is_some();
+        let bottom_takeover = form_visible || below_active;
+        let max_bottom = inner.height.saturating_sub(MIN_CHAT_ROWS);
+        let bottom_height = if permission_open {
+            self.permission_prompt.height(inner.width).min(max_bottom)
+        } else if below_active {
+            0
+        } else if form_visible {
+            self.plan_form.height().min(max_bottom)
         } else if self.is_main_chat() {
-            let base = queue_panel::height(self.queue.panel_len())
+            queue_panel::height(self.queue.panel_len())
                 + self.chats[self.active_chat].todo_panel.height()
-                + self.input_box.height(area.width);
-            if split_active { 0 } else { base }
+                + self.input_box.height(inner.width)
         } else {
             let todo_h = self.chats[self.active_chat].todo_panel.height();
             if todo_h > 0 { todo_h + 1 } else { 1 }
         };
 
-        let total_bottom = bottom_height + split_h;
-        let [msg_area, bottom_area, status_area] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(total_bottom),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let [msg_area, bottom_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).areas(inner);
 
-        let queue_height = if split_active {
-            0
+        let (queue_height, todo_h, input_height) = if bottom_takeover {
+            (0, 0, 0)
+        } else if !self.is_main_chat() {
+            let todo_h = self.chats[self.active_chat].todo_panel.height();
+            (0, todo_h, bottom_area.height.saturating_sub(todo_h))
         } else {
-            queue_panel::height(self.queue.panel_len())
-        };
-        let todo_h = if form_visible || split_active {
-            0
-        } else {
-            self.chats[self.active_chat].todo_panel.height()
-        };
-        let input_height = if split_active {
-            0
-        } else {
-            bottom_area.height.saturating_sub(queue_height + todo_h + split_h)
-        };
-
-        let (rest, split_area): (Rect, Rect) = if split_active {
-            let [a, b] = Layout::vertical([Constraint::Min(0), Constraint::Length(split_h)])
-                .areas(bottom_area);
-            (a, b)
-        } else {
-            (bottom_area, Rect::default())
+            let qh = queue_panel::height(self.queue.panel_len());
+            let th = self.chats[self.active_chat].todo_panel.height();
+            (qh, th, bottom_area.height.saturating_sub(qh + th))
         };
 
         let [queue_area, todo_area, input_area] = Layout::vertical([
@@ -104,7 +100,7 @@ impl App {
             Constraint::Length(todo_h),
             Constraint::Length(input_height),
         ])
-        .areas(rest);
+        .areas(bottom_area);
 
         ViewLayout {
             msg_area,
@@ -113,7 +109,7 @@ impl App {
             queue_area,
             todo_area,
             input_area,
-            split_area,
+            splits,
         }
     }
 
@@ -187,6 +183,14 @@ impl App {
                 panel_hint,
             );
             self.command_palette.view(frame, layout.input_area);
+        }
+    }
+
+    fn render_splits(&mut self, frame: &mut Frame, layout: &ViewLayout) {
+        for dir in Split::ALL {
+            if let Some(rect) = layout.splits.rect(dir) {
+                self.float_mgr.view_split(frame, dir, rect);
+            }
         }
     }
 
@@ -382,5 +386,23 @@ impl App {
             contexts.push(KeybindContext::Editing);
         }
         contexts
+    }
+
+    #[cfg(test)]
+    pub(super) fn layout_geometry(
+        &self,
+        area: Rect,
+    ) -> (Rect, Rect, Rect, Rect, SplitLayout) {
+        let in_plan = self.state.mode == Mode::Plan;
+        let form_visible =
+            self.permission_prompt.is_open() || (in_plan && self.plan_form.is_visible());
+        let layout = self.compute_layout_raw(area, form_visible);
+        (
+            layout.msg_area,
+            layout.bottom_area,
+            layout.status_area,
+            layout.input_area,
+            layout.splits,
+        )
     }
 }

@@ -19,6 +19,7 @@ pub(crate) mod render_hints;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;
 pub(crate) mod search_modal;
+pub(crate) mod split_layout;
 pub(crate) mod session_picker;
 pub mod status_bar;
 pub(crate) mod streaming_content;
@@ -55,11 +56,11 @@ pub(crate) fn hint_line<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)]) -> Line<
         spans.push(Span::raw("  "));
         for (i, part) in key.as_ref().split('/').enumerate() {
             if i > 0 {
-                spans.push(Span::styled("/", t.form_hint));
+                spans.push(Span::styled("/", t.tool_dim));
             }
             spans.push(Span::styled(part.to_string(), t.keybind_key));
         }
-        spans.push(Span::styled(format!(" {}", desc.as_ref()), t.form_hint));
+        spans.push(Span::styled(format!(" {}", desc.as_ref()), t.tool_dim));
     }
     Line::from(spans)
 }
@@ -357,6 +358,7 @@ pub(crate) fn test_pricing() -> ModelPricing {
         output: 15.0,
         cache_write: 3.75,
         cache_read: 0.30,
+        fast: None,
     }
 }
 
@@ -372,7 +374,6 @@ pub(crate) fn test_model() -> craft_providers::Model {
         pricing: test_pricing(),
         max_output_tokens: 8192,
         context_window: TEST_CONTEXT_WINDOW,
-        fast_capable: false,
     }
 }
 

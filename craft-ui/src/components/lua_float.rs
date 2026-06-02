@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use crossterm::event::KeyEvent;
 use craft_agent::{SharedBuf, SnapshotLine};
-use craft_lua::{Anchor, Border, FloatConfig, Split, TitlePos, WinCommand, WinEvent};
+use craft_lua::{Anchor, Axis, Border, FloatConfig, Split, TitlePos, WinCommand, WinEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
+use crate::components::split_layout::SplitReq;
 use crate::components::{
     Overlay, hint_line, keybindings::key_event_to_string, scrollbar::render_vertical_scrollbar,
     tool_display::resolve_span_style,
@@ -152,8 +153,7 @@ impl FloatManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        let is_split_below = config.split == Split::Below;
-
+        let split_dir = config.split;
         let win = FloatWindow {
             id,
             buf,
@@ -167,8 +167,9 @@ impl FloatManager {
             cmd_rx,
         };
 
-        if is_split_below {
-            self.evict_split_below(id);
+        if split_dir != Split::None {
+            let dir = split_dir;
+            self.evict_split(dir, id);
         }
 
         self.windows.push(win);
@@ -179,11 +180,11 @@ impl FloatManager {
         }
     }
 
-    fn evict_split_below(&mut self, keep_id: u32) {
+    fn evict_split(&mut self, dir: Split, keep_id: u32) {
         let to_remove: Vec<u32> = self
             .windows
             .iter()
-            .filter(|w| w.id != keep_id && w.config.split == Split::Below)
+            .filter(|w| w.id != keep_id && w.config.split == dir)
             .map(|w| w.id)
             .collect();
         if !to_remove.is_empty() {
@@ -265,7 +266,7 @@ impl FloatManager {
         let mut union = Rect::default();
 
         for win in &mut self.windows {
-            if win.config.split == Split::Below {
+            if win.config.split != Split::None {
                 continue;
             }
             let popup = resolve_rect(&win.config, area);
@@ -306,36 +307,37 @@ impl FloatManager {
         self.remove_windows(&ids);
     }
 
-    pub fn bottom_split_height(&self) -> u16 {
+    pub fn split_reqs(&self, area: Rect) -> Vec<SplitReq> {
         self.windows
             .iter()
-            .find(|w| w.config.split == Split::Below)
-            .map(|w| w.config.height.resolve(0))
-            .unwrap_or(0)
+            .filter_map(|w| {
+                let split = w.config.split;
+                let edge = split.edge()?;
+                let extent = match edge.axis {
+                    Axis::Vertical => w.config.height.resolve(area.height),
+                    Axis::Horizontal => w.config.width.resolve(area.width),
+                };
+                Some(SplitReq { split, extent })
+            })
+            .collect()
     }
 
-    pub fn view_bottom_split(&mut self, frame: &mut Frame, area: Rect) {
-        let Some(idx) = self.split_window_idx() else {
+    pub fn view_split(&mut self, frame: &mut Frame, dir: Split, rect: Rect) {
+        let Some(idx) = self.split_window_idx(dir) else {
             return;
         };
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
         let win = &mut self.windows[idx];
-        let config = FloatConfig {
-            row: Some(0),
-            col: Some(0),
-            split: Split::None,
-            ..win.config.clone()
-        };
-        win.config = config;
-        render_window(frame, win, area);
+        render_window(frame, win, rect);
         if Some(win.id) == self.focused_id {
-            self.focused_rect = Some(area);
+            self.focused_rect = Some(rect);
         }
     }
 
-    fn split_window_idx(&self) -> Option<usize> {
-        self.windows
-            .iter()
-            .position(|w| w.config.split == Split::Below)
+    fn split_window_idx(&self, dir: Split) -> Option<usize> {
+        self.windows.iter().position(|w| w.config.split == dir)
     }
 
     fn remove_windows(&mut self, ids: &[u32]) {
@@ -461,7 +463,7 @@ fn render_window(frame: &mut Frame, win: &mut FloatWindow, popup: Rect) {
         .map(|(i, sline)| {
             let mut line = snapshot_to_line(sline);
             if win.config.cursor_line && top + win.scroll_offset + i == win.cursor {
-                line = line.style(t.cmd_selected);
+                line = line.style(t.item_selected);
             }
             line
         })

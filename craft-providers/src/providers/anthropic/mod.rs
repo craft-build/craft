@@ -2,7 +2,7 @@
 //! definition, the system prompt, and the last block of the 2 most recent messages.
 
 pub(crate) mod bedrock;
-pub(super) mod shared;
+pub(crate) mod shared;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -113,13 +113,21 @@ impl Anthropic {
         body: &Value,
         event_tx: &Sender<ProviderEvent>,
         fast: bool,
+        long_context: bool,
     ) -> Result<StreamResponse, AgentError> {
         let json_body = serde_json::to_vec(body)?;
         let mut req = self
             .build_request("POST", None)
             .header("content-type", MIME_JSON);
+        let mut betas = Vec::new();
         if fast {
-            req = req.header("anthropic-beta", FAST_MODE_BETA);
+            betas.push(FAST_MODE_BETA);
+        }
+        if long_context {
+            betas.push(shared::LONG_CONTEXT_BETA);
+        }
+        if !betas.is_empty() {
+            req = req.header("anthropic-beta", betas.join(","));
         }
         let response = req.body(json_body).send().await?;
         let status = response.status().as_u16();
@@ -152,7 +160,14 @@ impl Anthropic {
 
             let body_text = response.text().await?;
             let page: ModelsPage = serde_json::from_str(&body_text)?;
-            models.extend(page.data.into_iter().map(|m| m.id));
+            for m in page.data {
+                // The API never tells us about `-1m`, so we mint it ourselves for
+                // any model that reports a 1M window.
+                if m.max_input_tokens >= shared::LONG_CONTEXT_WINDOW {
+                    models.push(format!("{}{}", m.id, shared::LONG_CONTEXT_SUFFIX));
+                }
+                models.push(m.id);
+            }
 
             if !page.has_more {
                 break;
@@ -207,12 +222,14 @@ impl Provider for Anthropic {
                 tools,
                 thinking,
             );
-            body["model"] = json!(model.id);
+            body["model"] = json!(shared::strip_long_context(&model.id));
             body["stream"] = json!(true);
             apply_fast_mode(&mut body, fast);
+            let long_context = model.id.ends_with(shared::LONG_CONTEXT_SUFFIX);
 
-            debug!(model = %model.id, num_messages = messages.len(), ?thinking, fast, "sending API request");
-            self.do_stream_request(&body, event_tx, fast).await
+            debug!(model = %model.id, num_messages = messages.len(), ?thinking, fast, long_context, "sending API request");
+            self.do_stream_request(&body, event_tx, fast, long_context)
+                .await
         })
     }
 
@@ -242,6 +259,8 @@ impl Provider for Anthropic {
 #[derive(Deserialize)]
 struct ModelInfo {
     id: String,
+    #[serde(default)]
+    max_input_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -624,5 +643,49 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
         apply_fast_mode(&mut body, true);
         let betas = body["anthropic_beta"].as_array().unwrap();
         assert_eq!(betas.len(), 1);
+    }
+
+    #[test]
+    fn long_context_spec_resolves_to_1m_window() {
+        let model = Model::from_spec("anthropic/claude-opus-4-8-1m").unwrap();
+        assert_eq!(model.id, "claude-opus-4-8-1m");
+        assert_eq!(model.context_window, shared::LONG_CONTEXT_WINDOW);
+        assert!(model.id.ends_with(shared::LONG_CONTEXT_SUFFIX));
+        // The API has never heard of `-1m`, so strip it before sending.
+        assert_eq!(shared::strip_long_context(&model.id), "claude-opus-4-8");
+    }
+
+    #[test]
+    fn list_models_adds_1m_variant_from_max_input_tokens() {
+        // The real /v1/models payload hides the 1M window in `max_input_tokens`.
+        let page: ModelsPage = serde_json::from_str(
+            r#"{
+                "data": [
+                    {"id": "claude-opus-4-8", "max_input_tokens": 1000000},
+                    {"id": "claude-opus-4-5-20251101", "max_input_tokens": 200000}
+                ],
+                "has_more": false,
+                "last_id": null
+            }"#,
+        )
+        .unwrap();
+
+        let mut models = Vec::new();
+        for m in page.data {
+            if m.max_input_tokens >= shared::LONG_CONTEXT_WINDOW {
+                models.push(format!("{}{}", m.id, shared::LONG_CONTEXT_SUFFIX));
+            }
+            models.push(m.id);
+        }
+        models.sort();
+
+        assert_eq!(
+            models,
+            vec![
+                "claude-opus-4-5-20251101".to_string(),
+                "claude-opus-4-8".to_string(),
+                "claude-opus-4-8-1m".to_string(),
+            ]
+        );
     }
 }

@@ -166,16 +166,46 @@ impl TitlePos {
 pub enum Split {
     #[default]
     None,
+    Above,
     Below,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    Vertical,
+    Horizontal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edge {
+    pub axis: Axis,
+    pub at_start: bool,
 }
 
 impl Split {
     pub fn parse(s: &str) -> Self {
         match s {
+            "above" => Self::Above,
             "below" => Self::Below,
+            "left" => Self::Left,
+            "right" => Self::Right,
             _ => Self::None,
         }
     }
+
+    pub fn edge(self) -> Option<Edge> {
+        Some(match self {
+            Self::None => return None,
+            Self::Above => Edge { axis: Axis::Vertical, at_start: true },
+            Self::Below => Edge { axis: Axis::Vertical, at_start: false },
+            Self::Left => Edge { axis: Axis::Horizontal, at_start: true },
+            Self::Right => Edge { axis: Axis::Horizontal, at_start: false },
+        })
+    }
+
+    pub const ALL: [Split; 4] = [Split::Left, Split::Right, Split::Above, Split::Below];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +414,39 @@ mod tests {
     #[test_case("" => TitlePos::Left ; "empty_defaults_left")]
     fn title_pos_parse(s: &str) -> TitlePos {
         TitlePos::parse(s)
+    }
+
+    #[test_case("above" => Split::Above ; "above")]
+    #[test_case("below" => Split::Below ; "below")]
+    #[test_case("left" => Split::Left ; "left")]
+    #[test_case("right" => Split::Right ; "right")]
+    #[test_case("none" => Split::None ; "none")]
+    #[test_case("" => Split::None ; "empty_defaults_none")]
+    #[test_case("Below" => Split::None ; "exact_match_is_case_sensitive")]
+    fn split_parse(s: &str) -> Split {
+        Split::parse(s)
+    }
+
+    #[test_case(Split::None => None ; "none_has_no_edge")]
+    #[test_case(Split::Above => Some(Edge { axis: Axis::Vertical, at_start: true }) ; "above_is_vertical_start")]
+    #[test_case(Split::Below => Some(Edge { axis: Axis::Vertical, at_start: false }) ; "below_is_vertical_end")]
+    #[test_case(Split::Left => Some(Edge { axis: Axis::Horizontal, at_start: true }) ; "left_is_horizontal_start")]
+    #[test_case(Split::Right => Some(Edge { axis: Axis::Horizontal, at_start: false }) ; "right_is_horizontal_end")]
+    fn split_edge(split: Split) -> Option<Edge> {
+        split.edge()
+    }
+
+    #[test_case(Split::None)]
+    #[test_case(Split::Above)]
+    #[test_case(Split::Below)]
+    #[test_case(Split::Left)]
+    #[test_case(Split::Right)]
+    fn all_lists_exactly_the_edge_bearing_variants(variant: Split) {
+        assert_eq!(
+            variant.edge().is_some(),
+            Split::ALL.contains(&variant),
+            "{variant:?}: edge-bearing variants belong in ALL, others must not",
+        );
     }
 
     #[test]

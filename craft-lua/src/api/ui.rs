@@ -51,9 +51,11 @@ pub(crate) fn create_ui_table(
     // `theme::style_by_name`) or a `{fg, bold, italic, underline}` table
     // for syntax-highlighted tokens.
     //
-    // Named styles: "", "bold", "italic", "bold_italic",
-    // "strikethrough", "inline_code", "code_bar", "heading",
-    // "list_marker", "table_border", "horizontal_rule".
+    // Named styles: "", "dim", "active", "accent", "selected",
+    // "success", "warning", "item", "match", "match_selected",
+    // "bold", "italic", "bold_italic", "strikethrough", "inline_code",
+    // "code_gutter", "heading", "list_marker", "table_border",
+    // "horizontal_rule".
     t.set(
         "markdown",
         lua.create_async_function(|lua, (text, width): (String, u16)| async move {
@@ -298,7 +300,7 @@ fn span_style_to_lua(lua: &Lua, span: &craft_markdown::render::Span) -> LuaResul
             }
             mlua::Value::Table(tbl)
         }
-        StyleToken::CodeBar => mlua::Value::String(lua.create_string("code_bar")?),
+        StyleToken::CodeBar => mlua::Value::String(lua.create_string("code_gutter")?),
         StyleToken::Heading => mlua::Value::String(lua.create_string("heading")?),
         StyleToken::ListMarker => mlua::Value::String(lua.create_string("list_marker")?),
         StyleToken::TableBorder => mlua::Value::String(lua.create_string("table_border")?),
@@ -590,7 +592,7 @@ mod tests {
     const STYLE_HR: &str = "horizontal_rule";
     const STYLE_PLAIN: &str = "";
     const STYLE_CODE: &str = "inline_code";
-    const STYLE_CODE_BAR: &str = "code_bar";
+    const STYLE_CODE_BAR: &str = "code_gutter";
     const STYLE_ITALIC: &str = "italic";
     const STYLE_STRIKE: &str = "strikethrough";
     const STYLE_TABLE_BORDER: &str = "table_border";

@@ -2474,3 +2474,112 @@ fn update_model_to_ineligible_resets_fast() {
     app.state.update_model(&sonnet);
     assert!(!app.state.fast);
 }
+
+const TEST_AREA: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 80,
+    height: 40,
+};
+const SPLIT_EXTENT: u16 = 8;
+
+fn open_split_window(app: &mut App, dir: craft_lua::Split) {
+    let buf = Arc::new(craft_agent::SharedBuf::new());
+    let config = craft_lua::FloatConfig {
+        width: craft_lua::Dimension::Abs(SPLIT_EXTENT),
+        height: craft_lua::Dimension::Abs(SPLIT_EXTENT),
+        border: craft_lua::Border::None,
+        split: dir,
+        ..craft_lua::FloatConfig::default()
+    };
+    let (event_tx, _event_rx) = flume::bounded::<craft_lua::WinEvent>(8);
+    let (_cmd_tx, cmd_rx) = flume::bounded::<craft_lua::WinCommand>(8);
+    app.float_mgr.open(buf, config, true, event_tx, cmd_rx);
+}
+
+#[test]
+fn below_split_reserves_bottom_and_suppresses_input() {
+    let mut app = test_app();
+    let (msg_before, _b, _s, input_before, splits_before) = app.layout_geometry(TEST_AREA);
+    assert!(
+        splits_before.rect(craft_lua::Split::Below).is_none(),
+        "no split open yet"
+    );
+    assert!(input_before.height > 0, "input box visible before split");
+
+    open_split_window(&mut app, craft_lua::Split::Below);
+    let (msg_after, _bottom, _s, input_after, splits_after) = app.layout_geometry(TEST_AREA);
+
+    let band = splits_after
+        .rect(craft_lua::Split::Below)
+        .expect("below split should reserve a bottom band");
+    assert_eq!(
+        band.height, SPLIT_EXTENT,
+        "below band reserves the requested rows",
+    );
+    assert!(
+        msg_after.height < msg_before.height,
+        "chat must shrink to make room for the below split",
+    );
+    assert_eq!(
+        input_after.height, 0,
+        "input box is suppressed under a below split"
+    );
+}
+
+#[test_case(craft_lua::Split::Above ; "above")]
+#[test_case(craft_lua::Split::Left ; "left")]
+#[test_case(craft_lua::Split::Right ; "right")]
+fn non_below_split_reserves_band_and_keeps_status_full_width(dir: craft_lua::Split) {
+    let mut app = test_app();
+    let (msg_before, _b, _s, _i, _sp) = app.layout_geometry(TEST_AREA);
+
+    open_split_window(&mut app, dir);
+    let (msg_after, _bottom, status_after, _input, splits) = app.layout_geometry(TEST_AREA);
+
+    assert!(splits.rect(dir).is_some(), "split must reserve a band");
+    assert!(
+        msg_after.area() < msg_before.area(),
+        "chat must shrink to make room for the split",
+    );
+    assert_eq!(
+        status_after.width, TEST_AREA.width,
+        "status bar stays full width regardless of the split",
+    );
+}
+
+#[test]
+fn closing_split_restores_layout() {
+    let mut app = test_app();
+    let before = app.layout_geometry(TEST_AREA);
+
+    open_split_window(&mut app, craft_lua::Split::Below);
+    app.float_mgr.close_all();
+
+    let after = app.layout_geometry(TEST_AREA);
+    assert_eq!(after, before, "closing the split restores the layout");
+}
+
+#[test]
+fn permission_prompt_takes_bottom_precedence_over_below_split() {
+    let mut app = test_app();
+    open_split_window(&mut app, craft_lua::Split::Below);
+    open_split_window(&mut app, craft_lua::Split::Left);
+    open_split_window(&mut app, craft_lua::Split::Above);
+    app.permission_prompt
+        .open("perm-1".into(), "bash".into(), vec!["ls".into()], None);
+
+    let (_msg, _bottom, _status, _input, splits) = app.layout_geometry(TEST_AREA);
+    assert!(
+        splits.rect(craft_lua::Split::Below).is_none(),
+        "below split must yield the bottom area to an open permission prompt",
+    );
+    assert!(
+        splits.rect(craft_lua::Split::Left).is_some(),
+        "the prompt must leave a left split untouched",
+    );
+    assert!(
+        splits.rect(craft_lua::Split::Above).is_some(),
+        "the prompt must leave an above split untouched",
+    );
+}

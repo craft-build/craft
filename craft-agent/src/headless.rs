@@ -28,6 +28,7 @@ pub struct HeadlessParams {
     pub excluded_tools: Vec<&'static str>,
     pub mcp_handle: Option<McpHandle>,
     pub initial_wd: PathBuf,
+    pub fast: bool,
 }
 
 pub struct HeadlessHandle {
@@ -105,6 +106,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                 .run(AgentInput {
                     message: params.prompt,
                     mode,
+                    fast: params.fast,
                     ..Default::default()
                 })
                 .await;

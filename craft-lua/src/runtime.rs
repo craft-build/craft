@@ -31,7 +31,9 @@ use crate::api::setup::ConfigStore;
 use crate::api::tool::{LuaOutputFormat, LuaTool, PendingTool, PendingTools, ToolCallReply};
 use crate::error::PluginError;
 
-const INTERRUPT_MSG: &str = "plugin interrupted: cancelled, deadline exceeded, or shutting down";
+const INTERRUPT_SHUTDOWN_MSG: &str = "plugin interrupted: host shutting down";
+const INTERRUPT_CANCELLED_MSG: &str = "plugin interrupted: task cancelled";
+const INTERRUPT_DEADLINE_MSG: &str = "plugin interrupted: deadline exceeded";
 const DISPATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const NIL_WITHOUT_FINISH_MSG: &str =
     "handler returned nil without calling ctx:finish() or starting jobs";
@@ -168,6 +170,35 @@ pub(crate) fn lock_cell(handle: &TaskHandle) -> std::sync::MutexGuard<'_, TaskCe
     handle.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn install_interrupt(lua: &Lua, shutdown: Arc<AtomicBool>) {
+    let interrupt_lua = lua.clone();
+    let interrupt_tick = Cell::new(0u32);
+    lua.set_interrupt(move |_| {
+        if shutdown.load(Ordering::Acquire) {
+            return Err(mlua::Error::runtime(INTERRUPT_SHUTDOWN_MSG));
+        }
+        let tick = interrupt_tick.get().wrapping_add(1);
+        interrupt_tick.set(tick);
+        if tick % INTERRUPT_CANCEL_CHECK_INTERVAL != 0 {
+            return Ok(VmState::Continue);
+        }
+        let stop = interrupt_lua.app_data_ref::<TaskHandle>().and_then(|h| {
+            let cell = lock_cell(&h);
+            if cell.cancel.is_cancelled() {
+                Some(INTERRUPT_CANCELLED_MSG)
+            } else if cell.deadline.get().is_some_and(|d| Instant::now() > d) {
+                Some(INTERRUPT_DEADLINE_MSG)
+            } else {
+                None
+            }
+        });
+        if let Some(msg) = stop {
+            return Err(mlua::Error::runtime(msg));
+        }
+        Ok(VmState::Continue)
+    });
+}
+
 /// Publishes a `TaskCell` into `Lua::app_data` for the duration of a
 /// task, and restores the previous one on drop. Async work must go
 /// through `scope_future` because concurrent tasks on the same executor
@@ -189,6 +220,10 @@ impl TaskScope {
         }
     }
 
+    pub(crate) fn detached(lua: &Lua) -> Self {
+        Self::new(lua, TaskCell::new(CancelToken::none(), None, None))
+    }
+
     pub(crate) fn handle(&self) -> &TaskHandle {
         &self.handle
     }
@@ -200,6 +235,13 @@ impl TaskScope {
             inner,
         }
     }
+}
+
+pub(crate) async fn run_detached<F: std::future::Future>(lua: &Lua, fut: F) -> F::Output {
+    let scope = TaskScope::detached(lua);
+    let out = scope.scope_future(fut).await;
+    drop(scope);
+    out
 }
 
 impl Drop for TaskScope {
@@ -488,31 +530,7 @@ impl LuaRuntime {
         let lua = Lua::new();
         let pending: PendingTools = Arc::new(Mutex::new(Vec::new()));
 
-        let interrupt_shutdown = Arc::clone(&shutdown);
-        let interrupt_lua = lua.clone();
-        let interrupt_tick = Cell::new(0u32);
-        lua.set_interrupt(move |_| {
-            if interrupt_shutdown.load(Ordering::Acquire) {
-                return Err(mlua::Error::runtime(INTERRUPT_MSG));
-            }
-            let tick = interrupt_tick.get().wrapping_add(1);
-            interrupt_tick.set(tick);
-            if tick % INTERRUPT_CANCEL_CHECK_INTERVAL != 0 {
-                return Ok(VmState::Continue);
-            }
-            let cancelled = interrupt_lua
-                .app_data_ref::<TaskHandle>()
-                .map(|h| {
-                    let cell = lock_cell(&h);
-                    cell.cancel.is_cancelled()
-                        || cell.deadline.get().is_some_and(|d| Instant::now() > d)
-                })
-                .unwrap_or(false);
-            if cancelled {
-                return Err(mlua::Error::runtime(INTERRUPT_MSG));
-            }
-            Ok(VmState::Continue)
-        });
+        install_interrupt(&lua, Arc::clone(&shutdown));
 
         let globals = lua.globals();
         for name in &["require", "io", "package"] {
@@ -639,17 +657,11 @@ impl LuaRuntime {
             let content = match item.content {
                 ResolvedContent::Static(s) => s,
                 ResolvedContent::Callback(func) => {
-                    let scope = TaskScope::new(
-                        &self.lua,
-                        TaskCell::new(CancelToken::none(), None, None),
-                    );
-                    let result: mlua::Result<LuaValue> = scope
-                        .scope_future(async {
-                            let thread = self.lua.create_thread(func)?;
-                            thread.into_async::<LuaValue>(())?.await
-                        })
-                        .await;
-                    drop(scope);
+                    let result: mlua::Result<LuaValue> = run_detached(&self.lua, async {
+                        let thread = self.lua.create_thread(func)?;
+                        thread.into_async::<LuaValue>(())?.await
+                    })
+                    .await;
                     match result {
                         Ok(LuaValue::String(s)) => s.to_string_lossy().to_string(),
                         Ok(LuaValue::Nil) => continue,
@@ -950,6 +962,15 @@ impl LuaRuntime {
         self.drop_plugin_keys(plugin);
     }
 
+    fn call_sync_detached<R: mlua::FromLuaMulti>(
+        &self,
+        func: &Function,
+        args: impl mlua::IntoLuaMulti,
+    ) -> mlua::Result<R> {
+        let _scope = TaskScope::detached(&self.lua);
+        func.call::<R>(args)
+    }
+
     /// Registers a TaskCtx so `craft.ui.buf()` works inside the handler.
     fn compute_header(&self, plugin: &str, tool: &str, input: Value) -> HeaderResult {
         let plugins = self.plugins.borrow();
@@ -974,9 +995,7 @@ impl LuaRuntime {
             }
         };
 
-        let scope = TaskScope::new(&self.lua, TaskCell::new(CancelToken::none(), None, None));
-        let result = func.call::<LuaValue>(input_lua);
-        drop(scope);
+        let result = self.call_sync_detached::<LuaValue>(&func, input_lua);
 
         match result {
             Ok(LuaValue::String(s)) => match s.to_str() {
@@ -1014,16 +1033,13 @@ impl LuaRuntime {
         let thread = self.lua.create_thread(func).ok()?;
 
         let (dummy_tx, _) = flume::unbounded();
-        let scope = TaskScope::new(
-            &self.lua,
-            TaskCell::new(
-                CancelToken::none(),
-                None,
-                Some(LiveCtx {
-                    event_tx: craft_agent::EventSender::new(dummy_tx, 0),
-                    tool_use_id: tool_use_id.to_owned(),
-                }),
-            ),
+        let cell = TaskCell::new(
+            CancelToken::none(),
+            None,
+            Some(LiveCtx {
+                event_tx: craft_agent::EventSender::new(dummy_tx, 0),
+                tool_use_id: tool_use_id.to_owned(),
+            }),
         );
 
         let ctx_ud = self
@@ -1033,12 +1049,12 @@ impl LuaRuntime {
         let inner = thread
             .into_async::<LuaValue>((input_lua, output, is_error, ctx_ud))
             .ok()?;
+        let scope = TaskScope::new(&self.lua, cell);
         let ret = scope
             .scope_future(inner)
             .await
             .inspect_err(|e| tracing::warn!(tool, error = %e, "restore callback failed"))
             .ok()?;
-        drop(scope);
 
         extract_restore_reply(&ret)
     }
@@ -1066,7 +1082,7 @@ impl LuaRuntime {
                 return None;
             }
         };
-        let result: LuaValue = match func.call(lua_input) {
+        let result: LuaValue = match self.call_sync_detached(&func, lua_input) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(plugin, tool, error = %e, "permission_scopes callback failed");
@@ -1438,10 +1454,19 @@ pub fn spawn(
             };
 
             let local = tokio::task::LocalSet::new();
-            let tokio_rt = tokio::runtime::Builder::new_current_thread()
+            let tokio_rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("failed to build lua runtime");
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = init_tx.send(Err(PluginError::Lua {
+                        plugin: String::new(),
+                        source: mlua::Error::external(e),
+                    }));
+                    return;
+                }
+            };
             let gate = Rc::new(InflightGate::new(rt.lua.clone()));
 
             // LocalSet::block_on is the idiomatic tokio pattern for !Send types (Lua uses Rc/RefCell).
@@ -1518,15 +1543,9 @@ pub fn spawn(
                                         return;
                                     };
                                     let _ = data.set("row", row);
-                                    let scope = TaskScope::new(
-                                        &lua,
-                                        TaskCell::new(CancelToken::none(), None, None),
-                                    );
-                                    let scoped = scope.scope_future(func.call_async::<()>(data));
-                                    if let Err(e) = scoped.await {
+                                    if let Err(e) = run_detached(&lua, func.call_async::<()>(data)).await {
                                         tracing::warn!(tool_id, error = %e, "click handler failed");
                                     }
-                                    drop(scope);
                                     drain_spawn_queue(&lua, &g);
                                     let _ = reply.send(Some(ClickReply {
                                         snapshot: buf.take(),
@@ -1551,19 +1570,13 @@ pub fn spawn(
                                 let lua = rt.lua.clone();
                                 let g = Rc::clone(&gate);
                                 tokio::task::spawn_local(async move {
-                                    let scope = TaskScope::new(
-                                        &lua,
-                                        TaskCell::new(CancelToken::none(), None, None),
-                                    );
                                     let run = async {
                                         let thread = lua.create_thread(func)?;
                                         thread.into_async::<()>(args)?.await
                                     };
-                                    let scoped = scope.scope_future(run);
-                                    if let Err(e) = scoped.await {
+                                    if let Err(e) = run_detached(&lua, run).await {
                                         tracing::warn!(plugin = %plugin, command = %command, error = %e, "command handler failed");
                                     }
-                                    drop(scope);
                                     drain_spawn_queue(&lua, &g);
                                 });
                             }
@@ -1718,6 +1731,53 @@ mod tests {
         assert!(lock_cell(&handle).bufs.live_buf().is_some());
         drop(scope);
         assert!(lock_cell(&handle).bufs.live_buf().is_none());
+    }
+
+    fn looping_callback(lua: &Lua) -> Function {
+        lua.load("for _ = 1, 100000 do end return true")
+            .into_function()
+            .unwrap()
+    }
+
+    fn cancelled_handle() -> TaskHandle {
+        let (trigger, token) = CancelToken::new();
+        trigger.cancel();
+        Arc::new(Mutex::new(TaskCell::new(token, None, None)))
+    }
+
+    #[test]
+    fn stale_cancelled_handle_aborts_callback_without_fresh_scope() {
+        let lua = Lua::new();
+        install_interrupt(&lua, Arc::new(AtomicBool::new(false)));
+        lua.set_app_data::<TaskHandle>(cancelled_handle());
+        let err = looping_callback(&lua).call::<bool>(()).unwrap_err();
+        assert!(err.to_string().contains(INTERRUPT_CANCELLED_MSG));
+    }
+
+    #[test]
+    fn fresh_task_scope_shields_callback_from_stale_cancelled_handle() {
+        let lua = Lua::new();
+        install_interrupt(&lua, Arc::new(AtomicBool::new(false)));
+        lua.set_app_data::<TaskHandle>(cancelled_handle());
+
+        let scope = TaskScope::detached(&lua);
+        let result = looping_callback(&lua).call::<bool>(());
+        drop(scope);
+
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn shutdown_flag_aborts_callback_even_with_fresh_scope() {
+        let lua = Lua::new();
+        let shutdown = Arc::new(AtomicBool::new(true));
+        install_interrupt(&lua, shutdown);
+
+        let scope = TaskScope::detached(&lua);
+        let err = looping_callback(&lua).call::<bool>(()).unwrap_err();
+        drop(scope);
+
+        assert!(err.to_string().contains(INTERRUPT_SHUTDOWN_MSG));
     }
 
     fn task_cell(live: Option<LiveCtx>) -> TaskCell {

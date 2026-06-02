@@ -392,6 +392,9 @@ pub fn scope_matches(pattern: &str, value: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix("/**") {
         return value == prefix || value.starts_with(&format!("{prefix}/"));
     }
+    if let Some(prefix) = pattern.strip_suffix(" *") {
+        return value == prefix || value.starts_with(&format!("{prefix} "));
+    }
     if let Some(prefix) = pattern.strip_suffix('*') {
         return value.starts_with(prefix);
     }
@@ -440,9 +443,9 @@ fn generalize_scope(tool: &str, scope: &str) -> String {
             let p = Path::new(scope);
             match p.parent() {
                 Some(parent) if !parent.as_os_str().is_empty() => {
-                    format!("{}/**", parent.display())
+                    format!("{}/{}{}", parent.display(), "*", "*")
                 }
-                _ => "**".to_string(),
+                _ => format!("/{}{}", "*", "*"),
             }
         }
         _ => scope.to_string(),
@@ -484,6 +487,9 @@ mod tests {
     #[test_case("*", "anything" => true ; "star")]
     #[test_case("cargo *", "cargo test" => true ; "prefix")]
     #[test_case("cargo *", "git push" => false ; "prefix_no_match")]
+    #[test_case("pwd *", "pwd" => true ; "space_star_matches_bare_command")]
+    #[test_case("pwd *", "pwd -L" => true ; "space_star_matches_with_args")]
+    #[test_case("pwd *", "pwdx" => false ; "space_star_no_partial_token")]
     #[test_case("src/**", "src/main.rs" => true ; "glob")]
     #[test_case("src/**", "src/deep/nested/file.rs" => true ; "glob_deep_nested")]
     #[test_case("src/**", "src" => true ; "glob_exact_prefix")]
@@ -701,7 +707,7 @@ mod tests {
     }
 
     #[test_case("edit", "/home/user/project/src/main.rs" => "/home/user/project/src/**" ; "edit_uses_parent_dir")]
-    #[test_case("edit", "/Cargo.toml" => "//**" ; "edit_root_file")]
+    #[test_case("edit", "/Cargo.toml" => "/**" ; "edit_root_file")]
     #[test_case("webfetch", "some:scope" => "some:scope" ; "unknown_tool_preserves_exact")]
     fn generalize_single_scope(tool: &str, scope: &str) -> String {
         generalized_scopes(tool, &[scope.into()])
@@ -710,18 +716,17 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn generalize_edit_scope_root_file() {
-        let scopes = vec!["/Cargo.toml".into()];
-        let result = generalized_scopes("edit", &scopes);
-        assert_eq!(result, vec!["//**"]);
-    }
-
-    #[test]
-    fn generalize_unknown_tool_preserves_exact() {
-        let scopes = vec!["some:scope".into()];
-        let result = generalized_scopes("webfetch", &scopes);
-        assert_eq!(result, vec!["some:scope"]);
+    #[test_case("bash", "pwd" ; "bash_bare_command")]
+    #[test_case("bash", "cargo test" ; "bash_command_with_args")]
+    #[test_case("bash", "git status --short" ; "bash_command_with_flags")]
+    #[test_case("edit", "/home/user/project/src/main.rs" ; "edit_path")]
+    #[test_case("webfetch", "https://example.com" ; "unknown_tool_exact")]
+    fn command_matches_its_own_generalized_rule(tool: &str, scope: &str) {
+        let rule = &generalized_scopes(tool, &[scope.into()])[0];
+        assert!(
+            scope_matches(rule, scope),
+            "{scope:?} does not match its generalized rule {rule:?}"
+        );
     }
 
     #[test]

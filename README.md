@@ -4,6 +4,12 @@
 
 Full attribution and thanks to the original project: [github.com/tontinton/maki](https://github.com/tontinton/maki.git)
 
+## Differences to Maki
+
+* `tokio` runtime instead of `smol`. This change was done for compatibility with async Rust libraries and to take advantage of tokio's performance optimizations.
+* `reqwest` instead of `isahc`. This change was done for better synergy with `tokio` and builtin streaming support.
+* Review workflow has been added for utilizing yaml based styleguide files to enforce code style.
+
 ## Features
 
 ### Context efficiency

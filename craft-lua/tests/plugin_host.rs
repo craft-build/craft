@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use craft_agent::tools::{ToolRegistry, ToolSource};
-use craft_config::{PluginsConfig, ToolOutputLines};
+use craft_config::{AlwaysThinking, PluginsConfig, ToolOutputLines};
 use craft_lua::{PluginError, PluginHost};
 
 fn fresh_registry() -> Arc<ToolRegistry> {
@@ -873,6 +873,8 @@ fn setup_all_sections_at_once() {
         .send_run_init_lua(
             r#"craft.setup({
                 always_yolo = true,
+                always_fast = true,
+                always_thinking = "adaptive",
                 ui = { splash_animation = false, mouse_scroll_lines = 5 },
                 agent = { bash_timeout_secs = 120, max_output_lines = 9000 },
                 provider = { default_model = "anthropic/claude-opus-4-6" },
@@ -887,6 +889,11 @@ fn setup_all_sections_at_once() {
         .unwrap()
         .expect("expected Some(RawConfig)");
     assert_eq!(raw.always_yolo, Some(true));
+    assert_eq!(raw.always_fast, Some(true));
+    assert_eq!(
+        raw.always_thinking,
+        Some(AlwaysThinking::Mode("adaptive".into()))
+    );
     assert_eq!(raw.ui.splash_animation, Some(false));
     assert_eq!(raw.ui.mouse_scroll_lines, Some(5));
     assert_eq!(raw.agent.bash_timeout_secs, Some(120));
@@ -898,6 +905,21 @@ fn setup_all_sections_at_once() {
     assert_eq!(raw.storage.max_log_files, Some(3));
     assert_eq!(raw.index.max_file_size_mb, Some(8));
     assert_eq!(raw.tools["bash"].enabled, Some(true));
+}
+
+#[test]
+fn setup_always_thinking_accepts_bool() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let raw = host
+        .send_run_init_lua(
+            "craft.setup({ always_thinking = true })".to_owned(),
+            "test_init.lua".to_owned(),
+            None,
+        )
+        .unwrap()
+        .expect("expected Some(RawConfig)");
+    assert_eq!(raw.always_thinking, Some(AlwaysThinking::Toggle(true)));
 }
 
 #[test]
@@ -1098,5 +1120,28 @@ async fn bash_timeout_round_trip() {
     assert!(
         text.contains(BASH_TIMEOUT_MARKER),
         "restored body missing timeout marker; got: {text:?}"
+    );
+}
+
+#[test_case::test_case("git status" ; "parseable command")]
+#[test_case::test_case("echo 'unterminated" ; "unparseable command")]
+fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+        .unwrap();
+
+    let input = serde_json::json!({ "command": command });
+    let entry = reg.get("bash").expect("bash registered");
+    let inv = entry.tool.parse(&input).expect("parse failed");
+    let scopes = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(inv.permission_scopes())
+    })
+    .expect("permission_scopes returned None (would fall back to raw JSON)");
+
+    assert!(
+        !scopes.scopes.iter().any(|s| s.contains("\"command\"")),
+        "fell back to raw JSON scope: {:?}",
+        scopes.scopes
     );
 }

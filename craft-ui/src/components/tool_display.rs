@@ -277,8 +277,8 @@ pub fn format_timestamp_now() -> String {
     zoned.strftime("%H:%M:%S").to_string()
 }
 
-pub fn format_turn_usage(usage: &TokenUsage, pricing: &ModelPricing) -> String {
-    let cost = usage.cost(pricing);
+pub fn format_turn_usage(usage: &TokenUsage, pricing: &ModelPricing, fast: bool) -> String {
+    let cost = usage.cost(pricing, fast);
     format!(
         "{}↑ {}↓ ${cost:.3}",
         format_tokens(usage.total_input()),
@@ -686,7 +686,7 @@ fn snapshot_to_lines_range(
 
 pub(crate) fn resolve_span_style(style: &SpanStyle) -> Style {
     match style {
-        SpanStyle::Default => Style::default(),
+        SpanStyle::Default => theme::current().tool,
         SpanStyle::Named(name) => theme::style_by_name(name),
         SpanStyle::Inline(inline) => {
             let mut s = Style::default();
@@ -1934,5 +1934,11 @@ mod tests {
         let lines = snapshot_to_lines_range(&snapshot, "", 0..1);
         let texts: Vec<&str> = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(texts, vec!["", "aaa", "bbb", "ccc"]);
+    }
+
+    #[test]
+    fn default_span_style_resolves_to_tool_theme() {
+        let resolved = resolve_span_style(&SpanStyle::Default);
+        assert_eq!(resolved, theme::current().tool);
     }
 }

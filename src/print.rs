@@ -127,6 +127,7 @@ pub async fn run(
     permissions_config: PermissionsConfig,
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
+    fast: bool,
 ) -> Result<()> {
     let prompt = match prompt_arg {
         Some(p) => p,
@@ -158,6 +159,7 @@ pub async fn run(
         excluded_tools: vec![QUESTION_TOOL_NAME],
         mcp_handle,
         initial_wd: cwd,
+        fast,
     });
 
     let HeadlessHandle {
@@ -289,7 +291,7 @@ pub async fn run(
     }
 
     let duration_ms = start.elapsed().as_millis();
-    let total_cost_usd = usage.cost(&model.pricing);
+    let total_cost_usd = usage.cost(&model.pricing, fast);
 
     match format {
         OutputFormat::Text => {

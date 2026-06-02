@@ -114,10 +114,10 @@ tool_error           = { fg = "red" }
 tool_dim             = { fg = "comment" }
 
 error                = { fg = "red" }
-status_context       = { fg = "comment" }
+status_dim       = { fg = "comment" }
 
 strikethrough        = { fg = "comment", modifiers = ["crossed_out"] }
-code_fallback        = { fg = "foreground" }
+code_block        = { fg = "foreground" }
 horizontal_rule      = { fg = "comment" }
 
 diff_old             = { bg = "#4a3030" }
@@ -133,10 +133,10 @@ todo_cancelled       = { fg = "red", modifiers = ["crossed_out"] }
 
 table_border         = { fg = "comment" }
 plan_rule            = { fg = "yellow", modifiers = ["bold"] }
-cmd_selected         = { fg = "background", bg = "yellow" }
-cmd_name             = { fg = "blue" }
-cmd_desc             = { fg = "comment" }
-highlight_text       = { fg = "orange" }
+item_selected         = { fg = "background", bg = "yellow" }
+item             = { fg = "blue" }
+item_desc             = { fg = "comment" }
+accent       = { fg = "orange" }
 panel_border         = { fg = "yellow" }
 panel_title          = { fg = "yellow", modifiers = ["bold"] }
 cursor               = { fg = "background", bg = "foreground" }
@@ -144,21 +144,13 @@ keybind_key          = { fg = "cyan", modifiers = ["bold"] }
 keybind_section      = { fg = "yellow", modifiers = ["bold"] }
 input_border         = { fg = "selection" }
 keybind_desc         = { fg = "foreground" }
-queue_compact        = { fg = "yellow" }
+queue        = { fg = "yellow" }
 plan_path            = { fg = "pink", modifiers = ["bold"] }
-status_flash         = { fg = "cyan" }
+status_notice         = { fg = "cyan" }
 status_retry_error   = { fg = "red" }
 status_retry_info    = { fg = "comment" }
 input_placeholder    = { fg = "comment" }
 queue_delete         = { fg = "red", modifiers = ["bold"] }
 timestamp            = { fg = "comment" }
 spinner              = { fg = "yellow" }
-form_separator       = { fg = "comment" }
-form_hint            = { fg = "comment" }
-form_description     = { fg = "comment" }
-form_active          = { fg = "cyan" }
-form_answered        = { fg = "yellow_green" }
-form_inactive        = { fg = "comment" }
-form_check           = { fg = "yellow_green" }
-form_arrow           = { fg = "comment" }
-form_answer          = { fg = "yellow_green" }
+active             = { fg = "cyan" }

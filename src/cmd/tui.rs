@@ -80,7 +80,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         .load_init_files(&cwd)
         .context("load init.lua files")?;
 
-    let mut config = raw_config.unwrap_or_default().into_config(cli.no_rtk);
+    let mut config = raw_config
+        .unwrap_or_default()
+        .into_config(cli.no_rtk)
+        .context("invalid config")?;
     config.permissions = load_permissions(&cwd);
 
     if cli.yolo || config.always_yolo {
@@ -116,6 +119,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     let commands = discover_commands(cli.no_commands);
 
     if cli.print {
+        let fast = config.always_fast && model.supports_fast();
         crate::print::run(
             &model,
             cli.prompt,
@@ -125,18 +129,25 @@ pub async fn run(cli: Cli) -> Result<()> {
             config.permissions,
             timeouts,
             plugin_host.event_handle(),
+            fast,
         )
         .await
         .context("run print mode")?;
     } else {
         let cwd_str = cwd.to_string_lossy().into_owned();
-        let session = resolve_session(
+        let mut session = resolve_session(
             cli.continue_session,
             cli.session,
             &model.spec(),
             &cwd_str,
             &storage,
         )?;
+        if session.messages.is_empty() {
+            session.meta.fast |= config.always_fast;
+            if let Some(thinking) = config.always_thinking {
+                session.meta.thinking = Some(thinking);
+            }
+        }
         let model = if session.messages.is_empty() {
             model
         } else {

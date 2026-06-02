@@ -49,6 +49,7 @@ use crate::permissions::PermissionManager;
 use crate::{AgentConfig, AgentMode, EventSender};
 use craft_config::ToolOutputLines;
 use craft_providers::Model;
+use craft_providers::RequestOptions;
 use craft_providers::provider::Provider;
 
 pub struct DescriptionContext<'a> {
@@ -204,6 +205,7 @@ pub struct ToolContext {
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    pub opts: RequestOptions,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -572,7 +574,7 @@ pub fn all_builtin_tool_names() -> Vec<&'static str> {
         .collect()
 }
 
-use craft_providers::{Message, ProviderEvent, RequestOptions, StreamResponse};
+use craft_providers::{Message, ProviderEvent, StreamResponse};
 
 struct NullProvider;
 
@@ -623,6 +625,7 @@ pub(crate) fn interpreter_ctx(
         timeouts: craft_providers::Timeouts::default(),
         file_tracker,
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+        opts: RequestOptions::default(),
     }
 }
 

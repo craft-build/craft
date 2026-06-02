@@ -438,7 +438,6 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: script_model.max_output_tokens,
         context_window: script_model.context_window,
-        fast_capable: false,
     })
 }
 
@@ -455,7 +454,6 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: script_model.max_output_tokens,
         context_window: script_model.context_window,
-        fast_capable: false,
     })
 }
 
