@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use craft_agent::tools::{ToolRegistry, ToolSource};
 use craft_config::{AlwaysThinking, PluginsConfig, ToolOutputLines};
-use craft_lua::{PluginError, PluginHost};
+use craft_lua::{Permission, PluginError, PluginHost, PluginPermissions};
 
 fn fresh_registry() -> Arc<ToolRegistry> {
     Arc::new(ToolRegistry::new())
@@ -62,6 +62,7 @@ const DEADLINE_ALREADY_SET_ERR: &str = "ctx:set_deadline() already called";
 const DEADLINE_TIMEOUT_MSG: &str = "tool deadline_test timed out after 1s";
 const BASH_TIMEOUT_MSG: &str = "tool bash timed out after 1s";
 const BASH_TIMEOUT_MARKER: &str = "Timed out after 1s";
+const PERMISSION_DENIED_PREFIX: &str = "Permission denied:";
 
 #[test]
 fn stdlib_globals_accessible() {
@@ -1120,6 +1121,99 @@ async fn bash_timeout_round_trip() {
     assert!(
         text.contains(BASH_TIMEOUT_MARKER),
         "restored body missing timeout marker; got: {text:?}"
+    );
+}
+
+async fn exec_tool_with_perms(
+    reg: &ToolRegistry,
+    name: &str,
+    input: serde_json::Value,
+) -> Result<String, String> {
+    let entry = reg
+        .get(name)
+        .unwrap_or_else(|| panic!("tool {name} not registered"));
+    let inv = entry.tool.parse(&input).expect("parse failed");
+    let ctx = craft_agent::tools::test_support::stub_ctx(&craft_agent::AgentMode::Build);
+    inv.execute(&ctx).await.map(|out| match out {
+        craft_agent::ToolOutput::Plain(s) => s,
+        other => panic!("unexpected output: {other:?}"),
+    })
+}
+
+fn perm_tool_src(api_call: &str) -> String {
+    format!(
+        r#"
+craft.api.register_tool({{
+    name = "perm_test",
+    description = "test",
+    schema = {{ type = "object", properties = {{}}, additionalProperties = false }},
+    audiences = {{ "main" }},
+    handler = function(input, ctx)
+        {api_call}
+        ctx:finish("ok")
+    end
+}})
+"#
+    )
+}
+
+    #[test_case::test_case("craft.fs.read('/etc/hosts')" ; "fs_read")]
+#[test_case::test_case("craft.fs.write('/tmp/craft-perm-test', 'x')" ; "fs_write")]
+#[test_case::test_case("craft.fn.jobstart('echo hi')" ; "run")]
+#[tokio::test]
+async fn denied_permission_blocks_api(api_call: &str) {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let perms = PluginPermissions::denied();
+    host.load_source_with_permissions("denied_plugin", &perm_tool_src(api_call), perms)
+        .unwrap();
+    let err = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({})).await.unwrap_err();
+    assert!(
+        err.contains(PERMISSION_DENIED_PREFIX),
+        "expected permission denied, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn user_plugin_with_fs_read_can_read_but_not_write() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let mut perms = PluginPermissions::denied();
+    perms.set(Permission::FsRead, true);
+    host.load_source_with_permissions(
+        "read_only_plugin",
+        &perm_tool_src("craft.fs.read('/etc/hosts')"),
+        perms,
+    )
+    .unwrap();
+    let result = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({})).await;
+    assert!(result.is_ok(), "fs.read with FsRead permission should succeed, got: {result:?}");
+}
+
+#[test]
+fn builtin_plugin_has_all_permissions() {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+        .unwrap();
+    assert!(reg.has("bash"));
+}
+
+#[tokio::test]
+async fn env_permission_guards_uv_and_env() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let perms = PluginPermissions::denied();
+    host.load_source_with_permissions(
+        "no_env_plugin",
+        &perm_tool_src("craft.env.state_dir()"),
+        perms,
+    )
+    .unwrap();
+    let err = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({})).await.unwrap_err();
+    assert!(
+        err.contains(PERMISSION_DENIED_PREFIX),
+        "expected permission denied for env, got: {err}"
     );
 }
 

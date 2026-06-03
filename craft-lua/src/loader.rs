@@ -10,6 +10,7 @@ use craft_config::{PluginsConfig, RawConfig};
 
 use crate::api::command::{LuaCommandReader, UiAction};
 use crate::error::PluginError;
+use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem, RestoreReply};
 use serde_json::Value;
 
@@ -156,7 +157,7 @@ impl PluginHost {
                     source: mlua::Error::runtime("bundled plugin missing init.lua"),
                 })?;
             let name: Arc<str> = Arc::from(builtin.as_str());
-            self.load_source_named(name, init.to_owned(), None)?;
+            self.send_load(name, init.to_owned(), None, PluginPermissions::trusted())?;
         }
         Ok(())
     }
@@ -173,6 +174,7 @@ impl PluginHost {
         name: Arc<str>,
         source: String,
         plugin_dir: Option<PathBuf>,
+        permissions: PluginPermissions,
     ) -> Result<(), PluginError> {
         let tx = self.tx()?;
         let (reply_tx, reply_rx) = flume::bounded(1);
@@ -180,6 +182,7 @@ impl PluginHost {
             name,
             source,
             plugin_dir,
+            permissions,
             reply: reply_tx,
         })
         .map_err(|_| PluginError::HostDead)?;
@@ -204,15 +207,6 @@ impl PluginHost {
         reply_rx.recv().map_err(|_| PluginError::HostDead)?
     }
 
-    fn load_source_named(
-        &mut self,
-        name: Arc<str>,
-        source: String,
-        plugin_dir: Option<PathBuf>,
-    ) -> Result<(), PluginError> {
-        self.send_load(name, source, plugin_dir)
-    }
-
     pub fn unload(&self, plugin: &str) -> Result<(), PluginError> {
         let tx = self.tx()?;
         let (reply_tx, reply_rx) = flume::bounded(1);
@@ -226,7 +220,11 @@ impl PluginHost {
     }
 
     pub fn load_source(&self, name: &str, source: &str) -> Result<(), PluginError> {
-        self.send_load(Arc::from(name), source.to_owned(), None)
+        self.send_load(Arc::from(name), source.to_owned(), None, PluginPermissions::trusted())
+    }
+
+    pub fn load_source_with_permissions(&self, name: &str, source: &str, permissions: PluginPermissions) -> Result<(), PluginError> {
+        self.send_load(Arc::from(name), source.to_owned(), None, permissions)
     }
 
     pub fn load_plugin_file(&self, path: &Path) -> Result<(), PluginError> {
@@ -235,11 +233,12 @@ impl PluginHost {
             source: e,
         })?;
         let plugin_dir = path.parent().map(Path::to_path_buf);
+        let permissions = load_plugin_permissions(plugin_dir.as_deref());
         let name: Arc<str> = path
             .file_stem()
             .and_then(|s| s.to_str())
             .map_or_else(|| Arc::from("user"), Arc::from);
-        self.send_load(name, source, plugin_dir)
+        self.send_load(name, source, plugin_dir, permissions)
     }
 
     pub fn event_handle(&self) -> Option<EventHandle> {

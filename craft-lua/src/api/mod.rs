@@ -24,12 +24,14 @@ use serde_json::Value as JsonValue;
 
 use crate::api::command::UiAction;
 use crate::api::tool::PendingTools;
+use crate::plugin_permissions::PluginPermissions;
 
 pub(crate) fn create_craft_global(
     lua: &Lua,
     pending: PendingTools,
     plugin: Arc<str>,
     ui_action_tx: Option<flume::Sender<UiAction>>,
+    permissions: &PluginPermissions,
 ) -> LuaResult<Table> {
     let craft = lua.create_table()?;
 
@@ -37,17 +39,17 @@ pub(crate) fn create_craft_global(
         "api",
         tool::create_api_table(lua, pending, Arc::clone(&plugin))?,
     )?;
-    craft.set("env", env::create_env_table(lua)?)?;
-    craft.set("fs", fs::create_fs_table(lua)?)?;
+    craft.set("env", env::create_env_table(lua, permissions)?)?;
+    craft.set("fs", fs::create_fs_table(lua, permissions)?)?;
     craft.set("log", log::create_log_table(lua, plugin)?)?;
     craft.set("treesitter", treesitter::create_treesitter_table(lua)?)?;
-    craft.set("uv", uv::create_uv_table(lua)?)?;
+    craft.set("uv", uv::create_uv_table(lua, permissions)?)?;
     craft.set("json", json::create_json_table(lua)?)?;
     craft.set("yaml", yaml::create_yaml_table(lua)?)?;
-    craft.set("net", net::create_net_table(lua)?)?;
+    craft.set("net", net::create_net_table(lua, permissions)?)?;
     craft.set("text", text::create_text_table(lua)?)?;
     craft.set("ui", ui::create_ui_table(lua, ui_action_tx)?)?;
-    craft.set("fn", fn_api::create_fn_table(lua)?)?;
+    craft.set("fn", fn_api::create_fn_table(lua, permissions)?)?;
     craft.set("async", async_api::create_async_table(lua)?)?;
 
     Ok(craft)

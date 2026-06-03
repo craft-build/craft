@@ -24,6 +24,7 @@ use crate::api::buf::{BufHandle, BufferStore};
 use crate::api::command::{CommandHandlerMap, publish_command_snapshot};
 use crate::api::command::{LuaCommandReader, LuaCommandWriter, UiAction};
 use crate::api::create_craft_global;
+use crate::plugin_permissions::PluginPermissions;
 use crate::api::json_to_lua;
 use crate::api::ctx::LuaCtx;
 use crate::api::fn_api::{JobEvent, JobStore};
@@ -42,6 +43,13 @@ const MAX_INFLIGHT_TOOLS: usize = 64;
 const GC_STEP_INTERVAL: usize = 4;
 const INTERRUPT_CANCEL_CHECK_INTERVAL: u32 = 128;
 const ASYNC_RUN_DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+
+fn strip_traceback(err: &mlua::Error) -> String {
+    match err {
+        mlua::Error::CallbackError { cause, .. } => strip_traceback(cause),
+        other => other.to_string(),
+    }
+}
 
 pub type LoadResult = Result<(), PluginError>;
 pub(crate) enum HintContent {
@@ -64,6 +72,7 @@ pub enum Request {
         name: Arc<str>,
         source: String,
         plugin_dir: Option<PathBuf>,
+        permissions: PluginPermissions,
         reply: flume::Sender<LoadResult>,
     },
     CallTool {
@@ -892,6 +901,7 @@ impl LuaRuntime {
         name: Arc<str>,
         source: &str,
         plugin_dir: Option<PathBuf>,
+        permissions: &PluginPermissions,
         config_store: Option<&ConfigStore>,
     ) -> LoadResult {
         let stale = self.drain_pending();
@@ -912,6 +922,7 @@ impl LuaRuntime {
             Arc::clone(&self.pending),
             Arc::clone(&name),
             self.ui_action_tx.clone(),
+            permissions,
         )
         .map_err(&map_err)?;
 
@@ -1168,6 +1179,7 @@ impl LuaRuntime {
             Arc::from(source_name),
             source,
             plugin_dir,
+            &PluginPermissions::trusted(),
             Some(&config_store),
         )
         .await?;
@@ -1279,7 +1291,7 @@ async fn dispatch_async(
                     JobEvent::Exit(code) => LuaValue::Integer(*code as i64),
                 };
                 if let Err(e) = func.call::<()>((job_id, arg)) {
-                    return ToolCallReply::err(format!("job callback error: {e}"));
+                    return ToolCallReply::err(format!("job callback error: {}", strip_traceback(&e)));
                 }
             }
 
@@ -1348,7 +1360,7 @@ async fn run_tool_call(
         };
         match lua.registry_value(&tool_keys.handler) {
             Ok(f) => f,
-            Err(e) => return ToolCallReply::err(e.to_string()),
+            Err(e) => return ToolCallReply::err(strip_traceback(&e)),
         }
     };
     if shutdown.load(Ordering::Acquire) {
@@ -1361,23 +1373,23 @@ async fn run_tool_call(
 
     let input_lua = match json_to_lua(&lua, &input) {
         Ok(v) => v,
-        Err(e) => return ToolCallReply::err(e.to_string()),
+        Err(e) => return ToolCallReply::err(strip_traceback(&e)),
     };
     let ctx_ud = match lua.create_userdata(*ctx) {
         Ok(u) => u,
-        Err(e) => return ToolCallReply::err(e.to_string()),
+        Err(e) => return ToolCallReply::err(strip_traceback(&e)),
     };
 
     let thread = match lua.create_thread(handler) {
         Ok(t) => t,
-        Err(e) => return ToolCallReply::err(e.to_string()),
+        Err(e) => return ToolCallReply::err(strip_traceback(&e)),
     };
     let scope = TaskScope::new(&lua, TaskCell::new(cancel, deadline, live));
     let handle = Arc::clone(scope.handle());
 
     let async_thread = match thread.into_async::<LuaValue>((input_lua, ctx_ud)) {
         Ok(at) => at,
-        Err(e) => return ToolCallReply::err(e.to_string()),
+        Err(e) => return ToolCallReply::err(strip_traceback(&e)),
     };
 
     let call_future = scope.scope_future(async {
@@ -1417,7 +1429,7 @@ async fn run_tool_call(
                 dispatch_async(&lua, Arc::clone(&handle), &plugin, &tool, finish_rx).await
             }
             Ok(val) => ToolCallReply::from_lua_value(&val),
-            Err(e) => ToolCallReply::err(e.to_string()),
+            Err(e) => ToolCallReply::err(strip_traceback(&e)),
         }
     });
 
@@ -1502,10 +1514,11 @@ pub fn spawn(
                             name,
                             source,
                             plugin_dir,
+                            permissions,
                             reply,
                         } => {
                             gate.drain().await;
-                            let res = rt.load_source(Arc::clone(&name), &source, plugin_dir, None).await;
+                            let res = rt.load_source(Arc::clone(&name), &source, plugin_dir, &permissions, None).await;
                             let _ = reply.send(res);
                         }
                         Request::CallTool {

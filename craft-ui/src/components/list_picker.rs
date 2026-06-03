@@ -49,6 +49,10 @@ pub trait PickerItem {
     fn is_spinning(&self) -> bool {
         false
     }
+    /// Dim this row in the list when true (e.g. user-overridden tier).
+    fn is_highlighted(&self) -> bool {
+        false
+    }
 }
 
 impl PickerItem for String {
@@ -486,13 +490,6 @@ impl<T: PickerItem> ListPicker<T> {
             .and_then(|s| s.items.get(idx))
     }
 
-    pub fn with_item_mut(&mut self, label: &str, f: impl FnOnce(&mut T)) {
-        if let Some(s) = self.state.as_mut().and_then(PickerState::ready_mut)
-            && let Some(item) = s.items.iter_mut().find(|i| i.label() == label)
-        {
-            f(item);
-        }
-    }
 
     pub fn handle_paste(&mut self, text: &str) -> bool {
         let Some(Some(s)) = self.state.as_mut().map(PickerState::ready_mut) else {
@@ -617,8 +614,7 @@ fn render_ready<T: PickerItem>(
     s.viewport_height = viewport_h as usize;
     s.ensure_visible();
 
-    let mut constraints: Vec<Constraint> =
-        Vec::with_capacity(3 + footer.is_some() as usize + error_text.is_some() as usize);
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(3 + error_text.is_some() as usize);
     if error_text.is_some() {
         constraints.push(Constraint::Length(1)); // error line
     }
@@ -806,10 +802,10 @@ fn render_list<T: PickerItem>(
             break;
         }
 
-        let style = if i == selected {
-            theme::current().item_selected
-        } else {
-            theme::current().item
+        let (style, detail_style) = match (i == selected, item.is_highlighted()) {
+            (true, _) => (theme::current().item_selected, theme::current().item_selected),
+            (false, true) => (theme::dim_style(theme::current().item, 0.3), theme::dim_style(theme::current().item_desc, 0.3)),
+            (false, false) => (theme::current().item, theme::current().item_desc),
         };
         let checkbox = enabled.map(|en| {
             let sym = if en[item_idx] { "✓ " } else { "✗ " };
@@ -832,11 +828,6 @@ fn render_list<T: PickerItem>(
             Some(detail) => {
                 let label = truncate_label(&label, max_label_width(detail, area.width));
                 let pad = detail_padding(&label, detail, area.width);
-                let detail_style = if i == selected {
-                    style
-                } else {
-                    theme::current().item_desc
-                };
                 let mut spans = Vec::with_capacity(5);
                 if let Some(cb) = checkbox {
                     spans.push(cb);
@@ -881,7 +872,7 @@ fn render_search(frame: &mut Frame, area: Rect, search: &TextBuffer) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, spec: &FooterSpec) {
-    frame.render_widget(Paragraph::new(vec![spec.build()]), area);
+    frame.render_widget(Paragraph::new(spec.build()), area);
 }
 
 #[cfg(test)]

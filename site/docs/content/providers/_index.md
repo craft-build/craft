@@ -7,13 +7,13 @@ group = "Reference"
 
 # Providers
 
-Maki talks to LLM providers over their HTTP APIs. Models are split into three tiers: **weak** (cheap and fast), **medium** (balanced), and **strong** (highest capability, highest cost).
+Craft talks to LLM providers over their HTTP APIs. Models are split into three tiers: **weak** (cheap and fast), **medium** (balanced), and **strong** (highest capability, highest cost).
 
-Open the model picker with `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it to strong, medium, or weak. Your overrides are saved to `~/.craft/model-tiers` and apply across sessions.
+Open the model picker with `/model` and press `1`, `2`, or `3` on any row to reassign it to strong, medium, or weak. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions.
 
 ## Auth Reloading
 
-Maki re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `craft auth login` in another terminal or change an env var, the next session picks it up without a restart.
+Craft re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `craft auth login` in another terminal or change an env var, the next session picks it up without a restart.
 
 You can set multiple API keys in one env var (`ANTHROPIC_API_KEY=sk-1,sk-2,sk-3`) and they rotate automatically on rate-limit or auth errors.
 
@@ -27,15 +27,17 @@ You can set multiple API keys in one env var (`ANTHROPIC_API_KEY=sk-1,sk-2,sk-3`
 
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
-| Weak | claude-3-haiku, claude-3-5-haiku, **claude-haiku-4-5** (default) | $0.25 / $1.25 | 200K ctx / 4K out |
-| Medium | claude-3-sonnet, claude-3-5-sonnet, claude-3-7-sonnet, claude-sonnet-4, claude-sonnet-4-5, claude-sonnet-4-6-1m, **claude-sonnet-4-6** (default) | $3.00 / $15.00 | 200K ctx / 4K out |
-| Strong | claude-opus-4-5, claude-opus-4-7-1m, **claude-opus-4-7** (default), claude-opus-4-6-1m, claude-opus-4-6, claude-3-opus, claude-opus-4-0, claude-opus-4-1 | $5.00 / $25.00 | 200K ctx / 64K out |
+| Weak | **claude-haiku-4-5** (default) | $1.00 / $5.00 | 200K ctx / 64K out |
+| Medium | claude-sonnet-4-5, **claude-sonnet-4-6** (default), claude-sonnet-4 | $3.00 / $15.00 | 200K ctx / 64K out |
+| Strong | claude-opus-4-5, claude-opus-4-6, claude-opus-4-7, **claude-opus-4-8** (default), claude-opus-4-0, claude-opus-4-1 | $5.00 / $25.00 | 200K ctx / 64K out |
 
-Defaults: claude-haiku-4-5 (weak), claude-sonnet-4-6 (medium), claude-opus-4-7 (strong)
+Defaults: claude-haiku-4-5 (weak), claude-sonnet-4-6 (medium), claude-opus-4-8 (strong)
+
+Add `-1m` to any Claude model, like `claude-sonnet-4-6-1m`, to use the 1M token context window.
 
 #### Amazon Bedrock
 
-If you already use Claude through AWS Bedrock, you can point Maki at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Maki will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
+If you already use Claude through AWS Bedrock, you can point Craft at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Craft will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
 
 You will need `AWS_REGION` and one of the following for auth:
 
@@ -95,9 +97,7 @@ Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
 - **API**: `http://localhost:11434/v1`
 - **Features**: Local or remote inference via OLLAMA_HOST, cloud fallback via OLLAMA_API_KEY
 
-This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
-
-Maki asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.craft/model-tiers`.
+Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.
 
 ### LlamaCpp
 
@@ -105,9 +105,7 @@ Maki asks the server for the list of installed models, so there's no built-in ca
 - **API**: `http://localhost:8080/v1`
 - **Features**: Local or remote inference via LLAMA_CPP_HOST, set optional key via LLAMA_CPP_API_KEY
 
-This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
-
-Maki asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak. If that guess is wrong, open `/model` and press `Alt+1`, `Alt+2`, or `Alt+3` on any row to reassign it. Your choices are saved to `~/.craft/model-tiers`.
+Connects to any OpenAI-compatible `/v1` endpoint. Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.
 
 ### Mistral
 
@@ -150,6 +148,14 @@ Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 
 Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
 
+### OpenRouter
+
+- **Env var**: `OPENROUTER_API_KEY`
+- **API**: `https://openrouter.ai/api/v1`
+- **Features**: 300+ models from all providers, prompt caching, provider routing
+
+OpenRouter aggregates models from many providers behind a single API. Craft asks the OpenRouter API for the list of available models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.
+
 ### Synthetic
 
 - **Env var**: `SYNTHETIC_API_KEY`
@@ -178,7 +184,7 @@ If the model name is unique across providers, the prefix can be omitted.
 
 ## Dynamic Providers
 
-To add a custom provider or proxy, drop an executable script into `~/.craft/providers/`. The script must handle these subcommands:
+To add a custom provider or proxy, drop an executable script into `~/.config/craft/providers/`. The script must handle these subcommands:
 
 | Subcommand | Timeout | What it does |
 |------------|---------|--------|
@@ -191,7 +197,7 @@ To add a custom provider or proxy, drop an executable script into `~/.craft/prov
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `zai-coding-plan`, `deepseek`, `synthetic`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `zai-coding-plan`, `deepseek`, `openrouter`, `synthetic`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 

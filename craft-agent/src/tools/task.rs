@@ -11,6 +11,7 @@ use crate::{AgentEvent, EventSender, SubagentInfo, ToolOutput};
 use craft_config::ToolOutputLines;
 use craft_providers::model::ModelTier;
 use craft_providers::provider;
+use craft_providers::tier_map;
 use craft_providers::{ContentBlock, Model, ModelError, Role};
 use craft_tool_macro::Tool;
 use serde::Deserialize;
@@ -66,12 +67,14 @@ impl Task {
             if effective == ctx.model.tier {
                 (Model::clone(&ctx.model), Arc::clone(&ctx.provider))
             } else {
-                let resolved_model = Model::from_tier_dynamic(
-                    ctx.model.provider,
-                    effective,
-                    ctx.model.dynamic_slug.as_deref(),
-                )
-                .map_err(|e| e.to_string())?;
+                let resolved_model = tier_map::tier_map()
+                    .read()
+                    .unwrap()
+                    .spec_for_tier(ctx.model.provider, effective)
+                    .or_else(|| tier_map::tier_map().read().unwrap().spec_for_tier_any(effective))
+                    .and_then(|spec| Model::from_spec(&spec).ok())
+                    .or_else(|| Model::from_tier_dynamic(ctx.model.provider, effective, ctx.model.dynamic_slug.as_deref()).ok())
+                    .ok_or_else(|| format!("no model available for tier {effective}"))?;
                 let resolved_provider = provider::from_model(&resolved_model, ctx.timeouts)
                     .await
                     .map_err(|e| e.to_string())?;

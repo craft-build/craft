@@ -26,6 +26,7 @@ Type `/` in the input box to open the command palette.
 | `/btw` | Ask a quick question (no tools, no history pollution) |
 | `/yolo` | Toggle YOLO mode (skip all permission prompts) |
 | `/thinking` | Toggle extended thinking (off, adaptive, or budget) |
+| `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/exit` | Exit the application |
 | `/memory` | View, edit, and delete memory files |
 
@@ -40,7 +41,7 @@ They appear in the palette as `/project:<filename>`.
 
 ### User commands
 
-Place `.md` files in `~/.craft/commands/`.
+Place `.md` files in `~/.config/craft/commands/`.
 They appear in the palette as `/user:<filename>`.
 
 Project commands override user commands with the same name.

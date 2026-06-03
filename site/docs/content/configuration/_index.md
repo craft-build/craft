@@ -55,6 +55,8 @@ All fields are optional. Typos in field names cause an error right away.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `always_yolo` | bool | `false` | Start every session with YOLO mode (skip permission prompts, deny rules still apply) |
+| `always_fast` | bool | `false` | Start every session with Anthropic fast mode (Opus only; ignored otherwise) |
+| `always_thinking` | bool | string | `false` | Start every session with extended thinking (true/"adaptive", "off", or a token budget) |
 
 ### `ui`
 
@@ -135,11 +137,11 @@ craft.setup({
 
 ## Validation
 
-If a value is below its minimum, Maki shows a `ConfigError` with the field name, value, and minimum.
+If a value is below its minimum, Craft shows a `ConfigError` with the field name, value, and minimum.
 
 ## Directory layout
 
-Maki uses XDG directories on Linux and macOS:
+Craft uses XDG directories on Linux and macOS:
 
 | Purpose | Path |
 |---------|------|

@@ -4,6 +4,8 @@ use std::time::Duration;
 use reqwest::Client;
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
+use crate::plugin_permissions::{Permission::Net, PluginPermissions};
+
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
 const MAX_TIMEOUT_SECS: f64 = 120.0;
 const DEFAULT_MAX_BYTES: usize = 5 * 1024 * 1024;
@@ -30,28 +32,35 @@ struct ResponseData {
     content_type: String,
 }
 
-pub(crate) fn create_net_table(lua: &Lua) -> LuaResult<Table> {
+pub(crate) fn create_net_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult<Table> {
     let net = lua.create_table()?;
+    let perms = perms.clone();
 
     // Supports both Neovim's current vim.net.request(url, opts, on_response) signature
     // and the proposed multi-method API: vim.net.request(url, opts) with opts.method.
     // See: https://github.com/neovim/neovim/issues/38946
     net.set(
         "request",
-        lua.create_async_function(|lua, (url, opts): (String, Option<Table>)| async move {
-            let params = match extract_request_params(&url, opts.as_ref()) {
-                Ok(p) => p,
-                Err(e) => return Ok((Value::Nil, Value::String(lua.create_string(&e)?))),
-            };
-            match do_request(params).await {
-                Ok(resp) => {
-                    let tbl = lua.create_table()?;
-                    tbl.set("body", resp.body)?;
-                    tbl.set("status", resp.status)?;
-                    tbl.set("content_type", resp.content_type)?;
-                    Ok((Value::Table(tbl), Value::Nil))
+        lua.create_async_function(move |lua, (url, opts): (String, Option<Table>)| {
+            let perms = perms.clone();
+            async move {
+                if !perms.is_allowed(Net) {
+                    return Err(crate::plugin_permissions::denied_error(Net));
                 }
-                Err(e) => Ok((Value::Nil, Value::String(lua.create_string(&e)?))),
+                let params = match extract_request_params(&url, opts.as_ref()) {
+                    Ok(p) => p,
+                    Err(e) => return Ok((Value::Nil, Value::String(lua.create_string(&e)?))),
+                };
+                match do_request(params).await {
+                    Ok(resp) => {
+                        let tbl = lua.create_table()?;
+                        tbl.set("body", resp.body)?;
+                        tbl.set("status", resp.status)?;
+                        tbl.set("content_type", resp.content_type)?;
+                        Ok((Value::Table(tbl), Value::Nil))
+                    }
+                    Err(e) => Ok((Value::Nil, Value::String(lua.create_string(&e)?))),
+                }
             }
         })?,
     )?;
@@ -454,7 +463,7 @@ mod tests {
     #[test_case(r#"net.request("ftp://x")"# ; "invalid_url")]
     fn lua_request_error_returns_nil_and_message(expr: &str) {
         let lua = Lua::new();
-        let net = create_net_table(&lua).unwrap();
+        let net = create_net_table(&lua, &PluginPermissions::trusted()).unwrap();
         lua.globals().set("net", net).unwrap();
         let (is_nil, has_err): (bool, bool) = lua
             .load(format!(

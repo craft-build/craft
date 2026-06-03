@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
 
+use crate::plugin_permissions::{Permission::{Env, Run}, PluginPermissions};
 use crate::runtime::with_task_jobs;
 
 const READER_BUF_SIZE: usize = 8 * 1024;
@@ -250,12 +251,17 @@ fn kill_job(meta: &mut JobMeta) {
     }
 }
 
-pub(crate) fn create_fn_table(lua: &Lua) -> LuaResult<Table> {
+pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult<Table> {
     let t = lua.create_table()?;
+    let perms = perms.clone();
 
+    let p = perms.clone();
     t.set(
         "jobstart",
-        lua.create_function(|lua, (cmd, opts): (String, Option<Table>)| {
+        lua.create_function(move |lua, (cmd, opts): (String, Option<Table>)| {
+            if !p.is_allowed(Run) {
+                return Err(crate::plugin_permissions::denied_error(Run));
+            }
             let (cwd, env, on_stdout, on_stderr, on_exit) = match opts {
                 Some(ref opts) => {
                     let cwd: Option<String> = opts.get("cwd").ok();
@@ -290,52 +296,67 @@ pub(crate) fn create_fn_table(lua: &Lua) -> LuaResult<Table> {
         })?,
     )?;
 
+    let p = perms.clone();
     t.set(
         "jobstop",
-        lua.create_function(|lua, job_id: u32| {
+        lua.create_function(move |lua, job_id: u32| {
+            if !p.is_allowed(Run) {
+                return Err(crate::plugin_permissions::denied_error(Run));
+            }
             with_task_jobs(lua, |store| store.kill(job_id));
             Ok(())
         })?,
     )?;
 
+    let p = perms.clone();
     t.set(
         "jobwait",
-        lua.create_async_function(|lua, (job_id, timeout_ms): (u32, Option<u64>)| async move {
-            let rx = with_task_jobs(&lua, |store| store.take_receiver(job_id))
-                .ok_or_else(|| mlua::Error::runtime("unknown job id or already waited"))?;
+        lua.create_async_function(move |lua, (job_id, timeout_ms): (u32, Option<u64>)| {
+            let p = p.clone();
+            async move {
+                if !p.is_allowed(Run) {
+                    return Err(crate::plugin_permissions::denied_error(Run));
+                }
+                let rx = with_task_jobs(&lua, |store| store.take_receiver(job_id))
+                    .ok_or_else(|| mlua::Error::runtime("unknown job id or already waited"))?;
 
-            let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
+                let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
 
-            let mut stdout_lines = Vec::new();
-            let mut stderr_lines = Vec::new();
+                let mut stdout_lines = Vec::new();
+                let mut stderr_lines = Vec::new();
 
-            let exit_code = loop {
-                let event = tokio::select! {
-                    event = rx.recv_async() => event.ok(),
-                    _ = tokio::time::sleep(timeout) => None,
+                let exit_code = loop {
+                    let event = tokio::select! {
+                        event = rx.recv_async() => event.ok(),
+                        _ = tokio::time::sleep(timeout) => None,
+                    };
+
+                    match event {
+                        None => return Ok(mlua::Value::Nil),
+                        Some(JobEvent::Stdout(line)) => stdout_lines.push(line),
+                        Some(JobEvent::Stderr(line)) => stderr_lines.push(line),
+                        Some(JobEvent::Exit(code)) => {
+                            break code;
+                        }
+                    }
                 };
 
-                match event {
-                    None => return Ok(mlua::Value::Nil),
-                    Some(JobEvent::Stdout(line)) => stdout_lines.push(line),
-                    Some(JobEvent::Stderr(line)) => stderr_lines.push(line),
-                    Some(JobEvent::Exit(code)) => {
-                        break code;
-                    }
-                }
-            };
-
-            let result = lua.create_table()?;
-            result.set("stdout", stdout_lines.join("\n"))?;
-            result.set("stderr", stderr_lines.join("\n"))?;
-            result.set("exit_code", exit_code)?;
-            Ok(mlua::Value::Table(result))
+                let result = lua.create_table()?;
+                result.set("stdout", stdout_lines.join("\n"))?;
+                result.set("stderr", stderr_lines.join("\n"))?;
+                result.set("exit_code", exit_code)?;
+                Ok(mlua::Value::Table(result))
+            }
         })?,
     )?;
 
+    let p = perms;
     t.set(
         "executable",
-        lua.create_function(|_, name: String| {
+        lua.create_function(move |_, name: String| {
+            if !p.is_allowed(Env) {
+                return Err(crate::plugin_permissions::denied_error(Env));
+            }
             let found = env::var_os("PATH")
                 .map(|paths| {
                     env::split_paths(&paths)
@@ -349,7 +370,6 @@ pub(crate) fn create_fn_table(lua: &Lua) -> LuaResult<Table> {
 
     Ok(t)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

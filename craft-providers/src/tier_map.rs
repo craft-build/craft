@@ -133,6 +133,41 @@ impl TierMap {
             _ => Some(spec),
         }
     }
+
+    /// Find any model spec matching the requested tier across all providers.
+    ///
+    /// Checks user overrides first (sorted order), then auto-assigned slots
+    /// in all `known_models`. Returns `None` if no match exists anywhere.
+    pub fn spec_for_tier_any(&self, tier: ModelTier) -> Option<String> {
+        for (spec, &t) in &self.overrides {
+            if t == tier {
+                return Some(spec.clone());
+            }
+        }
+
+        for (provider, models) in &self.known_models {
+            if models.is_empty() {
+                continue;
+            }
+            let want = match tier {
+                ModelTier::Strong => 0,
+                ModelTier::Medium => 1,
+                ModelTier::Weak => 2,
+            };
+            let idx = want.min(models.len() - 1);
+            let spec = format!("{provider}/{}", models[idx]);
+            match self.overrides.get(&spec) {
+                Some(&t) if t != tier => continue,
+                _ => return Some(spec),
+            }
+        }
+        None
+    }
+
+    /// Returns `true` if the given spec has a user override.
+    pub fn is_override(&self, spec: &str) -> bool {
+        self.overrides.contains_key(spec)
+    }
 }
 
 /// Pure function: map a list position to a tier. Position 0 is Strong, 1 is
@@ -275,11 +310,41 @@ mod tests {
     }
 
     #[test]
-    fn spec_for_tier_no_models_returns_none() {
+    fn spec_for_tier_any_no_models_returns_none() {
         let map = make_map(&[], &[]);
         assert_eq!(
-            map.spec_for_tier(ProviderKind::Ollama, ModelTier::Strong),
+            map.spec_for_tier_any(ModelTier::Strong),
             None
+        );
+    }
+
+    #[test]
+    fn spec_for_tier_any_cross_provider_and_sorted() {
+        let mut map = TierMap::default();
+        map.set_overrides(
+            [("openai/gpt-foo", ModelTier::Strong)]
+                .into_iter()
+                .map(|(s, t)| (s.to_string(), t))
+                .collect(),
+        );
+        map.set_known_models(
+            ProviderKind::Ollama,
+            vec!["big".into(), "mid".into(), "small".into()],
+        );
+        // Override takes priority even across providers.
+        assert_eq!(
+            map.spec_for_tier_any(ModelTier::Strong),
+            Some("openai/gpt-foo".into())
+        );
+        // Without override, falls back to known_models.
+        let mut map2 = TierMap::default();
+        map2.set_known_models(
+            ProviderKind::Ollama,
+            vec!["big".into()],
+        );
+        assert_eq!(
+            map2.spec_for_tier_any(ModelTier::Strong),
+            Some("ollama/big".into())
         );
     }
 
