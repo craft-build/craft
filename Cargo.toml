@@ -87,15 +87,15 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }
-sha2 = { version = "0.10", default-features = false }
-hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+hmac = { version = "0.13", default-features = false }
 base64 = "0.22"
-getrandom = "0.3"
+getrandom = "0.4"
 fastrand = "2"
 test-case = "3"
 ignore = "0.4"
 memchr = "2"
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 htmd = "0.5"
 tempfile = "3"
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
@@ -104,14 +104,14 @@ grep-searcher = "0.1"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-fancy"] }
 unicode-width = "0.2"
-similar = { version = "2", features = ["inline", "unicode"] }
+similar = { version = "3", features = ["inline", "unicode"] }
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-flume = { version = "0.11", default-features = false, features = ["async"] }
+flume = { version = "0.12", default-features = false, features = ["async"] }
 humantime = "2"
-toml = "0.8"
-toml_edit = "0.22"
+toml = "1"
+toml_edit = "0.25"
 arc-swap = "1"
 bitflags = "2"
 event-listener = "5"
@@ -119,7 +119,7 @@ libc = "0.2"
 nucleo = "0.5"
 nucleo-matcher = "0.3"
 open = "5"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 etcetera = "0.11"
 dotenvy = "0.15"
 tree-sitter = "0.26"
@@ -141,13 +141,13 @@ tree-sitter-php = "0.24"
 tree-sitter-python = "0.23"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
-tree-sitter-scala = "0.25"
+tree-sitter-scala = "0.26"
 tree-sitter-starlark = "1.3"
 tree-sitter-swift = "0.7"
 tree-sitter-typescript = "0.23"
 tree-sitter-zig = "1.1"
 monty = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.17", package = "monty" }
-notify = { version = "9.0.0-rc.2", default-features = false, features = ["flume", "macos_fsevent"] }
+notify = { version = "9.0.0-rc.4", default-features = false, features = ["flume", "macos_fsevent"] }
 serde_yaml = "0.9"
 once_cell = "1"
 shell-words = "1"

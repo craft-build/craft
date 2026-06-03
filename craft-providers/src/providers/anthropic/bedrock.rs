@@ -5,20 +5,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use flume::Sender;
-use hmac::{Hmac, Mac};
-use tokio::io::AsyncReadExt;
 use futures::TryStreamExt;
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
-use tokio_util::io::StreamReader;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt;
+use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
-use super::{shared, MIME_JSON, lock_unpoison};
+use super::{MIME_JSON, lock_unpoison, shared};
 
 const BEDROCK_API_VERSION: &str = "bedrock-2023-05-31";
 const MIN_EVENTSTREAM_FRAME: usize = 16;
@@ -163,7 +163,8 @@ async fn fetch_container_credentials(
         Ok(path) => Some(
             std::fs::read_to_string(&path).map_err(|e| AgentError::Config {
                 message: format!("read container auth token file {path}: {e}"),
-            })?),
+            })?,
+        ),
         Err(_) => env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN").ok(),
     };
 
@@ -188,9 +189,7 @@ async fn fetch_container_credentials(
     if status != 200 {
         let body_text = resp.text().await.unwrap_or_else(|_| "unknown error".into());
         return Err(AgentError::Config {
-            message: format!(
-                "container creds endpoint returned {status}: {body_text}"
-            ),
+            message: format!("container creds endpoint returned {status}: {body_text}"),
         });
     }
 
@@ -621,9 +620,7 @@ impl Provider for Bedrock {
             let mut read_buf = [0u8; 8192];
 
             let stream = response.bytes_stream();
-            let mut reader = StreamReader::new(
-                stream.map_err(std::io::Error::other),
-            );
+            let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
 
             loop {
                 let n = reader.read(&mut read_buf).await?;
@@ -983,9 +980,7 @@ aws_session_token = MYTOKEN\n";
 
         let resp = parser.finish();
         assert_eq!(resp.usage.input, 10);
-        assert!(
-            matches!(&resp.message.content[0], ContentBlock::Text { text } if text == "Hello")
-        );
+        assert!(matches!(&resp.message.content[0], ContentBlock::Text { text } if text == "Hello"));
         assert!(
             rx.drain()
                 .any(|e| matches!(e, ProviderEvent::TextDelta { text } if text == "Hello"))
