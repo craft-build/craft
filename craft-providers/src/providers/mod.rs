@@ -21,6 +21,7 @@ pub(crate) mod mistral;
 pub(crate) mod ollama;
 pub(crate) mod openai;
 pub(crate) mod openai_compat;
+pub(crate) mod openrouter;
 pub(crate) mod synthetic;
 pub(crate) mod zai;
 

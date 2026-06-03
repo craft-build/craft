@@ -38,6 +38,7 @@ pub(crate) trait Overlay {
     }
 }
 
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -281,6 +282,8 @@ pub struct DisplayMessage {
     pub truncated_lines: usize,
     pub render_snapshot: Option<BufferSnapshot>,
     pub render_header: Option<BufferSnapshot>,
+    pub tool_raw_input: Option<Value>,
+    pub snapshot_theme_gen: u64,
 }
 
 impl DisplayMessage {
@@ -298,6 +301,8 @@ impl DisplayMessage {
             truncated_lines: 0,
             render_snapshot: None,
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 
@@ -315,6 +320,8 @@ impl DisplayMessage {
             truncated_lines: 0,
             render_snapshot: None,
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 }

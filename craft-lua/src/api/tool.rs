@@ -209,7 +209,6 @@ impl ToolInvocation for LuaToolInvocation {
                 config: ctx.config.clone(),
                 tool_output_lines: ctx.tool_output_lines,
                 finish_tx: None,
-                live: live.clone(),
             };
 
             tx.send_async(Request::CallTool {
@@ -247,26 +246,19 @@ impl ToolInvocation for LuaToolInvocation {
                 )),
                 Some(Err(_)) => Err("lua thread disconnected".to_string()),
                 Some(Ok(reply)) => {
-                    if let Some(ref id) = ctx.tool_use_id {
-                        if let Some(live_buf) = reply.live_buf {
-                            let _ = ctx.event_tx.send(AgentEvent::LiveToolBuf {
-                                id: id.clone(),
-                                body: live_buf,
-                            });
+                        if let Some(ref id) = ctx.tool_use_id {
+                            if let Some(live_buf) = reply.live_buf {
+                                let _ = ctx.event_tx.send(AgentEvent::LiveToolBuf {
+                                    id: id.clone(),
+                                    body: live_buf,
+                                });
+                            }
+                            crate::runtime::RestoreReply {
+                                body: reply.snapshot,
+                                header: reply.header,
+                            }
+                            .emit(id, None, &ctx.event_tx);
                         }
-                        if let Some(snapshot) = reply.snapshot {
-                            let _ = ctx.event_tx.send(AgentEvent::ToolSnapshot {
-                                id: id.clone(),
-                                snapshot,
-                            });
-                        }
-                        if let Some(header) = reply.header {
-                            let _ = ctx.event_tx.send(AgentEvent::ToolHeaderSnapshot {
-                                id: id.clone(),
-                                snapshot: header,
-                            });
-                        }
-                    }
                     let format = reply.format;
                     reply.result.map(|s| match format {
                         LuaOutputFormat::Markdown => ToolOutput::Markdown(s),

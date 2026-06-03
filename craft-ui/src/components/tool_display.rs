@@ -48,6 +48,13 @@ pub struct RenderCtx<'a> {
 pub struct BatchChildState {
     pub snapshot: Option<BufferSnapshot>,
     pub header: Option<BufferSnapshot>,
+    pub snapshot_theme_gen: u64,
+}
+
+impl BatchChildState {
+    pub fn snapshot_is_stale(&self, current_gen: u64) -> bool {
+        (self.snapshot.is_some() || self.header.is_some()) && self.snapshot_theme_gen != current_gen
+    }
 }
 
 pub(crate) fn output_limits_from_hints(
@@ -174,6 +181,7 @@ pub fn assistant_style() -> RoleStyle {
         text_style: theme::current().assistant,
         prefix_style: theme::current().assistant_prefix,
         use_markdown: true,
+
     }
 }
 
@@ -183,6 +191,7 @@ pub fn user_style() -> RoleStyle {
         text_style: theme::current().assistant,
         prefix_style: theme::current().user,
         use_markdown: true,
+
     }
 }
 
@@ -192,6 +201,7 @@ pub fn thinking_style() -> RoleStyle {
         text_style: theme::current().thinking,
         prefix_style: theme::current().thinking,
         use_markdown: true,
+
     }
 }
 
@@ -201,6 +211,7 @@ pub fn error_style() -> RoleStyle {
         text_style: theme::current().error,
         prefix_style: theme::current().tool_error,
         use_markdown: false,
+
     }
 }
 
@@ -212,6 +223,7 @@ pub fn done_style() -> RoleStyle {
             .add_modifier(ratatui::style::Modifier::BOLD),
         prefix_style: theme::current().tool_success,
         use_markdown: false,
+
     }
 }
 
@@ -584,7 +596,7 @@ impl ToolLineBuilder {
     fn push_markdown_body(&mut self, text: &str) {
         let style = theme::current().assistant;
         let indent = TOOL_BODY_INDENT.len() as u16;
-        let md_lines = text_to_lines(text, "", style, style, self.width.saturating_sub(indent));
+        let md_lines = text_to_lines(text, "", style, style, self.width.saturating_sub(indent), Some(craft_markdown::render::TOOL_OUTPUT_MAX_LINE_BYTES));
         for mut line in md_lines {
             line.spans.insert(0, Span::raw(TOOL_BODY_INDENT));
             self.lines.push(line);
@@ -969,6 +981,8 @@ mod tests {
             turn_usage: None,
             render_snapshot: None,
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 
@@ -1102,6 +1116,7 @@ mod tests {
             summary: "test".into(),
             status,
             input,
+            raw_input: None,
             output,
             annotation: None,
         }
@@ -1259,6 +1274,8 @@ mod tests {
             truncated_lines: 0,
             render_snapshot: None,
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 
@@ -1372,6 +1389,8 @@ mod tests {
             truncated_lines: 0,
             render_snapshot: None,
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 
@@ -1409,6 +1428,8 @@ mod tests {
             truncated_lines: 0,
             render_snapshot: Some(snapshot),
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 
@@ -1571,6 +1592,8 @@ mod tests {
             turn_usage: None,
             render_snapshot: None,
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 
@@ -1674,6 +1697,8 @@ mod tests {
             turn_usage: None,
             render_snapshot: None,
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         }
     }
 
@@ -1819,6 +1844,8 @@ mod tests {
             truncated_lines: 0,
             render_snapshot: Some(snapshot),
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         };
         let tl = build_tool_lines(
             &msg,
@@ -1855,6 +1882,8 @@ mod tests {
             truncated_lines: 0,
             render_snapshot: Some(snapshot),
             render_header: None,
+            tool_raw_input: None,
+            snapshot_theme_gen: 0,
         };
         let tl = build_tool_lines(
             &msg,

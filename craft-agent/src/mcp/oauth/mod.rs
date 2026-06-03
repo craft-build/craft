@@ -23,6 +23,8 @@ use craft_storage::StateDir;
 use craft_storage::auth::{McpAuthData, load_mcp_auth, save_mcp_auth};
 use tracing::{info, warn};
 
+const MAX_REDIRECTS: usize = 10;
+
 use self::callback::CallbackServer;
 use self::discovery::parse_www_authenticate;
 use super::error::McpError;
@@ -203,6 +205,7 @@ async fn discover_auth_server_for(
 fn build_http_client() -> Result<Client, reqwest::Error> {
     Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
         .build()
 }
 

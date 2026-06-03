@@ -241,12 +241,12 @@ pub fn current() -> Guard<Arc<Theme>> {
 
 pub fn set(theme: Theme) {
     THEME.store(Arc::new(theme));
-    GENERATION.fetch_add(1, Ordering::Relaxed);
     crate::highlight::refresh_syntax_theme();
+    GENERATION.fetch_add(1, Ordering::Release);
 }
 
 pub fn generation() -> u64 {
-    GENERATION.load(Ordering::Relaxed)
+    GENERATION.load(Ordering::Acquire)
 }
 
 pub fn load_by_name(name: &str) -> Result<Theme, String> {

@@ -26,6 +26,8 @@ use crate::selection::Selection;
 use crate::splash::{ColorTransition, Splash};
 use crate::theme;
 use craft_config::{ToolOutputLines, UiConfig};
+use craft_lua::RestoreItem;
+use serde_json::Value;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -75,6 +77,7 @@ pub struct MessagesPanel {
     batch_children: HashMap<String, BatchChildState>,
     tool_output_lines: ToolOutputLines,
     render_hints: RenderHintsRegistry,
+    pending_restores: Vec<RestoreItem>,
 }
 
 impl MessagesPanel {
@@ -113,6 +116,7 @@ impl MessagesPanel {
             batch_children: HashMap::new(),
             tool_output_lines: ui_config.tool_output_lines,
             render_hints: RenderHintsRegistry::new(),
+            pending_restores: Vec::new(),
         }
     }
 
@@ -158,6 +162,7 @@ impl MessagesPanel {
             msg.text = event.summary;
             msg.tool_input = event.input.map(Arc::new);
             msg.tool_output = event.output.map(Arc::new);
+            msg.tool_raw_input = event.raw_input;
             msg.annotation = event.annotation;
             msg.render_header = event.render_header;
             self.rebuild_tool_segment(&event.id);
@@ -174,6 +179,7 @@ impl MessagesPanel {
         );
         msg.tool_input = event.input.map(Arc::new);
         msg.tool_output = event.output.map(Arc::new);
+        msg.tool_raw_input = event.raw_input;
         msg.annotation = event.annotation;
         msg.render_header = event.render_header;
         msg.timestamp = Some(format_timestamp_now());
@@ -204,7 +210,7 @@ impl MessagesPanel {
         if let Some(entry) = self.live_bufs.remove(&event.id)
             && let Some(lines) = entry.buf.read_if_dirty()
         {
-            self.store_snapshot(&event.id, BufferSnapshot::from_arc(lines));
+            self.store_snapshot(&event.id, BufferSnapshot::from_arc(lines), None);
         }
         let Some(msg) = self
             .messages
@@ -319,20 +325,21 @@ impl MessagesPanel {
         );
     }
 
-    pub fn tool_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot) {
-        self.store_snapshot(tool_id, snapshot);
+    pub fn tool_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
+        self.store_snapshot(tool_id, snapshot, theme_gen);
     }
 
-    pub fn tool_header_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot) {
+    pub fn tool_header_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
+        let theme_gen_val = theme_gen.unwrap_or(self.theme_generation);
         if let Some((batch_id, _)) = parse_batch_inner_id(tool_id) {
-            self.batch_children
-                .entry(tool_id.to_owned())
-                .or_default()
-                .header = Some(snapshot);
+            let child = self.batch_children.entry(tool_id.to_owned()).or_default();
+            child.header = Some(snapshot);
+            child.snapshot_theme_gen = theme_gen_val;
             self.rebuild_tool_segment(batch_id);
         } else if let Some(msg) = self.find_tool_msg_mut(tool_id) {
             msg.text = snapshot.first_line_text();
             msg.render_header = Some(snapshot);
+            msg.snapshot_theme_gen = theme_gen_val;
             self.rebuild_tool_segment(tool_id);
         }
     }
@@ -694,6 +701,7 @@ impl MessagesPanel {
         let width = area.width.saturating_sub(1);
         let theme_gen = theme::generation();
         let width_changed = self.viewport_width != width || self.theme_generation != theme_gen;
+        let theme_changed = self.theme_generation != theme_gen;
         if width_changed {
             self.viewport_width = width;
             self.theme_generation = theme_gen;
@@ -719,6 +727,10 @@ impl MessagesPanel {
                 assistant.text_style,
                 assistant.prefix_style,
             );
+        }
+
+        if theme_changed {
+            self.collect_stale_snapshots(theme_gen);
         }
         self.drain_highlights();
         self.poll_live_bufs();
@@ -827,15 +839,16 @@ impl MessagesPanel {
                 .is_some_and(|m| m.render_snapshot.is_some())
     }
 
-    fn store_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot) {
+    fn store_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
+        let theme_gen_val = theme_gen.unwrap_or(self.theme_generation);
         if let Some((batch_id, _)) = parse_batch_inner_id(tool_id) {
-            self.batch_children
-                .entry(tool_id.to_owned())
-                .or_default()
-                .snapshot = Some(snapshot);
+            let child = self.batch_children.entry(tool_id.to_owned()).or_default();
+            child.snapshot = Some(snapshot);
+            child.snapshot_theme_gen = theme_gen_val;
             self.rebuild_tool_segment(batch_id);
         } else if let Some(msg) = self.find_tool_msg_mut(tool_id) {
             msg.render_snapshot = Some(snapshot);
+            msg.snapshot_theme_gen = theme_gen_val;
             self.rebuild_tool_segment(tool_id);
         }
     }
@@ -853,6 +866,73 @@ impl MessagesPanel {
             tool_output_lines: &self.tool_output_lines,
             registry: &self.render_hints,
         }
+    }
+
+    fn collect_stale_snapshots(&mut self, current_gen: u64) {
+        let tol = self.tool_output_lines;
+        for msg in &self.messages {
+            let DisplayRole::Tool(t) = &msg.role else { continue };
+            let has_snapshot = msg.render_snapshot.is_some() || msg.render_header.is_some();
+            if has_snapshot && msg.snapshot_theme_gen != current_gen {
+                let output_text = msg
+                    .tool_output
+                    .as_deref()
+                    .map(|o| o.as_text())
+                    .unwrap_or_default();
+                self.pending_restores.push(RestoreItem {
+                    tool: Arc::clone(&t.name),
+                    tool_use_id: t.id.clone(),
+                    output: output_text,
+                    input: msg.tool_raw_input.clone().unwrap_or(Value::Null),
+                    is_error: t.status == ToolStatus::Error,
+                    tool_output_lines: tol,
+                    theme_gen: Some(current_gen),
+                });
+            }
+        }
+        for (child_id, child) in &self.batch_children {
+            if child.snapshot_is_stale(current_gen) {
+                let Some((batch_id, _)) = parse_batch_inner_id(child_id) else {
+                    continue;
+                };
+                let Some(msg) = self
+                    .messages
+                    .iter()
+                    .rfind(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == batch_id))
+                else {
+                    continue;
+                };
+                let Some(tool_output) = &msg.tool_output else {
+                    continue;
+                };
+                let ToolOutput::Batch { entries, .. } = tool_output.as_ref() else {
+                    continue;
+                };
+                let idx = child_id
+                    .rsplit_once("__")
+                    .and_then(|(_, i)| i.parse::<usize>().ok());
+                let Some(idx) = idx else { continue };
+                let Some(entry) = entries.get(idx) else { continue };
+                let output_text = entry
+                    .output
+                    .as_ref()
+                    .map(|o| o.as_text())
+                    .unwrap_or_default();
+                self.pending_restores.push(RestoreItem {
+                    tool: Arc::from(entry.tool.as_str()),
+                    tool_use_id: child_id.clone(),
+                    output: output_text,
+                    input: entry.raw_input.clone().unwrap_or(Value::Null),
+                    is_error: entry.status == BatchToolStatus::Error,
+                    tool_output_lines: tol,
+                    theme_gen: Some(current_gen),
+                });
+            }
+        }
+    }
+
+    pub fn drain_pending_restores(&mut self) -> Vec<RestoreItem> {
+        std::mem::take(&mut self.pending_restores)
     }
 
     pub fn register_live_buf(&mut self, id: String, body: Arc<SharedBuf>) {
@@ -877,7 +957,7 @@ impl MessagesPanel {
             }
         }
         for (tool_id, lines) in dirty {
-            self.store_snapshot(&tool_id, BufferSnapshot::from_arc(lines));
+            self.store_snapshot(&tool_id, BufferSnapshot::from_arc(lines), None);
         }
         for id in stale {
             self.live_bufs.remove(&id);
@@ -1130,6 +1210,7 @@ impl MessagesPanel {
                         style.text_style,
                         style.prefix_style,
                         self.viewport_width,
+                        None,
                     )
                 } else {
                     plain_lines(&msg.text, prefix, style.text_style, style.prefix_style)

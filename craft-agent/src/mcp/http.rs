@@ -16,6 +16,7 @@ const SESSION_HEADER: &str = "mcp-session-id";
 const CT_JSON: &str = "application/json";
 const CT_SSE: &str = "text/event-stream";
 const ACCEPT_VALUE: &str = "application/json, text/event-stream";
+const MAX_REDIRECTS: usize = 10;
 
 pub struct HttpTransport {
     name: Arc<str>,
@@ -36,6 +37,7 @@ impl HttpTransport {
         let client =
             reqwest::Client::builder()
                 .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
                 .build()
                 .map_err(|e| McpError::StartFailed {
                     server: name.into(),

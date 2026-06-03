@@ -21,7 +21,7 @@ pub const CODE_BAR: &str = "│ ";
 pub const CODE_BAR_WRAP: &str = "│";
 /// Lines longer than this get truncated with `...` to protect the parser
 /// and terminal from runaway output.
-pub const MAX_LINE_BYTES: usize = 500;
+pub const TOOL_OUTPUT_MAX_LINE_BYTES: usize = 500;
 const HR_CHAR: char = '─';
 const MIN_COL_WIDTH: usize = 5;
 const LONG_LINE_SUFFIX: &str = "...";
@@ -698,10 +698,14 @@ pub fn hr_text(width: u16) -> String {
     iter::repeat_n(HR_CHAR, width as usize).collect()
 }
 
-/// Truncate lines longer than [`MAX_LINE_BYTES`]. Returns borrowed when
+/// Truncate lines longer than [`TOOL_OUTPUT_MAX_LINE_BYTES`]. Returns borrowed when
 /// nothing needs truncating (common path, zero alloc).
 pub fn truncate_long_lines(text: &str) -> Cow<'_, str> {
-    if !text.lines().any(|l| l.len() > MAX_LINE_BYTES) {
+    truncate_long_lines_at(text, TOOL_OUTPUT_MAX_LINE_BYTES)
+}
+
+pub fn truncate_long_lines_at(text: &str, max_bytes: usize) -> Cow<'_, str> {
+    if !text.lines().any(|l| l.len() > max_bytes) {
         return Cow::Borrowed(text);
     }
     let mut result = String::with_capacity(text.len());
@@ -709,8 +713,8 @@ pub fn truncate_long_lines(text: &str) -> Cow<'_, str> {
         if i > 0 {
             result.push('\n');
         }
-        if line.len() > MAX_LINE_BYTES {
-            let mut boundary = MAX_LINE_BYTES;
+        if line.len() > max_bytes {
+            let mut boundary = max_bytes;
             while !line.is_char_boundary(boundary) {
                 boundary -= 1;
             }
@@ -756,6 +760,13 @@ mod tests {
 
     const TEST_WIDTH: u16 = 80;
 
+    fn find_span<'a>(lines: &'a [Line], text: &str) -> Option<&'a Span> {
+        lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| s.text.trim() == text)
+    }
+
     fn lines_text(lines: &[Line]) -> Vec<String> {
         lines
             .iter()
@@ -777,8 +788,7 @@ mod tests {
     #[test]
     fn render_bold_emits_text_with_bold_emphasis() {
         let lines = render("**bold**", TEST_WIDTH);
-        let span = &lines[0].spans[0];
-        assert_eq!(span.text, "bold");
+        let span = find_span(&lines, "bold").expect("bold span");
         assert_eq!(span.style, StyleToken::Text);
         assert_eq!(span.emphasis, Emphasis::BOLD);
     }
@@ -811,19 +821,11 @@ mod tests {
     }
 
     #[test]
-    fn render_heading_preserves_inline_code_token() {
+    fn render_heading_preserves_inline_styles() {
         let lines = render("## **bold** and `code`", TEST_WIDTH);
-        let code_span = lines[0]
-            .spans
-            .iter()
-            .find(|s| s.text == "code")
-            .expect("code span");
+        let code_span = find_span(&lines, "code").expect("code span");
         assert_eq!(code_span.style, StyleToken::InlineCode);
-        let bold_span = lines[0]
-            .spans
-            .iter()
-            .find(|s| s.text == "bold")
-            .expect("bold span");
+        let bold_span = find_span(&lines, "bold").expect("bold span");
         assert_eq!(bold_span.style, StyleToken::Heading);
     }
 
@@ -892,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn render_table_emits_borders_and_rows_with_table_border_tokens() {
+    fn render_table_emits_borders_and_rows() {
         let lines = render("| H |\n| --- |\n| d |", TEST_WIDTH);
         let borders: Vec<_> = lines
             .iter()
@@ -986,37 +988,34 @@ mod tests {
     #[test]
     fn render_table_header_row_cells_are_bold() {
         let lines = render("| Header |\n| --- |\n| Data |", TEST_WIDTH);
-        let header_span = lines
-            .iter()
-            .flat_map(|l| &l.spans)
-            .find(|s| s.text.trim() == "Header")
-            .expect("header span");
+        let header_span = find_span(&lines, "Header").expect("header span");
         match &header_span.style {
             StyleToken::Text | StyleToken::InlineCode => assert!(header_span.emphasis.bold),
             other => panic!("expected text/inline-code with bold, got {other:?}"),
         }
     }
 
-    #[test_case("short\nlines\n", "short\nlines\n" ; "short_text_unchanged")]
-    #[test_case(&"a".repeat(MAX_LINE_BYTES), &"a".repeat(MAX_LINE_BYTES) ; "exactly_at_limit_unchanged")]
-    #[test_case(&"a".repeat(MAX_LINE_BYTES + 1), &format!("{}...", "a".repeat(MAX_LINE_BYTES)) ; "one_over_limit_truncated")]
-    fn truncate_long_lines_cases(input: &str, expected: &str) {
-        assert_eq!(&*truncate_long_lines(input), expected);
-    }
-
     #[test]
-    fn truncate_long_lines_multibyte_boundary() {
-        let mut line = "a".repeat(MAX_LINE_BYTES - 1);
-        line.push('\u{00e9}');
-        let result = truncate_long_lines(&line);
-        assert!(result.ends_with("..."));
-        assert!(!result.contains('\u{00e9}'));
-    }
+    fn truncate_long_lines_behavior() {
+        let max = TOOL_OUTPUT_MAX_LINE_BYTES;
 
-    #[test_case(&format!("{}\n", "z".repeat(MAX_LINE_BYTES + 10)), true ; "preserves_trailing_newline")]
-    #[test_case(&"z".repeat(MAX_LINE_BYTES + 10), false ; "no_trailing_newline_when_absent")]
-    fn truncate_long_lines_trailing_newline(input: &str, expect_trailing: bool) {
-        assert_eq!(truncate_long_lines(input).ends_with('\n'), expect_trailing);
+        assert_eq!(&*truncate_long_lines("short\nlines\n"), "short\nlines\n");
+        assert_eq!(&*truncate_long_lines(&"a".repeat(max)), "a".repeat(max));
+        assert_eq!(
+            &*truncate_long_lines(&"a".repeat(max + 1)),
+            format!("{}{LONG_LINE_SUFFIX}", "a".repeat(max))
+        );
+
+        let mut multibyte = "a".repeat(max - 1);
+        multibyte.push('\u{00e9}');
+        let result = truncate_long_lines(&multibyte);
+        assert!(result.ends_with(LONG_LINE_SUFFIX));
+        assert!(!result.contains('\u{00e9}'));
+
+        let with_nl = format!("{}\n", "z".repeat(max + 10));
+        assert!(truncate_long_lines(&with_nl).ends_with('\n'));
+        let without_nl = "z".repeat(max + 10);
+        assert!(!truncate_long_lines(&without_nl).ends_with('\n'));
     }
 
     #[test]

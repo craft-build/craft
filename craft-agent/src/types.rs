@@ -121,6 +121,8 @@ pub struct BatchToolEntry {
     pub summary: String,
     pub status: BatchToolStatus,
     pub input: Option<ToolInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<serde_json::Value>,
     pub output: Option<ToolOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
@@ -348,6 +350,7 @@ pub struct ToolStartEvent {
     pub render_header: Option<BufferSnapshot>,
     pub annotation: Option<String>,
     pub input: Option<ToolInput>,
+    pub raw_input: Option<serde_json::Value>,
     pub output: Option<ToolOutput>,
 }
 
@@ -413,6 +416,8 @@ pub enum AgentEvent {
         name: String,
     },
     ToolStart(Box<ToolStartEvent>),
+    /// `content` is the full accumulated output so far, not a delta.
+    /// Producers must accumulate into a growing buffer and send the whole thing each flush.
     ToolOutput {
         id: String,
         content: String,
@@ -454,10 +459,14 @@ pub enum AgentEvent {
     ToolSnapshot {
         id: String,
         snapshot: BufferSnapshot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme_gen: Option<u64>,
     },
     ToolHeaderSnapshot {
         id: String,
         snapshot: BufferSnapshot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme_gen: Option<u64>,
     },
     LiveToolBuf {
         id: String,

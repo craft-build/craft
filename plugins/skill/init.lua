@@ -7,7 +7,6 @@ local parse_frontmatter = helpers.parse_frontmatter
 local build_skill_list = helpers.build_skill_list
 
 local PROJECT_SKILL_DIRS = {
-  ".craft/skills",
   ".claude/skills",
   ".opencode/skills",
   ".agents/skills",
@@ -59,8 +58,12 @@ end
 
 local function discover_skills()
   local skills = {}
-  local home = craft.uv.os_homedir()
+  local config = craft.env.config_dir()
+  if config then
+    scan_skill_dir(craft.fs.joinpath(config, "skills"), skills)
+  end
 
+  local home = craft.uv.os_homedir()
   if home then
     for _, rel in ipairs(GLOBAL_SKILL_DIRS) do
       scan_skill_dir(craft.fs.joinpath(home, rel), skills)

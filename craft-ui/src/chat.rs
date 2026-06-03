@@ -139,11 +139,11 @@ impl Chat {
             AgentEvent::AuthRequired => {
                 return ChatEventResult::AuthRequired;
             }
-            AgentEvent::ToolSnapshot { id, snapshot } => {
-                self.messages_panel.tool_snapshot(&id, snapshot);
+            AgentEvent::ToolSnapshot { id, snapshot, theme_gen } => {
+                self.messages_panel.tool_snapshot(&id, snapshot, theme_gen);
             }
-            AgentEvent::ToolHeaderSnapshot { id, snapshot } => {
-                self.messages_panel.tool_header_snapshot(&id, snapshot);
+            AgentEvent::ToolHeaderSnapshot { id, snapshot, theme_gen } => {
+                self.messages_panel.tool_header_snapshot(&id, snapshot, theme_gen);
             }
             AgentEvent::SubagentHistory { .. } => {}
             AgentEvent::LiveToolBuf { id, body } => {
@@ -221,8 +221,23 @@ impl Chat {
         self.messages_panel.handle_click(row, area)
     }
 
-    pub fn tool_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot) {
-        self.messages_panel.tool_snapshot(tool_id, snapshot);
+    pub fn tool_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
+        self.messages_panel.tool_snapshot(tool_id, snapshot, theme_gen);
+    }
+
+    pub fn tool_header_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
+        self.messages_panel.tool_header_snapshot(tool_id, snapshot, theme_gen);
+    }
+
+    pub fn drain_pending_restores(&mut self) -> Vec<craft_lua::RestoreItem> {
+        self.messages_panel.drain_pending_restores()
+    }
+
+    pub fn set_restore_channel(
+        &mut self,
+        _handle: Option<craft_lua::EventHandle>,
+        _tx: Option<craft_agent::EventSender>,
+    ) {
     }
 
     pub fn register_live_buf(&mut self, id: String, buf: Arc<SharedBuf>) {
@@ -406,6 +421,11 @@ pub fn history_to_display(
                                     render_header = reply.header;
                                 }
                             }
+                            let theme_gen = if render_snapshot.is_some() || render_header.is_some() {
+                                crate::theme::generation()
+                            } else {
+                                0
+                            };
                             display.push(DisplayMessage {
                                 role: DisplayRole::Tool(Box::new(ToolRole {
                                     id: id.clone(),
@@ -423,6 +443,8 @@ pub fn history_to_display(
                                 truncated_lines,
                                 render_snapshot,
                                 render_header,
+                                tool_raw_input: Some(input.clone()),
+                                snapshot_theme_gen: theme_gen,
                             });
                         }
                         _ => {}
@@ -535,6 +557,7 @@ mod tests {
             summary: String::new(),
             annotation: None,
             input: None,
+            raw_input: None,
             output: None,
             render_header: None,
         }))
@@ -829,6 +852,7 @@ mod tests {
                     summary: "/a.rs".into(),
                     status: BatchToolStatus::Success,
                     input: None,
+                    raw_input: None,
                     output: None,
                     annotation: None,
                 },
@@ -837,6 +861,7 @@ mod tests {
                     summary: "/missing".into(),
                     status: BatchToolStatus::Error,
                     input: None,
+                    raw_input: None,
                     output: None,
                     annotation: None,
                 },

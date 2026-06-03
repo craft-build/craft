@@ -73,6 +73,8 @@ use mouse::EDGE_SCROLL_LINES;
 pub(crate) use queue::MessageQueue;
 use session_state::SessionState;
 
+pub(crate) const RESTORE_RUN_ID: u64 = u64::MAX;
+
 const CANCEL_MSG: &str = "Cancelled.";
 const FLASH_CANCEL: &str = "Press esc again to stop...";
 const FLASH_REWIND: &str = "Press esc again to rewind...";
@@ -172,6 +174,7 @@ pub struct App {
     pub(super) buf_click: Option<BufClickHandler>,
     pub(crate) lua_event_handle: Option<EventHandle>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+    pub(crate) restore_event_tx: Option<craft_agent::EventSender>,
 }
 
 macro_rules! define_overlays {
@@ -254,11 +257,25 @@ impl App {
             buf_click: None,
             lua_event_handle: None,
             subagent_answers: HashMap::new(),
+            restore_event_tx: None,
         }
     }
 
     pub(crate) fn main_chat(&mut self) -> &mut Chat {
         &mut self.chats[0]
+    }
+
+    pub(crate) fn dispatch_pending_restores(&mut self) {
+        let items: Vec<_> = self
+            .chats
+            .iter_mut()
+            .flat_map(|c| c.drain_pending_restores())
+            .collect();
+        let Some(handle) = &self.lua_event_handle else { return };
+        let Some(event_tx) = &self.restore_event_tx else { return };
+        for item in items {
+            handle.restore_tool_async(item, event_tx);
+        }
     }
 
     fn is_main_chat(&self) -> bool {
@@ -840,6 +857,29 @@ impl App {
     }
 
     fn handle_agent_event(&mut self, envelope: Envelope) -> Vec<Action> {
+        if envelope.run_id == RESTORE_RUN_ID {
+            let (id, snapshot, theme_gen, is_header) = match envelope.event {
+                AgentEvent::ToolSnapshot {
+                    id,
+                    snapshot,
+                    theme_gen,
+                } => (id, snapshot, theme_gen, false),
+                AgentEvent::ToolHeaderSnapshot {
+                    id,
+                    snapshot,
+                    theme_gen,
+                } => (id, snapshot, theme_gen, true),
+                _ => return vec![],
+            };
+            for chat in &mut self.chats {
+                if is_header {
+                    chat.tool_header_snapshot(&id, snapshot.clone(), theme_gen);
+                } else {
+                    chat.tool_snapshot(&id, snapshot.clone(), theme_gen);
+                }
+            }
+            return vec![];
+        }
         if envelope.run_id != self.run_id {
             // Stale run_id after cancel: agent updates shared_history before sending
             // Done/Error, so this is the first moment the full conversation is available.
@@ -1018,6 +1058,7 @@ impl App {
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
         }
+        chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
         self.chats.push(chat);
         idx
     }

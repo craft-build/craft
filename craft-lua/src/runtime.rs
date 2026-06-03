@@ -111,20 +111,55 @@ pub enum Request {
         reply: flume::Sender<craft_agent::prompt::ResolvedSlots>,
     },
     Shutdown,
-    RestoreTool {
-        tool: Arc<str>,
-        tool_use_id: String,
-        output: String,
-        input: Value,
-        is_error: bool,
-        tool_output_lines: craft_config::ToolOutputLines,
-        reply: flume::Sender<Option<RestoreReply>>,
+    RestoreToolAsync {
+        item: RestoreItem,
+        event_tx: craft_agent::EventSender,
     },
+    RestoreToolBatch {
+        items: Vec<RestoreItem>,
+        reply: flume::Sender<Vec<Option<RestoreReply>>>,
+    },
+}
+
+/// Single source of truth for re-running a lua restore callback, shared by
+/// session load, batch load, and theme re-bake.
+pub struct RestoreItem {
+    pub tool: Arc<str>,
+    pub tool_use_id: String,
+    pub output: String,
+    pub input: Value,
+    pub is_error: bool,
+    pub tool_output_lines: craft_config::ToolOutputLines,
+    pub theme_gen: Option<u64>,
 }
 
 pub struct RestoreReply {
     pub body: Option<BufferSnapshot>,
     pub header: Option<BufferSnapshot>,
+}
+
+impl RestoreReply {
+    pub fn emit(
+        self,
+        tool_use_id: &str,
+        theme_gen: Option<u64>,
+        event_tx: &craft_agent::EventSender,
+    ) {
+        if let Some(snapshot) = self.body {
+            let _ = event_tx.send(craft_agent::AgentEvent::ToolSnapshot {
+                id: tool_use_id.to_owned(),
+                snapshot,
+                theme_gen,
+            });
+        }
+        if let Some(snapshot) = self.header {
+            let _ = event_tx.send(craft_agent::AgentEvent::ToolHeaderSnapshot {
+                id: tool_use_id.to_owned(),
+                snapshot,
+                theme_gen,
+            });
+        }
+    }
 }
 
 pub struct ClickReply {
@@ -485,6 +520,7 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
                     let _ = live.event_tx.send(craft_agent::AgentEvent::ToolSnapshot {
                         id: live.tool_use_id.clone(),
                         snapshot: buf.take(),
+                        theme_gen: None,
                     });
                 }
             }
@@ -856,6 +892,7 @@ impl LuaRuntime {
         name: Arc<str>,
         source: &str,
         plugin_dir: Option<PathBuf>,
+        config_store: Option<&ConfigStore>,
     ) -> LoadResult {
         let stale = self.drain_pending();
         debug_assert!(
@@ -864,6 +901,11 @@ impl LuaRuntime {
         );
         self.discard_pending(stale);
 
+        let map_err = |e: mlua::Error| PluginError::Lua {
+            plugin: name.to_string(),
+            source: e,
+        };
+
         let require_root = plugin_dir.as_ref().map(|d| d.join("lua"));
         let craft = create_craft_global(
             &self.lua,
@@ -871,17 +913,15 @@ impl LuaRuntime {
             Arc::clone(&name),
             self.ui_action_tx.clone(),
         )
-        .map_err(|e| PluginError::Lua {
-            plugin: name.to_string(),
-            source: e,
-        })?;
+        .map_err(&map_err)?;
 
-        let env = self
-            .build_env(craft, require_root)
-            .map_err(|e| PluginError::Lua {
-                plugin: name.to_string(),
-                source: e,
-            })?;
+        if let Some(cs) = config_store {
+            let setup_fn =
+                crate::api::setup::create_setup_fn(&self.lua, Arc::clone(cs)).map_err(&map_err)?;
+            craft.set("setup", setup_fn).map_err(&map_err)?;
+        }
+
+        let env = self.build_env(craft, require_root).map_err(&map_err)?;
 
         self.drop_plugin_keys(&name);
 
@@ -897,10 +937,7 @@ impl LuaRuntime {
             let stale = self.drain_pending();
             self.discard_pending(stale);
             self.drop_plugin_keys(&name);
-            return Err(PluginError::Lua {
-                plugin: name.to_string(),
-                source: e,
-            });
+            return Err(map_err(e));
         }
 
         let pending = self.drain_pending();
@@ -1059,6 +1096,18 @@ impl LuaRuntime {
         extract_restore_reply(&ret)
     }
 
+    async fn restore_item(&self, item: RestoreItem) -> Option<RestoreReply> {
+        self.restore_tool(
+            &item.tool,
+            &item.tool_use_id,
+            &item.output,
+            item.input,
+            item.is_error,
+            item.tool_output_lines,
+        )
+        .await
+    }
+
     fn compute_permission_scopes(
         &self,
         plugin: &str,
@@ -1108,51 +1157,21 @@ impl LuaRuntime {
         })
     }
 
-    fn run_init_lua(
-        &self,
+    async fn run_init_lua(
+        &mut self,
         source: &str,
         source_name: &str,
         plugin_dir: Option<PathBuf>,
     ) -> Result<Option<RawConfig>, PluginError> {
-        let map_err = |e: mlua::Error| PluginError::Lua {
-            plugin: source_name.to_owned(),
-            source: e,
-        };
-
         let config_store: ConfigStore = Arc::new(Mutex::new(None));
-        let require_root = plugin_dir.as_ref().map(|d| d.join("lua"));
-
-        let setup_fn = crate::api::setup::create_setup_fn(&self.lua, Arc::clone(&config_store))
-            .map_err(&map_err)?;
-        let craft = self.lua.create_table().map_err(&map_err)?;
-        craft.set("setup", setup_fn).map_err(&map_err)?;
-        craft.set(
-            "fs",
-            crate::api::fs::create_fs_table(&self.lua).map_err(&map_err)?,
+        self.load_source(
+            Arc::from(source_name),
+            source,
+            plugin_dir,
+            Some(&config_store),
         )
-        .map_err(&map_err)?;
-        craft.set(
-            "json",
-            crate::api::json::create_json_table(&self.lua).map_err(&map_err)?,
-        )
-        .map_err(&map_err)?;
-        craft.set(
-            "uv",
-            crate::api::uv::create_uv_table(&self.lua).map_err(&map_err)?,
-        )
-        .map_err(&map_err)?;
-
-        let env = self.build_env(craft, require_root).map_err(&map_err)?;
-
-        self.lua
-            .load(source)
-            .set_name(source_name)
-            .set_environment(env)
-            .exec()
-            .map_err(&map_err)?;
-
-        let raw = config_store.lock().unwrap().take();
-        Ok(raw)
+        .await?;
+        Ok(config_store.lock().unwrap().take())
     }
 }
 
@@ -1486,7 +1505,7 @@ pub fn spawn(
                             reply,
                         } => {
                             gate.drain().await;
-                            let res = rt.load_source(Arc::clone(&name), &source, plugin_dir).await;
+                            let res = rt.load_source(Arc::clone(&name), &source, plugin_dir, None).await;
                             let _ = reply.send(res);
                         }
                         Request::CallTool {
@@ -1606,25 +1625,29 @@ pub fn spawn(
                             reply,
                         } => {
                             gate.drain().await;
-                            let res = rt.run_init_lua(&source, &source_name, plugin_dir);
+                            let res = rt.run_init_lua(&source, &source_name, plugin_dir).await;
                             let _ = reply.send(res);
                         }
                         Request::CollectPromptSlots { reply } => {
                             let slots = rt.collect_prompt_slots().await;
                             let _ = reply.send(slots);
                         }
-                    Request::RestoreTool {
-                        tool,
-                        tool_use_id,
-                        output,
-                        input,
-                        is_error,
-                        tool_output_lines,
-                        reply,
-                    } => {
-                        let res = rt.restore_tool(&tool, &tool_use_id, &output, input, is_error, tool_output_lines).await;
+                    Request::RestoreToolAsync { item, event_tx } => {
+                        let id = item.tool_use_id.clone();
+                        let theme_gen = item.theme_gen;
+                        let res = rt.restore_item(item).await;
                         drain_spawn_queue(&rt.lua, &gate);
-                        let _ = reply.send(res);
+                        if let Some(reply) = res {
+                            reply.emit(&id, theme_gen, &event_tx);
+                        }
+                    }
+                    Request::RestoreToolBatch { items, reply } => {
+                        let mut replies = Vec::with_capacity(items.len());
+                        for item in items {
+                            replies.push(rt.restore_item(item).await);
+                        }
+                        drain_spawn_queue(&rt.lua, &gate);
+                        let _ = reply.send(replies);
                     }
                     }
                 }

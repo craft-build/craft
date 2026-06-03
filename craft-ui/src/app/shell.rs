@@ -109,9 +109,10 @@ impl App {
                     annotation: None,
                     input: Some(ToolInput::Code {
                         language: "bash".into(),
-                        code: command,
-                    }),
-                    output: None,
+                    code: command,
+                }),
+                raw_input: None,
+                output: None,
                     render_header: None,
                 });
             }

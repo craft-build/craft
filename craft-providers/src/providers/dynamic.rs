@@ -25,6 +25,7 @@ use super::llama_cpp::LlamaCpp;
 use super::mistral::Mistral;
 use super::ollama::Ollama;
 use super::openai::OpenAi;
+use super::openrouter::OpenRouter;
 use super::synthetic::Synthetic;
 use super::zai::{Zai, ZaiPlan};
 
@@ -376,6 +377,10 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
         ),
         ProviderKind::ZaiCodingPlan => Box::new(
             Zai::with_auth(ZaiPlan::Coding, auth.clone(), timeouts)?
+                .with_system_prefix(meta.system_prefix.clone()),
+        ),
+        ProviderKind::OpenRouter => Box::new(
+            OpenRouter::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::Synthetic => Box::new(

@@ -10,7 +10,7 @@ use craft_config::{PluginsConfig, RawConfig};
 
 use crate::api::command::{LuaCommandReader, UiAction};
 use crate::error::PluginError;
-use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreReply};
+use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem, RestoreReply};
 use serde_json::Value;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -306,16 +306,26 @@ impl EventHandle {
         tool_output_lines: &craft_config::ToolOutputLines,
     ) -> Option<RestoreReply> {
         let (tx, rx) = flume::bounded(1);
-        let _ = self.tx.send(Request::RestoreTool {
-            tool: Arc::from(tool),
-            tool_use_id: tool_use_id.to_owned(),
-            output: output.to_owned(),
-            input: input.clone(),
-            is_error,
-            tool_output_lines: *tool_output_lines,
+        let _ = self.tx.send(Request::RestoreToolBatch {
+            items: vec![RestoreItem {
+                tool: Arc::from(tool),
+                tool_use_id: tool_use_id.to_owned(),
+                output: output.to_owned(),
+                input: input.clone(),
+                is_error,
+                tool_output_lines: *tool_output_lines,
+                theme_gen: None,
+            }],
             reply: tx,
         });
-        rx.recv().unwrap_or_default()
+        rx.recv().unwrap_or_default().into_iter().next().flatten()
+    }
+
+    pub fn restore_tool_async(&self, item: RestoreItem, event_tx: &craft_agent::EventSender) {
+        let _ = self.tx.try_send(Request::RestoreToolAsync {
+            item,
+            event_tx: event_tx.clone(),
+        });
     }
 }
 

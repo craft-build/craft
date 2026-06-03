@@ -40,6 +40,7 @@ pub(crate) enum AgentCommand {
 pub(crate) struct AgentHandles {
     pub(crate) cmd_tx: flume::Sender<AgentCommand>,
     pub(crate) agent_rx: flume::Receiver<Envelope>,
+    agent_tx: flume::Sender<Envelope>,
     pub(crate) answer_tx: flume::Sender<String>,
     pub(crate) history: Arc<ArcSwap<Vec<Message>>>,
     pub(crate) tool_outputs: Arc<Mutex<HashMap<String, ToolOutput>>>,
@@ -95,6 +96,13 @@ impl AgentHandles {
         app.shared_tool_outputs = Some(Arc::clone(&self.tool_outputs));
         app.queue.set_shared(self.queue.clone());
         app.btw_system = Some(Arc::clone(&self.btw_system));
+
+        let restore_tx =
+            craft_agent::EventSender::new(self.agent_tx.clone(), crate::app::RESTORE_RUN_ID);
+        app.restore_event_tx = Some(restore_tx.clone());
+        for chat in &mut app.chats {
+            chat.set_restore_channel(app.lua_event_handle.clone(), Some(restore_tx.clone()));
+        }
     }
 
     pub(crate) fn send_cancel_all(&self) {
@@ -182,6 +190,7 @@ fn spawn_agent_internal(
     lua_handle: Option<EventHandle>,
 ) -> AgentHandles {
     let (agent_tx, agent_rx) = flume::unbounded::<Envelope>();
+    let agent_tx_clone = agent_tx.clone();
     let (cmd_tx, cmd_rx) = flume::unbounded::<AgentCommand>();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
     let (queue_tx, queue_rx) = shared_queue::queue();
@@ -205,7 +214,7 @@ fn spawn_agent_internal(
         Arc::clone(&shared_history),
         mcp_handle.clone(),
         Arc::clone(permissions),
-        agent_tx,
+        agent_tx_clone,
         answer_rx,
         queue_rx,
         cancel_map,
@@ -221,6 +230,7 @@ fn spawn_agent_internal(
     AgentHandles {
         cmd_tx,
         agent_rx,
+        agent_tx,
         answer_tx,
         history: shared_history,
         tool_outputs: shared_tool_outputs,

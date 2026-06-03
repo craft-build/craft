@@ -26,6 +26,7 @@ fn start(id: &str, tool: &str) -> ToolStartEvent {
         summary: id.into(),
         annotation: None,
         input: None,
+        raw_input: None,
         output: None,
         render_header: None,
     }
@@ -320,6 +321,7 @@ fn bash_code_start(panel: &mut MessagesPanel, id: &str, code: &str) {
             language: "bash".into(),
             code: code.into(),
         }),
+        raw_input: None,
         output: None,
         render_header: None,
     });
@@ -525,6 +527,7 @@ fn batch_entry(tool: &str, summary: &str, status: BatchToolStatus) -> BatchToolE
         summary: summary.into(),
         status,
         input: None,
+        raw_input: None,
         output: None,
         annotation: None,
     }
@@ -537,6 +540,7 @@ fn batch_start(panel: &mut MessagesPanel, entries: Vec<BatchToolEntry>) {
         summary: format!("{} tools", entries.len()),
         annotation: None,
         input: None,
+        raw_input: None,
         output: Some(ToolOutput::Batch {
             entries,
             text: String::new(),
@@ -814,6 +818,7 @@ fn panel_with_long_tool(line_count: usize) -> MessagesPanel {
         summary: "cmd".into(),
         annotation: None,
         input: None,
+        raw_input: None,
         output: None,
         render_header: None,
     });
@@ -876,6 +881,7 @@ fn panel_with_grep_tool(match_count: usize) -> MessagesPanel {
         summary: "grep pattern".into(),
         annotation: None,
         input: None,
+        raw_input: None,
         output: None,
         render_header: None,
     });
@@ -1083,6 +1089,7 @@ fn handle_click_returns_lua_tool_click_when_snapshot_exists() {
     panel.tool_snapshot(
         "t1",
         BufferSnapshot::from_arc(Arc::new(vec![snap_line("rendered")])),
+        None,
     );
     render(&mut panel, 80, 24);
     let area = Rect::new(0, 0, 80, 24);
@@ -1133,6 +1140,7 @@ fn handle_click_returns_lua_tool_click_for_batch_child() {
     panel.tool_snapshot(
         "b1__0",
         BufferSnapshot::from_arc(Arc::new(vec![snap_line("rendered")])),
+        None,
     );
     render(&mut panel, 80, 24);
 
@@ -1173,6 +1181,7 @@ fn tool_done_without_live_buf_preserves_existing_snapshot() {
     panel.tool_snapshot(
         "t1",
         BufferSnapshot::from_arc(Arc::new(vec![snap_line("pre-existing")])),
+        None,
     );
     panel.tool_done(ToolDoneEvent {
         id: "t1".into(),

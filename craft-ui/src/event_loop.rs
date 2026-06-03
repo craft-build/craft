@@ -297,6 +297,7 @@ impl<'t> EventLoop<'t> {
             self.tick();
             let had_agent_msg = self.drain_channels();
             self.terminal.draw(|f| self.app.view(f))?;
+            self.app.dispatch_pending_restores();
 
             if self.app.exit_request != ExitRequest::None {
                 return Ok(self.shutdown());

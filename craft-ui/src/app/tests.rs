@@ -645,6 +645,7 @@ fn cancel_resets_all_chats_and_indices() {
             summary: "running".into(),
             annotation: None,
             input: None,
+            raw_input: None,
             output: None,
             render_header: None,
         })),
@@ -980,6 +981,7 @@ fn double_esc_cancels_flushes_and_fails_tools() {
         summary: "running".into(),
         annotation: None,
         input: None,
+        raw_input: None,
         output: None,
         render_header: None,
     }))));
@@ -1385,6 +1387,7 @@ fn resolve_or_create_chat_sets_model_id_and_annotation() {
         summary: "research".into(),
         annotation: None,
         input: None,
+        raw_input: None,
         output: None,
         render_header: None,
     }))));
@@ -2333,7 +2336,7 @@ fn thinking_explicit_args() {
 #[test]
 fn thinking_non_anthropic_flashes_error() {
     let mut app = test_app();
-    app.state.model.provider = craft_providers::provider::ProviderKind::OpenAi;
+    app.state.model.provider = craft_providers::provider::ProviderKind::Ollama;
 
     app.execute_command(cmd("/thinking"));
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
@@ -2363,6 +2366,7 @@ fn agent_error_creates_synthetic_tool_done_with_message() {
         summary: "echo hello".into(),
         annotation: None,
         input: None,
+        raw_input: None,
         output: None,
         render_header: None,
     }))));
