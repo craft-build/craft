@@ -1,6 +1,6 @@
 use craft_tool_macro::Tool;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::info;
 use uuid::Uuid;
 
@@ -8,7 +8,8 @@ use super::{DescriptionContext, FileReadTracker, ToolContext, ToolFilter, ToolRe
 use crate::agent;
 use crate::template;
 use crate::tools::ToolAudience;
-use crate::{Agent, AgentInput, AgentMode, AgentParams, AgentRunParams, EventSender, ToolOutput};
+use crate::types::{Finding, ToolOutput};
+use crate::{Agent, AgentInput, AgentMode, AgentParams, AgentRunParams, EventSender};
 use craft_config::ToolOutputLines;
 
 const REVIEWER_PROMPT: &str = include_str!("../prompts/reviewer.md");
@@ -101,6 +102,9 @@ impl Review {
             answer_tx: None,
         });
 
+        let findings: Arc<Mutex<Vec<Finding>>> = Arc::new(Mutex::new(Vec::new()));
+        let findings_clone = Arc::clone(&findings);
+
         tokio::spawn(async move {
             while let Ok(mut envelope) = sub_rx.recv_async().await {
                 if matches!(
@@ -111,6 +115,11 @@ impl Review {
                         | crate::AgentEvent::ToolPending { .. }
                         | crate::AgentEvent::SubagentHistory { .. }
                 ) {
+                    if let crate::AgentEvent::ToolDone(ref done) = envelope.event
+                        && let ToolOutput::Findings(ref f) = done.output
+                    {
+                        findings_clone.lock().unwrap().extend(f.clone());
+                    }
                     continue;
                 }
                 envelope.subagent = subagent_info.clone();
@@ -136,6 +145,7 @@ impl Review {
                 timeouts: ctx.timeouts,
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
+                compression: ctx.compression.clone(),
             },
             AgentRunParams {
                 history: crate::History::new(Vec::new()),
@@ -173,7 +183,12 @@ impl Review {
             });
         }
 
-        Ok(ToolOutput::Plain(text))
+        let findings = match Arc::try_unwrap(findings) {
+            Ok(m) => m.into_inner().unwrap_or_default(),
+            Err(arc) => arc.lock().unwrap().clone(),
+        };
+
+        Ok(ToolOutput::ReviewResult { findings, verdict: text })
     }
 }
 

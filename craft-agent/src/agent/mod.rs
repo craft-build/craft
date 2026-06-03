@@ -1,6 +1,10 @@
+mod cache;
 mod compaction;
+pub(crate) mod compression_store;
 mod history;
 mod instructions;
+mod read_lifecycle;
+pub(crate) mod retrieve;
 mod run;
 mod streaming;
 pub mod tool_dispatch;

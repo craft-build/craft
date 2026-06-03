@@ -9,6 +9,7 @@ use craft_providers::{Message, Model, RequestOptions, StopReason, StreamResponse
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
 use super::history::{History, sanitize_cancelled_history};
 use super::instructions::LoadedInstructions;
+use super::read_lifecycle;
 use super::streaming::stream_with_retry;
 use super::tool_dispatch::{self, RecentCalls};
 use crate::cancel::CancelToken;
@@ -43,6 +44,7 @@ pub struct AgentParams {
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    pub compression: craft_config::CompressionConfig,
 }
 
 pub struct AgentRunParams {
@@ -79,6 +81,9 @@ pub struct Agent {
     timeouts: craft_providers::Timeouts,
     file_tracker: Arc<FileReadTracker>,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    compression: craft_config::CompressionConfig,
+    cache_tracker: super::cache::PrefixCacheTracker,
+    compression_store: super::compression_store::SharedCompressionStore,
 }
 
 impl Agent {
@@ -110,6 +115,9 @@ impl Agent {
             session_id: params.session_id,
             file_tracker: params.file_tracker,
             prompt_slots: params.prompt_slots,
+            compression: params.compression,
+            cache_tracker: super::cache::PrefixCacheTracker::new(),
+            compression_store: super::compression_store::shared_store(),
         }
     }
 
@@ -186,6 +194,12 @@ impl Agent {
         if self.cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
+
+        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history);
+        if lifecycle_removed > 0 {
+            info!(chars_removed = lifecycle_removed, "read lifecycle compression applied before turn");
+        }
+
         let response = match stream_with_retry(
             &*self.provider,
             &self.model,
@@ -230,6 +244,7 @@ impl Agent {
         self.emit_turn_complete(&response)?;
         let usage = response.usage;
         self.total_usage += usage;
+        self.cache_tracker.update(&usage, self.history.len());
 
         if has_tools {
             self.process_tool_calls(response).await?;
@@ -340,16 +355,48 @@ impl Agent {
             file_tracker: Arc::clone(&self.file_tracker),
             prompt_slots: Arc::clone(&self.prompt_slots),
             opts: self.opts,
+            compression: self.compression.clone(),
+            compression_store: Arc::clone(&self.compression_store),
         }
     }
 
     async fn try_auto_compact(&mut self, usage: &TokenUsage) -> Result<bool, AgentError> {
-        if !self.auto_compact
-            || !compaction::is_overflow(usage, &self.model, self.config.compaction_buffer)
-        {
+        if !self.auto_compact {
             return Ok(false);
         }
-        info!(total_input = usage.total_input(), "auto-compacting");
+
+        let overflow = compaction::is_overflow(usage, &self.model, self.config.compaction_buffer);
+        let proactive = !overflow
+            && compaction::is_proactive_threshold(&self.history, &self.model, 0.80);
+
+        if !overflow && !proactive {
+            return Ok(false);
+        }
+
+        // Try progressive compaction first (no LLM call)
+        let removed = compaction::progressive_compact(
+            &mut self.history,
+            self.compression.protect_recent_tool_outputs,
+            usage,
+            &self.model,
+            self.config.compaction_buffer,
+            Some(&self.cache_tracker),
+            Some(&self.compression_store),
+        );
+
+        if overflow && removed > 0
+            && !compaction::is_overflow(usage, &self.model, self.config.compaction_buffer)
+        {
+            info!(chars_removed = removed, "progressive compaction avoided full compaction");
+            return Ok(true);
+        }
+
+        if !overflow {
+            // Proactive case: progressive compaction is enough
+            return Ok(removed > 0);
+        }
+
+        info!(total_input = usage.total_input(), "auto-compacting (full)");
         self.event_tx.send(AgentEvent::AutoCompacting)?;
         self.do_compact().await?;
         Ok(true)
@@ -508,6 +555,7 @@ mod tests {
                 timeouts: craft_providers::Timeouts::default(),
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+                compression: craft_config::CompressionConfig::default(),
             },
             AgentRunParams {
                 history,
@@ -758,6 +806,7 @@ mod tests {
                 timeouts: craft_providers::Timeouts::default(),
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+                compression: craft_config::CompressionConfig::default(),
             },
             AgentRunParams {
                 history: History::new(Vec::new()),

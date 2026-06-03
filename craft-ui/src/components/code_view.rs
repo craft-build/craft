@@ -3,11 +3,51 @@ use crate::markdown::{should_truncate, truncation_notice};
 use crate::theme;
 
 use craft_agent::diff::{DiffLine, DiffSpan, compute_hunks};
-use craft_agent::{GrepFileEntry, InstructionBlock, ToolInput, ToolOutput};
-use ratatui::style::Style;
+use craft_agent::{Finding, GrepFileEntry, InstructionBlock, Priority, ToolInput, ToolOutput};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use syntect::parsing::SyntaxReference;
 use syntect::util::LinesWithEndings;
+
+const MAX_FINDING_LINES: usize = 30;
+
+fn priority_color(p: Priority) -> Color {
+    match p {
+        Priority::P0 => Color::Red,
+        Priority::P1 => Color::Rgb(255, 165, 0),
+        Priority::P2 => Color::Yellow,
+        Priority::P3 => Color::DarkGray,
+    }
+}
+
+fn render_findings(findings: &[Finding], max_lines: usize) -> (Vec<Line<'static>>, bool) {
+    if findings.is_empty() {
+        return (Vec::new(), false);
+    }
+    let dim = Style::default().dim();
+    let mut lines = Vec::new();
+    let truncated = findings.len() > max_lines;
+    let display = if truncated { &findings[..max_lines] } else { findings };
+    for (i, f) in display.iter().enumerate() {
+        let p_style = Style::default().fg(priority_color(f.priority)).bold();
+        lines.push(Line::from(vec![
+            Span::styled(format!("[{}] ", f.priority), p_style),
+            Span::raw(f.title.clone()),
+        ]));
+        let confidence_pct = (f.confidence.clamp(0.0, 1.0) * 100.0) as u8;
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}:{}-{} | {}%", f.file_path, f.line_start, f.line_end, confidence_pct), dim),
+        ]));
+        lines.push(Line::from(Span::styled(format!("  {}", f.body.trim()), dim)));
+        if let Some(ref fix) = f.suggestion {
+            lines.push(Line::from(Span::styled(format!("  Fix: {}", fix.trim()), dim)));
+        }
+        if i < display.len() - 1 {
+            lines.push(Line::default());
+        }
+    }
+    (lines, truncated)
+}
 
 pub(crate) const MAX_CODE_EXECUTION_LINES: usize = 100;
 pub(crate) const MAX_INSTRUCTION_LINES: usize = 15;
@@ -515,6 +555,12 @@ pub fn render_tool_content(
             (instruction_lines, trunc)
         }
         Some(ToolOutput::ReadDir { .. }) => (Vec::new(), false),
+        Some(ToolOutput::Findings(findings)) => {
+            render_findings(findings, limits.output.min(MAX_FINDING_LINES))
+        }
+        Some(ToolOutput::ReviewResult { findings, .. }) => {
+            render_findings(findings, limits.output.min(MAX_FINDING_LINES))
+        }
         _ => (Vec::new(), false),
     };
     truncation.output = output_trunc;

@@ -60,6 +60,17 @@ pub const MIN_CONNECT_TIMEOUT_SECS: u64 = 1;
 pub const MIN_LOW_SPEED_TIMEOUT_SECS: u64 = 1;
 pub const MIN_STREAM_TIMEOUT_SECS: u64 = 10;
 
+pub const DEFAULT_COMPRESSION_ENABLED: bool = true;
+pub const DEFAULT_COMPRESSION_MAX_LOG_LINES: usize = 50;
+pub const DEFAULT_COMPRESSION_MAX_SEARCH_FILES: usize = 20;
+pub const DEFAULT_COMPRESSION_MAX_MATCHES_PER_FILE: usize = 5;
+pub const DEFAULT_COMPRESSION_MAX_DIFF_LINES: usize = 100;
+pub const DEFAULT_COMPRESSION_MAX_JSON_ITEMS: usize = 15;
+pub const DEFAULT_COMPRESSION_JSON_FIRST_KEEP: usize = 5;
+pub const DEFAULT_COMPRESSION_JSON_LAST_KEEP: usize = 3;
+pub const DEFAULT_COMPRESSION_PROTECT_RECENT: usize = 2;
+pub const DEFAULT_COMPRESSION_CODE_RATE: f32 = 0.3;
+
 pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
     "glob",
@@ -215,6 +226,8 @@ pub struct RawConfig {
     pub provider: ProviderFileConfig,
     pub storage: StorageFileConfig,
     pub index: IndexFileConfig,
+    #[serde(default)]
+    pub compression: CompressionFileConfig,
     pub tools: HashMap<String, ToolFileConfig>,
 }
 
@@ -226,6 +239,7 @@ impl RawConfig {
         self.provider.merge(overlay.provider);
         self.storage.merge(overlay.storage);
         self.index.merge(overlay.index);
+        self.compression.merge(overlay.compression);
         self.tools.extend(overlay.tools);
     }
 
@@ -247,6 +261,7 @@ impl RawConfig {
             agent: AgentConfig::from_file(self.agent, no_rtk, &self.index, disabled_tools),
             provider: ProviderConfig::from_file(self.provider),
             storage: StorageConfig::from_file(self.storage),
+            compression: CompressionConfig::from_file(self.compression),
             permissions: PermissionsConfig::default(),
             plugins: PluginsConfig::from_tools(self.tools),
         })
@@ -409,6 +424,40 @@ impl IndexFileConfig {
     }
 }
 
+#[derive(Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompressionFileConfig {
+    pub enabled: Option<bool>,
+    pub code_compression_rate: Option<f32>,
+    pub max_log_lines: Option<usize>,
+    pub max_search_files: Option<usize>,
+    pub max_matches_per_file: Option<usize>,
+    pub max_diff_lines: Option<usize>,
+    pub max_json_items: Option<usize>,
+    pub json_first_keep: Option<usize>,
+    pub json_last_keep: Option<usize>,
+    pub protect_recent_tool_outputs: Option<usize>,
+}
+
+impl CompressionFileConfig {
+    fn merge(&mut self, overlay: CompressionFileConfig) {
+        merge_option!(
+            self,
+            overlay,
+            enabled,
+            code_compression_rate,
+            max_log_lines,
+            max_search_files,
+            max_matches_per_file,
+            max_diff_lines,
+            max_json_items,
+            json_first_keep,
+            json_last_keep,
+            protect_recent_tool_outputs
+        );
+    }
+}
+
 #[derive(Default)]
 struct PermissionsFileConfig {
     allow_all: Option<bool>,
@@ -489,6 +538,7 @@ pub struct Config {
     pub agent: AgentConfig,
     pub provider: ProviderConfig,
     pub storage: StorageConfig,
+    pub compression: CompressionConfig,
     pub permissions: PermissionsConfig,
     pub plugins: PluginsConfig,
 }
@@ -830,6 +880,73 @@ impl StorageConfig {
     }
 }
 
+#[derive(Debug, Clone, ConfigSection, Serialize)]
+#[config(section = "compression")]
+pub struct CompressionConfig {
+    #[config(default = DEFAULT_COMPRESSION_ENABLED, desc = "Enable tool output compression")]
+    pub enabled: bool,
+
+    #[config(skip, default = "DEFAULT_COMPRESSION_CODE_RATE")]
+    pub code_compression_rate: f32,
+
+    #[config(default = DEFAULT_COMPRESSION_MAX_LOG_LINES, min = 10, desc = "Max lines in compressed log output")]
+    pub max_log_lines: usize,
+
+    #[config(default = DEFAULT_COMPRESSION_MAX_SEARCH_FILES, min = 5, desc = "Max files in compressed search output")]
+    pub max_search_files: usize,
+
+    #[config(default = DEFAULT_COMPRESSION_MAX_MATCHES_PER_FILE, min = 1, desc = "Max matches per file in search output")]
+    pub max_matches_per_file: usize,
+
+    #[config(default = DEFAULT_COMPRESSION_MAX_DIFF_LINES, min = 10, desc = "Max lines in compressed diff output")]
+    pub max_diff_lines: usize,
+
+    #[config(default = DEFAULT_COMPRESSION_MAX_JSON_ITEMS, min = 5, desc = "Max items in compressed JSON array output")]
+    pub max_json_items: usize,
+
+    #[config(skip, default = "DEFAULT_COMPRESSION_JSON_FIRST_KEEP")]
+    pub json_first_keep: usize,
+
+    #[config(skip, default = "DEFAULT_COMPRESSION_JSON_LAST_KEEP")]
+    pub json_last_keep: usize,
+
+    #[config(default = DEFAULT_COMPRESSION_PROTECT_RECENT, min = 1, desc = "Never compress the last N tool outputs")]
+    pub protect_recent_tool_outputs: usize,
+}
+
+impl CompressionConfig {
+    fn from_file(f: CompressionFileConfig) -> Self {
+        Self {
+            enabled: f.enabled.unwrap_or(DEFAULT_COMPRESSION_ENABLED),
+            code_compression_rate: f
+                .code_compression_rate
+                .unwrap_or(DEFAULT_COMPRESSION_CODE_RATE),
+            max_log_lines: f.max_log_lines.unwrap_or(DEFAULT_COMPRESSION_MAX_LOG_LINES),
+            max_search_files: f
+                .max_search_files
+                .unwrap_or(DEFAULT_COMPRESSION_MAX_SEARCH_FILES),
+            max_matches_per_file: f
+                .max_matches_per_file
+                .unwrap_or(DEFAULT_COMPRESSION_MAX_MATCHES_PER_FILE),
+            max_diff_lines: f
+                .max_diff_lines
+                .unwrap_or(DEFAULT_COMPRESSION_MAX_DIFF_LINES),
+            max_json_items: f
+                .max_json_items
+                .unwrap_or(DEFAULT_COMPRESSION_MAX_JSON_ITEMS),
+            json_first_keep: f
+                .json_first_keep
+                .unwrap_or(DEFAULT_COMPRESSION_JSON_FIRST_KEEP),
+            json_last_keep: f
+                .json_last_keep
+                .unwrap_or(DEFAULT_COMPRESSION_JSON_LAST_KEEP),
+            protect_recent_tool_outputs: f
+                .protect_recent_tool_outputs
+                .unwrap_or(DEFAULT_COMPRESSION_PROTECT_RECENT),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PluginsConfig {
     pub tools: Vec<String>,
@@ -863,6 +980,7 @@ impl Config {
         self.agent.validate_all()?;
         self.provider.validate()?;
         self.storage.validate()?;
+        self.compression.validate()?;
         Ok(())
     }
 }
@@ -1254,6 +1372,7 @@ mod tests {
             agent: AgentConfig::default(),
             provider: ProviderConfig::default(),
             storage: StorageConfig::default(),
+            compression: CompressionConfig::default(),
             permissions: PermissionsConfig::default(),
             plugins: PluginsConfig::default(),
         };

@@ -67,6 +67,7 @@ impl AgentHandles {
         lua_handle: Option<EventHandle>,
         mcp_handle: Option<McpHandle>,
         mcp_config_errors: McpConfigErrors,
+        compression: craft_config::CompressionConfig,
     ) -> Self {
         spawn_agent_internal(
             model_slot,
@@ -79,6 +80,7 @@ impl AgentHandles {
             session_id,
             timeouts,
             lua_handle,
+            compression,
         )
     }
 
@@ -125,6 +127,7 @@ impl AgentHandles {
         history: Vec<Message>,
         model_slot: &Arc<ArcSwap<ModelSlot>>,
         config: AgentConfig,
+        compression: craft_config::CompressionConfig,
         tool_output_lines: ToolOutputLines,
         permissions: &Arc<PermissionManager>,
         app: &mut App,
@@ -148,6 +151,7 @@ impl AgentHandles {
             Some(app.state.session.id.clone()),
             self.timeouts,
             lua_handle,
+            compression,
         );
         let old = mem::replace(self, new);
         // Repoint the app at the new queue before dropping `old`, otherwise the app keeps
@@ -188,6 +192,7 @@ fn spawn_agent_internal(
     session_id: Option<String>,
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
+    compression: craft_config::CompressionConfig,
 ) -> AgentHandles {
     let (agent_tx, agent_rx) = flume::unbounded::<Envelope>();
     let agent_tx_clone = agent_tx.clone();
@@ -223,6 +228,7 @@ fn spawn_agent_internal(
         timeouts,
         lua_handle,
         Arc::clone(&btw_system),
+        compression,
     );
 
     let task = tokio::spawn(agent_loop.run());

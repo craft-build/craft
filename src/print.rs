@@ -124,6 +124,7 @@ pub async fn run(
     format: OutputFormat,
     verbose: bool,
     config: AgentConfig,
+    compression: craft_config::CompressionConfig,
     permissions_config: PermissionsConfig,
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
@@ -152,6 +153,7 @@ pub async fn run(
     let handle = craft_agent::headless::spawn(HeadlessParams {
         model: model.clone(),
         config,
+        compression,
         permissions_config,
         timeouts,
         prompt,

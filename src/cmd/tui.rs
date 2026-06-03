@@ -126,6 +126,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             cli.output_format,
             cli.verbose,
             config.agent,
+            config.compression,
             config.permissions,
             timeouts,
             plugin_host.event_handle(),
@@ -168,6 +169,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             session,
             storage,
             config: config.agent,
+            compression: config.compression,
             ui_config: config.ui,
             input_history_size: config.storage.input_history_size,
             permissions: Arc::new(craft_agent::permissions::PermissionManager::new(

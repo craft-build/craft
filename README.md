@@ -9,6 +9,13 @@ Full attribution and thanks to the original project: [github.com/tontinton/maki]
 * `tokio` runtime instead of `smol`. This change was done for compatibility with async Rust libraries and to take advantage of tokio's performance optimizations.
 * `reqwest` instead of `isahc`. This change was done for better synergy with `tokio` and builtin streaming support.
 * Review workflow has been added for utilizing yaml based styleguide files to enforce code style.
+* Multi-stage compression pipeline inspired by [Headroom](https://github.com/knuffic/headroom), which proactively reduces context usage instead of relying solely on reactive compaction:
+  - **Read lifecycle management** — stale and superseded file reads are replaced with compact markers before every LLM turn, so outdated reads don't waste tokens.
+  - **Tool output pre-compression** — code, logs, search results, diffs, and JSON arrays are compressed before entering the LLM context (original output is preserved for UI display).
+  - **Progressive compaction** — when context is near capacity, old tool outputs are compressed in-place (aggressive compression for old, summary markers for very old) without an expensive LLM summarization call.
+  - **Token estimation** — client-side character-based heuristic enables proactive compression at 80% context window, before overflow.
+  - **Prefix cache awareness** — messages confirmed to be in the provider's KV cache (via `cache_read` tokens) are skipped during compression to preserve cache read discounts.
+  - **Reversible compression (CCR)** — original content is stored in an in-memory LRU store, and a `retrieve` tool lets the LLM fetch originals on demand via content hashes embedded in compressed output.
 
 ## Features
 

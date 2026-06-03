@@ -139,9 +139,17 @@ pub fn models_for_provider(provider: ProviderKind) -> &'static [ModelEntry] {
 
 impl ModelFamily {
     pub fn supports_tool_examples(self) -> bool {
+        matches!(self, Self::Claude | Self::Gpt | Self::Gemini | Self::Glm)
+    }
+
+    /// Estimate token count for text using character-based heuristic.
+    /// Anthropic models tokenize slightly denser than GPT, so we apply a multiplier.
+    pub fn estimate_tokens(self, text: &str) -> u32 {
+        let base: u32 = (text.len() as u32).div_ceil(4);
         match self {
-            ModelFamily::Claude | ModelFamily::Gpt | ModelFamily::Synthetic => true,
-            ModelFamily::Generic | ModelFamily::Gemini | ModelFamily::Glm => false,
+            Self::Claude => (base as f32 * 1.1) as u32,
+            Self::Gemini => (base as f32 * 1.05) as u32,
+            _ => base,
         }
     }
 }
@@ -205,6 +213,10 @@ impl Model {
 
     pub fn supports_fast(&self) -> bool {
         self.pricing.fast.is_some() && self.provider == ProviderKind::Anthropic
+    }
+
+    pub fn estimate_tokens(&self, text: &str) -> u32 {
+        self.family.estimate_tokens(text)
     }
 
     pub fn spec(&self) -> String {
@@ -557,5 +569,22 @@ mod tests {
             output: 150.0,
         });
         assert!(!model.supports_fast());
+    }
+
+    #[test_case(ModelFamily::Claude,  "a b c d e", 3 ; "claude_short")]
+    #[test_case(ModelFamily::Gpt,     "a b c d e", 2 ; "gpt_short")]
+    #[test_case(ModelFamily::Gemini,  "a b c d e", 3 ; "gemini_short")]
+    #[test_case(ModelFamily::Generic, "a b c d e", 2 ; "generic_short")]
+    fn estimate_tokens_basic(family: ModelFamily, text: &str, min_tokens: u32) {
+        let estimate = family.estimate_tokens(text);
+        assert!(estimate >= min_tokens, "{family:?}: estimate={estimate}, min={min_tokens}");
+    }
+
+    #[test]
+    fn claude_estimate_higher_than_gpt() {
+        let text = "x".repeat(1000);
+        let claude = ModelFamily::Claude.estimate_tokens(&text);
+        let gpt = ModelFamily::Gpt.estimate_tokens(&text);
+        assert!(claude > gpt, "Claude estimate ({claude}) should exceed GPT ({gpt})");
     }
 }

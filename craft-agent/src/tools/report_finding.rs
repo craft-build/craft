@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use super::ToolContext;
 use crate::tools::ToolInvocation;
-use crate::ToolOutput;
+use crate::types::{Finding, Priority, ToolOutput};
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct ReportFinding {
@@ -40,29 +40,30 @@ impl ReportFinding {
     }
 
     pub async fn execute(&self, _ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let confidence_pct = (self.confidence.clamp(0.0, 1.0) * 100.0) as u8;
+        let priority = parse_priority(&self.priority)?;
+        let finding = Finding {
+            title: self.title.clone(),
+            body: self.body.trim().to_string(),
+            priority,
+            confidence: self.confidence.clamp(0.0, 1.0),
+            file_path: self.file_path.clone(),
+            line_start: self.line_start,
+            line_end: self.line_end,
+            rule_ids: self.rule_ids.clone().unwrap_or_default(),
+            suggestion: self.suggestion.clone(),
+        };
 
-        let mut lines = vec![
-            format!("# {} [{}]", self.priority.to_uppercase(), self.title),
-            format!("Location: {}:{}-{}", self.file_path, self.line_start, self.line_end),
-            format!("Priority: {} | Confidence: {}%", self.priority.to_uppercase(), confidence_pct),
-            String::new(),
-            self.body.trim().to_string(),
-        ];
+        Ok(ToolOutput::Findings(vec![finding]))
+    }
+}
 
-        if let Some(ref ids) = self.rule_ids
-            && !ids.is_empty()
-        {
-            lines.push(format!("\nRules: {}", ids.join(", ")));
-        }
-
-        if let Some(ref fix) = self.suggestion {
-            lines.push(String::new());
-            lines.push("**Suggested fix:**".into());
-            lines.push(fix.trim().to_string());
-        }
-
-        Ok(ToolOutput::Plain(lines.join("\n")))
+fn parse_priority(s: &str) -> Result<Priority, String> {
+    match s.to_uppercase().as_str() {
+        "P0" => Ok(Priority::P0),
+        "P1" => Ok(Priority::P1),
+        "P2" => Ok(Priority::P2),
+        "P3" => Ok(Priority::P3),
+        _ => Err(format!("invalid priority '{s}', expected P0-P3")),
     }
 }
 

@@ -21,6 +21,7 @@ use craft_providers::provider::{self, Provider};
 pub struct HeadlessParams {
     pub model: Model,
     pub config: AgentConfig,
+    pub compression: craft_config::CompressionConfig,
     pub permissions_config: PermissionsConfig,
     pub timeouts: Timeouts,
     pub prompt: String,
@@ -91,6 +92,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     timeouts: params.timeouts,
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::new(params.prompt_slots),
+                    compression: params.compression,
                 },
                 AgentRunParams {
                     history: History::new(Vec::new()),

@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use flume::Sender;
+use craft_config::CompressionConfig;
 use craft_providers::{AgentError, ContentBlock, Message, Role, StopReason, TokenUsage};
+
+use crate::compression;
 use craft_tool_macro::{ArgEnum, Args};
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +104,30 @@ pub enum TodoPriority {
     Low,
 }
 
+#[derive(ArgEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, strum::Display)]
+#[strum(serialize_all = "UPPERCASE")]
+pub enum Priority {
+    P0,
+    P1,
+    P2,
+    P3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Finding {
+    pub title: String,
+    pub body: String,
+    pub priority: Priority,
+    pub confidence: f64,
+    pub file_path: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolInput {
     Code { language: String, code: String },
@@ -181,6 +208,11 @@ pub enum ToolOutput {
         entries: Vec<BatchToolEntry>,
         text: String,
     },
+    Findings(Vec<Finding>),
+    ReviewResult {
+        findings: Vec<Finding>,
+        verdict: String,
+    },
     Instructions {
         blocks: Vec<InstructionBlock>,
     },
@@ -226,9 +258,22 @@ impl ToolOutput {
             | Self::ReadDir { .. }
             | Self::WriteCode { .. }
             | Self::GrepResult { .. }
-            | Self::TodoList(_) => Some(self.as_display_text()),
+            | Self::TodoList(_)
+            | Self::Findings(_)
+            | Self::ReviewResult { .. } => Some(self.as_display_text()),
             _ => None,
         }
+    }
+
+    /// Compressed text for LLM consumption. Detects content type and applies
+    /// compression when the output exceeds trivial size.
+    pub fn as_text_for_llm(&self, config: &CompressionConfig) -> String {
+        let raw = self.as_text();
+        if !config.enabled || raw.len() < 200 {
+            return raw;
+        }
+        let ct = compression::detect_content_type(&raw);
+        compression::compress(&raw, ct, &compression::CompressionConfig::from(config))
     }
 
     pub fn is_empty_result(&self) -> bool {
@@ -236,6 +281,7 @@ impl ToolOutput {
             Self::GrepResult { entries } => entries.is_empty(),
             Self::ReadDir { text, .. } => text.is_empty(),
             Self::Plain(text) | Self::Markdown(text) => text.is_empty(),
+            Self::Findings(f) | Self::ReviewResult { findings: f, .. } => f.is_empty(),
 
             _ => false,
         }
@@ -245,6 +291,18 @@ impl ToolOutput {
         match self {
             Self::Diff { summary, .. } => summary.clone(),
             Self::TodoList(_) => "ok".into(),
+            Self::Findings(findings) => findings_text(findings),
+            Self::ReviewResult { findings, verdict } => {
+                let mut out = findings_text(findings);
+                if !verdict.is_empty() {
+                    if !out.is_empty() {
+                        out.push_str("\n\n");
+                    }
+                    out.push_str("## Verdict\n\n");
+                    out.push_str(verdict);
+                }
+                out
+            }
             Self::ReadCode { instructions, .. } | Self::ReadDir { instructions, .. } => {
                 let mut out = self.as_display_text();
                 if let Some(blocks) = instructions {
@@ -338,8 +396,64 @@ impl ToolOutput {
                 append_instructions(&mut out, blocks);
                 out
             }
+            Self::Findings(findings) => findings_display(findings),
+            Self::ReviewResult { findings, verdict } => {
+                let mut out = findings_display(findings);
+                if !verdict.is_empty() {
+                    if !out.is_empty() {
+                        out.push_str("\n\n");
+                    }
+                    out.push_str(verdict);
+                }
+                out
+            }
         }
     }
+}
+
+fn findings_text(findings: &[Finding]) -> String {
+    if findings.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("## Review Findings ({} issue{})\n\n", findings.len(), if findings.len() == 1 { "" } else { "s" });
+    for f in findings {
+        let confidence_pct = (f.confidence.clamp(0.0, 1.0) * 100.0) as u8;
+        let _ = writeln!(out, "[{}] {}", f.priority, f.title);
+        let _ = writeln!(out, "  Location: {}:{}-{} | Confidence: {}%", f.file_path, f.line_start, f.line_end, confidence_pct);
+        out.push_str(f.body.trim());
+        out.push('\n');
+        if !f.rule_ids.is_empty() {
+            let _ = writeln!(out, "  Rules: {}", f.rule_ids.join(", "));
+        }
+        if let Some(ref fix) = f.suggestion {
+            out.push_str("  Fix: ");
+            out.push_str(fix.trim());
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn findings_display(findings: &[Finding]) -> String {
+    if findings.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("Findings ({} issue{})\n", findings.len(), if findings.len() == 1 { "" } else { "s" });
+    for f in findings {
+        let confidence_pct = (f.confidence.clamp(0.0, 1.0) * 100.0) as u8;
+        let _ = writeln!(out, "[{}] {}", f.priority, f.title);
+        let _ = writeln!(out, "  {}:{}-{} | {}%", f.file_path, f.line_start, f.line_end, confidence_pct);
+        out.push_str(f.body.trim());
+        out.push('\n');
+        if let Some(ref fix) = f.suggestion {
+            out.push_str("  Fix: ");
+            out.push_str(fix.trim());
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -387,14 +501,14 @@ impl ToolDoneEvent {
     }
 }
 
-pub fn tool_results(results: Vec<ToolDoneEvent>) -> Message {
+pub fn tool_results(results: Vec<ToolDoneEvent>, config: &CompressionConfig) -> Message {
     Message {
         role: Role::User,
         content: results
             .into_iter()
             .map(|r| ContentBlock::ToolResult {
                 tool_use_id: r.id,
-                content: r.output.as_text(),
+                content: r.output.as_text_for_llm(config),
                 is_error: r.is_error,
             })
             .collect(),
@@ -805,7 +919,7 @@ mod tests {
                 output: ToolOutput::Plain("fail".into()),
                 is_error: true,
             },
-        ]);
+        ], &CompressionConfig::default());
         assert!(matches!(msg.role, Role::User));
         assert_eq!(msg.content.len(), 2);
         assert!(
@@ -1020,5 +1134,20 @@ mod tests {
     #[test_case("a.rs\nb.rs", false ; "plain_output_not_empty_for_content")]
     fn plain_output_is_empty(text: &str, expected: bool) {
         assert_eq!(ToolOutput::Plain(text.into()).is_empty_result(), expected);
+    }
+
+    #[test]
+    fn as_text_for_llm_short_output_not_compressed() {
+        let output = ToolOutput::Plain("short content".into());
+        let config = CompressionConfig { enabled: true, ..CompressionConfig::default() };
+        assert_eq!(output.as_text_for_llm(&config), "short content");
+    }
+
+    #[test]
+    fn as_text_for_llm_disabled_returns_raw() {
+        let long = "fn foo()\n".repeat(50);
+        let output = ToolOutput::Plain(long.clone());
+        let config = CompressionConfig { enabled: false, ..CompressionConfig::default() };
+        assert_eq!(output.as_text_for_llm(&config), long);
     }
 }

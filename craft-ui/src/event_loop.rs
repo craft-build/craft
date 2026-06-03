@@ -72,6 +72,7 @@ pub struct EventLoopParams {
     pub session: AppSession,
     pub storage: StateDir,
     pub config: AgentConfig,
+    pub compression: craft_config::CompressionConfig,
     pub ui_config: UiConfig,
     pub input_history_size: usize,
     pub permissions: Arc<PermissionManager>,
@@ -94,6 +95,7 @@ pub(crate) struct EventLoop<'t> {
     handles: AgentHandles,
     model_slot: Arc<ArcSwap<ModelSlot>>,
     config: AgentConfig,
+    compression: craft_config::CompressionConfig,
     permissions: Arc<PermissionManager>,
     shell_tx: flume::Sender<ShellEvent>,
     shell_rx: flume::Receiver<ShellEvent>,
@@ -187,6 +189,7 @@ impl<'t> EventLoop<'t> {
             session,
             storage,
             config,
+            compression,
             ui_config,
             input_history_size,
             permissions,
@@ -229,6 +232,7 @@ impl<'t> EventLoop<'t> {
             lua_event_handle.clone(),
             mcp_handle,
             mcp_config_errors.clone(),
+            compression.clone(),
         );
 
         let custom_commands: Arc<[CustomCommand]> = Arc::from(commands);
@@ -271,6 +275,7 @@ impl<'t> EventLoop<'t> {
             handles,
             model_slot,
             config,
+            compression,
             permissions,
             shell_tx,
             shell_rx,
@@ -460,6 +465,7 @@ impl<'t> EventLoop<'t> {
             history,
             &self.model_slot,
             self.config.clone(),
+            self.compression.clone(),
             self.app.ui_config.tool_output_lines,
             &self.permissions,
             &mut self.app,

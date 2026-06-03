@@ -108,6 +108,16 @@ pub(crate) fn tool_output_annotation(output: &ToolOutput) -> Option<String> {
             let n = text.lines().count();
             Some(format!("{n} lines"))
         }
+        ToolOutput::Findings(findings) => {
+            let n = findings.len();
+            let s = if n == 1 { "finding" } else { "findings" };
+            Some(format!("{n} {s}"))
+        }
+        ToolOutput::ReviewResult { findings, .. } => {
+            let n = findings.len();
+            let s = if n == 1 { "finding" } else { "findings" };
+            Some(format!("{n} {s}"))
+        }
         _ => None,
     }
 }
@@ -263,7 +273,9 @@ impl HighlightRequest {
             | ToolOutput::Markdown(_)
             | ToolOutput::ReadDir { .. }
             | ToolOutput::TodoList(_)
-            | ToolOutput::Batch { .. } => None,
+            | ToolOutput::Batch { .. }
+            | ToolOutput::Findings(_)
+            | ToolOutput::ReviewResult { .. } => None,
         });
         if input.is_none() && output.is_none() {
             return None;

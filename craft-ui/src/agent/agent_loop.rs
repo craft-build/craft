@@ -45,6 +45,7 @@ pub(super) struct AgentLoop {
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
     btw_system: Arc<ArcSwap<String>>,
+    compression: craft_config::CompressionConfig,
 }
 
 impl AgentLoop {
@@ -66,6 +67,7 @@ impl AgentLoop {
         timeouts: craft_providers::Timeouts,
         lua_handle: Option<EventHandle>,
         btw_system: Arc<ArcSwap<String>>,
+        compression: craft_config::CompressionConfig,
     ) -> Self {
         Self {
             model_slot,
@@ -89,6 +91,7 @@ impl AgentLoop {
             timeouts,
             lua_handle,
             btw_system,
+            compression,
         }
     }
 
@@ -234,6 +237,7 @@ impl AgentLoop {
                 timeouts: self.timeouts,
                 file_tracker: Arc::clone(&self.file_tracker),
                 prompt_slots: std::sync::Arc::new(prompt_slots),
+                compression: self.compression.clone(),
             },
             AgentRunParams {
                 history: mem::replace(&mut self.history, History::new(Vec::new())),

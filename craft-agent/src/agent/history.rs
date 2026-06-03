@@ -15,6 +15,10 @@ impl History {
         &self.messages
     }
 
+    pub fn as_mut_slice(&mut self) -> &mut [Message] {
+        &mut self.messages
+    }
+
     pub fn push(&mut self, msg: Message) {
         self.messages.push(msg);
     }
@@ -37,6 +41,27 @@ impl History {
 
     pub fn into_vec(self) -> Vec<Message> {
         self.messages
+    }
+
+    /// Estimate total tokens for all messages using character-based heuristic.
+    pub fn estimate_tokens(&self, model: &craft_providers::Model) -> u32 {
+        use craft_providers::ContentBlock;
+        let mut total = 0u32;
+        for msg in &self.messages {
+            for block in &msg.content {
+                let text = match block {
+                    ContentBlock::Text { text } => text.as_str(),
+                    ContentBlock::ToolResult { content, .. } => content.as_str(),
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        total += model.estimate_tokens(name);
+                        &serde_json::to_string(input).unwrap_or_default()
+                    }
+                    _ => continue,
+                };
+                total += model.estimate_tokens(text);
+            }
+        }
+        total
     }
 }
 
@@ -156,5 +181,20 @@ mod tests {
             .collect();
         assert_eq!(error_ids, ["t1", "t2"]);
         assert_ends_with_cancel_marker(&history);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_history() {
+        let model = craft_providers::Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        let history = History::new(vec![
+            Message::user("hello world".into()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: "hi there".into() }],
+                ..Default::default()
+            },
+        ]);
+        let tokens = history.estimate_tokens(&model);
+        assert!(tokens > 0, "should estimate some tokens for non-empty history");
     }
 }

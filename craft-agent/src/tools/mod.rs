@@ -206,6 +206,8 @@ pub struct ToolContext {
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub opts: RequestOptions,
+    pub compression: craft_config::CompressionConfig,
+    pub(crate) compression_store: crate::agent::compression_store::SharedCompressionStore,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -560,6 +562,7 @@ register_tools! {
     styleguide::StyleguideGet,
     report_finding::ReportFinding,
     review::Review,
+    crate::agent::retrieve::Retrieve,
 }
 
 pub fn is_builtin_tool(name: &str) -> bool {
@@ -626,6 +629,8 @@ pub(crate) fn interpreter_ctx(
         file_tracker,
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
         opts: RequestOptions::default(),
+        compression: craft_config::CompressionConfig::default(),
+        compression_store: crate::agent::compression_store::shared_store(),
     }
 }
 

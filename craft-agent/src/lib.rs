@@ -15,6 +15,7 @@ pub use agent::{
 };
 pub use cancel::{CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
+pub mod compression;
 pub mod command;
 pub mod diff;
 pub mod permissions;
@@ -33,9 +34,10 @@ use craft_providers::Message;
 pub use craft_providers::{ImageMediaType, ImageSource, ThinkingConfig};
 pub use types::{
     AgentEvent, BatchProgressEvent, BatchToolEntry, BatchToolStatus, BufferSnapshot, Envelope,
-    EventSender, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock, NO_FILES_FOUND,
-    SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo, TodoItem, TodoPriority,
-    TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
+    EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock, NO_FILES_FOUND,
+    Priority, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo, TodoItem,
+    TodoPriority, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent,
+    TurnCompleteEvent,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
