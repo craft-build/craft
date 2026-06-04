@@ -179,13 +179,11 @@ pub(super) fn progressive_compact(
                 let old_lines = content.lines().count();
                 let is_very_old = msg_count.saturating_sub(i) > very_old_threshold;
 
-                // Store original in compression store for CCR retrieval
-                let hash = compression_store.and_then(|store| {
-                    let mut guard = store.lock().ok()?;
-                    Some(guard.put(content))
-                });
-
                 if is_very_old {
+                    let hash = compression_store.and_then(|store| {
+                        let mut guard = store.lock().ok()?;
+                        Some(guard.put(content))
+                    });
                     let line_count = old_lines;
                     let first_line = content.lines().next().unwrap_or("");
                     let preview: String = first_line.chars().take(80).collect();
@@ -199,6 +197,10 @@ pub(super) fn progressive_compact(
                     let ct = compression::detect_content_type(content);
                     let compressed = compression::compress(content, ct, &aggressive);
                     if compressed.len() < old_len {
+                        let hash = compression_store.and_then(|store| {
+                            let mut guard = store.lock().ok()?;
+                            Some(guard.put(content))
+                        });
                         let mut final_content = compressed;
                         if let Some(ref h) = hash {
                             let compressed_lines = final_content.lines().count();

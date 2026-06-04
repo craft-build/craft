@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use std::ops::Range;
+
 use craft_providers::{ContentBlock, Message, Role};
 use tracing::info;
 
@@ -28,6 +30,8 @@ struct FileOperation {
     tool_call_id: String,
     file_path: String,
     op_kind: OpKind,
+    /// For reads: the 0-indexed line range [start, end). None means full file.
+    line_range: Option<Range<usize>>,
 }
 
 #[derive(Debug)]
@@ -40,7 +44,7 @@ pub(super) struct ReadClassification {
 /// Scan history and classify all read operations as Fresh, Stale, or Superseded.
 ///
 /// - **Stale**: a read where the same file was edited/written at a later point
-/// - **Superseded**: a read where a later read covers the same or wider range of the same file
+/// - **Superseded**: a read where a later read fully contains the same file range
 /// - **Fresh**: neither of the above
 pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
     let mut operations: Vec<FileOperation> = Vec::new();
@@ -63,11 +67,17 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
                     },
                     _ => continue,
                 };
+                let line_range = if matches!(op_kind, OpKind::Read) {
+                    extract_line_range(input)
+                } else {
+                    None
+                };
                 operations.push(FileOperation {
                     msg_index,
                     tool_call_id: id.to_owned(),
                     file_path,
                     op_kind,
+                    line_range,
                 });
             }
         }
@@ -115,11 +125,14 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
             continue;
         }
 
-        let has_later_read = file_ops.iter().any(|op| {
-            op.msg_index > read_op.msg_index && matches!(op.op_kind, OpKind::Read)
+        let has_later_superseding_read = file_ops.iter().any(|op| {
+            if op.msg_index <= read_op.msg_index || !matches!(op.op_kind, OpKind::Read) {
+                return false;
+            }
+            range_contains(op.line_range.as_ref(), read_op.line_range.as_ref())
         });
 
-        if has_later_read {
+        if has_later_superseding_read {
             classifications.push(ReadClassification {
                 tool_call_id: read_op.tool_call_id.clone(),
                 file_path: read_op.file_path.clone(),
@@ -207,6 +220,27 @@ pub(super) fn run_lifecycle(history: &mut History) -> usize {
 
 fn extract_path(input: &serde_json::Value) -> Option<String> {
     input.get("path").and_then(|v| v.as_str()).map(String::from)
+}
+
+/// Extract the 0-indexed line range [start, end) from read tool input.
+/// Returns None if no offset specified (meaning full file read).
+fn extract_line_range(input: &serde_json::Value) -> Option<Range<usize>> {
+    let offset = input.get("offset").and_then(|v| v.as_u64())? as usize;
+    let start = offset.saturating_sub(1); // offset is 1-indexed
+    let limit = input.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize);
+    let end = limit.map_or(usize::MAX, |l| start + l);
+    Some(start..end)
+}
+
+/// Check if range `b` fully contains range `a`. None means full file.
+/// A full-file read contains any other read. A partial read only contains `a`
+/// if it starts at or before `a` and ends at or after `a`.
+fn range_contains(outer: Option<&Range<usize>>, inner: Option<&Range<usize>>) -> bool {
+    match (outer, inner) {
+        (None, _) => true,
+        (_, None) => false,
+        (Some(outer), Some(inner)) => outer.start <= inner.start && inner.end <= outer.end,
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +453,86 @@ mod tests {
         let classifications = classify_reads(&messages);
         assert_eq!(classifications.len(), 1);
         assert_eq!(classifications[0].state, ReadState::Stale);
+    }
+
+    #[test]
+    fn partial_reads_different_offsets_not_superseded() {
+        let messages = vec![
+            user_msg("read top"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 50})),
+            tool_result_msg("t1", "lines 1-50"),
+            user_msg("read bottom"),
+            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 51, "limit": 50})),
+            tool_result_msg("t2", "lines 51-100"),
+        ];
+        let classifications = classify_reads(&messages);
+        assert_eq!(classifications.len(), 2);
+        assert_eq!(classifications[0].state, ReadState::Fresh, "t1: non-overlapping range");
+        assert_eq!(classifications[1].state, ReadState::Fresh, "t2: non-overlapping range");
+    }
+
+    #[test]
+    fn full_file_read_supersedes_partial() {
+        let messages = vec![
+            user_msg("read partial"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 50})),
+            tool_result_msg("t1", "lines 1-50"),
+            user_msg("read full"),
+            tool_use_msg("t2", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t2", "all content"),
+        ];
+        let classifications = classify_reads(&messages);
+        assert_eq!(classifications.len(), 2);
+        assert_eq!(classifications[0].state, ReadState::Superseded, "t1: covered by full file read");
+        assert_eq!(classifications[1].state, ReadState::Fresh);
+    }
+
+    #[test]
+    fn partially_overlapping_partial_reads_not_superseded() {
+        let messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 100})),
+            tool_result_msg("t1", "lines 1-100"),
+            user_msg("read again"),
+            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 50, "limit": 100})),
+            tool_result_msg("t2", "lines 50-150"),
+        ];
+        let classifications = classify_reads(&messages);
+        assert_eq!(classifications.len(), 2);
+        assert_eq!(classifications[0].state, ReadState::Fresh, "t1: t2 doesn't fully contain t1 (1-100 vs 50-150)");
+        assert_eq!(classifications[1].state, ReadState::Fresh);
+    }
+
+    #[test]
+    fn wider_read_supersedes_narrower() {
+        let messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 20, "limit": 30})),
+            tool_result_msg("t1", "lines 20-50"),
+            user_msg("read wider"),
+            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 100})),
+            tool_result_msg("t2", "lines 1-100"),
+        ];
+        let classifications = classify_reads(&messages);
+        assert_eq!(classifications.len(), 2);
+        assert_eq!(classifications[0].state, ReadState::Superseded, "t1: fully contained by t2 (20-50 vs 1-100)");
+        assert_eq!(classifications[1].state, ReadState::Fresh);
+    }
+
+    #[test]
+    fn adjacent_partial_reads_not_superseded() {
+        let messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 50})),
+            tool_result_msg("t1", "lines 1-50"),
+            user_msg("read next"),
+            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 51, "limit": 50})),
+            tool_result_msg("t2", "lines 51-100"),
+        ];
+        let classifications = classify_reads(&messages);
+        assert_eq!(classifications.len(), 2);
+        assert_eq!(classifications[0].state, ReadState::Fresh, "t1: adjacent (not overlapping) with t2");
+        assert_eq!(classifications[1].state, ReadState::Fresh, "t2: adjacent (not overlapping) with t1");
     }
 
     #[test]

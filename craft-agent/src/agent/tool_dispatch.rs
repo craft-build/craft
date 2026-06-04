@@ -339,7 +339,7 @@ pub(super) async fn process_tool_calls(
 
     let mut all_results = results;
     all_results.extend(immediate_errors);
-    let tool_msg = crate::types::tool_results(all_results, &ctx.compression);
+    let tool_msg = crate::types::tool_results(all_results);
     event_tx.send(AgentEvent::ToolResultsSubmitted {
         message: Box::new(tool_msg.clone()),
     })?;
