@@ -223,7 +223,9 @@ pub async fn run(
             | AgentEvent::SubagentHistory { .. }
             | AgentEvent::ToolSnapshot { .. }
             | AgentEvent::ToolHeaderSnapshot { .. }
-            | AgentEvent::LiveToolBuf { .. } => {}
+            | AgentEvent::LiveToolBuf { .. }
+            | AgentEvent::Info { .. }
+            | AgentEvent::ModelEscalation { .. } => {}
             AgentEvent::Retry {
                 attempt,
                 message,
