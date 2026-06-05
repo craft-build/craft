@@ -1,13 +1,18 @@
 mod cache;
 mod compaction;
 pub(crate) mod compression_store;
+mod dedup;
+mod escalation;
 mod history;
 mod instructions;
 mod read_lifecycle;
 pub(crate) mod retrieve;
 mod run;
+mod snapshot;
 mod streaming;
 pub mod tool_dispatch;
+pub(crate) mod trust;
+mod validation;
 
 pub use compaction::compact;
 pub use history::History;

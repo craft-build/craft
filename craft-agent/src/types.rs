@@ -552,6 +552,13 @@ pub enum AgentEvent {
         stop_reason: Option<StopReason>,
     },
     AutoCompacting,
+    Info {
+        message: String,
+    },
+    ModelEscalation {
+        from: String,
+        to: String,
+    },
     Retry {
         attempt: u32,
         message: String,

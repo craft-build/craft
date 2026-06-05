@@ -213,11 +213,15 @@ impl AgentLoop {
             Some(h) => h.collect_prompt_slots_async().await,
             None => craft_agent::prompt::ResolvedSlots::default(),
         };
+        let model = self.model_slot.load();
+        let compact = self.config.small_model.should_activate(model.model.context_window)
+            && self.config.small_model.compact_prompt;
         let system = agent::build_system_prompt(
             &self.vars,
             &input.mode,
             &self.instructions.text,
             &prompt_slots,
+            compact,
         );
 
         self.publish_btw_system(&prompt_slots);
@@ -321,6 +325,7 @@ impl AgentLoop {
             &AgentMode::Build,
             &self.instructions.text,
             slots,
+            false,
         );
         self.btw_system.store(Arc::new(system));
     }

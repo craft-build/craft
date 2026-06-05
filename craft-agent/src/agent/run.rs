@@ -7,11 +7,16 @@ use craft_providers::provider::Provider;
 use craft_providers::{Message, Model, RequestOptions, StopReason, StreamResponse, TokenUsage};
 
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
+use super::dedup::ToolDedupCache;
+use super::escalation::EscalationTracker;
 use super::history::{History, sanitize_cancelled_history};
 use super::instructions::LoadedInstructions;
 use super::read_lifecycle;
+use super::snapshot::SnapshotManager;
 use super::streaming::stream_with_retry;
 use super::tool_dispatch::{self, RecentCalls};
+use super::trust::TrustTracker;
+use super::validation::Validator;
 use crate::cancel::CancelToken;
 use crate::mcp::McpHandle;
 use crate::permissions::PermissionManager;
@@ -84,6 +89,11 @@ pub struct Agent {
     compression: craft_config::CompressionConfig,
     cache_tracker: super::cache::PrefixCacheTracker,
     compression_store: super::compression_store::SharedCompressionStore,
+    dedup_cache: ToolDedupCache,
+    trust_tracker: TrustTracker,
+    snapshot: SnapshotManager,
+    validator: Validator,
+    escalation: EscalationTracker,
 }
 
 impl Agent {
@@ -118,10 +128,23 @@ impl Agent {
             compression: params.compression,
             cache_tracker: super::cache::PrefixCacheTracker::new(),
             compression_store: super::compression_store::shared_store(),
+            dedup_cache: ToolDedupCache::new(),
+            trust_tracker: TrustTracker::new(craft_config::TrustDecayConfig::default()),
+            snapshot: SnapshotManager::new(std::env::current_dir().unwrap_or_default()),
+            validator: Validator::new(
+                std::env::current_dir().unwrap_or_default(),
+                craft_config::ValidationConfig::default(),
+            ),
+            escalation: EscalationTracker::new(Default::default()),
         }
     }
 
     pub fn with_mcp(mut self, mcp: Option<McpHandle>) -> Self {
+        self.trust_tracker = TrustTracker::new(self.config.trust_decay);
+        self.validator = Validator::new(
+            std::env::current_dir().unwrap_or_default(),
+            self.config.validation.clone(),
+        );
         self.mcp = mcp;
         self
     }
@@ -183,6 +206,7 @@ impl Agent {
             match self.turn().await? {
                 TurnOutcome::Continue => {}
                 TurnOutcome::Done(stop_reason) => {
+                    self.snapshot.commit();
                     self.emit_done(stop_reason)?;
                     return Ok(());
                 }
@@ -247,7 +271,13 @@ impl Agent {
         self.cache_tracker.update(&usage, self.history.len());
 
         if has_tools {
-            self.process_tool_calls(response).await?;
+            let had_errors = self.process_tool_calls(response).await?;
+            self.escalation.record(&self.model.id, had_errors);
+            self.escalation.check_and_emit(
+                &self.model.id,
+                super::escalation::ModelTier::from_model_id(&self.model.id),
+                &self.event_tx,
+            );
         } else {
             self.history.push(response.message);
 
@@ -323,7 +353,7 @@ impl Agent {
         })
     }
 
-    async fn process_tool_calls(&mut self, response: StreamResponse) -> Result<(), AgentError> {
+    async fn process_tool_calls(&mut self, response: StreamResponse) -> Result<bool, AgentError> {
         let ctx = self.tool_context();
         tool_dispatch::process_tool_calls(
             response,
@@ -332,8 +362,22 @@ impl Agent {
             &mut self.history,
             &self.event_tx,
             &ctx,
+            &mut self.dedup_cache,
+            &mut self.trust_tracker,
+            &self.snapshot,
+            &self.validator,
         )
         .await
+    }
+
+    fn small_model_ratio(&self) -> f64 {
+        if self.config.small_model.should_activate(self.model.context_window)
+            && self.config.small_model.aggressive_truncation
+        {
+            self.config.small_model.compaction_threshold
+        } else {
+            0.80
+        }
     }
 
     fn tool_context(&self) -> ToolContext {
@@ -367,11 +411,17 @@ impl Agent {
 
         let overflow = compaction::is_overflow(usage, &self.model, self.config.compaction_buffer);
         let proactive = !overflow
-            && compaction::is_proactive_threshold(&self.history, &self.model, 0.80);
+            && compaction::is_proactive_threshold(
+                &self.history,
+                &self.model,
+                self.small_model_ratio(),
+            );
 
         if !overflow && !proactive {
             return Ok(false);
         }
+
+        self.dedup_cache.clear();
 
         // Try progressive compaction first (no LLM call)
         let removed = compaction::progressive_compact(
@@ -442,6 +492,11 @@ impl Agent {
             }
             ExtractedCommand::Compact(_) => {
                 self.do_compact().await?;
+            }
+            ExtractedCommand::Undo(_) => {
+                if let Some(msg) = self.snapshot.rollback() {
+                    self.event_tx.send(AgentEvent::Info { message: msg })?;
+                }
             }
         }
         Ok(true)

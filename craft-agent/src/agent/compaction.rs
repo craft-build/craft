@@ -245,9 +245,9 @@ pub(super) fn progressive_compact(
 
 /// Check if estimated history tokens have reached the proactive compression threshold.
 /// This fires before overflow to compress incrementally rather than all-at-once.
-pub(super) fn is_proactive_threshold(history: &History, model: &Model, ratio: f32) -> bool {
+pub(super) fn is_proactive_threshold(history: &History, model: &Model, ratio: f64) -> bool {
     let estimated = history.estimate_tokens(model);
-    let threshold = (model.context_window as f32 * ratio) as u32;
+    let threshold = (model.context_window as f64 * ratio) as u32;
     estimated >= threshold
 }
 

@@ -53,12 +53,18 @@ pub fn build_system_prompt(
     mode: &AgentMode,
     instructions: &str,
     slots: &crate::prompt::ResolvedSlots,
+    compact: bool,
 ) -> String {
     let env = vars.apply(
         "\n\nEnvironment:\n- Working directory: {cwd}\n- Platform: {platform}\n- Date: {date}",
     );
     let instructions = format!("{env}{instructions}");
-    let mut out = crate::prompt::assemble(crate::prompt::PromptId::System, slots, &instructions);
+    let template = if compact {
+        crate::prompt::SYSTEM_SMALL_PROMPT
+    } else {
+        crate::prompt::SYSTEM_PROMPT
+    };
+    let mut out = crate::prompt::assemble_raw(template, slots, &instructions);
 
     if let AgentMode::Plan(plan_path) = mode {
         let plan_vars = Vars::new().set("{plan_path}", plan_path.display().to_string());
@@ -181,7 +187,7 @@ mod tests {
     fn plan_section_presence(mode: &AgentMode, expect_plan: bool) {
         let vars = Vars::new().set("{cwd}", "/tmp").set("{platform}", "linux");
         let slots = crate::prompt::ResolvedSlots::default();
-        let prompt = build_system_prompt(&vars, mode, "", &slots);
+        let prompt = build_system_prompt(&vars, mode, "", &slots, false);
         assert_eq!(prompt.contains("Plan Mode"), expect_plan);
         if expect_plan {
             assert!(prompt.contains(PLAN_PATH));
@@ -208,6 +214,7 @@ mod tests {
             &AgentMode::Plan(PathBuf::from("plan.md")),
             &format!("\n{INSTR}"),
             &slots,
+            false,
         );
         let positions = [INSTR, EXTRA, "Plan Mode"].map(|n| prompt.find(n).unwrap());
         assert!(

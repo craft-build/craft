@@ -149,6 +149,13 @@ impl Chat {
             AgentEvent::LiveToolBuf { id, body } => {
                 self.messages_panel.register_live_buf(id, body);
             }
+            AgentEvent::Info { message } => {
+                self.messages_panel.push(DisplayMessage::new(
+                    DisplayRole::Assistant,
+                    message.clone(),
+                ));
+            }
+            AgentEvent::ModelEscalation { .. } => {}
         }
         ChatEventResult::Continue
     }

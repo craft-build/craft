@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,6 +13,10 @@ use crate::task_set::TaskSet;
 use crate::tools::ToolContext;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
 use crate::{AgentError, AgentEvent, AgentMode, ToolDoneEvent, ToolOutput, ToolStartEvent};
+
+use super::dedup::ToolDedupCache;
+use super::trust::TrustTracker;
+use super::validation::{ValidationResult, Validator};
 
 #[derive(Clone, Copy)]
 pub enum Emit {
@@ -86,15 +91,36 @@ pub async fn run(
     if let Some(entry) = entry {
         let invocation = match entry.tool.parse(input) {
             Ok(inv) => inv,
-            Err(e) => {
-                warn!(
-                    tool = %name,
-                    source = %entry.source.as_log_field(),
-                    input_preview = %crate::tools::schema::preview(&input.to_string()),
-                    error = %e,
-                    "tool input parse failed"
-                );
-                return done_error(e.to_string());
+            Err(first_err) => {
+                if ctx.config.small_model.enabled && ctx.config.small_model.forgiving_parsing {
+                    let aggressive = crate::tools::sanitize_tool_input_aggressive(input);
+                    if let Ok(inv) = entry.tool.parse(&aggressive) {
+                        warn!(
+                            tool = %name,
+                            original_error = %first_err,
+                            "recovered from parse error with aggressive sanitization"
+                        );
+                        inv
+                    } else {
+                        warn!(
+                            tool = %name,
+                            source = %entry.source.as_log_field(),
+                            input_preview = %crate::tools::schema::preview(&input.to_string()),
+                            error = %first_err,
+                            "tool input parse failed"
+                        );
+                        return done_error(first_err.to_string());
+                    }
+                } else {
+                    warn!(
+                        tool = %name,
+                        source = %entry.source.as_log_field(),
+                        input_preview = %crate::tools::schema::preview(&input.to_string()),
+                        error = %first_err,
+                        "tool input parse failed"
+                    );
+                    return done_error(first_err.to_string());
+                }
             }
         };
 
@@ -261,6 +287,7 @@ async fn execute_mcp_tool(
 }
 
 /// Skips doom-loop repeats (emitting errors instead), runs remaining tool calls in parallel.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn process_tool_calls(
     response: craft_providers::StreamResponse,
     recent_calls: &mut RecentCalls,
@@ -268,7 +295,11 @@ pub(super) async fn process_tool_calls(
     history: &mut super::history::History,
     event_tx: &crate::EventSender,
     ctx: &ToolContext,
-) -> Result<(), AgentError> {
+    dedup: &mut ToolDedupCache,
+    trust: &mut TrustTracker,
+    snapshot: &super::snapshot::SnapshotManager,
+    validator: &Validator,
+) -> Result<bool, AgentError> {
     let tool_uses: Vec<(String, String, Value)> = response
         .message
         .tool_uses()
@@ -302,12 +333,44 @@ pub(super) async fn process_tool_calls(
 
     let mut set = TaskSet::new();
     for (id, name, input) in runnable {
+        let dedup_key = if ToolDedupCache::is_read_only(&name) {
+            Some(ToolDedupCache::key(&name, &input))
+        } else {
+            None
+        };
+
+        if is_write_tool(&name) {
+            if !snapshot.is_active() {
+                snapshot.begin("auto");
+            }
+            if let Some(path) = extract_file_path(&input) {
+                snapshot.note(Path::new(&path));
+            }
+        }
+
+        if let Some(key) = dedup_key
+            && let Some(cached) = dedup.get(key)
+        {
+            let cached_output = ToolDedupCache::cached_output(cached);
+            let done = ToolDoneEvent {
+                id: id.clone(),
+                tool: Arc::from(name.as_str()),
+                output: cached_output,
+                is_error: false,
+            };
+            event_tx.try_send(AgentEvent::ToolDone(Box::new(done.clone())));
+            trust.record_success(&name);
+            immediate_errors.push(done);
+            continue;
+        }
+
         let event_tx_clone = ctx.event_tx.clone();
         let tool_ctx = ToolContext {
             tool_use_id: Some(id.clone()),
             ..ctx.clone()
         };
         let mcp_owned = mcp.cloned();
+        let is_read_only = dedup_key.is_some();
         set.spawn(async move {
             let done = run(
                 ToolRegistry::native(),
@@ -320,11 +383,11 @@ pub(super) async fn process_tool_calls(
             )
             .await;
             event_tx_clone.try_send(AgentEvent::ToolDone(Box::new(done.clone())));
-            done
+            (done, is_read_only, dedup_key)
         });
     }
 
-    let results: Vec<ToolDoneEvent> = set
+    let results: Vec<(ToolDoneEvent, bool, Option<u64>)> = set
         .join_all()
         .await
         .into_iter()
@@ -337,14 +400,57 @@ pub(super) async fn process_tool_calls(
         })
         .collect();
 
-    let mut all_results = results;
+    for (done, is_read_only, dedup_key) in &results {
+        if done.is_error {
+            trust.record_failure(&done.tool);
+        } else {
+            trust.record_success(&done.tool);
+        }
+        if *is_read_only && !done.is_error
+            && let Some(key) = dedup_key
+        {
+            dedup.insert(*key, &done.output);
+        }
+    }
+
+    let mut all_results: Vec<ToolDoneEvent> = results.into_iter().map(|(d, _, _)| d).collect();
+    let had_write_edits = all_results.iter().any(|r| {
+        !r.is_error && is_write_tool(&r.tool)
+    });
+
+    if had_write_edits {
+        let should_validate = all_results.iter().any(|r| {
+            if !is_write_tool(&r.tool) || r.is_error {
+                return false;
+            }
+            r.output.written_path().is_some_and(|p| validator.should_validate(Path::new(p)))
+        });
+        if should_validate {
+            match validator.validate().await {
+                ValidationResult::Errors(errors) => {
+                    let validation_result = ToolDoneEvent {
+                        id: format!("validation-{}", all_results[0].id),
+                        tool: Arc::from("validation"),
+                        output: crate::ToolOutput::Plain(format!(
+                            "post-write validation failed:\n{errors}"
+                        )),
+                        is_error: true,
+                    };
+                    all_results.push(validation_result);
+                }
+                ValidationResult::Clean | ValidationResult::Skipped => {}
+            }
+        }
+    }
+
     all_results.extend(immediate_errors);
+    let had_errors = all_results.iter().any(|r| r.is_error);
     let tool_msg = crate::types::tool_results(all_results);
     event_tx.send(AgentEvent::ToolResultsSubmitted {
         message: Box::new(tool_msg.clone()),
     })?;
     history.push(tool_msg);
-    Ok(())
+    Ok(had_errors)
 }
 
 /// Test-only entry that skips native lookup, letting plan-mode and MCP tests
@@ -362,6 +468,19 @@ async fn dispatch_mcp(
         .map(|m| m.interned_name(tool_name))
         .unwrap_or_else(|| Arc::from(UNKNOWN_MCP));
     execute_mcp_tool(ctx, id, tool_id, tool_name, input).await
+}
+
+fn is_write_tool(name: &str) -> bool {
+    matches!(
+        name,
+        crate::tools::WRITE_TOOL_NAME
+            | crate::tools::EDIT_TOOL_NAME
+            | crate::tools::MULTIEDIT_TOOL_NAME
+    )
+}
+
+fn extract_file_path(input: &Value) -> Option<String> {
+    input.get("path").and_then(|v| v.as_str()).map(|s| s.to_owned())
 }
 
 #[cfg(test)]

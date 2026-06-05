@@ -349,6 +349,12 @@ pub struct AgentFileConfig {
     pub compaction_buffer: Option<u32>,
     pub search_result_limit: Option<usize>,
     pub interpreter_max_memory_mb: Option<usize>,
+    #[serde(default)]
+    pub trust_decay: TrustDecayConfig,
+    #[serde(default)]
+    pub validation: ValidationConfig,
+    #[serde(default)]
+    pub small_model: SmallModelConfig,
 }
 
 impl AgentFileConfig {
@@ -691,6 +697,117 @@ impl Default for ToolOutputLines {
     }
 }
 
+const DEFAULT_WARN_AFTER: u32 = 3;
+const DEFAULT_DROP_AFTER: u32 = 5;
+const DEFAULT_MIN_TOOLS: usize = 5;
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct TrustDecayConfig {
+    #[serde(default = "default_warn_after")]
+    pub warn_after: u32,
+    #[serde(default = "default_drop_after")]
+    pub drop_after: u32,
+    #[serde(default = "default_min_tools")]
+    pub min_tools: usize,
+    #[serde(default = "default_true")]
+    pub reset_on_success: bool,
+}
+
+fn default_warn_after() -> u32 {
+    DEFAULT_WARN_AFTER
+}
+fn default_drop_after() -> u32 {
+    DEFAULT_DROP_AFTER
+}
+fn default_min_tools() -> usize {
+    DEFAULT_MIN_TOOLS
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for TrustDecayConfig {
+    fn default() -> Self {
+        Self {
+            warn_after: DEFAULT_WARN_AFTER,
+            drop_after: DEFAULT_DROP_AFTER,
+            min_tools: DEFAULT_MIN_TOOLS,
+            reset_on_success: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ValidationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_max_validation_iterations")]
+    pub max_iterations: u8,
+    pub command: Option<String>,
+}
+
+fn default_max_validation_iterations() -> u8 {
+    3
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_iterations: 3,
+            command: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct SmallModelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub reduced_tools: bool,
+    #[serde(default)]
+    pub compact_prompt: bool,
+    #[serde(default)]
+    pub aggressive_truncation: bool,
+    #[serde(default = "default_compaction_threshold")]
+    pub compaction_threshold: f64,
+    #[serde(default = "default_true")]
+    pub forgiving_parsing: bool,
+    #[serde(default = "default_context_window_threshold")]
+    pub auto_detect_context_window: u32,
+}
+
+fn default_compaction_threshold() -> f64 {
+    0.50
+}
+fn default_context_window_threshold() -> u32 {
+    32_000
+}
+
+impl Default for SmallModelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reduced_tools: false,
+            compact_prompt: false,
+            aggressive_truncation: false,
+            compaction_threshold: 0.50,
+            forgiving_parsing: true,
+            auto_detect_context_window: 32_000,
+        }
+    }
+}
+
+impl SmallModelConfig {
+    pub fn should_activate(&self, context_window: u32) -> bool {
+        if self.enabled {
+            return true;
+        }
+        context_window > 0 && context_window < self.auto_detect_context_window
+    }
+}
+
 #[derive(Debug, Clone, ConfigSection, Serialize)]
 #[config(section = "agent")]
 pub struct AgentConfig {
@@ -735,9 +852,30 @@ pub struct AgentConfig {
 
     #[config(skip, default = "Vec::new()")]
     pub disabled_tools: Vec<String>,
+
+    #[config(skip, default = "TrustDecayConfig::default()")]
+    pub trust_decay: TrustDecayConfig,
+
+    #[config(skip, default = "ValidationConfig::default()")]
+    pub validation: ValidationConfig,
+
+    #[config(skip, default = "SmallModelConfig::default()")]
+    pub small_model: SmallModelConfig,
 }
 
 impl AgentConfig {
+    pub fn effective_output_limits(&self) -> (usize, usize) {
+        let small_active = self.small_model.enabled;
+        let factor = if small_active && self.small_model.aggressive_truncation {
+            0.5
+        } else {
+            1.0
+        };
+        (
+            (self.max_output_bytes as f64 * factor) as usize,
+            (self.max_output_lines as f64 * factor) as usize,
+        )
+    }
     fn from_file(
         file: AgentFileConfig,
         no_rtk: bool,
@@ -773,6 +911,9 @@ impl AgentConfig {
                 * 1024,
             allowed_tools: Vec::new(),
             disabled_tools,
+            trust_decay: file.trust_decay,
+            validation: file.validation,
+            small_model: file.small_model,
         }
     }
 

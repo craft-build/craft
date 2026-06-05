@@ -4,6 +4,7 @@ use std::sync::Arc;
 use strum::EnumString;
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/system.md");
+pub const SYSTEM_SMALL_PROMPT: &str = include_str!("prompts/system_small.md");
 pub const PLAN_PROMPT: &str = include_str!("prompts/plan.md");
 pub const RESEARCH_PROMPT: &str = include_str!("prompts/research.md");
 pub const GENERAL_PROMPT: &str = include_str!("prompts/general.md");
@@ -123,7 +124,7 @@ pub fn assemble(id: PromptId, slots: &ResolvedSlots, instructions: &str) -> Stri
 pub fn assemble_raw(template: &str, slots: &ResolvedSlots, instructions: &str) -> String {
     let mut out = template.to_string();
     for &slot in Slot::ALL {
-        out = fill_marker(&out, slot.marker(), &render_slot(slots, PromptId::Research, slot));
+        out = fill_marker(&out, slot.marker(), &render_slot(slots, PromptId::System, slot));
     }
     out.replace(INSTRUCTIONS_MARKER, instructions)
 }

@@ -56,6 +56,15 @@ pub struct DescriptionContext<'a> {
     pub filter: &'a ToolFilter,
 }
 
+const SMALL_MODEL_CORE_TOOLS: &[&str] = &[
+    "read",
+    "edit",
+    "write",
+    "bash",
+    "glob",
+    "grep",
+];
+
 #[derive(Debug, Clone, Default)]
 pub enum ToolFilter {
     #[default]
@@ -98,7 +107,11 @@ impl ToolFilter {
 
     pub fn from_config(config: &AgentConfig, extra_exclude: &[&str]) -> Self {
         let base = if config.allowed_tools.is_empty() {
-            Self::All
+            if config.small_model.should_activate(0) && config.small_model.reduced_tools {
+                Self::Only(SMALL_MODEL_CORE_TOOLS.iter().map(|s| s.to_string()).collect())
+            } else {
+                Self::All
+            }
         } else {
             Self::Only(
                 config
@@ -403,20 +416,28 @@ pub(crate) fn build_interpreter_tools_description(filter: &ToolFilter) -> String
 }
 
 pub(crate) fn sanitize_tool_input(input: &Value) -> Value {
+    sanitize_tool_input_inner(input, false)
+}
+
+pub(crate) fn sanitize_tool_input_aggressive(input: &Value) -> Value {
+    sanitize_tool_input_inner(input, true)
+}
+
+fn sanitize_tool_input_inner(input: &Value, aggressive: bool) -> Value {
     let obj = match input.as_object() {
         Some(o) => o,
         None => {
             return input
                 .as_str()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .and_then(|s| try_parse_loose_json(s, aggressive))
                 .filter(|v| v.is_object())
-                .map(|v| sanitize_tool_input(&v))
+                .map(|v| sanitize_tool_input_inner(&v, aggressive))
                 .unwrap_or_else(|| input.clone());
         }
     };
 
     if let Some(inner) = obj.get("parameters").filter(|_| obj.len() == 1) {
-        return sanitize_tool_input(inner);
+        return sanitize_tool_input_inner(inner, aggressive);
     }
 
     let mut out = serde_json::Map::new();
@@ -424,6 +445,7 @@ pub(crate) fn sanitize_tool_input(input: &Value) -> Value {
         let norm_key = to_snake_case(key);
         let new_val = match val.as_str() {
             Some(s) => Value::String(strip_stray_quotes(key, s)),
+            None if aggressive && val.is_null() => Value::String(String::new()),
             None => val.clone(),
         };
         if norm_key != *key {
@@ -432,6 +454,22 @@ pub(crate) fn sanitize_tool_input(input: &Value) -> Value {
         out.insert(norm_key, new_val);
     }
     Value::Object(out)
+}
+
+fn try_parse_loose_json(s: &str, aggressive: bool) -> Option<Value> {
+    if let Ok(v) = serde_json::from_str::<Value>(s) {
+        return Some(v);
+    }
+    if !aggressive {
+        return None;
+    }
+    let trimmed = s.trim();
+    let fixed = if !trimmed.ends_with('}') && trimmed.contains('{') {
+        format!("{trimmed}}}")
+    } else {
+        return None;
+    };
+    serde_json::from_str::<Value>(&fixed).ok()
 }
 
 fn strip_stray_quotes(field: &str, s: &str) -> String {

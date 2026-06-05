@@ -953,6 +953,10 @@ impl App {
             return vec![];
         }
 
+        if let AgentEvent::ModelEscalation { to, .. } = &envelope.event {
+            return vec![Action::ChangeModel(to.clone())];
+        }
+
         self.retry_info = None;
 
         let plan_path = if self.state.mode == Mode::Plan {

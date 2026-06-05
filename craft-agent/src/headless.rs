@@ -51,8 +51,10 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let tools =
         ToolRegistry::native().definitions(&vars, &ctx, params.model.supports_tool_examples());
 
+    let compact = params.config.small_model.should_activate(params.model.context_window)
+        && params.config.small_model.compact_prompt;
     let system =
-        agent::build_system_prompt(&vars, &mode, &instructions.text, &params.prompt_slots);
+        agent::build_system_prompt(&vars, &mode, &instructions.text, &params.prompt_slots, compact);
 
     let tool_names = extract_tool_names(&tools);
 
