@@ -58,7 +58,7 @@ Full attribution and thanks to the original project: [github.com/tontinton/maki]
 * Z.AI - `ZHIPU_API_KEY`.
 * Synthetic - `SYNTHETIC_API_KEY`.
 
-**Dynamic providers** - drop an executable script into `~/.craft/providers/` to add custom providers or proxies.
+**Dynamic providers** - drop an executable script into `~/.config/craft/providers/` to add custom providers or proxies.
 
 ## Installation
 

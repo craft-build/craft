@@ -48,8 +48,12 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
 
     let filter = ToolFilter::from_config(&params.config, &params.excluded_tools);
     let ctx = DescriptionContext { filter: &filter };
-    let tools =
+    let mut tools =
         ToolRegistry::native().definitions(&vars, &ctx, params.model.supports_tool_examples());
+
+    if let Some(handle) = &params.mcp_handle {
+        handle.extend_tools(&mut tools);
+    }
 
     let compact = params.config.small_model.should_activate(params.model.context_window)
         && params.config.small_model.compact_prompt;
