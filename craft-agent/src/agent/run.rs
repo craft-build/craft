@@ -494,7 +494,7 @@ impl Agent {
                 self.do_compact().await?;
             }
             ExtractedCommand::Undo(_) => {
-                if let Some(msg) = self.snapshot.rollback() {
+                if let Some(msg) = self.snapshot.rollback().await {
                     self.event_tx.send(AgentEvent::Info { message: msg })?;
                 }
             }

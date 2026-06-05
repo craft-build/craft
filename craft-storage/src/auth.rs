@@ -12,7 +12,7 @@ const AUTH_DIR: &str = "auth";
 const AUTH_FILE_MODE: u32 = 0o600;
 const REFRESH_BUFFER_SECS: u64 = 60;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     pub access: String,
     pub refresh: String,
@@ -31,7 +31,7 @@ impl OAuthTokens {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpAuthData {
     pub server_url: String,
     pub tokens: Option<OAuthTokens>,

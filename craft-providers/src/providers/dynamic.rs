@@ -338,11 +338,18 @@ pub fn auth_providers() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+pub async fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>, AgentError> {
     let meta = find_meta(slug).ok_or_else(|| AgentError::Config {
         message: format!("unknown dynamic provider '{slug}'"),
     })?;
-    let resolved = resolve_auth(meta)?;
+    let resolved = tokio::task::spawn_blocking({
+        let meta: &'static DynamicProviderMeta = meta;
+        move || resolve_auth(meta)
+    })
+    .await
+    .map_err(|e| AgentError::Config {
+        message: format!("dynamic provider create task: {e}"),
+    })??;
     let auth = Arc::new(Mutex::new(resolved));
 
     let inner: Box<dyn Provider> = match meta.base {

@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use craft_config::ValidationConfig;
 use tokio::process::Command;
@@ -87,7 +88,11 @@ impl Validator {
 
         let (cmd, args) = if let Some(ref custom) = self.config.command {
             let parts: Vec<&str> = custom.split_whitespace().collect();
-            (parts[0], parts[1..].to_vec())
+            let Some(bin) = parts.first() else {
+                warn!(command = %custom, "empty custom validation command");
+                return ValidationResult::Skipped;
+            };
+            (*bin, parts[1..].to_vec())
         } else {
             let (c, a) = pt.validation_command();
             (c, a.to_vec())
@@ -95,17 +100,21 @@ impl Validator {
 
         debug!(command = cmd, args = ?args, "running validation");
 
-        let output = Command::new(cmd)
-            .args(&args)
-            .current_dir(&self.workdir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        let timeout = Duration::from_secs(self.config.timeout_secs);
+        let output = tokio::time::timeout(
+            timeout,
+            Command::new(cmd)
+                .args(&args)
+                .current_dir(&self.workdir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output(),
+        )
+        .await;
 
         match output {
-            Ok(out) if out.status.success() => ValidationResult::Clean,
-            Ok(out) => {
+            Ok(Ok(out)) if out.status.success() => ValidationResult::Clean,
+            Ok(Ok(out)) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let combined = if stderr.is_empty() {
@@ -118,8 +127,12 @@ impl Validator {
                 debug!(errors = %combined, "validation failed");
                 ValidationResult::Errors(combined)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(error = %e, "validation command failed to execute");
+                ValidationResult::Skipped
+            }
+            Err(_) => {
+                warn!(timeout_secs = self.config.timeout_secs, "validation timed out");
                 ValidationResult::Skipped
             }
         }

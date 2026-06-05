@@ -16,6 +16,12 @@ Full attribution and thanks to the original project: [github.com/tontinton/maki]
   - **Token estimation** — client-side character-based heuristic enables proactive compression at 80% context window, before overflow.
   - **Prefix cache awareness** — messages confirmed to be in the provider's KV cache (via `cache_read` tokens) are skipped during compression to preserve cache read discounts.
   - **Reversible compression (CCR)** — original content is stored in an in-memory LRU store, and a `retrieve` tool lets the LLM fetch originals on demand via content hashes embedded in compressed output.
+* **Tool dedup cache** — caches read-only tool results (`read`/`grep`/`glob`/`index`) keyed by hash(tool+args), bounded to 64 entries with FIFO eviction, cleared on compaction. Cache hits are prefixed with `[cached]`.
+* **Trust decay** — tracks per-tool consecutive failures and demotes or drops tools after configurable thresholds (`warn_after=3`, `drop_after=5`). A `min_tools` safeguard prevents dropping below a minimum. Configurable via `[agent.trust_decay]`.
+* **Snapshot & rollback** — auto-snapshots files before `write`/`edit`/`multiedit` operations, commits on agent Done, and supports rollback via `/undo`. Files >5MB and outside the workdir are skipped.
+* **Post-write validation** — detects project type (Rust/TS/Go/Python) from config files and runs validation commands after writes. Disabled by default, configurable via `[agent.validation]`.
+* **Small model mode** — auto-detects models with context window <32k and reduces tools to a core set, uses a compact system prompt, triggers compaction at 50% instead of 80%, and adds aggressive JSON repair on parse failures. Configurable via `[agent.small_model]`.
+* **Model escalation** — tracks per-model failure rates and emits a `ModelEscalation` event when the rate reaches 60% after 5 calls, prompting automatic tier upgrade (haiku/flash → sonnet → opus).
 
 ## Features
 

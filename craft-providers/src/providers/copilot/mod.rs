@@ -115,7 +115,11 @@ impl Copilot {
             return Ok(auth);
         }
 
-        let token = auth::load_token()?;
+        let token = tokio::task::spawn_blocking(auth::load_token)
+            .await
+            .map_err(|e| AgentError::Config {
+                message: format!("copilot load_token task: {e}"),
+            })??;
         let endpoint = discover_api_endpoint(&self.client, &token).await;
         let auth = CopilotAuth { token, endpoint };
         *lock_unpoison(&self.auth) = Some(auth.clone());

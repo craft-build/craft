@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::Client;
@@ -147,7 +147,7 @@ fn build_request(
 }
 
 async fn do_request(params: RequestParams) -> Result<ResponseData, String> {
-    let (host, resolved) = resolve_and_check_ssrf(&params.url)?;
+    let (host, resolved) = resolve_and_check_ssrf(&params.url).await?;
 
     let client = Client::builder()
         .resolve_to_addrs(&host, &resolved)
@@ -270,7 +270,7 @@ fn extract_port(url: &str) -> Option<u16> {
     }
 }
 
-fn resolve_and_check_ssrf(url: &str) -> Result<(String, Vec<SocketAddr>), String> {
+async fn resolve_and_check_ssrf(url: &str) -> Result<(String, Vec<SocketAddr>), String> {
     let host = extract_host(url).ok_or("cannot extract host from URL")?;
 
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -283,8 +283,8 @@ fn resolve_and_check_ssrf(url: &str) -> Result<(String, Vec<SocketAddr>), String
 
     let port = extract_port(url).unwrap_or(443);
     let addr = format!("{host}:{port}");
-    let addrs: Vec<_> = addr
-        .to_socket_addrs()
+    let addrs: Vec<_> = tokio::net::lookup_host(&addr)
+        .await
         .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?
         .collect();
 
@@ -361,21 +361,54 @@ mod tests {
         assert!(validate_and_upgrade_url(input).is_err());
     }
 
-    #[test_case("https://8.8.8.8", Ok(()) ; "public_ip_allowed")]
-    #[test_case("https://127.0.0.1", Err(()) ; "loopback_blocked")]
-    #[test_case("https://192.168.1.1", Err(()) ; "private_blocked")]
-    #[test_case("https://10.0.0.1", Err(()) ; "rfc1918_10_blocked")]
-    #[test_case("https://172.16.0.1", Err(()) ; "rfc1918_172_blocked")]
-    #[test_case("https://169.254.169.254", Err(()) ; "aws_metadata_blocked")]
-    #[test_case("https://[::1]", Err(()) ; "ipv6_loopback_blocked")]
-    #[test_case("https://[::ffff:127.0.0.1]", Err(()) ; "ipv4_mapped_loopback_blocked")]
-    #[test_case("https://0.0.0.0", Err(()) ; "unspecified_blocked")]
-    #[test_case("https://[::ffff:169.254.169.254]", Err(()) ; "ipv4_mapped_metadata_blocked")]
-    fn resolve_and_check_ssrf_cases(url: &str, expected: Result<(), ()>) {
-        match expected {
-            Ok(()) => assert!(resolve_and_check_ssrf(url).is_ok(), "{url} should be allowed"),
-            Err(()) => assert!(resolve_and_check_ssrf(url).is_err(), "{url} should be blocked"),
-        }
+    #[tokio::test]
+    async fn resolve_ssrf_public_ip_allowed() {
+        assert!(resolve_and_check_ssrf("https://8.8.8.8").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_loopback_blocked() {
+        assert!(resolve_and_check_ssrf("https://127.0.0.1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_private_blocked() {
+        assert!(resolve_and_check_ssrf("https://192.168.1.1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_rfc1918_10_blocked() {
+        assert!(resolve_and_check_ssrf("https://10.0.0.1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_rfc1918_172_blocked() {
+        assert!(resolve_and_check_ssrf("https://172.16.0.1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_aws_metadata_blocked() {
+        assert!(resolve_and_check_ssrf("https://169.254.169.254").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_ipv6_loopback_blocked() {
+        assert!(resolve_and_check_ssrf("https://[::1]").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_ipv4_mapped_loopback_blocked() {
+        assert!(resolve_and_check_ssrf("https://[::ffff:127.0.0.1]").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_unspecified_blocked() {
+        assert!(resolve_and_check_ssrf("https://0.0.0.0").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_ipv4_mapped_metadata_blocked() {
+        assert!(resolve_and_check_ssrf("https://[::ffff:169.254.169.254]").await.is_err());
     }
 
     #[test_case(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), true ; "v4_unspecified")]

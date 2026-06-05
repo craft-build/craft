@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use tokio::fs;
 use tracing::{debug, warn};
 
 const MAX_SNAPSHOT_FILE_SIZE: u64 = 5 * 1024 * 1024;
@@ -32,7 +34,7 @@ impl SnapshotManager {
         debug!(label = ?state.label, "snapshot session started");
     }
 
-    pub fn note(&self, path: &Path) {
+    pub async fn note(&self, path: &Path) {
         let abs = if path.is_absolute() {
             path.to_owned()
         } else {
@@ -43,7 +45,7 @@ impl SnapshotManager {
             return;
         }
 
-        match std::fs::metadata(&abs) {
+        match fs::metadata(&abs).await {
             Ok(meta) if meta.len() > MAX_SNAPSHOT_FILE_SIZE => {
                 warn!(path = %abs.display(), "skipping snapshot, file too large");
                 return;
@@ -51,6 +53,14 @@ impl SnapshotManager {
             Err(_) => return,
             Ok(_) => {}
         }
+
+        let content = match fs::read_to_string(&abs).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(path = %abs.display(), error = %e, "failed to read file for snapshot");
+                return;
+            }
+        };
 
         let mut state = self.state.lock().unwrap();
         if state.label.is_none() {
@@ -61,26 +71,21 @@ impl SnapshotManager {
             return;
         }
 
-        match std::fs::read_to_string(&abs) {
-            Ok(content) => {
-                debug!(path = %abs.display(), "snapshot saved");
-                state.originals.insert(abs, content);
-            }
-            Err(e) => {
-                warn!(path = %abs.display(), error = %e, "failed to read file for snapshot");
-            }
-        }
+        debug!(path = %abs.display(), "snapshot saved");
+        state.originals.insert(abs, content);
     }
 
-    pub fn rollback(&self) -> Option<String> {
-        let mut state = self.state.lock().unwrap();
-        let label = state.label.take()?;
-        let originals = std::mem::take(&mut state.originals);
-        drop(state);
+    pub async fn rollback(&self) -> Option<String> {
+        let (label, originals) = {
+            let mut state = self.state.lock().unwrap();
+            let label = state.label.take()?;
+            let originals = std::mem::take(&mut state.originals);
+            (label, originals)
+        };
 
         let mut restored = 0;
         for (path, content) in &originals {
-            match std::fs::write(path, content) {
+            match fs::write(path, content).await {
                 Ok(()) => {
                     debug!(path = %path.display(), "restored from snapshot");
                     restored += 1;
@@ -127,8 +132,8 @@ mod tests {
         (dir, path)
     }
 
-    #[test]
-    fn begin_sets_label() {
+    #[tokio::test]
+    async fn begin_sets_label() {
         let (_tmp, dir) = tmp_dir();
         let mgr = SnapshotManager::new(dir);
         assert!(!mgr.is_active());
@@ -136,46 +141,46 @@ mod tests {
         assert!(mgr.is_active());
     }
 
-    #[test]
-    fn note_saves_original_content() {
+    #[tokio::test]
+    async fn note_saves_original_content() {
         let (_tmp, dir) = tmp_dir();
         let mgr = SnapshotManager::new(dir.clone());
         mgr.begin("test");
 
         let file = dir.join("foo.rs");
         fs::write(&file, "original content").unwrap();
-        mgr.note(&file);
+        mgr.note(&file).await;
 
         fs::write(&file, "modified content").unwrap();
         assert_eq!(mgr.snapshot_count(), 1);
     }
 
-    #[test]
-    fn rollback_restores_files() {
+    #[tokio::test]
+    async fn rollback_restores_files() {
         let (_tmp, dir) = tmp_dir();
         let mgr = SnapshotManager::new(dir.clone());
         mgr.begin("test");
 
         let file = dir.join("foo.rs");
         fs::write(&file, "original").unwrap();
-        mgr.note(&file);
+        mgr.note(&file).await;
         fs::write(&file, "changed").unwrap();
 
-        let result = mgr.rollback().unwrap();
+        let result = mgr.rollback().await.unwrap();
         assert!(result.contains("rolled back"));
         assert_eq!(fs::read_to_string(&file).unwrap(), "original");
         assert!(!mgr.is_active());
     }
 
-    #[test]
-    fn commit_discards_snapshots() {
+    #[tokio::test]
+    async fn commit_discards_snapshots() {
         let (_tmp, dir) = tmp_dir();
         let mgr = SnapshotManager::new(dir.clone());
         mgr.begin("test");
 
         let file = dir.join("foo.rs");
         fs::write(&file, "original").unwrap();
-        mgr.note(&file);
+        mgr.note(&file).await;
         fs::write(&file, "changed").unwrap();
 
         mgr.commit();
@@ -183,37 +188,37 @@ mod tests {
         assert!(!mgr.is_active());
     }
 
-    #[test]
-    fn note_outside_workdir_is_ignored() {
+    #[tokio::test]
+    async fn note_outside_workdir_is_ignored() {
         let (_tmp, dir) = tmp_dir();
         let mgr = SnapshotManager::new(dir);
         mgr.begin("test");
 
         let outside = Path::new("/tmp/definitely_outside_craft_test.rs");
-        mgr.note(outside);
+        mgr.note(outside).await;
         assert_eq!(mgr.snapshot_count(), 0);
     }
 
-    #[test]
-    fn first_snapshot_wins() {
+    #[tokio::test]
+    async fn first_snapshot_wins() {
         let (_tmp, dir) = tmp_dir();
         let mgr = SnapshotManager::new(dir.clone());
         mgr.begin("test");
 
         let file = dir.join("foo.rs");
         fs::write(&file, "first").unwrap();
-        mgr.note(&file);
+        mgr.note(&file).await;
         fs::write(&file, "second").unwrap();
-        mgr.note(&file);
+        mgr.note(&file).await;
 
-        mgr.rollback().unwrap();
+        mgr.rollback().await.unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), "first");
     }
 
-    #[test]
-    fn rollback_without_begin_returns_none() {
+    #[tokio::test]
+    async fn rollback_without_begin_returns_none() {
         let (_tmp, dir) = tmp_dir();
         let mgr = SnapshotManager::new(dir);
-        assert!(mgr.rollback().is_none());
+        assert!(mgr.rollback().await.is_none());
     }
 }

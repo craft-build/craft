@@ -41,7 +41,16 @@ pub async fn authenticate(
     };
     let client = build_http_client().map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
 
-    if let Some(existing) = load_mcp_auth(storage, server_name, server_url)
+    let existing = tokio::task::spawn_blocking({
+        let storage = storage.clone();
+        let server_name = server_name.to_string();
+        let server_url = server_url.to_string();
+        move || load_mcp_auth(&storage, &server_name, &server_url)
+    })
+    .await
+    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
+
+    if let Some(existing) = existing
         && let Some(ref tokens) = existing.tokens
     {
         if !tokens.is_expired() {
@@ -66,9 +75,16 @@ pub async fn authenticate(
                         tokens: Some(new_tokens),
                         ..existing
                     };
-                    save_mcp_auth(storage, server_name, &data)
-                        .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
-                    return Ok(data);
+                    let result = data.clone();
+                    tokio::task::spawn_blocking({
+                        let storage = storage.clone();
+                        let server_name = server_name.to_string();
+                        move || save_mcp_auth(&storage, &server_name, &data)
+                    })
+                    .await
+                    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?
+                    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
+                    return Ok(result);
                 }
                 Err(e) => {
                     warn!(server = server_name, error = %e, "token refresh failed, starting full flow");
@@ -110,7 +126,16 @@ pub async fn authenticate(
         .map_err(|e| wrap(OAuthError::Other(e)))?;
     let redirect_uri = callback.redirect_uri();
 
-    let reg = if let Some(existing) = load_mcp_auth(storage, server_name, server_url)
+    let existing = tokio::task::spawn_blocking({
+        let storage = storage.clone();
+        let server_name = server_name.to_string();
+        let server_url = server_url.to_string();
+        move || load_mcp_auth(&storage, &server_name, &server_url)
+    })
+    .await
+    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
+
+    let reg = if let Some(existing) = existing
         && existing.redirect_uri.as_deref() == Some(&redirect_uri)
     {
         registration::ClientRegistration {
@@ -182,10 +207,17 @@ pub async fn authenticate(
         redirect_uri: Some(redirect_uri),
     };
 
-    save_mcp_auth(storage, server_name, &data)
-        .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
+    let result = data.clone();
+    tokio::task::spawn_blocking({
+        let storage = storage.clone();
+        let server_name = server_name.to_string();
+        move || save_mcp_auth(&storage, &server_name, &data)
+    })
+    .await
+    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?
+    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
     info!(server = server_name, "OAuth authentication complete");
-    Ok(data)
+    Ok(result)
 }
 
 async fn discover_auth_server_for(

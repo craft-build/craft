@@ -744,10 +744,16 @@ pub struct ValidationConfig {
     #[serde(default = "default_max_validation_iterations")]
     pub max_iterations: u8,
     pub command: Option<String>,
+    #[serde(default = "default_validation_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 fn default_max_validation_iterations() -> u8 {
     3
+}
+
+fn default_validation_timeout_secs() -> u64 {
+    30
 }
 
 impl Default for ValidationConfig {
@@ -756,6 +762,7 @@ impl Default for ValidationConfig {
             enabled: false,
             max_iterations: 3,
             command: None,
+            timeout_secs: default_validation_timeout_secs(),
         }
     }
 }

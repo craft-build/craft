@@ -248,7 +248,7 @@ pub trait Provider: Send + Sync {
 
 pub async fn from_model(model: &Model, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
     if let Some(slug) = &model.dynamic_slug {
-        let provider = dynamic::create(slug, timeouts)?;
+        let provider = dynamic::create(slug, timeouts).await?;
         debug!(slug, model = %model.id, "dynamic provider created");
         return Ok(provider);
     }
@@ -319,7 +319,7 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
                     warnings: vec![format!("{slug}: {reason} (using static fallback)")],
                 }
             };
-            match dynamic::create(&slug, timeouts) {
+            match dynamic::create(&slug, timeouts).await {
                 Ok(provider) => match provider.list_models().await {
                     Ok(ids) => ModelBatch {
                         models: ids.into_iter().map(|id| format!("{slug}/{id}")).collect(),

@@ -95,7 +95,7 @@ async fn resolve_bedrock_auth() -> Result<BedrockAuth, AgentError> {
         let creds_path = env::var("HOME")
             .map(|h| format!("{h}/.aws/credentials"))
             .unwrap_or_default();
-        if let Ok(content) = std::fs::read_to_string(&creds_path)
+        if let Ok(content) = tokio::fs::read_to_string(&creds_path).await
             && let Ok((access_key, secret_key, session_token)) =
                 parse_aws_credentials_file(&content, &profile)
         {
@@ -161,9 +161,11 @@ async fn fetch_container_credentials(
     // file rotates, so don't cache it.
     let auth_header = match env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE") {
         Ok(path) => Some(
-            std::fs::read_to_string(&path).map_err(|e| AgentError::Config {
-                message: format!("read container auth token file {path}: {e}"),
-            })?,
+            tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| AgentError::Config {
+                    message: format!("read container auth token file {path}: {e}"),
+                })?,
         ),
         Err(_) => env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN").ok(),
     };

@@ -268,20 +268,45 @@ pub(crate) fn is_oauth(dir: &StateDir) -> bool {
 }
 
 pub async fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
-    if let Some(tokens) = load_tokens(dir, PROVIDER) {
+    let tokens = tokio::task::spawn_blocking({
+        let dir = dir.clone();
+        move || load_tokens(&dir, PROVIDER)
+    })
+    .await
+    .map_err(|e| AgentError::Config {
+        message: format!("openai load_tokens task: {e}"),
+    })?;
+
+    if let Some(tokens) = tokens {
         if !tokens.is_expired() {
             debug!("using OpenAI OAuth authentication");
             return Ok(build_oauth_resolved(&tokens));
         }
         match refresh_tokens(&tokens).await {
             Ok(fresh) => {
-                save_tokens(dir, PROVIDER, &fresh)?;
+                let resolved = build_oauth_resolved(&fresh);
+                tokio::task::spawn_blocking({
+                    let dir = dir.clone();
+                    move || save_tokens(&dir, PROVIDER, &fresh)
+                })
+                .await
+                .map_err(|e| AgentError::Config {
+                    message: format!("openai save_tokens task: {e}"),
+                })??;
                 debug!("using OpenAI OAuth authentication (refreshed)");
-                return Ok(build_oauth_resolved(&fresh));
+                return Ok(resolved);
             }
             Err(e) => {
                 warn!(error = %e, "OpenAI OAuth refresh failed, clearing stale tokens");
-                delete_tokens(dir, PROVIDER).ok();
+                tokio::task::spawn_blocking({
+                    let dir = dir.clone();
+                    move || delete_tokens(&dir, PROVIDER)
+                })
+                .await
+                .map_err(|e| AgentError::Config {
+                    message: format!("openai delete_tokens task: {e}"),
+                })?
+                .ok();
             }
         }
     }
@@ -317,7 +342,14 @@ pub async fn login(dir: &StateDir) -> Result<(), AgentError> {
     })?;
 
     let tokens = into_oauth_tokens(token_resp);
-    save_tokens(dir, PROVIDER, &tokens)?;
+    tokio::task::spawn_blocking({
+        let dir = dir.clone();
+        move || save_tokens(&dir, PROVIDER, &tokens)
+    })
+    .await
+    .map_err(|e| AgentError::Config {
+        message: format!("openai save_tokens task: {e}"),
+    })??;
     println!("Authenticated successfully.");
     Ok(())
 }

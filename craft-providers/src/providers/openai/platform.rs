@@ -79,7 +79,15 @@ impl OpenAi {
             message: "OAuth refresh not available for externally-managed auth".into(),
         })?;
         let tokens =
-            craft_storage::auth::load_tokens(&storage, auth::PROVIDER).ok_or_else(|| {
+            tokio::task::spawn_blocking({
+                let storage = storage.clone();
+                move || craft_storage::auth::load_tokens(&storage, auth::PROVIDER)
+            })
+            .await
+            .map_err(|e| AgentError::Config {
+                message: format!("openai load_tokens task: {e}"),
+            })?
+            .ok_or_else(|| {
                 AgentError::Api {
                     status: 401,
                     message: "OpenAI OAuth tokens not found on disk".into(),
@@ -87,12 +95,27 @@ impl OpenAi {
             })?;
         let resolved = match auth::refresh_tokens(&tokens).await {
             Ok(fresh) => {
-                craft_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)?;
-                auth::build_oauth_resolved(&fresh)
+                let resolved = auth::build_oauth_resolved(&fresh);
+                tokio::task::spawn_blocking({
+                    let storage = storage.clone();
+                    move || craft_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)
+                })
+                .await
+                .map_err(|e| AgentError::Config {
+                    message: format!("openai save_tokens task: {e}"),
+                })??;
+                resolved
             }
             Err(e) => {
                 warn!(error = %e, "OpenAI OAuth refresh failed, clearing stale tokens");
-                let _ = craft_storage::auth::delete_tokens(&storage, auth::PROVIDER);
+                let _ = tokio::task::spawn_blocking({
+                    let storage = storage.clone();
+                    move || craft_storage::auth::delete_tokens(&storage, auth::PROVIDER)
+                })
+                .await
+                .map_err(|e| AgentError::Config {
+                    message: format!("openai delete_tokens task: {e}"),
+                })?;
                 return Err(e);
             }
         };

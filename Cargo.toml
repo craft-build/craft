@@ -58,9 +58,9 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.14+0.2.2"
+version = "0.3.14+0.2.3"
 edition = "2024"
-authors = ["Tony Solomonik <tony.solomonik@gmail.com>"]
+authors = ["Tony Solomonik <tony.solomonik@gmail.com>", "Jarrett Tierney <akarifur@pm.me>"]
 license = "MIT"
 repository = "https://gitlab.com/craft-build/craft"
 rust-version = "1.85"

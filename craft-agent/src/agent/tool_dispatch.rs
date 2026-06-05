@@ -344,7 +344,7 @@ pub(super) async fn process_tool_calls(
                 snapshot.begin("auto");
             }
             if let Some(path) = extract_file_path(&input) {
-                snapshot.note(Path::new(&path));
+                snapshot.note(Path::new(&path)).await;
             }
         }
 
