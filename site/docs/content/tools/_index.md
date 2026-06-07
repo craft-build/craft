@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Craft ships with 22 built-in tools. This is the full reference.
+Craft ships with 23 built-in tools. This is the full reference.
 
 ## File Operations
 

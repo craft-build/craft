@@ -7,7 +7,7 @@ use craft_providers::model::{Model, ModelTier};
 use craft_providers::provider::ProviderKind;
 use craft_storage::StateDir;
 use craft_storage::log::RotatingFileWriter;
-use craft_storage::model::{persist_model, read_model};
+use craft_storage::model::read_model;
 use tracing_subscriber::EnvFilter;
 
 const PROVIDER_PRIORITY: &[ProviderKind] = &[
@@ -27,7 +27,6 @@ pub async fn resolve_model(
 ) -> Result<Model> {
     if let Some(spec) = explicit {
         let model = Model::from_spec(spec).context("invalid --model spec")?;
-        persist_model(storage, &model.spec()).ok();
         return Ok(model);
     }
     if let Some(spec) = read_model(storage) {
