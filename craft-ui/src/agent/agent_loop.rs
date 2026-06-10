@@ -11,8 +11,8 @@ use craft_agent::template::Vars;
 use craft_agent::tools::{DescriptionContext, FileReadTracker, ToolFilter, ToolRegistry};
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelToken,
-    CancelTrigger, Envelope, EventSender, History, Instructions, McpCommand, PromptRole,
-    ToolOutputLines,
+    CancelTrigger, Envelope, EventSender, FindingsStore, History, Instructions, McpCommand,
+    PromptRole, SharedFindingsStore, ToolOutputLines,
 };
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, TokenUsage};
@@ -37,6 +37,7 @@ pub(super) struct AgentLoop {
     init_cancel: CancelToken,
     permissions: Arc<PermissionManager>,
     file_tracker: Arc<FileReadTracker>,
+    findings_store: SharedFindingsStore,
     min_run_id: u64,
     agent_tx: flume::Sender<Envelope>,
     answer_rx: Arc<tokio::sync::Mutex<flume::Receiver<String>>>,
@@ -83,6 +84,7 @@ impl AgentLoop {
             init_cancel,
             permissions,
             file_tracker: FileReadTracker::fresh(),
+            findings_store: FindingsStore::new_shared(),
             min_run_id: 0,
             agent_tx,
             answer_rx: Arc::new(tokio::sync::Mutex::new(answer_rx)),
@@ -242,6 +244,7 @@ impl AgentLoop {
                 file_tracker: Arc::clone(&self.file_tracker),
                 prompt_slots: std::sync::Arc::new(prompt_slots),
                 compression: self.compression.clone(),
+                findings_store: Some(Arc::clone(&self.findings_store)),
             },
             AgentRunParams {
                 history: mem::replace(&mut self.history, History::new(Vec::new())),

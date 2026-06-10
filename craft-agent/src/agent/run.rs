@@ -50,6 +50,7 @@ pub struct AgentParams {
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub compression: craft_config::CompressionConfig,
+    pub findings_store: Option<super::findings_store::SharedFindingsStore>,
 }
 
 pub struct AgentRunParams {
@@ -87,6 +88,7 @@ pub struct Agent {
     file_tracker: Arc<FileReadTracker>,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     compression: craft_config::CompressionConfig,
+    findings_store: Option<super::findings_store::SharedFindingsStore>,
     cache_tracker: super::cache::PrefixCacheTracker,
     compression_store: super::compression_store::SharedCompressionStore,
     dedup_cache: ToolDedupCache,
@@ -126,6 +128,7 @@ impl Agent {
             file_tracker: params.file_tracker,
             prompt_slots: params.prompt_slots,
             compression: params.compression,
+            findings_store: params.findings_store,
             cache_tracker: super::cache::PrefixCacheTracker::new(),
             compression_store: super::compression_store::shared_store(),
             dedup_cache: ToolDedupCache::new(),
@@ -401,6 +404,7 @@ impl Agent {
             opts: self.opts,
             compression: self.compression.clone(),
             compression_store: Arc::clone(&self.compression_store),
+            findings_store: self.findings_store.clone(),
         }
     }
 
@@ -611,6 +615,7 @@ mod tests {
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
                 compression: craft_config::CompressionConfig::default(),
+                findings_store: None,
             },
             AgentRunParams {
                 history,
@@ -862,6 +867,7 @@ mod tests {
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
                 compression: craft_config::CompressionConfig::default(),
+                findings_store: None,
             },
             AgentRunParams {
                 history: History::new(Vec::new()),

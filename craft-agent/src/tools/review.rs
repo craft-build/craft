@@ -107,19 +107,7 @@ impl Review {
 
         tokio::spawn(async move {
             while let Ok(mut envelope) = sub_rx.recv_async().await {
-                if matches!(
-                    envelope.event,
-                    crate::AgentEvent::Done { .. }
-                        | crate::AgentEvent::Error { .. }
-                        | crate::AgentEvent::ToolOutput { .. }
-                        | crate::AgentEvent::ToolPending { .. }
-                        | crate::AgentEvent::SubagentHistory { .. }
-                ) {
-                    if let crate::AgentEvent::ToolDone(ref done) = envelope.event
-                        && let ToolOutput::Findings(ref f) = done.output
-                    {
-                        findings_clone.lock().unwrap().extend(f.clone());
-                    }
+                if !filter_subagent_envelope(&envelope, &findings_clone) {
                     continue;
                 }
                 envelope.subagent = subagent_info.clone();
@@ -146,6 +134,7 @@ impl Review {
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 compression: ctx.compression.clone(),
+                findings_store: None,
             },
             AgentRunParams {
                 history: crate::History::new(Vec::new()),
@@ -188,6 +177,12 @@ impl Review {
             Err(arc) => arc.lock().unwrap().clone(),
         };
 
+        if !findings.is_empty()
+            && let Some(store) = ctx.findings_store.as_ref()
+        {
+            store.lock().unwrap().extend(&self.task, findings.iter().cloned());
+        }
+
         Ok(ToolOutput::ReviewResult { findings, verdict: text })
     }
 }
@@ -200,5 +195,93 @@ impl super::ToolInvocation for Review {
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
         Box::pin(async move { Review::execute(&self, ctx).await })
+    }
+}
+
+/// Returns `true` if the envelope should be forwarded to the parent listener.
+/// Returns `false` for events that the review tool handles internally (terminal events
+/// and `ToolDone` whose findings get captured into `findings`).
+fn filter_subagent_envelope(
+    envelope: &crate::Envelope,
+    findings: &Arc<Mutex<Vec<Finding>>>,
+) -> bool {
+    use crate::AgentEvent;
+    match &envelope.event {
+        AgentEvent::ToolDone(done) => {
+            if let ToolOutput::Findings(f) = &done.output {
+                findings.lock().unwrap().extend(f.clone());
+            }
+            false
+        }
+        AgentEvent::Done { .. }
+        | AgentEvent::Error { .. }
+        | AgentEvent::ToolOutput { .. }
+        | AgentEvent::ToolPending { .. }
+        | AgentEvent::SubagentHistory { .. } => false,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolDoneEvent;
+    use crate::types::{Finding, Priority};
+
+    fn finding(title: &str) -> Finding {
+        Finding {
+            title: title.into(),
+            body: "body".into(),
+            priority: Priority::P1,
+            confidence: 0.9,
+            file_path: "f.rs".into(),
+            line_start: 1,
+            line_end: 1,
+            rule_ids: vec![],
+            suggestion: None,
+        }
+    }
+
+    fn envelope(event: crate::AgentEvent) -> crate::Envelope {
+        crate::Envelope {
+            event,
+            subagent: None,
+            run_id: 0,
+        }
+    }
+
+    #[test]
+    fn tool_done_with_findings_captured_and_swallowed() {
+        let bucket: Arc<Mutex<Vec<Finding>>> = Arc::new(Mutex::new(Vec::new()));
+        let env = envelope(crate::AgentEvent::ToolDone(Box::new(ToolDoneEvent {
+            id: "t1".into(),
+            tool: "report_finding".into(),
+            output: ToolOutput::Findings(vec![finding("a"), finding("b")]),
+            is_error: false,
+        })));
+        assert!(!filter_subagent_envelope(&env, &bucket));
+        assert_eq!(bucket.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tool_done_without_findings_swallowed_no_capture() {
+        let bucket: Arc<Mutex<Vec<Finding>>> = Arc::new(Mutex::new(Vec::new()));
+        let env = envelope(crate::AgentEvent::ToolDone(Box::new(ToolDoneEvent {
+            id: "t1".into(),
+            tool: "read".into(),
+            output: ToolOutput::Plain("x".into()),
+            is_error: false,
+        })));
+        assert!(!filter_subagent_envelope(&env, &bucket));
+        assert!(bucket.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn text_delta_forwarded() {
+        let bucket: Arc<Mutex<Vec<Finding>>> = Arc::new(Mutex::new(Vec::new()));
+        let env = envelope(crate::AgentEvent::TextDelta {
+            text: "hi".into(),
+        });
+        assert!(filter_subagent_envelope(&env, &bucket));
     }
 }

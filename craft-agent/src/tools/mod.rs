@@ -14,6 +14,7 @@ mod fuzzy_replace;
 mod grep;
 mod multiedit;
 mod read;
+mod read_findings;
 pub mod registry;
 pub mod schema;
 mod report_finding;
@@ -221,6 +222,7 @@ pub struct ToolContext {
     pub opts: RequestOptions,
     pub compression: craft_config::CompressionConfig,
     pub(crate) compression_store: crate::agent::compression_store::SharedCompressionStore,
+    pub findings_store: Option<crate::agent::SharedFindingsStore>,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -599,6 +601,7 @@ register_tools! {
     styleguide::StyleguideSearch,
     styleguide::StyleguideGet,
     report_finding::ReportFinding,
+    read_findings::ReadFindings,
     review::Review,
     crate::agent::retrieve::Retrieve,
 }
@@ -669,6 +672,7 @@ pub(crate) fn interpreter_ctx(
         opts: RequestOptions::default(),
         compression: craft_config::CompressionConfig::default(),
         compression_store: crate::agent::compression_store::shared_store(),
+        findings_store: None,
     }
 }
 

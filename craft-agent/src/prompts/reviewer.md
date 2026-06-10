@@ -41,6 +41,8 @@ After reviewing, return a summary with:
 - Key concerns
 - Files reviewed
 
+Keep the verdict short and synthetic. Findings filed via `report_finding` are the durable record — the parent agent can query them later by tool. Do not restate every finding verbatim in the verdict.
+
 # Tool usage
 - Every tool result grows your context. Minimize use of verbose tool calls.
 - Use batch for 2+ independent reads.

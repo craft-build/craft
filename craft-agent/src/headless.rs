@@ -99,6 +99,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::new(params.prompt_slots),
                     compression: params.compression,
+                    findings_store: Some(crate::FindingsStore::new_shared()),
                 },
                 AgentRunParams {
                     history: History::new(Vec::new()),

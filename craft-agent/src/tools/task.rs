@@ -170,6 +170,7 @@ impl Task {
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 compression: ctx.compression.clone(),
+                findings_store: None,
             },
             AgentRunParams {
                 history: crate::History::new(Vec::new()),
