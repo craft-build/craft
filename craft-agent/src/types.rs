@@ -501,14 +501,14 @@ impl ToolDoneEvent {
     }
 }
 
-pub fn tool_results(results: Vec<ToolDoneEvent>) -> Message {
+pub fn tool_results(results: Vec<ToolDoneEvent>, config: &CompressionConfig) -> Message {
     Message {
         role: Role::User,
         content: results
             .into_iter()
             .map(|r| ContentBlock::ToolResult {
                 tool_use_id: r.id,
-                content: r.output.as_text(),
+                content: r.output.as_text_for_llm(config),
                 is_error: r.is_error,
             })
             .collect(),
@@ -930,7 +930,7 @@ mod tests {
                 output: ToolOutput::Plain("fail".into()),
                 is_error: true,
             },
-        ]);
+        ], &CompressionConfig::default());
         assert!(matches!(msg.role, Role::User));
         assert_eq!(msg.content.len(), 2);
         assert!(

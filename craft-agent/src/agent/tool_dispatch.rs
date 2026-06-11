@@ -448,7 +448,7 @@ pub(super) async fn process_tool_calls(
 
     all_results.extend(immediate_errors);
     let had_errors = all_results.iter().any(|r| r.is_error);
-    let tool_msg = crate::types::tool_results(all_results);
+    let tool_msg = crate::types::tool_results(all_results, &ctx.compression);
     event_tx.send(AgentEvent::ToolResultsSubmitted {
         message: Box::new(tool_msg.clone()),
     })?;
