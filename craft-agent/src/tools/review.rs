@@ -211,7 +211,7 @@ fn filter_subagent_envelope(
             if let ToolOutput::Findings(f) = &done.output {
                 findings.lock().unwrap().extend(f.clone());
             }
-            false
+            true
         }
         AgentEvent::Done { .. }
         | AgentEvent::Error { .. }
