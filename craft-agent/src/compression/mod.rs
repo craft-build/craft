@@ -120,6 +120,19 @@ pub fn detect_content_type(text: &str) -> ContentType {
 static MAGIKA_MODEL: std::sync::OnceLock<Result<std::sync::Mutex<magika::Session>, String>> = std::sync::OnceLock::new();
 
 #[cfg(feature = "onnx")]
+pub fn download_magika_model() -> Result<(), String> {
+    MAGIKA_MODEL
+        .get_or_init(|| {
+            magika::Session::new()
+                .map(std::sync::Mutex::new)
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| e.clone())
+}
+
+#[cfg(feature = "onnx")]
 pub fn detect_content_type_onnx(text: &str) -> ContentType {
     if text.is_empty() {
         return ContentType::PlainText;

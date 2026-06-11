@@ -54,6 +54,19 @@ impl EmbeddingService {
         TextEmbedding::try_new(options).map_err(|e| EmbeddingError::ModelLoad(e.to_string()))
     }
 
+    pub async fn download_model(&self) -> Result<(), EmbeddingError> {
+        let model = Arc::clone(&self.model);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = model.lock().map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?;
+            if guard.is_none() {
+                *guard = Some(Self::init_model()?);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?
+    }
+
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         let model = Arc::clone(&self.model);
         let text = text.to_owned();
