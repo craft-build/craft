@@ -489,7 +489,7 @@ impl Agent {
         {
             self.config.small_model.compaction_threshold
         } else {
-            0.80
+            0.60
         }
     }
 
