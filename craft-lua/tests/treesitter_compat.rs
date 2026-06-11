@@ -5,7 +5,7 @@ use craft_lua::PluginHost;
 
 fn setup() -> (Arc<ToolRegistry>, PluginHost) {
     let reg = Arc::new(ToolRegistry::new());
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     (reg, host)
 }
 

@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [features]
 demo = ["craft-ui/demo"]
+onnx = ["craft-agent/onnx", "craft-lua/onnx", "craft-ui/onnx"]
 
 [dependencies]
 craft-ui = { workspace = true }
@@ -33,6 +34,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+flume = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 libc = { workspace = true }
@@ -58,7 +60,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.15+0.2.3"
+version = "0.3.16+0.3.0"
 edition = "2024"
 authors = ["Tony Solomonik <tony.solomonik@gmail.com>", "Jarrett Tierney <akarifur@pm.me>"]
 license = "MIT"
@@ -151,6 +153,8 @@ notify = { version = "9.0.0-rc.4", default-features = false, features = ["flume"
 serde_yaml = "0.9"
 once_cell = "1"
 shell-words = "1"
+fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries"] }
+magika = "1"
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
@@ -160,6 +164,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 futures = "0.3"
 
 wait-timeout = "0.2"
+aho-corasick = "1"
 
 [profile.bench]
 debug = true

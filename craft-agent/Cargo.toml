@@ -40,9 +40,14 @@ getrandom = { workspace = true }
 uuid = { workspace = true }
 once_cell = { workspace = true }
 include_dir = { workspace = true }
+aho-corasick = { workspace = true }
+fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries"], optional = true }
+magika = { version = "1", optional = true }
 
+[features]
+default = []
+onnx = ["dep:fastembed", "dep:magika"]
 
 [dev-dependencies]
 test-case = { workspace = true }
 tempfile = { workspace = true }
-

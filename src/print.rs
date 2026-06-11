@@ -226,6 +226,8 @@ pub async fn run(
             | AgentEvent::LiveToolBuf { .. }
             | AgentEvent::Info { .. }
             | AgentEvent::ModelEscalation { .. } => {}
+            #[cfg(feature = "onnx")]
+            AgentEvent::StagnationDetected { .. } => {}
             AgentEvent::Retry {
                 attempt,
                 message,

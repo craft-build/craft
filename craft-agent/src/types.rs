@@ -593,6 +593,10 @@ pub enum AgentEvent {
         id: String,
         body: Arc<SharedBuf>,
     },
+    #[cfg(feature = "onnx")]
+    StagnationDetected {
+        similarity: f32,
+    },
 }
 
 /// Append-only buffer for streaming tool output to the UI. Writers append

@@ -87,6 +87,8 @@ pub struct EventLoopParams {
     pub mcp_config_errors: McpConfigErrors,
     #[cfg(feature = "demo")]
     pub demo: bool,
+    #[cfg(feature = "onnx")]
+    pub embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
 }
 
 pub(crate) struct EventLoop<'t> {
@@ -204,6 +206,8 @@ impl<'t> EventLoop<'t> {
             mcp_config_errors,
             #[cfg(feature = "demo")]
             demo,
+            #[cfg(feature = "onnx")]
+            embed_rx,
         } = params;
 
         std::thread::spawn(crate::highlight::warmup);
@@ -233,6 +237,8 @@ impl<'t> EventLoop<'t> {
             mcp_handle,
             mcp_config_errors.clone(),
             compression.clone(),
+            #[cfg(feature = "onnx")]
+            embed_rx,
         );
 
         let custom_commands: Arc<[CustomCommand]> = Arc::from(commands);

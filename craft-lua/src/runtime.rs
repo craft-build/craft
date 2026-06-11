@@ -561,6 +561,7 @@ struct LuaRuntime {
     shutdown: Arc<AtomicBool>,
     bundled_dirs: &'static [&'static Dir<'static>],
     ui_action_tx: Option<flume::Sender<UiAction>>,
+    embed_tx: Option<crate::api::embed::EmbedChannel>,
 }
 
 impl LuaRuntime {
@@ -571,6 +572,7 @@ impl LuaRuntime {
         bundled_dirs: &'static [&'static Dir<'static>],
         ui_action_tx: Option<flume::Sender<UiAction>>,
         command_writer: LuaCommandWriter,
+        embed_tx: Option<crate::api::embed::EmbedChannel>,
     ) -> Result<Self, PluginError> {
         let lua = Lua::new();
         let pending: PendingTools = Arc::new(Mutex::new(Vec::new()));
@@ -605,9 +607,10 @@ impl LuaRuntime {
             registry,
             tx,
             shutdown,
-            bundled_dirs,
-            ui_action_tx,
-        })
+             bundled_dirs,
+             ui_action_tx,
+             embed_tx,
+         })
     }
 
     fn drop_plugin_keys(&mut self, name: &str) {
@@ -922,7 +925,8 @@ impl LuaRuntime {
             Arc::clone(&self.pending),
             Arc::clone(&name),
             self.ui_action_tx.clone(),
-            permissions,
+             permissions,
+             self.embed_tx.clone(),
         )
         .map_err(&map_err)?;
 
@@ -1454,6 +1458,7 @@ pub(crate) struct LuaThread {
 pub fn spawn(
     registry: Arc<ToolRegistry>,
     bundled_dirs: &'static [&'static Dir<'static>],
+    embed_tx: Option<crate::api::embed::EmbedChannel>,
 ) -> Result<LuaThread, PluginError> {
     let (tx, rx) = flume::unbounded::<Request>();
     let tx_clone = tx.clone();
@@ -1466,14 +1471,15 @@ pub fn spawn(
     let handle = thread::Builder::new()
         .name("craft-lua".to_owned())
         .spawn(move || {
-            let mut rt = match LuaRuntime::new(
-                registry,
-                tx_clone,
-                shutdown_thread,
-                bundled_dirs,
-                Some(ui_action_tx),
-                command_writer,
-            ) {
+             let mut rt = match LuaRuntime::new(
+                 registry,
+                 tx_clone,
+                 shutdown_thread,
+                 bundled_dirs,
+                 Some(ui_action_tx),
+                 command_writer,
+                 embed_tx,
+             ) {
                 Ok(r) => {
                     let _ = init_tx.send(Ok(()));
                     r

@@ -155,6 +155,8 @@ impl Chat {
                     message.clone(),
                 ));
             }
+            #[cfg(feature = "onnx")]
+            AgentEvent::StagnationDetected { .. } => {}
             AgentEvent::ModelEscalation { .. } => {}
         }
         ChatEventResult::Continue

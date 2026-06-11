@@ -43,6 +43,54 @@ impl History {
         self.messages
     }
 
+    pub fn select_view(&self, indices: &[usize], total_len: usize) -> Vec<Message> {
+        let mut result = Vec::new();
+        let mut last_included: Option<usize> = None;
+        let mut _gap_start: Option<usize> = None;
+
+        for &idx in indices {
+        if let Some(prev) = last_included && idx > prev + 1 {
+            _gap_start = Some(prev + 1);
+            let gap_count = idx - prev - 1;
+            result.push(Message::user(format!(
+                "[{gap_count} earlier messages omitted — use retrieve tool if needed]"
+            )));
+        }
+            if let Some(msg) = self.messages.get(idx) {
+                result.push(msg.clone());
+            }
+            last_included = Some(idx);
+        }
+
+        if let Some(last_idx) = last_included && total_len > last_idx + 1 {
+            let remaining = total_len - last_idx - 1;
+            result.push(Message::user(format!(
+                "[{remaining} later messages omitted — use retrieve tool if needed]"
+            )));
+        }
+
+        result
+    }
+
+    pub fn message_token_estimate(&self, model: &craft_providers::Model, idx: usize) -> u32 {
+        let mut total = 0u32;
+        if let Some(msg) = self.messages.get(idx) {
+            for block in &msg.content {
+                let text = match block {
+                    ContentBlock::Text { text } => text.as_str(),
+                    ContentBlock::ToolResult { content, .. } => content.as_str(),
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        total += model.estimate_tokens(name);
+                        &serde_json::to_string(input).unwrap_or_default()
+                    }
+                    _ => continue,
+                };
+                total += model.estimate_tokens(text);
+            }
+        }
+        total
+    }
+
     /// Estimate total tokens for all messages using character-based heuristic.
     pub fn estimate_tokens(&self, model: &craft_providers::Model) -> u32 {
         use craft_providers::ContentBlock;
@@ -90,7 +138,8 @@ pub(crate) fn sanitize_cancelled_history(history: &mut History, rollback_len: us
 
 #[cfg(test)]
 mod tests {
-    use craft_providers::{ContentBlock, Message, Role};
+use craft_providers::{ContentBlock, Message, Role};
+use serde_json;
     use test_case::test_case;
 
     use super::*;

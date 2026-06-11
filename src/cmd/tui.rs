@@ -72,9 +72,19 @@ pub async fn run(cli: Cli) -> Result<()> {
     let mut plugin_host = if cli.no_plugins {
         PluginHost::disabled()
     } else {
-        PluginHost::new(Arc::clone(ToolRegistry::native_arc()))
+        PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
             .context("initialize lua plugin host")?
     };
+
+    #[cfg(feature = "onnx")]
+    let mut embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>> = None;
+    #[cfg(feature = "onnx")]
+    if !cli.no_plugins {
+        let (tx, rx) = flume::unbounded::<craft_agent::EmbedRequest>();
+        embed_rx = Some(rx);
+        plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), Some(craft_lua::EmbedChannel::new(tx)))
+            .context("initialize lua plugin host")?;
+    }
 
     let raw_config = plugin_host
         .load_init_files(&cwd)
@@ -193,6 +203,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             mcp_config_errors,
             #[cfg(feature = "demo")]
             demo: cli.demo,
+            #[cfg(feature = "onnx")]
+            embed_rx,
         };
         let result = tokio::task::spawn_blocking(move || {
             craft_ui::run(handle, params, initial_prompt)

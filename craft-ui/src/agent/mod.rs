@@ -68,6 +68,7 @@ impl AgentHandles {
         mcp_handle: Option<McpHandle>,
         mcp_config_errors: McpConfigErrors,
         compression: craft_config::CompressionConfig,
+        #[cfg(feature = "onnx")] embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
     ) -> Self {
         spawn_agent_internal(
             model_slot,
@@ -81,6 +82,8 @@ impl AgentHandles {
             timeouts,
             lua_handle,
             compression,
+            #[cfg(feature = "onnx")]
+            embed_rx,
         )
     }
 
@@ -152,6 +155,8 @@ impl AgentHandles {
             self.timeouts,
             lua_handle,
             compression,
+            #[cfg(feature = "onnx")]
+            None,
         );
         let old = mem::replace(self, new);
         // Repoint the app at the new queue before dropping `old`, otherwise the app keeps
@@ -193,6 +198,7 @@ fn spawn_agent_internal(
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
     compression: craft_config::CompressionConfig,
+    #[cfg(feature = "onnx")] embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
 ) -> AgentHandles {
     let (agent_tx, agent_rx) = flume::unbounded::<Envelope>();
     let agent_tx_clone = agent_tx.clone();
@@ -232,6 +238,17 @@ fn spawn_agent_internal(
     );
 
     let task = tokio::spawn(agent_loop.run());
+
+    #[cfg(feature = "onnx")]
+    if let Some(rx) = embed_rx {
+        let service = craft_agent::EmbeddingService::new();
+        tokio::spawn(async move {
+            while let Ok((text, reply_tx)) = rx.recv_async().await {
+                let result = service.embed(&text).await.map_err(|e| e.to_string());
+                let _ = reply_tx.send(result);
+            }
+        });
+    }
 
     AgentHandles {
         cmd_tx,

@@ -67,7 +67,7 @@ const PERMISSION_DENIED_PREFIX: &str = "Permission denied:";
 #[test]
 fn stdlib_globals_accessible() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     for global in &["os", "debug", "string", "table", "math"] {
         let source =
@@ -80,7 +80,7 @@ fn stdlib_globals_accessible() {
 #[test]
 fn dangerous_globals_blocked() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     for global in &["io", "package"] {
         let source =
@@ -93,7 +93,7 @@ fn dangerous_globals_blocked() {
 #[tokio::test]
 async fn register_echo_tool() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_source("echo_plugin", ECHO_PLUGIN).unwrap();
 
     let entry = reg.get("echo_").expect("echo_ tool not registered");
@@ -109,7 +109,7 @@ async fn register_echo_tool() {
 #[test]
 fn unload_round_trip() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     host.load_source("unload_test", ECHO_PLUGIN).unwrap();
     assert!(reg.has("echo_"));
@@ -126,7 +126,7 @@ fn unload_round_trip() {
 #[test_case::test_case(EMPTY_AUD_SRC, "audiences" ; "empty_audiences")]
 fn registration_validation_rejects(fields: &str, expected_err: &str) {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             {fields},
@@ -145,7 +145,7 @@ fn registration_validation_rejects(fields: &str, expected_err: &str) {
 #[test_case::test_case(NON_STRING_FIELD_SCHEMA, "count" ; "non_string_field")]
 fn permission_scope_invalid_rejected(schema: &str, scope_field: &str) {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"craft.api.register_tool({{
@@ -170,7 +170,7 @@ fn permission_scope_invalid_rejected(schema: &str, scope_field: &str) {
 #[test]
 fn permission_scope_valid_string_field_accepted() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"craft.api.register_tool({{
@@ -188,7 +188,7 @@ fn permission_scope_valid_string_field_accepted() {
 #[tokio::test]
 async fn interrupt_kills_infinite_loop_and_vm_recovers() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"
@@ -226,7 +226,7 @@ craft.api.register_tool({{
 #[test]
 fn reload_same_plugin_replaces_tools() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     host.load_source("p1", ECHO_PLUGIN).unwrap();
     assert!(reg.has("echo_"));
@@ -239,7 +239,7 @@ fn reload_same_plugin_replaces_tools() {
 #[test]
 fn failed_load_leaves_no_tools_or_commands() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"
@@ -272,7 +272,7 @@ error("plugin blew up after register")
 #[tokio::test]
 async fn is_error_propagated_as_error() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"craft.api.register_tool({{
@@ -294,7 +294,7 @@ async fn is_error_propagated_as_error() {
 #[tokio::test]
 async fn handler_bad_return_type_is_error() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "bad_ret_num",
@@ -313,7 +313,7 @@ async fn handler_bad_return_type_is_error() {
 #[tokio::test]
 async fn handler_nil_without_jobs_is_error() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = r#"craft.api.register_tool({
         name = "nil_no_jobs",
         description = "returns nil without starting jobs",
@@ -329,7 +329,7 @@ async fn handler_nil_without_jobs_is_error() {
 #[tokio::test]
 async fn handler_lua_error_surfaces_as_tool_error() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"craft.api.register_tool({{
@@ -349,7 +349,7 @@ async fn handler_lua_error_surfaces_as_tool_error() {
 #[test]
 fn lua_tool_schema_rejects_bad_input() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = r#"
 craft.api.register_tool({
@@ -415,7 +415,7 @@ greet.setup()
 
     let init_path = tmp.path().join("init.lua");
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_plugin_file(&init_path).unwrap();
 
     assert!(reg.has("greet"));
@@ -442,7 +442,7 @@ assert(a == b, "require should return cached module")
 
     let init_path = tmp.path().join("init.lua");
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_plugin_file(&init_path).unwrap();
 }
 
@@ -456,7 +456,7 @@ fn require_sandbox_escape_blocked() {
 
     let init_path = tmp.path().join("init.lua");
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let err = host
         .load_plugin_file(&init_path)
         .expect_err("expected sandbox error");
@@ -501,7 +501,7 @@ assert(b2.name == "b", "cached value should have name='b'")
 
     let init_path = tmp.path().join("init.lua");
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_plugin_file(&init_path).unwrap();
 }
 
@@ -515,7 +515,7 @@ fn require_nonexistent_module_errors() {
 
     let init_path = tmp.path().join("init.lua");
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let err = host
         .load_plugin_file(&init_path)
         .expect_err("expected error for missing module");
@@ -552,14 +552,14 @@ assert(g.ok == true)
 
     let init_path = tmp.path().join("init.lua");
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_plugin_file(&init_path).unwrap();
 }
 
 #[test]
 fn multi_tool_plugin_registers_and_unloads_all() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"
@@ -590,7 +590,7 @@ craft.api.register_tool({{
 #[test]
 fn conflict_from_different_plugin_preserves_original() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
     let src = format!(
         r#"craft.api.register_tool({{
@@ -615,7 +615,7 @@ fn conflict_from_different_plugin_preserves_original() {
 #[tokio::test]
 async fn ctx_finish_called_twice_is_error() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "double_finish",
@@ -636,7 +636,7 @@ async fn ctx_finish_called_twice_is_error() {
 #[tokio::test]
 async fn ctx_finish_with_is_error_propagates() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "finish_err",
@@ -656,7 +656,7 @@ async fn ctx_finish_with_is_error_propagates() {
 #[tokio::test]
 async fn async_job_on_exit_receives_exit_code() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "job_exit_code",
@@ -680,7 +680,7 @@ async fn async_job_on_exit_receives_exit_code() {
 #[tokio::test]
 async fn async_job_exits_without_finish_is_error() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "job_no_finish",
@@ -702,7 +702,7 @@ async fn async_job_exits_without_finish_is_error() {
 #[tokio::test]
 async fn async_job_callback_error_surfaces() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "job_cb_err",
@@ -726,7 +726,7 @@ async fn async_job_callback_error_surfaces() {
 #[tokio::test]
 async fn jobstop_kills_running_job() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "job_stop",
@@ -751,7 +751,7 @@ async fn jobstop_kills_running_job() {
 #[tokio::test]
 async fn vm_recovers_after_async_job_tool() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"
 craft.api.register_tool({{
@@ -787,7 +787,7 @@ const UNKNOWN_FIELD_ERR: &str = "unknown field";
 #[test]
 fn setup_happy_path() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let raw = host
         .send_run_init_lua(
             "craft.setup({ agent = { bash_timeout_secs = 120 } })".to_owned(),
@@ -811,7 +811,7 @@ fn setup_happy_path() {
 )]
 fn setup_rejects_bad_input(lua_src: &str, expected_substr: &str) {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let err = host
         .send_run_init_lua(lua_src.to_owned(), "test_init.lua".to_owned(), None)
         .expect_err("expected error");
@@ -824,7 +824,7 @@ fn setup_rejects_bad_input(lua_src: &str, expected_substr: &str) {
 #[test]
 fn setup_double_call_error() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let err = host
         .send_run_init_lua(
             "craft.setup({})\ncraft.setup({})".to_owned(),
@@ -838,7 +838,7 @@ fn setup_double_call_error() {
 #[test]
 fn setup_not_called_returns_none() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let raw = host
         .send_run_init_lua(
             "-- no setup call".to_owned(),
@@ -852,7 +852,7 @@ fn setup_not_called_returns_none() {
 #[test]
 fn setup_tools_section() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let raw = host
         .send_run_init_lua(
             "craft.setup({ tools = { websearch = { enabled = false }, bash = { enabled = true } } })"
@@ -869,7 +869,7 @@ fn setup_tools_section() {
 #[test]
 fn setup_all_sections_at_once() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let raw = host
         .send_run_init_lua(
             r#"craft.setup({
@@ -911,7 +911,7 @@ fn setup_all_sections_at_once() {
 #[test]
 fn setup_always_thinking_accepts_bool() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let raw = host
         .send_run_init_lua(
             "craft.setup({ always_thinking = true })".to_owned(),
@@ -926,7 +926,7 @@ fn setup_always_thinking_accepts_bool() {
 #[test]
 fn setup_no_tool_registration_in_init_env() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let err = host
         .send_run_init_lua(
             r#"craft.register_tool({
@@ -949,7 +949,7 @@ fn setup_no_tool_registration_in_init_env() {
 #[test]
 fn register_command_happy_path() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_source(
         "cmd_plugin",
         r#"
@@ -980,7 +980,7 @@ fn register_command_happy_path() {
 )]
 fn register_command_validation_rejects(src: &str, expected_err: &str) {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let err = host
         .load_source("bad_cmd", src)
         .expect_err("expected validation error");
@@ -991,7 +991,7 @@ fn register_command_validation_rejects(src: &str, expected_err: &str) {
 #[test]
 fn reload_replaces_commands() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_source(
         "reload_cmd",
         r#"craft.api.register_command({ name = "/v1", handler = function() end })"#,
@@ -1011,7 +1011,7 @@ fn reload_replaces_commands() {
 #[test]
 fn unload_clears_commands() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_source(
         "cmd_only",
         r#"craft.api.register_command({ name = "/bye", handler = function() end })"#,
@@ -1026,7 +1026,7 @@ fn unload_clears_commands() {
 #[tokio::test]
 async fn job_callback_finishes_after_handler_returns_nil() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "job_after_return",
@@ -1051,7 +1051,7 @@ async fn job_callback_finishes_after_handler_returns_nil() {
 #[tokio::test]
 async fn ctx_set_deadline_times_out() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "deadline_test",
@@ -1075,7 +1075,7 @@ async fn ctx_set_deadline_times_out() {
 #[tokio::test]
 async fn ctx_set_deadline_twice_errors() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             name = "deadline_twice",
@@ -1096,7 +1096,7 @@ async fn ctx_set_deadline_twice_errors() {
 #[tokio::test]
 async fn bash_timeout_round_trip() {
     let reg = fresh_registry();
-    let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
         .unwrap();
 
@@ -1163,7 +1163,7 @@ craft.api.register_tool({{
 #[tokio::test]
 async fn denied_permission_blocks_api(api_call: &str) {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let perms = PluginPermissions::denied();
     host.load_source_with_permissions("denied_plugin", &perm_tool_src(api_call), perms)
         .unwrap();
@@ -1177,7 +1177,7 @@ async fn denied_permission_blocks_api(api_call: &str) {
 #[tokio::test]
 async fn user_plugin_with_fs_read_can_read_but_not_write() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let mut perms = PluginPermissions::denied();
     perms.set(Permission::FsRead, true);
     host.load_source_with_permissions(
@@ -1193,7 +1193,7 @@ async fn user_plugin_with_fs_read_can_read_but_not_write() {
 #[test]
 fn builtin_plugin_has_all_permissions() {
     let reg = fresh_registry();
-    let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
         .unwrap();
     assert!(reg.has("bash"));
@@ -1202,7 +1202,7 @@ fn builtin_plugin_has_all_permissions() {
 #[tokio::test]
 async fn env_permission_guards_uv_and_env() {
     let reg = fresh_registry();
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let perms = PluginPermissions::denied();
     host.load_source_with_permissions(
         "no_env_plugin",
@@ -1221,7 +1221,7 @@ async fn env_permission_guards_uv_and_env() {
 #[test_case::test_case("echo 'unterminated" ; "unparseable command")]
 fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
     let reg = fresh_registry();
-    let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
         .unwrap();
 

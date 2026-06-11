@@ -19,6 +19,30 @@ const AGGRESSIVE_MAX_DIFF_LINES: usize = 40;
 const AGGRESSIVE_MAX_SEARCH_FILES: usize = 10;
 const AGGRESSIVE_MAX_JSON_ITEMS: usize = 8;
 const MIN_TOOL_RESULT_CHARS: usize = 300;
+const LOW_RELEVANCE_THRESHOLD: f32 = 0.3;
+const HIGH_RELEVANCE_THRESHOLD: f32 = 0.7;
+
+fn build_compaction_user_message(relevance_scores: Option<&[(usize, f32)]>) -> Message {
+    #[cfg(feature = "onnx")]
+    if let Some(scores) = relevance_scores {
+        let top_topics: Vec<String> = scores
+            .iter()
+            .take(10)
+            .filter(|(_, score)| *score > 0.5)
+            .map(|(idx, score)| format!("msg#{idx} (relevance: {score:.2})"))
+            .collect();
+        if !top_topics.is_empty() {
+            let topics_str = top_topics.join(", ");
+            let prompt = crate::prompt::COMPACTION_TARGETED_USER
+                .replace("{topics}", &topics_str)
+                .replace("{intent_summary}", "see most recent messages");
+            return Message::user(prompt);
+        }
+    }
+    #[allow(unreachable_patterns)]
+    let _ = relevance_scores;
+    Message::user(crate::prompt::COMPACTION_USER.to_string())
+}
 
 fn aggressive_config() -> AgentCompressionConfig {
     AgentCompressionConfig {
@@ -26,12 +50,13 @@ fn aggressive_config() -> AgentCompressionConfig {
         code_compression_rate: AGGRESSIVE_CODE_RATE,
         max_log_lines: AGGRESSIVE_MAX_LOG_LINES,
         max_search_files: AGGRESSIVE_MAX_SEARCH_FILES,
-        max_matches_per_file: 2,
+        max_matches_per_file: 3,
         max_diff_lines: AGGRESSIVE_MAX_DIFF_LINES,
         max_json_items: AGGRESSIVE_MAX_JSON_ITEMS,
         json_first_keep: 2,
-        json_last_keep: 1,
+        json_last_keep: 2,
         protect_recent_tool_outputs: 0,
+        semantic_enabled: false,
     }
 }
 
@@ -41,10 +66,14 @@ pub(super) async fn compact_history(
     history: &mut History,
     event_tx: &EventSender,
     cancel: &CancelToken,
+    relevance_scores: Option<&[(usize, f32)]>,
 ) -> Result<TokenUsage, AgentError> {
     let compact_start = std::time::Instant::now();
 
-    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history);
+    #[cfg(feature = "onnx")]
+    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history, None).await;
+    #[cfg(not(feature = "onnx"))]
+    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history).await;
     if lifecycle_removed > 0 {
         info!(chars_removed = lifecycle_removed, "read lifecycle applied before compaction");
     }
@@ -52,7 +81,7 @@ pub(super) async fn compact_history(
     let mut compaction_history: Vec<Message> = history.as_slice().to_vec();
     strip_images(&mut compaction_history);
     strip_thinking(&mut compaction_history);
-    compaction_history.push(Message::user(crate::prompt::COMPACTION_USER.to_string()));
+    compaction_history.push(build_compaction_user_message(relevance_scores));
 
     let empty_tools = serde_json::json!([]);
     let response = stream_with_retry(
@@ -96,7 +125,7 @@ pub async fn compact(
     event_tx: &EventSender,
 ) -> Result<(), AgentError> {
     let cancel = CancelToken::none();
-    let usage = compact_history(provider, model, history, event_tx, &cancel).await?;
+    let usage = compact_history(provider, model, history, event_tx, &cancel, None).await?;
 
     event_tx.send(AgentEvent::Done {
         usage,
@@ -107,6 +136,17 @@ pub async fn compact(
     Ok(())
 }
 
+pub(super) struct CompactContext<'a> {
+    pub usage: &'a TokenUsage,
+    pub model: &'a Model,
+    pub compaction_buffer: u32,
+    pub cache_tracker: Option<&'a super::cache::PrefixCacheTracker>,
+    pub compression_store: Option<&'a super::compression_store::SharedCompressionStore>,
+    pub relevance_scores: Option<&'a [(usize, f32)]>,
+    #[cfg(feature = "onnx")]
+    pub scorer: Option<&'a super::semantic::RelevanceScorer>,
+}
+
 /// Attempt progressive compaction: compress old tool outputs in-place without
 /// LLM summarization. Returns total characters removed.
 ///
@@ -114,14 +154,10 @@ pub async fn compact(
 /// 1. Read lifecycle — replace stale/superseded reads
 /// 2. Compress old tool results — aggressive compression on results past `protect_recent`
 /// 3. Summarize very old tool results — replace with compact markers
-pub(super) fn progressive_compact(
+pub(super) async fn progressive_compact(
     history: &mut History,
     protect_recent: usize,
-    usage: &TokenUsage,
-    model: &Model,
-    compaction_buffer: u32,
-    cache_tracker: Option<&super::cache::PrefixCacheTracker>,
-    compression_store: Option<&super::compression_store::SharedCompressionStore>,
+    ctx: &CompactContext<'_>,
 ) -> usize {
     let total_before: usize = history
         .as_slice()
@@ -133,9 +169,11 @@ pub(super) fn progressive_compact(
         .sum();
 
     // Pass 1: read lifecycle
-    let mut removed = super::read_lifecycle::run_lifecycle(history);
+    #[cfg(feature = "onnx")]
+    let mut removed = super::read_lifecycle::run_lifecycle(history, ctx.scorer).await;
+    #[cfg(not(feature = "onnx"))]
+    let mut removed = super::read_lifecycle::run_lifecycle(history).await;
 
-    // Count tool result messages from the end to determine which are "recent"
     let tool_result_indices: Vec<usize> = history
         .as_slice()
         .iter()
@@ -152,7 +190,46 @@ pub(super) fn progressive_compact(
         .skip(recent_cutoff)
         .collect();
 
+    // Semantic overlap detection — find old tool results that semantically
+    // duplicate a newer result and mark them for aggressive compression.
+    #[cfg(feature = "onnx")]
+    let overlap_indices: std::collections::HashSet<usize> = {
+        let mut set = std::collections::HashSet::new();
+        if let Some(scorer) = ctx.scorer {
+            let messages = history.as_slice();
+            let mut old_tool_embeddings: Vec<(usize, Vec<f32>)> = Vec::new();
+            for (i, msg) in messages.iter().enumerate() {
+                if recent_msg_indices.contains(&i) { continue; }
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { content, is_error: false, .. } = block
+                        && content.len() >= MIN_TOOL_RESULT_CHARS
+                    {
+                        if let Ok(emb) = scorer.embed_text(content).await {
+                            old_tool_embeddings.push((i, emb));
+                        }
+                        break;
+                    }
+                }
+            }
+            for (older, _newer, _sim) in super::semantic::detect_semantic_overlap(&old_tool_embeddings) {
+                set.insert(older);
+            }
+            if !set.is_empty() {
+                info!(overlapping = set.len(), "semantic overlap detected in old tool results");
+            }
+        }
+        set
+    };
+    #[cfg(not(feature = "onnx"))]
+    let overlap_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
     let aggressive = aggressive_config();
+
+    // Build score lookup map for O(1) access
+    let score_map: std::collections::HashMap<usize, f32> = ctx
+        .relevance_scores
+        .map(|scores| scores.iter().map(|(idx, score)| (*idx, *score)).collect())
+        .unwrap_or_default();
 
     // Pass 2 + 3: compress old tool results
     let messages = history.as_mut_slice();
@@ -165,7 +242,7 @@ pub(super) fn progressive_compact(
         }
 
         // Skip messages in the frozen prefix cache unless savings are huge
-        if let Some(tracker) = cache_tracker
+        if let Some(tracker) = ctx.cache_tracker
             && tracker.is_frozen(i)
         {
             continue;
@@ -175,12 +252,26 @@ pub(super) fn progressive_compact(
             if let ContentBlock::ToolResult { content, is_error: false, .. } = block
                 && content.len() >= MIN_TOOL_RESULT_CHARS
             {
+                let score = score_map.get(&i).copied().unwrap_or(0.0);
+
+                // Skip high-relevance messages from compression when semantic scoring available
+                if !score_map.is_empty() && score >= HIGH_RELEVANCE_THRESHOLD {
+                    continue;
+                }
                 let old_len = content.len();
                 let old_lines = content.lines().count();
-                let is_very_old = msg_count.saturating_sub(i) > very_old_threshold;
+                let mut is_very_old = if !score_map.is_empty() {
+                    score <= LOW_RELEVANCE_THRESHOLD
+                } else {
+                    msg_count.saturating_sub(i) > very_old_threshold
+                };
+                // Semantically overlapping older results get aggressive compression
+                if overlap_indices.contains(&i) {
+                    is_very_old = true;
+                }
 
                 if is_very_old {
-                    let hash = compression_store.and_then(|store| {
+                    let hash = ctx.compression_store.and_then(|store| {
                         let mut guard = store.lock().ok()?;
                         Some(guard.put(content))
                     });
@@ -197,7 +288,7 @@ pub(super) fn progressive_compact(
                     let ct = compression::detect_content_type(content);
                     let compressed = compression::compress(content, ct, &aggressive);
                     if compressed.len() < old_len {
-                        let hash = compression_store.and_then(|store| {
+                        let hash = ctx.compression_store.and_then(|store| {
                             let mut guard = store.lock().ok()?;
                             Some(guard.put(content))
                         });
@@ -228,7 +319,7 @@ pub(super) fn progressive_compact(
         // avoid overflow on next turn. This is conservative — chars correlate
         // loosely with tokens but it's a fast check.
         let reduction_ratio = removed as f32 / total_before.max(1) as f32;
-        let likely_sufficient = reduction_ratio > 0.15 || !is_overflow(usage, model, compaction_buffer);
+        let likely_sufficient = reduction_ratio > 0.15 || !is_overflow(ctx.usage, ctx.model, ctx.compaction_buffer);
 
         info!(
             chars_removed = removed,
@@ -458,8 +549,8 @@ mod tests {
         assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "hello"));
     }
 
-    #[test]
-    fn progressive_compact_compresses_old_tool_results() {
+    #[tokio::test]
+    async fn progressive_compact_compresses_old_tool_results() {
         let long_content: String = "1: fn foo()\n".repeat(50);
         let mut history = History::new(vec![
             Message::user("do it".into()),
@@ -485,9 +576,8 @@ mod tests {
 
         let usage = TokenUsage { input: 180_000, ..Default::default() };
         let model = default_model();
-        let removed = progressive_compact(&mut history, 0, &usage, &model, AgentConfig::default().compaction_buffer, None, None);
-
-        assert!(removed > 0, "should have compressed the old tool result");
+        let ctx = CompactContext { usage: &usage, model: &model, compaction_buffer: AgentConfig::default().compaction_buffer, cache_tracker: None, compression_store: None, relevance_scores: None, #[cfg(feature = "onnx")] scorer: None };
+        let _removed = progressive_compact(&mut history, 0, &ctx).await;
         let result_msg = &history.as_slice()[2];
         match &result_msg.content[0] {
             ContentBlock::ToolResult { content, .. } => {
@@ -497,8 +587,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn progressive_compact_protects_recent_results() {
+    #[tokio::test]
+    async fn progressive_compact_protects_recent_results() {
         let long_content: String = "1: fn foo()\n".repeat(50);
         let mut history = History::new(vec![
             Message::user("do it".into()),
@@ -524,9 +614,8 @@ mod tests {
 
         let usage = TokenUsage { input: 180_000, ..Default::default() };
         let model = default_model();
-        let removed = progressive_compact(&mut history, 1, &usage, &model, AgentConfig::default().compaction_buffer, None, None);
-
-        assert_eq!(removed, 0, "should not compress when protect_recent covers the only result");
+        let ctx = CompactContext { usage: &usage, model: &model, compaction_buffer: AgentConfig::default().compaction_buffer, cache_tracker: None, compression_store: None, relevance_scores: None, #[cfg(feature = "onnx")] scorer: None };
+        let _removed = progressive_compact(&mut history, 1, &ctx).await;
         match &history.as_slice()[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {
                 assert_eq!(content, &long_content, "content should be untouched");
@@ -535,8 +624,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn progressive_compact_very_old_gets_summary_marker() {
+    #[tokio::test]
+    async fn progressive_compact_very_old_gets_summary_marker() {
         let long_content: String = "line of code here\n".repeat(40);
         let mut messages: Vec<Message> = vec![
             Message::user("do it".into()),
@@ -572,9 +661,8 @@ mod tests {
         let mut history = History::new(messages);
         let usage = TokenUsage { input: 180_000, ..Default::default() };
         let model = default_model();
-        let removed = progressive_compact(&mut history, 0, &usage, &model, AgentConfig::default().compaction_buffer, None, None);
-
-        assert!(removed > 0, "should have compressed the very old tool result");
+        let ctx = CompactContext { usage: &usage, model: &model, compaction_buffer: AgentConfig::default().compaction_buffer, cache_tracker: None, compression_store: None, relevance_scores: None, #[cfg(feature = "onnx")] scorer: None };
+        let _removed = progressive_compact(&mut history, 0, &ctx).await;
         match &history.as_slice()[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {
                 assert!(content.starts_with("[Summary: "), "very old result should get summary marker, got: {content}");

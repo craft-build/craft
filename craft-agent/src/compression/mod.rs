@@ -1,6 +1,7 @@
 mod code;
 mod diff_comp;
 mod json;
+mod keywords;
 mod log;
 mod search;
 
@@ -31,6 +32,7 @@ pub struct CompressionConfig {
     pub json_first_keep: usize,
     pub json_last_keep: usize,
     pub protect_recent_tool_outputs: usize,
+    pub semantic_enabled: bool,
 }
 
 impl Default for CompressionConfig {
@@ -46,6 +48,7 @@ impl Default for CompressionConfig {
             json_first_keep: 5,
             json_last_keep: 3,
             protect_recent_tool_outputs: 2,
+            semantic_enabled: false,
         }
     }
 }
@@ -63,6 +66,7 @@ impl From<&craft_config::CompressionConfig> for CompressionConfig {
             json_first_keep: c.json_first_keep,
             json_last_keep: c.json_last_keep,
             protect_recent_tool_outputs: c.protect_recent_tool_outputs,
+            semantic_enabled: c.semantic_enabled,
         }
     }
 }
@@ -112,6 +116,63 @@ pub fn detect_content_type(text: &str) -> ContentType {
     ContentType::PlainText
 }
 
+#[cfg(feature = "onnx")]
+static MAGIKA_MODEL: std::sync::OnceLock<Result<std::sync::Mutex<magika::Session>, String>> = std::sync::OnceLock::new();
+
+#[cfg(feature = "onnx")]
+pub fn detect_content_type_onnx(text: &str) -> ContentType {
+    if text.is_empty() {
+        return ContentType::PlainText;
+    }
+
+    let session = MAGIKA_MODEL.get_or_init(|| {
+        magika::Session::new()
+            .map(std::sync::Mutex::new)
+            .map_err(|e| e.to_string())
+    });
+    let session = match session {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "magika init failed, falling back to heuristic");
+            return detect_content_type(text);
+        }
+    };
+    let mut guard = match session.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "magika lock failed, falling back to heuristic");
+            return detect_content_type(text);
+        }
+    };
+
+    match guard.identify_content_sync(text.as_bytes()) {
+        Ok(file_type) => {
+            let info = file_type.info();
+            let label = info.label;
+            let group = info.group;
+            if label.contains("json") {
+                ContentType::JsonArray
+            } else if label.contains("diff") || label.contains("patch") {
+                ContentType::Diff
+            } else if group.contains("source")
+                || group.contains("code")
+                || group.contains("script")
+            {
+                ContentType::Code
+            } else if label.contains("log") || label.contains("text") {
+                if text.lines().filter(|l| ERROR_LINE.is_match(l) || WARNING_LINE.is_match(l)).count() > 0 {
+                    ContentType::Log
+                } else {
+                    ContentType::PlainText
+                }
+            } else {
+                detect_content_type(text)
+            }
+        }
+        Err(_) => detect_content_type(text),
+    }
+}
+
 /// Compress content based on type and config. Returns compressed text.
 pub fn compress(text: &str, content_type: ContentType, config: &CompressionConfig) -> String {
     if !config.enabled || text.is_empty() {
@@ -135,4 +196,10 @@ pub fn compress(text: &str, content_type: ContentType, config: &CompressionConfi
         ),
         ContentType::PlainText => text.to_owned(),
     }
+}
+
+#[cfg(feature = "onnx")]
+pub fn compress_with_onnx(text: &str, config: &CompressionConfig) -> String {
+    let content_type = detect_content_type_onnx(text);
+    compress(text, content_type, config)
 }

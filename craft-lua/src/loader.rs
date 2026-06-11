@@ -94,8 +94,11 @@ impl Drop for PluginHost {
 }
 
 impl PluginHost {
-    pub fn new(registry: Arc<ToolRegistry>) -> Result<Self, PluginError> {
-        let lua = runtime::spawn(registry, *BUNDLED_DIRS)?;
+    pub fn new(
+        registry: Arc<ToolRegistry>,
+        embed_tx: Option<crate::api::embed::EmbedChannel>,
+    ) -> Result<Self, PluginError> {
+        let lua = runtime::spawn(registry, *BUNDLED_DIRS, embed_tx)?;
         Ok(Self { inner: Some(lua) })
     }
 
@@ -353,7 +356,7 @@ mod tests {
     #[test]
     fn memory_builtin_registers_command() {
         let reg = Arc::new(ToolRegistry::new());
-        let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_builtins(&PluginsConfig::from_tools(std::collections::HashMap::new()))
             .unwrap();
         let reader = host.command_reader();
@@ -392,7 +395,7 @@ mod tests {
     #[test]
     fn multiple_plugins_register_independent_commands() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "plugin_a",
             r#"
@@ -443,7 +446,7 @@ mod tests {
     #[test]
     fn callback_string_lands_in_targeted_prompt_only() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "test_hint",
             r#"
@@ -475,7 +478,7 @@ mod tests {
     #[test]
     fn callback_returning_nil_contributes_nothing() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "nil_hint",
             r#"
@@ -500,7 +503,7 @@ mod tests {
     #[test]
     fn static_no_prompt_lands_on_all_prompts_with_slot() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "broad_hint",
             r#"
@@ -528,7 +531,7 @@ mod tests {
     #[test]
     fn default_hint_skips_prompts_lacking_the_slot() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "conv_hint",
             r#"
@@ -554,7 +557,7 @@ mod tests {
     #[test]
     fn explicit_prompt_without_slot_is_dropped() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "bad_target",
             r#"
@@ -577,7 +580,7 @@ mod tests {
     #[test]
     fn prompt_list_targets_each_listed_prompt() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "multi_prompt",
             r#"
@@ -608,7 +611,7 @@ mod tests {
     #[test]
     fn multiple_plugins_sorted_by_plugin_name() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "zzz_plugin",
             r#"
@@ -643,7 +646,7 @@ mod tests {
     #[test]
     fn unload_clears_all_hints_from_plugin() {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         host.load_source(
             "temp_plugin",
             r#"
@@ -693,7 +696,7 @@ mod tests {
     )]
     fn invalid_hint_spec_is_rejected(lua_code: &str, _label: &str) {
         let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         assert!(host.load_source("bad_hint", lua_code).is_err());
     }
 }

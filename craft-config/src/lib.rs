@@ -70,6 +70,7 @@ pub const DEFAULT_COMPRESSION_JSON_FIRST_KEEP: usize = 5;
 pub const DEFAULT_COMPRESSION_JSON_LAST_KEEP: usize = 3;
 pub const DEFAULT_COMPRESSION_PROTECT_RECENT: usize = 2;
 pub const DEFAULT_COMPRESSION_CODE_RATE: f32 = 0.3;
+pub const DEFAULT_SEMANTIC_ENABLED: bool = false;
 
 pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
@@ -443,6 +444,7 @@ pub struct CompressionFileConfig {
     pub json_first_keep: Option<usize>,
     pub json_last_keep: Option<usize>,
     pub protect_recent_tool_outputs: Option<usize>,
+    pub semantic_enabled: Option<bool>,
 }
 
 impl CompressionFileConfig {
@@ -459,7 +461,8 @@ impl CompressionFileConfig {
             max_json_items,
             json_first_keep,
             json_last_keep,
-            protect_recent_tool_outputs
+            protect_recent_tool_outputs,
+            semantic_enabled
         );
     }
 }
@@ -1060,6 +1063,9 @@ pub struct CompressionConfig {
 
     #[config(default = DEFAULT_COMPRESSION_PROTECT_RECENT, min = 1, desc = "Never compress the last N tool outputs")]
     pub protect_recent_tool_outputs: usize,
+
+    #[config(default = DEFAULT_SEMANTIC_ENABLED, desc = "Enable semantic relevance scoring (requires onnx feature)")]
+    pub semantic_enabled: bool,
 }
 
 impl CompressionConfig {
@@ -1091,6 +1097,9 @@ impl CompressionConfig {
             protect_recent_tool_outputs: f
                 .protect_recent_tool_outputs
                 .unwrap_or(DEFAULT_COMPRESSION_PROTECT_RECENT),
+            semantic_enabled: f
+                .semantic_enabled
+                .unwrap_or(DEFAULT_SEMANTIC_ENABLED),
         }
     }
 }

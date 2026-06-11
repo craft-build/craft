@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -28,6 +29,12 @@ use crate::{
 use craft_config::ToolOutputLines;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
+#[cfg(feature = "onnx")]
+const MANDATORY_RECENT_MESSAGES: usize = 6;
+#[cfg(feature = "onnx")]
+const STAGNATION_WINDOW_SIZE: usize = 5;
+#[cfg(feature = "onnx")]
+const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
 
 enum TurnOutcome {
     Continue,
@@ -96,6 +103,12 @@ pub struct Agent {
     snapshot: SnapshotManager,
     validator: Validator,
     escalation: EscalationTracker,
+    #[cfg(feature = "onnx")]
+    scorer: Option<super::semantic::RelevanceScorer>,
+    #[cfg(feature = "onnx")]
+    turn_embeddings: VecDeque<Vec<f32>>,
+    #[cfg(feature = "onnx")]
+    last_relevance_scores: Option<Vec<(usize, f32)>>,
 }
 
 impl Agent {
@@ -127,7 +140,7 @@ impl Agent {
             session_id: params.session_id,
             file_tracker: params.file_tracker,
             prompt_slots: params.prompt_slots,
-            compression: params.compression,
+            compression: params.compression.clone(),
             findings_store: params.findings_store,
             cache_tracker: super::cache::PrefixCacheTracker::new(),
             compression_store: super::compression_store::shared_store(),
@@ -139,6 +152,16 @@ impl Agent {
                 craft_config::ValidationConfig::default(),
             ),
             escalation: EscalationTracker::new(Default::default()),
+            #[cfg(feature = "onnx")]
+            scorer: if params.compression.semantic_enabled {
+                Some(super::semantic::RelevanceScorer::new())
+            } else {
+                None
+            },
+            #[cfg(feature = "onnx")]
+            turn_embeddings: VecDeque::new(),
+            #[cfg(feature = "onnx")]
+            last_relevance_scores: None,
         }
     }
 
@@ -173,6 +196,37 @@ impl Agent {
     pub fn with_loaded_instructions(mut self, loaded: LoadedInstructions) -> Self {
         self.loaded_instructions = loaded;
         self
+    }
+
+    #[cfg(feature = "onnx")]
+    async fn build_intent(&self) -> Option<Vec<f32>> {
+        let scorer = self.scorer.as_ref()?;
+        scorer.build_intent(self.history.as_slice()).await.ok()
+    }
+
+    #[cfg(feature = "onnx")]
+    async fn build_semantic_view(&self, intent: &[f32]) -> Option<Vec<Message>> {
+        let scorer = self.scorer.as_ref()?;
+        let scores = scorer.score_messages(self.history.as_slice(), intent).await.ok()?;
+        let token_budget = self.model.context_window.saturating_sub(self.config.compaction_buffer);
+        let selected = super::semantic::select_messages(
+            &scores,
+            self.history.len(),
+            token_budget,
+            MANDATORY_RECENT_MESSAGES,
+            self.cache_tracker.frozen_count(),
+            &|idx| self.history.message_token_estimate(&self.model, idx),
+        );
+        if selected.len() < self.history.len() {
+            info!(
+                total = self.history.len(),
+                selected = selected.len(),
+                "semantic context curation applied"
+            );
+            Some(self.history.select_view(&selected, self.history.len()))
+        } else {
+            None
+        }
     }
 
     pub async fn run(mut self, input: AgentInput) -> RunOutcome {
@@ -222,15 +276,48 @@ impl Agent {
             return Err(AgentError::Cancelled);
         }
 
-        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history);
+        #[cfg(feature = "onnx")]
+        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history, self.scorer.as_ref()).await;
+        #[cfg(not(feature = "onnx"))]
+        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history).await;
         if lifecycle_removed > 0 {
             info!(chars_removed = lifecycle_removed, "read lifecycle compression applied before turn");
         }
 
+        #[cfg(feature = "onnx")]
+        let intent = self.build_intent().await;
+
+        #[cfg(feature = "onnx")]
+        if let Some(intent_vec) = &intent
+            && let Some(scorer) = &self.scorer
+        {
+            let restored = super::semantic::auto_retrieve(
+                scorer,
+                &self.compression_store,
+                intent_vec,
+                &mut self.history,
+            )
+            .await;
+            if restored > 0 {
+                info!(restored, "auto-retrieve restored compressed content");
+            }
+        }
+
+        #[cfg(feature = "onnx")]
+        let semantic_view: Option<Vec<Message>> = match &intent {
+            Some(intent_vec) => self.build_semantic_view(intent_vec).await,
+            None => None,
+        };
+
+        #[cfg(feature = "onnx")]
+        let messages: &[Message] = semantic_view.as_deref().unwrap_or_else(|| self.history.as_slice());
+        #[cfg(not(feature = "onnx"))]
+        let messages: &[Message] = self.history.as_slice();
+
         let response = match stream_with_retry(
             &*self.provider,
             &self.model,
-            self.history.as_slice(),
+            messages,
             &self.system,
             &self.tools,
             &self.event_tx,
@@ -272,6 +359,29 @@ impl Agent {
         let usage = response.usage;
         self.total_usage += usage;
         self.cache_tracker.update(&usage, self.history.len());
+
+        #[cfg(feature = "onnx")]
+        if let Some(scorer) = &self.scorer {
+            let turn_summary = super::semantic::intent_summary(self.history.as_slice());
+            if !turn_summary.is_empty()
+                && let Ok(emb) = scorer.embed_text(&turn_summary).await
+            {
+                self.turn_embeddings.push_back(emb);
+                if self.turn_embeddings.len() > STAGNATION_WINDOW_SIZE {
+                    self.turn_embeddings.pop_front();
+                }
+                let embeddings = self.turn_embeddings.make_contiguous();
+                if super::semantic::detect_stagnation(embeddings, STAGNATION_SIMILARITY_THRESHOLD) {
+                    let n = embeddings.len();
+                    let sim = super::semantic::RelevanceScorer::similarity(
+                        &embeddings[n - 2],
+                        &embeddings[n - 1],
+                    );
+                    info!(sim, "stagnation detected");
+                    let _ = self.event_tx.send(AgentEvent::StagnationDetected { similarity: sim });
+                }
+            }
+        }
 
         if has_tools {
             let had_errors = self.process_tool_calls(response).await?;
@@ -427,16 +537,36 @@ impl Agent {
 
         self.dedup_cache.clear();
 
+        #[cfg(feature = "onnx")]
+        if let Some(scorer) = &self.scorer
+            && let Ok(intent) = scorer.build_intent(self.history.as_slice()).await
+            && let Ok(scores) = scorer
+                .score_messages(self.history.as_slice(), &intent)
+                .await
+        {
+            self.last_relevance_scores = Some(scores);
+        }
+
         // Try progressive compaction first (no LLM call)
+        let ctx = compaction::CompactContext {
+            usage,
+            model: &self.model,
+            compaction_buffer: self.config.compaction_buffer,
+            cache_tracker: Some(&self.cache_tracker),
+            compression_store: Some(&self.compression_store),
+            #[cfg(feature = "onnx")]
+            relevance_scores: self.scorer.as_ref().and(self.last_relevance_scores.as_deref()),
+            #[cfg(not(feature = "onnx"))]
+            relevance_scores: None,
+            #[cfg(feature = "onnx")]
+            scorer: self.scorer.as_ref(),
+        };
         let removed = compaction::progressive_compact(
             &mut self.history,
             self.compression.protect_recent_tool_outputs,
-            usage,
-            &self.model,
-            self.config.compaction_buffer,
-            Some(&self.cache_tracker),
-            Some(&self.compression_store),
-        );
+            &ctx,
+        )
+        .await;
 
         if overflow && removed > 0
             && !compaction::is_overflow(usage, &self.model, self.config.compaction_buffer)
@@ -463,6 +593,10 @@ impl Agent {
             &mut self.history,
             &self.event_tx,
             &self.cancel,
+            #[cfg(feature = "onnx")]
+            self.last_relevance_scores.as_deref(),
+            #[cfg(not(feature = "onnx"))]
+            None,
         )
         .await?;
         self.rollback_len = self.history.len();

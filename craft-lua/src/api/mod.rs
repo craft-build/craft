@@ -3,6 +3,7 @@ pub(crate) mod buf;
 pub(crate) mod command;
 pub(crate) mod ctx;
 pub(crate) mod env;
+pub(crate) mod embed;
 pub(crate) mod fn_api;
 pub(crate) mod fs;
 pub(crate) mod json;
@@ -32,6 +33,7 @@ pub(crate) fn create_craft_global(
     plugin: Arc<str>,
     ui_action_tx: Option<flume::Sender<UiAction>>,
     permissions: &PluginPermissions,
+    embed_tx: Option<crate::api::embed::EmbedChannel>,
 ) -> LuaResult<Table> {
     let craft = lua.create_table()?;
 
@@ -51,6 +53,14 @@ pub(crate) fn create_craft_global(
     craft.set("ui", ui::create_ui_table(lua, ui_action_tx)?)?;
     craft.set("fn", fn_api::create_fn_table(lua, permissions)?)?;
     craft.set("async", async_api::create_async_table(lua)?)?;
+
+    #[cfg(feature = "onnx")]
+    if let Some(tx) = embed_tx {
+        craft.set("embed", crate::api::embed::create_embed_table(lua, tx)?)?;
+    }
+
+    #[cfg(not(feature = "onnx"))]
+    let _ = embed_tx;
 
     Ok(craft)
 }

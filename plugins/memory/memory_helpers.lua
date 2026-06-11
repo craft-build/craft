@@ -2,6 +2,9 @@ local M = {}
 
 M.MAX_LINES_PER_FILE = 200
 M.MAX_DIR_BYTES = 50 * 1024
+M.VECTORS_FILE = ".vectors.json"
+M.SEMANTIC_SEARCH_TOP_K = 5
+M.SEMANTIC_SIMILARITY_THRESHOLD = 0.3
 
 -- Lua's bit32 is 32-bit only, so we split the 64-bit FNV-1a state into
 -- hi/lo halves and propagate carries by hand during multiplication.
@@ -22,8 +25,6 @@ function M.fnv1a_64(data)
   return string.format("%08x%08x", hi, lo)
 end
 
--- Counts lines the way editors do: empty string is 1 line,
--- and a trailing newline does not start a new line.
 function M.count_lines(s)
   if s == "" then
     return 1
@@ -40,8 +41,6 @@ function M.project_id(path)
   return base .. "-" .. M.fnv1a_64(path)
 end
 
--- Normalize both paths and check the prefix to block "../" traversal
--- out of the memories sandbox.
 function M.safe_resolve(memories_dir, relative)
   if not relative or relative == "" then
     return nil, "path is required"
@@ -58,6 +57,109 @@ function M.safe_resolve(memories_dir, relative)
   return resolved
 end
 
+function M.has_embed()
+  return craft.embed ~= nil
+end
+
+function M.load_vectors(dir)
+  if not M.has_embed() then
+    return {}
+  end
+  local path = craft.fs.joinpath(dir, M.VECTORS_FILE)
+  local ok, raw = pcall(craft.fs.read, path)
+  if not ok then
+    return {}
+  end
+  local ok2, data = pcall(craft.json.decode, raw)
+  if not ok2 or type(data) ~= "table" then
+    return {}
+  end
+  return data
+end
+
+function M.save_vectors(dir, vectors)
+  if not M.has_embed() then
+    return
+  end
+  local path = craft.fs.joinpath(dir, M.VECTORS_FILE)
+  local encoded = craft.json.encode(vectors)
+  craft.fs.write(path, encoded)
+end
+
+function M.store_embedding(dir, filename, content)
+  if not M.has_embed() then
+    return
+  end
+  local ok, vec = pcall(craft.embed.embed, content)
+  if not ok or not vec then
+    return
+  end
+  local vectors = M.load_vectors(dir)
+  vectors[filename] = vec
+  M.save_vectors(dir, vectors)
+end
+
+function M.remove_embedding(dir, filename)
+  if not M.has_embed() then
+    return
+  end
+  local vectors = M.load_vectors(dir)
+  vectors[filename] = nil
+  M.save_vectors(dir, vectors)
+end
+
+local function cosine_similarity(a, b)
+  if #a ~= #b or #a == 0 then
+    return 0.0
+  end
+  return craft.embed.similarity(a, b)
+end
+
+function M.semantic_search(dir, query, top_k)
+  if not M.has_embed() then
+    return nil, "semantic search requires onnx feature"
+  end
+  local ok, query_vec = pcall(craft.embed.embed, query)
+  if not ok or not query_vec then
+    return nil, "failed to embed query"
+  end
+  local vectors = M.load_vectors(dir)
+  local scored = {}
+  for filename, vec in pairs(vectors) do
+    local sim = cosine_similarity(query_vec, vec)
+    if sim >= M.SEMANTIC_SIMILARITY_THRESHOLD then
+      scored[#scored + 1] = { filename, sim }
+    end
+  end
+  table.sort(scored, function(a, b)
+    return a[2] > b[2]
+  end)
+  local k = top_k or M.SEMANTIC_SEARCH_TOP_K
+  local results = {}
+  for i = 1, math.min(#scored, k) do
+    results[#results + 1] = scored[i]
+  end
+  return results
+end
+
+function M.cleanup_vectors(dir)
+  if not M.has_embed() then
+    return
+  end
+  local vectors = M.load_vectors(dir)
+  local changed = false
+  for filename, _ in pairs(vectors) do
+    local fp = M.safe_resolve(dir, filename)
+    if not fp or not craft.fs.metadata(fp) then
+      vectors[filename] = nil
+      changed = true
+    end
+  end
+  if changed then
+    M.save_vectors(dir, vectors)
+  end
+end
+
 function M.collect_file_entries(dir)
   local entries = craft.fs.dir(dir)
   if not entries then
@@ -65,7 +167,7 @@ function M.collect_file_entries(dir)
   end
   local files = {}
   for _, entry in ipairs(entries) do
-    if entry[2] == "file" then
+    if entry[2] == "file" and entry[1] ~= M.VECTORS_FILE then
       local meta = craft.fs.metadata(craft.fs.joinpath(dir, entry[1]))
       if meta then
         files[#files + 1] = { entry[1], meta.size }

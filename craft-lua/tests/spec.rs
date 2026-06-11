@@ -13,7 +13,7 @@ use test_case::test_case;
 #[test_case("websearch", include_str!("../../plugins/websearch/tests/spec.lua") ; "websearch_plugin_spec")]
 fn plugin_spec(name: &str, spec: &str) {
     let reg = Arc::new(ToolRegistry::new());
-    let host = PluginHost::new(Arc::clone(&reg)).unwrap();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_source(&format!("{name}_spec"), spec)
         .unwrap_or_else(|e| panic!("{name} spec failed:\n{e}"));
 }

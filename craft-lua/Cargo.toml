@@ -53,6 +53,11 @@ tree-sitter-starlark = { workspace = true }
 tree-sitter-swift = { workspace = true }
 tree-sitter-typescript = { workspace = true }
 tree-sitter-zig = { workspace = true }
+
+[features]
+default = []
+onnx = ["craft-agent/onnx"]
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

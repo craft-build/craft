@@ -179,27 +179,27 @@ pub(super) fn apply_lifecycle(history: &mut [Message], classifications: &[ReadCl
                 && let Some((state, file_path)) = stale_ids.get(tool_use_id.as_str())
             {
                 let (state, file_path) = (*state, *file_path);
-                    let old_len = content.len();
-                    let marker = match state {
-                        ReadState::Stale => {
-                            if old_len > STALE_MARKER_PREFIX.len() + 60 {
-                                format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. {old_len} chars removed]")
-                            } else {
-                                format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read.]")
-                            }
+                let old_len = content.len();
+                let marker = match state {
+                    ReadState::Stale => {
+                        if old_len > STALE_MARKER_PREFIX.len() + 60 {
+                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. {old_len} chars removed]")
+                        } else {
+                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read.]")
                         }
-                        ReadState::Superseded => {
-                            if old_len > SUPERSEDED_MARKER_PREFIX.len() + 60 {
-                                format!("{SUPERSEDED_MARKER_PREFIX}{file_path} was re-read later. {old_len} chars removed]")
-                            } else {
-                                format!("{SUPERSEDED_MARKER_PREFIX}{file_path} was re-read later.]")
-                            }
+                    }
+                    ReadState::Superseded => {
+                        if old_len > SUPERSEDED_MARKER_PREFIX.len() + 60 {
+                            format!("{SUPERSEDED_MARKER_PREFIX}{file_path} was re-read later. {old_len} chars removed]")
+                        } else {
+                            format!("{SUPERSEDED_MARKER_PREFIX}{file_path} was re-read later.]")
                         }
-                        ReadState::Fresh => unreachable!(),
-                    };
-                    total_removed += old_len.saturating_sub(marker.len());
-                    *content = marker;
-                }
+                    }
+                    ReadState::Fresh => unreachable!(),
+                };
+                total_removed += old_len.saturating_sub(marker.len());
+                *content = marker;
+            }
             }
         }
 
@@ -211,7 +211,46 @@ pub(super) fn apply_lifecycle(history: &mut [Message], classifications: &[ReadCl
 }
 
 /// Run read lifecycle management on a History, returning total chars removed.
-pub(super) fn run_lifecycle(history: &mut History) -> usize {
+/// When the `onnx` feature is enabled and a scorer is provided, semantically
+/// stale reads may be downgraded back to Fresh if the edit content is still
+/// similar enough to the original read content.
+#[cfg(feature = "onnx")]
+pub(super) async fn run_lifecycle(
+    history: &mut History,
+    scorer: Option<&super::semantic::RelevanceScorer>,
+) -> usize {
+    let messages = history.as_slice();
+    let mut classifications = classify_reads(messages);
+
+    if let Some(scorer) = scorer {
+        let stale: Vec<(String, String)> = classifications
+            .iter()
+            .filter(|c| c.state != ReadState::Fresh)
+            .map(|c| (c.tool_call_id.clone(), c.file_path.clone()))
+            .collect();
+        if !stale.is_empty() {
+            let semantic_results =
+                super::semantic::classify_reads_semantic(history.as_slice(), scorer, &stale)
+                    .await;
+            for (tool_call_id, _, is_still_stale) in semantic_results {
+                if !is_still_stale
+                    && let Some(c) = classifications
+                        .iter_mut()
+                        .find(|c| c.tool_call_id == tool_call_id)
+                {
+                    info!(file = %c.file_path, "semantic stale override: Stale -> Fresh");
+                    c.state = ReadState::Fresh;
+                }
+            }
+        }
+    }
+
+    let msgs = history.as_mut_slice();
+    apply_lifecycle(msgs, &classifications)
+}
+
+#[cfg(not(feature = "onnx"))]
+pub(super) async fn run_lifecycle(history: &mut History) -> usize {
     let messages = history.as_slice();
     let classifications = classify_reads(messages);
     let msgs = history.as_mut_slice();
@@ -405,8 +444,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_lifecycle_on_history() {
+    #[tokio::test]
+    async fn run_lifecycle_on_history() {
         let mut history = History::new(vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
@@ -415,7 +454,10 @@ mod tests {
             tool_use_msg("t2", "write", json!({"path": "/src/main.rs", "content": "new"})),
             tool_result_msg("t2", "ok"),
         ]);
-        let removed = run_lifecycle(&mut history);
+        #[cfg(feature = "onnx")]
+        let removed = run_lifecycle(&mut history, None).await;
+        #[cfg(not(feature = "onnx"))]
+        let removed = run_lifecycle(&mut history).await;
         assert!(removed > 0);
         match &history.as_slice()[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {

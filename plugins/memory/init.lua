@@ -75,22 +75,56 @@ local function render_content(content, path, ctx)
   return buf
 end
 
+local function semantic_view(query, dir, ctx)
+  local results, err = helpers.semantic_search(dir, query)
+  if not results then
+    return nil, err or "no matching memories"
+  end
+  if #results == 0 then
+    return nil, "no memories matching '" .. query .. "'"
+  end
+  local lines = { "Semantic search results for '" .. query .. "':\n" }
+  local rendered = {}
+  for _, entry in ipairs(results) do
+    local filename = entry[1]
+    local sim = entry[2]
+    lines[#lines + 1] = "## " .. filename .. " (similarity: " .. string.format("%.2f", sim) .. ")"
+    local fp = helpers.safe_resolve(dir, filename)
+    if fp then
+      local ok, content = pcall(craft.fs.read, fp)
+      if ok then
+        lines[#lines + 1] = content
+        lines[#lines + 1] = ""
+        rendered[#rendered + 1] = content
+      end
+    end
+  end
+  local output = table.concat(lines, "\n")
+  return {
+    llm_output = output,
+    body = render_content(table.concat(rendered, "\n---\n"), "search.md", ctx),
+  }
+end
+
 local function cmd_view(path, dir, ctx)
   if not path then
+    helpers.cleanup_vectors(dir)
     return helpers.list_memories(dir)
   end
   local file_path, err = helpers.safe_resolve(dir, path)
-  if not file_path then
-    return nil, err
+  if file_path then
+    local ok, content = pcall(craft.fs.read, file_path)
+    if ok then
+      return {
+        llm_output = content,
+        body = render_content(content, path, ctx),
+      }
+    end
   end
-  local ok, content = pcall(craft.fs.read, file_path)
-  if not ok then
-    return nil, "read error: " .. tostring(content)
+  if helpers.has_embed() then
+    return semantic_view(path, dir, ctx)
   end
-  return {
-    llm_output = content,
-    body = render_content(content, path, ctx),
-  }
+  return nil, "'" .. path .. "' not found"
 end
 
 local function cmd_write(path, content, dir, ctx)
@@ -112,6 +146,7 @@ local function cmd_write(path, content, dir, ctx)
   if not ok then
     return nil, "write error: " .. tostring(write_err)
   end
+  helpers.store_embedding(dir, path, content)
   return {
     llm_output = "wrote " .. path .. " (" .. lc .. " lines)",
     body = render_content(content, path, ctx),
@@ -130,6 +165,7 @@ local function cmd_delete(path, dir)
   if not ok then
     return nil, "delete error: " .. tostring(rm_err)
   end
+  helpers.remove_embedding(dir, path)
   return "deleted " .. path
 end
 
@@ -137,7 +173,8 @@ craft.api.register_tool({
   name = "memory",
   description = "Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.\n\n"
     .. "- Save important context before compaction or to build up project knowledge.\n"
-    .. "- Keep entries concise and current. Delete outdated information.",
+    .. "- Keep entries concise and current. Delete outdated information.\n"
+    .. "- Use `view` with a search query (not a filename) for semantic search across memories.",
 
   schema = {
     type = "object",
@@ -253,6 +290,7 @@ craft.api.register_command({
         local item = entries[event.index]
         local ok, err = craft.fs.rm(craft.fs.joinpath(dir, item[1]))
         if ok then
+          helpers.remove_embedding(dir, item[1])
           craft.ui.flash("Deleted " .. item[1])
           table.remove(entries, event.index)
           if #entries == 0 then

@@ -14,6 +14,9 @@ pub use agent::{
     Agent, AgentParams, AgentRunParams, FindingsStore, History, Instructions, LoadedInstructions,
     RunOutcome, SharedFindingsStore, StoredFinding,
 };
+pub use agent::EmbedRequest;
+#[cfg(feature = "onnx")]
+pub use agent::EmbeddingService;
 pub use cancel::{CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
 pub mod compression;

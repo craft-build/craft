@@ -1,7 +1,5 @@
 use std::collections::HashSet;
 
-/// Compress code output by keeping only significant lines (signatures, type definitions, etc.)
-/// The rate parameter (0.0-1.0) controls what fraction of lines to keep.
 pub fn compress_code(text: &str, rate: f32) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
@@ -17,7 +15,7 @@ pub fn compress_code(text: &str, rate: f32) -> String {
         .iter()
         .enumerate()
         .map(|(i, line)| {
-            let score = score_code_line(line);
+            let score = super::keywords::score_code_line(line);
             (i, *line, score)
         })
         .collect();
@@ -63,59 +61,3 @@ pub fn compress_code(text: &str, rate: f32) -> String {
     result
 }
 
-fn score_code_line(line: &str) -> i32 {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return -5;
-    }
-    let mut score = 0;
-
-    if trimmed.starts_with("pub ") || trimmed.starts_with("fn ") || trimmed.starts_with("async ") {
-        score += 10;
-    }
-    if trimmed.contains("fn ")
-        || trimmed.contains("struct ")
-        || trimmed.contains("enum ")
-        || trimmed.contains("impl ")
-        || trimmed.contains("trait ")
-        || trimmed.contains("type ")
-        || trimmed.contains("interface ")
-        || trimmed.contains("class ")
-        || trimmed.contains("def ")
-        || trimmed.contains("function ")
-    {
-        score += 10;
-    }
-    if trimmed.starts_with("use ")
-        || trimmed.starts_with("import ")
-        || trimmed.starts_with("from ")
-        || trimmed.starts_with("#include")
-    {
-        score += 8;
-    }
-    if trimmed.starts_with("const ")
-        || trimmed.starts_with("let ")
-        || trimmed.starts_with("static ")
-    {
-        score += 5;
-    }
-    if trimmed.starts_with("mod ")
-        || trimmed.starts_with("package ")
-        || trimmed.starts_with("module ")
-    {
-        score += 8;
-    }
-    if trimmed.starts_with("//")
-        || trimmed.starts_with("#")
-        || trimmed.starts_with("--")
-        || trimmed.starts_with("/*")
-    {
-        score -= 3;
-    }
-    // trimmed.is_empty() already checked at top
-    if trimmed == "}" || trimmed == "end" {
-        score -= 4;
-    }
-
-    score
-}

@@ -1,4 +1,3 @@
-/// Compress log output by keeping error/warning lines and head/tail.
 pub fn compress_log(text: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= max_lines {
@@ -16,7 +15,7 @@ pub fn compress_log(text: &str, max_lines: usize) -> String {
     let middle: Vec<(usize, &str, i32)> = lines[head..lines.len().saturating_sub(tail)]
         .iter()
         .enumerate()
-        .map(|(i, line)| (i + head, *line, score_log_line(line)))
+        .map(|(i, line)| (i + head, *line, super::keywords::score_log_line(line)))
         .collect();
 
     let mut important: Vec<(usize, &str)> = middle
@@ -51,24 +50,3 @@ pub fn compress_log(text: &str, max_lines: usize) -> String {
     kept.join("\n")
 }
 
-fn score_log_line(line: &str) -> i32 {
-    let trimmed = line.trim().to_lowercase();
-    if trimmed.is_empty() {
-        return -5;
-    }
-    if trimmed.starts_with("error")
-        || trimmed.starts_with("fatal")
-        || trimmed.starts_with("panic")
-        || trimmed.starts_with("critical")
-        || trimmed.starts_with("exception")
-    {
-        return 10;
-    }
-    if trimmed.starts_with("warning") || trimmed.starts_with("warn") {
-        return 5;
-    }
-    if trimmed.starts_with("note") || trimmed.starts_with("info") {
-        return 1;
-    }
-    -1
-}

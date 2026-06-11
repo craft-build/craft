@@ -13,6 +13,8 @@ pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost};
 pub use plugin_permissions::{denied_error, Permission, PluginPermissions};
 pub use runtime::{ClickReply, RestoreItem, RestoreReply};
+#[cfg(feature = "onnx")]
+pub use api::embed::EmbedChannel;
 
 pub mod test_support {
     use crate::api::command::{LuaCommandInfo, LuaCommandReader, LuaCommandWriter};

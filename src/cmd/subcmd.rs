@@ -50,7 +50,7 @@ pub async fn index(path: &str, no_plugins: bool) -> Result<()> {
     let mut host = if no_plugins {
         PluginHost::disabled()
     } else {
-        PluginHost::new(Arc::clone(ToolRegistry::native_arc()))
+        PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
             .context("initialize lua plugin host")?
     };
 
