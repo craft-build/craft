@@ -49,8 +49,12 @@ impl EmbeddingService {
     }
 
     fn init_model() -> Result<TextEmbedding, EmbeddingError> {
-        let mut options = TextInitOptions::default();
-        options.model_name = EmbeddingModel::BGEBaseENV15;
+        let options = TextInitOptions::new(EmbeddingModel::BGEBaseENV15)
+            .with_show_download_progress(false);
+        let options = match craft_storage::paths::models_dir() {
+            Ok(dir) => options.with_cache_dir(dir),
+            Err(_) => options,
+        };
         TextEmbedding::try_new(options).map_err(|e| EmbeddingError::ModelLoad(e.to_string()))
     }
 

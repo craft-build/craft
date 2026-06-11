@@ -126,12 +126,6 @@ pub async fn run(cli: Cli) -> Result<()> {
     setup::init_logging(&storage, &config.storage);
     setup::install_panic_log_hook();
 
-    #[cfg(feature = "onnx")]
-    if config.compression.semantic_enabled {
-        let embed_service = craft_agent::EmbeddingService::new();
-        let _ = embed_service.download_model().await;
-        let _ = craft_agent::compression::download_magika_model();
-    }
 
     let commands = discover_commands(cli.no_commands);
 

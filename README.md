@@ -8,12 +8,24 @@ Full attribution and thanks to the original project: [github.com/tontinton/maki]
 
 * `tokio` runtime instead of `smol`. This change was done for compatibility with async Rust libraries and to take advantage of tokio's performance optimizations.
 * `reqwest` instead of `isahc`. This change was done for better synergy with `tokio` and builtin streaming support.
-* Review workflow has been added for utilizing yaml based styleguide files to enforce code style.
+* **Semantic intelligence** (optional, `onnx` feature) — local ONNX embeddings via fastembed for smarter context management:
+  - **Relevance scoring** — builds an intent embedding from recent user messages and scores all history by relevance, protecting high-value content during compaction.
+  - **Semantic context curation** — selects the most relevant messages within the token budget instead of a simple window, filling gaps with omission markers.
+  - **Semantic overlap detection** — finds old tool results that semantically duplicate newer ones and aggressively compresses the older copies.
+  - **Auto-retrieve** — restores compressed content from the LRU store when it becomes semantically relevant to the current intent.
+  - **Stagnation detection** — flags when consecutive turns have high embedding similarity, emitting a `StagnationDetected` event.
+  - **Semantic stale override** — prevents marking reads as stale when edits are still semantically similar to the original content.
+  - **Targeted compaction** — compaction prompts include relevance-ranked topics for better summarization focus.
+  - **Magika content detection** — uses ONNX-based file type detection instead of extension-based heuristics for more accurate compression routing.
+  - Models are downloaded eagerly at startup before the TUI takes over the terminal.
+* **Keyword scoring** — shared aho-corasick based line classifier replaces hand-rolled scoring for code and log compression, with explicit categories (error, warning, security, code definition, import, module, comment, closing brace).
+* **Embed API for Lua plugins** — exposes `embed(text)` and `similarity(a, b)` to the Lua plugin host via a channel-based request/response bridge.
+* **Review workflow** has been added for utilizing yaml based styleguide files to enforce code style.
 * Multi-stage compression pipeline inspired by [Headroom](https://github.com/knuffic/headroom), which proactively reduces context usage instead of relying solely on reactive compaction:
   - **Read lifecycle management** — stale and superseded file reads are replaced with compact markers before every LLM turn, so outdated reads don't waste tokens.
-  - **Tool output pre-compression** — code, logs, search results, diffs, and JSON arrays are compressed before entering the LLM context (original output is preserved for UI display).
-  - **Progressive compaction** — when context is near capacity, old tool outputs are compressed in-place (aggressive compression for old, summary markers for very old) without an expensive LLM summarization call.
-  - **Token estimation** — client-side character-based heuristic enables proactive compression at 80% context window, before overflow.
+  - **Tool output pre-compression** — code, logs, search results, diffs, and JSON arrays are compressed before entering history, using content type detection and keyword-aware line scoring.
+  - **Progressive compaction** — when context reaches 60% of the window, old tool outputs are compressed in-place (aggressive compression for old, summary markers for very old) without an expensive LLM summarization call.
+  - **Token estimation** — client-side character-based heuristic enables proactive compression before overflow.
   - **Prefix cache awareness** — messages confirmed to be in the provider's KV cache (via `cache_read` tokens) are skipped during compression to preserve cache read discounts.
   - **Reversible compression (CCR)** — original content is stored in an in-memory LRU store, and a `retrieve` tool lets the LLM fetch originals on demand via content hashes embedded in compressed output.
 * **Tool dedup cache** — caches read-only tool results (`read`/`grep`/`glob`/`index`) keyed by hash(tool+args), bounded to 64 entries with FIFO eviction, cleared on compaction. Cache hits are prefixed with `[cached]`.

@@ -97,6 +97,11 @@ pub fn cache_dir() -> Result<PathBuf, std::io::Error> {
     ensure(&p.cache)
 }
 
+pub fn models_dir() -> Result<PathBuf, std::io::Error> {
+    let p = resolve().ok_or_else(err)?;
+    ensure(&p.data.join("local_models"))
+}
+
 pub struct XdgPaths {
     pub config: PathBuf,
     pub state: PathBuf,

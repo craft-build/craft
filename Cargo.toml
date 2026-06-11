@@ -16,6 +16,7 @@ name = "craft"
 path = "src/main.rs"
 
 [features]
+default = ["onnx"]
 demo = ["craft-ui/demo"]
 onnx = ["craft-agent/onnx", "craft-lua/onnx", "craft-ui/onnx"]
 
