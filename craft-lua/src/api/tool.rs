@@ -867,8 +867,9 @@ mod tests {
         std::thread::spawn(move || {
             if let Ok(Request::ComputePermissionScopes { reply, .. }) = rx.recv() {
                 let _ = reply.send(Some(PermissionScopes {
-                    scopes: vec!["cargo".into(), "test".into()],
+                    scopes: vec!["bash:cargo test".into()],
                     force_prompt: false,
+                    context: craft_agent::types::PermissionContext::default(),
                 }));
             }
         });

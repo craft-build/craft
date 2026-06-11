@@ -97,6 +97,7 @@ pub enum PermissionPrompt {
         id: String,
         tool: String,
         scopes: Vec<String>,
+        context: Box<craft_agent::types::PermissionContext>,
         subagent_id: Option<String>,
         allow_scopes: Vec<String>,
         state: PromptState,
@@ -128,6 +129,7 @@ impl PermissionPrompt {
         id: String,
         tool: String,
         scopes: Vec<String>,
+        context: craft_agent::types::PermissionContext,
         subagent_id: Option<String>,
     ) {
         let allow_scopes = generalized_scopes(&tool, &scopes);
@@ -140,6 +142,7 @@ impl PermissionPrompt {
             id,
             tool,
             scopes,
+            context: Box::new(context),
             subagent_id,
             allow_scopes,
             state: PromptState::Normal,
@@ -250,6 +253,7 @@ impl PermissionPrompt {
         let Self::Open {
             tool,
             scopes,
+            context,
             subagent_id,
             allow_scopes,
             state,
@@ -276,6 +280,41 @@ impl PermissionPrompt {
                 Span::raw("  "),
                 Span::styled(label, label_style),
                 Span::styled(s.clone(), value_style),
+            ]));
+        }
+
+        if !context.files.is_empty() {
+            for (i, f) in context.files.iter().enumerate() {
+                let label = if i == 0 { "file  " } else { "    + " };
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(label, label_style),
+                    Span::styled(f.clone(), value_style),
+                ]));
+            }
+        }
+
+        if !context.commands.is_empty() {
+            for (i, c) in context.commands.iter().enumerate() {
+                let label = if i == 0 { "cmd   " } else { "    + " };
+                let display = if c.len() > 80 {
+                    format!("{}…", &c[..79])
+                } else {
+                    c.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(label, label_style),
+                    Span::styled(display, value_style),
+                ]));
+            }
+        }
+
+        if let Some(reason) = &context.reason {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("why   ", label_style),
+                Span::styled(reason.clone(), value_style),
             ]));
         }
 
@@ -370,11 +409,15 @@ mod tests {
 
     fn open_prompt() -> PermissionPrompt {
         let mut prompt = PermissionPrompt::new();
-        prompt.open("id".into(), "bash".into(), vec!["execute".into()], None);
+        prompt.open(
+            "id".into(),
+            "bash".into(),
+            vec!["execute".into()],
+            craft_agent::types::PermissionContext::default(),
+            None,
+        );
         prompt
-    }
-
-    fn ctrl_c() -> KeyEvent {
+    }    fn ctrl_c() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
     }
 

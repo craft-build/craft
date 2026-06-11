@@ -2389,7 +2389,7 @@ fn agent_error_creates_synthetic_tool_done_with_message() {
 fn ctrl_c_denies_permission_prompt() {
     let mut app = test_app();
     app.permission_prompt
-        .open("id".into(), "bash".into(), vec!["execute".into()], None);
+        .open("id".into(), "bash".into(), vec!["execute".into()], craft_agent::types::PermissionContext::default(), None);
     assert!(app.permission_prompt.is_open());
 
     let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
@@ -2571,7 +2571,7 @@ fn permission_prompt_takes_bottom_precedence_over_below_split() {
     open_split_window(&mut app, craft_lua::Split::Left);
     open_split_window(&mut app, craft_lua::Split::Above);
     app.permission_prompt
-        .open("perm-1".into(), "bash".into(), vec!["ls".into()], None);
+        .open("perm-1".into(), "bash".into(), vec!["ls".into()], craft_agent::types::PermissionContext::default(), None);
 
     let (_msg, _bottom, _status, _input, splits) = app.layout_geometry(TEST_AREA);
     assert!(

@@ -1169,6 +1169,7 @@ impl LuaRuntime {
         Some(PermissionScopes {
             scopes,
             force_prompt,
+            context: craft_agent::types::PermissionContext::default(),
         })
     }
 

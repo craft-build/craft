@@ -77,8 +77,14 @@ impl super::ToolInvocation for Write {
         Some(Path::new(&self.path))
     }
     fn permission_scopes(&self) -> super::BoxFuture<'_, Option<super::PermissionScopes>> {
-        Box::pin(std::future::ready(Some(super::PermissionScopes::single(
+        let ctx = crate::types::PermissionContext {
+            files: vec![self.path.clone()],
+            commands: vec![],
+            reason: Some("write file".into()),
+        };
+        Box::pin(std::future::ready(Some(super::PermissionScopes::single_with_context(
             crate::permissions::canonicalize_scope_path(&self.path),
+            ctx,
         ))))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {

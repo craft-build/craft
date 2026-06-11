@@ -6,6 +6,7 @@
 //! at the bottom wire each native tool into the registry through `Native<T>`. Plan mode
 //! rejects writes to anything but the plan file before they reach the tool.
 
+mod apply_patch;
 mod batch;
 mod code_execution;
 mod edit;
@@ -135,6 +136,7 @@ pub fn is_tool_enabled(config: &AgentConfig, name: &str) -> bool {
 
 pub const BASH_TOOL_NAME: &str = "bash";
 pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
+pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
 pub const GLOB_TOOL_NAME: &str = "glob";
 pub const GREP_TOOL_NAME: &str = grep::Grep::NAME;
@@ -592,6 +594,7 @@ register_tools! {
     write::Write,
     edit::Edit,
     multiedit::MultiEdit,
+    apply_patch::ApplyPatch,
     grep::Grep,
     todowrite::TodoWrite,
     task::Task,
@@ -1021,6 +1024,7 @@ mod tests {
     #[test_case("write",     |p: &str, _: &str| json!({"path": p, "content": "plan"})                          , |_: &str, o: &str| json!({"path": o, "content": "x"})                           ; "write")]
     #[test_case("edit",      |p: &str, _: &str| json!({"path": p, "old_string": "old", "new_string": "new"})  , |_: &str, o: &str| json!({"path": o, "old_string": "old", "new_string": "new"})  ; "edit")]
     #[test_case("multiedit", |p: &str, _: &str| json!({"path": p, "edits": [{"old_string": "old", "new_string": "new"}]}) , |_: &str, o: &str| json!({"path": o, "edits": [{"old_string": "old", "new_string": "new"}]}) ; "multiedit")]
+    #[test_case("apply_patch", |p: &str, _: &str| json!({"patch_text": format!("*** Begin Patch\n*** Add File: {p}\n+plan\n*** End Patch")}) , |_: &str, o: &str| json!({"patch_text": format!("*** Begin Patch\n*** Add File: {o}\n+x\n*** End Patch")}) ; "apply_patch")]
     #[tokio::test]
     async fn plan_mode_restricts_mutations(
         tool: &str,

@@ -86,6 +86,7 @@ impl Read {
                 lines,
                 total_lines,
                 instructions,
+                no_compress: true,
             })
         })
         .await

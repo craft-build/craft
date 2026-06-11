@@ -112,6 +112,7 @@ impl Future for HeaderFuture {
 pub struct PermissionScopes {
     pub scopes: Vec<String>,
     pub force_prompt: bool,
+    pub context: crate::types::PermissionContext,
 }
 
 impl PermissionScopes {
@@ -119,6 +120,34 @@ impl PermissionScopes {
         Self {
             scopes: vec![scope],
             force_prompt: false,
+            context: crate::types::PermissionContext::default(),
+        }
+    }
+
+    pub fn single_with_context(scope: String, context: crate::types::PermissionContext) -> Self {
+        Self {
+            scopes: vec![scope],
+            force_prompt: false,
+            context,
+        }
+    }
+
+    pub fn multiple(scopes: Vec<String>) -> Self {
+        Self {
+            scopes,
+            force_prompt: false,
+            context: crate::types::PermissionContext::default(),
+        }
+    }
+
+    pub fn multiple_with_context(
+        scopes: Vec<String>,
+        context: crate::types::PermissionContext,
+    ) -> Self {
+        Self {
+            scopes,
+            force_prompt: false,
+            context,
         }
     }
 
@@ -126,6 +155,7 @@ impl PermissionScopes {
         Self {
             scopes: vec![scope],
             force_prompt: true,
+            context: crate::types::PermissionContext::default(),
         }
     }
 }

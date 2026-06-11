@@ -186,6 +186,7 @@ pub fn mock_events() -> Vec<MockEvent> {
             ],
             total_lines: 5,
             instructions: None,
+            no_compress: false,
         },
         false,
     )));
@@ -720,6 +721,7 @@ print(f'Total lines across config: {total}')"
                 ],
                 total_lines: 50,
                 instructions: None,
+                no_compress: false,
             },
             false,
         ),
@@ -779,6 +781,7 @@ print(f'Total lines across config: {total}')"
                 ],
                 total_lines: 8,
                 instructions: None,
+                no_compress: false,
             },
             false,
         ),

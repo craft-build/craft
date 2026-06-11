@@ -43,6 +43,7 @@ pub enum ChatEventResult {
         id: String,
         tool: String,
         scopes: Vec<String>,
+        context: craft_agent::types::PermissionContext,
     },
     AuthRequired,
 }
@@ -133,8 +134,18 @@ impl Chat {
                 self.messages_panel.flush();
                 return ChatEventResult::Error(message);
             }
-            AgentEvent::PermissionRequest { id, tool, scopes } => {
-                return ChatEventResult::PermissionRequest { id, tool, scopes };
+            AgentEvent::PermissionRequest {
+                id,
+                tool,
+                scopes,
+                context,
+            } => {
+                return ChatEventResult::PermissionRequest {
+                    id,
+                    tool,
+                    scopes,
+                    context,
+                };
             }
             AgentEvent::AuthRequired => {
                 return ChatEventResult::AuthRequired;
@@ -789,6 +800,7 @@ mod tests {
                     lines: vec!["fn main() {}".into()],
                     total_lines: 1,
                     instructions: None,
+                    no_compress: false,
                 },
             ),
             (

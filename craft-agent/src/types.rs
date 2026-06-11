@@ -182,6 +182,8 @@ pub enum ToolOutput {
         total_lines: usize,
         #[serde(default)]
         instructions: Option<Vec<InstructionBlock>>,
+        #[serde(default)]
+        no_compress: bool,
     },
     ReadDir {
         text: String,
@@ -269,11 +271,18 @@ impl ToolOutput {
     /// compression when the output exceeds trivial size.
     pub fn as_text_for_llm(&self, config: &CompressionConfig) -> String {
         let raw = self.as_text();
-        if !config.enabled || raw.len() < 200 {
+        if !config.enabled || raw.len() < 200 || self.skip_compress() {
             return raw;
         }
         let ct = compression::detect_content_type(&raw);
         compression::compress(&raw, ct, &compression::CompressionConfig::from(config))
+    }
+
+    fn skip_compress(&self) -> bool {
+        match self {
+            Self::ReadCode { no_compress, .. } => *no_compress,
+            _ => false,
+        }
     }
 
     pub fn is_empty_result(&self) -> bool {
@@ -516,6 +525,16 @@ pub fn tool_results(results: Vec<ToolDoneEvent>, config: &CompressionConfig) -> 
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PermissionContext {
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -571,6 +590,8 @@ pub enum AgentEvent {
         id: String,
         tool: String,
         scopes: Vec<String>,
+        #[serde(default)]
+        context: PermissionContext,
     },
     AuthRequired,
     SubagentHistory {
@@ -967,6 +988,7 @@ mod tests {
             lines,
             total_lines: 100,
             instructions,
+            no_compress: false,
         };
         assert_eq!(output.as_display_text(), expected);
     }
@@ -982,6 +1004,7 @@ mod tests {
                 path: "AGENTS.md".into(),
                 content: "do stuff".into(),
             }]),
+            no_compress: false,
         };
         let text = output.as_text();
         assert!(text.contains("1: fn main()"));
