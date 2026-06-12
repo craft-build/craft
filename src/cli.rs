@@ -95,6 +95,8 @@ pub enum Command {
     },
     /// Rollback to the previous version
     Rollback,
+    /// Run craft as an Agent Client Protocol (ACP) server over stdio
+    Acp,
     /// Data migration utilities
     Migrate {
         #[command(subcommand)]

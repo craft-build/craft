@@ -1,5 +1,3 @@
-#[cfg(feature = "onnx")]
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -10,13 +8,14 @@ use craft_providers::{Message, Model, RequestOptions, StopReason, StreamResponse
 
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
 use super::dedup::ToolDedupCache;
+use super::doom::SharedDoomTracker;
 use super::escalation::EscalationTracker;
 use super::guardrails::ToolGuardrails;
 use super::history::{History, sanitize_cancelled_history};
 use super::instructions::LoadedInstructions;
 use super::snapshot::SnapshotManager;
 use super::streaming::stream_with_retry;
-use super::tool_dispatch::{self, RecentCalls};
+use super::tool_dispatch::{self, ToolBatchOutcome};
 use super::trust::TrustTracker;
 use super::validation::Validator;
 use crate::cancel::CancelToken;
@@ -30,7 +29,7 @@ use crate::{
 use craft_config::ToolOutputLines;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
-const GRACE_CALL_PROMPT: &str = "You have reached the turn limit. Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
+const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
 const DEFAULT_SMALL_MODEL_RATIO: f64 = 0.60;
 const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 #[cfg(feature = "onnx")]
@@ -63,6 +62,8 @@ pub struct AgentParams {
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub compression: craft_config::CompressionConfig,
     pub findings_store: Option<super::findings_store::SharedFindingsStore>,
+    pub fs: Arc<dyn crate::tools::FsBackend>,
+    pub doom: SharedDoomTracker,
 }
 
 pub struct AgentRunParams {
@@ -85,8 +86,7 @@ pub struct Agent {
     cancel: CancelToken,
     total_usage: TokenUsage,
     num_turns: u32,
-    grace_called: bool,
-    recent_calls: RecentCalls,
+    doom: SharedDoomTracker,
     guardrails: ToolGuardrails,
     ineffective_compaction_count: u8,
     auto_compact: bool,
@@ -114,9 +114,8 @@ pub struct Agent {
     #[cfg(feature = "onnx")]
     scorer: Option<super::semantic::RelevanceScorer>,
     #[cfg(feature = "onnx")]
-    turn_embeddings: VecDeque<Vec<f32>>,
-    #[cfg(feature = "onnx")]
     last_relevance_scores: Option<Vec<(usize, f32)>>,
+    fs: Arc<dyn crate::tools::FsBackend>,
 }
 
 impl Agent {
@@ -138,8 +137,7 @@ impl Agent {
             cancel: CancelToken::none(),
             total_usage: TokenUsage::default(),
             num_turns: 0,
-            grace_called: false,
-            recent_calls: RecentCalls::new(),
+            doom: params.doom,
             guardrails: ToolGuardrails::new(),
             ineffective_compaction_count: 0,
             auto_compact: compaction::auto_compact_enabled(),
@@ -170,9 +168,8 @@ impl Agent {
                 None
             },
             #[cfg(feature = "onnx")]
-            turn_embeddings: VecDeque::new(),
-            #[cfg(feature = "onnx")]
             last_relevance_scores: None,
+            fs: params.fs,
         }
     }
 
@@ -241,6 +238,8 @@ impl Agent {
     }
 
     pub async fn run(mut self, input: AgentInput) -> RunOutcome {
+        strip_trailing_grace_prompt(&mut self.history);
+        self.doom.lock().unwrap_or_else(|e| e.into_inner()).reset_for_new_user_input();
         self.rollback_len = self.history.len();
         let msg = Message::user_with_images(input.message.clone(), input.images);
         self.history.push(msg);
@@ -271,17 +270,23 @@ impl Agent {
 
     async fn run_loop(&mut self) -> Result<(), AgentError> {
         loop {
-            if self.num_turns >= self.config.max_turns {
-                if !self.grace_called {
-                    self.grace_called = true;
-                    self.history.push(Message::user(GRACE_CALL_PROMPT.to_string()));
-                    info!(turns = self.num_turns, "turn budget exhausted, issuing grace call");
-                    continue;
-                }
-                info!(turns = self.num_turns, "turn budget exhausted after grace call, stopping");
+            let (should_grace, should_hard_stop) = {
+                let d = self.doom.lock().unwrap_or_else(|e| e.into_inner());
+                (d.should_grace(), d.should_hard_stop())
+            };
+            if should_hard_stop {
+                let score = self.doom.lock().unwrap_or_else(|e| e.into_inner()).score();
+                info!(score, turns = self.num_turns, "doom hard-stop reached, ending run");
                 self.snapshot.commit();
                 self.emit_done(None)?;
                 return Ok(());
+            }
+            if should_grace {
+                self.doom.lock().unwrap_or_else(|e| e.into_inner()).mark_grace_called();
+                self.history.push(Message::user(GRACE_CALL_PROMPT.to_string()));
+                let score = self.doom.lock().unwrap_or_else(|e| e.into_inner()).score();
+                info!(score, turns = self.num_turns, "doom grace threshold reached, issuing grace call");
+                // fall through to turn() so the model can produce the summary
             }
             match self.turn().await? {
                 TurnOutcome::Continue => {}
@@ -390,11 +395,12 @@ impl Agent {
             if !turn_summary.is_empty()
                 && let Ok(emb) = scorer.embed_text(&turn_summary).await
             {
-                self.turn_embeddings.push_back(emb);
-                if self.turn_embeddings.len() > STAGNATION_WINDOW_SIZE {
-                    self.turn_embeddings.pop_front();
+                let mut doom = self.doom.lock().unwrap_or_else(|e| e.into_inner());
+                doom.turn_embeddings.push_back(emb);
+                if doom.turn_embeddings.len() > STAGNATION_WINDOW_SIZE {
+                    doom.turn_embeddings.pop_front();
                 }
-                let embeddings = self.turn_embeddings.make_contiguous();
+                let embeddings = doom.turn_embeddings.make_contiguous();
                 if super::semantic::detect_stagnation(embeddings, STAGNATION_SIMILARITY_THRESHOLD) {
                     let n = embeddings.len();
                     let sim = super::semantic::RelevanceScorer::similarity(
@@ -402,14 +408,30 @@ impl Agent {
                         &embeddings[n - 1],
                     );
                     info!(sim, "stagnation detected");
+                    doom.note_stagnation();
                     let _ = self.event_tx.send(AgentEvent::StagnationDetected { similarity: sim });
                 }
             }
         }
 
         if has_tools {
-            let had_errors = self.process_tool_calls(response).await?;
-            self.escalation.record(&self.model.id, had_errors);
+            let batch = self.process_tool_calls(response).await?;
+            {
+                let mut doom = self.doom.lock().unwrap_or_else(|e| e.into_inner());
+                for _ in 0..batch.doom_loops {
+                    doom.note_doom_loop();
+                }
+                for _ in 0..batch.errors {
+                    doom.note_tool_error();
+                }
+                for _ in 0..batch.successes {
+                    doom.note_tool_success();
+                }
+                for _ in 0..batch.validation_rejections {
+                    doom.note_validator_rejection();
+                }
+            }
+            self.escalation.record(&self.model.id, batch.had_errors());
             self.escalation.check_and_emit(
                 &self.model.id,
                 super::escalation::ModelTier::from_model_id(&self.model.id),
@@ -490,11 +512,15 @@ impl Agent {
         })
     }
 
-    async fn process_tool_calls(&mut self, response: StreamResponse) -> Result<bool, AgentError> {
+    async fn process_tool_calls(&mut self, response: StreamResponse) -> Result<ToolBatchOutcome, AgentError> {
         let ctx = self.tool_context();
-        tool_dispatch::process_tool_calls(
+        let mut recent = {
+            let mut d = self.doom.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut d.recent_calls)
+        };
+        let result = tool_dispatch::process_tool_calls(
             response,
-            &mut self.recent_calls,
+            &mut recent,
             &mut self.guardrails,
             self.mcp.as_ref(),
             &mut self.history,
@@ -505,7 +531,12 @@ impl Agent {
             &self.snapshot,
             &self.validator,
         )
-        .await
+        .await;
+        {
+            let mut d = self.doom.lock().unwrap_or_else(|e| e.into_inner());
+            d.recent_calls = recent;
+        }
+        result
     }
 
     fn small_model_ratio(&self) -> f64 {
@@ -540,6 +571,7 @@ impl Agent {
             compression: self.compression.clone(),
             compression_store: Arc::clone(&self.compression_store),
             findings_store: self.findings_store.clone(),
+            fs: Arc::clone(&self.fs),
         }
     }
 
@@ -633,8 +665,10 @@ impl Agent {
         if savings < INEFFECTIVE_COMPACTION_THRESHOLD {
             self.ineffective_compaction_count += 1;
             info!(savings_pct = format!("{:.0}%", savings * 100.0), "compaction was ineffective");
+            self.doom.lock().unwrap_or_else(|e| e.into_inner()).note_ineffective_compaction();
         } else {
             self.ineffective_compaction_count = 0;
+            self.doom.lock().unwrap_or_else(|e| e.into_inner()).note_effective_compaction();
         }
         Ok(true)
     }
@@ -691,6 +725,41 @@ impl Agent {
             }
         }
         Ok(true)
+    }
+}
+
+/// Removes a trailing GRACE_CALL_PROMPT user message and any synthetic
+/// assistant reply that follows it. Called when a fresh user message is
+/// about to be appended so the "Do NOT call any tools" instruction does
+/// not shadow the new request.
+fn strip_trailing_grace_prompt(history: &mut History) {
+    loop {
+        let msgs = history.as_slice();
+        let n = msgs.len();
+        if n == 0 {
+            break;
+        }
+        let last = &msgs[n - 1];
+        let last_is_grace = matches!(last.role, craft_providers::Role::User)
+            && last.content.iter().any(|b| {
+                matches!(b, craft_providers::ContentBlock::Text { text } if text == GRACE_CALL_PROMPT)
+            });
+        if last_is_grace {
+            history.truncate(n - 1);
+            continue;
+        }
+        if matches!(last.role, craft_providers::Role::Assistant) && n >= 2 {
+            let prev = &msgs[n - 2];
+            let prev_is_grace = matches!(prev.role, craft_providers::Role::User)
+                && prev.content.iter().any(|b| {
+                    matches!(b, craft_providers::ContentBlock::Text { text } if text == GRACE_CALL_PROMPT)
+                });
+            if prev_is_grace {
+                history.truncate(n - 2);
+                continue;
+            }
+        }
+        break;
     }
 }
 
@@ -803,6 +872,8 @@ mod tests {
                 prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
                 compression: craft_config::CompressionConfig::default(),
                 findings_store: None,
+                fs: Arc::new(crate::tools::LocalFs),
+                doom: Arc::new(std::sync::Mutex::new(crate::agent::doom::DoomTracker::new())),
             },
             AgentRunParams {
                 history,
@@ -1055,6 +1126,8 @@ mod tests {
                 prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
                 compression: craft_config::CompressionConfig::default(),
                 findings_store: None,
+                fs: Arc::new(crate::tools::LocalFs),
+                doom: Arc::new(std::sync::Mutex::new(crate::agent::doom::DoomTracker::new())),
             },
             AgentRunParams {
                 history: History::new(Vec::new()),

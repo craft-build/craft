@@ -2,6 +2,7 @@ mod cache;
 mod compaction;
 pub(crate) mod compression_store;
 mod dedup;
+mod doom;
 mod escalation;
 pub mod findings_store;
 mod guardrails;
@@ -29,6 +30,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub use compaction::compact;
+pub use doom::{DoomTracker, SharedDoomTracker};
 pub use findings_store::{FindingsStore, SharedFindingsStore, StoredFinding};
 pub use history::History;
 pub(crate) use instructions::is_instruction_file;

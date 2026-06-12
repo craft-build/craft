@@ -1,148 +1,77 @@
 use std::collections::HashMap;
 use std::env;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
+use std::sync::Arc;
 use std::time::Duration;
 
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
 
 use crate::plugin_permissions::{Permission::{Env, Run}, PluginPermissions};
 use crate::runtime::with_task_jobs;
-
-const READER_BUF_SIZE: usize = 8 * 1024;
-
-#[derive(Clone)]
-pub(crate) enum JobEvent {
-    Stdout(String),
-    Stderr(String),
-    Exit(i32),
-}
+use crate::terminal_backend::{
+    JobEvent, TerminalBackend, TerminalHandle, TerminalSpec,
+};
+#[cfg(test)]
+use crate::terminal_backend::LocalTerminal;
 
 struct JobMeta {
-    pid: u32,
     alive: bool,
     on_stdout: Option<RegistryKey>,
     on_stderr: Option<RegistryKey>,
     on_exit: Option<RegistryKey>,
     event_rx: Option<flume::Receiver<JobEvent>>,
+    kill: Option<Box<dyn FnOnce() + Send>>,
 }
 
 pub(crate) struct JobStore {
     jobs: HashMap<u32, JobMeta>,
     next_id: u32,
+    backend: Arc<dyn TerminalBackend>,
 }
 
 impl JobStore {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_backend(Arc::new(LocalTerminal))
+    }
+
+    pub fn with_backend(backend: Arc<dyn TerminalBackend>) -> Self {
         Self {
             jobs: HashMap::new(),
             next_id: 1,
+            backend,
         }
     }
 
-    pub fn start(
+    pub fn next_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    pub fn backend(&self) -> Arc<dyn TerminalBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    pub fn register(
         &mut self,
-        cmd: &str,
-        cwd: Option<String>,
-        env: Option<HashMap<String, String>>,
+        id: u32,
+        handle: TerminalHandle,
         on_stdout: Option<RegistryKey>,
         on_stderr: Option<RegistryKey>,
         on_exit: Option<RegistryKey>,
-    ) -> Result<u32, String> {
-        let mut command = shell_command(cmd);
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                command.pre_exec(|| {
-                    let ret = libc::setsid();
-                    if ret == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-
-        if let Some(ref dir) = cwd {
-            command.current_dir(dir);
-        }
-        if let Some(ref env_map) = env {
-            for (k, v) in env_map {
-                command.env(k, v);
-            }
-        }
-
-        let mut child = command.spawn().map_err(|e| e.to_string())?;
-        let pid = child.id();
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let (event_tx, event_rx) = flume::unbounded();
-
-        macro_rules! spawn_reader {
-            ($stream:expr, $name:expr, $variant:ident) => {
-                if let Some(stream) = $stream {
-                    let tx = event_tx.clone();
-                    Some(
-                        thread::Builder::new()
-                            .name($name.into())
-                            .spawn(move || {
-                                for line in BufReader::with_capacity(READER_BUF_SIZE, stream)
-                                    .lines()
-                                    .map_while(Result::ok)
-                                {
-                                    if tx.send(JobEvent::$variant(line)).is_err() {
-                                        break;
-                                    }
-                                }
-                            })
-                            .map_err(|e| e.to_string())?,
-                    )
-                } else {
-                    None
-                }
-            };
-        }
-        let stdout_handle = spawn_reader!(stdout, "job-stdout", Stdout);
-        let stderr_handle = spawn_reader!(stderr, "job-stderr", Stderr);
-
-        thread::Builder::new()
-            .name("job-wait".into())
-            .spawn(move || {
-                let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-                if let Some(h) = stdout_handle {
-                    let _ = h.join();
-                }
-                if let Some(h) = stderr_handle {
-                    let _ = h.join();
-                }
-                let _ = event_tx.send(JobEvent::Exit(code));
-            })
-            .map_err(|e| e.to_string())?;
-
+    ) {
         self.jobs.insert(
             id,
             JobMeta {
-                pid,
                 alive: true,
                 on_stdout,
                 on_stderr,
                 on_exit,
-                event_rx: Some(event_rx),
+                event_rx: Some(handle.events),
+                kill: Some(handle.kill),
             },
         );
-
-        Ok(id)
     }
 
     pub fn has_alive_jobs(&self) -> bool {
@@ -187,7 +116,9 @@ impl JobStore {
     pub fn kill(&mut self, job_id: u32) {
         if let Some(meta) = self.jobs.get_mut(&job_id) {
             if meta.alive {
-                kill_job(meta);
+                if let Some(kill) = meta.kill.take() {
+                    kill();
+                }
             }
         }
     }
@@ -195,7 +126,9 @@ impl JobStore {
     pub fn kill_all(&mut self) {
         for meta in self.jobs.values_mut() {
             if meta.alive {
-                kill_job(meta);
+                if let Some(kill) = meta.kill.take() {
+                    kill();
+                }
             }
         }
     }
@@ -212,45 +145,6 @@ impl JobStore {
     }
 }
 
-fn shell_command(cmd: &str) -> Command {
-    #[cfg(unix)]
-    {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(cmd);
-        c
-    }
-    #[cfg(windows)]
-    {
-        let mut c = Command::new("cmd.exe");
-        c.arg("/C").arg(cmd);
-        c
-    }
-}
-
-fn kill_job(meta: &mut JobMeta) {
-    let pid = meta.pid;
-    #[cfg(unix)]
-    unsafe {
-        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-    }
-    #[cfg(windows)]
-    {
-        const PROCESS_TERMINATE: u32 = 0x0001;
-        unsafe extern "system" {
-            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
-            fn TerminateProcess(handle: *mut std::ffi::c_void, exit_code: u32) -> i32;
-            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
-        }
-        unsafe {
-            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-            if !handle.is_null() {
-                TerminateProcess(handle, 1);
-                CloseHandle(handle);
-            }
-        }
-    }
-}
-
 pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult<Table> {
     let t = lua.create_table()?;
     let perms = perms.clone();
@@ -258,41 +152,49 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
     let p = perms.clone();
     t.set(
         "jobstart",
-        lua.create_function(move |lua, (cmd, opts): (String, Option<Table>)| {
-            if !p.is_allowed(Run) {
-                return Err(crate::plugin_permissions::denied_error(Run));
-            }
-            let (cwd, env, on_stdout, on_stderr, on_exit) = match opts {
-                Some(ref opts) => {
-                    let cwd: Option<String> = opts.get("cwd").ok();
-                    let env: Option<HashMap<String, String>> = opts
-                        .get::<Table>("env")
-                        .ok()
-                        .map(|t| t.pairs::<String, String>().filter_map(Result::ok).collect());
-                    let on_stdout = opts
-                        .get::<Function>("on_stdout")
-                        .ok()
-                        .map(|f| lua.create_registry_value(f))
-                        .transpose()?;
-                    let on_stderr = opts
-                        .get::<Function>("on_stderr")
-                        .ok()
-                        .map(|f| lua.create_registry_value(f))
-                        .transpose()?;
-                    let on_exit = opts
-                        .get::<Function>("on_exit")
-                        .ok()
-                        .map(|f| lua.create_registry_value(f))
-                        .transpose()?;
-                    (cwd, env, on_stdout, on_stderr, on_exit)
+        lua.create_async_function(move |lua, (cmd, opts): (String, Option<Table>)| {
+            let p = p.clone();
+            async move {
+                if !p.is_allowed(Run) {
+                    return Err(crate::plugin_permissions::denied_error(Run));
                 }
-                None => (None, None, None, None, None),
-            };
+                let (cwd, env, on_stdout, on_stderr, on_exit) = match opts {
+                    Some(ref opts) => {
+                        let cwd: Option<String> = opts.get("cwd").ok();
+                        let env: Option<HashMap<String, String>> = opts
+                            .get::<Table>("env")
+                            .ok()
+                            .map(|t| {
+                                t.pairs::<String, String>().filter_map(Result::ok).collect()
+                            });
+                        let on_stdout = opts
+                            .get::<Function>("on_stdout")
+                            .ok()
+                            .map(|f| lua.create_registry_value(f))
+                            .transpose()?;
+                        let on_stderr = opts
+                            .get::<Function>("on_stderr")
+                            .ok()
+                            .map(|f| lua.create_registry_value(f))
+                            .transpose()?;
+                        let on_exit = opts
+                            .get::<Function>("on_exit")
+                            .ok()
+                            .map(|f| lua.create_registry_value(f))
+                            .transpose()?;
+                        (cwd, env, on_stdout, on_stderr, on_exit)
+                    }
+                    None => (None, None, None, None, None),
+                };
 
-            with_task_jobs(lua, |store| {
-                store.start(&cmd, cwd, env, on_stdout, on_stderr, on_exit)
-            })
-            .map_err(mlua::Error::runtime)
+                let (backend, id) = with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
+                let spec = TerminalSpec { cmd, cwd, env };
+                let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
+                with_task_jobs(&lua, |store| {
+                    store.register(id, handle, on_stdout, on_stderr, on_exit);
+                });
+                Ok(id)
+            }
         })?,
     )?;
 
@@ -370,65 +272,75 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
 
     Ok(t)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal_backend::TerminalSpec;
 
     fn make_store() -> JobStore {
         JobStore::new()
     }
 
-    fn start_echo(store: &mut JobStore) -> u32 {
-        store
-            .start("echo hello", None, None, None, None, None)
-            .unwrap()
+    async fn start_echo(store: &mut JobStore) -> u32 {
+        let backend = store.backend();
+        let id = store.next_id();
+        let handle = backend
+            .start(TerminalSpec {
+                cmd: "echo hello".into(),
+                cwd: None,
+                env: None,
+            })
+            .await
+            .unwrap();
+        store.register(id, handle, None, None, None);
+        id
     }
 
-    #[test]
-    fn start_invalid_cwd_returns_error() {
-        let mut store = make_store();
-        let result = store.start(
-            "echo hello",
-            Some("/nonexistent_dir_abc_xyz_123".into()),
-            None,
-            None,
-            None,
-            None,
-        );
+    #[tokio::test]
+    async fn start_invalid_cwd_returns_error() {
+        let backend = LocalTerminal;
+        let result = backend
+            .start(TerminalSpec {
+                cmd: "echo hello".into(),
+                cwd: Some("/nonexistent_dir_abc_xyz_123".into()),
+                env: None,
+            })
+            .await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn has_alive_jobs_tracks_state() {
+    #[tokio::test]
+    async fn has_alive_jobs_tracks_state() {
         let mut store = make_store();
         assert!(!store.has_alive_jobs());
 
-        let id = start_echo(&mut store);
+        let id = start_echo(&mut store).await;
         assert!(store.has_alive_jobs());
 
         store.mark_dead(id);
         assert!(!store.has_alive_jobs());
     }
 
-    #[test]
-    fn noop_on_nonexistent_or_dead_jobs() {
+    #[tokio::test]
+    async fn noop_on_nonexistent_or_dead_jobs() {
         let mut store = make_store();
         store.mark_dead(999);
         store.kill(999);
 
-        let id = start_echo(&mut store);
+        let id = start_echo(&mut store).await;
         store.mark_dead(id);
         store.kill(id);
 
         assert!(store.callback_key(999, &JobEvent::Exit(0)).is_none());
     }
 
-    #[test]
-    fn take_receiver_lifecycle() {
+    #[tokio::test]
+    async fn take_receiver_lifecycle() {
         let mut store = make_store();
         assert!(store.take_receiver(999).is_none());
 
-        let id = start_echo(&mut store);
+        let id = start_echo(&mut store).await;
         assert!(store.take_receiver(id).is_some());
         assert!(
             store.take_receiver(id).is_none(),
@@ -436,10 +348,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn callback_key_returns_none_without_callbacks() {
+    #[tokio::test]
+    async fn callback_key_returns_none_without_callbacks() {
         let mut store = make_store();
-        let id = start_echo(&mut store);
+        let id = start_echo(&mut store).await;
         assert!(
             store
                 .callback_key(id, &JobEvent::Stdout("x".into()))
@@ -453,10 +365,10 @@ mod tests {
         assert!(store.callback_key(id, &JobEvent::Exit(0)).is_none());
     }
 
-    #[test]
-    fn take_receiver_delivers_events() {
+    #[tokio::test]
+    async fn take_receiver_delivers_events() {
         let mut store = make_store();
-        let id = start_echo(&mut store);
+        let id = start_echo(&mut store).await;
         let rx = store.take_receiver(id).unwrap();
 
         let mut got_exit = false;
@@ -475,10 +387,10 @@ mod tests {
         assert!(got_exit, "should receive exit event for completed job");
     }
 
-    #[test]
-    fn drain_events_collects_from_all_jobs() {
+    #[tokio::test]
+    async fn drain_events_collects_from_all_jobs() {
         let mut store = make_store();
-        let id = start_echo(&mut store);
+        let id = start_echo(&mut store).await;
 
         let mut buf = Vec::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -497,10 +409,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn drain_events_empty_after_take() {
+    #[tokio::test]
+    async fn drain_events_empty_after_take() {
         let mut store = make_store();
-        let id = start_echo(&mut store);
+        let id = start_echo(&mut store).await;
         let _rx = store.take_receiver(id).unwrap();
 
         let mut buf = Vec::new();

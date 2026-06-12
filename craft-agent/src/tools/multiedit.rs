@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::ToolOutput;
@@ -62,31 +61,25 @@ impl MultiEdit {
 
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
         let path = super::resolve_path(&self.path)?;
-        let this = self.clone();
-        let file_tracker = ctx.file_tracker.clone();
-        tokio::task::spawn_blocking(move || {
-            let p = Path::new(&path);
-            file_tracker.check_before_edit(p)?;
+        let p = Path::new(&path);
+        ctx.file_tracker.check_before_edit(p)?;
 
-            let before = fs::read_to_string(p).map_err(|e| format!("read error: {e}"))?;
-            let after = this.apply_edits(&before)?;
-            fs::write(p, &after).map_err(|e| format!("write error: {e}"))?;
+        let before = ctx.fs.read_text_file(p).await?;
+        let after = self.apply_edits(&before)?;
+        ctx.fs.write_text_file(p, &after).await?;
 
-            file_tracker.record_read(p);
+        ctx.file_tracker.record_read(p);
 
-            Ok(ToolOutput::Diff {
-                summary: format!(
-                    "applied {} to {}",
-                    this.edit_count_label(),
-                    relative_path(&path)
-                ),
-                path,
-                before,
-                after,
-            })
+        Ok(ToolOutput::Diff {
+            summary: format!(
+                "applied {} to {}",
+                self.edit_count_label(),
+                relative_path(&path)
+            ),
+            path,
+            before,
+            after,
         })
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     pub fn start_header(&self) -> String {

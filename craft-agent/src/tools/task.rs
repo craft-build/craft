@@ -171,6 +171,8 @@ impl Task {
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 compression: ctx.compression.clone(),
                 findings_store: None,
+                fs: Arc::new(crate::tools::LocalFs),
+                doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
             },
             AgentRunParams {
                 history: crate::History::new(Vec::new()),

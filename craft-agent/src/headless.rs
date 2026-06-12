@@ -100,6 +100,8 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     prompt_slots: Arc::new(params.prompt_slots),
                     compression: params.compression,
                     findings_store: Some(crate::FindingsStore::new_shared()),
+                    fs: Arc::new(crate::tools::LocalFs),
+                    doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
                 },
                 AgentRunParams {
                     history: History::new(Vec::new()),

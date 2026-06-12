@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::{AgentMode, ToolOutput};
@@ -80,82 +79,59 @@ impl ApplyPatch {
             match hunk {
                 PatchHunk::AddFile { path, contents } => {
                     let resolved = super::resolve_path(path)?;
-                    let contents_clone = contents.clone();
-                    let path_owned = path.clone();
-                    let file_tracker = ctx.file_tracker.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        let p = Path::new(&resolved);
-                        if let Some(parent) = p.parent() {
-                            fs::create_dir_all(parent)
-                                .map_err(|e| format!("mkdir error for {path_owned}: {e}"))?;
-                        }
-                        let diff = generate_diff_summary("", &contents_clone);
-                        fs::write(p, &contents_clone)
-                            .map_err(|e| format!("write error for {path_owned}: {e}"))?;
-                        file_tracker.record_read(p);
-                        Ok::<_, String>(diff)
-                    })
-                    .await
-                    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+                    let p = Path::new(&resolved);
+                    if let Some(parent) = p.parent() {
+                        tokio::fs::create_dir_all(parent)
+                            .await
+                            .map_err(|e| format!("mkdir error for {path}: {e}"))?;
+                    }
+                    let diff = generate_diff_summary("", contents);
+                    ctx.fs
+                        .write_text_file(p, contents)
+                        .await
+                        .map_err(|e| format!("write error for {path}: {e}"))?;
+                    ctx.file_tracker.record_read(p);
 
                     touched_paths.push(path.clone());
                     last_before = String::new();
                     last_after = contents.clone();
-                    if result.is_empty() {
+                    if diff.is_empty() {
                         results.push(format!("{path}: created"));
                     } else {
-                        results.push(format!("{path}: created\n{result}"));
+                        results.push(format!("{path}: created\n{diff}"));
                     }
                 }
                 PatchHunk::DeleteFile { path } => {
                     let resolved = super::resolve_path(path)?;
-                    let path_owned = path.clone();
-                    let file_tracker = ctx.file_tracker.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        let p = Path::new(&resolved);
-                        file_tracker.check_before_edit(p)?;
-                        let old_contents = fs::read_to_string(p).unwrap_or_default();
-                        if let Err(e) = fs::remove_file(p) {
-                            return Err(format!("failed to delete {path_owned}: {e}"));
-                        }
-                        let diff = generate_diff_summary(&old_contents, "");
-                        Ok::<_, String>(diff)
-                    })
-                    .await
-                    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+                    let p = Path::new(&resolved);
+                    ctx.file_tracker.check_before_edit(p)?;
+                    let old_contents = ctx.fs.read_text_file(p).await.unwrap_or_default();
+                    tokio::fs::remove_file(p)
+                        .await
+                        .map_err(|e| format!("failed to delete {path}: {e}"))?;
+                    let diff = generate_diff_summary(&old_contents, "");
 
                     touched_paths.push(path.clone());
-                    if result.is_empty() {
+                    if diff.is_empty() {
                         results.push(format!("{path}: deleted"));
                     } else {
-                        results.push(format!("{path}: deleted\n{result}"));
+                        results.push(format!("{path}: deleted\n{diff}"));
                     }
                 }
                 PatchHunk::UpdateFile { path, chunks } => {
                     let resolved = super::resolve_path(path)?;
-                    let chunks = chunks.clone();
+                    let p = Path::new(&resolved);
                     let chunk_count = chunks.len();
-                    let path_owned = path.clone();
-                    let file_tracker = ctx.file_tracker.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        let p = Path::new(&resolved);
-                        file_tracker.check_before_edit(p)?;
-                        let original =
-                            fs::read_to_string(p).map_err(|e| format!("read error: {e}"))?;
-                        let new_contents =
-                            apply_update_chunks(&original, &chunks, &path_owned)?;
-                        let diff = generate_diff_summary(&original, &new_contents);
-                        fs::write(p, &new_contents).map_err(|e| format!("write error: {e}"))?;
-                        file_tracker.record_read(p);
-                        Ok::<_, String>((diff, original, new_contents))
-                    })
-                    .await
-                    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+                    ctx.file_tracker.check_before_edit(p)?;
+                    let original = ctx.fs.read_text_file(p).await?;
+                    let new_contents = apply_update_chunks(&original, chunks, path)?;
+                    let diff_text = generate_diff_summary(&original, &new_contents);
+                    ctx.fs.write_text_file(p, &new_contents).await?;
+                    ctx.file_tracker.record_read(p);
 
                     touched_paths.push(path.clone());
-                    let (diff_text, before, after) = (result.0, result.1, result.2);
-                    last_before = before;
-                    last_after = after;
+                    last_before = original;
+                    last_after = new_contents;
                     if diff_text.is_empty() {
                         results.push(format!(
                             "{path}: modified ({chunk_count} hunks)"

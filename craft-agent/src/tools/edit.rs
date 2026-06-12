@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::ToolOutput;
@@ -32,29 +31,26 @@ impl Edit {
 
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
         let path = super::resolve_path(&self.path)?;
-        let old_string = self.old_string.clone();
-        let new_string = self.new_string.clone();
-        let replace_all = self.replace_all.unwrap_or(false);
-        let file_tracker = ctx.file_tracker.clone();
-        tokio::task::spawn_blocking(move || {
-            let p = Path::new(&path);
-            file_tracker.check_before_edit(p)?;
+        let p = Path::new(&path);
+        ctx.file_tracker.check_before_edit(p)?;
 
-            let before = fs::read_to_string(p).map_err(|e| format!("read error: {e}"))?;
-            let after = fuzzy_replace::replace(&before, &old_string, &new_string, replace_all)?;
-            fs::write(p, &after).map_err(|e| format!("write error: {e}"))?;
+        let before = ctx.fs.read_text_file(p).await?;
+        let after = fuzzy_replace::replace(
+            &before,
+            &self.old_string,
+            &self.new_string,
+            self.replace_all.unwrap_or(false),
+        )?;
+        ctx.fs.write_text_file(p, &after).await?;
 
-            file_tracker.record_read(p);
+        ctx.file_tracker.record_read(p);
 
-            Ok(ToolOutput::Diff {
-                summary: format!("edited {}", relative_path(&path)),
-                path,
-                before,
-                after,
-            })
+        Ok(ToolOutput::Diff {
+            summary: format!("edited {}", relative_path(&path)),
+            path,
+            before,
+            after,
         })
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     pub fn start_header(&self) -> String {

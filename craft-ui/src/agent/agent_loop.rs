@@ -11,8 +11,8 @@ use craft_agent::template::Vars;
 use craft_agent::tools::{DescriptionContext, FileReadTracker, ToolFilter, ToolRegistry};
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelToken,
-    CancelTrigger, Envelope, EventSender, FindingsStore, History, Instructions, McpCommand,
-    PromptRole, SharedFindingsStore, ToolOutputLines,
+    CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History, Instructions,
+    McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
 };
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, TokenUsage};
@@ -47,6 +47,7 @@ pub(super) struct AgentLoop {
     lua_handle: Option<EventHandle>,
     btw_system: Arc<ArcSwap<String>>,
     compression: craft_config::CompressionConfig,
+    doom: SharedDoomTracker,
 }
 
 impl AgentLoop {
@@ -94,6 +95,7 @@ impl AgentLoop {
             lua_handle,
             btw_system,
             compression,
+            doom: Arc::new(Mutex::new(DoomTracker::new())),
         }
     }
 
@@ -245,6 +247,8 @@ impl AgentLoop {
                 prompt_slots: std::sync::Arc::new(prompt_slots),
                 compression: self.compression.clone(),
                 findings_store: Some(Arc::clone(&self.findings_store)),
+                fs: Arc::new(craft_agent::tools::LocalFs),
+                doom: Arc::clone(&self.doom),
             },
             AgentRunParams {
                 history: mem::replace(&mut self.history, History::new(Vec::new())),

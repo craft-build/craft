@@ -11,8 +11,8 @@ pub use mcp::protocol::PromptRole;
 pub use mcp::{McpCommand, McpHandle, McpPromptArg, McpPromptInfo, McpSnapshot, McpSnapshotReader};
 pub(crate) mod task_set;
 pub use agent::{
-    Agent, AgentParams, AgentRunParams, FindingsStore, History, Instructions, LoadedInstructions,
-    RunOutcome, SharedFindingsStore, StoredFinding,
+    Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
+    LoadedInstructions, RunOutcome, SharedDoomTracker, SharedFindingsStore, StoredFinding,
 };
 pub use agent::EmbedRequest;
 #[cfg(feature = "onnx")]

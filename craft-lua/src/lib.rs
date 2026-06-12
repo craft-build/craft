@@ -4,6 +4,7 @@ pub mod language;
 mod loader;
 mod plugin_permissions;
 mod runtime;
+pub mod terminal_backend;
 
 pub use api::command::{
     Anchor, Axis, Border, Dimension, Edge, FloatConfig, FloatConfigPatch, LuaCommandInfo,
@@ -13,6 +14,10 @@ pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost};
 pub use plugin_permissions::{denied_error, Permission, PluginPermissions};
 pub use runtime::{ClickReply, RestoreItem, RestoreReply};
+pub use terminal_backend::{
+    JobEvent as TerminalEvent, LocalTerminal, TerminalBackend, TerminalHandle, TerminalSpec,
+    local_backend,
+};
 #[cfg(feature = "onnx")]
 pub use api::embed::EmbedChannel;
 

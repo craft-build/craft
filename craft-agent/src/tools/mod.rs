@@ -11,6 +11,7 @@ mod batch;
 mod code_execution;
 mod edit;
 mod file_tracker;
+pub mod fs_backend;
 mod fuzzy_replace;
 mod grep;
 mod multiedit;
@@ -26,6 +27,7 @@ mod todowrite;
 mod write;
 
 pub use file_tracker::FileReadTracker;
+pub use fs_backend::{FsBackend, FsFuture, LocalFs};
 pub use registry::{
     BoxFuture, ExecFuture, HeaderFuture, HeaderResult, Native, ParseError, PermissionScopes,
     RegisteredTool, RegistryError, Tool, ToolAudience, ToolInvocation, ToolRegistry, ToolSource,
@@ -225,6 +227,7 @@ pub struct ToolContext {
     pub compression: craft_config::CompressionConfig,
     pub(crate) compression_store: crate::agent::compression_store::SharedCompressionStore,
     pub findings_store: Option<crate::agent::SharedFindingsStore>,
+    pub fs: Arc<dyn FsBackend>,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -676,6 +679,7 @@ pub(crate) fn interpreter_ctx(
         compression: craft_config::CompressionConfig::default(),
         compression_store: crate::agent::compression_store::shared_store(),
         findings_store: None,
+        fs: Arc::new(LocalFs),
     }
 }
 

@@ -41,6 +41,9 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Migrate { action }) => match action {
             MigrateAction::Xdg => migrate::xdg()?,
         },
+        Some(Command::Acp) => {
+            craft_acp::run_stdio().await?;
+        }
         None => {
             tui::run(cli).await?;
         }

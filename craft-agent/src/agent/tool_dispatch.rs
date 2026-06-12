@@ -33,13 +33,10 @@ const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
 const MCP_SCOPE_PREVIEW_BYTES: usize = 200;
 const NULL_VALUE: Value = Value::Null;
 
+#[derive(Default)]
 pub(super) struct RecentCalls(VecDeque<(String, u64)>);
 
 impl RecentCalls {
-    pub(super) fn new() -> Self {
-        Self(VecDeque::new())
-    }
-
     fn hash_input(input: &Value) -> u64 {
         let mut h = DefaultHasher::new();
         input.to_string().hash(&mut h);
@@ -290,6 +287,21 @@ async fn execute_mcp_tool(
     }
 }
 
+/// Per-batch counts used by doom-loop scoring.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ToolBatchOutcome {
+    pub errors: u32,
+    pub successes: u32,
+    pub doom_loops: u32,
+    pub validation_rejections: u32,
+}
+
+impl ToolBatchOutcome {
+    pub fn had_errors(&self) -> bool {
+        self.errors > 0
+    }
+}
+
 /// Skips doom-loop repeats (emitting errors instead), runs remaining tool calls in parallel.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn process_tool_calls(
@@ -304,7 +316,7 @@ pub(super) async fn process_tool_calls(
     trust: &mut TrustTracker,
     snapshot: &super::snapshot::SnapshotManager,
     validator: &Validator,
-) -> Result<bool, AgentError> {
+) -> Result<ToolBatchOutcome, AgentError> {
     let tool_uses: Vec<(String, String, Value)> = response
         .message
         .tool_uses()
@@ -313,6 +325,7 @@ pub(super) async fn process_tool_calls(
 
     history.push(response.message);
 
+    let mut outcome = ToolBatchOutcome::default();
     let mut immediate_errors: Vec<ToolDoneEvent> = Vec::new();
     let mut all_results: Vec<ToolDoneEvent> = Vec::new();
     let mut runnable: Vec<(String, String, Value)> = Vec::new();
@@ -326,6 +339,7 @@ pub(super) async fn process_tool_calls(
         );
         if recent_calls.is_doom_loop(&name, &input) {
             warn!(tool = %name, "doom loop detected, skipping execution");
+            outcome.doom_loops += 1;
             immediate_errors.push(ToolDoneEvent::error(id.clone(), DOOM_LOOP_MESSAGE));
         } else if trust.is_dropped(&name) {
             warn!(tool = %name, "tool dropped due to repeated failures");
@@ -474,6 +488,7 @@ pub(super) async fn process_tool_calls(
         if should_validate {
             match validator.validate().await {
                 ValidationResult::Errors(errors) => {
+                    outcome.validation_rejections += 1;
                     let validation_result = ToolDoneEvent {
                         id: format!("validation-{}", all_results[0].id),
                         tool: Arc::from("validation"),
@@ -490,13 +505,19 @@ pub(super) async fn process_tool_calls(
     }
 
     all_results.extend(immediate_errors);
-    let had_errors = all_results.iter().any(|r| r.is_error);
+    for r in &all_results {
+        if r.is_error {
+            outcome.errors += 1;
+        } else {
+            outcome.successes += 1;
+        }
+    }
     let tool_msg = crate::types::tool_results(all_results, &ctx.compression);
     event_tx.send(AgentEvent::ToolResultsSubmitted {
         message: Box::new(tool_msg.clone()),
     })?;
     history.push(tool_msg);
-    Ok(had_errors)
+    Ok(outcome)
 }
 
 /// Test-only entry that skips native lookup, letting plan-mode and MCP tests
@@ -614,7 +635,7 @@ mod tests {
     use super::*;
 
     fn recent_calls(entries: &[(&str, Value)]) -> RecentCalls {
-        let mut rc = RecentCalls::new();
+        let mut rc = RecentCalls::default();
         for (n, v) in entries {
             rc.record(n.to_string(), v);
         }

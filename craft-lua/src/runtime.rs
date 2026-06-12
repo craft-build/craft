@@ -27,7 +27,8 @@ use crate::api::create_craft_global;
 use crate::plugin_permissions::PluginPermissions;
 use crate::api::json_to_lua;
 use crate::api::ctx::LuaCtx;
-use crate::api::fn_api::{JobEvent, JobStore};
+use crate::api::fn_api::JobStore;
+use crate::terminal_backend::{JobEvent, TerminalBackend};
 use crate::api::setup::ConfigStore;
 use crate::api::tool::{LuaOutputFormat, LuaTool, PendingTool, PendingTools, ToolCallReply};
 use crate::error::PluginError;
@@ -194,12 +195,17 @@ pub(crate) struct TaskCell {
 }
 
 impl TaskCell {
-    fn new(cancel: CancelToken, deadline: Option<Instant>, live: Option<LiveCtx>) -> Self {
+    fn new(
+        cancel: CancelToken,
+        deadline: Option<Instant>,
+        live: Option<LiveCtx>,
+        backend: Arc<dyn TerminalBackend>,
+    ) -> Self {
         Self {
             cancel,
             deadline: Cell::new(deadline),
             deadline_secs: Cell::new(None),
-            jobs: JobStore::new(),
+            jobs: JobStore::with_backend(backend),
             bufs: BufferStore::new(),
             live,
         }
@@ -265,7 +271,10 @@ impl TaskScope {
     }
 
     pub(crate) fn detached(lua: &Lua) -> Self {
-        Self::new(lua, TaskCell::new(CancelToken::none(), None, None))
+        Self::new(
+            lua,
+            TaskCell::new(CancelToken::none(), None, None, Arc::new(crate::terminal_backend::LocalTerminal)),
+        )
     }
 
     pub(crate) fn handle(&self) -> &TaskHandle {
@@ -347,7 +356,15 @@ pub(crate) fn active_task(lua: &Lua) -> TaskHandle {
 }
 
 pub(crate) fn with_task_jobs<R>(lua: &Lua, f: impl FnOnce(&mut JobStore) -> R) -> R {
-    f(&mut lock_cell(&active_task(lua)).jobs)
+    let cell = active_task(lua);
+    let mut guard = lock_cell(&cell);
+    f(&mut guard.jobs)
+}
+
+pub(crate) fn active_terminal_backend(lua: &Lua) -> Arc<dyn TerminalBackend> {
+    lua.app_data_ref::<Arc<dyn TerminalBackend>>()
+        .map(|b| Arc::clone(&*b))
+        .unwrap_or_else(|| Arc::new(crate::terminal_backend::LocalTerminal))
 }
 
 pub(crate) fn with_task_bufs<R>(lua: &Lua, f: impl FnOnce(&mut BufferStore) -> R) -> R {
@@ -500,7 +517,12 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
 
             let scope = TaskScope::new(
                 &lua,
-                TaskCell::new(task.cancel.clone(), task.deadline, task.live_ctx.clone()),
+                TaskCell::new(
+                    task.cancel.clone(),
+                    task.deadline,
+                    task.live_ctx.clone(),
+                    active_terminal_backend(&lua),
+                ),
             );
             let run = scope.scope_future(async {
                 let work_fn: Function = lua.registry_value(&task.work_fn)?;
@@ -562,9 +584,11 @@ struct LuaRuntime {
     bundled_dirs: &'static [&'static Dir<'static>],
     ui_action_tx: Option<flume::Sender<UiAction>>,
     embed_tx: Option<crate::api::embed::EmbedChannel>,
+    terminal_backend: Arc<dyn TerminalBackend>,
 }
 
 impl LuaRuntime {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         registry: Arc<ToolRegistry>,
         tx: flume::Sender<Request>,
@@ -573,6 +597,7 @@ impl LuaRuntime {
         ui_action_tx: Option<flume::Sender<UiAction>>,
         command_writer: LuaCommandWriter,
         embed_tx: Option<crate::api::embed::EmbedChannel>,
+        terminal_backend: Arc<dyn TerminalBackend>,
     ) -> Result<Self, PluginError> {
         let lua = Lua::new();
         let pending: PendingTools = Arc::new(Mutex::new(Vec::new()));
@@ -599,6 +624,7 @@ impl LuaRuntime {
         lua.set_app_data(SpawnQueue::default());
         lua.set_app_data(command_writer);
         lua.set_app_data(PromptHintCallbacks::default());
+        lua.set_app_data::<Arc<dyn TerminalBackend>>(Arc::clone(&terminal_backend));
 
         Ok(Self {
             lua,
@@ -607,10 +633,11 @@ impl LuaRuntime {
             registry,
             tx,
             shutdown,
-             bundled_dirs,
-             ui_action_tx,
-             embed_tx,
-         })
+            bundled_dirs,
+            ui_action_tx,
+            embed_tx,
+            terminal_backend,
+        })
     }
 
     fn drop_plugin_keys(&mut self, name: &str) {
@@ -1092,6 +1119,7 @@ impl LuaRuntime {
                 event_tx: craft_agent::EventSender::new(dummy_tx, 0),
                 tool_use_id: tool_use_id.to_owned(),
             }),
+            Arc::clone(&self.terminal_backend),
         );
 
         let ctx_ud = self
@@ -1389,7 +1417,10 @@ async fn run_tool_call(
         Ok(t) => t,
         Err(e) => return ToolCallReply::err(strip_traceback(&e)),
     };
-    let scope = TaskScope::new(&lua, TaskCell::new(cancel, deadline, live));
+    let scope = TaskScope::new(
+        &lua,
+        TaskCell::new(cancel, deadline, live, active_terminal_backend(&lua)),
+    );
     let handle = Arc::clone(scope.handle());
 
     let async_thread = match thread.into_async::<LuaValue>((input_lua, ctx_ud)) {
@@ -1460,6 +1491,7 @@ pub fn spawn(
     registry: Arc<ToolRegistry>,
     bundled_dirs: &'static [&'static Dir<'static>],
     embed_tx: Option<crate::api::embed::EmbedChannel>,
+    terminal_backend: Arc<dyn TerminalBackend>,
 ) -> Result<LuaThread, PluginError> {
     let (tx, rx) = flume::unbounded::<Request>();
     let tx_clone = tx.clone();
@@ -1480,6 +1512,7 @@ pub fn spawn(
                  Some(ui_action_tx),
                  command_writer,
                  embed_tx,
+                 terminal_backend,
              ) {
                 Ok(r) => {
                     let _ = init_tx.send(Ok(()));
@@ -1702,6 +1735,7 @@ pub(crate) fn install_live_ctx(lua: &Lua, tool_use_id: &str) {
             event_tx: craft_agent::EventSender::new(tx, 0),
             tool_use_id: tool_use_id.to_owned(),
         }),
+        Arc::new(crate::terminal_backend::LocalTerminal),
     );
     let handle: TaskHandle = Arc::new(Mutex::new(cell));
     lua.set_app_data::<TaskHandle>(handle);
@@ -1785,7 +1819,12 @@ mod tests {
     fn cancelled_handle() -> TaskHandle {
         let (trigger, token) = CancelToken::new();
         trigger.cancel();
-        Arc::new(Mutex::new(TaskCell::new(token, None, None)))
+        Arc::new(Mutex::new(TaskCell::new(
+            token,
+            None,
+            None,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        )))
     }
 
     #[test]
@@ -1824,7 +1863,12 @@ mod tests {
     }
 
     fn task_cell(live: Option<LiveCtx>) -> TaskCell {
-        TaskCell::new(CancelToken::none(), None, live)
+        TaskCell::new(
+            CancelToken::none(),
+            None,
+            live,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        )
     }
 
     #[test]
@@ -1965,7 +2009,10 @@ mod tests {
     fn enqueue_async_task_inherits_cancel_token() {
         let lua = enqueue_test_lua();
         let (trigger, token) = CancelToken::new();
-        let _h = set_active(&lua, TaskCell::new(token, None, None));
+        let _h = set_active(
+            &lua,
+            TaskCell::new(token, None, None, Arc::new(crate::terminal_backend::LocalTerminal)),
+        );
         enqueue_async_task(&lua, enqueue_dummy(&lua)).unwrap();
 
         let queue = lua.app_data_ref::<SpawnQueue>().unwrap();
@@ -1984,7 +2031,12 @@ mod tests {
         let parent_deadline = Instant::now() - Duration::from_secs(10);
         let _h = set_active(
             &lua,
-            TaskCell::new(CancelToken::none(), Some(parent_deadline), None),
+            TaskCell::new(
+                CancelToken::none(),
+                Some(parent_deadline),
+                None,
+                Arc::new(crate::terminal_backend::LocalTerminal),
+            ),
         );
 
         let before = Instant::now();

@@ -41,56 +41,47 @@ impl Read {
 
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
         let path = super::resolve_path(&self.path)?;
-        let offset = self.offset;
-        let limit = self.limit;
-        let loaded = ctx.loaded_instructions.clone();
+        let cwd = std::env::current_dir().ok();
+        let p = Path::new(&path);
+        if p.is_dir() {
+            return Self::list_dir(&path, cwd.as_deref(), &ctx.loaded_instructions);
+        }
+
+        let raw = ctx.fs.read_text_file(p).await?;
         let max_output_lines = ctx.config.max_output_lines;
         let max_line_bytes = ctx.config.max_line_bytes;
-        let file_tracker = ctx.file_tracker.clone();
-        tokio::task::spawn_blocking(move || {
-            let cwd = std::env::current_dir().ok();
-            let p = Path::new(&path);
-            if p.is_dir() {
-                return Self::list_dir(&path, cwd.as_deref(), &loaded);
+        let start = self.offset.unwrap_or(1).saturating_sub(1);
+        let limit = self.limit.unwrap_or(max_output_lines);
+
+        let total_lines = raw.lines().count();
+        let lines: Vec<String> = raw
+            .lines()
+            .skip(start)
+            .take(limit)
+            .map(|l| truncate_bytes(l, max_line_bytes))
+            .collect();
+
+        let instructions = cwd.as_deref().and_then(|cwd| {
+            if agent::is_instruction_file(p.file_name()?.to_str()?) {
+                return None;
             }
+            to_instruction_blocks(agent::find_subdirectory_instructions(
+                p.parent()?,
+                cwd,
+                &ctx.loaded_instructions,
+            ))
+        });
 
-            let raw = fs::read_to_string(p).map_err(|e| format!("read error: {e}"))?;
-            let total_lines = raw.lines().count();
+        ctx.file_tracker.record_read(p);
 
-            let start = offset.unwrap_or(1).saturating_sub(1);
-            let limit = limit.unwrap_or(max_output_lines);
-
-            let lines: Vec<String> = raw
-                .lines()
-                .skip(start)
-                .take(limit)
-                .map(|l| truncate_bytes(l, max_line_bytes))
-                .collect();
-
-            let instructions = cwd.as_deref().and_then(|cwd| {
-                if agent::is_instruction_file(p.file_name()?.to_str()?) {
-                    return None;
-                }
-                to_instruction_blocks(agent::find_subdirectory_instructions(
-                    p.parent()?,
-                    cwd,
-                    &loaded,
-                ))
-            });
-
-            file_tracker.record_read(p);
-
-            Ok(ToolOutput::ReadCode {
-                path,
-                start_line: start + 1,
-                lines,
-                total_lines,
-                instructions,
-                no_compress: true,
-            })
+        Ok(ToolOutput::ReadCode {
+            path,
+            start_line: start + 1,
+            lines,
+            total_lines,
+            instructions,
+            no_compress: true,
         })
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }
 
     fn list_dir(

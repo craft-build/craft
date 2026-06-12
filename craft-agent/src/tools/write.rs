@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::ToolOutput;
@@ -36,21 +35,17 @@ impl Write {
 
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
         let path = super::resolve_path(&self.path)?;
-        let content = self.content.clone();
         let output = self.write_output(&path, ctx.config.max_output_lines);
-        let file_tracker = ctx.file_tracker.clone();
-        tokio::task::spawn_blocking(move || {
-            let p = Path::new(&path);
-            file_tracker.check_before_edit(p)?;
-            if let Some(parent) = p.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("mkdir error: {e}"))?;
-            }
-            fs::write(&path, &content).map_err(|e| format!("write error: {e}"))?;
-            file_tracker.record_read(p);
-            Ok(output)
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"))?
+        let p = Path::new(&path);
+        ctx.file_tracker.check_before_edit(p)?;
+        if let Some(parent) = p.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("mkdir error: {e}"))?;
+        }
+        ctx.fs.write_text_file(p, &self.content).await?;
+        ctx.file_tracker.record_read(p);
+        Ok(output)
     }
 
     pub fn start_header(&self) -> String {

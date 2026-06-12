@@ -12,6 +12,7 @@ use crate::api::command::{LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem, RestoreReply};
+use crate::terminal_backend::{LocalTerminal, TerminalBackend};
 use serde_json::Value;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -98,7 +99,15 @@ impl PluginHost {
         registry: Arc<ToolRegistry>,
         embed_tx: Option<crate::api::embed::EmbedChannel>,
     ) -> Result<Self, PluginError> {
-        let lua = runtime::spawn(registry, *BUNDLED_DIRS, embed_tx)?;
+        Self::with_terminal_backend(registry, embed_tx, Arc::new(LocalTerminal))
+    }
+
+    pub fn with_terminal_backend(
+        registry: Arc<ToolRegistry>,
+        embed_tx: Option<crate::api::embed::EmbedChannel>,
+        terminal_backend: Arc<dyn TerminalBackend>,
+    ) -> Result<Self, PluginError> {
+        let lua = runtime::spawn(registry, *BUNDLED_DIRS, embed_tx, terminal_backend)?;
         Ok(Self { inner: Some(lua) })
     }
 
