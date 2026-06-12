@@ -93,8 +93,7 @@ pub(crate) enum PromptState {
 pub enum PermissionPrompt {
     Closed,
     Open {
-        #[allow(dead_code)]
-        id: String,
+        _id: String,
         tool: String,
         scopes: Vec<String>,
         context: Box<craft_agent::types::PermissionContext>,
@@ -139,7 +138,7 @@ impl PermissionPrompt {
             allow_scopes
         };
         *self = Self::Open {
-            id,
+            _id: id,
             tool,
             scopes,
             context: Box::new(context),

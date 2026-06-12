@@ -327,6 +327,12 @@ pub(super) async fn process_tool_calls(
         if recent_calls.is_doom_loop(&name, &input) {
             warn!(tool = %name, "doom loop detected, skipping execution");
             immediate_errors.push(ToolDoneEvent::error(id.clone(), DOOM_LOOP_MESSAGE));
+        } else if trust.is_dropped(&name) {
+            warn!(tool = %name, "tool dropped due to repeated failures");
+            immediate_errors.push(ToolDoneEvent::error(
+                id.clone(),
+                format!("{name} has been temporarily disabled due to repeated failures. Try a different tool or approach."),
+            ));
         } else {
             let is_read_only = ToolDedupCache::is_read_only(&name);
             match guardrails.check_before_call(&name, &input, is_read_only) {

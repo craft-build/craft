@@ -32,14 +32,13 @@ impl TrustTracker {
         }
     }
 
-    #[allow(dead_code)]
     pub(super) fn is_dropped(&self, tool: &str) -> bool {
         let count = self.failures.get(tool).copied().unwrap_or(0);
         count >= self.config.drop_after
     }
 
-    #[allow(dead_code)]
-    pub(super) fn filter_tools(&self, tools: &[String]) -> Vec<String> {
+    #[cfg(test)]
+    fn filter_tools(&self, tools: &[String]) -> Vec<String> {
         let remaining: Vec<_> = tools
             .iter()
             .filter(|t| !self.is_dropped(t))
@@ -53,8 +52,8 @@ impl TrustTracker {
         remaining
     }
 
-    #[allow(dead_code)]
-    pub(super) fn clear(&mut self) {
+    #[cfg(test)]
+    fn clear(&mut self) {
         self.failures.clear();
     }
 }

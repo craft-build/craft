@@ -115,7 +115,7 @@ impl SnapshotManager {
         self.state.lock().unwrap().label.is_some()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn snapshot_count(&self) -> usize {
         self.state.lock().unwrap().originals.len()
     }

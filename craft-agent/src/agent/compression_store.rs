@@ -49,14 +49,9 @@ impl CompressionStore {
         self.entries.get(hash).map(String::as_str)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }
 

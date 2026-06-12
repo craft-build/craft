@@ -10,10 +10,7 @@ use craft_providers::TokenUsage;
 use tracing::info;
 
 /// Economics for Anthropic-style prefix caching.
-/// Economics for Anthropic-style prefix caching.
-#[allow(dead_code)]
 const CACHE_READ_DISCOUNT: f32 = 0.90;
-#[allow(dead_code)]
 const CACHE_WRITE_PENALTY: f32 = 0.25;
 
 pub(super) struct PrefixCacheTracker {
@@ -53,7 +50,6 @@ impl PrefixCacheTracker {
     /// Returns true if the net token savings outweigh the lost cache read discount.
     /// The write penalty on the compressed version is small (25% of compressed size),
     /// while we lose the read discount (90%) on the original size we no longer send.
-    #[allow(dead_code)]
     pub(super) fn should_compress(
         &self,
         msg_index: usize,
@@ -72,16 +68,13 @@ impl PrefixCacheTracker {
         new_cost < original_cost
     }
 
-    #[allow(dead_code)]
     pub(super) fn frozen_count(&self) -> usize {
         self.frozen_count
     }
 }
 
-/// Filter out frozen message indices from a set of candidate indices for
-/// compression. Returns only the indices that should actually be compressed.
-#[allow(dead_code)]
-pub(super) fn filter_frozen<'a>(
+#[cfg(test)]
+fn filter_frozen<'a>(
     tracker: &PrefixCacheTracker,
     candidates: &'a [usize],
 ) -> Vec<&'a usize> {
@@ -141,7 +134,6 @@ mod tests {
         };
         tracker.update(&usage, 10);
         assert_eq!(tracker.frozen_count(), 8);
-        // Smaller history shouldn't shrink frozen count
         tracker.update(&usage, 6);
         assert_eq!(tracker.frozen_count(), 8);
     }
@@ -157,11 +149,8 @@ mod tests {
         };
         tracker.update(&usage, 10);
 
-        // 50% savings: not worth busting cache (new_cost > original_cost after discount)
         assert!(!tracker.should_compress(0, 1000, 500));
-        // 95% savings: worth it (50*1.25=62.5 < 1000*0.10=100)
         assert!(tracker.should_compress(0, 1000, 50));
-        // Non-frozen always compress
         assert!(tracker.should_compress(9, 1000, 999));
     }
 

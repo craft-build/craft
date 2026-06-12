@@ -19,7 +19,6 @@ pub enum GuardrailDecision {
 
 #[derive(Debug)]
 pub struct GuardrailWarning {
-    #[allow(dead_code)] pub tool: String,
     pub reason: String,
 }
 
@@ -112,12 +111,10 @@ impl ToolGuardrails {
 
             if tracker.exact_fail_count == EXACT_REPEAT_WARN {
                 warning = Some(GuardrailWarning {
-                    tool: tool.to_string(),
                     reason: format!("same tool+input failed {EXACT_REPEAT_WARN} times, consider a different approach"),
                 });
             } else if tracker.any_fail_count == SAME_TOOL_FAIL_WARN {
                 warning = Some(GuardrailWarning {
-                    tool: tool.to_string(),
                     reason: format!("{tool} has failed {SAME_TOOL_FAIL_WARN} times total, consider using a different tool"),
                 });
             }
@@ -130,7 +127,6 @@ impl ToolGuardrails {
                     tracker.same_result_count += 1;
                     if tracker.same_result_count == NO_PROGRESS_WARN {
                         warning = Some(GuardrailWarning {
-                            tool: tool.to_string(),
                             reason: format!("{tool} returned identical results {NO_PROGRESS_WARN} times, you may be stuck"),
                         });
                     }
@@ -148,7 +144,8 @@ impl ToolGuardrails {
         warning
     }
 
-    #[allow(dead_code)] pub fn reset(&mut self) {
+    #[cfg(test)]
+    pub fn reset(&mut self) {
         self.trackers.clear();
     }
 }

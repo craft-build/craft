@@ -91,7 +91,7 @@ impl EscalationTracker {
     /// Check if the model should be escalated. If so, emit a `ModelEscalation`
     /// event so the UI can switch models on the next turn.
     pub fn check_and_emit(
-        &self,
+        &mut self,
         model_id: &str,
         current_tier: ModelTier,
         event_tx: &crate::EventSender,
@@ -112,6 +112,7 @@ impl EscalationTracker {
             from: model_id.to_owned(),
             to: suggested_spec.to_owned(),
         });
+        self.clear();
     }
 
     pub(crate) fn should_escalate(&self, model_id: &str) -> bool {
@@ -125,8 +126,7 @@ impl EscalationTracker {
         rate >= self.config.failure_threshold
     }
 
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.stats.clear();
     }
 }

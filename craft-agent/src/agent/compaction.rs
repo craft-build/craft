@@ -269,12 +269,7 @@ pub(super) async fn progressive_compact(
             continue;
         }
 
-        // Skip messages in the frozen prefix cache unless savings are huge
-        if let Some(tracker) = ctx.cache_tracker
-            && tracker.is_frozen(i)
-        {
-            continue;
-        }
+        let is_frozen = ctx.cache_tracker.is_some_and(|t| t.is_frozen(i));
 
         for block in &mut msg.content {
             if let ContentBlock::ToolResult { content, is_error: false, .. } = block
@@ -282,7 +277,6 @@ pub(super) async fn progressive_compact(
             {
                 let score = score_map.get(&i).copied().unwrap_or(0.0);
 
-                // Skip high-relevance messages from compression when semantic scoring available
                 if !score_map.is_empty() && score >= HIGH_RELEVANCE_THRESHOLD {
                     continue;
                 }
@@ -293,12 +287,11 @@ pub(super) async fn progressive_compact(
                 } else {
                     msg_count.saturating_sub(i) > very_old_threshold
                 };
-                // Semantically overlapping older results get aggressive compression
                 if overlap_indices.contains(&i) {
                     is_very_old = true;
                 }
 
-                if is_very_old {
+                let new_content = if is_very_old {
                     let hash = ctx.compression_store.and_then(|store| {
                         let mut guard = store.lock().ok()?;
                         Some(guard.put(content))
@@ -310,8 +303,7 @@ pub(super) async fn progressive_compact(
                     if let Some(ref h) = hash {
                         summary.push_str(&super::compression_store::retrieval_marker(old_lines, 1, h));
                     }
-                    removed += old_len.saturating_sub(summary.len());
-                    *content = summary;
+                    summary
                 } else {
                     let ct = compression::detect_content_type(content);
                     let compressed = compression::compress(content, ct, &aggressive);
@@ -325,10 +317,22 @@ pub(super) async fn progressive_compact(
                             let compressed_lines = final_content.lines().count();
                             final_content.push_str(&super::compression_store::retrieval_marker(old_lines, compressed_lines, h));
                         }
-                        removed += old_len.saturating_sub(final_content.len());
-                        *content = final_content;
+                        final_content
+                    } else {
+                        continue;
                     }
+                };
+
+                let new_len = new_content.len();
+                if is_frozen
+                    && let Some(tracker) = ctx.cache_tracker
+                    && !tracker.should_compress(i, old_len, new_len)
+                {
+                    continue;
                 }
+
+                removed += old_len.saturating_sub(new_len);
+                *content = new_content;
             }
         }
     }
