@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use std::ops::Range;
 
@@ -11,6 +11,10 @@ use super::compression_store::SharedCompressionStore;
 
 const STALE_MARKER_PREFIX: &str = "[Stale read: ";
 const SUPERSEDED_MARKER_PREFIX: &str = "[Superseded read: ";
+
+/// Number of most-recent assistant messages whose edit targets form the "working set".
+/// Reads of working-set files are not marked Stale — the model is still actively editing them.
+const WORKING_SET_LOOKBACK: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OpKind {
@@ -48,6 +52,10 @@ pub(super) struct ReadClassification {
 /// - **Stale**: a read where the same file was edited/written at a later point
 /// - **Superseded**: a read where a later read fully contains the same file range
 /// - **Fresh**: neither of the above
+///
+/// Files in the active "working set" (edited in the last `WORKING_SET_LOOKBACK` assistant
+/// messages) are never marked Stale — the model is still actively editing them and
+/// stale-marking would destroy the context it needs for the next edit.
 pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
     let mut operations: Vec<FileOperation> = Vec::new();
 
@@ -98,6 +106,31 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
         map
     };
 
+    // Build the working set: files edited in the last WORKING_SET_LOOKBACK assistant messages.
+    let assistant_msg_indices: Vec<usize> = operations
+        .iter()
+        .map(|op| op.msg_index)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let recent_assistant_indices: HashSet<usize> = {
+        let mut sorted = assistant_msg_indices;
+        sorted.sort_unstable();
+        sorted
+            .into_iter()
+            .rev()
+            .take(WORKING_SET_LOOKBACK)
+            .collect()
+    };
+    let working_set_files: HashSet<&str> = operations
+        .iter()
+        .filter(|op| {
+            matches!(op.op_kind, OpKind::Edit | OpKind::Write)
+                && recent_assistant_indices.contains(&op.msg_index)
+        })
+        .map(|op| op.file_path.as_str())
+        .collect();
+
     let mut classifications = Vec::new();
 
     let last_assistant_msg = operations.iter().map(|op| op.msg_index).max();
@@ -120,7 +153,9 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
                 && matches!(op.op_kind, OpKind::Edit | OpKind::Write)
         });
 
-        if has_later_edit {
+        // Working set protection: if the file is actively being edited, don't mark stale.
+        // The model still needs the read content for subsequent edits.
+        if has_later_edit && !working_set_files.contains(read_op.file_path.as_str()) {
             classifications.push(ReadClassification {
                 tool_call_id: read_op.tool_call_id.clone(),
                 file_path: read_op.file_path.clone(),
@@ -201,10 +236,13 @@ pub(super) fn apply_lifecycle(
 
                 let mut marker = match state {
                     ReadState::Stale => {
+                        // Actionable stale marker: tell the model to re-read before editing.
+                        // No retrieval marker — retrieving old content is misleading;
+                        // the model needs current content, not historical.
                         if old_len > STALE_MARKER_PREFIX.len() + 60 {
-                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. {old_len} chars removed]")
+                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. Re-read the file with the read tool before editing. {old_len} chars removed]")
                         } else {
-                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read.]")
+                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. Re-read the file with the read tool before editing.]")
                         }
                     }
                     ReadState::Superseded => {
@@ -217,7 +255,13 @@ pub(super) fn apply_lifecycle(
                     ReadState::Fresh => unreachable!(),
                 };
 
-                if let Some(ref h) = hash {
+                // Only attach retrieval marker for superseded reads — the retrieved
+                // content is still valid (a newer read exists with the same data).
+                // For stale reads, retrieval returns outdated content which misleads
+                // the model into editing against the wrong file state.
+                if matches!(state, ReadState::Superseded)
+                    && let Some(ref h) = hash
+                {
                     marker.push_str(&super::compression_store::retrieval_marker(
                         original_lines,
                         1,
@@ -350,6 +394,30 @@ mod tests {
         Message::user(text.into())
     }
 
+    /// Generate gap assistant turns (reads of unrelated files) to push earlier edits
+    /// outside the working set lookback window.
+    fn gap_assistant_turns(n: usize) -> Vec<Message> {
+        (0..n)
+            .flat_map(|i| {
+                vec![
+                    tool_use_msg(
+                        &format!("gap_{i}"),
+                        "read",
+                        json!({"path": format!("/other/{i}.rs")}),
+                    ),
+                    tool_result_msg(&format!("gap_{i}"), "gap content"),
+                ]
+            })
+            .collect()
+    }
+
+    fn find_by_id<'a>(classifications: &'a [ReadClassification], id: &str) -> &'a ReadClassification {
+        classifications
+            .iter()
+            .find(|c| c.tool_call_id == id)
+            .unwrap_or_else(|| panic!("no classification for {id}"))
+    }
+
     #[test]
     fn fresh_read_no_edits() {
         let messages = vec![
@@ -365,7 +433,7 @@ mod tests {
 
     #[test]
     fn stale_read_after_edit() {
-        let messages = vec![
+        let mut messages = vec![
             user_msg("read it"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "line 1\nline 2\nline 3"),
@@ -373,10 +441,11 @@ mod tests {
             tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
             tool_result_msg("t2", "ok"),
         ];
-        let classifications = classify_reads(&messages);
-        assert_eq!(classifications.len(), 1);
-        assert_eq!(classifications[0].state, ReadState::Stale);
-        assert_eq!(classifications[0].tool_call_id, "t1");
+        // Push the edit outside the working set lookback so the read becomes stale.
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let cls = classify_reads(&messages);
+        let c = find_by_id(&cls, "t1");
+        assert_eq!(c.state, ReadState::Stale);
     }
 
     #[test]
@@ -399,7 +468,7 @@ mod tests {
 
     #[test]
     fn stale_takes_precedence_over_superseded() {
-        let messages = vec![
+        let mut messages = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
@@ -410,15 +479,17 @@ mod tests {
             tool_use_msg("t3", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t3", "new content"),
         ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         let classifications = classify_reads(&messages);
-        assert_eq!(classifications.len(), 2);
-        assert_eq!(classifications[0].state, ReadState::Stale, "t1: stale (edited after)");
-        assert_eq!(classifications[1].state, ReadState::Fresh, "t3: fresh (latest read)");
+        let t1 = find_by_id(&classifications, "t1");
+        let t3 = find_by_id(&classifications, "t3");
+        assert_eq!(t1.state, ReadState::Stale, "t1: stale (edited after)");
+        assert_eq!(t3.state, ReadState::Fresh, "t3: fresh (latest read)");
     }
 
     #[test]
     fn different_files_dont_interfere() {
-        let messages = vec![
+        let mut messages = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/a.rs"})),
             tool_result_msg("t1", "a content"),
@@ -428,10 +499,12 @@ mod tests {
             tool_use_msg("t3", "edit", json!({"path": "/src/a.rs", "old_string": "x", "new_string": "y"})),
             tool_result_msg("t3", "ok"),
         ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         let classifications = classify_reads(&messages);
-        assert_eq!(classifications.len(), 2);
-        assert_eq!(classifications[0].state, ReadState::Stale, "a.rs was edited");
-        assert_eq!(classifications[1].state, ReadState::Fresh, "b.rs was not touched");
+        let t1 = find_by_id(&classifications, "t1");
+        let t2 = find_by_id(&classifications, "t2");
+        assert_eq!(t1.state, ReadState::Stale, "a.rs was edited");
+        assert_eq!(t2.state, ReadState::Fresh, "b.rs was not touched");
     }
 
     #[test]
@@ -444,15 +517,18 @@ mod tests {
             tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
             tool_result_msg("t2", "ok"),
         ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         let classifications = classify_reads(&messages);
+        let t1 = find_by_id(&classifications, "t1");
+        assert_eq!(t1.state, ReadState::Stale);
         let removed = apply_lifecycle(&mut messages, &classifications, None);
         assert!(removed > 0);
-        let result_msg = &messages[2];
-        match &result_msg.content[0] {
+        match &messages[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {
                 assert!(content.starts_with(STALE_MARKER_PREFIX));
                 assert!(content.contains("/src/main.rs"));
                 assert!(content.contains("was modified after this read"));
+                assert!(content.contains("Re-read the file"));
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
@@ -478,14 +554,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_lifecycle_on_history() {
-        let mut history = History::new(vec![
+        let mut msgs = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "a substantial amount of content that would typically appear in a file read operation, spanning multiple lines and containing various code constructs that make it significantly longer than the compact marker which will replace it"),
             user_msg("edit"),
             tool_use_msg("t2", "write", json!({"path": "/src/main.rs", "content": "new"})),
             tool_result_msg("t2", "ok"),
-        ]);
+        ];
+        msgs.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let mut history = History::new(msgs);
         #[cfg(feature = "onnx")]
         let removed = run_lifecycle(&mut history, None, None).await;
         #[cfg(not(feature = "onnx"))]
@@ -501,7 +579,7 @@ mod tests {
 
     #[test]
     fn write_makes_read_stale() {
-        let messages = vec![
+        let mut messages = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
@@ -509,14 +587,15 @@ mod tests {
             tool_use_msg("t2", "write", json!({"path": "/src/main.rs", "content": "new"})),
             tool_result_msg("t2", "ok"),
         ];
-        let classifications = classify_reads(&messages);
-        assert_eq!(classifications.len(), 1);
-        assert_eq!(classifications[0].state, ReadState::Stale);
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let cls = classify_reads(&messages);
+        let c = find_by_id(&cls, "t1");
+        assert_eq!(c.state, ReadState::Stale);
     }
 
     #[test]
     fn multiedit_makes_read_stale() {
-        let messages = vec![
+        let mut messages = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
@@ -524,9 +603,10 @@ mod tests {
             tool_use_msg("t2", "multiedit", json!({"path": "/src/main.rs", "edits": []})),
             tool_result_msg("t2", "ok"),
         ];
-        let classifications = classify_reads(&messages);
-        assert_eq!(classifications.len(), 1);
-        assert_eq!(classifications[0].state, ReadState::Stale);
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let cls = classify_reads(&messages);
+        let c = find_by_id(&cls, "t1");
+        assert_eq!(c.state, ReadState::Stale);
     }
 
     #[test]
@@ -607,6 +687,95 @@ mod tests {
         assert_eq!(classifications.len(), 2);
         assert_eq!(classifications[0].state, ReadState::Fresh, "t1: adjacent (not overlapping) with t2");
         assert_eq!(classifications[1].state, ReadState::Fresh, "t2: adjacent (not overlapping) with t1");
+    }
+
+    #[test]
+    fn working_set_protects_recently_edited_file() {
+        // read→edit with no gap: the edit is in the most recent assistant message,
+        // so the file is in the working set and the read stays Fresh.
+        let messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t1", "content"),
+            user_msg("edit"),
+            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_result_msg("t2", "ok"),
+        ];
+        let cls = classify_reads(&messages);
+        let c = find_by_id(&cls, "t1");
+        assert_eq!(c.state, ReadState::Fresh, "read protected by working set");
+    }
+
+    #[test]
+    fn working_set_expires_after_lookback() {
+        // read→edit, then gap turns to push the edit outside the working set.
+        // With 2 original assistant msgs, we need gap turns such that the edit
+        // stays in / falls out of the last WORKING_SET_LOOKBACK.
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t1", "content"),
+            user_msg("edit"),
+            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_result_msg("t2", "ok"),
+        ];
+        // 2 original + (LOOKBACK-2) gap = LOOKBACK total assistant msgs → edit is in the set.
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK - 2));
+        let cls = classify_reads(&messages);
+        let c = find_by_id(&cls, "t1");
+        assert_eq!(c.state, ReadState::Fresh, "edit still in working set");
+
+        // One more gap turn pushes the edit outside.
+        messages.extend(gap_assistant_turns(2));
+        let cls = classify_reads(&messages);
+        let c = find_by_id(&cls, "t1");
+        assert_eq!(c.state, ReadState::Stale, "edit expired from working set");
+    }
+
+    #[test]
+    fn stale_marker_has_re_read_instruction() {
+        let content = "a long line of content that should be replaced with a stale marker with re-read instruction that is significantly shorter than this original content to ensure the marker fits inside the original tool result";
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t1", content),
+            user_msg("edit"),
+            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_result_msg("t2", "ok"),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let classifications = classify_reads(&messages);
+        let removed = apply_lifecycle(&mut messages, &classifications, None);
+        assert!(removed > 0, "marker should be shorter than content");
+        match &messages[2].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(content.contains("Re-read the file with the read tool before editing"));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_read_has_no_retrieval_marker() {
+        let content = "a long line of content that should be replaced with a stale marker without retrieval that is significantly shorter than this original content to ensure the marker fits inside the original tool result";
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t1", content),
+            user_msg("edit"),
+            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_result_msg("t2", "ok"),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let classifications = classify_reads(&messages);
+        let store = super::super::compression_store::shared_store();
+        apply_lifecycle(&mut messages, &classifications, Some(&store));
+        match &messages[2].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(!content.contains("Retrieve original"), "stale reads should not have retrieval markers");
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 
     #[test]
