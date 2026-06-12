@@ -47,6 +47,8 @@ pub const MIN_LINE_BYTES: usize = 80;
 pub const MIN_BASH_TIMEOUT_SECS: u64 = 5;
 pub const MIN_CODE_EXECUTION_TIMEOUT_SECS: u64 = 5;
 pub const MIN_MAX_CONTINUATION_TURNS: u32 = 1;
+pub const DEFAULT_MAX_TURNS: u32 = 90;
+pub const MIN_MAX_TURNS: u32 = 10;
 pub const MIN_COMPACTION_BUFFER: u32 = 1_000;
 pub const MIN_SEARCH_RESULT_LIMIT: usize = 10;
 pub const MIN_INTERPRETER_MAX_MEMORY_MB: usize = 10;
@@ -347,6 +349,7 @@ pub struct AgentFileConfig {
     pub bash_timeout_secs: Option<u64>,
     pub code_execution_timeout_secs: Option<u64>,
     pub max_continuation_turns: Option<u32>,
+    pub max_turns: Option<u32>,
     pub compaction_buffer: Option<u32>,
     pub search_result_limit: Option<usize>,
     pub interpreter_max_memory_mb: Option<usize>,
@@ -370,7 +373,8 @@ impl AgentFileConfig {
             bash_timeout_secs,
             code_execution_timeout_secs,
             max_continuation_turns,
-            compaction_buffer,
+              max_turns,
+              compaction_buffer,
             search_result_limit,
             interpreter_max_memory_mb
         );
@@ -842,6 +846,9 @@ pub struct AgentConfig {
     #[config(default = DEFAULT_MAX_CONTINUATION_TURNS, min = MIN_MAX_CONTINUATION_TURNS, desc = "Max automatic continuation turns")]
     pub max_continuation_turns: u32,
 
+    #[config(default = DEFAULT_MAX_TURNS, min = MIN_MAX_TURNS, desc = "Global turn budget before forced shutdown")]
+    pub max_turns: u32,
+
     #[config(default = DEFAULT_COMPACTION_BUFFER, min = MIN_COMPACTION_BUFFER, desc = "Token buffer reserved during compaction")]
     pub compaction_buffer: u32,
 
@@ -907,6 +914,7 @@ impl AgentConfig {
             max_continuation_turns: file
                 .max_continuation_turns
                 .unwrap_or(DEFAULT_MAX_CONTINUATION_TURNS),
+            max_turns: file.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             compaction_buffer: file.compaction_buffer.unwrap_or(DEFAULT_COMPACTION_BUFFER),
             search_result_limit: file
                 .search_result_limit

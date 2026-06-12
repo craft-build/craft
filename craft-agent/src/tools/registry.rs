@@ -182,6 +182,9 @@ pub trait ToolInvocation: Send + Sync {
     fn permission_scopes(&self) -> BoxFuture<'_, Option<PermissionScopes>> {
         Box::pin(std::future::ready(None))
     }
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn execute<'a>(self: Box<Self>, ctx: &'a ToolContext) -> ExecFuture<'a>;
 }
 

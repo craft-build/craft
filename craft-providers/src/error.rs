@@ -22,9 +22,19 @@ pub enum AgentError {
     Cancelled,
     #[error("stream timed out after {secs}s of inactivity")]
     Timeout { secs: u64 },
+    #[error("context length exceeded: {message}")]
+    ContextOverflow { message: String },
+    #[error("content policy violation: {message}")]
+    ContentPolicy { message: String },
+    #[error("billing error: {message}")]
+    Billing { message: String },
 }
 
 impl AgentError {
+    pub fn is_overflow(&self) -> bool {
+        matches!(self, Self::ContextOverflow { .. })
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Api { status, .. } => *status == 429 || *status >= 500,
@@ -34,7 +44,10 @@ impl AgentError {
             | Self::Tool { .. }
             | Self::Channel
             | Self::Json(_)
-            | Self::Cancelled => false,
+            | Self::Cancelled
+            | Self::ContextOverflow { .. }
+            | Self::ContentPolicy { .. }
+            | Self::Billing { .. } => false,
         }
     }
 
@@ -43,7 +56,17 @@ impl AgentError {
     }
 
     pub fn should_rotate_key(&self) -> bool {
-        matches!(self, Self::Api { status, .. } if *status == 429 || *status == 401 || *status == 403)
+        match self {
+            Self::Api { status, .. } => *status == 429 || *status == 401 || *status == 403,
+            _ => false,
+        }
+    }
+
+    pub fn should_abort(&self) -> bool {
+        matches!(
+            self,
+            Self::ContentPolicy { .. } | Self::Billing { .. } | Self::Cancelled
+        )
     }
 
     pub fn user_message(&self) -> String {
@@ -63,6 +86,9 @@ impl AgentError {
             Self::Json(_) => "received an invalid response from the API".into(),
             Self::Channel => "internal error, try again".into(),
             Self::Cancelled => "cancelled".into(),
+            Self::ContextOverflow { .. } => "context length exceeded, will attempt compression".into(),
+            Self::ContentPolicy { message } => format!("content policy violation: {message}"),
+            Self::Billing { .. } => "billing error, check your API credits or plan".into(),
         }
     }
 
@@ -73,6 +99,36 @@ impl AgentError {
             .await
             .unwrap_or_else(|_| "unable to read error body".into());
         Self::Api { status, message }
+    }
+
+    pub fn classify(self) -> Self {
+        match &self {
+            Self::Api { status: 400, message }
+                if message.contains("context_length_exceeded")
+                    || message.contains("context window")
+                    || (message.contains("max_tokens") && message.contains("reduce")) =>
+            {
+                Self::ContextOverflow {
+                    message: message.clone(),
+                }
+            }
+            Self::Api { status: 413, message } => Self::ContextOverflow {
+                message: message.clone(),
+            },
+            Self::Api { status: 402, message } => Self::Billing {
+                message: message.clone(),
+            },
+            Self::Api { status: 400, message }
+                if message.contains("content_policy")
+                    || message.contains("content_policy_violation")
+                    || message.contains("safety") =>
+            {
+                Self::ContentPolicy {
+                    message: message.clone(),
+                }
+            }
+            _ => self,
+        }
     }
 
     pub fn retry_message(&self) -> String {

@@ -1,6 +1,7 @@
+use std::collections::{HashMap, HashSet};
 use std::env;
 
-use craft_providers::{ContentBlock, Message, Model, RequestOptions, TokenUsage};
+use craft_providers::{ContentBlock, Message, Model, RequestOptions, Role, TokenUsage};
 use tracing::info;
 
 use super::history::History;
@@ -21,14 +22,23 @@ const AGGRESSIVE_MAX_JSON_ITEMS: usize = 8;
 const MIN_TOOL_RESULT_CHARS: usize = 300;
 const LOW_RELEVANCE_THRESHOLD: f32 = 0.3;
 const HIGH_RELEVANCE_THRESHOLD: f32 = 0.7;
+#[cfg(feature = "onnx")]
+const TARGETED_TOPICS_COUNT: usize = 10;
+#[cfg(feature = "onnx")]
+const TARGETED_MIN_SCORE: f32 = 0.5;
+const VERY_OLD_MULTIPLIER: usize = 3;
+const SUMMARY_PREVIEW_CHARS: usize = 80;
+const SUFFICIENT_REDUCTION_RATIO: f32 = 0.15;
+const ERROR_SNIPPET_CHARS: usize = 200;
+const COMPACT_USER_PROMPT: &str = "What did we do so far?";
 
 fn build_compaction_user_message(relevance_scores: Option<&[(usize, f32)]>) -> Message {
     #[cfg(feature = "onnx")]
     if let Some(scores) = relevance_scores {
         let top_topics: Vec<String> = scores
             .iter()
-            .take(10)
-            .filter(|(_, score)| *score > 0.5)
+            .take(TARGETED_TOPICS_COUNT)
+            .filter(|(_, score)| *score > TARGETED_MIN_SCORE)
             .map(|(idx, score)| format!("msg#{idx} (relevance: {score:.2})"))
             .collect();
         if !top_topics.is_empty() {
@@ -39,9 +49,9 @@ fn build_compaction_user_message(relevance_scores: Option<&[(usize, f32)]>) -> M
             return Message::user(prompt);
         }
     }
-    #[allow(unreachable_patterns)]
+    #[allow(unused_variables)]
     let _ = relevance_scores;
-    Message::user(crate::prompt::COMPACTION_USER.to_string())
+    Message::user(COMPACT_USER_PROMPT.to_string())
 }
 
 fn aggressive_config() -> AgentCompressionConfig {
@@ -84,7 +94,7 @@ pub(super) async fn compact_history(
     compaction_history.push(build_compaction_user_message(relevance_scores));
 
     let empty_tools = serde_json::json!([]);
-    let response = stream_with_retry(
+    let result = stream_with_retry(
         provider,
         model,
         &compaction_history,
@@ -95,7 +105,25 @@ pub(super) async fn compact_history(
         RequestOptions::default(),
         None,
     )
-    .await?;
+    .await;
+
+    let response = match result {
+        Ok(r) => r,
+        Err(e) => {
+            info!(error = %e, "LLM compaction failed, using static fallback");
+            let summary = build_static_summary(history.as_slice());
+            let new_history = vec![
+                Message::user(COMPACT_USER_PROMPT.into()),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text { text: summary }],
+                    ..Default::default()
+                },
+            ];
+            history.replace(new_history);
+            return Ok(TokenUsage::default());
+        }
+    };
 
     event_tx.send(AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
         message: response.message.clone(),
@@ -105,7 +133,7 @@ pub(super) async fn compact_history(
     })))?;
 
     let new_history = vec![
-        Message::user("What did we do so far?".into()),
+        Message::user(COMPACT_USER_PROMPT.into()),
         response.message,
     ];
     history.replace(new_history);
@@ -185,7 +213,7 @@ pub(super) async fn progressive_compact(
     let recent_cutoff = tool_result_indices
         .len()
         .saturating_sub(protect_recent);
-    let recent_msg_indices: std::collections::HashSet<usize> = tool_result_indices
+    let recent_msg_indices: HashSet<usize> = tool_result_indices
         .into_iter()
         .skip(recent_cutoff)
         .collect();
@@ -193,8 +221,8 @@ pub(super) async fn progressive_compact(
     // Semantic overlap detection — find old tool results that semantically
     // duplicate a newer result and mark them for aggressive compression.
     #[cfg(feature = "onnx")]
-    let overlap_indices: std::collections::HashSet<usize> = {
-        let mut set = std::collections::HashSet::new();
+    let overlap_indices: HashSet<usize> = {
+        let mut set = HashSet::new();
         if let Some(scorer) = ctx.scorer {
             let messages = history.as_slice();
             let mut old_tool_embeddings: Vec<(usize, Vec<f32>)> = Vec::new();
@@ -221,12 +249,12 @@ pub(super) async fn progressive_compact(
         set
     };
     #[cfg(not(feature = "onnx"))]
-    let overlap_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let overlap_indices: HashSet<usize> = HashSet::new();
 
     let aggressive = aggressive_config();
 
     // Build score lookup map for O(1) access
-    let score_map: std::collections::HashMap<usize, f32> = ctx
+    let score_map: HashMap<usize, f32> = ctx
         .relevance_scores
         .map(|scores| scores.iter().map(|(idx, score)| (*idx, *score)).collect())
         .unwrap_or_default();
@@ -234,7 +262,7 @@ pub(super) async fn progressive_compact(
     // Pass 2 + 3: compress old tool results
     let messages = history.as_mut_slice();
     let msg_count = messages.len();
-    let very_old_threshold = protect_recent * 3;
+    let very_old_threshold = protect_recent * VERY_OLD_MULTIPLIER;
 
     for (i, msg) in messages.iter_mut().enumerate() {
         if recent_msg_indices.contains(&i) {
@@ -277,7 +305,7 @@ pub(super) async fn progressive_compact(
                     });
                     let line_count = old_lines;
                     let first_line = content.lines().next().unwrap_or("");
-                    let preview: String = first_line.chars().take(80).collect();
+                    let preview: String = first_line.chars().take(SUMMARY_PREVIEW_CHARS).collect();
                     let mut summary = format!("{SUMMARY_MARKER_PREFIX}{line_count} lines. First: {preview}]");
                     if let Some(ref h) = hash {
                         summary.push_str(&super::compression_store::retrieval_marker(old_lines, 1, h));
@@ -319,7 +347,7 @@ pub(super) async fn progressive_compact(
         // avoid overflow on next turn. This is conservative — chars correlate
         // loosely with tokens but it's a fast check.
         let reduction_ratio = removed as f32 / total_before.max(1) as f32;
-        let likely_sufficient = reduction_ratio > 0.15 || !is_overflow(ctx.usage, ctx.model, ctx.compaction_buffer);
+        let likely_sufficient = reduction_ratio > SUFFICIENT_REDUCTION_RATIO || !is_overflow(ctx.usage, ctx.model, ctx.compaction_buffer);
 
         info!(
             chars_removed = removed,
@@ -375,6 +403,53 @@ pub(super) fn auto_compact_enabled() -> bool {
     env::var("CRAFT_DISABLE_AUTOCOMPACT")
         .map(|v| v != "1" && v != "true")
         .unwrap_or(true)
+}
+
+fn build_static_summary(messages: &[Message]) -> String {
+    let mut summary = String::from("[Static summary — LLM compaction failed]\n\n");
+    let mut user_count = 0;
+    let mut tool_names = Vec::new();
+    let mut errors = Vec::new();
+
+    for msg in messages {
+        if matches!(msg.role, Role::User) {
+            user_count += 1;
+            let text = msg.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } if !text.is_empty() => Some(text.as_str()),
+                _ => None,
+            });
+            if let Some(text) = text {
+                let first_line = text.lines().next().unwrap_or("");
+                if !first_line.is_empty() {
+                    summary.push_str(&format!("**User**: {first_line}\n"));
+                }
+            }
+        }
+        for (_id, name, _input) in msg.tool_uses() {
+            tool_names.push(name.to_string());
+        }
+        for block in &msg.content {
+            if let ContentBlock::ToolResult { content, .. } = block
+                && (content.contains("error") || content.contains("Error"))
+            {
+                let snippet: String = content.chars().take(ERROR_SNIPPET_CHARS).collect();
+                errors.push(snippet);
+            }
+        }
+    }
+
+    if !tool_names.is_empty() {
+        summary.push_str(&format!("\n**Tools used**: {}\n", tool_names.join(", ")));
+    }
+    if !errors.is_empty() {
+        summary.push_str("\n**Errors encountered**:\n");
+        for e in &errors {
+            summary.push_str(&format!("- {e}\n"));
+        }
+    }
+    summary.push_str(&format!("\n**Total user messages**: {user_count}\n"));
+
+    summary
 }
 
 #[cfg(test)]

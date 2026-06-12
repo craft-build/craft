@@ -4,6 +4,7 @@ pub(crate) mod compression_store;
 mod dedup;
 mod escalation;
 pub mod findings_store;
+mod guardrails;
 mod history;
 mod instructions;
 mod read_lifecycle;

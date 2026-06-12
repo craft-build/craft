@@ -1,3 +1,4 @@
+#[cfg(feature = "onnx")]
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use craft_providers::{Message, Model, RequestOptions, StopReason, StreamResponse
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
 use super::dedup::ToolDedupCache;
 use super::escalation::EscalationTracker;
+use super::guardrails::ToolGuardrails;
 use super::history::{History, sanitize_cancelled_history};
 use super::instructions::LoadedInstructions;
 use super::read_lifecycle;
@@ -29,6 +31,9 @@ use crate::{
 use craft_config::ToolOutputLines;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
+const GRACE_CALL_PROMPT: &str = "You have reached the turn limit. Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
+const DEFAULT_SMALL_MODEL_RATIO: f64 = 0.60;
+const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 #[cfg(feature = "onnx")]
 const MANDATORY_RECENT_MESSAGES: usize = 6;
 #[cfg(feature = "onnx")]
@@ -39,6 +44,7 @@ const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
 enum TurnOutcome {
     Continue,
     Done(Option<StopReason>),
+    Overflow,
 }
 
 pub struct RunOutcome {
@@ -80,7 +86,10 @@ pub struct Agent {
     cancel: CancelToken,
     total_usage: TokenUsage,
     num_turns: u32,
+    grace_called: bool,
     recent_calls: RecentCalls,
+    guardrails: ToolGuardrails,
+    ineffective_compaction_count: u8,
     auto_compact: bool,
     loaded_instructions: LoadedInstructions,
     rollback_len: usize,
@@ -130,7 +139,10 @@ impl Agent {
             cancel: CancelToken::none(),
             total_usage: TokenUsage::default(),
             num_turns: 0,
+            grace_called: false,
             recent_calls: RecentCalls::new(),
+            guardrails: ToolGuardrails::new(),
+            ineffective_compaction_count: 0,
             auto_compact: compaction::auto_compact_enabled(),
             loaded_instructions: LoadedInstructions::new(),
             rollback_len: 0,
@@ -260,12 +272,29 @@ impl Agent {
 
     async fn run_loop(&mut self) -> Result<(), AgentError> {
         loop {
+            if self.num_turns >= self.config.max_turns {
+                if !self.grace_called {
+                    self.grace_called = true;
+                    self.history.push(Message::user(GRACE_CALL_PROMPT.to_string()));
+                    info!(turns = self.num_turns, "turn budget exhausted, issuing grace call");
+                    continue;
+                }
+                info!(turns = self.num_turns, "turn budget exhausted after grace call, stopping");
+                self.snapshot.commit();
+                self.emit_done(None)?;
+                return Ok(());
+            }
             match self.turn().await? {
                 TurnOutcome::Continue => {}
                 TurnOutcome::Done(stop_reason) => {
                     self.snapshot.commit();
                     self.emit_done(stop_reason)?;
                     return Ok(());
+                }
+                TurnOutcome::Overflow => {
+                    info!("context overflow detected, attempting auto-compact and retry");
+                    let usage = self.total_usage;
+                    self.try_auto_compact(&usage, true).await?;
                 }
             }
         }
@@ -333,6 +362,10 @@ impl Agent {
             }
             Err(e) if e.is_auth_error() => {
                 return self.wait_for_reauth(e).await;
+            }
+            Err(e) if e.is_overflow() => {
+                info!("context overflow detected, will attempt auto-compact");
+                return Ok(TurnOutcome::Overflow);
             }
             Err(e) => {
                 error!(error = %e, model = %self.model.id, self.num_turns, "stream_message failed");
@@ -405,7 +438,7 @@ impl Agent {
             }
         }
 
-        if self.try_auto_compact(&usage).await? || self.handle_queued_command().await? {
+        if self.try_auto_compact(&usage, false).await? || self.handle_queued_command().await? {
             return Ok(TurnOutcome::Continue);
         }
 
@@ -471,6 +504,7 @@ impl Agent {
         tool_dispatch::process_tool_calls(
             response,
             &mut self.recent_calls,
+            &mut self.guardrails,
             self.mcp.as_ref(),
             &mut self.history,
             &self.event_tx,
@@ -489,7 +523,7 @@ impl Agent {
         {
             self.config.small_model.compaction_threshold
         } else {
-            0.60
+            DEFAULT_SMALL_MODEL_RATIO
         }
     }
 
@@ -518,12 +552,17 @@ impl Agent {
         }
     }
 
-    async fn try_auto_compact(&mut self, usage: &TokenUsage) -> Result<bool, AgentError> {
+    async fn try_auto_compact(&mut self, usage: &TokenUsage, force_full: bool) -> Result<bool, AgentError> {
         if !self.auto_compact {
             return Ok(false);
         }
 
-        let overflow = compaction::is_overflow(usage, &self.model, self.config.compaction_buffer);
+        if self.ineffective_compaction_count >= 2 {
+            info!("skipping auto-compaction: last 2 attempts were ineffective");
+            return Ok(false);
+        }
+
+        let overflow = force_full || compaction::is_overflow(usage, &self.model, self.config.compaction_buffer);
         let proactive = !overflow
             && compaction::is_proactive_threshold(
                 &self.history,
@@ -582,7 +621,30 @@ impl Agent {
 
         info!(total_input = usage.total_input(), "auto-compacting (full)");
         self.event_tx.send(AgentEvent::AutoCompacting)?;
+        let chars_before: usize = self.history.as_slice().iter().map(|m| {
+            m.content.iter().map(|b| match b {
+                craft_providers::ContentBlock::Text { text } => text.len(),
+                _ => 0,
+            }).sum::<usize>()
+        }).sum();
         self.do_compact().await?;
+        let chars_after: usize = self.history.as_slice().iter().map(|m| {
+            m.content.iter().map(|b| match b {
+                craft_providers::ContentBlock::Text { text } => text.len(),
+                _ => 0,
+            }).sum::<usize>()
+        }).sum();
+        let savings = if chars_before > 0 {
+            1.0 - (chars_after as f32 / chars_before as f32)
+        } else {
+            0.0
+        };
+        if savings < INEFFECTIVE_COMPACTION_THRESHOLD {
+            self.ineffective_compaction_count += 1;
+            info!(savings_pct = format!("{:.0}%", savings * 100.0), "compaction was ineffective");
+        } else {
+            self.ineffective_compaction_count = 0;
+        }
         Ok(true)
     }
 
@@ -942,7 +1004,7 @@ mod tests {
             input: total_input,
             ..Default::default()
         };
-        let result = agent.try_auto_compact(&usage).await.unwrap();
+        let result = agent.try_auto_compact(&usage, false).await.unwrap();
 
         assert_eq!(result, expected);
         drop(agent);

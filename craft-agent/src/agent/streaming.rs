@@ -73,7 +73,8 @@ pub(crate) async fn stream_with_retry(
                     return Err(AgentError::Cancelled);
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) if e.should_abort() => return Err(e),
+            Err(e) => return Err(e.classify()),
         }
     }
 }
