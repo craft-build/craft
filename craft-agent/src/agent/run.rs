@@ -277,9 +277,9 @@ impl Agent {
         }
 
         #[cfg(feature = "onnx")]
-        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history, self.scorer.as_ref()).await;
+        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history, self.scorer.as_ref(), Some(&self.compression_store)).await;
         #[cfg(not(feature = "onnx"))]
-        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history).await;
+        let lifecycle_removed = read_lifecycle::run_lifecycle(&mut self.history, Some(&self.compression_store)).await;
         if lifecycle_removed > 0 {
             info!(chars_removed = lifecycle_removed, "read lifecycle compression applied before turn");
         }

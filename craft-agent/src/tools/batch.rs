@@ -323,9 +323,14 @@ impl Batch {
             let _ = write!(output, "All {total} tools executed successfully.");
         }
 
+        let no_compress = results.iter().any(|br| {
+            br.output.as_ref().is_some_and(|o| o.skip_compress())
+        });
+
         Ok(ToolOutput::Batch {
             entries,
             text: output,
+            no_compress,
         })
     }
 
@@ -354,6 +359,7 @@ impl super::ToolInvocation for Batch {
         Some(ToolOutput::Batch {
             entries,
             text: String::new(),
+            no_compress: false,
         })
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
@@ -379,7 +385,7 @@ mod tests {
     async fn execute_batch(ctx: &ToolContext, input: Value) -> (Vec<BatchToolEntry>, String) {
         let batch = Batch::parse_input(&input).unwrap();
         match batch.execute(ctx).await.unwrap() {
-            ToolOutput::Batch { entries, text } => (entries, text),
+            ToolOutput::Batch { entries, text, .. } => (entries, text),
             other => panic!("expected Batch, got {other:?}"),
         }
     }

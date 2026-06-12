@@ -454,6 +454,7 @@ pub fn mock_events() -> Vec<MockEvent> {
                 },
             ],
             text: String::new(),
+            no_compress: false,
         },
         false,
     )));

@@ -542,20 +542,22 @@ fn batch_start(panel: &mut MessagesPanel, entries: Vec<BatchToolEntry>) {
         input: None,
         raw_input: None,
         output: Some(ToolOutput::Batch {
-            entries,
-            text: String::new(),
-        }),
+             entries,
+             text: String::new(),
+             no_compress: false,
+         }),
         render_header: None,
     });
 }
 
-fn batch_done(panel: &mut MessagesPanel, entries: Vec<BatchToolEntry>) {
+fn batch_done(panel: &mut MessagesPanel, _entries: Vec<BatchToolEntry>) {
     panel.tool_done(ToolDoneEvent {
         id: "b1".into(),
         tool: "batch".into(),
         output: ToolOutput::Batch {
-            entries,
+            entries: vec![],
             text: String::new(),
+            no_compress: false,
         },
         is_error: false,
     });

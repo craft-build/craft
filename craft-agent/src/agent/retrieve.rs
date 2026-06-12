@@ -16,7 +16,7 @@ pub(crate) struct Retrieve {
 
 impl Retrieve {
     pub const NAME: &str = RETRIEVE_TOOL_NAME;
-    pub const DESCRIPTION: &str = "Retrieve the original (uncompressed) content for a previously compressed tool output. Use the hash value from a compression marker in the conversation.";
+    pub const DESCRIPTION: &str = "Retrieve the original (uncompressed) content for a previously compressed tool output. Use the hash value from a compression marker in the conversation. Compression markers appear as [N lines compressed from M. Retrieve original: hash=HASH] or in stale/superseded read markers that include a hash.";
     pub const EXAMPLES: Option<&str> = Some(
         r#"[{"hash": "a1b2c3d4"}]"#,
     );

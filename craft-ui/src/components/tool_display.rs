@@ -1527,7 +1527,7 @@ mod tests {
         ; "empty_plain_resolves_to_none"
     )]
     #[test_case(
-        Some(ToolOutput::Batch { entries: vec![], text: String::new() }),
+        Some(ToolOutput::Batch { entries: vec![], text: String::new(), no_compress: false }),
         None, "batch", false
         ; "batch_always_none"
     )]

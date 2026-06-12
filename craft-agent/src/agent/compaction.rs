@@ -71,9 +71,9 @@ pub(super) async fn compact_history(
     let compact_start = std::time::Instant::now();
 
     #[cfg(feature = "onnx")]
-    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history, None).await;
+    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history, None, None).await;
     #[cfg(not(feature = "onnx"))]
-    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history).await;
+    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history, None).await;
     if lifecycle_removed > 0 {
         info!(chars_removed = lifecycle_removed, "read lifecycle applied before compaction");
     }
@@ -170,9 +170,9 @@ pub(super) async fn progressive_compact(
 
     // Pass 1: read lifecycle
     #[cfg(feature = "onnx")]
-    let mut removed = super::read_lifecycle::run_lifecycle(history, ctx.scorer).await;
+    let mut removed = super::read_lifecycle::run_lifecycle(history, ctx.scorer, ctx.compression_store).await;
     #[cfg(not(feature = "onnx"))]
-    let mut removed = super::read_lifecycle::run_lifecycle(history).await;
+    let mut removed = super::read_lifecycle::run_lifecycle(history, ctx.compression_store).await;
 
     let tool_result_indices: Vec<usize> = history
         .as_slice()

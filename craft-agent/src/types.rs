@@ -209,6 +209,8 @@ pub enum ToolOutput {
     Batch {
         entries: Vec<BatchToolEntry>,
         text: String,
+        #[serde(default)]
+        no_compress: bool,
     },
     Findings(Vec<Finding>),
     ReviewResult {
@@ -278,9 +280,9 @@ impl ToolOutput {
         compression::compress(&raw, ct, &compression::CompressionConfig::from(config))
     }
 
-    fn skip_compress(&self) -> bool {
+    pub(crate) fn skip_compress(&self) -> bool {
         match self {
-            Self::ReadCode { no_compress, .. } => *no_compress,
+            Self::ReadCode { no_compress, .. } | Self::Batch { no_compress, .. } => *no_compress,
             _ => false,
         }
     }

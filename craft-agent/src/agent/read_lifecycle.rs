@@ -7,6 +7,8 @@ use tracing::info;
 
 use super::history::History;
 
+use super::compression_store::SharedCompressionStore;
+
 const STALE_MARKER_PREFIX: &str = "[Stale read: ";
 const SUPERSEDED_MARKER_PREFIX: &str = "[Superseded read: ";
 
@@ -98,6 +100,8 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
 
     let mut classifications = Vec::new();
 
+    let last_assistant_msg = operations.iter().map(|op| op.msg_index).max();
+
     for read_op in &reads {
         let file_ops = match by_file.get(read_op.file_path.as_str()) {
             Some(ops) => ops,
@@ -132,7 +136,11 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
             range_contains(op.line_range.as_ref(), read_op.line_range.as_ref())
         });
 
-        if has_later_superseding_read {
+        // Don't supersede reads from the most recent turn — the LLM is still
+        // actively using them and premature compaction causes re-read feedback loops.
+        let is_most_recent = last_assistant_msg.is_some_and(|last| read_op.msg_index == last);
+
+        if has_later_superseding_read && !is_most_recent {
             classifications.push(ReadClassification {
                 tool_call_id: read_op.tool_call_id.clone(),
                 file_path: read_op.file_path.clone(),
@@ -153,7 +161,11 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
 
 /// Replace stale/superseded tool result content blocks with compact markers.
 /// Returns total characters removed for observability.
-pub(super) fn apply_lifecycle(history: &mut [Message], classifications: &[ReadClassification]) -> usize {
+pub(super) fn apply_lifecycle(
+    history: &mut [Message],
+    classifications: &[ReadClassification],
+    compression_store: Option<&SharedCompressionStore>,
+) -> usize {
     let stale_ids: HashMap<&str, (ReadState, &str)> = classifications
         .iter()
         .filter(|c| !matches!(c.state, ReadState::Fresh))
@@ -180,7 +192,14 @@ pub(super) fn apply_lifecycle(history: &mut [Message], classifications: &[ReadCl
             {
                 let (state, file_path) = (*state, *file_path);
                 let old_len = content.len();
-                let marker = match state {
+                let original_lines = content.lines().count();
+
+                let hash = compression_store.and_then(|store| {
+                    let mut guard = store.lock().ok()?;
+                    Some(guard.put(content))
+                });
+
+                let mut marker = match state {
                     ReadState::Stale => {
                         if old_len > STALE_MARKER_PREFIX.len() + 60 {
                             format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. {old_len} chars removed]")
@@ -197,6 +216,15 @@ pub(super) fn apply_lifecycle(history: &mut [Message], classifications: &[ReadCl
                     }
                     ReadState::Fresh => unreachable!(),
                 };
+
+                if let Some(ref h) = hash {
+                    marker.push_str(&super::compression_store::retrieval_marker(
+                        original_lines,
+                        1,
+                        h,
+                    ));
+                }
+
                 total_removed += old_len.saturating_sub(marker.len());
                 *content = marker;
             }
@@ -218,6 +246,7 @@ pub(super) fn apply_lifecycle(history: &mut [Message], classifications: &[ReadCl
 pub(super) async fn run_lifecycle(
     history: &mut History,
     scorer: Option<&super::semantic::RelevanceScorer>,
+    compression_store: Option<&SharedCompressionStore>,
 ) -> usize {
     let messages = history.as_slice();
     let mut classifications = classify_reads(messages);
@@ -246,15 +275,18 @@ pub(super) async fn run_lifecycle(
     }
 
     let msgs = history.as_mut_slice();
-    apply_lifecycle(msgs, &classifications)
+    apply_lifecycle(msgs, &classifications, compression_store)
 }
 
 #[cfg(not(feature = "onnx"))]
-pub(super) async fn run_lifecycle(history: &mut History) -> usize {
+pub(super) async fn run_lifecycle(
+    history: &mut History,
+    compression_store: Option<&SharedCompressionStore>,
+) -> usize {
     let messages = history.as_slice();
     let classifications = classify_reads(messages);
     let msgs = history.as_mut_slice();
-    apply_lifecycle(msgs, &classifications)
+    apply_lifecycle(msgs, &classifications, compression_store)
 }
 
 fn extract_path(input: &serde_json::Value) -> Option<String> {
@@ -413,7 +445,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         let classifications = classify_reads(&messages);
-        let removed = apply_lifecycle(&mut messages, &classifications);
+        let removed = apply_lifecycle(&mut messages, &classifications, None);
         assert!(removed > 0);
         let result_msg = &messages[2];
         match &result_msg.content[0] {
@@ -434,7 +466,7 @@ mod tests {
             tool_result_msg("t1", "fresh content"),
         ];
         let classifications = classify_reads(&messages);
-        let removed = apply_lifecycle(&mut messages, &classifications);
+        let removed = apply_lifecycle(&mut messages, &classifications, None);
         assert_eq!(removed, 0);
         match &messages[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {
@@ -455,9 +487,9 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ]);
         #[cfg(feature = "onnx")]
-        let removed = run_lifecycle(&mut history, None).await;
+        let removed = run_lifecycle(&mut history, None, None).await;
         #[cfg(not(feature = "onnx"))]
-        let removed = run_lifecycle(&mut history).await;
+        let removed = run_lifecycle(&mut history, None).await;
         assert!(removed > 0);
         match &history.as_slice()[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {

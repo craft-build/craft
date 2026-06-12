@@ -264,11 +264,13 @@ impl MessagesPanel {
         if let ToolOutput::Batch {
             entries: new_entries,
             text,
+            ..
         } = &event.output
             && let Some(arc) = &mut msg.tool_output
             && let ToolOutput::Batch {
                 entries: existing,
                 text: existing_text,
+                ..
             } = Arc::make_mut(arc)
         {
             for (existing, new) in existing.iter_mut().zip(new_entries) {

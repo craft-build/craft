@@ -888,6 +888,7 @@ mod tests {
                 },
             ],
             text: String::new(),
+            no_compress: false,
         };
         let msgs = tool_use_pair("batch", serde_json::json!({"tool_calls": []}), "", false);
         let outputs = HashMap::from([("t1".into(), batch_output)]);
