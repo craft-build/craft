@@ -39,6 +39,7 @@ flume = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 libc = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 test-case = { workspace = true }
@@ -166,6 +167,7 @@ futures = "0.3"
 
 wait-timeout = "0.2"
 aho-corasick = "1"
+time = ">=0.3, <0.3.48"
 
 [profile.bench]
 debug = true
