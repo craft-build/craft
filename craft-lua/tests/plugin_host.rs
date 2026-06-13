@@ -1244,9 +1244,17 @@ async fn env_permission_guards_uv_and_env() {
     );
 }
 
-#[test_case::test_case("git status" ; "parseable command")]
-#[test_case::test_case("echo 'unterminated" ; "unparseable command")]
-fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
+#[tokio::test]
+async fn bash_permission_scopes_parseable_command() {
+    bash_permission_scopes_never_falls_back_to_json("git status").await;
+}
+
+#[tokio::test]
+async fn bash_permission_scopes_unparseable_command() {
+    bash_permission_scopes_never_falls_back_to_json("echo 'unterminated").await;
+}
+
+async fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
@@ -1255,10 +1263,10 @@ fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
     let input = serde_json::json!({ "command": command });
     let entry = reg.get("bash").expect("bash registered");
     let inv = entry.tool.parse(&input).expect("parse failed");
-    let scopes = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(inv.permission_scopes())
-    })
-    .expect("permission_scopes returned None (would fall back to raw JSON)");
+    let scopes = inv
+        .permission_scopes()
+        .await
+        .expect("permission_scopes returned None (would fall back to raw JSON)");
 
     assert!(
         !scopes.scopes.iter().any(|s| s.contains("\"command\"")),

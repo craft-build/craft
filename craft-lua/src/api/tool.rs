@@ -884,7 +884,7 @@ mod tests {
         });
         let result = inv.permission_scopes().await;
         let scopes = result.unwrap();
-        assert_eq!(scopes.scopes, vec!["cargo", "test"]);
+        assert_eq!(scopes.scopes, vec!["bash:cargo test"]);
         assert!(!scopes.force_prompt);
     }
 
