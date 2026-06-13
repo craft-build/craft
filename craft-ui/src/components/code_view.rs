@@ -623,6 +623,11 @@ mod tests {
     use craft_agent::GrepMatchGroup;
     use test_case::test_case;
 
+    fn ensure_theme() {
+        let theme = crate::theme::load_by_name("dracula").expect("dracula theme");
+        craft_highlight::set_theme(theme.syntax);
+    }
+
     fn plain(text: &str) -> DiffSpan {
         DiffSpan {
             text: text.into(),
@@ -687,6 +692,7 @@ mod tests {
     /// state, not a fresh one from the hunk start.
     #[test]
     fn diff_context_line_inside_block_comment_matches_full_file_state() {
+        ensure_theme();
         let before = "/*\nalpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\nOLD\ngolf\n*/\n";
         let after = "/*\nalpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\nNEW\ngolf\n*/\n";
 
@@ -696,6 +702,7 @@ mod tests {
             after,
         );
 
+        ensure_theme();
         let expected = fg_in_context("test.rs", "/*\nalpha\nbravo\ncharlie\n", "delta", "delta");
         assert_eq!(diff_fg(&lines, "delta"), expected);
     }
@@ -704,6 +711,7 @@ mod tests {
     /// Unchanged context lines must use the AFTER parser state.
     #[test]
     fn diff_unchanged_line_uses_after_state_when_close_tag_removed() {
+        ensure_theme();
         let before = "/*\ndoc\n*/\nfn x() {}\n";
         let after = "/*\ndoc\nfn x() {}\n";
 
@@ -713,6 +721,7 @@ mod tests {
             after,
         );
 
+        ensure_theme();
         let expected = fg_in_context("test.rs", "/*\ndoc\n", "fn x() {}", "fn");
         assert_eq!(diff_fg(&lines, "fn x() {}"), expected);
     }
