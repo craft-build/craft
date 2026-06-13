@@ -14,7 +14,7 @@ use craft_agent::{
     McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
 };
 use craft_lua::EventHandle;
-use craft_providers::{AgentError, Message, Model, TokenUsage};
+use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
 use serde_json::Value;
 use tracing::error;
 
@@ -323,7 +323,7 @@ impl AgentLoop {
                 let _ = event_tx.send(AgentEvent::Done {
                     usage: TokenUsage::default(),
                     num_turns: 0,
-                    stop_reason: None,
+                    stop_reason: Some(StopReason::Cancelled),
                 });
             }
             e => {

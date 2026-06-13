@@ -203,6 +203,7 @@ pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
+    Cancelled,
 }
 
 impl StopReason {

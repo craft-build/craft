@@ -120,6 +120,9 @@ pub enum Request {
     CollectPromptSlots {
         reply: flume::Sender<craft_agent::prompt::ResolvedSlots>,
     },
+    SetTerminalBackend {
+        backend: Arc<dyn TerminalBackend>,
+    },
     Shutdown,
     RestoreToolAsync {
         item: RestoreItem,
@@ -1685,6 +1688,10 @@ pub fn spawn(
                         Request::CollectPromptSlots { reply } => {
                             let slots = rt.collect_prompt_slots().await;
                             let _ = reply.send(slots);
+                        }
+                        Request::SetTerminalBackend { backend } => {
+                            gate.drain().await;
+                            rt.lua.set_app_data::<Arc<dyn TerminalBackend>>(backend);
                         }
                     Request::RestoreToolAsync { item, event_tx } => {
                         let id = item.tool_use_id.clone();

@@ -181,6 +181,15 @@ impl PluginHost {
             .ok_or(PluginError::HostDead)
     }
 
+    pub fn set_terminal_backend(
+        &self,
+        backend: Arc<dyn TerminalBackend>,
+    ) -> Result<(), PluginError> {
+        let tx = self.tx()?;
+        tx.send(Request::SetTerminalBackend { backend })
+            .map_err(|_| PluginError::HostDead)
+    }
+
     fn send_load(
         &self,
         name: Arc<str>,

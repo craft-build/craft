@@ -67,6 +67,7 @@ pub async fn run(yolo: bool) -> Result<()> {
         mcp_config,
         prompt_slots: Arc::new(prompt_slots),
         yolo,
+        plugin_host,
     })
     .await
 }

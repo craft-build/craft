@@ -10,6 +10,7 @@ use std::sync::Arc;
 use craft_agent::mcp::config::McpConfig;
 use craft_agent::prompt::ResolvedSlots;
 use craft_agent::{AgentConfig, PermissionsConfig};
+use craft_lua::PluginHost;
 use craft_providers::Timeouts;
 use craft_providers::model::Model;
 
@@ -22,6 +23,7 @@ pub struct AcpParams {
     pub mcp_config: McpConfig,
     pub prompt_slots: Arc<ResolvedSlots>,
     pub yolo: bool,
+    pub plugin_host: PluginHost,
 }
 
 pub async fn run(params: AcpParams) -> color_eyre::Result<()> {

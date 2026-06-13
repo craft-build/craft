@@ -484,6 +484,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
         yolo: permission_mode == PermissionMode::BypassPermissions,
         system_prompt_override: cli.system_prompt.clone().filter(|s| !s.is_empty()),
         append_system_prompt: cli.append_system_prompt.clone().filter(|s| !s.is_empty()),
+        fs: Arc::new(craft_agent::tools::LocalFs),
     });
 
     let (out_tx, out_rx) = flume::unbounded::<String>();

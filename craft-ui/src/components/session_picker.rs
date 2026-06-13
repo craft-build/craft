@@ -62,7 +62,7 @@ impl SessionPicker {
         let dir = dir.clone();
         let (tx, rx) = flume::bounded(1);
         thread::spawn(move || {
-            let result = AppSession::list(&cwd, &dir)
+            let result = AppSession::list(Some(&cwd), &dir)
                 .map(|summaries| {
                     summaries
                         .into_iter()

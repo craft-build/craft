@@ -60,6 +60,12 @@ pub fn thinking_delta(text: &str) -> SessionUpdate {
     ))))
 }
 
+pub fn user_message_chunk(text: &str) -> SessionUpdate {
+    SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+        text.to_string(),
+    ))))
+}
+
 pub fn tool_pending(id: &str, name: &str) -> SessionUpdate {
     let kind = tool_kind(name);
     SessionUpdate::ToolCall(
@@ -202,6 +208,9 @@ pub fn map_stop_reason(
         }
         Some(craft_providers::StopReason::ToolUse) => {
             agent_client_protocol_schema::StopReason::EndTurn
+        }
+        Some(craft_providers::StopReason::Cancelled) => {
+            agent_client_protocol_schema::StopReason::Cancelled
         }
     }
 }

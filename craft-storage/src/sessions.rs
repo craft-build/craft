@@ -90,6 +90,7 @@ pub struct Session<M, U, T> {
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
+    pub cwd: String,
     pub updated_at: u64,
 }
 
@@ -648,7 +649,7 @@ enum ScanRecord {
     Other,
 }
 
-fn scan_headers(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, StorageError> {
+fn scan_headers(cwd: Option<&str>, dir: &Path) -> Result<Vec<SessionSummary>, StorageError> {
     let mut out = Vec::new();
 
     for path in session_entries(dir)? {
@@ -670,14 +671,19 @@ fn scan_headers(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, StorageErr
     Ok(out)
 }
 
-fn scan_jsonl_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
+fn scan_jsonl_header(cwd: Option<&str>, path: &Path) -> Option<SessionSummary> {
     let file = File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
 
     let first_line = lines.next()?.ok()?;
     let header: JsonlHeader = serde_json::from_str(&first_line).ok()?;
-    if header.v > LOG_FORMAT_VERSION || header.cwd != cwd {
+    if header.v > LOG_FORMAT_VERSION {
+        return None;
+    }
+    if let Some(filter) = cwd
+        && header.cwd != filter
+    {
         return None;
     }
 
@@ -699,19 +705,26 @@ fn scan_jsonl_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
     Some(SessionSummary {
         id: header.id,
         title,
+        cwd: header.cwd,
         updated_at,
     })
 }
 
-fn scan_legacy_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
+fn scan_legacy_header(cwd: Option<&str>, path: &Path) -> Option<SessionSummary> {
     let data = fs::read(path).ok()?;
     let h: LegacyHeader = serde_json::from_slice(&data).ok()?;
-    if h.version != SESSION_VERSION || h.cwd != cwd {
+    if h.version != SESSION_VERSION {
+        return None;
+    }
+    if let Some(filter) = cwd
+        && h.cwd != filter
+    {
         return None;
     }
     Some(SessionSummary {
         id: h.id,
         title: h.title,
+        cwd: h.cwd,
         updated_at: h.updated_at,
     })
 }
@@ -803,12 +816,12 @@ where
         Ok(session)
     }
 
-    pub fn list(cwd: &str, dir: &StateDir) -> Result<Vec<SessionSummary>, SessionError> {
+    pub fn list(cwd: Option<&str>, dir: &StateDir) -> Result<Vec<SessionSummary>, SessionError> {
         let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
         Self::list_in(cwd, &sessions_dir)
     }
 
-    pub fn list_in(cwd: &str, dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
+    pub fn list_in(cwd: Option<&str>, dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
         let mut summaries = scan_headers(cwd, dir)?;
         summaries.sort_unstable_by_key(|s| Reverse(s.updated_at));
         Ok(summaries)
@@ -826,7 +839,7 @@ where
         {
             return Ok(Some(s));
         }
-        let summaries = scan_headers(cwd, dir)?;
+        let summaries = scan_headers(Some(cwd), dir)?;
         let latest = summaries.into_iter().max_by_key(|s| s.updated_at);
         match latest {
             Some(s) => Self::load_from(&s.id, dir).map(Some),
@@ -1097,7 +1110,7 @@ mod tests {
         s2.save_to(dir).unwrap();
         s3.save_to(dir).unwrap();
 
-        let list = TestSession::list_in("/project-a", dir).unwrap();
+        let list = TestSession::list_in(Some("/project-a"), dir).unwrap();
         assert_eq!(list.len(), 2);
         assert!(list.iter().all(|s| s.id != s2.id));
     }
@@ -1206,7 +1219,7 @@ mod tests {
         let json_path = dir.join(format!("{}.json", s2.id));
         fs::write(&json_path, serde_json::to_vec(&s2).unwrap()).unwrap();
 
-        let list = TestSession::list_in("/project", dir).unwrap();
+        let list = TestSession::list_in(Some("/project"), dir).unwrap();
         assert_eq!(list.len(), 2);
     }
 

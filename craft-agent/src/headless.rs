@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use craft_providers::Message;
+use craft_providers::StopReason;
 use craft_providers::Timeouts;
 use craft_providers::TokenUsage;
 use craft_providers::model::Model;
@@ -17,13 +18,29 @@ use crate::cancel::CancelToken;
 use crate::permissions::PermissionManager;
 use crate::prompt::ResolvedSlots;
 use crate::template;
-use crate::tools::{DescriptionContext, FileReadTracker, ToolFilter, ToolRegistry};
+use crate::tools::{DescriptionContext, FileReadTracker, FsBackend, ToolFilter, ToolRegistry};
 use crate::{
-    Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope,
-    EventSender, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
+    Envelope, EventSender, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
 };
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
+
+fn error_event(error: AgentError) -> AgentEvent {
+    match error {
+        AgentError::Cancelled => AgentEvent::Done {
+            usage: TokenUsage::default(),
+            num_turns: 0,
+            stop_reason: Some(StopReason::Cancelled),
+        },
+        e => {
+            error!(error = %e, "agent error");
+            AgentEvent::Error {
+                message: e.user_message(),
+            }
+        }
+    }
+}
 
 struct SessionStore {
     dir: StateDir,
@@ -211,10 +228,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                 .await;
 
             if let Err(e) = result {
-                error!(error = %e, "agent error");
-                let _ = error_tx.send(AgentEvent::Error {
-                    message: e.user_message(),
-                });
+                let _ = error_tx.send(error_event(e));
             }
 
             if let Some(handle) = mcp_shutdown {
@@ -247,6 +261,7 @@ pub struct InteractiveParams {
     pub yolo: bool,
     pub system_prompt_override: Option<String>,
     pub append_system_prompt: Option<String>,
+    pub fs: Arc<dyn FsBackend>,
 }
 
 pub struct InteractiveHandle {
@@ -387,7 +402,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         prompt_slots: Arc::clone(&params.prompt_slots),
                         compression: params.compression.clone(),
                         findings_store: Some(crate::FindingsStore::new_shared()),
-                        fs: Arc::new(crate::tools::LocalFs),
+                        fs: Arc::clone(&params.fs),
                         doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
                     },
                     AgentRunParams {
@@ -405,11 +420,8 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 let result = agent.run(input).await;
                 cancel_task.abort();
 
-                if let Err(ref e) = result {
-                    error!(error = %e, "agent error");
-                    let _ = error_tx.send(AgentEvent::Error {
-                        message: e.user_message(),
-                    });
+                if let Err(e) = result {
+                    let _ = error_tx.send(error_event(e));
                 }
 
                 if let Some(store) = &mut store {

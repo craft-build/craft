@@ -1,7 +1,9 @@
 use agent_client_protocol_schema::{
     AgentCapabilities, Implementation, InitializeResponse, LoadSessionResponse, McpCapabilities,
-    NewSessionResponse, PromptCapabilities, ProtocolVersion, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption,
+    NewSessionResponse, PromptCapabilities, ProtocolVersion, ResumeSessionResponse,
+    SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionListCapabilities, SessionMode,
+    SessionModeId, SessionModeState, SessionResumeCapabilities,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -13,15 +15,20 @@ pub const MODEL_CONFIG_ID: &str = "model";
 pub const MODE_CONFIG_ID: &str = "mode";
 
 pub fn initialize_response() -> InitializeResponse {
-    InitializeResponse::new(ProtocolVersion::V1)
-        .agent_capabilities(
-            AgentCapabilities::new()
-                .load_session(true)
-                .prompt_capabilities(PromptCapabilities::new().image(true).embedded_context(true))
-                .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
-        )
-        .auth_methods(vec![])
-        .agent_info(Implementation::new("craft", VERSION))
+    InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+        AgentCapabilities::new()
+            .load_session(true)
+            .session_capabilities(
+                SessionCapabilities::new()
+                    .list(SessionListCapabilities::new())
+                    .resume(SessionResumeCapabilities::new())
+                    .close(SessionCloseCapabilities::new()),
+            )
+            .prompt_capabilities(PromptCapabilities::new().image(true).embedded_context(true))
+            .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
+    )
+    .auth_methods(vec![])
+    .agent_info(Implementation::new("craft", VERSION))
 }
 
 pub fn mode_config_option(current: &str) -> SessionConfigOption {
@@ -43,13 +50,31 @@ fn model_config_option_default() -> SessionConfigOption {
     .category(SessionConfigOptionCategory::Model)
 }
 
+fn session_modes(current: &str) -> SessionModeState {
+    SessionModeState::new(
+        SessionModeId::from(current.to_string()),
+        vec![
+            SessionMode::new(MODE_BUILD.to_string(), "Build"),
+            SessionMode::new(MODE_PLAN.to_string(), "Plan"),
+        ],
+    )
+}
+
 pub fn new_session_response(session_id: &str) -> NewSessionResponse {
     NewSessionResponse::new(session_id.to_string())
+        .modes(session_modes(MODE_BUILD))
         .config_options(vec![mode_config_option(MODE_BUILD), model_config_option_default()])
 }
 
 pub fn load_session_response() -> LoadSessionResponse {
     LoadSessionResponse::new()
+        .modes(session_modes(MODE_BUILD))
+        .config_options(vec![mode_config_option(MODE_BUILD), model_config_option_default()])
+}
+
+pub fn resume_session_response() -> ResumeSessionResponse {
+    ResumeSessionResponse::new()
+        .modes(session_modes(MODE_BUILD))
         .config_options(vec![mode_config_option(MODE_BUILD), model_config_option_default()])
 }
 
