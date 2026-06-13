@@ -454,10 +454,10 @@ fn generalize_scope(tool: &str, scope: &str) -> String {
         "write" | "edit" | "multiedit" => {
             let p = Path::new(scope);
             match p.parent() {
-                Some(parent) if !parent.as_os_str().is_empty() => {
+                Some(parent) if !parent.as_os_str().is_empty() && parent != Path::new("/") => {
                     format!("{}/{}{}", parent.display(), "*", "*")
                 }
-                _ => format!("/{}{}", "*", "*"),
+                _ => "/**".to_string(),
             }
         }
         _ => scope.to_string(),
@@ -494,6 +494,10 @@ mod tests {
 
     fn default_mgr() -> PermissionManager {
         PermissionManager::new(PermissionsConfig::default(), PathBuf::from("/tmp"))
+    }
+
+    fn canonical_cwd() -> PathBuf {
+        PathBuf::from("/tmp").canonicalize().unwrap_or_else(|_| PathBuf::from("/tmp"))
     }
 
     #[test_case("*", "anything" => true ; "star")]
@@ -547,7 +551,15 @@ mod tests {
         ));
     }
 
-    #[test_case("write", "/tmp/file.txt" => true ; "write_in_cwd")]
+    #[test]
+    fn write_in_cwd() {
+        let scope = canonical_cwd().join("file.txt");
+        assert!(matches!(
+            default_mgr().check("write", &scope.to_string_lossy()),
+            PermissionCheck::Allowed
+        ));
+    }
+
     #[test_case("write", "/etc/passwd" => false ; "write_outside_cwd")]
     #[test_case("task", "task:research" => true ; "task_allowed")]
     #[test_case("bash", "cargo test" => false ; "bash_prompts")]

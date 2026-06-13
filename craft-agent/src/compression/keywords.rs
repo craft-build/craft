@@ -103,6 +103,16 @@ pub fn classify_line(line: &str) -> LineCategory {
         return LineCategory::Warning;
     }
 
+    if code_def_ac.is_match(trimmed) {
+        return LineCategory::CodeDefinition;
+    }
+    if code_import_ac.is_match(trimmed) {
+        return LineCategory::CodeImport;
+    }
+    if code_mod_ac.is_match(trimmed) {
+        return LineCategory::CodeModule;
+    }
+
     if trimmed.starts_with("//")
         || trimmed.starts_with("#")
         || trimmed.starts_with("--")
@@ -113,16 +123,6 @@ pub fn classify_line(line: &str) -> LineCategory {
     }
     if trimmed == "}" || trimmed == "end" || trimmed == "end;" {
         return LineCategory::ClosingBrace;
-    }
-
-    if code_def_ac.is_match(trimmed) {
-        return LineCategory::CodeDefinition;
-    }
-    if code_import_ac.is_match(trimmed) {
-        return LineCategory::CodeImport;
-    }
-    if code_mod_ac.is_match(trimmed) {
-        return LineCategory::CodeModule;
     }
 
     LineCategory::Other
