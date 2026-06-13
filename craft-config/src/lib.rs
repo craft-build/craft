@@ -1769,7 +1769,13 @@ mod tests {
 
     #[test]
     fn merge_tools_overlay_replaces_and_preserves() {
-        let mut base = RawConfig::default();
+        let mut base = RawConfig {
+            ui: UiFileConfig {
+                flash_duration_ms: Some(2000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         base.tools.insert(
             "index".to_string(),
             ToolFileConfig {
