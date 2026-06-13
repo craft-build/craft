@@ -531,7 +531,8 @@ impl Provider for Bedrock {
             }
             let auth = lock_unpoison(&self.auth).clone();
             let requested_id = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| model.id.clone());
-            let long_context = requested_id.ends_with(shared::LONG_CONTEXT_SUFFIX);
+            let long_context = requested_id.ends_with(shared::LONG_CONTEXT_SUFFIX)
+                || shared::has_native_1m(&requested_id);
             let model_id = shared::strip_long_context(&requested_id).to_string();
 
             let mut body = shared::build_request_body_with_system(

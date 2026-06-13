@@ -41,14 +41,22 @@ Read `justfile` for more.
 Rust workspace, key crates in root dir:
 
 - craft-ui: Uses ratatui for an interactive UI (elm like architecture)
-- craft-providers: Integration with LLM providers via APIs (e.g. Anthropic, Z.AI)
-- craft-agent: An async agent loop that runs on smol + tools descriptions and implementations
+- craft-agent: Async agent loop on tokio. Holds tool descriptions, the agent state machine, compression, snapshots, and skill loading
 - craft-interpreter: code_execution tool implementation using pydantic/monty (a minimal python sandbox)
+- craft-providers: Integration with LLM providers via APIs (e.g. Anthropic, Z.AI)
 - craft-storage: Persistent state across runs (e.g. sessions, auth)
 - craft-config: User config
+- craft-config-macro: Proc macro used by craft-config
 - craft-lua: Lua plugin system (API mirrored from neovim for plugin compatibility), built-in plugins in ./plugins dir
+- craft-tool-macro: Derive macro for tool schemas used by craft-agent
+- craft-acp: Agent Client Protocol server (exposes craft as an ACP-compatible agent to external clients like editors)
+- craft-docgen: Bin that generates the user docs in site/docs/content from the workspace metadata
+- craft-highlight: Thin wrapper around syntect/two-face for syntax highlighting
+- craft-markdown: Theme-free markdown parser and width-aware renderer, shared by craft-ui and craft-lua
 
-Built-in lua plugins in ./plugins: index (return a compact skeleton of a source file using tree-sitter), bash, glob, question, skill, memory, webfetch, websearch.
+Built-in lua plugins in ./plugins: index (compact tree-sitter skeleton of a source file), bash, glob, question, skill, memory, webfetch, websearch.
+
+The bin entry point lives in src/main.rs (clap dispatch into src/cmd/ subcommands, plus print, sdk_mode, setup, update). HTTP is done with reqwest. Async channels use flume.
 
 ## Docs
 

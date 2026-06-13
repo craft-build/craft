@@ -20,17 +20,34 @@ pub(crate) const LONG_CONTEXT_SUFFIX: &str = "-1m";
 pub(crate) const LONG_CONTEXT_BETA: &str = "context-1m-2025-08-07";
 pub(crate) const LONG_CONTEXT_WINDOW: u32 = 1_000_000;
 
+/// Model prefixes that natively support 1M context without the `-1m` suffix.
+const NATIVE_1M_PREFIXES: &[&str] = &[
+    "claude-sonnet-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable-5",
+];
+
+pub(crate) fn has_native_1m(model_id: &str) -> bool {
+    NATIVE_1M_PREFIXES
+        .iter()
+        .any(|p| strip_long_context(model_id).starts_with(p))
+}
+
 pub(crate) fn strip_long_context(model_id: &str) -> &str {
     model_id
         .strip_suffix(LONG_CONTEXT_SUFFIX)
         .unwrap_or(model_id)
 }
 
-/// A `-1m` model is just its base entry with a wider window.
+/// Returns the 1M context window if the model either has the `-1m` suffix
+/// or is one of the models that natively supports 1M context.
 pub(crate) fn long_context_window(model_id: &str) -> Option<u32> {
-    model_id
-        .ends_with(LONG_CONTEXT_SUFFIX)
-        .then_some(LONG_CONTEXT_WINDOW)
+    if model_id.ends_with(LONG_CONTEXT_SUFFIX) || has_native_1m(model_id) {
+        Some(LONG_CONTEXT_WINDOW)
+    } else {
+        None
+    }
 }
 
 pub(super) const MESSAGE_CACHE_BREAKPOINTS: usize = 2;
@@ -547,7 +564,8 @@ mod tests {
     use test_case::test_case;
 
     use super::{
-        LONG_CONTEXT_SUFFIX, LONG_CONTEXT_WINDOW, long_context_window, strip_long_context,
+        LONG_CONTEXT_SUFFIX, LONG_CONTEXT_WINDOW, has_native_1m, long_context_window,
+        strip_long_context,
     };
 
     #[test_case("claude-opus-4-8-1m", "claude-opus-4-8" ; "strips_suffix")]
@@ -561,5 +579,30 @@ mod tests {
     fn long_context_window_follows_suffix(model_id: &str, expected: Option<u32>) {
         assert_eq!(long_context_window(model_id), expected);
         assert!(LONG_CONTEXT_SUFFIX.ends_with("1m"));
+    }
+
+    #[test_case("claude-sonnet-4-6" ; "sonnet_4_6")]
+    #[test_case("claude-opus-4-7" ; "opus_4_7")]
+    #[test_case("claude-opus-4-8" ; "opus_4_8")]
+    #[test_case("claude-fable-5" ; "fable_5")]
+    #[test_case("claude-opus-4-8-1m" ; "with_1m_suffix")]
+    fn has_native_1m_true(model_id: &str) {
+        assert!(has_native_1m(model_id));
+    }
+
+    #[test_case("claude-haiku-4-5" ; "haiku")]
+    #[test_case("claude-sonnet-4-5" ; "sonnet_4_5")]
+    #[test_case("claude-opus-4-6" ; "opus_4_6")]
+    fn has_native_1m_false(model_id: &str) {
+        assert!(!has_native_1m(model_id));
+    }
+
+    #[test_case("claude-sonnet-4-6", LONG_CONTEXT_WINDOW ; "native_1m_sonnet")]
+    #[test_case("claude-opus-4-8", LONG_CONTEXT_WINDOW ; "native_1m_opus")]
+    #[test_case("claude-fable-5", LONG_CONTEXT_WINDOW ; "native_1m_fable")]
+    #[test_case("claude-opus-4-8-1m", LONG_CONTEXT_WINDOW ; "suffix_1m")]
+    #[test_case("claude-haiku-4-5", 200_000 ; "base_model")]
+    fn long_context_window_for_native_1m(model_id: &str, expected: u32) {
+        assert_eq!(long_context_window(model_id).unwrap_or(200_000), expected);
     }
 }

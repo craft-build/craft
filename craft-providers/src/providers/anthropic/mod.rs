@@ -225,7 +225,8 @@ impl Provider for Anthropic {
             body["model"] = json!(shared::strip_long_context(&model.id));
             body["stream"] = json!(true);
             apply_fast_mode(&mut body, fast);
-            let long_context = model.id.ends_with(shared::LONG_CONTEXT_SUFFIX);
+            let long_context = model.id.ends_with(shared::LONG_CONTEXT_SUFFIX)
+                || shared::has_native_1m(&model.id);
 
             debug!(model = %model.id, num_messages = messages.len(), ?thinking, fast, long_context, "sending API request");
             self.do_stream_request(&body, event_tx, fast, long_context)
