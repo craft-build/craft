@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol_schema::{
-    AgentNotification, AgentRequest, AgentResponse, ContentBlock,
+    AgentNotification, AgentRequest, AgentResponse, ConfigOptionUpdate, ContentBlock,
     CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent, JsonRpcMessage,
     LoadSessionRequest, NewSessionRequest, Notification, PromptRequest, PromptResponse, Request,
     RequestId, RequestPermissionRequest, RequestPermissionResponse, Response, SessionId,
@@ -28,6 +28,7 @@ use crate::{AcpParams, methods, permissions, translate};
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 
 type PendingPrompt = Arc<Mutex<Option<RequestId>>>;
+type ModelSpecs = Arc<Mutex<Vec<String>>>;
 
 struct SessionState {
     handle: InteractiveHandle,
@@ -36,9 +37,17 @@ struct SessionState {
     pending_prompt: PendingPrompt,
 }
 
+struct SessionInfo {
+    session_id: String,
+    current_model: String,
+}
+
+type SharedSession = Arc<Mutex<Option<SessionInfo>>>;
+
 struct Server {
     out_tx: Sender<Value>,
-    model_specs: Vec<String>,
+    model_specs: ModelSpecs,
+    shared_session: SharedSession,
     session: Option<SessionState>,
 }
 
@@ -62,10 +71,42 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         }
     });
 
-    let model_specs = Vec::new();
+    let shared_session: SharedSession = Arc::new(Mutex::new(None));
+    let model_specs: ModelSpecs = Arc::new(Mutex::new(Vec::new()));
+
+    let bg_specs = Arc::clone(&model_specs);
+    let bg_session = Arc::clone(&shared_session);
+    let bg_out = out_tx.clone();
+
+    let _bg_fetch = tokio::spawn(async move {
+        craft_providers::provider::fetch_all_models(|batch| {
+            if batch.models.is_empty() {
+                return;
+            }
+            let mut specs = bg_specs.lock().unwrap_or_else(|e| e.into_inner());
+            specs.extend(batch.models);
+            let guard = specs.clone();
+            drop(specs);
+
+            let sess = bg_session.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(info) = &*sess {
+                let sid = SessionId::from(info.session_id.clone());
+                session_update(
+                    &bg_out,
+                    &sid,
+                    SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![
+                        methods::model_config_option(&info.current_model, &guard),
+                    ])),
+                );
+            }
+        })
+        .await;
+    });
+
     let mut server = Server {
         out_tx,
         model_specs,
+        shared_session,
         session: None,
     };
 
@@ -124,8 +165,11 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
         "session/new" => parse_params::<NewSessionRequest>(raw).map(|req| {
             let handle = spawn_session(params, req.cwd, None, Vec::new());
             let spec = params.model.spec();
-            let resp = methods::new_session_response(&handle.session_id)
-                .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
+            let resp = {
+                let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
+                methods::new_session_response(&handle.session_id)
+                    .config_options(vec![methods::model_config_option(&spec, &specs)])
+            };
             install_session(srv, handle, spec);
             AgentResponse::NewSessionResponse(resp)
         }),
@@ -138,8 +182,11 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
             }
             let handle = spawn_session(params, req.cwd, Some(session_id), history);
             let spec = params.model.spec();
-            let resp = methods::load_session_response()
-                .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
+            let resp = {
+                let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
+                methods::load_session_response()
+                    .config_options(vec![methods::model_config_option(&spec, &specs)])
+            };
             install_session(srv, handle, spec);
             Ok(AgentResponse::LoadSessionResponse(resp))
         }),
@@ -179,6 +226,7 @@ fn spawn_session(
 }
 
 fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: String) {
+    let session_id = handle.session_id.clone();
     let pending = PendingPrompt::default();
     start_event_pump(
         handle.event_rx.clone(),
@@ -186,6 +234,10 @@ fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: S
         srv.out_tx.clone(),
         Arc::clone(&pending),
     );
+    *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionInfo {
+        session_id: session_id.clone(),
+        current_model: current_model.clone(),
+    });
     srv.session = Some(SessionState {
         handle,
         current_mode: AgentMode::Build,
@@ -274,10 +326,15 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         .map_err(|_| AcpError::new(-32603, "session ended"))?;
     session.current_model = spec.clone();
 
+    if let Some(info) = srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        info.current_model = spec.clone();
+    }
+
+    let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
     Ok(AgentResponse::SetSessionConfigOptionResponse(
         SetSessionConfigOptionResponse::new(vec![methods::model_config_option(
             &spec,
-            &srv.model_specs,
+            &specs,
         )]),
     ))
 }
