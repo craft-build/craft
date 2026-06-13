@@ -1,14 +1,30 @@
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 use craft_providers::{ContentBlock, Message, Role};
 
 const CANCEL_MARKER: &str = "[Cancelled by user]";
+const UNAVAILABLE_RESULT: &str = "[Tool result not available]";
+
+pub type SharedMessages = Arc<ArcSwap<Vec<Message>>>;
 
 pub struct History {
     messages: Vec<Message>,
+    mirror: Option<SharedMessages>,
 }
 
 impl History {
     pub fn new(messages: Vec<Message>) -> Self {
-        Self { messages }
+        Self {
+            messages,
+            mirror: None,
+        }
+    }
+
+    pub fn with_mirror(mut self, mirror: SharedMessages) -> Self {
+        self.mirror = Some(mirror);
+        self.publish();
+        self
     }
 
     pub fn as_slice(&self) -> &[Message] {
@@ -20,7 +36,7 @@ impl History {
     }
 
     pub fn push(&mut self, msg: Message) {
-        self.messages.push(msg);
+        self.edit(|msgs| msgs.push(msg));
     }
 
     pub fn len(&self) -> usize {
@@ -32,25 +48,36 @@ impl History {
     }
 
     pub fn replace(&mut self, messages: Vec<Message>) {
-        self.messages = messages;
+        self.edit(|msgs| *msgs = messages);
     }
 
     pub fn truncate(&mut self, len: usize) {
-        self.messages.truncate(len);
+        self.edit(|msgs| msgs.truncate(len));
     }
 
     pub fn into_vec(self) -> Vec<Message> {
         self.messages
     }
 
+    pub fn edit(&mut self, f: impl FnOnce(&mut Vec<Message>)) {
+        f(&mut self.messages);
+        self.publish();
+    }
+
+    fn publish(&self) {
+        if let Some(mirror) = &self.mirror {
+            let mut snapshot = self.messages.clone();
+            close_dangling_tool_calls(&mut snapshot, UNAVAILABLE_RESULT);
+            mirror.store(Arc::new(snapshot));
+        }
+    }
+
     pub fn select_view(&self, indices: &[usize], total_len: usize) -> Vec<Message> {
         let mut result = Vec::new();
         let mut last_included: Option<usize> = None;
-        let mut _gap_start: Option<usize> = None;
 
         for &idx in indices {
         if let Some(prev) = last_included && idx > prev + 1 {
-            _gap_start = Some(prev + 1);
             let gap_count = idx - prev - 1;
             result.push(Message::user(format!(
                 "[{gap_count} earlier messages omitted — use retrieve tool if needed]"
@@ -113,27 +140,34 @@ impl History {
     }
 }
 
+fn close_dangling_tool_calls(messages: &mut Vec<Message>, note: &str) {
+    let Some(last) = messages.last() else { return };
+    if !matches!(last.role, Role::Assistant) || !last.has_tool_calls() {
+        return;
+    }
+    let error_results: Vec<ContentBlock> = last
+        .tool_uses()
+        .map(|(id, _, _)| ContentBlock::ToolResult {
+            tool_use_id: id.to_owned(),
+            content: note.to_owned(),
+            is_error: true,
+        })
+        .collect();
+    messages.push(Message {
+        role: Role::User,
+        content: error_results,
+        display_text: Some(String::new()),
+    });
+}
+
 pub(crate) fn sanitize_cancelled_history(history: &mut History, rollback_len: usize) {
     if history.len() <= rollback_len {
         return;
     }
-    let last = history.as_slice().last().unwrap();
-    if matches!(last.role, Role::Assistant) && last.has_tool_calls() {
-        let error_results: Vec<ContentBlock> = last
-            .tool_uses()
-            .map(|(id, _, _)| ContentBlock::ToolResult {
-                tool_use_id: id.to_owned(),
-                content: CANCEL_MARKER.to_owned(),
-                is_error: true,
-            })
-            .collect();
-        history.push(Message {
-            role: Role::User,
-            content: error_results,
-            display_text: Some(String::new()),
-        });
-    }
-    history.push(Message::synthetic(CANCEL_MARKER.into()));
+    history.edit(|msgs| {
+        close_dangling_tool_calls(msgs, CANCEL_MARKER);
+        msgs.push(Message::synthetic(CANCEL_MARKER.into()));
+    });
 }
 
 #[cfg(test)]

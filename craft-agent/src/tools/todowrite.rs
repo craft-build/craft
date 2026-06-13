@@ -25,6 +25,7 @@ super::impl_tool!(
     audience = super::ToolAudience::MAIN
         | super::ToolAudience::RESEARCH_SUB
         | super::ToolAudience::GENERAL_SUB,
+    kind = "think",
 );
 
 impl super::ToolInvocation for TodoWrite {

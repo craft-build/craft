@@ -112,6 +112,7 @@ end
 
 craft.api.register_tool({
   name = "index",
+  kind = "read",
   description = [[
 Return a compact overview of a source file: imports, type definitions, function signatures, and structure with their line numbers surrounded by []. ~70-90% more efficient than reading the full file.
 

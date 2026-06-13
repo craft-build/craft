@@ -233,6 +233,7 @@ Commands run in ]] .. cwd .. [[ by default.
 
 craft.api.register_tool({
   name = "bash",
+  kind = "execute",
   description = description,
   schema = {
     type = "object",

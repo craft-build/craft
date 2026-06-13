@@ -77,7 +77,7 @@ fn parse_priority(s: &str) -> Result<Priority, String> {
     }
 }
 
-super::impl_tool!(ReadFindings, audience = super::ToolAudience::MAIN);
+super::impl_tool!(ReadFindings, audience = super::ToolAudience::MAIN, kind = "search");
 
 impl ToolInvocation for ReadFindings {
     fn start_header(&self) -> super::HeaderFuture {

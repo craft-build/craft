@@ -131,20 +131,40 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     if cli.print {
         let fast = config.always_fast && model.supports_fast();
-        crate::print::run(
-            &model,
-            cli.prompt,
-            cli.output_format,
-            cli.verbose,
-            config.agent,
-            config.compression,
-            config.permissions,
-            timeouts,
-            plugin_host.event_handle(),
-            fast,
-        )
-        .await
-        .context("run print mode")?;
+        if cli.is_sdk_mode() {
+            let prompt_slots = plugin_host
+                .event_handle()
+                .as_ref()
+                .map(|h| h.collect_prompt_slots())
+                .unwrap_or_default();
+            crate::sdk_mode::run(crate::sdk_mode::SdkParams {
+                cli,
+                model,
+                config: config.agent,
+                compression: config.compression,
+                permissions_config: config.permissions,
+                timeouts,
+                prompt_slots,
+                fast,
+            })
+            .await
+            .context("run SDK mode")?;
+        } else {
+            crate::print::run(
+                &model,
+                cli.prompt,
+                cli.output_format,
+                cli.verbose,
+                config.agent,
+                config.compression,
+                config.permissions,
+                timeouts,
+                plugin_host.event_handle(),
+                fast,
+            )
+            .await
+            .context("run print mode")?;
+        }
     } else {
         let cwd_str = cwd.to_string_lossy().into_owned();
         let mut session = resolve_session(

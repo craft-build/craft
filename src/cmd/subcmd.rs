@@ -13,6 +13,8 @@ use craft_providers::provider::fetch_all_models;
 use craft_providers::{copilot_auth, dynamic, openai_auth};
 use craft_storage::StateDir;
 
+pub mod acp;
+
 pub async fn auth_login(provider: &str, storage: &StateDir) -> Result<()> {
     match provider {
         "openai" => openai_auth::login(storage).await?,

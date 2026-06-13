@@ -26,7 +26,7 @@ impl StyleguideList {
     }
 }
 
-super::impl_tool!(StyleguideList);
+super::impl_tool!(StyleguideList, kind = "search");
 
 impl super::ToolInvocation for StyleguideList {
     fn start_header(&self) -> super::HeaderFuture {
@@ -72,7 +72,7 @@ impl StyleguideSearch {
     }
 }
 
-super::impl_tool!(StyleguideSearch);
+super::impl_tool!(StyleguideSearch, kind = "search");
 
 impl super::ToolInvocation for StyleguideSearch {
     fn start_header(&self) -> super::HeaderFuture {
@@ -127,7 +127,7 @@ impl StyleguideGet {
     }
 }
 
-super::impl_tool!(StyleguideGet);
+super::impl_tool!(StyleguideGet, kind = "search");
 
 impl super::ToolInvocation for StyleguideGet {
     fn start_header(&self) -> super::HeaderFuture {

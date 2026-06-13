@@ -28,7 +28,7 @@ pub struct Grep {
     pattern: String,
     #[param(description = "Directory to search in (default: cwd)")]
     path: Option<String>,
-    #[param(description = "File glob filter (e.g. *.c)")]
+    #[param(description = "File glob filter (e.g. *.c)", alias = "glob")]
     include: Option<String>,
     #[param(description = "Context lines before match")]
     context_before: Option<usize>,
@@ -173,7 +173,7 @@ impl Grep {
     }
 }
 
-super::impl_tool!(Grep);
+super::impl_tool!(Grep, kind = "search");
 
 impl super::ToolInvocation for Grep {
     fn start_header(&self) -> super::HeaderFuture {

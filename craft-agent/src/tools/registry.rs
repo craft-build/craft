@@ -199,6 +199,9 @@ pub trait Tool: Send + Sync + 'static {
         ToolAudience::default()
     }
     fn parse(&self, input: &Value) -> Result<Box<dyn ToolInvocation>, ParseError>;
+    fn tool_kind(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Clone)]

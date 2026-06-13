@@ -8,7 +8,7 @@ use super::relative_path;
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct Write {
-    #[param(description = "Absolute path to the file")]
+    #[param(description = "Absolute path to the file", alias = "file_path")]
     path: String,
     #[param(description = "The complete file content to write")]
     content: String,
@@ -58,6 +58,7 @@ super::impl_tool!(
     audience = super::ToolAudience::MAIN
         | super::ToolAudience::GENERAL_SUB
         | super::ToolAudience::INTERPRETER,
+    kind = "edit",
 );
 
 impl super::ToolInvocation for Write {

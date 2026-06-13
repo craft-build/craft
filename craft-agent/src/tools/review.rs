@@ -122,6 +122,7 @@ impl Review {
             ..Default::default()
         };
 
+        let mut history = crate::History::new(Vec::new());
         let agent = Agent::new(
             AgentParams {
                 provider: Arc::clone(&ctx.provider),
@@ -139,7 +140,7 @@ impl Review {
                 doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
             },
             AgentRunParams {
-                history: crate::History::new(Vec::new()),
+                history: &mut history,
                 system,
                 event_tx: sub_event_tx,
                 tools,
@@ -149,12 +150,12 @@ impl Review {
         .with_mcp(ctx.mcp.clone());
 
         info!(task = %self.task, "review subagent spawning");
-        let outcome = agent.run(input).await;
+        let result = agent.run(input).await;
         drop(_child_trigger);
 
-        outcome.result.map_err(|e| format!("review sub-agent error: {e}"))?;
+        result.map_err(|e| format!("review sub-agent error: {e}"))?;
 
-        let messages = outcome.history.into_vec();
+        let messages = history.into_vec();
         let text = messages
             .iter()
             .rev()
@@ -189,7 +190,7 @@ impl Review {
     }
 }
 
-super::impl_tool!(Review, audience = super::ToolAudience::MAIN);
+super::impl_tool!(Review, audience = super::ToolAudience::MAIN, kind = "think");
 
 impl super::ToolInvocation for Review {
     fn start_header(&self) -> super::HeaderFuture {

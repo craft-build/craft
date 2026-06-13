@@ -72,6 +72,7 @@ pub struct TodoItem {
     #[param(description = "Task description")]
     pub content: String,
     pub status: TodoStatus,
+    #[serde(default)]
     pub priority: TodoPriority,
 }
 
@@ -95,11 +96,14 @@ impl TodoStatus {
     }
 }
 
-#[derive(ArgEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, strum::Display)]
+#[derive(
+    ArgEnum, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum TodoPriority {
     High,
+    #[default]
     Medium,
     Low,
 }
@@ -757,6 +761,7 @@ pub struct TurnCompleteEvent {
 pub struct BatchProgressEvent {
     pub batch_id: String,
     pub index: usize,
+    pub tool: String,
     pub status: BatchToolStatus,
     pub output: Option<ToolOutput>,
     pub summary: Option<String>,

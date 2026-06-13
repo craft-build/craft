@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
 
+use crate::api::fs::expand_tilde;
 use crate::plugin_permissions::{Permission::{Env, Run}, PluginPermissions};
 use crate::runtime::with_task_jobs;
 use crate::terminal_backend::{
@@ -188,7 +189,16 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 };
 
                 let (backend, id) = with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
-                let spec = TerminalSpec { cmd, cwd, env };
+                let cwd = cwd.as_deref().map(expand_tilde);
+                if let Some(ref dir) = cwd
+                    && !dir.is_dir()
+                {
+                    return Err(mlua::Error::runtime(format!(
+                        "cwd is not a directory: {}",
+                        dir.display()
+                    )));
+                }
+                let spec = TerminalSpec { cmd, cwd: cwd.map(|p| p.to_string_lossy().into_owned()), env };
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
                     store.register(id, handle, on_stdout, on_stderr, on_exit);

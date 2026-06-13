@@ -11,7 +11,7 @@ use super::{relative_path, truncate_bytes};
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct Read {
-    #[param(description = "Absolute path to the file or directory")]
+    #[param(description = "Absolute path to the file or directory", alias = "file_path")]
     path: String,
     #[param(description = "Line number to start from (1-indexed)")]
     offset: Option<usize>,
@@ -136,7 +136,7 @@ impl Read {
     }
 }
 
-super::impl_tool!(Read);
+super::impl_tool!(Read, kind = "read");
 
 impl super::ToolInvocation for Read {
     fn start_header(&self) -> super::HeaderFuture {

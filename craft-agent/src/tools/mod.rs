@@ -513,9 +513,12 @@ macro_rules! impl_tool {
     (@augment_body $desc:ident, $ctx:ident, $f:expr) => { ($f)(&mut $desc, $ctx); };
     (@audience_body) => { $crate::tools::ToolAudience::all() };
     (@audience_body $aud:expr) => { $aud };
+    (@kind_body) => { None };
+    (@kind_body $kind:expr) => { Some($kind) };
     (
         $ty:ty
         $(, audience = $aud:expr)?
+        $(, kind = $kind:expr)?
         $(, augment = $augment:expr)?
         $(,)?
     ) => {
@@ -543,6 +546,10 @@ macro_rules! impl_tool {
 
             fn audience(&self) -> $crate::tools::ToolAudience {
                 $crate::tools::impl_tool!(@audience_body $($aud)?)
+            }
+
+            fn tool_kind(&self) -> Option<&str> {
+                $crate::tools::impl_tool!(@kind_body $($kind)?)
             }
 
             fn parse(&self, input: &serde_json::Value)

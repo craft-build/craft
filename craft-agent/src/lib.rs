@@ -12,7 +12,7 @@ pub use mcp::{McpCommand, McpHandle, McpPromptArg, McpPromptInfo, McpSnapshot, M
 pub(crate) mod task_set;
 pub use agent::{
     Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
-    LoadedInstructions, RunOutcome, SharedDoomTracker, SharedFindingsStore, StoredFinding,
+    LoadedInstructions, SharedDoomTracker, SharedFindingsStore, SharedMessages, StoredFinding,
 };
 pub use agent::EmbedRequest;
 #[cfg(feature = "onnx")]

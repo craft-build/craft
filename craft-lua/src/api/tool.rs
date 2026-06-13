@@ -44,6 +44,7 @@ pub(crate) struct PendingTool {
     pub(crate) permission_scope_kind: Option<PermissionScopeKind>,
     pub(crate) permission_scopes_key: Option<RegistryKey>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) kind: Option<Arc<str>>,
 }
 
 pub(crate) type PendingTools = Arc<Mutex<Vec<PendingTool>>>;
@@ -58,6 +59,7 @@ pub(crate) struct LuaTool {
     pub(crate) has_header_fn: bool,
     pub(crate) permission_scope_kind: Option<PermissionScopeKind>,
     pub(crate) timeout: Option<Duration>,
+    pub(crate) kind: Option<Arc<str>>,
 }
 
 impl Tool for LuaTool {
@@ -99,6 +101,10 @@ impl Tool for LuaTool {
             permission_state,
             timeout: self.timeout,
         }))
+    }
+
+    fn tool_kind(&self) -> Option<&str> {
+        self.kind.as_deref()
     }
 }
 
@@ -499,6 +505,7 @@ fn register_tool_from_lua(lua: &Lua, spec: &Table, pending: PendingTools) -> Lua
     let restore_fn: Option<Function> = spec.get("restore").ok();
     let audience = parse_audience(audiences)?;
     let timeout = parse_timeout(spec)?;
+    let kind: Option<Arc<str>> = spec.get::<String>("kind").ok().map(|s| Arc::from(s.as_str()));
     let handler_key: RegistryKey = lua.create_registry_value(handler)?;
     let header_key = header_fn
         .map(|f| lua.create_registry_value(f))
@@ -522,6 +529,7 @@ fn register_tool_from_lua(lua: &Lua, spec: &Table, pending: PendingTools) -> Lua
             permission_scope_kind,
             permission_scopes_key,
             timeout,
+            kind,
         });
 
     Ok(())
@@ -735,6 +743,7 @@ mod tests {
             has_header_fn: false,
             permission_scope_kind,
             timeout: Some(Duration::from_secs(60)),
+            kind: None,
         }
     }
 
@@ -900,6 +909,7 @@ mod tests {
             has_header_fn: false,
             permission_scope_kind: Some(PermissionScopeKind::Field(Arc::from("count"))),
             timeout: Some(Duration::from_secs(60)),
+            kind: None,
         };
         let inv = tool.parse(&serde_json::json!({"count": 42})).unwrap();
         assert!(inv.permission_scopes().await.is_none());

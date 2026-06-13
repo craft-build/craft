@@ -871,6 +871,9 @@ pub struct AgentConfig {
 
     #[config(skip, default = "SmallModelConfig::default()")]
     pub small_model: SmallModelConfig,
+
+    #[config(skip, default = "None")]
+    pub max_turns: Option<u32>,
 }
 
 impl AgentConfig {
@@ -924,6 +927,7 @@ impl AgentConfig {
             trust_decay: file.trust_decay,
             validation: file.validation,
             small_model: file.small_model,
+            max_turns: None,
         }
     }
 

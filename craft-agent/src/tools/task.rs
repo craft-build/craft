@@ -67,14 +67,17 @@ impl Task {
             if effective == ctx.model.tier {
                 (Model::clone(&ctx.model), Arc::clone(&ctx.provider))
             } else {
-                let resolved_model = tier_map::tier_map()
-                    .read()
-                    .unwrap()
-                    .spec_for_tier(ctx.model.provider, effective)
-                    .or_else(|| tier_map::tier_map().read().unwrap().spec_for_tier_any(effective))
-                    .and_then(|spec| Model::from_spec(&spec).ok())
-                    .or_else(|| Model::from_tier_dynamic(ctx.model.provider, effective, ctx.model.dynamic_slug.as_deref()).ok())
-                    .ok_or_else(|| format!("no model available for tier {effective}"))?;
+                let resolved_model = {
+                    let map = tier_map::tier_map()
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    map
+                        .spec_for_tier(ctx.model.provider, effective)
+                        .or_else(|| map.spec_for_tier_any(effective))
+                        .and_then(|spec| Model::from_spec(&spec).ok())
+                        .or_else(|| Model::from_tier_dynamic(ctx.model.provider, effective, ctx.model.dynamic_slug.as_deref()).ok())
+                        .ok_or_else(|| format!("no model available for tier {effective}"))?
+                };
                 let resolved_provider = provider::from_model(&resolved_model, ctx.timeouts)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -158,6 +161,7 @@ impl Task {
             ..Default::default()
         };
 
+        let mut history = crate::History::new(Vec::new());
         let agent = Agent::new(
             AgentParams {
                 provider,
@@ -175,7 +179,7 @@ impl Task {
                 doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
             },
             AgentRunParams {
-                history: crate::History::new(Vec::new()),
+                history: &mut history,
                 system,
                 event_tx: sub_event_tx,
                 tools,
@@ -185,16 +189,15 @@ impl Task {
         .with_cancel(child_cancel)
         .with_mcp(ctx.mcp.clone());
         let start = Instant::now();
-        let outcome = agent.run(input).await;
+        let result = agent.run(input).await;
         let duration_ms = start.elapsed().as_millis() as u64;
         drop(child_trigger);
-        let success = outcome.result.is_ok();
+        let success = result.is_ok();
         info!(description = %self.description, duration_ms, success, "subagent completed");
-        outcome
-            .result
+        result
             .map_err(|e| format!("sub-agent error: {e}"))?;
 
-        let messages = outcome.history.into_vec();
+        let messages = history.into_vec();
 
         let text = messages
             .iter()
@@ -223,7 +226,7 @@ impl Task {
     }
 }
 
-super::impl_tool!(Task, audience = super::ToolAudience::MAIN);
+super::impl_tool!(Task, audience = super::ToolAudience::MAIN, kind = "think");
 
 impl super::ToolInvocation for Task {
     fn start_header(&self) -> super::HeaderFuture {

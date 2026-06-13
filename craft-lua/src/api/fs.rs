@@ -8,7 +8,7 @@ use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::plugin_permissions::{Permission::{FsRead, FsWrite}, PluginPermissions};
 
-fn expand_tilde(path: &str) -> PathBuf {
+pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = craft_storage::paths::home() {
             return home.join(rest);
