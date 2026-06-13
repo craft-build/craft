@@ -1,16 +1,16 @@
 use agent_client_protocol_schema::{
     AgentCapabilities, Implementation, InitializeResponse, LoadSessionResponse, McpCapabilities,
     NewSessionResponse, PromptCapabilities, ProtocolVersion, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionMode, SessionModeId,
-    SessionModeState,
+    SessionConfigOptionCategory, SessionConfigSelectOption,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const MODE_BUILD: &str = "build";
-const MODE_PLAN: &str = "plan";
+pub const MODE_BUILD: &str = "build";
+pub const MODE_PLAN: &str = "plan";
 
 pub const MODEL_CONFIG_ID: &str = "model";
+pub const MODE_CONFIG_ID: &str = "mode";
 
 pub fn initialize_response() -> InitializeResponse {
     InitializeResponse::new(ProtocolVersion::V1)
@@ -24,22 +24,33 @@ pub fn initialize_response() -> InitializeResponse {
         .agent_info(Implementation::new("craft", VERSION))
 }
 
-pub fn mode_state(current: &str) -> SessionModeState {
-    SessionModeState::new(
-        SessionModeId::from(current.to_string()),
-        vec![
-            SessionMode::new(SessionModeId::from(MODE_BUILD.to_string()), "Build"),
-            SessionMode::new(SessionModeId::from(MODE_PLAN.to_string()), "Plan"),
-        ],
+pub fn mode_config_option(current: &str) -> SessionConfigOption {
+    let options = vec![
+        SessionConfigSelectOption::new(MODE_BUILD.to_string(), "Build"),
+        SessionConfigSelectOption::new(MODE_PLAN.to_string(), "Plan"),
+    ];
+    SessionConfigOption::select(MODE_CONFIG_ID, "Mode", current.to_string(), options)
+        .category(SessionConfigOptionCategory::Mode)
+}
+
+fn model_config_option_default() -> SessionConfigOption {
+    SessionConfigOption::select(
+        MODEL_CONFIG_ID,
+        "Model",
+        "",
+        Vec::<SessionConfigSelectOption>::new(),
     )
+    .category(SessionConfigOptionCategory::Model)
 }
 
 pub fn new_session_response(session_id: &str) -> NewSessionResponse {
-    NewSessionResponse::new(session_id.to_string()).modes(mode_state(MODE_BUILD))
+    NewSessionResponse::new(session_id.to_string())
+        .config_options(vec![mode_config_option(MODE_BUILD), model_config_option_default()])
 }
 
 pub fn load_session_response() -> LoadSessionResponse {
-    LoadSessionResponse::new().modes(mode_state(MODE_BUILD))
+    LoadSessionResponse::new()
+        .config_options(vec![mode_config_option(MODE_BUILD), model_config_option_default()])
 }
 
 pub fn model_config_option(current: &str, specs: &[String]) -> SessionConfigOption {

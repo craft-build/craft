@@ -622,7 +622,13 @@ fn record_tool_result(
     if is_read_only && !done.is_error
         && let Some(key) = dedup_key
     {
-        dedup.insert(key, &done.output);
+        let path = extract_file_path(input_val);
+        dedup.insert(key, &done.output, path.as_deref());
+    }
+    if !is_read_only && !done.is_error {
+        for p in extract_write_paths(&done.tool, input_val) {
+            dedup.invalidate_path(&p);
+        }
     }
 }
 

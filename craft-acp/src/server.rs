@@ -95,6 +95,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
                     &bg_out,
                     &sid,
                     SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![
+                        methods::mode_config_option(methods::MODE_BUILD),
                         methods::model_config_option(&info.current_model, &guard),
                     ])),
                 );
@@ -168,7 +169,10 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
                 methods::new_session_response(&handle.session_id)
-                    .config_options(vec![methods::model_config_option(&spec, &specs)])
+                    .config_options(vec![
+                        methods::mode_config_option(methods::MODE_BUILD),
+                        methods::model_config_option(&spec, &specs),
+                    ])
             };
             install_session(srv, handle, spec);
             AgentResponse::NewSessionResponse(resp)
@@ -185,7 +189,10 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
                 methods::load_session_response()
-                    .config_options(vec![methods::model_config_option(&spec, &specs)])
+                    .config_options(vec![
+                        methods::mode_config_option(methods::MODE_BUILD),
+                        methods::model_config_option(&spec, &specs),
+                    ])
             };
             install_session(srv, handle, spec);
             Ok(AgentResponse::LoadSessionResponse(resp))
@@ -309,7 +316,13 @@ fn handle_set_mode(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpEr
 
 fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpError> {
     let req: SetSessionConfigOptionRequest = parse_params(raw)?;
-    if req.config_id.0.as_ref() != methods::MODEL_CONFIG_ID {
+    let config_id = req.config_id.0.as_ref();
+
+    if config_id == methods::MODE_CONFIG_ID {
+        return handle_set_mode_config(srv, &req);
+    }
+
+    if config_id != methods::MODEL_CONFIG_ID {
         let detail = format!("unknown config option: {}", req.config_id);
         return Err(AcpError::invalid_params().data(json_str(&detail)));
     }
@@ -330,12 +343,44 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         info.current_model = spec.clone();
     }
 
+    let mode = srv.session.as_ref().map(|s| &s.current_mode);
+    let mode_id = match mode {
+        Some(AgentMode::Plan(_)) => "plan",
+        _ => "build",
+    };
     let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
     Ok(AgentResponse::SetSessionConfigOptionResponse(
-        SetSessionConfigOptionResponse::new(vec![methods::model_config_option(
-            &spec,
-            &specs,
-        )]),
+        SetSessionConfigOptionResponse::new(vec![
+            methods::mode_config_option(mode_id),
+            methods::model_config_option(&spec, &specs),
+        ]),
+    ))
+}
+
+fn handle_set_mode_config(
+    srv: &mut Server,
+    req: &SetSessionConfigOptionRequest,
+) -> Result<AgentResponse, AcpError> {
+    let mode_str = req.value.0.to_string();
+    let new_mode = methods::mode_id_to_agent_mode(&mode_str)
+        .ok_or_else(|| AcpError::new(-32602, format!("unknown mode: {mode_str}")))?;
+
+    let session = srv.session.as_mut().ok_or_else(no_session)?;
+    session.current_mode = new_mode;
+
+    let sid = SessionId::from(session.handle.session_id.clone());
+    session_update(
+        &srv.out_tx,
+        &sid,
+        SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(SessionModeId::from(mode_str.clone()))),
+    );
+
+    let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(AgentResponse::SetSessionConfigOptionResponse(
+        SetSessionConfigOptionResponse::new(vec![
+            methods::mode_config_option(&mode_str),
+            methods::model_config_option(&session.current_model, &specs),
+        ]),
     ))
 }
 

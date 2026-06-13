@@ -12,7 +12,7 @@ const MAX_CACHE_ENTRIES: usize = 64;
 
 #[derive(Debug)]
 pub(super) struct ToolDedupCache {
-    entries: HashMap<u64, ToolOutput>,
+    entries: HashMap<u64, (ToolOutput, Option<String>)>,
     order: VecDeque<u64>,
 }
 
@@ -36,19 +36,33 @@ impl ToolDedupCache {
     }
 
     pub(super) fn get(&self, key: u64) -> Option<&ToolOutput> {
-        self.entries.get(&key)
+        self.entries.get(&key).map(|(output, _)| output)
     }
 
-    pub(super) fn insert(&mut self, key: u64, output: &ToolOutput) {
+    pub(super) fn insert(&mut self, key: u64, output: &ToolOutput, path: Option<&str>) {
         if self.entries.len() >= MAX_CACHE_ENTRIES
             && let Some(evict) = self.order.front().copied()
         {
             self.entries.remove(&evict);
             self.order.pop_front();
         }
-        if self.entries.insert(key, output.clone()).is_none() {
+        if self
+            .entries
+            .insert(key, (output.clone(), path.map(String::from)))
+            .is_none()
+        {
             self.order.push_back(key);
         }
+    }
+
+    pub(super) fn invalidate_path(&mut self, path: &str) {
+        self.entries.retain(|k, (_, cached_path)| {
+            let keep = cached_path.as_ref().is_none_or(|p| p != path);
+            if !keep {
+                self.order.retain(|o| o != k);
+            }
+            keep
+        });
     }
 
     pub(super) fn clear(&mut self) {
@@ -136,7 +150,7 @@ mod tests {
         let input = serde_json::json!({"path": "/foo.rs"});
         let key = ToolDedupCache::key("read", &input);
         let output = ToolOutput::Plain("file contents".into());
-        cache.insert(key, &output);
+        cache.insert(key, &output, None);
         assert!(cache.get(key).is_some());
     }
 
@@ -144,7 +158,7 @@ mod tests {
     fn clear_removes_entries() {
         let mut cache = ToolDedupCache::new();
         let key = ToolDedupCache::key("read", &serde_json::json!({"path": "/x.rs"}));
-        cache.insert(key, &ToolOutput::Plain("x".into()));
+        cache.insert(key, &ToolOutput::Plain("x".into()), None);
         cache.clear();
         assert!(cache.get(key).is_none());
     }
@@ -193,10 +207,48 @@ mod tests {
         let mut cache = ToolDedupCache::new();
         for i in 0..=MAX_CACHE_ENTRIES {
             let key = i as u64;
-            cache.insert(key, &ToolOutput::Plain(format!("v{i}")));
+            cache.insert(key, &ToolOutput::Plain(format!("v{i}")), None);
         }
         assert_eq!(cache.entries.len(), MAX_CACHE_ENTRIES);
         assert!(cache.get(0).is_none(), "first entry should be evicted");
         assert!(cache.get(1).is_some(), "second entry should remain");
+    }
+
+    #[test]
+    fn invalidate_path_removes_matching_entry() {
+        let mut cache = ToolDedupCache::new();
+        let input_a = serde_json::json!({"path": "/foo.rs"});
+        let input_b = serde_json::json!({"path": "/bar.rs"});
+        let key_a = ToolDedupCache::key("read", &input_a);
+        let key_b = ToolDedupCache::key("read", &input_b);
+        cache.insert(key_a, &ToolOutput::Plain("a".into()), Some("/foo.rs"));
+        cache.insert(key_b, &ToolOutput::Plain("b".into()), Some("/bar.rs"));
+
+        cache.invalidate_path("/foo.rs");
+
+        assert!(cache.get(key_a).is_none(), "matching path should be removed");
+        assert!(cache.get(key_b).is_some(), "other path should remain");
+    }
+
+    #[test]
+    fn invalidate_path_noop_for_unknown_path() {
+        let mut cache = ToolDedupCache::new();
+        let key = ToolDedupCache::key("read", &serde_json::json!({"path": "/foo.rs"}));
+        cache.insert(key, &ToolOutput::Plain("content".into()), Some("/foo.rs"));
+
+        cache.invalidate_path("/other.rs");
+
+        assert!(cache.get(key).is_some());
+    }
+
+    #[test]
+    fn invalidate_path_skips_pathless_entries() {
+        let mut cache = ToolDedupCache::new();
+        let key = ToolDedupCache::key("grep", &serde_json::json!({"pattern": "todo"}));
+        cache.insert(key, &ToolOutput::Plain("results".into()), None);
+
+        cache.invalidate_path("/foo.rs");
+
+        assert!(cache.get(key).is_some(), "pathless entry should not be invalidated");
     }
 }
