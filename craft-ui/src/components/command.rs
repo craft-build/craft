@@ -97,6 +97,26 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Exit the application",
         max_args: 0,
     },
+    BuiltinCommand {
+        name: "/goal",
+        description: "Set a goal the agent must meet before stopping (blank to clear)",
+        max_args: usize::MAX,
+    },
+    BuiltinCommand {
+        name: "/dream",
+        description: "Consolidate and curate project memory",
+        max_args: 0,
+    },
+    BuiltinCommand {
+        name: "/distill",
+        description: "Discover reusable workflows and propose skills",
+        max_args: 0,
+    },
+    BuiltinCommand {
+        name: "/checkpoint",
+        description: "Write a session checkpoint for smooth resume",
+        max_args: 0,
+    },
 ];
 
 pub struct ParsedCommand {

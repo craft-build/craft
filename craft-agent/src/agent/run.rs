@@ -111,7 +111,11 @@ pub struct Agent<'h> {
     #[cfg(feature = "onnx")]
     last_relevance_scores: Option<Vec<(usize, f32)>>,
     fs: Arc<dyn crate::tools::FsBackend>,
+    goal: Option<String>,
+    judge_continuations: u8,
 }
+
+const MAX_JUDGE_CONTINUATIONS: u8 = 5;
 
 impl<'h> Agent<'h> {
     pub fn new(params: AgentParams, run: AgentRunParams<'h>) -> Self {
@@ -165,6 +169,8 @@ impl<'h> Agent<'h> {
             #[cfg(feature = "onnx")]
             last_relevance_scores: None,
             fs: params.fs,
+            goal: None,
+            judge_continuations: 0,
         }
     }
 
@@ -239,6 +245,7 @@ impl<'h> Agent<'h> {
         let msg = Message::user_with_images(input.message.clone(), input.images);
         self.history.push(msg);
         self.mode = input.mode;
+        self.goal = input.goal;
         self.opts = RequestOptions {
             thinking: input.thinking,
             fast: input.fast,
@@ -454,8 +461,55 @@ impl<'h> Agent<'h> {
 
         if has_tools {
             Ok(TurnOutcome::Continue)
+        } else if let Some(ref goal) = self.goal.clone() {
+            self.run_goal_judge(goal, stop_reason).await
         } else {
             Ok(TurnOutcome::Done(stop_reason))
+        }
+    }
+
+    async fn run_goal_judge(
+        &mut self,
+        goal: &str,
+        stop_reason: Option<StopReason>,
+    ) -> Result<TurnOutcome, AgentError> {
+        if self.judge_continuations >= MAX_JUDGE_CONTINUATIONS {
+            warn!(
+                continuations = self.judge_continuations,
+                "judge continuation cap reached, allowing stop"
+            );
+            return Ok(TurnOutcome::Done(stop_reason));
+        }
+        let outcome = super::judge::evaluate(
+            goal,
+            self.history.as_slice(),
+            &self.provider,
+            &self.model,
+            self.config.judge_model.as_deref(),
+            self.timeouts,
+            self.session_id.as_deref(),
+        )
+        .await;
+        match outcome {
+            Ok(super::judge::JudgeOutcome::Done) => {
+                self.event_tx.send(AgentEvent::Info {
+                    message: "Goal met (verified by judge)".into(),
+                })?;
+                Ok(TurnOutcome::Done(stop_reason))
+            }
+            Ok(super::judge::JudgeOutcome::NotDone(reason)) => {
+                self.judge_continuations += 1;
+                let note = format!(
+                    "The judge evaluated that the goal is not yet fully met: {reason}. \
+                     Continue working toward the goal: {goal}. Do not stop until it is done."
+                );
+                self.history.push(Message::synthetic(note));
+                Ok(TurnOutcome::Continue)
+            }
+            Err(e) => {
+                warn!(error = %e, "judge evaluation failed, allowing stop (fail-open)");
+                Ok(TurnOutcome::Done(stop_reason))
+            }
         }
     }
 
@@ -569,6 +623,7 @@ impl<'h> Agent<'h> {
             compression_store: Arc::clone(&self.compression_store),
             findings_store: self.findings_store.clone(),
             fs: Arc::clone(&self.fs),
+            parent_messages: Arc::from(self.history.as_slice()),
         }
     }
 

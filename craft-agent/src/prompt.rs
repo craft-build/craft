@@ -12,6 +12,9 @@ pub const COMPACTION_SYSTEM: &str = include_str!("prompts/compaction.md");
 pub const COMPACTION_USER: &str = include_str!("prompts/compaction_user.md");
 #[cfg(feature = "onnx")]
 pub const COMPACTION_TARGETED_USER: &str = include_str!("prompts/compaction_targeted_user.md");
+pub const DREAM_PROMPT: &str = include_str!("prompts/dream.md");
+pub const DISTILL_PROMPT: &str = include_str!("prompts/distill.md");
+pub const CHECKPOINT_PROMPT: &str = include_str!("prompts/checkpoint.md");
 
 const NATIVE_EFFICIENT_TOOLS: &[&str] = &["batch", "code_execution", "task"];
 const INSTRUCTIONS_MARKER: &str = "{{instructions}}";

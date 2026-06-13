@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
     ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
-    McpSnapshotReader, TodoItem, TodoPriority, TodoStatus, ToolDoneEvent, ToolOutput,
+    McpSnapshotReader, TaskNode, TodoStatus, ToolDoneEvent, ToolOutput,
     ToolStartEvent, TurnCompleteEvent,
 };
 use craft_config::{PermissionsConfig, UiConfig};
@@ -2227,7 +2227,7 @@ fn ctrl_t_toggles_plan_form_in_plan_mode() {
     assert!(app.plan_form.is_visible());
 }
 
-fn send_subagent_todo(app: &mut App, items: Vec<TodoItem>) {
+fn send_subagent_todo(app: &mut App, items: Vec<TaskNode>) {
     app.update(subagent_msg(
         AgentEvent::ToolDone(Box::new(ToolDoneEvent {
             id: "tw1".into(),
@@ -2245,10 +2245,12 @@ fn ctrl_t_toggles_todo_panel_on_subagent_chat() {
     let mut app = app_with_subagent();
     send_subagent_todo(
         &mut app,
-        vec![TodoItem {
+        vec![TaskNode {
+            id: "T1".into(),
+            parent: None,
             content: "task".into(),
             status: TodoStatus::Pending,
-            priority: TodoPriority::Medium,
+            owner: None,
         }],
     );
     app.active_chat = 1;

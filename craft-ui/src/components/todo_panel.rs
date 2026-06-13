@@ -1,6 +1,6 @@
 use crate::components::keybindings::key;
 use crate::theme;
-use craft_agent::{TodoItem, TodoStatus, ToolOutput};
+use craft_agent::{TaskNode, TodoStatus, ToolOutput, flatten_task_tree};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -26,7 +26,7 @@ impl Visibility {
 
 pub struct TodoPanel {
     visibility: Visibility,
-    items: Vec<TodoItem>,
+    items: Vec<TaskNode>,
 }
 
 impl TodoPanel {
@@ -42,7 +42,7 @@ impl TodoPanel {
         self.items.clear();
     }
 
-    pub fn on_todowrite(&mut self, items: &[TodoItem]) {
+    pub fn on_todowrite(&mut self, items: &[TaskNode]) {
         self.items = items.to_vec();
         if items.is_empty() {
             self.visibility = Visibility::Hidden;
@@ -113,18 +113,23 @@ impl TodoPanel {
         }
 
         let t = theme::current();
-        let lines: Vec<Line> = self
-            .items
+        let lines: Vec<Line> = flatten_task_tree(&self.items)
             .iter()
-            .map(|item| {
+            .map(|(depth, item)| {
                 let style = match item.status {
                     TodoStatus::Completed => t.todo_completed,
                     TodoStatus::InProgress => t.todo_in_progress,
                     TodoStatus::Pending => t.todo_pending,
                     TodoStatus::Cancelled => t.todo_cancelled,
                 };
+                let indent = "  ".repeat(*depth);
+                let id = if item.id.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", item.id)
+                };
                 Line::from(Span::styled(
-                    format!("{} {}", item.status.marker(), item.content),
+                    format!("{indent}{id}{} {}", item.status.marker(), item.content),
                     style,
                 ))
             })
@@ -152,7 +157,7 @@ impl TodoPanel {
     }
 }
 
-fn extract_last_todos(outputs: &HashMap<String, ToolOutput>) -> Vec<TodoItem> {
+fn extract_last_todos(outputs: &HashMap<String, ToolOutput>) -> Vec<TaskNode> {
     outputs
         .values()
         .find_map(|o| match o {
@@ -165,26 +170,30 @@ fn extract_last_todos(outputs: &HashMap<String, ToolOutput>) -> Vec<TodoItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use craft_agent::{TodoPriority, TodoStatus};
+    use craft_agent::TodoStatus;
 
-    fn make_items(n: usize) -> Vec<TodoItem> {
+    fn make_items(n: usize) -> Vec<TaskNode> {
         (0..n)
-            .map(|i| TodoItem {
+            .map(|i| TaskNode {
+                id: format!("T{}", i + 1),
+                parent: None,
                 content: format!("task {i}"),
                 status: TodoStatus::Pending,
-                priority: TodoPriority::Medium,
+                owner: None,
             })
             .collect()
     }
 
-    fn make_items_with_status(statuses: &[TodoStatus]) -> Vec<TodoItem> {
+    fn make_items_with_status(statuses: &[TodoStatus]) -> Vec<TaskNode> {
         statuses
             .iter()
             .enumerate()
-            .map(|(i, &status)| TodoItem {
+            .map(|(i, &status)| TaskNode {
+                id: format!("T{}", i + 1),
+                parent: None,
                 content: format!("task {i}"),
                 status,
-                priority: TodoPriority::Medium,
+                owner: None,
             })
             .collect()
     }

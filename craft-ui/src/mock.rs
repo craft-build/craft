@@ -5,7 +5,7 @@ use craft_agent::tools::{
 };
 use craft_agent::{
     AgentEvent, BatchToolEntry, BatchToolStatus, Envelope, GrepFileEntry, GrepMatchGroup,
-    SubagentInfo, TodoItem, TodoPriority, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput,
+    SubagentInfo, TaskNode, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput,
     ToolStartEvent, TurnCompleteEvent,
 };
 use craft_providers::{Message, TokenUsage};
@@ -279,25 +279,33 @@ pub fn mock_events() -> Vec<MockEvent> {
         "t_todo",
         TODOWRITE_TOOL_NAME,
         ToolOutput::TodoList(vec![
-            TodoItem {
+            TaskNode {
+                id: "T1".into(),
+                parent: None,
                 content: "Read existing config".into(),
                 status: TodoStatus::Completed,
-                priority: TodoPriority::High,
+                owner: None,
             },
-            TodoItem {
+            TaskNode {
+                id: "T2".into(),
+                parent: None,
                 content: "Create builder struct".into(),
                 status: TodoStatus::Completed,
-                priority: TodoPriority::High,
+                owner: None,
             },
-            TodoItem {
+            TaskNode {
+                id: "T3".into(),
+                parent: None,
                 content: "Add validation".into(),
                 status: TodoStatus::InProgress,
-                priority: TodoPriority::Medium,
+                owner: None,
             },
-            TodoItem {
+            TaskNode {
+                id: "T4".into(),
+                parent: None,
                 content: "Update tests".into(),
                 status: TodoStatus::Pending,
-                priority: TodoPriority::Low,
+                owner: None,
             },
         ]),
         false,

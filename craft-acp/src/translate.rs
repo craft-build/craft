@@ -5,7 +5,7 @@ use agent_client_protocol_schema::{
 };
 use craft_agent::tools::ToolRegistry;
 use craft_agent::types::{BatchProgressEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
-use craft_agent::{TodoItem, TodoPriority, TodoStatus};
+use craft_agent::{TaskNode, TodoStatus, flatten_task_tree};
 use craft_providers::{ContentBlock as MsgBlock, ImageMediaType, Message, Role as MsgRole};
 
 const MIN_FENCE_LEN: usize = 3;
@@ -168,26 +168,18 @@ pub fn tool_done(event: &ToolDoneEvent) -> SessionUpdate {
     ))
 }
 
-pub fn todo_list_to_plan(items: &[TodoItem]) -> SessionUpdate {
-    let entries: Vec<PlanEntry> = items
+pub fn todo_list_to_plan(items: &[TaskNode]) -> SessionUpdate {
+    let entries: Vec<PlanEntry> = flatten_task_tree(items)
         .iter()
-        .map(|item| {
+        .map(|(_, item)| {
             PlanEntry::new(
                 &item.content,
-                map_priority(item.priority),
+                PlanEntryPriority::Medium,
                 map_status(item.status),
             )
         })
         .collect();
     SessionUpdate::Plan(Plan::new(entries))
-}
-
-fn map_priority(p: TodoPriority) -> PlanEntryPriority {
-    match p {
-        TodoPriority::High => PlanEntryPriority::High,
-        TodoPriority::Medium => PlanEntryPriority::Medium,
-        TodoPriority::Low => PlanEntryPriority::Low,
-    }
 }
 
 fn map_status(s: TodoStatus) -> PlanEntryStatus {
@@ -331,10 +323,12 @@ mod tests {
 
     #[test]
     fn cancelled_todo_renders_as_completed_plan_entry() {
-        let items = [TodoItem {
+        let items = [TaskNode {
+            id: "T1".into(),
+            parent: None,
             content: "task".into(),
             status: TodoStatus::Cancelled,
-            priority: TodoPriority::Low,
+            owner: None,
         }];
         let json = serde_json::to_value(todo_list_to_plan(&items)).unwrap();
         assert_eq!(json["entries"][0]["status"], "completed");

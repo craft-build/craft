@@ -58,6 +58,8 @@ impl App {
                 name: chat.name.clone(),
                 prompt: None,
                 model: chat.model_id.clone(),
+                lifecycle: None,
+                context_mode: None,
             })
             .collect();
     }

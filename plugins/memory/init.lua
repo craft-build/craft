@@ -41,9 +41,21 @@ craft.api.register_prompt_hint({
     table.sort(entries, function(a, b)
       return a[1] < b[1]
     end)
-    local out = "\n\nMemory files (use the memory tool to view/update):\n"
+    local header = "\n\nMemory files (use the memory tool to view/update):\n"
+    local out = header
+    local shown = 0
+    local truncated = false
     for _, e in ipairs(entries) do
-      out = out .. "- " .. e[1] .. " (" .. e[2] .. " bytes)\n"
+      local line = "- " .. e[1] .. " (" .. e[2] .. " bytes)\n"
+      if shown >= helpers.MAX_HINT_FILES or #out + #line - #header > helpers.MAX_HINT_BYTES then
+        truncated = true
+        break
+      end
+      out = out .. line
+      shown = shown + 1
+    end
+    if truncated then
+      out = out .. "- ... (" .. (#entries - shown) .. " more; use the memory tool to view)\n"
     end
     return out
   end,
@@ -52,6 +64,30 @@ craft.api.register_prompt_hint({
 craft.api.register_prompt_hint({
   slot = "tool_usage",
   content = "- Proactively save non-obvious project gotchas and architecture decisions to **memory**.",
+})
+
+craft.api.register_prompt_hint({
+  prompt = "system",
+  slot = "after_instructions",
+  content = function()
+    local dir = resolve_dir(true)
+    if not dir then
+      return nil
+    end
+    local fp = helpers.safe_resolve(dir, "checkpoint.md")
+    if not fp then
+      return nil
+    end
+    local meta = craft.fs.metadata(fp)
+    if not meta then
+      return nil
+    end
+    local ok, content = pcall(craft.fs.read, fp)
+    if not ok or not content or content == "" then
+      return nil
+    end
+    return "\n\n## Checkpoint (from last session)\n\n" .. content .. "\n"
+  end,
 })
 
 local function render_content(content, path, ctx)
@@ -106,6 +142,34 @@ local function semantic_view(query, dir, ctx)
   }
 end
 
+local function lexical_view(query, dir, ctx)
+  local results = helpers.keyword_search(dir, query)
+  if not results or #results == 0 then
+    return nil
+  end
+  local lines = { "Keyword search results for '" .. query .. "':\n" }
+  local rendered = {}
+  for _, entry in ipairs(results) do
+    local filename = entry[1]
+    local score = entry[2]
+    lines[#lines + 1] = "## " .. filename .. " (score: " .. string.format("%.2f", score) .. ")"
+    local fp = helpers.safe_resolve(dir, filename)
+    if fp then
+      local ok, content = pcall(craft.fs.read, fp)
+      if ok then
+        lines[#lines + 1] = content
+        lines[#lines + 1] = ""
+        rendered[#rendered + 1] = content
+      end
+    end
+  end
+  local output = table.concat(lines, "\n")
+  return {
+    llm_output = output,
+    body = render_content(table.concat(rendered, "\n---\n"), "search.md", ctx),
+  }
+end
+
 local function cmd_view(path, dir, ctx)
   if not path then
     helpers.cleanup_vectors(dir)
@@ -120,6 +184,10 @@ local function cmd_view(path, dir, ctx)
         body = render_content(content, path, ctx),
       }
     end
+  end
+  local lexical = lexical_view(path, dir, ctx)
+  if lexical then
+    return lexical
   end
   if helpers.has_embed() then
     return semantic_view(path, dir, ctx)
@@ -174,7 +242,7 @@ craft.api.register_tool({
   description = "Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.\n\n"
     .. "- Save important context before compaction or to build up project knowledge.\n"
     .. "- Keep entries concise and current. Delete outdated information.\n"
-    .. "- Use `view` with a search query (not a filename) for semantic search across memories.",
+    .. "- Use `view` with a search query (not a filename) to recall memories: keyword search is always-on; semantic search is used when available.",
 
   schema = {
     type = "object",

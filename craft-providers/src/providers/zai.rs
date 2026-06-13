@@ -34,6 +34,21 @@ const INSUFFICIENT_FUNDS_MARKER: &str = "nsufficien";
 pub(crate) fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
+            prefixes: &["glm-5.2"],
+            tier: ModelTier::Strong,
+            family: ModelFamily::Glm,
+            default: true,
+            pricing: ModelPricing {
+                input: 1.20,
+                output: 5.00,
+                cache_write: 0.00,
+                cache_read: 0.30,
+                fast: None,
+            },
+            max_output_tokens: 131072,
+            context_window: 1_000_000,
+        },
+        ModelEntry {
             prefixes: &["glm-5-code"],
             tier: ModelTier::Strong,
             family: ModelFamily::Glm,
@@ -215,7 +230,8 @@ impl Provider for Zai {
             {
                 Err(AgentError::Api { status, message })
                     if (status == 429 || status >= 500)
-                        && (message.contains(INSUFFICIENT_FUNDS_CODE) || message.contains(INSUFFICIENT_FUNDS_MARKER)) =>
+                        && (message.contains(INSUFFICIENT_FUNDS_CODE)
+                            || message.contains(INSUFFICIENT_FUNDS_MARKER)) =>
                 {
                     warn!(status, "insufficient funds, bailing out");
                     Err(AgentError::Api {

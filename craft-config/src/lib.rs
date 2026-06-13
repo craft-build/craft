@@ -356,6 +356,7 @@ pub struct AgentFileConfig {
     pub validation: ValidationConfig,
     #[serde(default)]
     pub small_model: SmallModelConfig,
+    pub judge_model: Option<String>,
 }
 
 impl AgentFileConfig {
@@ -372,7 +373,8 @@ impl AgentFileConfig {
             max_continuation_turns,
               compaction_buffer,
             search_result_limit,
-            interpreter_max_memory_mb
+            interpreter_max_memory_mb,
+            judge_model
         );
     }
 }
@@ -874,6 +876,9 @@ pub struct AgentConfig {
 
     #[config(skip, default = "None")]
     pub max_turns: Option<u32>,
+
+    #[config(skip, default = "None")]
+    pub judge_model: Option<String>,
 }
 
 impl AgentConfig {
@@ -928,6 +933,7 @@ impl AgentConfig {
             validation: file.validation,
             small_model: file.small_model,
             max_turns: None,
+            judge_model: file.judge_model,
         }
     }
 

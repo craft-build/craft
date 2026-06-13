@@ -1165,6 +1165,22 @@ impl App {
                 vec![]
             }
             "/exit" => self.quit(),
+            "/goal" => {
+                let goal = cmd.args.trim().to_string();
+                if goal.is_empty() {
+                    self.state.session.meta.goal = None;
+                    self.flash("Goal cleared".into());
+                } else {
+                    self.state.session.meta.goal = Some(goal.clone());
+                    self.flash(format!("Goal set: {goal}"));
+                }
+                vec![]
+            }
+            "/dream" => self.run_meta_prompt("/dream", craft_agent::prompt::DREAM_PROMPT),
+            "/distill" => self.run_meta_prompt("/distill", craft_agent::prompt::DISTILL_PROMPT),
+            "/checkpoint" => {
+                self.run_meta_prompt("/checkpoint", craft_agent::prompt::CHECKPOINT_PROMPT)
+            }
             name if name.starts_with("/project:") || name.starts_with("/user:") => {
                 self.execute_custom_command(name, &cmd.args)
             }
@@ -1231,6 +1247,21 @@ impl App {
             self.main_chat().show_user_message(display_text);
             vec![Action::SendMessage(Box::new(input))]
         }
+    }
+
+    fn run_meta_prompt(&mut self, label: &str, prompt: &'static str) -> Vec<Action> {
+        if self.status == Status::Streaming {
+            self.flash("Agent is busy, try again later".into());
+            return vec![];
+        }
+        let input = self.build_agent_input(&QueuedMessage {
+            text: prompt.to_string(),
+            images: Vec::new(),
+        });
+        self.run_id += 1;
+        self.status = Status::Streaming;
+        self.main_chat().show_user_message(label.to_string());
+        vec![Action::SendMessage(Box::new(input))]
     }
 
     fn parse_prompt_args(prompt: &McpPromptInfo, args: &str) -> HashMap<String, String> {

@@ -127,6 +127,7 @@ impl App {
             images: msg.images.clone(),
             thinking: self.state.thinking,
             fast: self.state.fast,
+            goal: self.state.session.meta.goal.clone(),
             ..Default::default()
         }
     }

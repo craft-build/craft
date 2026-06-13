@@ -38,6 +38,10 @@ pub struct Task {
         description = "Model tier (optional, omit to use current model, capped at current tier):\n- \"strong\" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.\n- \"medium\" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.\n- \"weak\" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits."
     )]
     model_tier: Option<String>,
+    #[param(
+        description = "Parent context to pass to the subagent:\n- \"none\" (default): fresh, no parent history.\n- \"summary\": last few parent messages for context.\n- \"full\": full parent conversation history."
+    )]
+    context_mode: Option<String>,
 }
 
 impl Task {
@@ -161,7 +165,14 @@ impl Task {
             ..Default::default()
         };
 
-        let mut history = crate::History::new(Vec::new());
+        let ctx_mode = self.context_mode.as_deref().unwrap_or("none");
+        let seeded: Vec<craft_providers::Message> = match ctx_mode {
+            "none" => Vec::new(),
+            "summary" => ctx.parent_messages.iter().rev().take(8).rev().cloned().collect(),
+            "full" => ctx.parent_messages.to_vec(),
+            other => return Err(format!("unknown context_mode: {other}")),
+        };
+        let mut history = crate::History::new(seeded);
         let agent = Agent::new(
             AgentParams {
                 provider,

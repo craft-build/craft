@@ -5,6 +5,40 @@ M.MAX_DIR_BYTES = 50 * 1024
 M.VECTORS_FILE = ".vectors.json"
 M.SEMANTIC_SEARCH_TOP_K = 5
 M.SEMANTIC_SIMILARITY_THRESHOLD = 0.3
+M.KEYWORD_SEARCH_TOP_K = 5
+M.KEYWORD_MIN_SCORE = 0.0
+M.MAX_HINT_FILES = 20
+M.MAX_HINT_BYTES = 1200
+
+local STOPWORDS = {}
+for _, w in ipairs({
+  "the", "a", "an", "and", "or", "but", "if", "then", "else", "for", "of", "to",
+  "in", "on", "at", "by", "with", "from", "is", "are", "was", "were", "be",
+  "been", "being", "this", "that", "these", "those", "it", "as", "not", "no",
+  "do", "does", "did", "has", "have", "had", "will", "would", "can", "could",
+  "should", "may", "might", "must", "i", "you", "he", "she", "we", "they",
+  "them", "his", "her", "its", "our", "their", "your", "my", "me", "us", "so",
+  "than", "too", "very", "into", "about", "over", "under", "out", "up", "down",
+  "all", "any", "some", "each", "both", "more", "most", "other", "such", "only",
+  "own", "same", "use", "used", "using", "via", "per", "etc", "there", "here",
+  "when", "where", "which", "who", "whom", "what", "why", "how",
+}) do
+  STOPWORDS[w] = true
+end
+
+local function tokenize(s)
+  local tokens = {}
+  for word in (s .. " "):lower():gmatch("([a-z0-9_]+)") do
+    if #word > 1 and not STOPWORDS[word] then
+      tokens[#tokens + 1] = word
+    end
+  end
+  return tokens
+end
+
+function M.tokenize(s)
+  return tokenize(s)
+end
 
 -- Lua's bit32 is 32-bit only, so we split the 64-bit FNV-1a state into
 -- hi/lo halves and propagate carries by hand during multiplication.
@@ -135,6 +169,63 @@ function M.semantic_search(dir, query, top_k)
     return a[2] > b[2]
   end)
   local k = top_k or M.SEMANTIC_SEARCH_TOP_K
+  local results = {}
+  for i = 1, math.min(#scored, k) do
+    results[#results + 1] = scored[i]
+  end
+  return results
+end
+
+function M.keyword_search(dir, query, top_k)
+  local entries = M.collect_file_entries(dir)
+  if #entries == 0 then
+    return {}
+  end
+  local query_terms = tokenize(query)
+  if #query_terms == 0 then
+    return {}
+  end
+  local docs = {}
+  local df = {}
+  local n = 0
+  for _, entry in ipairs(entries) do
+    local filename = entry[1]
+    local fp = M.safe_resolve(dir, filename)
+    if fp then
+      local ok, content = pcall(craft.fs.read, fp)
+      if ok and content then
+        local terms = tokenize(content)
+        local tf = {}
+        for _, t in ipairs(terms) do
+          tf[t] = (tf[t] or 0) + 1
+        end
+        docs[filename] = { tf = tf, len = #terms }
+        n = n + 1
+        for t in pairs(tf) do
+          df[t] = (df[t] or 0) + 1
+        end
+      end
+    end
+  end
+  local scored = {}
+  for filename, doc in pairs(docs) do
+    local score = 0.0
+    for _, term in ipairs(query_terms) do
+      local f = doc.tf[term]
+      if f then
+        local idf = math.log(1 + n / df[term])
+        score = score + f * idf
+      end
+    end
+    if score > M.KEYWORD_MIN_SCORE then
+      local norm = doc.len > 0 and doc.len or 1
+      scored[#scored + 1] = { filename, score / norm }
+    end
+  end
+  table.sort(scored, function(a, b)
+    return a[2] > b[2]
+  end)
+  local k = top_k or M.KEYWORD_SEARCH_TOP_K
   local results = {}
   for i = 1, math.min(#scored, k) do
     results[#results + 1] = scored[i]

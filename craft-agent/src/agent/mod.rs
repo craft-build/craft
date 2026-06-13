@@ -8,6 +8,7 @@ pub mod findings_store;
 mod guardrails;
 mod history;
 mod instructions;
+mod judge;
 mod read_lifecycle;
 pub(crate) mod retrieve;
 mod run;

@@ -39,9 +39,9 @@ pub use craft_providers::{ImageMediaType, ImageSource, ThinkingConfig};
 pub use types::{
     AgentEvent, BatchProgressEvent, BatchToolEntry, BatchToolStatus, BufferSnapshot, Envelope,
     EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock, NO_FILES_FOUND,
-    Priority, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo, TodoItem,
-    TodoPriority, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent,
-    TurnCompleteEvent,
+    Priority, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo, TaskNode,
+    TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
+    flatten_task_tree,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -76,4 +76,5 @@ pub struct AgentInput {
     pub thinking: ThinkingConfig,
     pub fast: bool,
     pub prompt: Option<Box<McpPromptRef>>,
+    pub goal: Option<String>,
 }

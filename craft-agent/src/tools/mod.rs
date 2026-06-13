@@ -229,6 +229,7 @@ pub struct ToolContext {
     pub(crate) compression_store: crate::agent::compression_store::SharedCompressionStore,
     pub findings_store: Option<crate::agent::SharedFindingsStore>,
     pub fs: Arc<dyn FsBackend>,
+    pub parent_messages: Arc<[craft_providers::Message]>,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -688,6 +689,7 @@ pub(crate) fn interpreter_ctx(
         compression_store: crate::agent::compression_store::shared_store(),
         findings_store: None,
         fs: Arc::new(LocalFs),
+        parent_messages: Arc::from(Vec::new()),
     }
 }
 

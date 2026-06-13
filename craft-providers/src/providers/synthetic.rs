@@ -21,34 +21,49 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
 pub(crate) fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
-            prefixes: &["hf:moonshotai/Kimi-K2.5"],
-            tier: ModelTier::Strong,
-            family: ModelFamily::Synthetic,
-            default: true,
-            pricing: ModelPricing {
-                input: 0.45,
-                output: 3.40,
-                cache_write: 0.00,
-                cache_read: 0.00,
-                fast: None,
-            },
-            max_output_tokens: 131072,
-            context_window: 200_000,
-        },
-        ModelEntry {
-            prefixes: &["hf:deepseek-ai/DeepSeek-V3.2"],
+            prefixes: &["hf:MiniMaxAI/MiniMax-M3"],
             tier: ModelTier::Medium,
             family: ModelFamily::Synthetic,
             default: true,
             pricing: ModelPricing {
-                input: 0.56,
-                output: 1.68,
+                input: 0.60,
+                output: 1.20,
                 cache_write: 0.00,
                 cache_read: 0.00,
                 fast: None,
             },
             max_output_tokens: 131072,
-            context_window: 200_000,
+            context_window: 512_000,
+        },
+        ModelEntry {
+            prefixes: &["hf:Qwen/Qwen3.6-27B"],
+            tier: ModelTier::Weak,
+            family: ModelFamily::Synthetic,
+            default: true,
+            pricing: ModelPricing {
+                input: 0.45,
+                output: 3.6,
+                cache_read: 0.00,
+                cache_write: 0.00,
+                fast: None,
+            },
+            max_output_tokens: 131072,
+            context_window: 256_000,
+        },
+        ModelEntry {
+            prefixes: &["hf:moonshotai/Kimi-K2.6"],
+            tier: ModelTier::Strong,
+            family: ModelFamily::Synthetic,
+            default: true,
+            pricing: ModelPricing {
+                input: 0.95,
+                output: 4.00,
+                cache_read: 0.00,
+                cache_write: 0.00,
+                fast: None,
+            },
+            max_output_tokens: 131072,
+            context_window: 256_000,
         },
         ModelEntry {
             prefixes: &["hf:zai-org/GLM-4.7-Flash"],
@@ -86,7 +101,10 @@ impl Synthetic {
         })
     }
 
-    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Result<Self, AgentError> {
+    pub(crate) fn with_auth(
+        auth: Arc<Mutex<ResolvedAuth>>,
+        timeouts: super::Timeouts,
+    ) -> Result<Self, AgentError> {
         Ok(Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth,

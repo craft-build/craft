@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::{StateDir, StorageError, atomic_write, now_epoch};
 
 const SESSION_VERSION: u32 = 1;
-const LOG_FORMAT_VERSION: u32 = 2;
+// v3: flat todos replaced by hierarchical TaskNode (old records load as root tasks).
+const LOG_FORMAT_VERSION: u32 = 3;
 pub const SESSIONS_DIR: &str = "sessions";
 const CWD_INDEX_FILE: &str = "cwd_latest.json";
 const DEFAULT_TITLE: &str = "New session";
@@ -63,6 +64,8 @@ pub struct SessionMeta {
     pub thinking: Option<StoredThinking>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +155,10 @@ pub struct StoredSubagent {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -535,7 +542,7 @@ where
                 cwd: h_cwd,
                 created_at: h_created,
             } => {
-                if v != LOG_FORMAT_VERSION {
+                if v > LOG_FORMAT_VERSION {
                     return Err(SessionError::VersionMismatch {
                         found: v,
                         expected: LOG_FORMAT_VERSION,
@@ -670,7 +677,7 @@ fn scan_jsonl_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
 
     let first_line = lines.next()?.ok()?;
     let header: JsonlHeader = serde_json::from_str(&first_line).ok()?;
-    if header.v != LOG_FORMAT_VERSION || header.cwd != cwd {
+    if header.v > LOG_FORMAT_VERSION || header.cwd != cwd {
         return None;
     }
 
