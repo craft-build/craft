@@ -124,7 +124,7 @@ pub struct McpServerInfo {
     pub url: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 pub struct McpConfig {
     #[serde(default)]
     pub mcp: HashMap<String, RawServerConfig>,

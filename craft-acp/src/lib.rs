@@ -1,3 +1,4 @@
+pub mod mcp;
 pub mod methods;
 pub mod permissions;
 pub mod server;
@@ -6,6 +7,7 @@ pub mod translate;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use craft_agent::mcp::config::McpConfig;
 use craft_agent::prompt::ResolvedSlots;
 use craft_agent::{AgentConfig, PermissionsConfig};
 use craft_providers::Timeouts;
@@ -17,7 +19,7 @@ pub struct AcpParams {
     pub permissions_config: PermissionsConfig,
     pub timeouts: Timeouts,
     pub initial_wd: PathBuf,
-    pub mcp_handle: Option<craft_agent::McpHandle>,
+    pub mcp_config: McpConfig,
     pub prompt_slots: Arc<ResolvedSlots>,
     pub yolo: bool,
 }

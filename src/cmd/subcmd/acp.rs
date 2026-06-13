@@ -51,7 +51,7 @@ pub async fn run(yolo: bool) -> Result<()> {
     setup::init_logging(&storage, &config.storage);
     setup::install_panic_log_hook();
 
-    let (mcp_handle, _mcp_config_errors) = craft_agent::mcp::start(&cwd).await;
+    let (mcp_config, _mcp_config_errors) = craft_agent::mcp::config::load_config(&cwd);
 
     let prompt_slots = plugin_host
         .event_handle()
@@ -64,7 +64,7 @@ pub async fn run(yolo: bool) -> Result<()> {
         permissions_config: config.permissions,
         timeouts,
         initial_wd: cwd,
-        mcp_handle,
+        mcp_config,
         prompt_slots: Arc::new(prompt_slots),
         yolo,
     })

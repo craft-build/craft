@@ -5,14 +5,16 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol_schema::{
     AgentNotification, AgentRequest, AgentResponse, ConfigOptionUpdate, ContentBlock,
     CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent, JsonRpcMessage,
-    LoadSessionRequest, NewSessionRequest, Notification, PromptRequest, PromptResponse, Request,
-    RequestId, RequestPermissionRequest, RequestPermissionResponse, Response, SessionId,
+    LoadSessionRequest, McpServer, NewSessionRequest, Notification, PromptRequest, PromptResponse,
+    Request, RequestId, RequestPermissionRequest, RequestPermissionResponse, Response, SessionId,
     SessionModeId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, TextContent,
     ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use color_eyre::eyre::Context;
 use craft_agent::headless::{self, InteractiveHandle, InteractiveParams};
+use craft_agent::mcp::config::{McpConfig, ServerConfig, Transport};
+use craft_agent::mcp;
 use craft_agent::types::{AgentEvent, BatchToolStatus, ToolOutput};
 use craft_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
 use craft_providers::Message;
@@ -23,7 +25,7 @@ use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tracing::{debug, warn};
 
-use crate::{AcpParams, methods, permissions, translate};
+use crate::{AcpParams, mcp as acp_mcp, methods, permissions, translate};
 
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 
@@ -140,7 +142,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
             handle_incoming_response(&server, &raw);
         } else if let Some(method) = raw.get("method").and_then(Value::as_str) {
             match id {
-                Some(id) => handle_request(&mut server, method, id, &raw, &params),
+                Some(id) => handle_request(&mut server, method, id, &raw, &params).await,
                 None => handle_notification(&server, method),
             }
         } else if let Some(id) = id {
@@ -158,13 +160,18 @@ fn request_id(v: &Value) -> RequestId {
     serde_json::from_value(v.clone()).unwrap_or(RequestId::Null)
 }
 
-fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, params: &AcpParams) {
-    let result = match method {
+async fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, params: &AcpParams) {
+    let result: Result<AgentResponse, AcpError> = match method {
         "initialize" => Ok(AgentResponse::InitializeResponse(
             methods::initialize_response(),
         )),
-        "session/new" => parse_params::<NewSessionRequest>(raw).map(|req| {
-            let handle = spawn_session(params, req.cwd, None, Vec::new());
+        "session/new" => {
+            let req = match parse_params::<NewSessionRequest>(raw) {
+                Ok(r) => r,
+                Err(e) => { srv.respond(id, Err(e)); return; }
+            };
+            let mcp_servers = req.mcp_servers.clone();
+            let handle = spawn_session(params, req.cwd, None, Vec::new(), &mcp_servers).await;
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
@@ -175,16 +182,24 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
                     ])
             };
             install_session(srv, handle, spec);
-            AgentResponse::NewSessionResponse(resp)
-        }),
-        "session/load" => parse_params::<LoadSessionRequest>(raw).and_then(|req| {
+            Ok(AgentResponse::NewSessionResponse(resp))
+        }
+        "session/load" => {
+            let req = match parse_params::<LoadSessionRequest>(raw) {
+                Ok(r) => r,
+                Err(e) => { srv.respond(id, Err(e)); return; }
+            };
             let session_id = req.session_id.0.to_string();
-            let history = load_history(&session_id)?;
+            let history = match load_history(&session_id) {
+                Ok(h) => h,
+                Err(e) => { srv.respond(id, Err(e)); return; }
+            };
             let sid = SessionId::from(session_id.clone());
             for update in translate::replay_history(&history) {
                 session_update(&srv.out_tx, &sid, update);
             }
-            let handle = spawn_session(params, req.cwd, Some(session_id), history);
+            let mcp_servers = req.mcp_servers.clone();
+            let handle = spawn_session(params, req.cwd, Some(session_id), history, &mcp_servers).await;
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
@@ -196,7 +211,7 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
             };
             install_session(srv, handle, spec);
             Ok(AgentResponse::LoadSessionResponse(resp))
-        }),
+        }
         "session/prompt" => match handle_prompt(srv, raw, &id) {
             Ok(()) => return,
             Err(e) => Err(e),
@@ -208,12 +223,14 @@ fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, pa
     srv.respond(id, result);
 }
 
-fn spawn_session(
+async fn spawn_session(
     params: &AcpParams,
     cwd: PathBuf,
     session_id: Option<String>,
     history: Vec<Message>,
+    client_mcp_servers: &[McpServer],
 ) -> InteractiveHandle {
+    let mcp_handle = build_mcp_handle(&params.mcp_config, client_mcp_servers).await;
     headless::spawn_interactive(InteractiveParams {
         model: params.model.clone(),
         config: params.config.clone(),
@@ -222,7 +239,7 @@ fn spawn_session(
         timeouts: params.timeouts,
         prompt_slots: Arc::clone(&params.prompt_slots),
         excluded_tools: Vec::new(),
-        mcp_handle: params.mcp_handle.clone(),
+        mcp_handle,
         initial_wd: cwd,
         session_id,
         initial_history: history,
@@ -230,6 +247,53 @@ fn spawn_session(
         system_prompt_override: None,
         append_system_prompt: None,
     })
+}
+
+async fn build_mcp_handle(
+    local_config: &McpConfig,
+    client_servers: &[McpServer],
+) -> Option<craft_agent::McpHandle> {
+    let client_configs = acp_mcp::convert_acp_servers(client_servers);
+    if local_config.is_empty() && client_configs.is_empty() {
+        return None;
+    }
+    let merged = merge_configs(local_config, &client_configs);
+    mcp::start_with_config(merged).await
+}
+
+fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {
+    let mut merged = local.clone();
+    for cfg in client {
+        let raw = craft_agent::mcp::config::RawServerConfig {
+            enabled: true,
+            timeout: cfg.timeout.as_millis() as u64,
+            transport: match &cfg.transport {
+                Transport::Stdio { program, args, environment } => {
+                    let mut command = vec![program.clone()];
+                    command.extend(args.iter().cloned());
+                    craft_agent::mcp::config::RawTransport::Stdio(
+                        craft_agent::mcp::config::RawStdioFields {
+                            command,
+                            environment: environment.clone(),
+                        },
+                    )
+                }
+                Transport::Http { url, headers } => {
+                    craft_agent::mcp::config::RawTransport::Http(
+                        craft_agent::mcp::config::RawHttpFields {
+                            url: url.clone(),
+                            headers: headers.clone(),
+                        },
+                    )
+                }
+            },
+        };
+        merged
+            .origins
+            .insert(cfg.name.clone(), PathBuf::from("acp-client"));
+        merged.mcp.insert(cfg.name.clone(), raw);
+    }
+    merged
 }
 
 fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: String) {
