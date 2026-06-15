@@ -124,9 +124,9 @@ Defaults: devstral-latest (strong), mistral-large-latest (medium), mistral-small
 |------|--------|-------------------------------|---------|
 | Weak | **glm-4.7-flash** (default), glm-4.5-flash, glm-4.5-air | $0.00 / $0.00 | 200K ctx / 131K out |
 | Medium | **glm-4.7, glm-4.6** (default), glm-4.5 | $0.60 / $2.20 | 200K ctx / 131K out |
-| Strong | **glm-5.2** (default), **glm-5-code** (default), glm-5 | $1.20 / $5.00 | 1000K ctx / 131K out |
+| Strong | **glm-5.2** (default), glm-5-code, glm-5 | $1.20 / $5.00 | 1000K ctx / 131K out |
 
-Defaults: glm-5.2 (strong), glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
+Defaults: glm-5.2 (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 
 ### DeepSeek
 
@@ -157,11 +157,11 @@ OpenRouter aggregates models from many providers behind a single API. Craft asks
 
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
-| Weak | **hf:Qwen/Qwen3.6-27B** (default), **hf:zai-org/GLM-4.7-Flash** (default) | $0.45 / $3.60 | 256K ctx / 131K out |
+| Weak | hf:Qwen/Qwen3.6-27B, **hf:zai-org/GLM-4.7-Flash** (default) | $0.45 / $3.60 | 256K ctx / 131K out |
 | Medium | **hf:MiniMaxAI/MiniMax-M3** (default) | $0.60 / $1.20 | 512K ctx / 131K out |
 | Strong | **hf:moonshotai/Kimi-K2.6** (default) | $0.95 / $4.00 | 256K ctx / 131K out |
 
-Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), hf:Qwen/Qwen3.6-27B (weak), hf:moonshotai/Kimi-K2.6 (strong), hf:zai-org/GLM-4.7-Flash (weak)
+Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), hf:moonshotai/Kimi-K2.6 (strong), hf:zai-org/GLM-4.7-Flash (weak)
 
 ## Model Identifiers
 

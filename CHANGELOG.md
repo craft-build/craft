@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-15
+
+### Added
+
+- **acp**: subagent task output is now folded into the parent task tool call
+  result, keeping the transcript compact. (`fbcd4bd`)
+
+### Fixed
+
+- **skill**: the `/distill` command now writes skills to the project's
+  `.craft/skills` directory instead of the memory store, and `.craft/skills`
+  is now scanned by the skill discovery tool. (`10c0f7e`)
+- **providers**: resolve duplicate model defaults on the `zai` and `synthetic`
+  providers, and fix a stale long-context test case. (`591c131`)
+- **agent**: use the synchronous `start_kill` in the Windows `ChildGuard` drop
+  path so the crate compiles on Windows. (`a881042`)
+- **agent**: ungate `PrefixCacheTracker::frozen_count` so the default-feature
+  test build compiles. (`98e1668`)
+- **lua**: disable the sandbox in `bash_timeout_round_trip` so the test passes
+  on CI environments without a sandbox backing binary. (`a1ea786`)
+
 ## [0.5.0] - 2026-06-14
 
 ### Changed

@@ -16,8 +16,8 @@ use agent_client_protocol_schema::{
     SessionInfo as AcpSessionInfo, SessionInfoUpdate, SessionModeId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
     SetSessionModeRequest, SetSessionModeResponse, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, TextContent, ToolCallId, ToolCallUpdate,
-    ToolCallUpdateFields, WriteTextFileRequest, WriteTextFileResponse,
+    TerminalOutputResponse, TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use color_eyre::eyre::Context;
 use craft_agent::headless::{self, InteractiveHandle, InteractiveParams};
