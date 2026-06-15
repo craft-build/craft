@@ -645,7 +645,13 @@ fn render_table(
         let wrapped_cells: Vec<Vec<Vec<Span>>> = (0..col_count)
             .map(|c| {
                 let cell = row.get(c).map(String::as_str).unwrap_or("");
-                wrap_spans_impl(cell_spans(cell, header), col_widths[c], col_widths[c], true, true)
+                wrap_spans_impl(
+                    cell_spans(cell, header),
+                    col_widths[c],
+                    col_widths[c],
+                    true,
+                    true,
+                )
             })
             .collect();
 

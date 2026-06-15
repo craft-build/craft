@@ -389,11 +389,7 @@ impl<T: PickerItem> ListPicker<T> {
     }
 
     fn handle_ready_key(&mut self, key: KeyEvent) -> PickerAction<T> {
-        let Some(s) = self
-            .state
-            .as_mut()
-            .and_then(PickerState::ready_mut)
-        else {
+        let Some(s) = self.state.as_mut().and_then(PickerState::ready_mut) else {
             return PickerAction::Close;
         };
 
@@ -429,7 +425,11 @@ impl<T: PickerItem> ListPicker<T> {
                 }
                 match idx {
                     Some(idx) => {
-                        let PickerState::Ready(mut state) = self.state.take().expect("state is Ready per handle_ready_key guard") else {
+                        let PickerState::Ready(mut state) = self
+                            .state
+                            .take()
+                            .expect("state is Ready per handle_ready_key guard")
+                        else {
                             return PickerAction::Consumed;
                         };
                         PickerAction::Select(idx, state.items.swap_remove(idx))
@@ -489,7 +489,6 @@ impl<T: PickerItem> ListPicker<T> {
             .and_then(PickerState::ready)
             .and_then(|s| s.items.get(idx))
     }
-
 
     pub fn handle_paste(&mut self, text: &str) -> bool {
         let Some(Some(s)) = self.state.as_mut().map(PickerState::ready_mut) else {
@@ -803,8 +802,14 @@ fn render_list<T: PickerItem>(
         }
 
         let (style, detail_style) = match (i == selected, item.is_highlighted()) {
-            (true, _) => (theme::current().item_selected, theme::current().item_selected),
-            (false, true) => (theme::dim_style(theme::current().item, 0.3), theme::dim_style(theme::current().item_desc, 0.3)),
+            (true, _) => (
+                theme::current().item_selected,
+                theme::current().item_selected,
+            ),
+            (false, true) => (
+                theme::dim_style(theme::current().item, 0.3),
+                theme::dim_style(theme::current().item_desc, 0.3),
+            ),
             (false, false) => (theme::current().item, theme::current().item_desc),
         };
         let checkbox = enabled.map(|en| {

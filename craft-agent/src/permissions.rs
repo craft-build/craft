@@ -254,7 +254,12 @@ impl PermissionManager {
         *self.session_rules() = rules;
     }
 
-    pub fn apply_decision(&self, tool: &str, scopes: &[String], answer: &PermissionAnswer) -> Vec<(String, Option<String>, Effect, PermissionTarget)> {
+    pub fn apply_decision(
+        &self,
+        tool: &str,
+        scopes: &[String],
+        answer: &PermissionAnswer,
+    ) -> Vec<(String, Option<String>, Effect, PermissionTarget)> {
         let mut persist = Vec::new();
         let resolved = if answer.is_allow() {
             generalized_scopes(tool, scopes)
@@ -370,7 +375,8 @@ impl PermissionManager {
         if !persist.is_empty() {
             tokio::task::spawn_blocking(move || {
                 for (tool, scope, effect, target) in persist {
-                    if let Err(e) = append_permission_rule(&tool, scope.as_deref(), effect, &target) {
+                    if let Err(e) = append_permission_rule(&tool, scope.as_deref(), effect, &target)
+                    {
                         tracing::warn!(error = %e, "failed to persist permission rule");
                     }
                 }
@@ -497,7 +503,9 @@ mod tests {
     }
 
     fn canonical_cwd() -> PathBuf {
-        PathBuf::from("/tmp").canonicalize().unwrap_or_else(|_| PathBuf::from("/tmp"))
+        PathBuf::from("/tmp")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
     }
 
     #[test_case("*", "anything" => true ; "star")]

@@ -81,7 +81,8 @@ pub async fn index(path: &str, no_plugins: bool) -> Result<()> {
         .parse(&input)
         .map_err(|e| color_eyre::eyre::eyre!("parse index input: {e}"))?;
     let ctx = craft_agent::tools::cli_tool_ctx();
-    let result: Result<craft_agent::ToolOutput, String> = inv.execute(&ctx).await.map_err(|e| e.to_string());
+    let result: Result<craft_agent::ToolOutput, String> =
+        inv.execute(&ctx).await.map_err(|e| e.to_string());
     match result {
         Ok(output) => print!("{}", output.as_text()),
         Err(e) => bail!("index failed: {e}"),

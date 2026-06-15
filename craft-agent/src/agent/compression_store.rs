@@ -84,7 +84,11 @@ fn extended_hash(content: &str) -> String {
 }
 
 /// Build a retrieval marker string to append to compressed output.
-pub(crate) fn retrieval_marker(original_lines: usize, compressed_lines: usize, hash: &str) -> String {
+pub(crate) fn retrieval_marker(
+    original_lines: usize,
+    compressed_lines: usize,
+    hash: &str,
+) -> String {
     format!(
         "\n\n[{} lines compressed from {}. Retrieve original: hash={}]",
         compressed_lines, original_lines, hash,

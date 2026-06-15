@@ -542,10 +542,10 @@ fn batch_start(panel: &mut MessagesPanel, entries: Vec<BatchToolEntry>) {
         input: None,
         raw_input: None,
         output: Some(ToolOutput::Batch {
-             entries,
-             text: String::new(),
-             no_compress: false,
-         }),
+            entries,
+            text: String::new(),
+            no_compress: false,
+        }),
         render_header: None,
     });
 }
@@ -993,10 +993,10 @@ fn read_code_with_instructions(blocks: Vec<InstructionBlock>) -> ToolOutput {
         path: "file.rs".into(),
         start_line: 1,
         lines: vec!["fn main() {}".into()],
-            total_lines: 1,
-            instructions: Some(blocks),
-            no_compress: false,
-        }
+        total_lines: 1,
+        instructions: Some(blocks),
+        no_compress: false,
+    }
 }
 
 fn prev_segment_is_spacer(panel: &MessagesPanel, tool_id: &str) -> bool {

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use crossterm::event::KeyEvent;
 use craft_agent::{SharedBuf, SnapshotLine};
 use craft_lua::{Anchor, Axis, Border, FloatConfig, Split, TitlePos, WinCommand, WinEvent};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};

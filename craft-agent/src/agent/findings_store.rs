@@ -64,9 +64,7 @@ impl FindingsStore {
         self.entries
             .iter()
             .filter(|e| priority.is_none_or(|p| e.finding.priority == p))
-            .filter(|e| {
-                file_path_contains.is_none_or(|s| e.finding.file_path.contains(s))
-            })
+            .filter(|e| file_path_contains.is_none_or(|s| e.finding.file_path.contains(s)))
             .take(limit)
             .cloned()
             .collect()

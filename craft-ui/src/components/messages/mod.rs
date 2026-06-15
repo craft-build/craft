@@ -327,11 +327,21 @@ impl MessagesPanel {
         );
     }
 
-    pub fn tool_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
+    pub fn tool_snapshot(
+        &mut self,
+        tool_id: &str,
+        snapshot: BufferSnapshot,
+        theme_gen: Option<u64>,
+    ) {
         self.store_snapshot(tool_id, snapshot, theme_gen);
     }
 
-    pub fn tool_header_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
+    pub fn tool_header_snapshot(
+        &mut self,
+        tool_id: &str,
+        snapshot: BufferSnapshot,
+        theme_gen: Option<u64>,
+    ) {
         let theme_gen_val = theme_gen.unwrap_or(self.theme_generation);
         if let Some((batch_id, _)) = parse_batch_inner_id(tool_id) {
             let child = self.batch_children.entry(tool_id.to_owned()).or_default();
@@ -873,7 +883,9 @@ impl MessagesPanel {
     fn collect_stale_snapshots(&mut self, current_gen: u64) {
         let tol = self.tool_output_lines;
         for msg in &self.messages {
-            let DisplayRole::Tool(t) = &msg.role else { continue };
+            let DisplayRole::Tool(t) = &msg.role else {
+                continue;
+            };
             let has_snapshot = msg.render_snapshot.is_some() || msg.render_header.is_some();
             if has_snapshot && msg.snapshot_theme_gen != current_gen {
                 let output_text = msg
@@ -914,7 +926,9 @@ impl MessagesPanel {
                     .rsplit_once("__")
                     .and_then(|(_, i)| i.parse::<usize>().ok());
                 let Some(idx) = idx else { continue };
-                let Some(entry) = entries.get(idx) else { continue };
+                let Some(entry) = entries.get(idx) else {
+                    continue;
+                };
                 let output_text = entry
                     .output
                     .as_ref()

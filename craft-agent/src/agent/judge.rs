@@ -50,10 +50,24 @@ pub async fn evaluate(
             }
             Err(e) => {
                 warn!(error = %e, spec, "judge model resolution failed, using active model");
-                collect_text(active_provider.as_ref(), active_model, &messages, session_id).await?
+                collect_text(
+                    active_provider.as_ref(),
+                    active_model,
+                    &messages,
+                    session_id,
+                )
+                .await?
             }
         },
-        None => collect_text(active_provider.as_ref(), active_model, &messages, session_id).await?,
+        None => {
+            collect_text(
+                active_provider.as_ref(),
+                active_model,
+                &messages,
+                session_id,
+            )
+            .await?
+        }
     };
 
     Ok(parse_verdict(&verdict_text))
@@ -63,10 +77,9 @@ async fn resolve_judge(
     spec: &str,
     timeouts: craft_providers::Timeouts,
 ) -> Result<(Model, Box<dyn Provider>), CrateAgentError> {
-    let model = Model::from_spec(spec)
-        .map_err(|e| AgentError::Config {
-            message: format!("invalid judge_model spec: {e}"),
-        })?;
+    let model = Model::from_spec(spec).map_err(|e| AgentError::Config {
+        message: format!("invalid judge_model spec: {e}"),
+    })?;
     let provider = craft_providers::provider::from_model(&model, timeouts).await?;
     Ok((model, provider))
 }
@@ -81,7 +94,15 @@ async fn collect_text(
     let system = JUDGE_SYSTEM.to_string();
     let tools = Value::Array(vec![]);
     let response = provider
-        .stream_message(model, messages, &system, &tools, &ptx, RequestOptions::default(), session_id)
+        .stream_message(
+            model,
+            messages,
+            &system,
+            &tools,
+            &ptx,
+            RequestOptions::default(),
+            session_id,
+        )
         .await?;
     Ok(response.message.user_text().unwrap_or_default().to_string())
 }

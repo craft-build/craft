@@ -160,13 +160,15 @@ async fn fetch_container_credentials(
 ) -> Result<(String, String, Option<String>, Option<u64>), AgentError> {
     // file rotates, so don't cache it.
     let auth_header = match env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE") {
-        Ok(path) => Some(
-            tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| AgentError::Config {
-                    message: format!("read container auth token file {path}: {e}"),
-                })?,
-        ),
+        Ok(path) => {
+            Some(
+                tokio::fs::read_to_string(&path)
+                    .await
+                    .map_err(|e| AgentError::Config {
+                        message: format!("read container auth token file {path}: {e}"),
+                    })?,
+            )
+        }
         Err(_) => env::var("AWS_CONTAINER_AUTHORIZATION_TOKEN").ok(),
     };
 

@@ -389,10 +389,7 @@ impl App {
     }
 
     #[cfg(test)]
-    pub(super) fn layout_geometry(
-        &self,
-        area: Rect,
-    ) -> (Rect, Rect, Rect, Rect, SplitLayout) {
+    pub(super) fn layout_geometry(&self, area: Rect) -> (Rect, Rect, Rect, Rect, SplitLayout) {
         let in_plan = self.state.mode == Mode::Plan;
         let form_visible =
             self.permission_prompt.is_open() || (in_plan && self.plan_form.is_visible());

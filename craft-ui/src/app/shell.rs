@@ -4,12 +4,12 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use craft_agent::{
     AgentConfig, CancelToken, CancelTrigger, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent,
 };
 use craft_providers::Message;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::App;
 
@@ -109,10 +109,10 @@ impl App {
                     annotation: None,
                     input: Some(ToolInput::Code {
                         language: "bash".into(),
-                    code: command,
-                }),
-                raw_input: None,
-                output: None,
+                        code: command,
+                    }),
+                    raw_input: None,
+                    output: None,
                     render_header: None,
                 });
             }

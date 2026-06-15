@@ -16,7 +16,10 @@ pub fn compress_json_array(
 
         let first: Vec<&serde_json::Value> = items.iter().take(first_keep).collect();
         let last: Vec<&serde_json::Value> = items.iter().rev().take(last_keep).rev().collect();
-        let omitted = items.len().saturating_sub(first_keep).saturating_sub(last_keep);
+        let omitted = items
+            .len()
+            .saturating_sub(first_keep)
+            .saturating_sub(last_keep);
 
         let mut result = String::from("[\n");
         for item in &first {

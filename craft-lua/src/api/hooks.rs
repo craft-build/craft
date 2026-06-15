@@ -55,7 +55,10 @@ async fn fire_pre_tool_use(handle: &EventHandle, tool: String, input: Value) -> 
         is_error: false,
         reply: tx,
     });
-    rx.recv_async().await.map(|r| r.decision).unwrap_or(HookDecision::Allow)
+    rx.recv_async()
+        .await
+        .map(|r| r.decision)
+        .unwrap_or(HookDecision::Allow)
 }
 
 async fn fire_post_tool_use(
@@ -131,8 +134,7 @@ pub async fn run_hooks_in_vm(
                 decision: HookDecision::Allow,
             };
         };
-        regs
-            .iter()
+        regs.iter()
             .filter_map(|(plugin, key)| {
                 lua.registry_value::<Function>(key)
                     .ok()
@@ -152,13 +154,12 @@ pub async fn run_hooks_in_vm(
     for (plugin, func) in handlers {
         let lua_input = json_to_lua_value(lua, input);
 
-        let result: mlua::Result<LuaValue> =
-            crate::runtime::run_detached(lua, async move {
-                let thread = lua.create_thread(func)?;
-                let args = build_hook_args(lua, event, tool, lua_input, output, is_error)?;
-                thread.into_async::<LuaValue>(args)?.await
-            })
-            .await;
+        let result: mlua::Result<LuaValue> = crate::runtime::run_detached(lua, async move {
+            let thread = lua.create_thread(func)?;
+            let args = build_hook_args(lua, event, tool, lua_input, output, is_error)?;
+            thread.into_async::<LuaValue>(args)?.await
+        })
+        .await;
 
         match result {
             Ok(ret) => {
@@ -221,7 +222,8 @@ fn parse_pre_decision(ret: &LuaValue) -> HookDecision {
                         .unwrap_or_else(|_| "blocked by hook".into()),
                 },
                 "transform" => {
-                    let new_input: Value = lua_value_to_json(&t.get("input").unwrap_or(LuaValue::Nil));
+                    let new_input: Value =
+                        lua_value_to_json(&t.get("input").unwrap_or(LuaValue::Nil));
                     HookDecision::Transform { input: new_input }
                 }
                 _ => HookDecision::Allow,

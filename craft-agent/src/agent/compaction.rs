@@ -85,7 +85,10 @@ pub(super) async fn compact_history(
     #[cfg(not(feature = "onnx"))]
     let lifecycle_removed = super::read_lifecycle::run_lifecycle(history, None).await;
     if lifecycle_removed > 0 {
-        info!(chars_removed = lifecycle_removed, "read lifecycle applied before compaction");
+        info!(
+            chars_removed = lifecycle_removed,
+            "read lifecycle applied before compaction"
+        );
     }
 
     let mut compaction_history: Vec<Message> = history.as_slice().to_vec();
@@ -132,10 +135,7 @@ pub(super) async fn compact_history(
         context_size: Some(response.usage.context_tokens()),
     })))?;
 
-    let new_history = vec![
-        Message::user(COMPACT_USER_PROMPT.into()),
-        response.message,
-    ];
+    let new_history = vec![Message::user(COMPACT_USER_PROMPT.into()), response.message];
     history.replace(new_history);
     info!(
         model = %model.id,
@@ -190,15 +190,20 @@ pub(super) async fn progressive_compact(
     let total_before: usize = history
         .as_slice()
         .iter()
-        .flat_map(|m| m.content.iter().map(|b| match b {
-            ContentBlock::Text { text } | ContentBlock::ToolResult { content: text, .. } => text.len(),
-            _ => 0,
-        }))
+        .flat_map(|m| {
+            m.content.iter().map(|b| match b {
+                ContentBlock::Text { text } | ContentBlock::ToolResult { content: text, .. } => {
+                    text.len()
+                }
+                _ => 0,
+            })
+        })
         .sum();
 
     // Pass 1: read lifecycle
     #[cfg(feature = "onnx")]
-    let mut removed = super::read_lifecycle::run_lifecycle(history, ctx.scorer, ctx.compression_store).await;
+    let mut removed =
+        super::read_lifecycle::run_lifecycle(history, ctx.scorer, ctx.compression_store).await;
     #[cfg(not(feature = "onnx"))]
     let mut removed = super::read_lifecycle::run_lifecycle(history, ctx.compression_store).await;
 
@@ -206,13 +211,15 @@ pub(super) async fn progressive_compact(
         .as_slice()
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))
+        .filter(|(_, m)| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        })
         .map(|(i, _)| i)
         .collect();
 
-    let recent_cutoff = tool_result_indices
-        .len()
-        .saturating_sub(protect_recent);
+    let recent_cutoff = tool_result_indices.len().saturating_sub(protect_recent);
     let recent_msg_indices: HashSet<usize> = tool_result_indices
         .into_iter()
         .skip(recent_cutoff)
@@ -227,9 +234,15 @@ pub(super) async fn progressive_compact(
             let messages = history.as_slice();
             let mut old_tool_embeddings: Vec<(usize, Vec<f32>)> = Vec::new();
             for (i, msg) in messages.iter().enumerate() {
-                if recent_msg_indices.contains(&i) { continue; }
+                if recent_msg_indices.contains(&i) {
+                    continue;
+                }
                 for block in &msg.content {
-                    if let ContentBlock::ToolResult { content, is_error: false, .. } = block
+                    if let ContentBlock::ToolResult {
+                        content,
+                        is_error: false,
+                        ..
+                    } = block
                         && content.len() >= MIN_TOOL_RESULT_CHARS
                     {
                         if let Ok(emb) = scorer.embed_text(content).await {
@@ -239,11 +252,16 @@ pub(super) async fn progressive_compact(
                     }
                 }
             }
-            for (older, _newer, _sim) in super::semantic::detect_semantic_overlap(&old_tool_embeddings) {
+            for (older, _newer, _sim) in
+                super::semantic::detect_semantic_overlap(&old_tool_embeddings)
+            {
                 set.insert(older);
             }
             if !set.is_empty() {
-                info!(overlapping = set.len(), "semantic overlap detected in old tool results");
+                info!(
+                    overlapping = set.len(),
+                    "semantic overlap detected in old tool results"
+                );
             }
         }
         set
@@ -272,7 +290,11 @@ pub(super) async fn progressive_compact(
         let is_frozen = ctx.cache_tracker.is_some_and(|t| t.is_frozen(i));
 
         for block in &mut msg.content {
-            if let ContentBlock::ToolResult { content, is_error: false, .. } = block
+            if let ContentBlock::ToolResult {
+                content,
+                is_error: false,
+                ..
+            } = block
                 && content.len() >= MIN_TOOL_RESULT_CHARS
             {
                 let score = score_map.get(&i).copied().unwrap_or(0.0);
@@ -299,9 +321,11 @@ pub(super) async fn progressive_compact(
                     let line_count = old_lines;
                     let first_line = content.lines().next().unwrap_or("");
                     let preview: String = first_line.chars().take(SUMMARY_PREVIEW_CHARS).collect();
-                    let mut summary = format!("{SUMMARY_MARKER_PREFIX}{line_count} lines. First: {preview}]");
+                    let mut summary =
+                        format!("{SUMMARY_MARKER_PREFIX}{line_count} lines. First: {preview}]");
                     if let Some(ref h) = hash {
-                        summary.push_str(&super::compression_store::retrieval_marker(old_lines, 1, h));
+                        summary
+                            .push_str(&super::compression_store::retrieval_marker(old_lines, 1, h));
                     }
                     summary
                 } else {
@@ -315,7 +339,11 @@ pub(super) async fn progressive_compact(
                         let mut final_content = compressed;
                         if let Some(ref h) = hash {
                             let compressed_lines = final_content.lines().count();
-                            final_content.push_str(&super::compression_store::retrieval_marker(old_lines, compressed_lines, h));
+                            final_content.push_str(&super::compression_store::retrieval_marker(
+                                old_lines,
+                                compressed_lines,
+                                h,
+                            ));
                         }
                         final_content
                     } else {
@@ -341,17 +369,21 @@ pub(super) async fn progressive_compact(
         let total_after: usize = history
             .as_slice()
             .iter()
-            .flat_map(|m| m.content.iter().map(|b| match b {
-                ContentBlock::Text { text } | ContentBlock::ToolResult { content: text, .. } => text.len(),
-                _ => 0,
-            }))
+            .flat_map(|m| {
+                m.content.iter().map(|b| match b {
+                    ContentBlock::Text { text }
+                    | ContentBlock::ToolResult { content: text, .. } => text.len(),
+                    _ => 0,
+                })
+            })
             .sum();
 
         // Rough heuristic: if we removed >15% of total chars, likely enough to
         // avoid overflow on next turn. This is conservative — chars correlate
         // loosely with tokens but it's a fast check.
         let reduction_ratio = removed as f32 / total_before.max(1) as f32;
-        let likely_sufficient = reduction_ratio > SUFFICIENT_REDUCTION_RATIO || !is_overflow(ctx.usage, ctx.model, ctx.compaction_buffer);
+        let likely_sufficient = reduction_ratio > SUFFICIENT_REDUCTION_RATIO
+            || !is_overflow(ctx.usage, ctx.model, ctx.compaction_buffer);
 
         info!(
             chars_removed = removed,
@@ -653,14 +685,29 @@ mod tests {
             },
         ]);
 
-        let usage = TokenUsage { input: 180_000, ..Default::default() };
+        let usage = TokenUsage {
+            input: 180_000,
+            ..Default::default()
+        };
         let model = default_model();
-        let ctx = CompactContext { usage: &usage, model: &model, compaction_buffer: AgentConfig::default().compaction_buffer, cache_tracker: None, compression_store: None, relevance_scores: None, #[cfg(feature = "onnx")] scorer: None };
+        let ctx = CompactContext {
+            usage: &usage,
+            model: &model,
+            compaction_buffer: AgentConfig::default().compaction_buffer,
+            cache_tracker: None,
+            compression_store: None,
+            relevance_scores: None,
+            #[cfg(feature = "onnx")]
+            scorer: None,
+        };
         let _removed = progressive_compact(&mut history, 0, &ctx).await;
         let result_msg = &history.as_slice()[2];
         match &result_msg.content[0] {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(content.len() < long_content.len(), "content should be shorter");
+                assert!(
+                    content.len() < long_content.len(),
+                    "content should be shorter"
+                );
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
@@ -691,9 +738,21 @@ mod tests {
             },
         ]);
 
-        let usage = TokenUsage { input: 180_000, ..Default::default() };
+        let usage = TokenUsage {
+            input: 180_000,
+            ..Default::default()
+        };
         let model = default_model();
-        let ctx = CompactContext { usage: &usage, model: &model, compaction_buffer: AgentConfig::default().compaction_buffer, cache_tracker: None, compression_store: None, relevance_scores: None, #[cfg(feature = "onnx")] scorer: None };
+        let ctx = CompactContext {
+            usage: &usage,
+            model: &model,
+            compaction_buffer: AgentConfig::default().compaction_buffer,
+            cache_tracker: None,
+            compression_store: None,
+            relevance_scores: None,
+            #[cfg(feature = "onnx")]
+            scorer: None,
+        };
         let _removed = progressive_compact(&mut history, 1, &ctx).await;
         match &history.as_slice()[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {
@@ -732,19 +791,36 @@ mod tests {
             messages.push(Message::user(format!("msg {i}")));
             messages.push(Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: format!("reply {i}") }],
+                content: vec![ContentBlock::Text {
+                    text: format!("reply {i}"),
+                }],
                 ..Default::default()
             });
         }
 
         let mut history = History::new(messages);
-        let usage = TokenUsage { input: 180_000, ..Default::default() };
+        let usage = TokenUsage {
+            input: 180_000,
+            ..Default::default()
+        };
         let model = default_model();
-        let ctx = CompactContext { usage: &usage, model: &model, compaction_buffer: AgentConfig::default().compaction_buffer, cache_tracker: None, compression_store: None, relevance_scores: None, #[cfg(feature = "onnx")] scorer: None };
+        let ctx = CompactContext {
+            usage: &usage,
+            model: &model,
+            compaction_buffer: AgentConfig::default().compaction_buffer,
+            cache_tracker: None,
+            compression_store: None,
+            relevance_scores: None,
+            #[cfg(feature = "onnx")]
+            scorer: None,
+        };
         let _removed = progressive_compact(&mut history, 0, &ctx).await;
         match &history.as_slice()[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(content.starts_with("[Summary: "), "very old result should get summary marker, got: {content}");
+                assert!(
+                    content.starts_with("[Summary: "),
+                    "very old result should get summary marker, got: {content}"
+                );
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
@@ -762,15 +838,19 @@ mod tests {
                 ..Default::default()
             },
         ]);
-        assert!(is_proactive_threshold(&history, &model, 0.50), "should exceed 50% threshold");
+        assert!(
+            is_proactive_threshold(&history, &model, 0.50),
+            "should exceed 50% threshold"
+        );
     }
 
     #[test]
     fn proactive_threshold_false_for_small_history() {
         let model = small_context_model(200_000, 20_000);
-        let history = History::new(vec![
-            Message::user("hello".into()),
-        ]);
-        assert!(!is_proactive_threshold(&history, &model, 0.75), "should not exceed 75% threshold");
+        let history = History::new(vec![Message::user("hello".into())]);
+        assert!(
+            !is_proactive_threshold(&history, &model, 0.75),
+            "should not exceed 75% threshold"
+        );
     }
 }

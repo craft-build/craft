@@ -67,17 +67,26 @@ impl ToolGuardrails {
         h.finish()
     }
 
-    pub fn check_before_call(&self, tool: &str, input: &Value, is_read_only: bool) -> GuardrailDecision {
+    pub fn check_before_call(
+        &self,
+        tool: &str,
+        input: &Value,
+        is_read_only: bool,
+    ) -> GuardrailDecision {
         let tracker = match self.trackers.get(tool) {
             Some(t) => t,
             None => return GuardrailDecision::Allow,
         };
 
         let input_hash = Self::hash_value(input);
-        if tracker.exact_fail_count >= EXACT_REPEAT_BLOCK && input_hash == tracker.last_input_hash.unwrap_or(0) {
+        if tracker.exact_fail_count >= EXACT_REPEAT_BLOCK
+            && input_hash == tracker.last_input_hash.unwrap_or(0)
+        {
             return GuardrailDecision::Block;
         }
-        if tracker.exact_fail_count >= EXACT_REPEAT_WARN && input_hash == tracker.last_input_hash.unwrap_or(0) {
+        if tracker.exact_fail_count >= EXACT_REPEAT_WARN
+            && input_hash == tracker.last_input_hash.unwrap_or(0)
+        {
             return GuardrailDecision::Warn;
         }
 
@@ -98,8 +107,18 @@ impl ToolGuardrails {
         GuardrailDecision::Allow
     }
 
-    pub fn record_result(&mut self, tool: &str, input: &Value, result: &str, is_error: bool, is_read_only: bool) -> Option<GuardrailWarning> {
-        let tracker = self.trackers.entry(tool.to_string()).or_insert_with(ToolTracker::new);
+    pub fn record_result(
+        &mut self,
+        tool: &str,
+        input: &Value,
+        result: &str,
+        is_error: bool,
+        is_read_only: bool,
+    ) -> Option<GuardrailWarning> {
+        let tracker = self
+            .trackers
+            .entry(tool.to_string())
+            .or_insert_with(ToolTracker::new);
         let input_hash = Self::hash_value(input);
         tracker.last_input_hash = Some(input_hash);
 
@@ -111,11 +130,15 @@ impl ToolGuardrails {
 
             if tracker.exact_fail_count == EXACT_REPEAT_WARN {
                 warning = Some(GuardrailWarning {
-                    reason: format!("same tool+input failed {EXACT_REPEAT_WARN} times, consider a different approach"),
+                    reason: format!(
+                        "same tool+input failed {EXACT_REPEAT_WARN} times, consider a different approach"
+                    ),
                 });
             } else if tracker.any_fail_count == SAME_TOOL_FAIL_WARN {
                 warning = Some(GuardrailWarning {
-                    reason: format!("{tool} has failed {SAME_TOOL_FAIL_WARN} times total, consider using a different tool"),
+                    reason: format!(
+                        "{tool} has failed {SAME_TOOL_FAIL_WARN} times total, consider using a different tool"
+                    ),
                 });
             }
         } else {
@@ -127,7 +150,9 @@ impl ToolGuardrails {
                     tracker.same_result_count += 1;
                     if tracker.same_result_count == NO_PROGRESS_WARN {
                         warning = Some(GuardrailWarning {
-                            reason: format!("{tool} returned identical results {NO_PROGRESS_WARN} times, you may be stuck"),
+                            reason: format!(
+                                "{tool} returned identical results {NO_PROGRESS_WARN} times, you may be stuck"
+                            ),
                         });
                     }
                 } else {
@@ -152,7 +177,7 @@ impl ToolGuardrails {
 
 #[cfg(test)]
 mod tests {
-    
+
     use serde_json::json;
 
     use super::*;
@@ -160,7 +185,10 @@ mod tests {
     #[test]
     fn allow_when_no_history() {
         let g = ToolGuardrails::new();
-        assert_eq!(g.check_before_call("bash", &json!("ls"), false), GuardrailDecision::Allow);
+        assert_eq!(
+            g.check_before_call("bash", &json!("ls"), false),
+            GuardrailDecision::Allow
+        );
     }
 
     #[test]
@@ -170,7 +198,10 @@ mod tests {
         for _ in 0..EXACT_REPEAT_WARN {
             g.record_result("bash", &input, "error", true, false);
         }
-        assert_eq!(g.check_before_call("bash", &input, false), GuardrailDecision::Warn);
+        assert_eq!(
+            g.check_before_call("bash", &input, false),
+            GuardrailDecision::Warn
+        );
     }
 
     #[test]
@@ -180,7 +211,10 @@ mod tests {
         for _ in 0..EXACT_REPEAT_BLOCK {
             g.record_result("bash", &input, "error", true, false);
         }
-        assert_eq!(g.check_before_call("bash", &input, false), GuardrailDecision::Block);
+        assert_eq!(
+            g.check_before_call("bash", &input, false),
+            GuardrailDecision::Block
+        );
     }
 
     #[test]
@@ -189,7 +223,10 @@ mod tests {
         for i in 0..SAME_TOOL_FAIL_WARN {
             g.record_result("bash", &json!(format!("cmd{i}")), "error", true, false);
         }
-        assert_eq!(g.check_before_call("bash", &json!("new_cmd"), false), GuardrailDecision::Warn);
+        assert_eq!(
+            g.check_before_call("bash", &json!("new_cmd"), false),
+            GuardrailDecision::Warn
+        );
     }
 
     #[test]
@@ -199,7 +236,10 @@ mod tests {
         for _ in 0..NO_PROGRESS_WARN + 1 {
             g.record_result("grep", &json!("pattern"), result, false, true);
         }
-        assert_eq!(g.check_before_call("grep", &json!("pattern"), true), GuardrailDecision::Warn);
+        assert_eq!(
+            g.check_before_call("grep", &json!("pattern"), true),
+            GuardrailDecision::Warn
+        );
     }
 
     #[test]
@@ -209,6 +249,9 @@ mod tests {
             g.record_result("bash", &json!("cmd"), "err", true, false);
         }
         g.reset();
-        assert_eq!(g.check_before_call("bash", &json!("cmd"), false), GuardrailDecision::Allow);
+        assert_eq!(
+            g.check_before_call("bash", &json!("cmd"), false),
+            GuardrailDecision::Allow
+        );
     }
 }

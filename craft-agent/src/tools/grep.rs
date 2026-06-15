@@ -2,11 +2,11 @@ use std::io;
 use std::path::Path;
 
 use crate::{GrepFileEntry, GrepLine, GrepMatchGroup, ToolOutput};
+use craft_tool_macro::Tool;
 use grep_regex::RegexMatcher;
 use grep_searcher::Searcher;
 use grep_searcher::SearcherBuilder;
 use grep_searcher::{Sink, SinkContext, SinkFinish, SinkMatch};
-use craft_tool_macro::Tool;
 use serde::Deserialize;
 use tracing::debug;
 

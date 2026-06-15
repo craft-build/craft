@@ -749,7 +749,6 @@ dependencies = [
  "tempfile",
  "test-case",
  "thiserror 2.0.18",
- "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -793,7 +792,6 @@ dependencies = [
  "event-listener",
  "fastembed",
  "flume",
- "futures",
  "getrandom 0.4.2",
  "grep-regex",
  "grep-searcher",
@@ -818,7 +816,6 @@ dependencies = [
  "test-case",
  "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "toml",
  "toml_edit",
  "tracing",
@@ -897,7 +894,6 @@ dependencies = [
  "crossterm",
  "event-listener",
  "flume",
- "futures",
  "htmd",
  "humantime",
  "include_dir",
@@ -1622,9 +1618,9 @@ checksum = "dd2e7510819d6fbf51a5545c8f922716ecfb14df168a3242f7d33e0239efe6a1"
 
 [[package]]
 name = "fastembed"
-version = "5.16.1"
+version = "5.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6a4d483ea0f1a37e39387a8d2e6f8da60c66d635384b05215dc2faadd0a72b1"
+checksum = "13d4a1da220e9adaed8435d0d1a508712c2141190afa86050e3f0f2bec68eba3"
 dependencies = [
  "anyhow",
  "hf-hub",

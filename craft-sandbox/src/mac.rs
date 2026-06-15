@@ -8,7 +8,9 @@ use std::process::Command;
 #[cfg(test)]
 use tracing::warn;
 
-use crate::{NetworkPolicy, SandboxError, SandboxMode, SandboxProfile, default_writable_roots, normalize};
+use crate::{
+    NetworkPolicy, SandboxError, SandboxMode, SandboxProfile, default_writable_roots, normalize,
+};
 
 const SANDBOX_EXEC: &str = "sandbox-exec";
 

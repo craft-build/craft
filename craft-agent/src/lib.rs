@@ -10,17 +10,17 @@ pub use mcp::config::{McpConfigError, McpConfigErrors, McpServerInfo, McpServerS
 pub use mcp::protocol::PromptRole;
 pub use mcp::{McpCommand, McpHandle, McpPromptArg, McpPromptInfo, McpSnapshot, McpSnapshotReader};
 pub(crate) mod task_set;
+pub use agent::EmbedRequest;
+#[cfg(feature = "onnx")]
+pub use agent::EmbeddingService;
 pub use agent::{
     Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
     LoadedInstructions, SharedDoomTracker, SharedFindingsStore, SharedMessages, StoredFinding,
 };
-pub use agent::EmbedRequest;
-#[cfg(feature = "onnx")]
-pub use agent::EmbeddingService;
 pub use cancel::{CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
-pub mod compression;
 pub mod command;
+pub mod compression;
 pub mod diff;
 pub mod permissions;
 pub mod prompt;
@@ -38,9 +38,9 @@ use craft_providers::Message;
 pub use craft_providers::{ImageMediaType, ImageSource, ThinkingConfig};
 pub use types::{
     AgentEvent, BatchProgressEvent, BatchToolEntry, BatchToolStatus, BufferSnapshot, Envelope,
-    EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock, NO_FILES_FOUND,
-    Priority, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo, TaskNode,
-    TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
+    EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock,
+    NO_FILES_FOUND, Priority, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo,
+    TaskNode, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
     flatten_task_tree,
 };
 

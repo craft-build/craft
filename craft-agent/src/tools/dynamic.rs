@@ -129,7 +129,8 @@ pub fn build_active_tools(
 ) -> Value {
     let filter = ToolFilter::from_config(config, &build.excluded);
     let ctx = DescriptionContext { filter: &filter };
-    let mut tools = ToolRegistry::native().definitions(&build.vars, &ctx, model.supports_tool_examples());
+    let mut tools =
+        ToolRegistry::native().definitions(&build.vars, &ctx, model.supports_tool_examples());
     if let Some(handle) = &build.mcp {
         handle.extend_tools(&mut tools);
     }
@@ -142,7 +143,11 @@ pub fn build_active_tools(
 
 /// Keep a tool definition iff it is core, already promoted, or the discovery tool
 /// itself. Definitions without a parseable `name` are kept defensively.
-pub fn filter_to_active(tools: &Value, core: &HashSet<String>, promoted: &HashSet<String>) -> Value {
+pub fn filter_to_active(
+    tools: &Value,
+    core: &HashSet<String>,
+    promoted: &HashSet<String>,
+) -> Value {
     let Some(arr) = tools.as_array() else {
         return tools.clone();
     };
@@ -152,9 +157,7 @@ pub fn filter_to_active(tools: &Value, core: &HashSet<String>, promoted: &HashSe
             let Some(name) = def.get("name").and_then(|v| v.as_str()) else {
                 return true;
             };
-            name == tools::LIST_TOOLS_TOOL_NAME
-                || core.contains(name)
-                || promoted.contains(name)
+            name == tools::LIST_TOOLS_TOOL_NAME || core.contains(name) || promoted.contains(name)
         })
         .cloned()
         .collect();
@@ -250,7 +253,8 @@ mod tests {
         let cfg = config_with_dynamic(false);
         let dynamic = DynamicContext::from_config(&cfg);
         let build = empty_build();
-        let tools = build_active_tools(&build, &spec_model(), &cfg, &dynamic, &PromotedTools::new());
+        let tools =
+            build_active_tools(&build, &spec_model(), &cfg, &dynamic, &PromotedTools::new());
         let names = tool_names(&tools);
         assert!(names.contains(&"review".to_string()));
     }
@@ -303,7 +307,8 @@ mod tests {
         let cfg = config_with_dynamic(true);
         let dynamic = DynamicContext::from_config(&cfg);
         let build = empty_build();
-        let tools = build_active_tools(&build, &spec_model(), &cfg, &dynamic, &PromotedTools::new());
+        let tools =
+            build_active_tools(&build, &spec_model(), &cfg, &dynamic, &PromotedTools::new());
         assert!(tool_names(&tools).contains(&"list_tools".to_string()));
     }
 }

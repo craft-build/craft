@@ -49,8 +49,8 @@ impl EmbeddingService {
     }
 
     fn init_model() -> Result<TextEmbedding, EmbeddingError> {
-        let options = TextInitOptions::new(EmbeddingModel::BGEBaseENV15)
-            .with_show_download_progress(false);
+        let options =
+            TextInitOptions::new(EmbeddingModel::BGEBaseENV15).with_show_download_progress(false);
         let options = match craft_storage::paths::models_dir() {
             Ok(dir) => options.with_cache_dir(dir),
             Err(_) => options,
@@ -61,7 +61,9 @@ impl EmbeddingService {
     pub async fn download_model(&self) -> Result<(), EmbeddingError> {
         let model = Arc::clone(&self.model);
         tokio::task::spawn_blocking(move || {
-            let mut guard = model.lock().map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?;
+            let mut guard = model
+                .lock()
+                .map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?;
             if guard.is_none() {
                 *guard = Some(Self::init_model()?);
             }
@@ -75,7 +77,9 @@ impl EmbeddingService {
         let model = Arc::clone(&self.model);
         let text = text.to_owned();
         tokio::task::spawn_blocking(move || {
-            let mut guard = model.lock().map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?;
+            let mut guard = model
+                .lock()
+                .map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?;
             if guard.is_none() {
                 *guard = Some(Self::init_model()?);
             }
@@ -93,7 +97,9 @@ impl EmbeddingService {
     pub async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let model = Arc::clone(&self.model);
         tokio::task::spawn_blocking(move || {
-            let mut guard = model.lock().map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?;
+            let mut guard = model
+                .lock()
+                .map_err(|e| EmbeddingError::TaskFailed(e.to_string()))?;
             if guard.is_none() {
                 *guard = Some(Self::init_model()?);
             }
@@ -291,9 +297,7 @@ pub fn select_messages(
 
     let mut scored: Vec<(usize, f32)> = scores
         .iter()
-        .filter(|(idx, _)| {
-            *idx >= frozen_count && *idx < recent_start
-        })
+        .filter(|(idx, _)| *idx >= frozen_count && *idx < recent_start)
         .cloned()
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -435,7 +439,10 @@ pub async fn classify_reads_semantic(
         let sim = cosine_similarity(&read_emb, &edit_emb);
         let is_stale = sim >= STALE_RELEVANCE_THRESHOLD;
         if !is_stale {
-            info!(file = file_path.as_str(), sim, "semantic stale detection: downgraded Stale -> Fresh");
+            info!(
+                file = file_path.as_str(),
+                sim, "semantic stale detection: downgraded Stale -> Fresh"
+            );
         }
         results.push((tool_call_id.clone(), file_path.clone(), is_stale));
     }
@@ -446,7 +453,11 @@ pub async fn classify_reads_semantic(
 fn find_read_content(history: &[Message], tool_call_id: &str) -> Option<String> {
     for msg in history {
         for block in &msg.content {
-            if let ContentBlock::ToolResult { tool_use_id, content, .. } = block
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
                 && tool_use_id == tool_call_id
             {
                 let truncated: String = content.chars().take(CLASSIFY_TRUNCATE_CHARS).collect();
@@ -481,9 +492,7 @@ fn find_latest_edit_content(history: &[Message], file_path: &str) -> Option<Stri
 
 pub const SEMANTIC_DEDUP_THRESHOLD: f32 = 0.9;
 
-pub fn detect_semantic_overlap(
-    embeddings: &[(usize, Vec<f32>)],
-) -> Vec<(usize, usize, f32)> {
+pub fn detect_semantic_overlap(embeddings: &[(usize, Vec<f32>)]) -> Vec<(usize, usize, f32)> {
     let mut overlaps = Vec::new();
     for i in 0..embeddings.len() {
         for j in (i + 1)..embeddings.len() {
@@ -547,14 +556,7 @@ mod tests {
     #[test]
     fn test_select_messages_always_includes_frozen_and_recent() {
         let scores = vec![(2, 0.9), (3, 0.5), (4, 0.1)];
-        let selected = select_messages(
-            &scores,
-            8,
-            10000,
-            2,
-            2,
-            &|_| 100,
-        );
+        let selected = select_messages(&scores, 8, 10000, 2, 2, &|_| 100);
         assert!(selected.contains(&0));
         assert!(selected.contains(&1));
         assert!(selected.contains(&6));

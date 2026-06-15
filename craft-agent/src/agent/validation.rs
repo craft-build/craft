@@ -132,7 +132,10 @@ impl Validator {
                 ValidationResult::Skipped
             }
             Err(_) => {
-                warn!(timeout_secs = self.config.timeout_secs, "validation timed out");
+                warn!(
+                    timeout_secs = self.config.timeout_secs,
+                    "validation timed out"
+                );
                 ValidationResult::Skipped
             }
         }

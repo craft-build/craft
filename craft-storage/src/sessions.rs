@@ -879,8 +879,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ThinkingParseError;
     use super::StoredThinking;
+    use super::ThinkingParseError;
     use super::{
         CWD_INDEX_FILE, DEFAULT_TITLE, MAX_TITLE_LEN, SESSION_VERSION, generate_title,
         load_cwd_index, update_cwd_index,

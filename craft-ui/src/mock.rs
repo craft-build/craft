@@ -5,8 +5,8 @@ use craft_agent::tools::{
 };
 use craft_agent::{
     AgentEvent, BatchToolEntry, BatchToolStatus, Envelope, GrepFileEntry, GrepMatchGroup,
-    SubagentInfo, TaskNode, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput,
-    ToolStartEvent, TurnCompleteEvent,
+    SubagentInfo, TaskNode, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent,
+    TurnCompleteEvent,
 };
 use craft_providers::{Message, TokenUsage};
 

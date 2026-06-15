@@ -312,11 +312,7 @@ fn build_highlighted_line<'a>(
     t: &'a theme::Theme,
 ) -> Line<'a> {
     let index_set: std::collections::HashSet<u32> = indices.iter().copied().collect();
-    let base_style = if is_selected {
-        t.item_selected
-    } else {
-        t.item
-    };
+    let base_style = if is_selected { t.item_selected } else { t.item };
     let match_style = base_style
         .fg(t.accent.fg.unwrap_or_default())
         .add_modifier(Modifier::BOLD);

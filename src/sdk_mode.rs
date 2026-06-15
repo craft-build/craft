@@ -23,8 +23,8 @@ use craft_agent::{
 use craft_config::CompressionConfig;
 use craft_providers::model::Model;
 use craft_providers::{Message, StopReason, Timeouts, TokenUsage};
-use craft_storage::sessions::Session;
 use craft_storage::StateDir;
+use craft_storage::sessions::Session;
 use flume::{Receiver, Sender};
 use serde::Serialize;
 use serde_json::Value;

@@ -7,7 +7,9 @@ use crate::types::{Finding, Priority, ToolOutput};
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct ReportFinding {
-    #[param(description = "Imperative title, prefixed with priority (e.g. '[P1] Add error handling')")]
+    #[param(
+        description = "Imperative title, prefixed with priority (e.g. '[P1] Add error handling')"
+    )]
     title: String,
     #[param(description = "Markdown body: what, why, rule, fix")]
     body: String,
@@ -67,11 +69,17 @@ fn parse_priority(s: &str) -> Result<Priority, String> {
     }
 }
 
-super::impl_tool!(ReportFinding, audience = super::ToolAudience::MAIN | super::ToolAudience::RESEARCH_SUB, kind = "think");
+super::impl_tool!(
+    ReportFinding,
+    audience = super::ToolAudience::MAIN | super::ToolAudience::RESEARCH_SUB,
+    kind = "think"
+);
 
 impl ToolInvocation for ReportFinding {
     fn start_header(&self) -> super::HeaderFuture {
-        super::HeaderFuture::Ready(super::HeaderResult::plain(ReportFinding::start_header(self)))
+        super::HeaderFuture::Ready(super::HeaderResult::plain(ReportFinding::start_header(
+            self,
+        )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
         Box::pin(async move { ReportFinding::execute(&self, ctx).await })

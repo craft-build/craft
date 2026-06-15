@@ -252,10 +252,18 @@ fn write_model_table(out: &mut String, entries: &[ModelEntry]) {
 
 fn no_catalog_note(kind: ProviderKind) -> &'static str {
     match kind {
-        ProviderKind::Ollama => "Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.",
-        ProviderKind::LlamaCpp => "Connects to any OpenAI-compatible `/v1` endpoint. Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.",
-        ProviderKind::OpenRouter => "OpenRouter aggregates models from many providers behind a single API. Craft asks the OpenRouter API for the list of available models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.",
-        _ => "Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.",
+        ProviderKind::Ollama => {
+            "Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."
+        }
+        ProviderKind::LlamaCpp => {
+            "Connects to any OpenAI-compatible `/v1` endpoint. Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."
+        }
+        ProviderKind::OpenRouter => {
+            "OpenRouter aggregates models from many providers behind a single API. Craft asks the OpenRouter API for the list of available models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."
+        }
+        _ => {
+            "Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."
+        }
     }
 }
 

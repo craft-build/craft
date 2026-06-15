@@ -1,5 +1,5 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use craft_ui::splash::Splash;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 

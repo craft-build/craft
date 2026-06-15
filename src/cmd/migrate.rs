@@ -35,8 +35,7 @@ fn move_file(src: &Path, dst: &Path) -> Result<()> {
     match fs::rename(src, dst) {
         Ok(()) => Ok(()),
         Err(e) if is_cross_device(&e) => {
-            fs::copy(src, dst)
-                .with_context(|| format!("copy {} -> {}", tilde(src), tilde(dst)))?;
+            fs::copy(src, dst).with_context(|| format!("copy {} -> {}", tilde(src), tilde(dst)))?;
             #[cfg(unix)]
             {
                 let mode = fs::metadata(src)
@@ -44,8 +43,7 @@ fn move_file(src: &Path, dst: &Path) -> Result<()> {
                     .unwrap_or(0o644);
                 fs::set_permissions(dst, fs::Permissions::from_mode(mode)).ok();
             }
-            fs::remove_file(src)
-                .with_context(|| format!("remove source {}", tilde(src)))?;
+            fs::remove_file(src).with_context(|| format!("remove source {}", tilde(src)))?;
             Ok(())
         }
         Err(e) => Err(e).with_context(|| format!("move {} -> {}", tilde(src), tilde(dst))),
@@ -81,8 +79,7 @@ fn move_auth(legacy_dir: &Path, target_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    fs::create_dir_all(target_dir)
-        .with_context(|| format!("create {}", tilde(target_dir)))?;
+    fs::create_dir_all(target_dir).with_context(|| format!("create {}", tilde(target_dir)))?;
 
     let count = entries.len();
     for entry in &entries {
@@ -97,11 +94,7 @@ fn move_auth(legacy_dir: &Path, target_dir: &Path) -> Result<()> {
     fs::remove_dir(legacy_dir).ok();
 
     let plural = if count == 1 { "" } else { "s" };
-    log_move(
-        "auth/",
-        target_dir,
-        Some(&format!("{count} file{plural}")),
-    );
+    log_move("auth/", target_dir, Some(&format!("{count} file{plural}")));
     Ok(())
 }
 
@@ -128,11 +121,7 @@ fn merge_json_file(legacy: &Path, target: &Path, name: &str) -> Result<()> {
     fs::write(target, serde_json::to_vec_pretty(&merged)?)
         .with_context(|| format!("write {}", tilde(target)))?;
     fs::remove_file(legacy)?;
-    log_move(
-        name,
-        target.parent().unwrap_or(target),
-        Some("merged"),
-    );
+    log_move(name, target.parent().unwrap_or(target), Some("merged"));
     Ok(())
 }
 
@@ -141,8 +130,7 @@ fn merge_input_history(legacy: &Path, target: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let legacy_items: Vec<String> =
-        serde_json::from_slice(&fs::read(legacy)?).unwrap_or_default();
+    let legacy_items: Vec<String> = serde_json::from_slice(&fs::read(legacy)?).unwrap_or_default();
 
     if !target.exists() {
         move_file(legacy, target)?;
@@ -154,8 +142,7 @@ fn merge_input_history(legacy: &Path, target: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let target_items: Vec<String> =
-        serde_json::from_slice(&fs::read(target)?).unwrap_or_default();
+    let target_items: Vec<String> = serde_json::from_slice(&fs::read(target)?).unwrap_or_default();
 
     let mut merged = Vec::with_capacity(target_items.len() + legacy_items.len());
     merged.extend(target_items);
@@ -174,12 +161,7 @@ fn merge_input_history(legacy: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn merge_dir(
-    legacy: &Path,
-    target: &Path,
-    subdir: &str,
-    recursive: bool,
-) -> Result<(u32, u32)> {
+fn merge_dir(legacy: &Path, target: &Path, subdir: &str, recursive: bool) -> Result<(u32, u32)> {
     let src = legacy.join(subdir);
     let dst = target.join(subdir);
     if !src.is_dir() {
@@ -238,8 +220,7 @@ fn move_logs(legacy: &Path, logs_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    fs::create_dir_all(logs_dir)
-        .with_context(|| format!("create {}", tilde(logs_dir)))?;
+    fs::create_dir_all(logs_dir).with_context(|| format!("create {}", tilde(logs_dir)))?;
 
     for entry in &entries {
         let dst = logs_dir.join(entry.file_name());

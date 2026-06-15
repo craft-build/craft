@@ -41,7 +41,6 @@ reqwest = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 libc = { workspace = true }
-time = { workspace = true }
 
 [dev-dependencies]
 test-case = { workspace = true }

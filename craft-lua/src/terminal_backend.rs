@@ -135,7 +135,9 @@ where
     R: std::io::Read + Send + 'static,
     F: Fn(String) -> JobEvent + Send + 'static,
 {
-    let Some(stream) = stream else { return Ok(None) };
+    let Some(stream) = stream else {
+        return Ok(None);
+    };
     let tx = tx.clone();
     let handle = thread::Builder::new()
         .name(name.into())

@@ -24,8 +24,7 @@ pub struct Review {
 
 impl Review {
     pub const NAME: &str = "review";
-    pub const DESCRIPTION: &str =
-        "Spawn a code review subagent that reads files, checks against styleguide rules, and reports structured findings with priorities (P0-P3) and a verdict.";
+    pub const DESCRIPTION: &str = "Spawn a code review subagent that reads files, checks against styleguide rules, and reports structured findings with priorities (P0-P3) and a verdict.";
     pub const EXAMPLES: Option<&str> = Some(
         r#"[{"task": "Review error handling in the agent module", "focus_files": ["craft-agent/src/agent/run.rs"]}]"#,
     );
@@ -42,16 +41,21 @@ impl Review {
                 format!(
                     "{}\n\nFocus files:\n{}",
                     self.task,
-                    files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")
+                    files
+                        .iter()
+                        .map(|f| format!("- {f}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 )
             }
             None => self.task.clone(),
         };
 
         let cwd_owned = vars.apply("{cwd}").into_owned();
-        let instructions = tokio::task::spawn_blocking(move || agent::load_instruction_text(&cwd_owned))
-            .await
-            .map_err(|e| format!("review failed: {e}"))?;
+        let instructions =
+            tokio::task::spawn_blocking(move || agent::load_instruction_text(&cwd_owned))
+                .await
+                .map_err(|e| format!("review failed: {e}"))?;
 
         let system = vars
             .apply(&crate::prompt::assemble_raw(
@@ -75,16 +79,18 @@ impl Review {
             .iter()
             .filter(|e| {
                 let name = e.name();
-                e.tool.audience().contains(ToolAudience::RESEARCH_SUB)
-                    && allowed.contains(&name)
+                e.tool.audience().contains(ToolAudience::RESEARCH_SUB) && allowed.contains(&name)
             })
             .map(|e| e.name().to_owned())
             .collect();
 
         let filter = ToolFilter::Only(tool_names);
         let ctx_desc = DescriptionContext { filter: &filter };
-        let mut tools =
-            ToolRegistry::native().definitions(&vars, &ctx_desc, ctx.model.supports_tool_examples());
+        let mut tools = ToolRegistry::native().definitions(
+            &vars,
+            &ctx_desc,
+            ctx.model.supports_tool_examples(),
+        );
         if let Some(ref mcp) = ctx.mcp {
             mcp.extend_tools(&mut tools);
         }
@@ -186,10 +192,16 @@ impl Review {
         if !findings.is_empty()
             && let Some(store) = ctx.findings_store.as_ref()
         {
-            store.lock().unwrap().extend(&self.task, findings.iter().cloned());
+            store
+                .lock()
+                .unwrap()
+                .extend(&self.task, findings.iter().cloned());
         }
 
-        Ok(ToolOutput::ReviewResult { findings, verdict: text })
+        Ok(ToolOutput::ReviewResult {
+            findings,
+            verdict: text,
+        })
     }
 }
 
@@ -285,9 +297,7 @@ mod tests {
     #[test]
     fn text_delta_forwarded() {
         let bucket: Arc<Mutex<Vec<Finding>>> = Arc::new(Mutex::new(Vec::new()));
-        let env = envelope(crate::AgentEvent::TextDelta {
-            text: "hi".into(),
-        });
+        let env = envelope(crate::AgentEvent::TextDelta { text: "hi".into() });
         assert!(filter_subagent_envelope(&env, &bucket));
     }
 }

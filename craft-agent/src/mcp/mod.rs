@@ -281,7 +281,7 @@ impl McpHandle {
     pub async fn shutdown(&self) {
         let (ack_tx, ack_rx) = flume::bounded(1);
         self.send(McpCommand::Shutdown { ack: ack_tx });
-        let finished =         tokio::select! {
+        let finished = tokio::select! {
             _ = ack_rx.recv_async() => {
                 true
             }
@@ -298,10 +298,12 @@ impl McpHandle {
 pub async fn start(cwd: &Path) -> (Option<McpHandle>, McpConfigErrors) {
     tracing::info!(cwd = %cwd.display(), "starting MCP");
     let cwd = cwd.to_owned();
-    let (config, config_errors) = tokio::task::spawn_blocking(move || load_config(&cwd)).await.unwrap_or_else(|e| {
-        tracing::error!(error = %e, "failed to load config");
-        (McpConfig::default(), McpConfigErrors::new(PathBuf::new()))
-    });
+    let (config, config_errors) = tokio::task::spawn_blocking(move || load_config(&cwd))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to load config");
+            (McpConfig::default(), McpConfigErrors::new(PathBuf::new()))
+        });
     let handle = start_with_config(config).await;
     (handle, config_errors)
 }
@@ -686,9 +688,10 @@ fn transport_url(transport: &Transport) -> Option<String> {
 fn spawn_persist_enabled(path: PathBuf, name: String, enabled: bool) {
     let log_name = name.clone();
     tokio::spawn(async move {
-        if let Err(e) = tokio::task::spawn_blocking(move || config::persist_enabled(&path, &name, enabled))
-            .await
-            .unwrap_or_else(|e| Err(McpError::Config(format!("spawn_blocking failed: {e}"))))
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || config::persist_enabled(&path, &name, enabled))
+                .await
+                .unwrap_or_else(|e| Err(McpError::Config(format!("spawn_blocking failed: {e}"))))
         {
             warn!(error = %e, server = %log_name, "failed to persist MCP toggle");
         }
@@ -724,9 +727,9 @@ fn intern(name: String) -> Arc<str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Mutex as AsyncMutex;
     use config::{RawServerConfig, RawStdioFields, RawTransport};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex as AsyncMutex;
 
     const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 

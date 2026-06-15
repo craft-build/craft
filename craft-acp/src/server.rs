@@ -10,23 +10,25 @@ use agent_client_protocol_schema::{
     CurrentModeUpdate, EmbeddedResourceResource, EnvVariable, Error as AcpError, ImageContent,
     InitializeRequest, JsonRpcMessage, KillTerminalRequest, ListSessionsRequest,
     ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, Notification,
-    PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
-    Request, RequestId, RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    Response, SessionId, SessionInfo as AcpSessionInfo, SessionInfoUpdate, SessionModeId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent, ToolCall, ToolCallId,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, WriteTextFileRequest,
-    WriteTextFileResponse,
+    PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, Request, RequestId, RequestPermissionRequest,
+    RequestPermissionResponse, Response, ResumeSessionRequest, SessionId,
+    SessionInfo as AcpSessionInfo, SessionInfoUpdate, SessionModeId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModeResponse, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, TextContent, ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, WriteTextFileRequest, WriteTextFileResponse,
 };
 use color_eyre::eyre::Context;
 use craft_agent::headless::{self, InteractiveHandle, InteractiveParams};
-use craft_agent::mcp::config::{McpConfig, ServerConfig, Transport};
 use craft_agent::mcp;
+use craft_agent::mcp::config::{McpConfig, ServerConfig, Transport};
 use craft_agent::tools::{FsBackend, FsFuture, LocalFs};
 use craft_agent::types::{AgentEvent, BatchToolStatus, ToolOutput};
 use craft_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
-use craft_lua::{LocalTerminal, TerminalBackend, TerminalEvent, TerminalFuture, TerminalHandle, TerminalSpec};
+use craft_lua::{
+    LocalTerminal, TerminalBackend, TerminalEvent, TerminalFuture, TerminalHandle, TerminalSpec,
+};
 use craft_providers::Message;
 use craft_providers::model::Model;
 use flume::{Receiver, Sender};
@@ -123,8 +125,7 @@ impl FsBackend for AcpFs {
                 contents,
             ));
             let v = send_delegated(&self.out_tx, &self.pending, &self.next_id, request).await?;
-            let _: WriteTextFileResponse =
-                serde_json::from_value(v).map_err(|e| e.to_string())?;
+            let _: WriteTextFileResponse = serde_json::from_value(v).map_err(|e| e.to_string())?;
             Ok(())
         })
     }
@@ -258,12 +259,7 @@ impl TerminalBackend for AcpTerminal {
 }
 
 impl AcpTerminal {
-    fn spawn_poller(
-        &self,
-        sid: String,
-        terminal_id: TerminalId,
-        event_tx: Sender<TerminalEvent>,
-    ) {
+    fn spawn_poller(&self, sid: String, terminal_id: TerminalId, event_tx: Sender<TerminalEvent>) {
         let out_tx = self.out_tx.clone();
         let pending = Arc::clone(&self.pending);
         let next = Arc::clone(&self.next_id);
@@ -287,7 +283,10 @@ impl AcpTerminal {
                 if let Some(resp) = resp {
                     let start = sent.min(resp.output.len());
                     for line in resp.output[start..].lines() {
-                        if event_tx.send(TerminalEvent::Stdout(line.to_string())).is_err() {
+                        if event_tx
+                            .send(TerminalEvent::Stdout(line.to_string()))
+                            .is_err()
+                        {
                             release_terminal(&out_tx, &pending, &next, &sid, &terminal_id).await;
                             return;
                         }
@@ -496,7 +495,13 @@ fn request_id(v: &Value) -> RequestId {
     serde_json::from_value(v.clone()).unwrap_or(RequestId::Null)
 }
 
-async fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Value, params: &AcpParams) {
+async fn handle_request(
+    srv: &mut Server,
+    method: &str,
+    id: RequestId,
+    raw: &Value,
+    params: &AcpParams,
+) {
     let result: Result<AgentResponse, AcpError> = match method {
         "initialize" => {
             if let Ok(req) = parse_params::<InitializeRequest>(raw) {
@@ -509,20 +514,21 @@ async fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Val
         "session/new" => {
             let req = match parse_params::<NewSessionRequest>(raw) {
                 Ok(r) => r,
-                Err(e) => { srv.respond(id, Err(e)); return; }
+                Err(e) => {
+                    srv.respond(id, Err(e));
+                    return;
+                }
             };
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
-            let handle =
-                spawn_session(params, req.cwd, None, Vec::new(), &mcp_servers, fs).await;
+            let handle = spawn_session(params, req.cwd, None, Vec::new(), &mcp_servers, fs).await;
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
-                methods::new_session_response(&handle.session_id)
-                    .config_options(vec![
-                        methods::mode_config_option(methods::MODE_BUILD),
-                        methods::model_config_option(&spec, &specs),
-                    ])
+                methods::new_session_response(&handle.session_id).config_options(vec![
+                    methods::mode_config_option(methods::MODE_BUILD),
+                    methods::model_config_option(&spec, &specs),
+                ])
             };
             install_session(srv, handle, spec);
             Ok(AgentResponse::NewSessionResponse(resp))
@@ -530,12 +536,18 @@ async fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Val
         "session/load" => {
             let req = match parse_params::<LoadSessionRequest>(raw) {
                 Ok(r) => r,
-                Err(e) => { srv.respond(id, Err(e)); return; }
+                Err(e) => {
+                    srv.respond(id, Err(e));
+                    return;
+                }
             };
             let session_id = req.session_id.0.to_string();
             let history = match load_history(&session_id) {
                 Ok(h) => h,
-                Err(e) => { srv.respond(id, Err(e)); return; }
+                Err(e) => {
+                    srv.respond(id, Err(e));
+                    return;
+                }
             };
             let sid = SessionId::from(session_id.clone());
             for update in translate::replay_history(&history) {
@@ -548,11 +560,10 @@ async fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Val
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
-                methods::load_session_response()
-                    .config_options(vec![
-                        methods::mode_config_option(methods::MODE_BUILD),
-                        methods::model_config_option(&spec, &specs),
-                    ])
+                methods::load_session_response().config_options(vec![
+                    methods::mode_config_option(methods::MODE_BUILD),
+                    methods::model_config_option(&spec, &specs),
+                ])
             };
             install_session(srv, handle, spec);
             Ok(AgentResponse::LoadSessionResponse(resp))
@@ -560,12 +571,18 @@ async fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Val
         "session/resume" => {
             let req = match parse_params::<ResumeSessionRequest>(raw) {
                 Ok(r) => r,
-                Err(e) => { srv.respond(id, Err(e)); return; }
+                Err(e) => {
+                    srv.respond(id, Err(e));
+                    return;
+                }
             };
             let session_id = req.session_id.0.to_string();
             let history = match load_history(&session_id) {
                 Ok(h) => h,
-                Err(e) => { srv.respond(id, Err(e)); return; }
+                Err(e) => {
+                    srv.respond(id, Err(e));
+                    return;
+                }
             };
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
@@ -574,11 +591,10 @@ async fn handle_request(srv: &mut Server, method: &str, id: RequestId, raw: &Val
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
-                methods::resume_session_response()
-                    .config_options(vec![
-                        methods::mode_config_option(methods::MODE_BUILD),
-                        methods::model_config_option(&spec, &specs),
-                    ])
+                methods::resume_session_response().config_options(vec![
+                    methods::mode_config_option(methods::MODE_BUILD),
+                    methods::model_config_option(&spec, &specs),
+                ])
             };
             install_session(srv, handle, spec);
             Ok(AgentResponse::ResumeSessionResponse(resp))
@@ -653,7 +669,11 @@ fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {
             enabled: true,
             timeout: cfg.timeout.as_millis() as u64,
             transport: match &cfg.transport {
-                Transport::Stdio { program, args, environment } => {
+                Transport::Stdio {
+                    program,
+                    args,
+                    environment,
+                } => {
                     let mut command = vec![program.clone()];
                     command.extend(args.iter().cloned());
                     craft_agent::mcp::config::RawTransport::Stdio(
@@ -663,14 +683,12 @@ fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {
                         },
                     )
                 }
-                Transport::Http { url, headers } => {
-                    craft_agent::mcp::config::RawTransport::Http(
-                        craft_agent::mcp::config::RawHttpFields {
-                            url: url.clone(),
-                            headers: headers.clone(),
-                        },
-                    )
-                }
+                Transport::Http { url, headers } => craft_agent::mcp::config::RawTransport::Http(
+                    craft_agent::mcp::config::RawHttpFields {
+                        url: url.clone(),
+                        headers: headers.clone(),
+                    },
+                ),
             },
         };
         merged
@@ -782,7 +800,10 @@ fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), Ac
         .input_tx
         .send(input)
         .map_err(|_| AcpError::internal_error().data(json_str("session ended")))?;
-    *session.pending_prompt.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+    *session
+        .pending_prompt
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
     Ok(())
 }
 
@@ -839,7 +860,12 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         .map_err(|_| AcpError::internal_error().data(json_str("session ended")))?;
     session.current_model = spec.clone();
 
-    if let Some(info) = srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(info) = srv
+        .shared_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
         info.current_model = spec.clone();
     }
 
@@ -898,9 +924,9 @@ fn handle_list_sessions(raw: &Value) -> Result<AgentResponse, AcpError> {
                 .updated_at(epoch_to_iso8601(s.updated_at))
         })
         .collect();
-    Ok(AgentResponse::ListSessionsResponse(ListSessionsResponse::new(
-        sessions,
-    )))
+    Ok(AgentResponse::ListSessionsResponse(
+        ListSessionsResponse::new(sessions),
+    ))
 }
 
 fn handle_close_session(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpError> {
@@ -915,7 +941,9 @@ fn handle_close_session(srv: &mut Server, raw: &Value) -> Result<AgentResponse, 
         }
         *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
-    Ok(AgentResponse::CloseSessionResponse(CloseSessionResponse::new()))
+    Ok(AgentResponse::CloseSessionResponse(
+        CloseSessionResponse::new(),
+    ))
 }
 
 fn epoch_to_iso8601(epoch_secs: u64) -> Option<String> {
@@ -1094,7 +1122,9 @@ fn start_event_pump(
                     }
                     translate::batch_inner_start(&event)
                 }
-                AgentEvent::PermissionRequest { id, tool, scopes, .. } => {
+                AgentEvent::PermissionRequest {
+                    id, tool, scopes, ..
+                } => {
                     let fields =
                         ToolCallUpdateFields::new().title(format!("{tool}: {}", scopes.join(", ")));
                     let request =

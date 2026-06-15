@@ -20,14 +20,15 @@ mod multiedit;
 mod read;
 mod read_findings;
 pub mod registry;
-pub mod schema;
 mod report_finding;
 mod review;
+pub mod schema;
 mod styleguide;
 mod task;
 mod todowrite;
 mod write;
 
+pub use dynamic::{DynamicContext, PromotedTools, ToolBuild, build_active_tools, filter_to_active};
 pub use file_tracker::FileReadTracker;
 pub use fs_backend::{FsBackend, FsFuture, LocalFs};
 pub use registry::{
@@ -35,7 +36,6 @@ pub use registry::{
     RegisteredTool, RegistryError, Tool, ToolAudience, ToolInvocation, ToolRegistry, ToolSource,
     ToolTier,
 };
-pub use dynamic::{DynamicContext, PromotedTools, ToolBuild, build_active_tools, filter_to_active};
 
 use std::collections::HashSet;
 use std::env;
@@ -64,14 +64,7 @@ pub struct DescriptionContext<'a> {
     pub filter: &'a ToolFilter,
 }
 
-const SMALL_MODEL_CORE_TOOLS: &[&str] = &[
-    "read",
-    "edit",
-    "write",
-    "bash",
-    "glob",
-    "grep",
-];
+const SMALL_MODEL_CORE_TOOLS: &[&str] = &["read", "edit", "write", "bash", "glob", "grep"];
 
 #[derive(Debug, Clone, Default)]
 pub enum ToolFilter {
@@ -116,7 +109,12 @@ impl ToolFilter {
     pub fn from_config(config: &AgentConfig, extra_exclude: &[&str]) -> Self {
         let base = if config.allowed_tools.is_empty() {
             if config.small_model.should_activate(0) && config.small_model.reduced_tools {
-                Self::Only(SMALL_MODEL_CORE_TOOLS.iter().map(|s| s.to_string()).collect())
+                Self::Only(
+                    SMALL_MODEL_CORE_TOOLS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                )
             } else {
                 Self::All
             }
@@ -904,8 +902,7 @@ mod tests {
         assert!(full.contains("1: line1"));
         assert!(full.contains("10: line10"));
 
-        let r =
-            read::Read::parse_input(&json!({"path": path, "offset": 3, "limit": 2})).unwrap();
+        let r = read::Read::parse_input(&json!({"path": path, "offset": 3, "limit": 2})).unwrap();
         let slice = r.execute(&ctx).await.unwrap().as_text().to_string();
         assert!(slice.contains("3: line3"));
         assert!(slice.contains("4: line4"));
@@ -933,8 +930,8 @@ mod tests {
         assert!(filtered.contains("b.rs"));
         assert!(!filtered.contains("a.txt"));
 
-        let g = grep::Grep::parse_input(&json!({"pattern": "zzzznotfound", "path": dir_str}))
-            .unwrap();
+        let g =
+            grep::Grep::parse_input(&json!({"pattern": "zzzznotfound", "path": dir_str})).unwrap();
         assert_eq!(g.execute(&ctx).await.unwrap().as_text(), NO_FILES_FOUND);
     }
 
@@ -963,8 +960,7 @@ mod tests {
         let dir_str = dir.path().to_string_lossy().to_string();
         let ctx = stub_ctx(&AgentMode::Build);
 
-        let g =
-            grep::Grep::parse_input(&json!({"pattern": "findme", "path": dir_str})).unwrap();
+        let g = grep::Grep::parse_input(&json!({"pattern": "findme", "path": dir_str})).unwrap();
         let out = g.execute(&ctx).await.unwrap().as_text().to_string();
         assert!(out.contains("text.txt"));
         assert!(!out.contains("binary.bin"));
@@ -976,8 +972,7 @@ mod tests {
         let dir_str = dir.path().to_string_lossy().to_string();
         let ctx = stub_ctx(&AgentMode::Build);
 
-        let g =
-            grep::Grep::parse_input(&json!({"pattern": "[invalid", "path": dir_str})).unwrap();
+        let g = grep::Grep::parse_input(&json!({"pattern": "[invalid", "path": dir_str})).unwrap();
         let err = g.execute(&ctx).await.unwrap_err();
         assert!(err.contains(grep::INVALID_REGEX), "got: {err}");
     }

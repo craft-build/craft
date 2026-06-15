@@ -4,9 +4,6 @@ use std::time::Duration;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use color_eyre::Result;
 
-use crossterm::event::{
-    self, Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
-};
 use craft_agent::command::CustomCommand;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle};
@@ -16,10 +13,16 @@ use craft_providers::Timeouts;
 use craft_providers::provider::{Provider, fetch_all_models, from_model};
 use craft_providers::{Message, Model};
 use craft_storage::StateDir;
+use crossterm::event::{
+    self, Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
+};
 use tracing::warn;
 
 use crate::AppSession;
-use crate::agent::{AgentCommand, AgentHandles, ModelSlot, shared_queue::{QueueItem, lock}};
+use crate::agent::{
+    AgentCommand, AgentHandles, ModelSlot,
+    shared_queue::{QueueItem, lock},
+};
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg};
 #[cfg(feature = "demo")]
@@ -576,7 +579,11 @@ impl<'t> EventLoop<'t> {
             }
             Action::Suspend => terminal::suspend(self.terminal),
             Action::Quit => {}
-            Action::ProviderReady { model_spec, provider, pending_load_session } => {
+            Action::ProviderReady {
+                model_spec,
+                provider,
+                pending_load_session,
+            } => {
                 match provider {
                     Ok(new_provider) => {
                         if let Ok(new_model) = Model::from_spec(&model_spec) {

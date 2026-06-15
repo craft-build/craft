@@ -1,10 +1,10 @@
 use std::mem;
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent};
 use craft_agent::command::CustomCommand;
 use craft_agent::{McpPromptInfo, McpSnapshotReader};
 use craft_lua::{LuaCommandInfo, LuaCommandReader};
+use crossterm::event::{KeyCode, KeyEvent};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Matcher, Nucleo, Utf32String};
 use ratatui::Frame;
@@ -517,8 +517,7 @@ impl CommandPalette {
                     spans.push(Span::styled(" ".repeat(PAD), s));
                     Line::from(spans)
                 } else {
-                    let highlighted_name =
-                        self.build_highlighted_spans(&name, &m.indices, t.item);
+                    let highlighted_name = self.build_highlighted_spans(&name, &m.indices, t.item);
                     let mut spans = vec![Span::raw(" ".repeat(PAD))];
                     spans.extend(highlighted_name);
                     spans.push(Span::raw(" ".repeat(name_pad)));

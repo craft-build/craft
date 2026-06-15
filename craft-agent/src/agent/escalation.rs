@@ -34,7 +34,9 @@ impl ModelTier {
         let id = model_id.to_lowercase();
         if id.contains("haiku") || id.contains("flash") || id.contains("mini") {
             Self::Weak
-        } else if id.contains("opus") || id.contains("o3") || id.contains("pro")
+        } else if id.contains("opus")
+            || id.contains("o3")
+            || id.contains("pro")
             || id.contains("ultra")
         {
             Self::Strong
@@ -100,7 +102,10 @@ impl EscalationTracker {
             return;
         }
         let Some(suggested_spec) = current_tier.suggested_model_spec() else {
-            warn!(model = model_id, "failure rate high but already at strongest tier");
+            warn!(
+                model = model_id,
+                "failure rate high but already at strongest tier"
+            );
             return;
         };
         warn!(
@@ -171,11 +176,26 @@ mod tests {
 
     #[test]
     fn model_tier_from_id() {
-        assert_eq!(ModelTier::from_model_id("anthropic/claude-haiku-4-20250514"), ModelTier::Weak);
-        assert_eq!(ModelTier::from_model_id("google/gemini-2.0-flash"), ModelTier::Weak);
-        assert_eq!(ModelTier::from_model_id("anthropic/claude-sonnet-4-20250514"), ModelTier::Default);
-        assert_eq!(ModelTier::from_model_id("openai/gpt-4o"), ModelTier::Default);
-        assert_eq!(ModelTier::from_model_id("anthropic/claude-opus-4-20250514"), ModelTier::Strong);
+        assert_eq!(
+            ModelTier::from_model_id("anthropic/claude-haiku-4-20250514"),
+            ModelTier::Weak
+        );
+        assert_eq!(
+            ModelTier::from_model_id("google/gemini-2.0-flash"),
+            ModelTier::Weak
+        );
+        assert_eq!(
+            ModelTier::from_model_id("anthropic/claude-sonnet-4-20250514"),
+            ModelTier::Default
+        );
+        assert_eq!(
+            ModelTier::from_model_id("openai/gpt-4o"),
+            ModelTier::Default
+        );
+        assert_eq!(
+            ModelTier::from_model_id("anthropic/claude-opus-4-20250514"),
+            ModelTier::Strong
+        );
         assert_eq!(ModelTier::from_model_id("openai/o3"), ModelTier::Strong);
     }
 

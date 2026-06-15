@@ -9,7 +9,11 @@ fn fresh_registry() -> Arc<ToolRegistry> {
     Arc::new(ToolRegistry::new())
 }
 
-async fn exec_tool(reg: &ToolRegistry, name: &str, input: serde_json::Value) -> Result<String, String> {
+async fn exec_tool(
+    reg: &ToolRegistry,
+    name: &str,
+    input: serde_json::Value,
+) -> Result<String, String> {
     let entry = reg
         .get(name)
         .unwrap_or_else(|| panic!("tool {name} not registered"));
@@ -104,7 +108,9 @@ async fn register_echo_tool() {
         matches!(entry.source, ToolSource::Lua { ref plugin } if plugin.as_ref() == "echo_plugin"),
     );
 
-    let out = exec_tool(&reg, "echo_", serde_json::json!({"msg": "hello"})).await.unwrap();
+    let out = exec_tool(&reg, "echo_", serde_json::json!({"msg": "hello"}))
+        .await
+        .unwrap();
     assert_eq!(out, "hello");
 }
 
@@ -289,7 +295,9 @@ async fn is_error_propagated_as_error() {
     );
     host.load_source("err_plugin", &src).unwrap();
 
-    let err = exec_tool(&reg, "returns_error", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "returns_error", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert_eq!(err, "boom");
 }
 
@@ -308,7 +316,9 @@ async fn handler_bad_return_type_is_error() {
     );
     host.load_source("bad_ret", &src).unwrap();
 
-    let err = exec_tool(&reg, "bad_ret_num", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "bad_ret_num", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains("must return string"), "got: {err}");
 }
 
@@ -324,7 +334,9 @@ async fn handler_nil_without_jobs_is_error() {
         handler = function() return nil end
     })"#;
     host.load_source("nil_no_jobs", src).unwrap();
-    let err = exec_tool(&reg, "nil_no_jobs", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "nil_no_jobs", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains(NIL_WITHOUT_JOBS_ERR), "got: {err}");
 }
 
@@ -344,7 +356,9 @@ async fn handler_lua_error_surfaces_as_tool_error() {
     );
     host.load_source("thrower_plugin", &src).unwrap();
 
-    let err = exec_tool(&reg, "thrower", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "thrower", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains("intentional kaboom"), "got: {err}");
 }
 
@@ -631,7 +645,9 @@ async fn ctx_finish_called_twice_is_error() {
         }})"#,
     );
     host.load_source("double_finish", &src).unwrap();
-    let err = exec_tool(&reg, "double_finish", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "double_finish", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains(FINISH_CALLED_TWICE_ERR), "got: {err}");
 }
 
@@ -651,7 +667,9 @@ async fn ctx_finish_with_is_error_propagates() {
         }})"#,
     );
     host.load_source("finish_err", &src).unwrap();
-    let err = exec_tool(&reg, "finish_err", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "finish_err", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert_eq!(err, "async boom");
 }
 
@@ -675,7 +693,9 @@ async fn async_job_on_exit_receives_exit_code() {
         }})"#,
     );
     host.load_source("job_exit_code", &src).unwrap();
-    let out = exec_tool(&reg, "job_exit_code", serde_json::json!({})).await.unwrap();
+    let out = exec_tool(&reg, "job_exit_code", serde_json::json!({}))
+        .await
+        .unwrap();
     assert_eq!(out, "code=42");
 }
 
@@ -696,7 +716,9 @@ async fn jobstart_invalid_cwd_errors_with_expanded_path() {
         }})"#,
     );
     host.load_source("job_bad_cwd", &src).unwrap();
-    let out = exec_tool(&reg, "job_bad_cwd", serde_json::json!({})).await.unwrap();
+    let out = exec_tool(&reg, "job_bad_cwd", serde_json::json!({}))
+        .await
+        .unwrap();
     let expanded = craft_storage::paths::home()
         .expect("home dir")
         .join(JOB_BAD_CWD.strip_prefix("~/").unwrap());
@@ -722,7 +744,9 @@ async fn async_job_exits_without_finish_is_error() {
         }})"#,
     );
     host.load_source("job_no_finish", &src).unwrap();
-    let err = exec_tool(&reg, "job_no_finish", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "job_no_finish", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains(NIL_WITHOUT_JOBS_ERR), "got: {err}");
 }
 
@@ -746,7 +770,9 @@ async fn async_job_callback_error_surfaces() {
         }})"#,
     );
     host.load_source("job_cb_err", &src).unwrap();
-    let err = exec_tool(&reg, "job_cb_err", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "job_cb_err", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains("callback exploded"), "got: {err}");
 }
 
@@ -771,7 +797,9 @@ async fn jobstop_kills_running_job() {
         }})"#,
     );
     host.load_source("job_stop", &src).unwrap();
-    let out = exec_tool(&reg, "job_stop", serde_json::json!({})).await.unwrap();
+    let out = exec_tool(&reg, "job_stop", serde_json::json!({}))
+        .await
+        .unwrap();
     assert_eq!(out, "killed=true");
 }
 
@@ -802,9 +830,13 @@ craft.api.register_tool({{
 "#,
     );
     host.load_source("recovery", &src).unwrap();
-    let out1 = exec_tool(&reg, "async_first", serde_json::json!({})).await.unwrap();
+    let out1 = exec_tool(&reg, "async_first", serde_json::json!({}))
+        .await
+        .unwrap();
     assert_eq!(out1, "ok1");
-    let out2 = exec_tool(&reg, "sync_after", serde_json::json!({})).await.unwrap();
+    let out2 = exec_tool(&reg, "sync_after", serde_json::json!({}))
+        .await
+        .unwrap();
     assert_eq!(out2, "ok2");
 }
 
@@ -1071,7 +1103,9 @@ async fn job_callback_finishes_after_handler_returns_nil() {
         }})"#,
     );
     host.load_source("job_after_return", &src).unwrap();
-    let out = exec_tool(&reg, "job_after_return", serde_json::json!({})).await.unwrap();
+    let out = exec_tool(&reg, "job_after_return", serde_json::json!({}))
+        .await
+        .unwrap();
     assert_eq!(out, "exit=0");
 }
 
@@ -1095,7 +1129,9 @@ async fn ctx_set_deadline_times_out() {
         }})"#,
     );
     host.load_source("deadline_test", &src).unwrap();
-    let err = exec_tool(&reg, "deadline_test", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "deadline_test", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert_eq!(err, DEADLINE_TIMEOUT_MSG);
 }
 
@@ -1116,7 +1152,9 @@ async fn ctx_set_deadline_twice_errors() {
         }})"#,
     );
     host.load_source("deadline_twice", &src).unwrap();
-    let err = exec_tool(&reg, "deadline_twice", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool(&reg, "deadline_twice", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains(DEADLINE_ALREADY_SET_ERR), "got: {err}");
 }
 
@@ -1184,7 +1222,7 @@ craft.api.register_tool({{
     )
 }
 
-    #[test_case::test_case("craft.fs.read('/etc/hosts')" ; "fs_read")]
+#[test_case::test_case("craft.fs.read('/etc/hosts')" ; "fs_read")]
 #[test_case::test_case("craft.fs.write('/tmp/craft-perm-test', 'x')" ; "fs_write")]
 #[test_case::test_case("craft.fn.jobstart('echo hi')" ; "run")]
 #[tokio::test]
@@ -1194,7 +1232,9 @@ async fn denied_permission_blocks_api(api_call: &str) {
     let perms = PluginPermissions::denied();
     host.load_source_with_permissions("denied_plugin", &perm_tool_src(api_call), perms)
         .unwrap();
-    let err = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(
         err.contains(PERMISSION_DENIED_PREFIX),
         "expected permission denied, got: {err}"
@@ -1214,7 +1254,10 @@ async fn user_plugin_with_fs_read_can_read_but_not_write() {
     )
     .unwrap();
     let result = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({})).await;
-    assert!(result.is_ok(), "fs.read with FsRead permission should succeed, got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "fs.read with FsRead permission should succeed, got: {result:?}"
+    );
 }
 
 #[test]
@@ -1237,7 +1280,9 @@ async fn env_permission_guards_uv_and_env() {
         perms,
     )
     .unwrap();
-    let err = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({})).await.unwrap_err();
+    let err = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({}))
+        .await
+        .unwrap_err();
     assert!(
         err.contains(PERMISSION_DENIED_PREFIX),
         "expected permission denied for env, got: {err}"

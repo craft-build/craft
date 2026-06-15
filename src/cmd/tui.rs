@@ -82,8 +82,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     if !cli.no_plugins {
         let (tx, rx) = flume::unbounded::<craft_agent::EmbedRequest>();
         embed_rx = Some(rx);
-        plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), Some(craft_lua::EmbedChannel::new(tx)))
-            .context("initialize lua plugin host")?;
+        plugin_host = PluginHost::new(
+            Arc::clone(ToolRegistry::native_arc()),
+            Some(craft_lua::EmbedChannel::new(tx)),
+        )
+        .context("initialize lua plugin host")?;
     }
 
     let raw_config = plugin_host
@@ -131,7 +134,6 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     setup::init_logging(&storage, &config.storage);
     setup::install_panic_log_hook();
-
 
     let commands = discover_commands(cli.no_commands);
 
@@ -233,12 +235,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             #[cfg(feature = "onnx")]
             embed_rx,
         };
-        let result = tokio::task::spawn_blocking(move || {
-            craft_ui::run(handle, params, initial_prompt)
-        })
-        .await
-        .map_err(|e| color_eyre::eyre::eyre!("UI thread panicked: {e}"))?
-        .context("run UI")?;
+        let result =
+            tokio::task::spawn_blocking(move || craft_ui::run(handle, params, initial_prompt))
+                .await
+                .map_err(|e| color_eyre::eyre::eyre!("UI thread panicked: {e}"))?
+                .context("run UI")?;
         let session_id = result.session_id().map(|s| s.to_owned());
         let exit_code = result.exit_code();
         result.cleanup().await;

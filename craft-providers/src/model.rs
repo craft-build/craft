@@ -577,7 +577,10 @@ mod tests {
     #[test_case(ModelFamily::Generic, "a b c d e", 2 ; "generic_short")]
     fn estimate_tokens_basic(family: ModelFamily, text: &str, min_tokens: u32) {
         let estimate = family.estimate_tokens(text);
-        assert!(estimate >= min_tokens, "{family:?}: estimate={estimate}, min={min_tokens}");
+        assert!(
+            estimate >= min_tokens,
+            "{family:?}: estimate={estimate}, min={min_tokens}"
+        );
     }
 
     #[test]
@@ -585,6 +588,9 @@ mod tests {
         let text = "x".repeat(1000);
         let claude = ModelFamily::Claude.estimate_tokens(&text);
         let gpt = ModelFamily::Gpt.estimate_tokens(&text);
-        assert!(claude > gpt, "Claude estimate ({claude}) should exceed GPT ({gpt})");
+        assert!(
+            claude > gpt,
+            "Claude estimate ({claude}) should exceed GPT ({gpt})"
+        );
     }
 }

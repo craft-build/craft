@@ -154,10 +154,7 @@ pub fn parse(text: &str) -> Vec<Block> {
     blocks
 }
 
-fn try_extract_table(
-    lines_with_offsets: &[(usize, &str)],
-    i: usize,
-) -> Option<(usize, Block)> {
+fn try_extract_table(lines_with_offsets: &[(usize, &str)], i: usize) -> Option<(usize, Block)> {
     let (_, line) = lines_with_offsets[i];
     if !is_table_row(line) {
         return None;
@@ -183,19 +180,19 @@ fn try_extract_table(
     }
 
     let mut rows = Vec::new();
-    for (k, &(_, row_line)) in lines_with_offsets[table_start..j]
-        .iter()
-        .enumerate()
-    {
+    for (k, &(_, row_line)) in lines_with_offsets[table_start..j].iter().enumerate() {
         if k != si {
             rows.push(parse_table_cells(row_line));
         }
     }
 
-    Some((j, Block::Table {
-        rows,
-        header_end: si,
-    }))
+    Some((
+        j,
+        Block::Table {
+            rows,
+            header_end: si,
+        },
+    ))
 }
 
 fn split_normal_blocks(text: &str) -> Vec<Block> {

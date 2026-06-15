@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap};
-use tokio::sync::Mutex;
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 use super::error::McpError;
 use super::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
@@ -34,15 +34,14 @@ impl HttpTransport {
         headers: &HashMap<String, String>,
         timeout: Duration,
     ) -> Result<Self, McpError> {
-        let client =
-            reqwest::Client::builder()
-                .timeout(timeout)
-                .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-                .build()
-                .map_err(|e| McpError::StartFailed {
-                    server: name.into(),
-                    reason: e.to_string(),
-                })?;
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+            .build()
+            .map_err(|e| McpError::StartFailed {
+                server: name.into(),
+                reason: e.to_string(),
+            })?;
 
         Ok(Self {
             name: Arc::from(name),
@@ -64,7 +63,8 @@ impl HttpTransport {
         body: Vec<u8>,
         session_id: Option<&str>,
     ) -> reqwest::Request {
-        let mut builder = self.client
+        let mut builder = self
+            .client
             .request(method, &self.url)
             .header(CONTENT_TYPE, CT_JSON)
             .header(ACCEPT, ACCEPT_VALUE);
@@ -77,7 +77,10 @@ impl HttpTransport {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
-        builder.body(body).build().expect("request builder is valid")
+        builder
+            .body(body)
+            .build()
+            .expect("request builder is valid")
     }
 
     async fn send_http(
@@ -85,16 +88,23 @@ impl HttpTransport {
         http_req: reqwest::Request,
     ) -> Result<(reqwest::StatusCode, HeaderMap, String), McpError> {
         let server = self.server();
-        let response = self.client.execute(http_req).await.map_err(|e| McpError::WriteFailed {
-            server: server.clone(),
-            reason: e.to_string(),
-        })?;
+        let response = self
+            .client
+            .execute(http_req)
+            .await
+            .map_err(|e| McpError::WriteFailed {
+                server: server.clone(),
+                reason: e.to_string(),
+            })?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = response.text().await.map_err(|e| McpError::InvalidResponse {
-            server,
-            reason: e.to_string(),
-        })?;
+        let body = response
+            .text()
+            .await
+            .map_err(|e| McpError::InvalidResponse {
+                server,
+                reason: e.to_string(),
+            })?;
         Ok((status, headers, body))
     }
 

@@ -17,11 +17,11 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::ResolvedAuth;
 use super::anthropic::Anthropic;
-use super::lock_unpoison;
 use super::copilot::Copilot;
 use super::deepseek::DeepSeek;
 use super::google::Google;
 use super::llama_cpp::LlamaCpp;
+use super::lock_unpoison;
 use super::mistral::Mistral;
 use super::ollama::Ollama;
 use super::openai::OpenAi;
@@ -338,7 +338,10 @@ pub fn auth_providers() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-pub async fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+pub async fn create(
+    slug: &str,
+    timeouts: super::Timeouts,
+) -> Result<Box<dyn Provider>, AgentError> {
     let meta = find_meta(slug).ok_or_else(|| AgentError::Config {
         message: format!("unknown dynamic provider '{slug}'"),
     })?;
@@ -493,7 +496,9 @@ impl DynamicProvider {
                 Ok(())
             })
             .await
-            .map_err(|e| AgentError::Config { message: e.to_string() })?
+            .map_err(|e| AgentError::Config {
+                message: e.to_string(),
+            })?
         })
     }
 }
@@ -509,9 +514,8 @@ impl Provider for DynamicProvider {
         opts: RequestOptions,
         session_id: Option<&'a str>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        self.inner.stream_message(
-            model, messages, system, tools, event_tx, opts, session_id,
-        )
+        self.inner
+            .stream_message(model, messages, system, tools, event_tx, opts, session_id)
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {

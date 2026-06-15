@@ -13,8 +13,8 @@ use craft_storage::StateDir;
 use craft_storage::sessions::{SESSIONS_DIR, SessionError, SessionLog};
 use tracing::warn;
 
-use crate::agent::shared_queue::lock;
 use crate::AppSession;
+use crate::agent::shared_queue::lock;
 
 pub struct StorageWriter {
     latest: Arc<Mutex<Option<Box<AppSession>>>>,

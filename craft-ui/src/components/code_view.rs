@@ -27,7 +27,11 @@ fn render_findings(findings: &[Finding], max_lines: usize) -> (Vec<Line<'static>
     let dim = Style::default().dim();
     let mut lines = Vec::new();
     let truncated = findings.len() > max_lines;
-    let display = if truncated { &findings[..max_lines] } else { findings };
+    let display = if truncated {
+        &findings[..max_lines]
+    } else {
+        findings
+    };
     for (i, f) in display.iter().enumerate() {
         let p_style = Style::default().fg(priority_color(f.priority)).bold();
         lines.push(Line::from(vec![
@@ -35,12 +39,22 @@ fn render_findings(findings: &[Finding], max_lines: usize) -> (Vec<Line<'static>
             Span::raw(f.title.clone()),
         ]));
         let confidence_pct = (f.confidence.clamp(0.0, 1.0) * 100.0) as u8;
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {}:{}-{} | {}%", f.file_path, f.line_start, f.line_end, confidence_pct), dim),
-        ]));
-        lines.push(Line::from(Span::styled(format!("  {}", f.body.trim()), dim)));
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "  {}:{}-{} | {}%",
+                f.file_path, f.line_start, f.line_end, confidence_pct
+            ),
+            dim,
+        )]));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", f.body.trim()),
+            dim,
+        )));
         if let Some(ref fix) = f.suggestion {
-            lines.push(Line::from(Span::styled(format!("  Fix: {}", fix.trim()), dim)));
+            lines.push(Line::from(Span::styled(
+                format!("  Fix: {}", fix.trim()),
+                dim,
+            )));
         }
         if i < display.len() - 1 {
             lines.push(Line::default());

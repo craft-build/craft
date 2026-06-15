@@ -59,9 +59,10 @@ pub(crate) fn create_ui_table(
     t.set(
         "markdown",
         lua.create_async_function(|lua, (text, width): (String, u16)| async move {
-            let lines = tokio::task::spawn_blocking(move || craft_markdown::render::render(&text, width))
-                .await
-                .map_err(|e| mlua::Error::runtime(format!("markdown task failed: {e}")))?;
+            let lines =
+                tokio::task::spawn_blocking(move || craft_markdown::render::render(&text, width))
+                    .await
+                    .map_err(|e| mlua::Error::runtime(format!("markdown task failed: {e}")))?;
             markdown_lines_to_lua(&lua, &lines)
         })?,
     )?;

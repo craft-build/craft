@@ -1,5 +1,5 @@
-use reqwest::Client;
 use craft_storage::auth::{OAuthTokens, now_millis};
+use reqwest::Client;
 
 use super::OAuthError;
 

@@ -75,11 +75,17 @@ impl Task {
                     let map = tier_map::tier_map()
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
-                    map
-                        .spec_for_tier(ctx.model.provider, effective)
+                    map.spec_for_tier(ctx.model.provider, effective)
                         .or_else(|| map.spec_for_tier_any(effective))
                         .and_then(|spec| Model::from_spec(&spec).ok())
-                        .or_else(|| Model::from_tier_dynamic(ctx.model.provider, effective, ctx.model.dynamic_slug.as_deref()).ok())
+                        .or_else(|| {
+                            Model::from_tier_dynamic(
+                                ctx.model.provider,
+                                effective,
+                                ctx.model.dynamic_slug.as_deref(),
+                            )
+                            .ok()
+                        })
                         .ok_or_else(|| format!("no model available for tier {effective}"))?
                 };
                 let resolved_provider = provider::from_model(&resolved_model, ctx.timeouts)
@@ -99,9 +105,10 @@ impl Task {
         );
 
         let cwd_owned = vars.apply("{cwd}").into_owned();
-        let instructions = tokio::task::spawn_blocking(move || agent::load_instruction_text(&cwd_owned))
-            .await
-            .map_err(|e| format!("task failed: {e}"))?;
+        let instructions =
+            tokio::task::spawn_blocking(move || agent::load_instruction_text(&cwd_owned))
+                .await
+                .map_err(|e| format!("task failed: {e}"))?;
         let system = vars
             .apply(&crate::prompt::assemble(
                 prompt_id,
@@ -168,7 +175,14 @@ impl Task {
         let ctx_mode = self.context_mode.as_deref().unwrap_or("none");
         let seeded: Vec<craft_providers::Message> = match ctx_mode {
             "none" => Vec::new(),
-            "summary" => ctx.parent_messages.iter().rev().take(8).rev().cloned().collect(),
+            "summary" => ctx
+                .parent_messages
+                .iter()
+                .rev()
+                .take(8)
+                .rev()
+                .cloned()
+                .collect(),
             "full" => ctx.parent_messages.to_vec(),
             other => return Err(format!("unknown context_mode: {other}")),
         };
@@ -208,8 +222,7 @@ impl Task {
         drop(child_trigger);
         let success = result.is_ok();
         info!(description = %self.description, duration_ms, success, "subagent completed");
-        result
-            .map_err(|e| format!("sub-agent error: {e}"))?;
+        result.map_err(|e| format!("sub-agent error: {e}"))?;
 
         let messages = history.into_vec();
 
@@ -240,7 +253,12 @@ impl Task {
     }
 }
 
-super::impl_tool!(Task, audience = super::ToolAudience::MAIN, kind = "think", tier = super::ToolTier::Core);
+super::impl_tool!(
+    Task,
+    audience = super::ToolAudience::MAIN,
+    kind = "think",
+    tier = super::ToolTier::Core
+);
 
 impl super::ToolInvocation for Task {
     fn start_header(&self) -> super::HeaderFuture {

@@ -3,9 +3,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use flume::Sender;
 use craft_config::CompressionConfig;
 use craft_providers::{AgentError, ContentBlock, Message, Role, StopReason, TokenUsage};
+use flume::Sender;
 
 use crate::compression;
 use craft_tool_macro::{ArgEnum, Args};
@@ -498,11 +498,19 @@ fn findings_text(findings: &[Finding]) -> String {
     if findings.is_empty() {
         return String::new();
     }
-    let mut out = format!("## Review Findings ({} issue{})\n\n", findings.len(), if findings.len() == 1 { "" } else { "s" });
+    let mut out = format!(
+        "## Review Findings ({} issue{})\n\n",
+        findings.len(),
+        if findings.len() == 1 { "" } else { "s" }
+    );
     for f in findings {
         let confidence_pct = (f.confidence.clamp(0.0, 1.0) * 100.0) as u8;
         let _ = writeln!(out, "[{}] {}", f.priority, f.title);
-        let _ = writeln!(out, "  Location: {}:{}-{} | Confidence: {}%", f.file_path, f.line_start, f.line_end, confidence_pct);
+        let _ = writeln!(
+            out,
+            "  Location: {}:{}-{} | Confidence: {}%",
+            f.file_path, f.line_start, f.line_end, confidence_pct
+        );
         out.push_str(f.body.trim());
         out.push('\n');
         if !f.rule_ids.is_empty() {
@@ -522,11 +530,19 @@ fn findings_display(findings: &[Finding]) -> String {
     if findings.is_empty() {
         return String::new();
     }
-    let mut out = format!("Findings ({} issue{})\n", findings.len(), if findings.len() == 1 { "" } else { "s" });
+    let mut out = format!(
+        "Findings ({} issue{})\n",
+        findings.len(),
+        if findings.len() == 1 { "" } else { "s" }
+    );
     for f in findings {
         let confidence_pct = (f.confidence.clamp(0.0, 1.0) * 100.0) as u8;
         let _ = writeln!(out, "[{}] {}", f.priority, f.title);
-        let _ = writeln!(out, "  {}:{}-{} | {}%", f.file_path, f.line_start, f.line_end, confidence_pct);
+        let _ = writeln!(
+            out,
+            "  {}:{}-{} | {}%",
+            f.file_path, f.line_start, f.line_end, confidence_pct
+        );
         out.push_str(f.body.trim());
         out.push('\n');
         if let Some(ref fix) = f.suggestion {
@@ -1004,11 +1020,7 @@ mod tests {
             .collect();
         assert_eq!(
             flat,
-            vec![
-                (0, "two".into()),
-                (0, "one".into()),
-                (1, "one-one".into())
-            ]
+            vec![(0, "two".into()), (0, "one".into()), (1, "one-one".into())]
         );
     }
 
@@ -1095,20 +1107,23 @@ mod tests {
 
     #[test]
     fn tool_results_builds_message_with_tool_result_blocks() {
-        let msg = tool_results(vec![
-            ToolDoneEvent {
-                id: "t1".into(),
-                tool: Arc::from("bash"),
-                output: ToolOutput::Plain("ok".into()),
-                is_error: false,
-            },
-            ToolDoneEvent {
-                id: "t2".into(),
-                tool: Arc::from("read"),
-                output: ToolOutput::Plain("fail".into()),
-                is_error: true,
-            },
-        ], &CompressionConfig::default());
+        let msg = tool_results(
+            vec![
+                ToolDoneEvent {
+                    id: "t1".into(),
+                    tool: Arc::from("bash"),
+                    output: ToolOutput::Plain("ok".into()),
+                    is_error: false,
+                },
+                ToolDoneEvent {
+                    id: "t2".into(),
+                    tool: Arc::from("read"),
+                    output: ToolOutput::Plain("fail".into()),
+                    is_error: true,
+                },
+            ],
+            &CompressionConfig::default(),
+        );
         assert!(matches!(msg.role, Role::User));
         assert_eq!(msg.content.len(), 2);
         assert!(
@@ -1330,7 +1345,10 @@ mod tests {
     #[test]
     fn as_text_for_llm_short_output_not_compressed() {
         let output = ToolOutput::Plain("short content".into());
-        let config = CompressionConfig { enabled: true, ..CompressionConfig::default() };
+        let config = CompressionConfig {
+            enabled: true,
+            ..CompressionConfig::default()
+        };
         assert_eq!(output.as_text_for_llm(&config), "short content");
     }
 
@@ -1338,7 +1356,10 @@ mod tests {
     fn as_text_for_llm_disabled_returns_raw() {
         let long = "fn foo()\n".repeat(50);
         let output = ToolOutput::Plain(long.clone());
-        let config = CompressionConfig { enabled: false, ..CompressionConfig::default() };
+        let config = CompressionConfig {
+            enabled: false,
+            ..CompressionConfig::default()
+        };
         assert_eq!(output.as_text_for_llm(&config), long);
     }
 }

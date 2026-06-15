@@ -77,19 +77,23 @@ impl History {
         let mut last_included: Option<usize> = None;
 
         for &idx in indices {
-        if let Some(prev) = last_included && idx > prev + 1 {
-            let gap_count = idx - prev - 1;
-            result.push(Message::user(format!(
-                "[{gap_count} earlier messages omitted — use retrieve tool if needed]"
-            )));
-        }
+            if let Some(prev) = last_included
+                && idx > prev + 1
+            {
+                let gap_count = idx - prev - 1;
+                result.push(Message::user(format!(
+                    "[{gap_count} earlier messages omitted — use retrieve tool if needed]"
+                )));
+            }
             if let Some(msg) = self.messages.get(idx) {
                 result.push(msg.clone());
             }
             last_included = Some(idx);
         }
 
-        if let Some(last_idx) = last_included && total_len > last_idx + 1 {
+        if let Some(last_idx) = last_included
+            && total_len > last_idx + 1
+        {
             let remaining = total_len - last_idx - 1;
             result.push(Message::user(format!(
                 "[{remaining} later messages omitted — use retrieve tool if needed]"
@@ -172,8 +176,8 @@ pub(crate) fn sanitize_cancelled_history(history: &mut History, rollback_len: us
 
 #[cfg(test)]
 mod tests {
-use craft_providers::{ContentBlock, Message, Role};
-use serde_json;
+    use craft_providers::{ContentBlock, Message, Role};
+    use serde_json;
     use test_case::test_case;
 
     use super::*;
@@ -268,16 +272,22 @@ use serde_json;
 
     #[test]
     fn estimate_tokens_counts_history() {
-        let model = craft_providers::Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        let model =
+            craft_providers::Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
         let history = History::new(vec![
             Message::user("hello world".into()),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: "hi there".into() }],
+                content: vec![ContentBlock::Text {
+                    text: "hi there".into(),
+                }],
                 ..Default::default()
             },
         ]);
         let tokens = history.estimate_tokens(&model);
-        assert!(tokens > 0, "should estimate some tokens for non-empty history");
+        assert!(
+            tokens > 0,
+            "should estimate some tokens for non-empty history"
+        );
     }
 }

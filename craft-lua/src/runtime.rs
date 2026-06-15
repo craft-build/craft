@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 
 use event_listener::Event;
 
-use include_dir::Dir;
 use craft_agent::cancel::CancelToken;
 use craft_agent::tools::{
     HeaderResult, PermissionScopes, RegistryError, Tool, ToolRegistry, ToolSource,
 };
 use craft_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
+use include_dir::Dir;
 use mlua::{Function, Lua, RegistryKey, Value as LuaValue, VmState};
 use serde_json::Value;
 
@@ -26,14 +26,14 @@ use crate::api::buf::{BufHandle, BufferStore};
 use crate::api::command::{CommandHandlerMap, publish_command_snapshot};
 use crate::api::command::{LuaCommandReader, LuaCommandWriter, UiAction};
 use crate::api::create_craft_global;
-use crate::plugin_permissions::PluginPermissions;
-use crate::api::json_to_lua;
 use crate::api::ctx::LuaCtx;
 use crate::api::fn_api::JobStore;
-use crate::terminal_backend::{JobEvent, TerminalBackend};
+use crate::api::json_to_lua;
 use crate::api::setup::ConfigStore;
 use crate::api::tool::{LuaOutputFormat, LuaTool, PendingTool, PendingTools, ToolCallReply};
 use crate::error::PluginError;
+use crate::plugin_permissions::PluginPermissions;
+use crate::terminal_backend::{JobEvent, TerminalBackend};
 
 const INTERRUPT_SHUTDOWN_MSG: &str = "plugin interrupted: host shutting down";
 const INTERRUPT_CANCELLED_MSG: &str = "plugin interrupted: task cancelled";
@@ -293,7 +293,12 @@ impl TaskScope {
     pub(crate) fn detached(lua: &Lua) -> Self {
         Self::new(
             lua,
-            TaskCell::new(CancelToken::none(), None, None, Arc::new(crate::terminal_backend::LocalTerminal)),
+            TaskCell::new(
+                CancelToken::none(),
+                None,
+                None,
+                Arc::new(crate::terminal_backend::LocalTerminal),
+            ),
         )
     }
 
@@ -797,10 +802,14 @@ impl LuaRuntime {
                     }
                     continue;
                 }
-                slots.insert(pid, item.slot, SlotEntry {
-                    plugin: Arc::clone(&item.plugin),
-                    content: content.clone(),
-                });
+                slots.insert(
+                    pid,
+                    item.slot,
+                    SlotEntry {
+                        plugin: Arc::clone(&item.plugin),
+                        content: content.clone(),
+                    },
+                );
             }
         }
 
@@ -976,8 +985,8 @@ impl LuaRuntime {
             Arc::clone(&self.pending),
             Arc::clone(&name),
             self.ui_action_tx.clone(),
-             permissions,
-             self.embed_tx.clone(),
+            permissions,
+            self.embed_tx.clone(),
         )
         .map_err(&map_err)?;
 
@@ -1349,7 +1358,10 @@ async fn dispatch_async(
                     JobEvent::Exit(code) => LuaValue::Integer(*code as i64),
                 };
                 if let Err(e) = func.call::<()>((job_id, arg)) {
-                    return ToolCallReply::err(format!("job callback error: {}", strip_traceback(&e)));
+                    return ToolCallReply::err(format!(
+                        "job callback error: {}",
+                        strip_traceback(&e)
+                    ));
                 }
             }
 
@@ -1952,36 +1964,43 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_gate_drain_requires_all_decrements() {
-        tokio::task::LocalSet::new().run_until(async {
-            let g = Rc::new(gate());
-            g.increment();
-            g.increment();
-            let g2 = Rc::clone(&g);
-            let waiter = tokio::task::spawn_local(async move { g2.drain().await });
-            tokio::task::yield_now().await;
-            assert!(!waiter.is_finished());
-            g.decrement();
-            tokio::task::yield_now().await;
-            assert!(!waiter.is_finished());
-            g.decrement();
-            let _ = waiter.await;
-        }).await;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let g = Rc::new(gate());
+                g.increment();
+                g.increment();
+                let g2 = Rc::clone(&g);
+                let waiter = tokio::task::spawn_local(async move { g2.drain().await });
+                tokio::task::yield_now().await;
+                assert!(!waiter.is_finished());
+                g.decrement();
+                tokio::task::yield_now().await;
+                assert!(!waiter.is_finished());
+                g.decrement();
+                let _ = waiter.await;
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn inflight_gate_blocks_at_max_capacity() {
-        tokio::task::LocalSet::new().run_until(async {
-            let g = Rc::new(gate());
-            for _ in 0..MAX_INFLIGHT_TOOLS {
-                g.increment();
-            }
-            let g2 = Rc::clone(&g);
-            let waiter = tokio::task::spawn_local(async move { g2.wait_below(MAX_INFLIGHT_TOOLS).await });
-            tokio::task::yield_now().await;
-            assert!(!waiter.is_finished());
-            g.decrement();
-            let _ = waiter.await;
-        }).await;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let g = Rc::new(gate());
+                for _ in 0..MAX_INFLIGHT_TOOLS {
+                    g.increment();
+                }
+                let g2 = Rc::clone(&g);
+                let waiter =
+                    tokio::task::spawn_local(
+                        async move { g2.wait_below(MAX_INFLIGHT_TOOLS).await },
+                    );
+                tokio::task::yield_now().await;
+                assert!(!waiter.is_finished());
+                g.decrement();
+                let _ = waiter.await;
+            })
+            .await;
     }
 
     #[test]
@@ -2065,7 +2084,12 @@ mod tests {
         let (trigger, token) = CancelToken::new();
         let _h = set_active(
             &lua,
-            TaskCell::new(token, None, None, Arc::new(crate::terminal_backend::LocalTerminal)),
+            TaskCell::new(
+                token,
+                None,
+                None,
+                Arc::new(crate::terminal_backend::LocalTerminal),
+            ),
         );
         enqueue_async_task(&lua, enqueue_dummy(&lua)).unwrap();
 
@@ -2120,39 +2144,43 @@ mod tests {
 
     #[tokio::test]
     async fn drain_spawn_queue_skips_cancelled_tasks() {
-        tokio::task::LocalSet::new().run_until(async {
-            let lua = enqueue_test_lua();
-            let (trigger, token) = CancelToken::new();
-            trigger.cancel();
-            push_pending_task(&lua, token, None);
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let lua = enqueue_test_lua();
+                let (trigger, token) = CancelToken::new();
+                trigger.cancel();
+                push_pending_task(&lua, token, None);
 
-            let g = Rc::new(gate());
-            drain_spawn_queue(&lua, &g);
-            tokio::task::yield_now().await;
-            assert_eq!(g.count.get(), 0);
-        }).await;
+                let g = Rc::new(gate());
+                drain_spawn_queue(&lua, &g);
+                tokio::task::yield_now().await;
+                assert_eq!(g.count.get(), 0);
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn drain_spawn_queue_runs_and_decrements_gate() {
-        tokio::task::LocalSet::new().run_until(async {
-            let lua = enqueue_test_lua();
-            push_pending_task(
-                &lua,
-                CancelToken::none(),
-                Some(Instant::now() + Duration::from_secs(5)),
-            );
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let lua = enqueue_test_lua();
+                push_pending_task(
+                    &lua,
+                    CancelToken::none(),
+                    Some(Instant::now() + Duration::from_secs(5)),
+                );
 
-            let g = Rc::new(gate());
-            drain_spawn_queue(&lua, &g);
+                let g = Rc::new(gate());
+                drain_spawn_queue(&lua, &g);
 
-            for _ in 0..10 {
-                tokio::task::yield_now().await;
-                if g.count.get() == 0 {
-                    return;
+                for _ in 0..10 {
+                    tokio::task::yield_now().await;
+                    if g.count.get() == 0 {
+                        return;
+                    }
                 }
-            }
-            panic!("gate count never reached 0 after draining");
-        }).await;
+                panic!("gate count never reached 0 after draining");
+            })
+            .await;
     }
 }

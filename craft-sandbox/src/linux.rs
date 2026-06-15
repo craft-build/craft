@@ -9,14 +9,20 @@ use std::process::Command;
 #[cfg(test)]
 use tracing::warn;
 
-use crate::{NetworkPolicy, SandboxError, SandboxMode, SandboxProfile, default_writable_roots, normalize, which};
+use crate::{
+    NetworkPolicy, SandboxError, SandboxMode, SandboxProfile, default_writable_roots, normalize,
+    which,
+};
 
 const BWRAP: &str = "bwrap";
 
 /// Rewrites `command` to run under bwrap. The workspace is bind-mounted
 /// read-write for `WorkspaceWrite` and read-only for `ReadOnly`.
 pub fn apply(command: &mut Command, profile: &SandboxProfile) -> Result<(), SandboxError> {
-    if matches!(profile.mode, SandboxMode::DangerFullAccess | SandboxMode::Off) {
+    if matches!(
+        profile.mode,
+        SandboxMode::DangerFullAccess | SandboxMode::Off
+    ) {
         return Ok(());
     }
     if which(BWRAP).is_none() {

@@ -86,7 +86,9 @@ impl AgentError {
             Self::Json(_) => "received an invalid response from the API".into(),
             Self::Channel => "internal error, try again".into(),
             Self::Cancelled => "cancelled".into(),
-            Self::ContextOverflow { .. } => "context length exceeded, will attempt compression".into(),
+            Self::ContextOverflow { .. } => {
+                "context length exceeded, will attempt compression".into()
+            }
             Self::ContentPolicy { message } => format!("content policy violation: {message}"),
             Self::Billing { .. } => "billing error, check your API credits or plan".into(),
         }
@@ -103,25 +105,35 @@ impl AgentError {
 
     pub fn classify(self) -> Self {
         match &self {
-            Self::Api { status: 400, message }
-                if message.contains("context_length_exceeded")
-                    || message.contains("context window")
-                    || (message.contains("max_tokens") && message.contains("reduce")) =>
+            Self::Api {
+                status: 400,
+                message,
+            } if message.contains("context_length_exceeded")
+                || message.contains("context window")
+                || (message.contains("max_tokens") && message.contains("reduce")) =>
             {
                 Self::ContextOverflow {
                     message: message.clone(),
                 }
             }
-            Self::Api { status: 413, message } => Self::ContextOverflow {
+            Self::Api {
+                status: 413,
+                message,
+            } => Self::ContextOverflow {
                 message: message.clone(),
             },
-            Self::Api { status: 402, message } => Self::Billing {
+            Self::Api {
+                status: 402,
+                message,
+            } => Self::Billing {
                 message: message.clone(),
             },
-            Self::Api { status: 400, message }
-                if message.contains("content_policy")
-                    || message.contains("content_policy_violation")
-                    || message.contains("safety") =>
+            Self::Api {
+                status: 400,
+                message,
+            } if message.contains("content_policy")
+                || message.contains("content_policy_violation")
+                || message.contains("safety") =>
             {
                 Self::ContentPolicy {
                     message: message.clone(),

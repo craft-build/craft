@@ -109,10 +109,12 @@ impl super::ToolInvocation for MultiEdit {
             commands: vec![],
             reason: Some("edit multiple files".into()),
         };
-        Box::pin(std::future::ready(Some(super::PermissionScopes::single_with_context(
-            crate::permissions::canonicalize_scope_path(&self.path),
-            ctx,
-        ))))
+        Box::pin(std::future::ready(Some(
+            super::PermissionScopes::single_with_context(
+                crate::permissions::canonicalize_scope_path(&self.path),
+                ctx,
+            ),
+        )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
         Box::pin(async move { MultiEdit::execute(&self, ctx).await })

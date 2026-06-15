@@ -8,8 +8,8 @@ use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::KeyPool;
-use super::{ResolvedAuth, lock_unpoison};
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
+use super::{ResolvedAuth, lock_unpoison};
 
 const HOST_ENV: &str = "OLLAMA_HOST";
 const API_KEY_ENV: &str = "OLLAMA_API_KEY";
@@ -41,7 +41,10 @@ impl Ollama {
         Self::from_env(timeouts, key_pool, std::env::var(HOST_ENV).ok())
     }
 
-    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Result<Self, AgentError> {
+    pub(crate) fn with_auth(
+        auth: Arc<Mutex<ResolvedAuth>>,
+        timeouts: super::Timeouts,
+    ) -> Result<Self, AgentError> {
         Ok(Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth,

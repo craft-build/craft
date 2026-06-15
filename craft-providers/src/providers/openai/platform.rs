@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use flume::Sender;
 use craft_storage::StateDir;
+use flume::Sender;
 use serde_json::Value;
 use tracing::{debug, warn};
 
@@ -9,8 +9,8 @@ use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
-use super::auth;
 use super::super::lock_unpoison;
+use super::auth;
 use crate::providers::ResolvedAuth;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
@@ -78,21 +78,18 @@ impl OpenAi {
         let storage = self.storage.clone().ok_or_else(|| AgentError::Config {
             message: "OAuth refresh not available for externally-managed auth".into(),
         })?;
-        let tokens =
-            tokio::task::spawn_blocking({
-                let storage = storage.clone();
-                move || craft_storage::auth::load_tokens(&storage, auth::PROVIDER)
-            })
-            .await
-            .map_err(|e| AgentError::Config {
-                message: format!("openai load_tokens task: {e}"),
-            })?
-            .ok_or_else(|| {
-                AgentError::Api {
-                    status: 401,
-                    message: "OpenAI OAuth tokens not found on disk".into(),
-                }
-            })?;
+        let tokens = tokio::task::spawn_blocking({
+            let storage = storage.clone();
+            move || craft_storage::auth::load_tokens(&storage, auth::PROVIDER)
+        })
+        .await
+        .map_err(|e| AgentError::Config {
+            message: format!("openai load_tokens task: {e}"),
+        })?
+        .ok_or_else(|| AgentError::Api {
+            status: 401,
+            message: "OpenAI OAuth tokens not found on disk".into(),
+        })?;
         let resolved = match auth::refresh_tokens(&tokens).await {
             Ok(fresh) => {
                 let resolved = auth::build_oauth_resolved(&fresh);

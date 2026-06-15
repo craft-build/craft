@@ -552,14 +552,7 @@ local function render_confirming(state, width)
     for j, md_line in ipairs(question_md(state, i, width - q_prefix_w)) do
       append_wrapped(lines, md_line, width - q_prefix_w, j == 1 and q_prefix or q_pad, "", q_pad)
     end
-    append_wrapped(
-      lines,
-      { { ans_text, "success" } },
-      width - ARROW_PREFIX_W,
-      ARROW_PREFIX,
-      "dim",
-      arrow_pad
-    )
+    append_wrapped(lines, { { ans_text, "success" } }, width - ARROW_PREFIX_W, ARROW_PREFIX, "dim", arrow_pad)
 
     if i < #state.questions then
       lines[#lines + 1] = separator_row(width)

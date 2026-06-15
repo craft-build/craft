@@ -326,9 +326,9 @@ impl Batch {
             let _ = write!(output, "All {total} tools executed successfully.");
         }
 
-        let no_compress = results.iter().any(|br| {
-            br.output.as_ref().is_some_and(|o| o.skip_compress())
-        });
+        let no_compress = results
+            .iter()
+            .any(|br| br.output.as_ref().is_some_and(|o| o.skip_compress()));
 
         Ok(ToolOutput::Batch {
             entries,

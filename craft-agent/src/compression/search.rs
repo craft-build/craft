@@ -18,7 +18,10 @@ pub fn compress_search(text: &str, max_files: usize, max_matches_per_file: usize
             && !trimmed.starts_with('-')
         {
             if !current_file.is_empty() {
-                file_groups.push((std::mem::take(&mut current_file), std::mem::take(&mut current_matches)));
+                file_groups.push((
+                    std::mem::take(&mut current_file),
+                    std::mem::take(&mut current_matches),
+                ));
             }
             current_file = trimmed.to_owned();
         } else {

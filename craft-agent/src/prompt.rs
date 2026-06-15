@@ -129,7 +129,11 @@ pub fn assemble(id: PromptId, slots: &ResolvedSlots, instructions: &str) -> Stri
 pub fn assemble_raw(template: &str, slots: &ResolvedSlots, instructions: &str) -> String {
     let mut out = template.to_string();
     for &slot in Slot::ALL {
-        out = fill_marker(&out, slot.marker(), &render_slot(slots, PromptId::System, slot));
+        out = fill_marker(
+            &out,
+            slot.marker(),
+            &render_slot(slots, PromptId::System, slot),
+        );
     }
     out.replace(INSTRUCTIONS_MARKER, instructions)
 }

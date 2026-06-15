@@ -133,7 +133,9 @@ fn list_all(ctx: &super::ToolContext) -> ToolOutput {
     for (name, desc, _) in &core {
         out.push_str(&format!("- {name}: {desc}\n"));
     }
-    out.push_str("\nNot yet available — call list_tools(detail=\"<name>\") to enable and inspect:\n");
+    out.push_str(
+        "\nNot yet available — call list_tools(detail=\"<name>\") to enable and inspect:\n",
+    );
     if extended.is_empty() {
         out.push_str("  (none)\n");
     }

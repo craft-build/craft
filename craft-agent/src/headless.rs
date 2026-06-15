@@ -153,10 +153,18 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         params.mcp_handle.as_ref(),
     );
 
-    let compact = params.config.small_model.should_activate(params.model.context_window)
+    let compact = params
+        .config
+        .small_model
+        .should_activate(params.model.context_window)
         && params.config.small_model.compact_prompt;
-    let system =
-        agent::build_system_prompt(&vars, &mode, &instructions.text, &params.prompt_slots, compact);
+    let system = agent::build_system_prompt(
+        &vars,
+        &mode,
+        &instructions.text,
+        &params.prompt_slots,
+        compact,
+    );
 
     let tool_names = extract_tool_names(&tools);
 
@@ -361,7 +369,10 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                     }
                 }
 
-                let compact = params.config.small_model.should_activate(model.context_window)
+                let compact = params
+                    .config
+                    .small_model
+                    .should_activate(model.context_window)
                     && params.config.small_model.compact_prompt;
                 let mut system = params.system_prompt_override.clone().unwrap_or_else(|| {
                     agent::build_system_prompt(

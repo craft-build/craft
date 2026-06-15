@@ -1,6 +1,8 @@
 use mlua::{Table, UserData, UserDataMethods};
 
-use crate::api::command::{Anchor, Border, FloatConfigPatch, Split, TitlePos, WinCommand, WinEvent};
+use crate::api::command::{
+    Anchor, Border, FloatConfigPatch, Split, TitlePos, WinCommand, WinEvent,
+};
 use crate::api::ui::{parse_footer, try_parse_dimension};
 
 pub(crate) struct WinHandle {

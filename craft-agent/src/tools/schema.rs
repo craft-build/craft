@@ -719,7 +719,10 @@ mod tests {
     };
 
     const MULTIEDIT_LIKE: ParamSchema = ParamSchema::Object {
-        properties: &[("path", &STR_PRIM, true, &[]), ("edits", &EDITS_ARRAY, true, &[])],
+        properties: &[
+            ("path", &STR_PRIM, true, &[]),
+            ("edits", &EDITS_ARRAY, true, &[]),
+        ],
         description: "",
     };
 
@@ -848,7 +851,10 @@ mod tests {
     #[test]
     fn optional_null_treated_as_absent() {
         const SCHEMA: ParamSchema = ParamSchema::Object {
-            properties: &[("name", &STR_PRIM, true, &[]), ("hint", &STR_PRIM, false, &[])],
+            properties: &[
+                ("name", &STR_PRIM, true, &[]),
+                ("hint", &STR_PRIM, false, &[]),
+            ],
             description: "",
         };
         let out = validate(&SCHEMA, json!({"name": "x", "hint": null})).unwrap();
@@ -897,7 +903,10 @@ mod tests {
             description: "",
         };
         const SCHEMA: ParamSchema = ParamSchema::Object {
-            properties: &[("name", &STR_PRIM, true, &[]), ("count", &INT_PRIM, false, &[])],
+            properties: &[
+                ("name", &STR_PRIM, true, &[]),
+                ("count", &INT_PRIM, false, &[]),
+            ],
             description: "",
         };
         let json_schema = to_json_schema(&SCHEMA);

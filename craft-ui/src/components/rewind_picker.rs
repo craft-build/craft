@@ -1,8 +1,8 @@
 use crate::components::Overlay;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 
-use crossterm::event::KeyEvent;
 use craft_providers::{Message, Role};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 

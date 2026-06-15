@@ -51,7 +51,10 @@ async fn main() -> ExitCode {
 
     let ((tools, providers), (config, (keybindings, commands))) = (
         (tools.await.unwrap(), providers.await.unwrap()),
-        (config.await.unwrap(), (keybindings.await.unwrap(), commands.await.unwrap())),
+        (
+            config.await.unwrap(),
+            (keybindings.await.unwrap(), commands.await.unwrap()),
+        ),
     );
 
     let pages = [

@@ -149,8 +149,7 @@ pub(super) fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
         };
 
         let has_later_edit = file_ops.iter().any(|op| {
-            op.msg_index > read_op.msg_index
-                && matches!(op.op_kind, OpKind::Edit | OpKind::Write)
+            op.msg_index > read_op.msg_index && matches!(op.op_kind, OpKind::Edit | OpKind::Write)
         });
 
         // Working set protection: if the file is actively being edited, don't mark stale.
@@ -240,14 +239,20 @@ pub(super) fn apply_lifecycle(
                         // No retrieval marker — retrieving old content is misleading;
                         // the model needs current content, not historical.
                         if old_len > STALE_MARKER_PREFIX.len() + 60 {
-                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. Re-read the file with the read tool before editing. {old_len} chars removed]")
+                            format!(
+                                "{STALE_MARKER_PREFIX}{file_path} was modified after this read. Re-read the file with the read tool before editing. {old_len} chars removed]"
+                            )
                         } else {
-                            format!("{STALE_MARKER_PREFIX}{file_path} was modified after this read. Re-read the file with the read tool before editing.]")
+                            format!(
+                                "{STALE_MARKER_PREFIX}{file_path} was modified after this read. Re-read the file with the read tool before editing.]"
+                            )
                         }
                     }
                     ReadState::Superseded => {
                         if old_len > SUPERSEDED_MARKER_PREFIX.len() + 60 {
-                            format!("{SUPERSEDED_MARKER_PREFIX}{file_path} was re-read later. {old_len} chars removed]")
+                            format!(
+                                "{SUPERSEDED_MARKER_PREFIX}{file_path} was re-read later. {old_len} chars removed]"
+                            )
                         } else {
                             format!("{SUPERSEDED_MARKER_PREFIX}{file_path} was re-read later.]")
                         }
@@ -272,11 +277,14 @@ pub(super) fn apply_lifecycle(
                 total_removed += old_len.saturating_sub(marker.len());
                 *content = marker;
             }
-            }
         }
+    }
 
     if total_removed > 0 {
-        info!(total_chars_removed = total_removed, "read lifecycle applied");
+        info!(
+            total_chars_removed = total_removed,
+            "read lifecycle applied"
+        );
     }
 
     total_removed
@@ -303,8 +311,7 @@ pub(super) async fn run_lifecycle(
             .collect();
         if !stale.is_empty() {
             let semantic_results =
-                super::semantic::classify_reads_semantic(history.as_slice(), scorer, &stale)
-                    .await;
+                super::semantic::classify_reads_semantic(history.as_slice(), scorer, &stale).await;
             for (tool_call_id, _, is_still_stale) in semantic_results {
                 if !is_still_stale
                     && let Some(c) = classifications
@@ -342,7 +349,10 @@ fn extract_path(input: &serde_json::Value) -> Option<String> {
 fn extract_line_range(input: &serde_json::Value) -> Option<Range<usize>> {
     let offset = input.get("offset").and_then(|v| v.as_u64())? as usize;
     let start = offset.saturating_sub(1); // offset is 1-indexed
-    let limit = input.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize);
+    let limit = input
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|l| l as usize);
     let end = limit.map_or(usize::MAX, |l| start + l);
     Some(start..end)
 }
@@ -411,7 +421,10 @@ mod tests {
             .collect()
     }
 
-    fn find_by_id<'a>(classifications: &'a [ReadClassification], id: &str) -> &'a ReadClassification {
+    fn find_by_id<'a>(
+        classifications: &'a [ReadClassification],
+        id: &str,
+    ) -> &'a ReadClassification {
         classifications
             .iter()
             .find(|c| c.tool_call_id == id)
@@ -438,7 +451,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "line 1\nline 2\nline 3"),
             user_msg("edit it"),
-            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         // Push the edit outside the working set lookback so the read becomes stale.
@@ -473,7 +490,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
             user_msg("edit"),
-            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t2", "ok"),
             user_msg("read again"),
             tool_use_msg("t3", "read", json!({"path": "/src/main.rs"})),
@@ -496,7 +517,11 @@ mod tests {
             tool_use_msg("t2", "read", json!({"path": "/src/b.rs"})),
             tool_result_msg("t2", "b content"),
             user_msg("edit a"),
-            tool_use_msg("t3", "edit", json!({"path": "/src/a.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t3",
+                "edit",
+                json!({"path": "/src/a.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t3", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
@@ -512,9 +537,16 @@ mod tests {
         let mut messages = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
-            tool_result_msg("t1", "a long line of content that should be replaced with something even longer to ensure the marker is shorter than the original content being replaced in the tool result"),
+            tool_result_msg(
+                "t1",
+                "a long line of content that should be replaced with something even longer to ensure the marker is shorter than the original content being replaced in the tool result",
+            ),
             user_msg("edit"),
-            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
@@ -557,9 +589,16 @@ mod tests {
         let mut msgs = vec![
             user_msg("read"),
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
-            tool_result_msg("t1", "a substantial amount of content that would typically appear in a file read operation, spanning multiple lines and containing various code constructs that make it significantly longer than the compact marker which will replace it"),
+            tool_result_msg(
+                "t1",
+                "a substantial amount of content that would typically appear in a file read operation, spanning multiple lines and containing various code constructs that make it significantly longer than the compact marker which will replace it",
+            ),
             user_msg("edit"),
-            tool_use_msg("t2", "write", json!({"path": "/src/main.rs", "content": "new"})),
+            tool_use_msg(
+                "t2",
+                "write",
+                json!({"path": "/src/main.rs", "content": "new"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         msgs.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
@@ -584,7 +623,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
             user_msg("write"),
-            tool_use_msg("t2", "write", json!({"path": "/src/main.rs", "content": "new"})),
+            tool_use_msg(
+                "t2",
+                "write",
+                json!({"path": "/src/main.rs", "content": "new"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
@@ -600,7 +643,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
             user_msg("edit"),
-            tool_use_msg("t2", "multiedit", json!({"path": "/src/main.rs", "edits": []})),
+            tool_use_msg(
+                "t2",
+                "multiedit",
+                json!({"path": "/src/main.rs", "edits": []}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
@@ -613,23 +660,43 @@ mod tests {
     fn partial_reads_different_offsets_not_superseded() {
         let messages = vec![
             user_msg("read top"),
-            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 50})),
+            tool_use_msg(
+                "t1",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 1, "limit": 50}),
+            ),
             tool_result_msg("t1", "lines 1-50"),
             user_msg("read bottom"),
-            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 51, "limit": 50})),
+            tool_use_msg(
+                "t2",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 51, "limit": 50}),
+            ),
             tool_result_msg("t2", "lines 51-100"),
         ];
         let classifications = classify_reads(&messages);
         assert_eq!(classifications.len(), 2);
-        assert_eq!(classifications[0].state, ReadState::Fresh, "t1: non-overlapping range");
-        assert_eq!(classifications[1].state, ReadState::Fresh, "t2: non-overlapping range");
+        assert_eq!(
+            classifications[0].state,
+            ReadState::Fresh,
+            "t1: non-overlapping range"
+        );
+        assert_eq!(
+            classifications[1].state,
+            ReadState::Fresh,
+            "t2: non-overlapping range"
+        );
     }
 
     #[test]
     fn full_file_read_supersedes_partial() {
         let messages = vec![
             user_msg("read partial"),
-            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 50})),
+            tool_use_msg(
+                "t1",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 1, "limit": 50}),
+            ),
             tool_result_msg("t1", "lines 1-50"),
             user_msg("read full"),
             tool_use_msg("t2", "read", json!({"path": "/src/main.rs"})),
@@ -637,7 +704,11 @@ mod tests {
         ];
         let classifications = classify_reads(&messages);
         assert_eq!(classifications.len(), 2);
-        assert_eq!(classifications[0].state, ReadState::Superseded, "t1: covered by full file read");
+        assert_eq!(
+            classifications[0].state,
+            ReadState::Superseded,
+            "t1: covered by full file read"
+        );
         assert_eq!(classifications[1].state, ReadState::Fresh);
     }
 
@@ -645,15 +716,27 @@ mod tests {
     fn partially_overlapping_partial_reads_not_superseded() {
         let messages = vec![
             user_msg("read"),
-            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 100})),
+            tool_use_msg(
+                "t1",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 1, "limit": 100}),
+            ),
             tool_result_msg("t1", "lines 1-100"),
             user_msg("read again"),
-            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 50, "limit": 100})),
+            tool_use_msg(
+                "t2",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 50, "limit": 100}),
+            ),
             tool_result_msg("t2", "lines 50-150"),
         ];
         let classifications = classify_reads(&messages);
         assert_eq!(classifications.len(), 2);
-        assert_eq!(classifications[0].state, ReadState::Fresh, "t1: t2 doesn't fully contain t1 (1-100 vs 50-150)");
+        assert_eq!(
+            classifications[0].state,
+            ReadState::Fresh,
+            "t1: t2 doesn't fully contain t1 (1-100 vs 50-150)"
+        );
         assert_eq!(classifications[1].state, ReadState::Fresh);
     }
 
@@ -661,15 +744,27 @@ mod tests {
     fn wider_read_supersedes_narrower() {
         let messages = vec![
             user_msg("read"),
-            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 20, "limit": 30})),
+            tool_use_msg(
+                "t1",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 20, "limit": 30}),
+            ),
             tool_result_msg("t1", "lines 20-50"),
             user_msg("read wider"),
-            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 100})),
+            tool_use_msg(
+                "t2",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 1, "limit": 100}),
+            ),
             tool_result_msg("t2", "lines 1-100"),
         ];
         let classifications = classify_reads(&messages);
         assert_eq!(classifications.len(), 2);
-        assert_eq!(classifications[0].state, ReadState::Superseded, "t1: fully contained by t2 (20-50 vs 1-100)");
+        assert_eq!(
+            classifications[0].state,
+            ReadState::Superseded,
+            "t1: fully contained by t2 (20-50 vs 1-100)"
+        );
         assert_eq!(classifications[1].state, ReadState::Fresh);
     }
 
@@ -677,16 +772,32 @@ mod tests {
     fn adjacent_partial_reads_not_superseded() {
         let messages = vec![
             user_msg("read"),
-            tool_use_msg("t1", "read", json!({"path": "/src/main.rs", "offset": 1, "limit": 50})),
+            tool_use_msg(
+                "t1",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 1, "limit": 50}),
+            ),
             tool_result_msg("t1", "lines 1-50"),
             user_msg("read next"),
-            tool_use_msg("t2", "read", json!({"path": "/src/main.rs", "offset": 51, "limit": 50})),
+            tool_use_msg(
+                "t2",
+                "read",
+                json!({"path": "/src/main.rs", "offset": 51, "limit": 50}),
+            ),
             tool_result_msg("t2", "lines 51-100"),
         ];
         let classifications = classify_reads(&messages);
         assert_eq!(classifications.len(), 2);
-        assert_eq!(classifications[0].state, ReadState::Fresh, "t1: adjacent (not overlapping) with t2");
-        assert_eq!(classifications[1].state, ReadState::Fresh, "t2: adjacent (not overlapping) with t1");
+        assert_eq!(
+            classifications[0].state,
+            ReadState::Fresh,
+            "t1: adjacent (not overlapping) with t2"
+        );
+        assert_eq!(
+            classifications[1].state,
+            ReadState::Fresh,
+            "t2: adjacent (not overlapping) with t1"
+        );
     }
 
     #[test]
@@ -698,7 +809,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
             user_msg("edit"),
-            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         let cls = classify_reads(&messages);
@@ -716,7 +831,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "content"),
             user_msg("edit"),
-            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         // 2 original + (LOOKBACK-2) gap = LOOKBACK total assistant msgs → edit is in the set.
@@ -740,7 +859,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", content),
             user_msg("edit"),
-            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
@@ -763,7 +886,11 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", content),
             user_msg("edit"),
-            tool_use_msg("t2", "edit", json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"})),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
@@ -772,7 +899,10 @@ mod tests {
         apply_lifecycle(&mut messages, &classifications, Some(&store));
         match &messages[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {
-                assert!(!content.contains("Retrieve original"), "stale reads should not have retrieval markers");
+                assert!(
+                    !content.contains("Retrieve original"),
+                    "stale reads should not have retrieval markers"
+                );
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
@@ -784,9 +914,7 @@ mod tests {
             user_msg("hello"),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "hi".into() }],
                 ..Default::default()
             },
         ];

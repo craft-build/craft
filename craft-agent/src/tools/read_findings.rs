@@ -6,8 +6,7 @@ use crate::tools::ToolInvocation;
 use crate::types::{Priority, ToolOutput};
 
 const DEFAULT_LIMIT: usize = 50;
-const NO_FINDINGS_MSG: &str =
-    "No findings recorded yet in this session. Run a `review` first; findings reported via `report_finding` are stored automatically.";
+const NO_FINDINGS_MSG: &str = "No findings recorded yet in this session. Run a `review` first; findings reported via `report_finding` are stored automatically.";
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct ReadFindings {
@@ -21,11 +20,9 @@ pub struct ReadFindings {
 
 impl ReadFindings {
     pub const NAME: &str = "read_findings";
-    pub const DESCRIPTION: &str =
-        "Retrieve detailed code review findings recorded by review subagents during this session. Use this when you need the original priority, file path, line numbers, body, suggested fix, and rule IDs after a review tool has finished.";
-    pub const EXAMPLES: Option<&str> = Some(
-        r#"[{"priority": "P0"}, {"file_path_contains": "auth", "limit": 10}]"#,
-    );
+    pub const DESCRIPTION: &str = "Retrieve detailed code review findings recorded by review subagents during this session. Use this when you need the original priority, file path, line numbers, body, suggested fix, and rule IDs after a review tool has finished.";
+    pub const EXAMPLES: Option<&str> =
+        Some(r#"[{"priority": "P0"}, {"file_path_contains": "auth", "limit": 10}]"#);
 
     pub fn start_header(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -53,10 +50,11 @@ impl ReadFindings {
         };
 
         let limit = self.limit.unwrap_or(DEFAULT_LIMIT).max(1);
-        let entries = store
-            .lock()
-            .unwrap()
-            .filter(priority, self.file_path_contains.as_deref(), limit);
+        let entries =
+            store
+                .lock()
+                .unwrap()
+                .filter(priority, self.file_path_contains.as_deref(), limit);
 
         if entries.is_empty() {
             return Ok(ToolOutput::Markdown(NO_FINDINGS_MSG.to_owned()));
@@ -77,7 +75,11 @@ fn parse_priority(s: &str) -> Result<Priority, String> {
     }
 }
 
-super::impl_tool!(ReadFindings, audience = super::ToolAudience::MAIN, kind = "search");
+super::impl_tool!(
+    ReadFindings,
+    audience = super::ToolAudience::MAIN,
+    kind = "search"
+);
 
 impl ToolInvocation for ReadFindings {
     fn start_header(&self) -> super::HeaderFuture {
@@ -168,8 +170,7 @@ mod tests {
         );
         ctx.findings_store = Some(store);
 
-        let tool =
-            ReadFindings::parse_input(&json!({"file_path_contains": "auth"})).unwrap();
+        let tool = ReadFindings::parse_input(&json!({"file_path_contains": "auth"})).unwrap();
         let out = tool.execute(&ctx).await.unwrap();
         match out {
             ToolOutput::Findings(f) => {

@@ -246,7 +246,10 @@ pub trait Provider: Send + Sync {
     }
 }
 
-pub async fn from_model(model: &Model, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+pub async fn from_model(
+    model: &Model,
+    timeouts: Timeouts,
+) -> Result<Box<dyn Provider>, AgentError> {
     if let Some(slug) = &model.dynamic_slug {
         let provider = dynamic::create(slug, timeouts).await?;
         debug!(slug, model = %model.id, "dynamic provider created");

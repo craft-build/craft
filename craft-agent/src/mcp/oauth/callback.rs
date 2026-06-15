@@ -44,7 +44,7 @@ impl CallbackServer {
         }
     }
 
-            async fn accept_loop(self, expected_state: &str) -> Result<CallbackResult, String> {
+    async fn accept_loop(self, expected_state: &str) -> Result<CallbackResult, String> {
         loop {
             let (mut stream, _) = self
                 .listener
@@ -193,18 +193,18 @@ mod tests {
 
     #[tokio::test]
     async fn callback_receives_code() {
-            let server = CallbackServer::bind().await.unwrap();
-            let port = server.port;
+        let server = CallbackServer::bind().await.unwrap();
+        let port = server.port;
 
-            let handle = tokio::spawn(async move { server.wait_for_callback("test-state").await });
+        let handle = tokio::spawn(async move { server.wait_for_callback("test-state").await });
 
-            let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
-                .await
-                .unwrap();
-            let req = format!(
-                "GET {CALLBACK_PATH}?code=auth-code&state=test-state HTTP/1.1\r\nHost: localhost\r\n\r\n"
-            );
-            stream.write_all(req.as_bytes()).await.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let req = format!(
+            "GET {CALLBACK_PATH}?code=auth-code&state=test-state HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
 
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result.code, "auth-code");

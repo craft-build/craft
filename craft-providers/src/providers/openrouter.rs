@@ -45,7 +45,10 @@ impl OpenRouter {
         })
     }
 
-    pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Result<Self, AgentError> {
+    pub(crate) fn with_auth(
+        auth: Arc<Mutex<ResolvedAuth>>,
+        timeouts: super::Timeouts,
+    ) -> Result<Self, AgentError> {
         Ok(Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth,

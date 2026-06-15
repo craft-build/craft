@@ -187,11 +187,7 @@ impl StyleguideRegistry {
                     60
                 } else if rule.description.to_lowercase().contains(&lower) {
                     40
-                } else if rule
-                    .tags
-                    .iter()
-                    .any(|t| t.to_lowercase().contains(&lower))
-                {
+                } else if rule.tags.iter().any(|t| t.to_lowercase().contains(&lower)) {
                     30
                 } else {
                     continue;
@@ -398,8 +394,7 @@ pub fn get_rules(
                 sections.push(format!("## {}", sg.data.metadata.name));
                 for rule in active.iter().take(5) {
                     sections.push(format!("\n**{}**: {}", rule.id, rule.name));
-                    sections
-                        .push(rule.description.lines().next().unwrap_or("").to_string());
+                    sections.push(rule.description.lines().next().unwrap_or("").to_string());
                     if let Some(ref examples) = rule.examples
                         && let Some(ref good) = examples.good
                         && let Some(first) = good.first()
@@ -436,18 +431,11 @@ pub fn get_rules(
             return Ok(format!("No rules found with IDs: {}", ids.join(", ")));
         }
 
-        let mut lines = vec![
-            format!("# Styleguide Rules: {language}"),
-            String::new(),
-        ];
+        let mut lines = vec![format!("# Styleguide Rules: {language}"), String::new()];
 
-        let mut by_cat: HashMap<&str, Vec<(&LoadedStyleguide, &StyleguideRule)>> =
-            HashMap::new();
+        let mut by_cat: HashMap<&str, Vec<(&LoadedStyleguide, &StyleguideRule)>> = HashMap::new();
         for (sg, rule) in &found {
-            by_cat
-                .entry(&sg.category)
-                .or_default()
-                .push((*sg, *rule));
+            by_cat.entry(&sg.category).or_default().push((*sg, *rule));
         }
 
         for (cat, items) in &by_cat {
@@ -490,8 +478,8 @@ pub fn get_rules(
         return Ok(lines.join("\n"));
     }
 
-    let cat = category
-        .ok_or_else(|| "Must provide category, rule_ids, or file_path".to_string())?;
+    let cat =
+        category.ok_or_else(|| "Must provide category, rule_ids, or file_path".to_string())?;
 
     let sg = registry.get(language, cat).ok_or_else(|| {
         let available = registry.categories(Some(language));

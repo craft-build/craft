@@ -163,7 +163,9 @@ async fn poll_device_token(device: &DeviceCodeResponse) -> Result<DeviceTokenRes
     }
 }
 
-async fn exchange_device_token(device_token: &DeviceTokenResponse) -> Result<TokenResponse, AgentError> {
+async fn exchange_device_token(
+    device_token: &DeviceTokenResponse,
+) -> Result<TokenResponse, AgentError> {
     let client = http_client(TOKEN_EXCHANGE_TIMEOUT)?;
 
     let form_body = format!(

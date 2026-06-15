@@ -24,8 +24,8 @@ use std::sync::OnceLock;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use tracing::warn;
 
-mod mac;
 mod linux;
+mod mac;
 
 #[derive(Debug, Error)]
 pub enum SandboxError {
@@ -172,9 +172,7 @@ pub fn default_writable_roots() -> Vec<PathBuf> {
 fn etcetera_cache_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache"))
-        })
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .and_then(|p| p.canonicalize().ok())
 }
 

@@ -106,7 +106,9 @@ fn convert_sse(s: &McpServerSse) -> Result<ServerConfig, String> {
 
 fn validate_url(name: &str, url: &str) -> Result<(), String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(format!("server '{name}' url must start with http:// or https://"));
+        return Err(format!(
+            "server '{name}' url must start with http:// or https://"
+        ));
     }
     Ok(())
 }
@@ -125,9 +127,7 @@ fn sanitize_chars(name: &str) -> String {
 
 fn sanitize_name(name: &str, seen: &mut HashMap<String, usize>) -> String {
     let base = sanitize_chars(name);
-    if !base.contains(SEPARATOR)
-        && base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
+    if !base.contains(SEPARATOR) && base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         let count = seen.entry(base.clone()).or_insert(0);
         *count += 1;
         if *count == 1 {

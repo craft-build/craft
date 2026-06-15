@@ -1,13 +1,13 @@
 use std::time::{Duration, Instant};
 
 use flume::Sender;
-use futures::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use futures::TryStreamExt;
+use futures::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use reqwest::Client;
-use tokio_util::compat::TokioAsyncReadCompatExt;
-use tokio_util::io::StreamReader;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 use super::{MIME_JSON, ResolvedAuth};
@@ -32,7 +32,10 @@ pub(crate) struct OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(config: &'static OpenAiCompatConfig, timeouts: super::Timeouts) -> Result<Self, AgentError> {
+    pub fn new(
+        config: &'static OpenAiCompatConfig,
+        timeouts: super::Timeouts,
+    ) -> Result<Self, AgentError> {
         Ok(Self {
             client: super::http_client(timeouts)?,
             config,
@@ -80,7 +83,9 @@ impl OpenAiCompatProvider {
         auth: &ResolvedAuth,
     ) -> reqwest::RequestBuilder {
         let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
-        let mut builder = self.client.request(method.parse().unwrap(), format!("{base}{path}"));
+        let mut builder = self
+            .client
+            .request(method.parse().unwrap(), format!("{base}{path}"));
         for (key, value) in &auth.headers {
             builder = builder.header(key.as_str(), value.as_str());
         }
@@ -114,9 +119,7 @@ impl OpenAiCompatProvider {
 
         if status == 200 {
             let stream = response.bytes_stream();
-            let reader = StreamReader::new(
-                stream.map_err(std::io::Error::other),
-            );
+            let reader = StreamReader::new(stream.map_err(std::io::Error::other));
             parse_sse(
                 BufReader::new(reader.compat()),
                 event_tx,
@@ -626,9 +629,7 @@ data: [DONE]\n";
         assert!(
             matches!(&resp.message.content[0], ContentBlock::Thinking { thinking, .. } if thinking == "Let me think...")
         );
-        assert!(
-            matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello")
-        );
+        assert!(matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello"));
 
         let mut thinking = Vec::new();
         let mut text_deltas = Vec::new();
@@ -912,9 +913,7 @@ data: [DONE]\n";
             "{:?}",
             resp.message.content[0],
         );
-        assert!(
-            matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello")
-        );
+        assert!(matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello"));
 
         let mut thinking_deltas = Vec::new();
         let mut text_deltas = Vec::new();

@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flume::Sender;
 use craft_agent::tools::Tool;
 use craft_agent::tools::schema::{ParamSchema, to_json_schema, try_from_json, validate};
 use craft_agent::tools::{
@@ -10,6 +9,7 @@ use craft_agent::tools::{
     PermissionScopes, ToolAudience, ToolContext, ToolInvocation,
 };
 use craft_agent::{AgentEvent, BufferSnapshot, SharedBuf, ToolOutput};
+use flume::Sender;
 use mlua::{
     Function, Lua, LuaSerdeExt, RegistryKey, Result as LuaResult, Table, Value as LuaValue,
 };
@@ -252,19 +252,19 @@ impl ToolInvocation for LuaToolInvocation {
                 )),
                 Some(Err(_)) => Err("lua thread disconnected".to_string()),
                 Some(Ok(reply)) => {
-                        if let Some(ref id) = ctx.tool_use_id {
-                            if let Some(live_buf) = reply.live_buf {
-                                let _ = ctx.event_tx.send(AgentEvent::LiveToolBuf {
-                                    id: id.clone(),
-                                    body: live_buf,
-                                });
-                            }
-                            crate::runtime::RestoreReply {
-                                body: reply.snapshot,
-                                header: reply.header,
-                            }
-                            .emit(id, None, &ctx.event_tx);
+                    if let Some(ref id) = ctx.tool_use_id {
+                        if let Some(live_buf) = reply.live_buf {
+                            let _ = ctx.event_tx.send(AgentEvent::LiveToolBuf {
+                                id: id.clone(),
+                                body: live_buf,
+                            });
                         }
+                        crate::runtime::RestoreReply {
+                            body: reply.snapshot,
+                            header: reply.header,
+                        }
+                        .emit(id, None, &ctx.event_tx);
+                    }
                     let format = reply.format;
                     reply.result.map(|s| match format {
                         LuaOutputFormat::Markdown => ToolOutput::Markdown(s),
@@ -298,12 +298,9 @@ pub(crate) fn create_api_table(
                 let slot_str: String = spec
                     .get("slot")
                     .map_err(|_| mlua::Error::runtime("register_prompt_hint: missing 'slot'"))?;
-                let slot: craft_agent::prompt::Slot =
-                    slot_str.parse().map_err(|_| {
-                        mlua::Error::runtime(format!(
-                            "register_prompt_hint: invalid slot '{slot_str}'"
-                        ))
-                    })?;
+                let slot: craft_agent::prompt::Slot = slot_str.parse().map_err(|_| {
+                    mlua::Error::runtime(format!("register_prompt_hint: invalid slot '{slot_str}'"))
+                })?;
 
                 let prompts = parse_prompt_targets(&spec)?;
 
@@ -381,9 +378,7 @@ fn parse_prompt_targets(spec: &Table) -> LuaResult<Option<Vec<craft_agent::promp
             for item in t.sequence_values::<String>() {
                 let s = item?;
                 let pid = s.parse().map_err(|_| {
-                    mlua::Error::runtime(format!(
-                        "register_prompt_hint: invalid prompt '{s}'"
-                    ))
+                    mlua::Error::runtime(format!("register_prompt_hint: invalid prompt '{s}'"))
                 })?;
                 ids.push(pid);
             }
@@ -515,7 +510,10 @@ fn register_tool_from_lua(lua: &Lua, spec: &Table, pending: PendingTools) -> Lua
     let restore_fn: Option<Function> = spec.get("restore").ok();
     let audience = parse_audience(audiences)?;
     let timeout = parse_timeout(spec)?;
-    let kind: Option<Arc<str>> = spec.get::<String>("kind").ok().map(|s| Arc::from(s.as_str()));
+    let kind: Option<Arc<str>> = spec
+        .get::<String>("kind")
+        .ok()
+        .map(|s| Arc::from(s.as_str()));
     let handler_key: RegistryKey = lua.create_registry_value(handler)?;
     let header_key = header_fn
         .map(|f| lua.create_registry_value(f))

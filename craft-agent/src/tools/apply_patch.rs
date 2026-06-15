@@ -27,9 +27,17 @@ struct UpdateFileChunk {
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)]
 enum PatchHunk {
-    AddFile { path: String, contents: String },
-    DeleteFile { path: String },
-    UpdateFile { path: String, chunks: Vec<UpdateFileChunk> },
+    AddFile {
+        path: String,
+        contents: String,
+    },
+    DeleteFile {
+        path: String,
+    },
+    UpdateFile {
+        path: String,
+        chunks: Vec<UpdateFileChunk>,
+    },
 }
 
 impl ApplyPatch {
@@ -133,9 +141,7 @@ impl ApplyPatch {
                     last_before = original;
                     last_after = new_contents;
                     if diff_text.is_empty() {
-                        results.push(format!(
-                            "{path}: modified ({chunk_count} hunks)"
-                        ));
+                        results.push(format!("{path}: modified ({chunk_count} hunks)"));
                     } else {
                         results.push(format!(
                             "{path}: modified ({chunk_count} hunks)\n{diff_text}"
@@ -236,8 +242,7 @@ fn apply_update_chunks(
     chunks: &[UpdateFileChunk],
     path: &str,
 ) -> Result<String, String> {
-    let mut original_lines: Vec<String> =
-        original_contents.split('\n').map(String::from).collect();
+    let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
     let had_trailing_newline = original_lines.last().is_some_and(String::is_empty);
     if had_trailing_newline {
         original_lines.pop();
@@ -269,9 +274,7 @@ fn compute_replacements(
             ) {
                 line_index = idx + 1;
             } else {
-                return Err(format!(
-                    "Failed to find context '{ctx_line}' in {path}"
-                ));
+                return Err(format!("Failed to find context '{ctx_line}' in {path}"));
             }
         }
 
@@ -646,10 +649,7 @@ mod tests {
         let hunks = parse_apply_patch(patch).unwrap();
         match &hunks[0] {
             PatchHunk::UpdateFile { chunks, .. } => {
-                assert_eq!(
-                    chunks[0].change_context,
-                    Some("def my_func():".to_string())
-                );
+                assert_eq!(chunks[0].change_context, Some("def my_func():".to_string()));
                 assert_eq!(chunks[0].old_lines, vec!["    pass"]);
                 assert_eq!(chunks[0].new_lines, vec!["    return 42"]);
             }
@@ -700,8 +700,7 @@ mod tests {
 
     #[test]
     fn parse_update_without_explicit_at() {
-        let patch =
-            "*** Begin Patch\n*** Update File: file.py\n import foo\n+bar\n*** End Patch";
+        let patch = "*** Begin Patch\n*** Update File: file.py\n import foo\n+bar\n*** End Patch";
         let hunks = parse_apply_patch(patch).unwrap();
         match &hunks[0] {
             PatchHunk::UpdateFile { chunks, .. } => {
@@ -714,7 +713,10 @@ mod tests {
 
     #[test]
     fn seek_sequence_exact_match() {
-        let lines: Vec<String> = vec!["foo", "bar", "baz"].into_iter().map(String::from).collect();
+        let lines: Vec<String> = vec!["foo", "bar", "baz"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let pattern: Vec<String> = vec!["bar", "baz"].into_iter().map(String::from).collect();
         assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(1));
     }
@@ -789,10 +791,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "foo\nBAR\nbaz\nQUX\n"
-        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "foo\nBAR\nbaz\nQUX\n");
     }
 
     #[tokio::test]
@@ -902,10 +901,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "foo\nbar\nbaz\nquux\n"
-        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "foo\nbar\nbaz\nquux\n");
     }
 
     #[tokio::test]
@@ -916,16 +912,14 @@ mod tests {
         pre_read(&ctx, &path);
 
         ApplyPatch {
-            patch_text: "*** Begin Patch\n*** Update File: {path}\n@@\n foo\n-bar\n+BAR\n*** End Patch"
-                .replace("{path}", &path),
+            patch_text:
+                "*** Begin Patch\n*** Update File: {path}\n@@\n foo\n-bar\n+BAR\n*** End Patch"
+                    .replace("{path}", &path),
         }
         .execute(&ctx)
         .await
         .unwrap();
 
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "foo\nBAR\n"
-        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "foo\nBAR\n");
     }
 }

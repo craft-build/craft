@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
 use flume::Sender;
-use futures::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use futures::TryStreamExt;
+use futures::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use reqwest::Client;
+use serde_json::{Value, json};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::io::StreamReader;
-use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use crate::providers::{MIME_JSON, ResolvedAuth};
@@ -170,15 +170,8 @@ pub(crate) async fn do_stream(
 
     if status == 200 {
         let stream = response.bytes_stream();
-        let reader = StreamReader::new(
-            stream.map_err(std::io::Error::other),
-        );
-        parse_sse(
-            BufReader::new(reader.compat()),
-            event_tx,
-            stream_timeout,
-        )
-        .await
+        let reader = StreamReader::new(stream.map_err(std::io::Error::other));
+        parse_sse(BufReader::new(reader.compat()), event_tx, stream_timeout).await
     } else {
         Err(AgentError::from_response(response).await)
     }

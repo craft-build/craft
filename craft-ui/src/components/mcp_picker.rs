@@ -152,8 +152,8 @@ mod tests {
     use super::*;
     use crate::components::key;
     use crate::components::keybindings::key as kb;
-    use crossterm::event::{KeyCode, KeyEvent};
     use craft_agent::{McpServerInfo, McpSnapshot};
+    use crossterm::event::{KeyCode, KeyEvent};
     use std::path::PathBuf;
     use test_case::test_case;
 

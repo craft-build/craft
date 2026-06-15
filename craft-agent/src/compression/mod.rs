@@ -71,21 +71,12 @@ impl From<&craft_config::CompressionConfig> for CompressionConfig {
     }
 }
 
-static ERROR_LINE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(error|fatal|panic|critical|exception|traceback)").unwrap()
-});
-static WARNING_LINE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(warning|warn)").unwrap()
-});
-static DIFF_HEADER: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(diff --git|---|\+\+\+|@@)").unwrap()
-});
-static JSON_ARRAY_START: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*\[").unwrap()
-});
-static CODE_LINE_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*\d+:\s").unwrap()
-});
+static ERROR_LINE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(error|fatal|panic|critical|exception|traceback)").unwrap());
+static WARNING_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^(warning|warn)").unwrap());
+static DIFF_HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(diff --git|---|\+\+\+|@@)").unwrap());
+static JSON_ARRAY_START: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*\[").unwrap());
+static CODE_LINE_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*\d+:\s").unwrap());
 
 /// Detect content type from tool output text. Uses simple heuristics.
 pub fn detect_content_type(text: &str) -> ContentType {
@@ -97,7 +88,10 @@ pub fn detect_content_type(text: &str) -> ContentType {
         return ContentType::Diff;
     }
 
-    let code_line_count = text.lines().filter(|l| CODE_LINE_PATTERN.is_match(l)).count();
+    let code_line_count = text
+        .lines()
+        .filter(|l| CODE_LINE_PATTERN.is_match(l))
+        .count();
     let total_lines = text.lines().count();
     if total_lines > 3 && code_line_count as f32 / total_lines as f32 > 0.7 {
         return ContentType::Code;
@@ -117,7 +111,8 @@ pub fn detect_content_type(text: &str) -> ContentType {
 }
 
 #[cfg(feature = "onnx")]
-static MAGIKA_MODEL: std::sync::OnceLock<Result<std::sync::Mutex<magika::Session>, String>> = std::sync::OnceLock::new();
+static MAGIKA_MODEL: std::sync::OnceLock<Result<std::sync::Mutex<magika::Session>, String>> =
+    std::sync::OnceLock::new();
 
 #[cfg(feature = "onnx")]
 pub fn download_magika_model() -> Result<(), String> {
@@ -167,13 +162,16 @@ pub fn detect_content_type_onnx(text: &str) -> ContentType {
                 ContentType::JsonArray
             } else if label.contains("diff") || label.contains("patch") {
                 ContentType::Diff
-            } else if group.contains("source")
-                || group.contains("code")
-                || group.contains("script")
+            } else if group.contains("source") || group.contains("code") || group.contains("script")
             {
                 ContentType::Code
             } else if label.contains("log") || label.contains("text") {
-                if text.lines().filter(|l| ERROR_LINE.is_match(l) || WARNING_LINE.is_match(l)).count() > 0 {
+                if text
+                    .lines()
+                    .filter(|l| ERROR_LINE.is_match(l) || WARNING_LINE.is_match(l))
+                    .count()
+                    > 0
+                {
                     ContentType::Log
                 } else {
                     ContentType::PlainText
@@ -195,11 +193,9 @@ pub fn compress(text: &str, content_type: ContentType, config: &CompressionConfi
     match content_type {
         ContentType::Code => code::compress_code(text, config.code_compression_rate),
         ContentType::Log => log::compress_log(text, config.max_log_lines),
-        ContentType::SearchResult => search::compress_search(
-            text,
-            config.max_search_files,
-            config.max_matches_per_file,
-        ),
+        ContentType::SearchResult => {
+            search::compress_search(text, config.max_search_files, config.max_matches_per_file)
+        }
         ContentType::Diff => diff_comp::compress_diff(text, config.max_diff_lines),
         ContentType::JsonArray => json::compress_json_array(
             text,

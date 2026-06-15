@@ -132,7 +132,8 @@ mod tests {
     use mlua::Lua;
     use test_case::test_case;
 
-    const ERR_TOO_FEW_ARGS: &str = "craft.async.await requires at least 2 arguments: argc, fun, ...";
+    const ERR_TOO_FEW_ARGS: &str =
+        "craft.async.await requires at least 2 arguments: argc, fun, ...";
     const ERR_ARGC_GE_1: &str = "argc must be >= 1";
     const ERR_ARGC_INTEGER: &str = "argc must be an integer";
     const ERR_SECOND_ARG_FN: &str = "second argument must be a function";

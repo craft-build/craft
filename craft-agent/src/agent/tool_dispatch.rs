@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
@@ -14,7 +14,10 @@ use crate::mcp::{McpHandle, UNKNOWN_MCP};
 use crate::task_set::TaskSet;
 use crate::tools::ToolContext;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
-use crate::{AgentError, AgentEvent, AgentMode, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent};
+use crate::{
+    AgentError, AgentEvent, AgentMode, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent,
+    ToolUseEvent,
+};
 
 use super::dedup::ToolDedupCache;
 use super::trust::TrustTracker;
@@ -258,11 +261,12 @@ fn fire_post_tool_use(ctx: &ToolContext, name: &str, input: &Value, done: &ToolD
     let output_text = done.output.as_text();
     let is_error = done.is_error;
     let tool_name = event.tool.clone();
-    let join = tokio::spawn(async move {
-        hooks.post_tool_use(event, output_text, is_error).await
-    });
+    let join = tokio::spawn(async move { hooks.post_tool_use(event, output_text, is_error).await });
     tokio::spawn(async move {
-        if tokio::time::timeout(POST_TOOL_HOOK_TIMEOUT, join).await.is_err() {
+        if tokio::time::timeout(POST_TOOL_HOOK_TIMEOUT, join)
+            .await
+            .is_err()
+        {
             warn!(tool = %tool_name, "post_tool_use hook timed out");
         }
     });
@@ -441,7 +445,11 @@ pub(super) async fn process_tool_calls(
     for (id, name, input) in runnable {
         inputs_by_id.insert(id.clone(), input.clone());
         let is_ro = ToolDedupCache::is_read_only(&name);
-        let dedup_key = if is_ro { Some(ToolDedupCache::key(&name, &input)) } else { None };
+        let dedup_key = if is_ro {
+            Some(ToolDedupCache::key(&name, &input))
+        } else {
+            None
+        };
         let write_paths = extract_write_paths(&name, &input);
 
         if is_never_parallel(&name) {
@@ -503,15 +511,33 @@ pub(super) async fn process_tool_calls(
         });
 
         if has_path_conflict {
-            let batch_results: Vec<_> = set.join_all().await.into_iter().zip(spawned_ids.drain(..)).map(|(r, id)| match r {
-                Ok(out) => out,
-                Err(e) => {
-                    error!(error = %e, "tool task panicked");
-                    (ToolDoneEvent::error(id, format!("internal error: tool panicked: {e}")), false, None)
-                }
-            }).collect();
+            let batch_results: Vec<_> = set
+                .join_all()
+                .await
+                .into_iter()
+                .zip(spawned_ids.drain(..))
+                .map(|(r, id)| match r {
+                    Ok(out) => out,
+                    Err(e) => {
+                        error!(error = %e, "tool task panicked");
+                        (
+                            ToolDoneEvent::error(id, format!("internal error: tool panicked: {e}")),
+                            false,
+                            None,
+                        )
+                    }
+                })
+                .collect();
             for (done, is_read_only, dedup_key) in &batch_results {
-                record_tool_result(done, *is_read_only, *dedup_key, &inputs_by_id, guardrails, trust, dedup);
+                record_tool_result(
+                    done,
+                    *is_read_only,
+                    *dedup_key,
+                    &inputs_by_id,
+                    guardrails,
+                    trust,
+                    dedup,
+                );
             }
             all_results.extend(batch_results.into_iter().map(|(d, _, _)| d));
             set = TaskSet::new();
@@ -520,29 +546,48 @@ pub(super) async fn process_tool_calls(
         }
     }
 
-    let remaining_results: Vec<_> = set.join_all().await.into_iter().zip(spawned_ids).map(|(r, id)| match r {
-        Ok(out) => out,
-        Err(e) => {
-            error!(error = %e, "tool task panicked");
-            (ToolDoneEvent::error(id, format!("internal error: tool panicked: {e}")), false, None)
-        }
-    }).collect();
+    let remaining_results: Vec<_> = set
+        .join_all()
+        .await
+        .into_iter()
+        .zip(spawned_ids)
+        .map(|(r, id)| match r {
+            Ok(out) => out,
+            Err(e) => {
+                error!(error = %e, "tool task panicked");
+                (
+                    ToolDoneEvent::error(id, format!("internal error: tool panicked: {e}")),
+                    false,
+                    None,
+                )
+            }
+        })
+        .collect();
     for (done, is_read_only, dedup_key) in &remaining_results {
-        record_tool_result(done, *is_read_only, *dedup_key, &inputs_by_id, guardrails, trust, dedup);
+        record_tool_result(
+            done,
+            *is_read_only,
+            *dedup_key,
+            &inputs_by_id,
+            guardrails,
+            trust,
+            dedup,
+        );
     }
     all_results.extend(remaining_results.into_iter().map(|(d, _, _)| d));
 
-
-    let had_write_edits = all_results.iter().any(|r| {
-        !r.is_error && is_write_tool(&r.tool)
-    });
+    let had_write_edits = all_results
+        .iter()
+        .any(|r| !r.is_error && is_write_tool(&r.tool));
 
     if had_write_edits {
         let should_validate = all_results.iter().any(|r| {
             if !is_write_tool(&r.tool) || r.is_error {
                 return false;
             }
-            r.output.written_path().is_some_and(|p| validator.should_validate(Path::new(p)))
+            r.output
+                .written_path()
+                .is_some_and(|p| validator.should_validate(Path::new(p)))
         });
         if should_validate {
             match validator.validate().await {
@@ -629,8 +674,16 @@ fn wrap_untrusted(tool: &str, output: ToolOutput) -> ToolOutput {
 }
 
 fn extract_file_path(input: &Value) -> Option<String> {
-    input.get("path").and_then(|v| v.as_str()).map(String::from)
-        .or_else(|| input.get("file_path").and_then(|v| v.as_str()).map(String::from))
+    input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| {
+            input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
 }
 
 fn is_never_parallel(name: &str) -> bool {
@@ -678,7 +731,8 @@ fn record_tool_result(
         done.is_error,
         is_read_only,
     );
-    if is_read_only && !done.is_error
+    if is_read_only
+        && !done.is_error
         && let Some(key) = dedup_key
     {
         let path = extract_file_path(input_val);
@@ -745,9 +799,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_tool_blocked_in_plan_mode() {
         let result = dispatch_mcp(
-            &crate::tools::test_support::stub_ctx(&AgentMode::Plan(PathBuf::from(
-                "/tmp/plan.md",
-            ))),
+            &crate::tools::test_support::stub_ctx(&AgentMode::Plan(PathBuf::from("/tmp/plan.md"))),
             "t1",
             "myserver__mytool",
             &serde_json::json!({}),
@@ -793,10 +845,8 @@ mod tests {
             deny_all_write,
             dir.path().to_path_buf(),
         ));
-        let ctx = crate::tools::test_support::stub_ctx_with_permissions(
-            &AgentMode::Build,
-            permissions,
-        );
+        let ctx =
+            crate::tools::test_support::stub_ctx_with_permissions(&AgentMode::Build, permissions);
 
         let marker = dir.path().join("should_never_exist");
         let marker_str = marker.to_str().unwrap();
@@ -821,8 +871,8 @@ mod tests {
         );
     }
 
-    use crate::hooks::test_support::RecordingHooks;
     use crate::hooks::HookDecision;
+    use crate::hooks::test_support::RecordingHooks;
     use crate::tools::test_support::stub_ctx_with_hooks;
 
     const DENY_MESSAGE: &str = "blocked by hook";

@@ -47,7 +47,12 @@ pub trait Hooks: Send + Sync {
         Box::pin(async { HookDecision::Allow })
     }
 
-    fn post_tool_use(&self, event: ToolUseEvent, output: String, is_error: bool) -> HookFuture<'_, ()> {
+    fn post_tool_use(
+        &self,
+        event: ToolUseEvent,
+        output: String,
+        is_error: bool,
+    ) -> HookFuture<'_, ()> {
         let _ = (event, output, is_error);
         Box::pin(async {})
     }
@@ -98,7 +103,12 @@ pub mod test_support {
             let decision = self.pre_decision.lock().unwrap().clone();
             Box::pin(async move { decision })
         }
-        fn post_tool_use(&self, event: ToolUseEvent, _output: String, is_error: bool) -> HookFuture<'_, ()> {
+        fn post_tool_use(
+            &self,
+            event: ToolUseEvent,
+            _output: String,
+            is_error: bool,
+        ) -> HookFuture<'_, ()> {
             self.record(format!("post:{}:{}", event.tool, is_error));
             Box::pin(async {})
         }

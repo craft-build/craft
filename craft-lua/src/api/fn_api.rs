@@ -7,18 +7,16 @@ use std::time::Duration;
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
 
 use crate::api::fs::expand_tilde;
-use crate::plugin_permissions::{Permission::{Env, Run}, PluginPermissions};
-use crate::runtime::{SharedSandboxConfig, with_task_jobs};
-use crate::terminal_backend::{
-    JobEvent, TerminalBackend, TerminalHandle, TerminalSpec,
+use crate::plugin_permissions::{
+    Permission::{Env, Run},
+    PluginPermissions,
 };
+use crate::runtime::{SharedSandboxConfig, with_task_jobs};
 #[cfg(test)]
 use crate::terminal_backend::LocalTerminal;
+use crate::terminal_backend::{JobEvent, TerminalBackend, TerminalHandle, TerminalSpec};
 
-fn build_sandbox_profile(
-    lua: &Lua,
-    cwd: Option<&Path>,
-) -> Option<craft_sandbox::SandboxProfile> {
+fn build_sandbox_profile(lua: &Lua, cwd: Option<&Path>) -> Option<craft_sandbox::SandboxProfile> {
     let shared = lua.app_data_ref::<SharedSandboxConfig>()?;
     let config = shared.load();
     if !config.enabled || matches!(config.mode, craft_config::SandboxMode::Off) {
@@ -197,9 +195,7 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                         let env: Option<HashMap<String, String>> = opts
                             .get::<Table>("env")
                             .ok()
-                            .map(|t| {
-                                t.pairs::<String, String>().filter_map(Result::ok).collect()
-                            });
+                            .map(|t| t.pairs::<String, String>().filter_map(Result::ok).collect());
                         let on_stdout = opts
                             .get::<Function>("on_stdout")
                             .ok()
@@ -221,7 +217,8 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                     None => (None, None, None, None, None, false),
                 };
 
-                let (backend, id) = with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
+                let (backend, id) =
+                    with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
                 let cwd = cwd.as_deref().map(expand_tilde);
                 if let Some(ref dir) = cwd
                     && !dir.is_dir()
@@ -236,7 +233,12 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 } else {
                     None
                 };
-                let spec = TerminalSpec { cmd, cwd: cwd.map(|p| p.to_string_lossy().into_owned()), env, sandbox };
+                let spec = TerminalSpec {
+                    cmd,
+                    cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
+                    env,
+                    sandbox,
+                };
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
                     store.register(id, handle, on_stdout, on_stderr, on_exit);
@@ -308,10 +310,7 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 return Err(crate::plugin_permissions::denied_error(Env));
             }
             let found = env::var_os("PATH")
-                .map(|paths| {
-                    env::split_paths(&paths)
-                        .any(|dir| dir.join(&name).is_file())
-                })
+                .map(|paths| env::split_paths(&paths).any(|dir| dir.join(&name).is_file()))
                 .unwrap_or(false)
                 || Path::new(&name).is_file();
             Ok(if found { 1 } else { 0 })

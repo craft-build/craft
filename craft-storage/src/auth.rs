@@ -5,8 +5,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::{StateDir, StorageError, atomic_write_permissions};
 pub use crate::now_millis;
+use crate::{StateDir, StorageError, atomic_write_permissions};
 
 const AUTH_DIR: &str = "auth";
 const AUTH_FILE_MODE: u32 = 0o600;

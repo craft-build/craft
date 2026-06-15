@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flume::Sender;
-use futures::io::{AsyncBufReadExt, BufReader};
 use futures::TryStreamExt;
+use futures::io::{AsyncBufReadExt, BufReader};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -134,10 +134,13 @@ impl Anthropic {
 
         if status == 200 {
             let stream = response.bytes_stream();
-            let reader = StreamReader::new(
-                stream.map_err(std::io::Error::other),
-            );
-            parse_sse(BufReader::new(reader.compat()), event_tx, self.stream_timeout).await
+            let reader = StreamReader::new(stream.map_err(std::io::Error::other));
+            parse_sse(
+                BufReader::new(reader.compat()),
+                event_tx,
+                self.stream_timeout,
+            )
+            .await
         } else {
             Err(AgentError::from_response(response).await)
         }
@@ -225,8 +228,8 @@ impl Provider for Anthropic {
             body["model"] = json!(shared::strip_long_context(&model.id));
             body["stream"] = json!(true);
             apply_fast_mode(&mut body, fast);
-            let long_context = model.id.ends_with(shared::LONG_CONTEXT_SUFFIX)
-                || shared::has_native_1m(&model.id);
+            let long_context =
+                model.id.ends_with(shared::LONG_CONTEXT_SUFFIX) || shared::has_native_1m(&model.id);
 
             debug!(model = %model.id, num_messages = messages.len(), ?thinking, fast, long_context, "sending API request");
             self.do_stream_request(&body, event_tx, fast, long_context)
@@ -388,10 +391,13 @@ event: message_delta\n\
 data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n";
 
         let (tx, rx) = flume::unbounded();
-        let resp =
-            parse_sse(futures::io::Cursor::new(sse_data.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let resp = parse_sse(
+            futures::io::Cursor::new(sse_data.as_bytes()),
+            &tx,
+            TEST_STREAM_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let tools: Vec<_> = resp.message.tool_uses().collect();
         assert_eq!(tools.len(), 1);
@@ -508,10 +514,13 @@ event: message_delta\n\
 data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n";
 
         let (tx, _rx) = flume::unbounded();
-        let resp =
-            parse_sse(futures::io::Cursor::new(sse_data.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+        let resp = parse_sse(
+            futures::io::Cursor::new(sse_data.as_bytes()),
+            &tx,
+            TEST_STREAM_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let tools: Vec<_> = resp.message.tool_uses().collect();
         assert_eq!(tools.len(), 1);
@@ -561,9 +570,7 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
             matches!(&resp.message.content[0], ContentBlock::Thinking { thinking, signature }
                 if thinking == "Let me think" && *signature == Some("sig123".to_string()))
         );
-        assert!(
-            matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello")
-        );
+        assert!(matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hello"));
 
         let thinking_deltas: Vec<_> = rx
             .drain()
@@ -607,9 +614,7 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
         assert!(
             matches!(&resp.message.content[0], ContentBlock::RedactedThinking { data } if data == "opaque_data")
         );
-        assert!(
-            matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hi")
-        );
+        assert!(matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hi"));
     }
 
     #[test]

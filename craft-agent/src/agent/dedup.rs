@@ -1,6 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 
 use serde_json::Value;
 
@@ -185,7 +185,10 @@ mod tests {
         hash_value(&input, &mut h2);
         let streamed = h2.finish();
 
-        assert_ne!(serialized, streamed, "hashes differ due to discriminant tags, but both are deterministic");
+        assert_ne!(
+            serialized, streamed,
+            "hashes differ due to discriminant tags, but both are deterministic"
+        );
     }
 
     #[test]
@@ -226,7 +229,10 @@ mod tests {
 
         cache.invalidate_path("/foo.rs");
 
-        assert!(cache.get(key_a).is_none(), "matching path should be removed");
+        assert!(
+            cache.get(key_a).is_none(),
+            "matching path should be removed"
+        );
         assert!(cache.get(key_b).is_some(), "other path should remain");
     }
 
@@ -249,6 +255,9 @@ mod tests {
 
         cache.invalidate_path("/foo.rs");
 
-        assert!(cache.get(key).is_some(), "pathless entry should not be invalidated");
+        assert!(
+            cache.get(key).is_some(),
+            "pathless entry should not be invalidated"
+        );
     }
 }

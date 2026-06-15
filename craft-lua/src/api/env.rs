@@ -39,7 +39,8 @@ pub(crate) fn create_env_table(lua: &Lua, perms: &PluginPermissions) -> LuaResul
             let perms = perms.clone();
             move |lua, ()| {
                 perms.guard(Env, lua, |_| {
-                    Ok(craft_storage::paths::legacy_home_dir().and_then(|p| p.to_str().map(String::from)))
+                    Ok(craft_storage::paths::legacy_home_dir()
+                        .and_then(|p| p.to_str().map(String::from)))
                 })
             }
         })?,

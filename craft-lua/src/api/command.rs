@@ -198,10 +198,22 @@ impl Split {
     pub fn edge(self) -> Option<Edge> {
         Some(match self {
             Self::None => return None,
-            Self::Above => Edge { axis: Axis::Vertical, at_start: true },
-            Self::Below => Edge { axis: Axis::Vertical, at_start: false },
-            Self::Left => Edge { axis: Axis::Horizontal, at_start: true },
-            Self::Right => Edge { axis: Axis::Horizontal, at_start: false },
+            Self::Above => Edge {
+                axis: Axis::Vertical,
+                at_start: true,
+            },
+            Self::Below => Edge {
+                axis: Axis::Vertical,
+                at_start: false,
+            },
+            Self::Left => Edge {
+                axis: Axis::Horizontal,
+                at_start: true,
+            },
+            Self::Right => Edge {
+                axis: Axis::Horizontal,
+                at_start: false,
+            },
         })
     }
 

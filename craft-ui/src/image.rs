@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
-use image::{ImageBuffer, RgbaImage};
 use craft_agent::{ImageMediaType, ImageSource};
+use image::{ImageBuffer, RgbaImage};
 
 const MAX_IMAGE_PIXELS: usize = 8_000_000;
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;

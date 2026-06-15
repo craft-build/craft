@@ -25,7 +25,6 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 event-listener = { workspace = true }
 flume = { workspace = true }
-futures = { workspace = true }
 tree-sitter = { workspace = true }
 regex = { workspace = true }
 include_dir = { workspace = true }

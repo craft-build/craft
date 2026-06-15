@@ -345,7 +345,9 @@ mod tests {
 
     #[test_case(None; "missing_stop_reason")]
     #[test_case(Some(craft_providers::StopReason::ToolUse); "tool_use")]
-    fn stop_reason_without_acp_equivalent_maps_to_end_turn(sr: Option<craft_providers::StopReason>) {
+    fn stop_reason_without_acp_equivalent_maps_to_end_turn(
+        sr: Option<craft_providers::StopReason>,
+    ) {
         assert_eq!(
             map_stop_reason(sr),
             agent_client_protocol_schema::StopReason::EndTurn

@@ -10,8 +10,8 @@ use craft_providers::{Message, Model, ThinkingConfig, TokenUsage};
 use craft_storage::StateDir;
 use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
 
-use crate::agent::shared_queue::lock;
 use crate::AppSession;
+use crate::agent::shared_queue::lock;
 
 use super::mode::{Mode, PlanState};
 

@@ -50,7 +50,6 @@ use crate::event_loop::BufClickHandler;
 use crate::image;
 use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
@@ -62,6 +61,7 @@ use craft_providers::{Message, Model, ThinkingConfig};
 use craft_storage::StateDir;
 use craft_storage::input_history::InputHistory;
 use craft_storage::model::persist_model;
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 
 use crate::storage_writer::StorageWriter;
 use ratatui::layout::Position;
@@ -271,8 +271,12 @@ impl App {
             .iter_mut()
             .flat_map(|c| c.drain_pending_restores())
             .collect();
-        let Some(handle) = &self.lua_event_handle else { return };
-        let Some(event_tx) = &self.restore_event_tx else { return };
+        let Some(handle) = &self.lua_event_handle else {
+            return;
+        };
+        let Some(event_tx) = &self.restore_event_tx else {
+            return;
+        };
         for item in items {
             handle.restore_tool_async(item, event_tx);
         }
@@ -1349,9 +1353,18 @@ impl App {
     }
 
     define_overlays!(
-        help_modal, btw_modal, float_mgr, search_modal,
-        file_picker, task_picker, session_picker, rewind_picker,
-        theme_picker, model_picker, mcp_picker, permission_prompt,
+        help_modal,
+        btw_modal,
+        float_mgr,
+        search_modal,
+        file_picker,
+        task_picker,
+        session_picker,
+        rewind_picker,
+        theme_picker,
+        model_picker,
+        mcp_picker,
+        permission_prompt,
     );
 
     pub fn any_overlay_open(&self) -> bool {

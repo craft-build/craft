@@ -312,10 +312,7 @@ mod tests {
     #[test]
     fn spec_for_tier_any_no_models_returns_none() {
         let map = make_map(&[], &[]);
-        assert_eq!(
-            map.spec_for_tier_any(ModelTier::Strong),
-            None
-        );
+        assert_eq!(map.spec_for_tier_any(ModelTier::Strong), None);
     }
 
     #[test]
@@ -338,10 +335,7 @@ mod tests {
         );
         // Without override, falls back to known_models.
         let mut map2 = TierMap::default();
-        map2.set_known_models(
-            ProviderKind::Ollama,
-            vec!["big".into()],
-        );
+        map2.set_known_models(ProviderKind::Ollama, vec!["big".into()]);
         assert_eq!(
             map2.spec_for_tier_any(ModelTier::Strong),
             Some("ollama/big".into())

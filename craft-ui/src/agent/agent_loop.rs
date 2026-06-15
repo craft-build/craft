@@ -7,11 +7,11 @@ use craft_agent::mcp::config::McpServerStatus;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::template;
 use craft_agent::template::Vars;
-use craft_agent::tools::{FileReadTracker};
+use craft_agent::tools::FileReadTracker;
 use craft_agent::{
-    Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelToken,
-    CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History, Instructions,
-    McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
+    Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
+    CancelToken, CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History,
+    Instructions, McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
 };
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
@@ -211,7 +211,10 @@ impl AgentLoop {
             None => craft_agent::prompt::ResolvedSlots::default(),
         };
         let model = self.model_slot.load();
-        let compact = self.config.small_model.should_activate(model.model.context_window)
+        let compact = self
+            .config
+            .small_model
+            .should_activate(model.model.context_window)
             && self.config.small_model.compact_prompt;
         let system = agent::build_system_prompt(
             &self.vars,
@@ -254,9 +257,10 @@ impl AgentLoop {
                     excluded: Vec::new(),
                     mcp: self.mcp_handle.clone(),
                 }),
-                hooks: self.lua_handle.as_ref().map(|h| {
-                    craft_lua::LuaHooks::new(h.clone()) as Arc<dyn craft_agent::Hooks>
-                }),
+                hooks: self
+                    .lua_handle
+                    .as_ref()
+                    .map(|h| craft_lua::LuaHooks::new(h.clone()) as Arc<dyn craft_agent::Hooks>),
             },
         )
         .with_loaded_instructions(self.instructions.loaded.clone())

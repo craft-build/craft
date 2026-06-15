@@ -333,5 +333,4 @@ mod tests {
         );
         assert!(p.is_open());
     }
-
 }

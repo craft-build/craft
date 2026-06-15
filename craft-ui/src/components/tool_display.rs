@@ -192,7 +192,6 @@ pub fn assistant_style() -> RoleStyle {
         text_style: theme::current().assistant,
         prefix_style: theme::current().assistant_prefix,
         use_markdown: true,
-
     }
 }
 
@@ -202,7 +201,6 @@ pub fn user_style() -> RoleStyle {
         text_style: theme::current().assistant,
         prefix_style: theme::current().user,
         use_markdown: true,
-
     }
 }
 
@@ -212,7 +210,6 @@ pub fn thinking_style() -> RoleStyle {
         text_style: theme::current().thinking,
         prefix_style: theme::current().thinking,
         use_markdown: true,
-
     }
 }
 
@@ -222,7 +219,6 @@ pub fn error_style() -> RoleStyle {
         text_style: theme::current().error,
         prefix_style: theme::current().tool_error,
         use_markdown: false,
-
     }
 }
 
@@ -234,7 +230,6 @@ pub fn done_style() -> RoleStyle {
             .add_modifier(ratatui::style::Modifier::BOLD),
         prefix_style: theme::current().tool_success,
         use_markdown: false,
-
     }
 }
 
@@ -616,7 +611,14 @@ impl ToolLineBuilder {
     fn push_markdown_body(&mut self, text: &str) {
         let style = theme::current().assistant;
         let indent = TOOL_BODY_INDENT.len() as u16;
-        let md_lines = text_to_lines(text, "", style, style, self.width.saturating_sub(indent), Some(craft_markdown::render::TOOL_OUTPUT_MAX_LINE_BYTES));
+        let md_lines = text_to_lines(
+            text,
+            "",
+            style,
+            style,
+            self.width.saturating_sub(indent),
+            Some(craft_markdown::render::TOOL_OUTPUT_MAX_LINE_BYTES),
+        );
         for mut line in md_lines {
             line.spans.insert(0, Span::raw(TOOL_BODY_INDENT));
             self.lines.push(line);

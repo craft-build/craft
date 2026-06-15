@@ -23,7 +23,6 @@ use crate::task_set::TaskSet;
 use crate::{AgentConfig, AgentEvent, AgentMode, EventSender, ToolInput, ToolOutput};
 use tokio::sync::Mutex;
 
-
 use super::truncate_output;
 use super::{Deadline, FileReadTracker};
 use crate::tools::{ToolAudience, ToolRegistry};
@@ -215,15 +214,17 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
                     );
                     inner_ctx.deadline = deadline;
                     inner_ctx.config = config.clone();
-                    let done = tokio::runtime::Handle::current().block_on(crate::agent::tool_dispatch::run(
-                        ToolRegistry::native(),
-                        inner_ctx.mcp.as_ref(),
-                        String::new(),
-                        fn_name,
-                        &input,
-                        &inner_ctx,
-                        Emit::Silent,
-                    ));
+                    let done = tokio::runtime::Handle::current().block_on(
+                        crate::agent::tool_dispatch::run(
+                            ToolRegistry::native(),
+                            inner_ctx.mcp.as_ref(),
+                            String::new(),
+                            fn_name,
+                            &input,
+                            &inner_ctx,
+                            Emit::Silent,
+                        ),
+                    );
                     if done.is_error {
                         Err(done.output.as_text())
                     } else {

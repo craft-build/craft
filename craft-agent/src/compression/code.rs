@@ -60,4 +60,3 @@ pub fn compress_code(text: &str, rate: f32) -> String {
 
     result
 }
-

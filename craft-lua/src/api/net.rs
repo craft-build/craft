@@ -1,8 +1,8 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use reqwest::Client;
 use mlua::{Lua, Result as LuaResult, Table, Value};
+use reqwest::Client;
 
 use crate::plugin_permissions::{Permission::Net, PluginPermissions};
 
@@ -388,7 +388,11 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ssrf_aws_metadata_blocked() {
-        assert!(resolve_and_check_ssrf("https://169.254.169.254").await.is_err());
+        assert!(
+            resolve_and_check_ssrf("https://169.254.169.254")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -398,7 +402,11 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ssrf_ipv4_mapped_loopback_blocked() {
-        assert!(resolve_and_check_ssrf("https://[::ffff:127.0.0.1]").await.is_err());
+        assert!(
+            resolve_and_check_ssrf("https://[::ffff:127.0.0.1]")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -408,7 +416,11 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ssrf_ipv4_mapped_metadata_blocked() {
-        assert!(resolve_and_check_ssrf("https://[::ffff:169.254.169.254]").await.is_err());
+        assert!(
+            resolve_and_check_ssrf("https://[::ffff:169.254.169.254]")
+                .await
+                .is_err()
+        );
     }
 
     #[test_case(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), true ; "v4_unspecified")]
@@ -452,7 +464,15 @@ mod tests {
 
     #[test]
     fn build_request_get_no_opts() {
-        let req = build_request(&test_client(), "https://example.com", "agent", "GET", &[], vec![]).unwrap();
+        let req = build_request(
+            &test_client(),
+            "https://example.com",
+            "agent",
+            "GET",
+            &[],
+            vec![],
+        )
+        .unwrap();
         assert_eq!(req.method(), "GET");
         assert!(req.body().is_none());
         assert_eq!(req.headers()["User-Agent"], "agent");
@@ -481,14 +501,29 @@ mod tests {
             ("Accept".to_string(), "text/html".to_string()),
             ("X-Custom".to_string(), "foo".to_string()),
         ];
-        let req = build_request(&test_client(), "https://example.com", "agent", "GET", &headers, vec![]).unwrap();
+        let req = build_request(
+            &test_client(),
+            "https://example.com",
+            "agent",
+            "GET",
+            &headers,
+            vec![],
+        )
+        .unwrap();
         assert_eq!(req.headers()["Accept"], "text/html");
         assert_eq!(req.headers()["X-Custom"], "foo");
     }
 
     #[test]
     fn build_request_invalid_uri_errors() {
-        let result = build_request(&test_client(), "not a valid uri \x00", "agent", "GET", &[], vec![]);
+        let result = build_request(
+            &test_client(),
+            "not a valid uri \x00",
+            "agent",
+            "GET",
+            &[],
+            vec![],
+        );
         assert!(result.is_err());
     }
 
@@ -515,7 +550,10 @@ mod tests {
         assert_eq!(params.method, "GET");
         assert!(params.headers.is_empty());
         assert!(params.body.is_empty());
-        assert_eq!(params.timeout, Duration::from_secs_f64(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(
+            params.timeout,
+            Duration::from_secs_f64(DEFAULT_TIMEOUT_SECS)
+        );
         assert_eq!(params.max_bytes, DEFAULT_MAX_BYTES);
         assert_eq!(params.retries, MAX_RETRIES);
     }

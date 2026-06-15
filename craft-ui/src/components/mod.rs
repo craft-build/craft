@@ -19,8 +19,8 @@ pub(crate) mod render_hints;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;
 pub(crate) mod search_modal;
-pub(crate) mod split_layout;
 pub(crate) mod session_picker;
+pub(crate) mod split_layout;
 pub mod status_bar;
 pub(crate) mod streaming_content;
 pub(crate) mod theme_picker;
@@ -43,11 +43,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use craft_agent::AgentInput;
 use craft_agent::{BufferSnapshot, ToolInput, ToolOutput};
 use craft_providers::provider::Provider;
 use craft_providers::{Message, ModelTier};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
 
 pub(crate) fn hint_line<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)]) -> Line<'static> {

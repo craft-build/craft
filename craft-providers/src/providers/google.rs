@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flume::Sender;
-use futures::io::{AsyncBufReadExt, BufReader};
 use futures::TryStreamExt;
+use futures::io::{AsyncBufReadExt, BufReader};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,8 +14,8 @@ use tracing::warn;
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
 use crate::{
-    AgentError, ContentBlock, Message, ProviderEvent, Role, StopReason, StreamResponse,
-    ThinkingConfig, RequestOptions, TokenUsage,
+    AgentError, ContentBlock, Message, ProviderEvent, RequestOptions, Role, StopReason,
+    StreamResponse, ThinkingConfig, TokenUsage,
 };
 
 use super::{KeyPool, MIME_JSON, ResolvedAuth, http_client, lock_unpoison, next_sse_line};
@@ -207,9 +207,7 @@ impl Google {
 
         if status == 200 {
             let stream = response.bytes_stream();
-            let reader = StreamReader::new(
-                stream.map_err(std::io::Error::other),
-            );
+            let reader = StreamReader::new(stream.map_err(std::io::Error::other));
             let reader = BufReader::new(reader.compat());
             parse_sse(reader, event_tx, self.stream_timeout).await
         } else {

@@ -25,7 +25,9 @@ impl PluginPermissions {
     }
 
     pub fn denied() -> Self {
-        Self { allowed: [false; 5] }
+        Self {
+            allowed: [false; 5],
+        }
     }
 
     pub fn is_allowed(&self, perm: Permission) -> bool {
@@ -37,9 +39,7 @@ impl PluginPermissions {
     }
 
     pub fn from_manifest(manifest: &toml::Value) -> Self {
-        let table = manifest
-            .get("permissions")
-            .and_then(|v| v.as_table());
+        let table = manifest.get("permissions").and_then(|v| v.as_table());
         let Some(table) = table else {
             return Self::denied();
         };

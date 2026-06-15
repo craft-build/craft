@@ -6,7 +6,10 @@ use std::path::{Component, Path, PathBuf};
 
 use mlua::{Lua, Result as LuaResult, Table};
 
-use crate::plugin_permissions::{Permission::{FsRead, FsWrite}, PluginPermissions};
+use crate::plugin_permissions::{
+    Permission::{FsRead, FsWrite},
+    PluginPermissions,
+};
 
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -424,89 +427,87 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
     let p = perms;
     t.set(
         "glob",
-        lua.create_async_function(
-            move |lua, (patterns, opts): (mlua::Value, Option<Table>)| {
-                let p = p.clone();
-                async move {
-                    if !p.is_allowed(FsRead) {
-                        return Err(crate::plugin_permissions::denied_error(FsRead));
-                    }
+        lua.create_async_function(move |lua, (patterns, opts): (mlua::Value, Option<Table>)| {
+            let p = p.clone();
+            async move {
+                if !p.is_allowed(FsRead) {
+                    return Err(crate::plugin_permissions::denied_error(FsRead));
+                }
 
-                    let patterns: Vec<String> = match patterns {
-                        mlua::Value::String(s) => vec![s.to_str()?.to_owned()],
-                        mlua::Value::Table(t) => {
-                            let mut v = Vec::new();
-                            for val in t.sequence_values::<String>() {
-                                v.push(val?);
-                            }
-                            v
+                let patterns: Vec<String> = match patterns {
+                    mlua::Value::String(s) => vec![s.to_str()?.to_owned()],
+                    mlua::Value::Table(t) => {
+                        let mut v = Vec::new();
+                        for val in t.sequence_values::<String>() {
+                            v.push(val?);
                         }
-                        _ => {
-                            return Err(mlua::Error::runtime(
-                                "glob: patterns must be a string or array of strings",
-                            ));
+                        v
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "glob: patterns must be a string or array of strings",
+                        ));
+                    }
+                };
+
+                let path = opts.as_ref().and_then(|t| t.get::<String>("path").ok());
+                let limit = opts.as_ref().and_then(|t| t.get::<usize>("limit").ok());
+                let gitignore = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("gitignore").ok())
+                    .unwrap_or(true);
+                let sort = opts.as_ref().and_then(|t| t.get::<String>("sort").ok());
+                let sort_mtime = sort.as_deref() == Some("mtime");
+
+                let results = tokio::task::spawn_blocking(move || {
+                    let root = craft_agent::tools::resolve_search_path(path.as_deref())
+                        .map_err(mlua::Error::runtime)?;
+                    let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
+
+                    let walker =
+                        craft_agent::tools::walk_builder_opts(&root, &pattern_refs, gitignore)
+                            .map_err(mlua::Error::runtime)?
+                            .build();
+
+                    let iter = walker
+                        .flatten()
+                        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()));
+
+                    let paths: Vec<String> = if sort_mtime {
+                        let mut entries: Vec<_> = iter
+                            .filter_map(|e| {
+                                let p = e.into_path();
+                                let mt = craft_agent::tools::mtime(&p);
+                                p.to_str().map(|s| (mt, s.to_owned()))
+                            })
+                            .collect();
+                        entries.sort_unstable_by_key(|e| Reverse(e.0));
+                        if let Some(lim) = limit {
+                            entries.truncate(lim);
                         }
+                        entries.into_iter().map(|(_, s)| s).collect()
+                    } else {
+                        let bounded: Box<dyn Iterator<Item = _>> = match limit {
+                            Some(lim) => Box::new(iter.take(lim)),
+                            None => Box::new(iter),
+                        };
+                        bounded
+                            .filter_map(|e| e.into_path().to_str().map(|s| s.to_owned()))
+                            .collect()
                     };
 
-                    let path = opts.as_ref().and_then(|t| t.get::<String>("path").ok());
-                    let limit = opts.as_ref().and_then(|t| t.get::<usize>("limit").ok());
-                    let gitignore = opts
-                        .as_ref()
-                        .and_then(|t| t.get::<bool>("gitignore").ok())
-                        .unwrap_or(true);
-                    let sort = opts.as_ref().and_then(|t| t.get::<String>("sort").ok());
-                    let sort_mtime = sort.as_deref() == Some("mtime");
+                    Ok::<_, mlua::Error>(paths)
+                })
+                .await
+                .map_err(|e| mlua::Error::runtime(format!("task failed: {e}")))??;
 
-                    let results = tokio::task::spawn_blocking(move || {
-                        let root = craft_agent::tools::resolve_search_path(path.as_deref())
-                            .map_err(mlua::Error::runtime)?;
-                        let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.as_str()).collect();
-
-                        let walker =
-                            craft_agent::tools::walk_builder_opts(&root, &pattern_refs, gitignore)
-                                .map_err(mlua::Error::runtime)?
-                                .build();
-
-                        let iter = walker
-                            .flatten()
-                            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()));
-
-                        let paths: Vec<String> = if sort_mtime {
-                            let mut entries: Vec<_> = iter
-                                .filter_map(|e| {
-                                    let p = e.into_path();
-                                    let mt = craft_agent::tools::mtime(&p);
-                                    p.to_str().map(|s| (mt, s.to_owned()))
-                                })
-                                .collect();
-                            entries.sort_unstable_by_key(|e| Reverse(e.0));
-                            if let Some(lim) = limit {
-                                entries.truncate(lim);
-                            }
-                            entries.into_iter().map(|(_, s)| s).collect()
-                        } else {
-                            let bounded: Box<dyn Iterator<Item = _>> = match limit {
-                                Some(lim) => Box::new(iter.take(lim)),
-                                None => Box::new(iter),
-                            };
-                            bounded
-                                .filter_map(|e| e.into_path().to_str().map(|s| s.to_owned()))
-                                .collect()
-                        };
-
-                        Ok::<_, mlua::Error>(paths)
-                    })
-                    .await
-                    .map_err(|e| mlua::Error::runtime(format!("task failed: {e}")))??;
-
-                    let tbl = lua.create_table()?;
-                    for (i, path) in results.iter().enumerate() {
-                        tbl.set(i + 1, path.as_str())?;
-                    }
-                    Ok(tbl)
+                let tbl = lua.create_table()?;
+                for (i, path) in results.iter().enumerate() {
+                    tbl.set(i + 1, path.as_str())?;
                 }
-            },
-        )?,
+                Ok(tbl)
+            }
+        })?,
     )?;
 
     Ok(t)
@@ -542,8 +543,10 @@ mod tests {
         let lua = Lua::new();
         let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
         let dir: mlua::Function = tbl.get("dir").unwrap();
-        let result: Table =
-            dir.call_async::<Table>(tmp.path().to_str().unwrap()).await.unwrap();
+        let result: Table = dir
+            .call_async::<Table>(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         let mut names: Vec<String> = Vec::new();
         let mut types: Vec<String> = Vec::new();
@@ -571,8 +574,10 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("depth", 2).unwrap();
 
-        let result: Table =
-            dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts)).await.unwrap();
+        let result: Table = dir
+            .call_async::<Table>((tmp.path().to_str().unwrap(), opts))
+            .await
+            .unwrap();
 
         let mut names: Vec<String> = Vec::new();
         for i in 1..=result.len().unwrap() {
@@ -591,8 +596,10 @@ mod tests {
         let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
         let dir: mlua::Function = tbl.get("dir").unwrap();
         let missing = tmp.path().join("does_not_exist");
-        let result: Table =
-            dir.call_async::<Table>(missing.to_str().unwrap()).await.unwrap();
+        let result: Table = dir
+            .call_async::<Table>(missing.to_str().unwrap())
+            .await
+            .unwrap();
         assert_eq!(result.len().unwrap(), 0);
     }
 
@@ -606,20 +613,26 @@ mod tests {
         let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
         let metadata: mlua::Function = tbl.get("metadata").unwrap();
 
-        let f: Table =
-            metadata.call_async::<Table>(file.to_str().unwrap()).await.unwrap();
+        let f: Table = metadata
+            .call_async::<Table>(file.to_str().unwrap())
+            .await
+            .unwrap();
         assert!(f.get::<bool>("is_file").unwrap());
         assert!(!f.get::<bool>("is_dir").unwrap());
         assert_eq!(f.get::<u64>("size").unwrap(), 5);
 
-        let d: Table =
-            metadata.call_async::<Table>(tmp.path().to_str().unwrap()).await.unwrap();
+        let d: Table = metadata
+            .call_async::<Table>(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
         assert!(!d.get::<bool>("is_file").unwrap());
         assert!(d.get::<bool>("is_dir").unwrap());
 
         let missing = tmp.path().join("nope");
-        let nil: mlua::Value =
-            metadata.call_async(missing.to_str().unwrap()).await.unwrap();
+        let nil: mlua::Value = metadata
+            .call_async(missing.to_str().unwrap())
+            .await
+            .unwrap();
         assert!(matches!(nil, mlua::Value::Nil));
     }
 
@@ -639,8 +652,10 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("depth", 2u32).unwrap();
 
-        let result: Table =
-            dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts)).await.unwrap();
+        let result: Table = dir
+            .call_async::<Table>((tmp.path().to_str().unwrap(), opts))
+            .await
+            .unwrap();
 
         let mut names: Vec<String> = Vec::new();
         let mut types: Vec<String> = Vec::new();
@@ -665,8 +680,10 @@ mod tests {
         let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
         let dir: mlua::Function = tbl.get("dir").unwrap();
 
-        let result: Table =
-            dir.call_async::<Table>(tmp.path().to_str().unwrap()).await.unwrap();
+        let result: Table = dir
+            .call_async::<Table>(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         let mut found = false;
         for i in 1..=result.len().unwrap() {
@@ -696,8 +713,10 @@ mod tests {
         let opts = lua.create_table().unwrap();
         opts.set("depth", 10u32).unwrap();
 
-        let result: Table =
-            dir.call_async::<Table>((tmp.path().to_str().unwrap(), opts)).await.unwrap();
+        let result: Table = dir
+            .call_async::<Table>((tmp.path().to_str().unwrap(), opts))
+            .await
+            .unwrap();
 
         let len = result.len().unwrap();
         assert!(
@@ -714,8 +733,10 @@ mod tests {
         let lua = Lua::new();
         let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
         let write: mlua::Function = tbl.get("write").unwrap();
-        let (ok, err): (mlua::Value, mlua::Value) =
-            write.call_async((file.to_str().unwrap(), "hello world")).await.unwrap();
+        let (ok, err): (mlua::Value, mlua::Value) = write
+            .call_async((file.to_str().unwrap(), "hello world"))
+            .await
+            .unwrap();
         assert!(
             matches!(ok, mlua::Value::Boolean(true)),
             "write should succeed"
@@ -748,8 +769,10 @@ mod tests {
         let lua = Lua::new();
         let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
         let write: mlua::Function = tbl.get("write").unwrap();
-        let (ok, err): (mlua::Value, mlua::Value) =
-            write.call_async((file.to_str().unwrap(), "data")).await.unwrap();
+        let (ok, err): (mlua::Value, mlua::Value) = write
+            .call_async((file.to_str().unwrap(), "data"))
+            .await
+            .unwrap();
         assert!(matches!(ok, mlua::Value::Nil), "should fail");
         assert!(
             matches!(err, mlua::Value::String(_)),
@@ -830,8 +853,10 @@ mod tests {
         let mkdir: mlua::Function = tbl.get("mkdir").unwrap();
         let opts = lua.create_table().unwrap();
         opts.set("parents", true).unwrap();
-        let (ok, _): (mlua::Value, mlua::Value) =
-            mkdir.call_async((dir.to_str().unwrap(), opts)).await.unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) = mkdir
+            .call_async((dir.to_str().unwrap(), opts))
+            .await
+            .unwrap();
         assert!(matches!(ok, mlua::Value::Boolean(true)));
         assert!(dir.is_dir());
     }
@@ -865,8 +890,10 @@ mod tests {
         let mkdir: mlua::Function = tbl.get("mkdir").unwrap();
         let opts = lua.create_table().unwrap();
         opts.set("parents", true).unwrap();
-        let (ok, _): (mlua::Value, mlua::Value) =
-            mkdir.call_async((dir.to_str().unwrap(), opts)).await.unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) = mkdir
+            .call_async((dir.to_str().unwrap(), opts))
+            .await
+            .unwrap();
         assert!(
             matches!(ok, mlua::Value::Boolean(true)),
             "parents=true should be idempotent"

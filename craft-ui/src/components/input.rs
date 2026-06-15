@@ -7,8 +7,8 @@ use crate::highlight;
 use crate::text_buffer::{EditResult, TextBuffer, is_newline_key};
 use crate::theme;
 
-use crossterm::event::{KeyCode, KeyEvent};
 use craft_storage::input_history::InputHistory;
+use crossterm::event::{KeyCode, KeyEvent};
 use std::mem;
 
 use craft_providers::ImageSource;

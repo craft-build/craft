@@ -13,13 +13,7 @@ const ERROR_KEYWORDS: &[&str] = &[
     "out of memory",
 ];
 
-const WARNING_KEYWORDS: &[&str] = &[
-    "warning",
-    "warn",
-    "deprecated",
-    "caution",
-    "note:",
-];
+const WARNING_KEYWORDS: &[&str] = &["warning", "warn", "deprecated", "caution", "note:"];
 
 const SECURITY_KEYWORDS: &[&str] = &[
     "vulnerability",
@@ -44,19 +38,9 @@ const CODE_DEFINITION_KEYWORDS: &[&str] = &[
     "function ",
 ];
 
-const CODE_IMPORT_KEYWORDS: &[&str] = &[
-    "use ",
-    "import ",
-    "from ",
-    "#include",
-    "require(",
-];
+const CODE_IMPORT_KEYWORDS: &[&str] = &["use ", "import ", "from ", "#include", "require("];
 
-const CODE_MODULE_KEYWORDS: &[&str] = &[
-    "mod ",
-    "package ",
-    "module ",
-];
+const CODE_MODULE_KEYWORDS: &[&str] = &["mod ", "package ", "module "];
 
 pub enum LineCategory {
     Error,
@@ -89,8 +73,10 @@ pub fn classify_line(line: &str) -> LineCategory {
     let error_ac = ERROR_AC.get_or_init(|| AhoCorasick::new(ERROR_KEYWORDS).unwrap());
     let warning_ac = WARNING_AC.get_or_init(|| AhoCorasick::new(WARNING_KEYWORDS).unwrap());
     let security_ac = SECURITY_AC.get_or_init(|| AhoCorasick::new(SECURITY_KEYWORDS).unwrap());
-    let code_def_ac = CODE_DEF_AC.get_or_init(|| AhoCorasick::new(CODE_DEFINITION_KEYWORDS).unwrap());
-    let code_import_ac = CODE_IMPORT_AC.get_or_init(|| AhoCorasick::new(CODE_IMPORT_KEYWORDS).unwrap());
+    let code_def_ac =
+        CODE_DEF_AC.get_or_init(|| AhoCorasick::new(CODE_DEFINITION_KEYWORDS).unwrap());
+    let code_import_ac =
+        CODE_IMPORT_AC.get_or_init(|| AhoCorasick::new(CODE_IMPORT_KEYWORDS).unwrap());
     let code_mod_ac = CODE_MOD_AC.get_or_init(|| AhoCorasick::new(CODE_MODULE_KEYWORDS).unwrap());
 
     if error_ac.is_match(&lower) {

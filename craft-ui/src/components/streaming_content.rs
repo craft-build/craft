@@ -61,7 +61,8 @@ impl StreamingCache {
         if self.key == Some(key) {
             return false;
         }
-        let text = craft_markdown::render::truncate_long_lines_at(visible, STREAMING_MAX_LINE_BYTES);
+        let text =
+            craft_markdown::render::truncate_long_lines_at(visible, STREAMING_MAX_LINE_BYTES);
         let semantic = renderer.render(text.as_ref(), width, theme_gen);
         self.lines = paint_semantic(&semantic, prefix, text_style, prefix_style);
         self.key = Some(key);

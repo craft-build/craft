@@ -150,21 +150,28 @@ impl Chat {
             AgentEvent::AuthRequired => {
                 return ChatEventResult::AuthRequired;
             }
-            AgentEvent::ToolSnapshot { id, snapshot, theme_gen } => {
+            AgentEvent::ToolSnapshot {
+                id,
+                snapshot,
+                theme_gen,
+            } => {
                 self.messages_panel.tool_snapshot(&id, snapshot, theme_gen);
             }
-            AgentEvent::ToolHeaderSnapshot { id, snapshot, theme_gen } => {
-                self.messages_panel.tool_header_snapshot(&id, snapshot, theme_gen);
+            AgentEvent::ToolHeaderSnapshot {
+                id,
+                snapshot,
+                theme_gen,
+            } => {
+                self.messages_panel
+                    .tool_header_snapshot(&id, snapshot, theme_gen);
             }
             AgentEvent::SubagentHistory { .. } => {}
             AgentEvent::LiveToolBuf { id, body } => {
                 self.messages_panel.register_live_buf(id, body);
             }
             AgentEvent::Info { message } => {
-                self.messages_panel.push(DisplayMessage::new(
-                    DisplayRole::Assistant,
-                    message.clone(),
-                ));
+                self.messages_panel
+                    .push(DisplayMessage::new(DisplayRole::Assistant, message.clone()));
             }
             #[cfg(feature = "onnx")]
             AgentEvent::StagnationDetected { .. } => {}
@@ -241,12 +248,24 @@ impl Chat {
         self.messages_panel.handle_click(row, area)
     }
 
-    pub fn tool_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
-        self.messages_panel.tool_snapshot(tool_id, snapshot, theme_gen);
+    pub fn tool_snapshot(
+        &mut self,
+        tool_id: &str,
+        snapshot: BufferSnapshot,
+        theme_gen: Option<u64>,
+    ) {
+        self.messages_panel
+            .tool_snapshot(tool_id, snapshot, theme_gen);
     }
 
-    pub fn tool_header_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
-        self.messages_panel.tool_header_snapshot(tool_id, snapshot, theme_gen);
+    pub fn tool_header_snapshot(
+        &mut self,
+        tool_id: &str,
+        snapshot: BufferSnapshot,
+        theme_gen: Option<u64>,
+    ) {
+        self.messages_panel
+            .tool_header_snapshot(tool_id, snapshot, theme_gen);
     }
 
     pub fn drain_pending_restores(&mut self) -> Vec<craft_lua::RestoreItem> {
@@ -441,7 +460,8 @@ pub fn history_to_display(
                                     render_header = reply.header;
                                 }
                             }
-                            let theme_gen = if render_snapshot.is_some() || render_header.is_some() {
+                            let theme_gen = if render_snapshot.is_some() || render_header.is_some()
+                            {
                                 crate::theme::generation()
                             } else {
                                 0

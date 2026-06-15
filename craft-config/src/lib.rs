@@ -378,7 +378,7 @@ impl AgentFileConfig {
             bash_timeout_secs,
             code_execution_timeout_secs,
             max_continuation_turns,
-              compaction_buffer,
+            compaction_buffer,
             search_result_limit,
             interpreter_max_memory_mb,
             hooks_enabled,
@@ -1155,9 +1155,7 @@ impl CompressionConfig {
             protect_recent_tool_outputs: f
                 .protect_recent_tool_outputs
                 .unwrap_or(DEFAULT_COMPRESSION_PROTECT_RECENT),
-            semantic_enabled: f
-                .semantic_enabled
-                .unwrap_or(DEFAULT_SEMANTIC_ENABLED),
+            semantic_enabled: f.semantic_enabled.unwrap_or(DEFAULT_SEMANTIC_ENABLED),
         }
     }
 }
@@ -1407,9 +1405,7 @@ fn append_global_permission(
         .ok_or(PermissionError::NoHomeDir)?
         .join(PERMISSIONS_FILE);
     let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(PermissionError::Parse)?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(PermissionError::Parse)?;
 
     insert_permission_entry(&mut doc, tool, scope, effect)?;
 
@@ -1428,9 +1424,7 @@ fn append_project_permission(
 ) -> Result<(), PermissionError> {
     let path = cwd.join(PROJECT_DIR).join(PERMISSIONS_FILE);
     let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(PermissionError::Parse)?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(PermissionError::Parse)?;
 
     insert_permission_entry(&mut doc, tool, scope, effect)?;
 
@@ -1899,11 +1893,7 @@ mod tests {
         );
 
         base.merge(overlay);
-        assert_eq!(
-            base.ui.flash_duration_ms,
-            Some(2000),
-            "base preserved"
-        );
+        assert_eq!(base.ui.flash_duration_ms, Some(2000), "base preserved");
     }
 
     #[test]

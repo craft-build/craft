@@ -14,10 +14,7 @@ pub fn json_to_monty(value: Value) -> MontyObject {
             if let Some(i) = n.as_i64() {
                 MontyObject::Int(i)
             } else {
-                MontyObject::Float(
-                    n.as_f64()
-                        .expect("serde_json Number is always i64 or f64"),
-                )
+                MontyObject::Float(n.as_f64().expect("serde_json Number is always i64 or f64"))
             }
         }
         Value::String(s) => MontyObject::String(s),

@@ -28,7 +28,11 @@ impl TrustTracker {
         *count += 1;
 
         if *count == self.config.warn_after {
-            warn!(tool, consecutive_failures = *count, "tool approaching drop threshold");
+            warn!(
+                tool,
+                consecutive_failures = *count,
+                "tool approaching drop threshold"
+            );
         }
     }
 

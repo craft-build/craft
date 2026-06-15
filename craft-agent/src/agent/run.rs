@@ -230,8 +230,14 @@ impl<'h> Agent<'h> {
     #[cfg(feature = "onnx")]
     async fn build_semantic_view(&self, intent: &[f32]) -> Option<Vec<Message>> {
         let scorer = self.scorer.as_ref()?;
-        let scores = scorer.score_messages(self.history.as_slice(), intent).await.ok()?;
-        let token_budget = self.model.context_window.saturating_sub(self.config.compaction_buffer);
+        let scores = scorer
+            .score_messages(self.history.as_slice(), intent)
+            .await
+            .ok()?;
+        let token_budget = self
+            .model
+            .context_window
+            .saturating_sub(self.config.compaction_buffer);
         let selected = super::semantic::select_messages(
             &scores,
             self.history.len(),
@@ -254,7 +260,10 @@ impl<'h> Agent<'h> {
 
     pub async fn run(mut self, input: AgentInput) -> Result<(), AgentError> {
         strip_trailing_grace_prompt(self.history);
-        self.doom.lock().unwrap_or_else(|e| e.into_inner()).reset_for_new_user_input();
+        self.doom
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset_for_new_user_input();
         self.rollback_len = self.history.len();
         let msg = Message::user_with_images(input.message.clone(), input.images);
         self.history.push(msg);
@@ -304,16 +313,28 @@ impl<'h> Agent<'h> {
             };
             if should_hard_stop {
                 let score = self.doom.lock().unwrap_or_else(|e| e.into_inner()).score();
-                info!(score, turns = self.num_turns, "doom hard-stop reached, ending run");
+                info!(
+                    score,
+                    turns = self.num_turns,
+                    "doom hard-stop reached, ending run"
+                );
                 self.snapshot.commit();
                 self.emit_done(None)?;
                 return Ok(());
             }
             if should_grace {
-                self.doom.lock().unwrap_or_else(|e| e.into_inner()).mark_grace_called();
-                self.history.push(Message::user(GRACE_CALL_PROMPT.to_string()));
+                self.doom
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .mark_grace_called();
+                self.history
+                    .push(Message::user(GRACE_CALL_PROMPT.to_string()));
                 let score = self.doom.lock().unwrap_or_else(|e| e.into_inner()).score();
-                info!(score, turns = self.num_turns, "doom grace threshold reached, issuing grace call");
+                info!(
+                    score,
+                    turns = self.num_turns,
+                    "doom grace threshold reached, issuing grace call"
+                );
             }
             match self.turn().await? {
                 TurnOutcome::Continue => {}
@@ -372,7 +393,9 @@ impl<'h> Agent<'h> {
         };
 
         #[cfg(feature = "onnx")]
-        let messages: &[Message] = semantic_view.as_deref().unwrap_or_else(|| self.history.as_slice());
+        let messages: &[Message] = semantic_view
+            .as_deref()
+            .unwrap_or_else(|| self.history.as_slice());
         #[cfg(not(feature = "onnx"))]
         let messages: &[Message] = self.history.as_slice();
 
@@ -446,7 +469,9 @@ impl<'h> Agent<'h> {
                     );
                     info!(sim, "stagnation detected");
                     doom.note_stagnation();
-                    let _ = self.event_tx.send(AgentEvent::StagnationDetected { similarity: sim });
+                    let _ = self
+                        .event_tx
+                        .send(AgentEvent::StagnationDetected { similarity: sim });
                 }
             }
         }
@@ -562,8 +587,7 @@ impl<'h> Agent<'h> {
         match tokio::select! {
             r = rx.recv_async() => r.map_err(|_| flume::RecvError::Disconnected),
             _ = self.cancel.cancelled() => Err(flume::RecvError::Disconnected),
-        }
-        {
+        } {
             Ok(_) => {
                 self.provider.refresh_auth().await?;
                 Ok(TurnOutcome::Continue)
@@ -596,7 +620,10 @@ impl<'h> Agent<'h> {
         })
     }
 
-    async fn process_tool_calls(&mut self, response: StreamResponse) -> Result<ToolBatchOutcome, AgentError> {
+    async fn process_tool_calls(
+        &mut self,
+        response: StreamResponse,
+    ) -> Result<ToolBatchOutcome, AgentError> {
         let ctx = self.tool_context();
         let mut recent = {
             let mut d = self.doom.lock().unwrap_or_else(|e| e.into_inner());
@@ -624,7 +651,10 @@ impl<'h> Agent<'h> {
     }
 
     fn small_model_ratio(&self) -> f64 {
-        if self.config.small_model.should_activate(self.model.context_window)
+        if self
+            .config
+            .small_model
+            .should_activate(self.model.context_window)
             && self.config.small_model.aggressive_truncation
         {
             self.config.small_model.compaction_threshold
@@ -663,7 +693,11 @@ impl<'h> Agent<'h> {
         }
     }
 
-    async fn try_auto_compact(&mut self, usage: &TokenUsage, force_full: bool) -> Result<bool, AgentError> {
+    async fn try_auto_compact(
+        &mut self,
+        usage: &TokenUsage,
+        force_full: bool,
+    ) -> Result<bool, AgentError> {
         if !self.auto_compact {
             return Ok(false);
         }
@@ -673,7 +707,8 @@ impl<'h> Agent<'h> {
             return Ok(false);
         }
 
-        let overflow = force_full || compaction::is_overflow(usage, &self.model, self.config.compaction_buffer);
+        let overflow = force_full
+            || compaction::is_overflow(usage, &self.model, self.config.compaction_buffer);
         let proactive = !overflow
             && compaction::is_proactive_threshold(
                 self.history,
@@ -704,7 +739,10 @@ impl<'h> Agent<'h> {
             cache_tracker: Some(&self.cache_tracker),
             compression_store: Some(&self.compression_store),
             #[cfg(feature = "onnx")]
-            relevance_scores: self.scorer.as_ref().and(self.last_relevance_scores.as_deref()),
+            relevance_scores: self
+                .scorer
+                .as_ref()
+                .and(self.last_relevance_scores.as_deref()),
             #[cfg(not(feature = "onnx"))]
             relevance_scores: None,
             #[cfg(feature = "onnx")]
@@ -717,10 +755,14 @@ impl<'h> Agent<'h> {
         )
         .await;
 
-        if overflow && removed > 0
+        if overflow
+            && removed > 0
             && !compaction::is_overflow(usage, &self.model, self.config.compaction_buffer)
         {
-            info!(chars_removed = removed, "progressive compaction avoided full compaction");
+            info!(
+                chars_removed = removed,
+                "progressive compaction avoided full compaction"
+            );
             return Ok(true);
         }
 
@@ -730,19 +772,35 @@ impl<'h> Agent<'h> {
 
         info!(total_input = usage.total_input(), "auto-compacting (full)");
         self.event_tx.send(AgentEvent::AutoCompacting)?;
-        let chars_before: usize = self.history.as_slice().iter().map(|m| {
-            m.content.iter().map(|b| match b {
-                craft_providers::ContentBlock::Text { text } => text.len(),
-                _ => 0,
-            }).sum::<usize>()
-        }).sum();
+        let chars_before: usize = self
+            .history
+            .as_slice()
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        craft_providers::ContentBlock::Text { text } => text.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+            })
+            .sum();
         self.do_compact().await?;
-        let chars_after: usize = self.history.as_slice().iter().map(|m| {
-            m.content.iter().map(|b| match b {
-                craft_providers::ContentBlock::Text { text } => text.len(),
-                _ => 0,
-            }).sum::<usize>()
-        }).sum();
+        let chars_after: usize = self
+            .history
+            .as_slice()
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        craft_providers::ContentBlock::Text { text } => text.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+            })
+            .sum();
         let savings = if chars_before > 0 {
             1.0 - (chars_after as f32 / chars_before as f32)
         } else {
@@ -750,11 +808,20 @@ impl<'h> Agent<'h> {
         };
         if savings < INEFFECTIVE_COMPACTION_THRESHOLD {
             self.ineffective_compaction_count += 1;
-            info!(savings_pct = format!("{:.0}%", savings * 100.0), "compaction was ineffective");
-            self.doom.lock().unwrap_or_else(|e| e.into_inner()).note_ineffective_compaction();
+            info!(
+                savings_pct = format!("{:.0}%", savings * 100.0),
+                "compaction was ineffective"
+            );
+            self.doom
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note_ineffective_compaction();
         } else {
             self.ineffective_compaction_count = 0;
-            self.doom.lock().unwrap_or_else(|e| e.into_inner()).note_effective_compaction();
+            self.doom
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note_effective_compaction();
         }
         Ok(true)
     }
@@ -856,8 +923,8 @@ mod tests {
 
     use craft_providers::provider::{BoxFuture, Provider};
     use craft_providers::{
-        ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason, StreamResponse,
-        TokenUsage,
+        ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason,
+        StreamResponse, TokenUsage,
     };
     use serde_json::Value;
     use test_case::test_case;
@@ -1061,7 +1128,11 @@ mod tests {
     #[test_case(&[StopReason::MaxTokens, StopReason::EndTurn],                                 2, Some(StopReason::EndTurn)  ; "max_tokens_continues")]
     #[test_case(&[StopReason::MaxTokens, StopReason::MaxTokens, StopReason::MaxTokens, StopReason::MaxTokens], 4, Some(StopReason::MaxTokens) ; "max_tokens_gives_up_after_limit")]
     #[tokio::test]
-    async fn turn_counting(stops: &[StopReason], expected_turns: u32, expected_stop: Option<StopReason>) {
+    async fn turn_counting(
+        stops: &[StopReason],
+        expected_turns: u32,
+        expected_stop: Option<StopReason>,
+    ) {
         let responses: Vec<_> = stops.iter().map(|s| text_response(*s)).collect();
         let provider = MockProvider::new(responses);
         let (turns, stop_reason) = run_agent(provider).await;
@@ -1073,7 +1144,11 @@ mod tests {
     #[test_case(Some(false), true,  true  ; "after_text_only_turn")]
     #[test_case(None,        false, false ; "channel_empty")]
     #[tokio::test]
-    async fn interrupt_handling(queued: Option<bool>, expect_consumed: bool, expect_injected: bool) {
+    async fn interrupt_handling(
+        queued: Option<bool>,
+        expect_consumed: bool,
+        expect_injected: bool,
+    ) {
         let source = if queued.is_some() {
             Some(MockInterruptSource::new(vec![ExtractedCommand::Interrupt(
                 default_input(),
@@ -1141,8 +1216,7 @@ mod tests {
         let (run_params, _event_rx) = make_run_params(&mut history);
         let mut params = make_agent_params();
         params.provider = Arc::new(MockProvider::new(responses));
-        let agent = Agent::new(params, run_params)
-            .with_interrupt_source(source);
+        let agent = Agent::new(params, run_params).with_interrupt_source(source);
         let result = agent.run(default_input()).await;
 
         assert!(result.is_ok());

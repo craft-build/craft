@@ -80,10 +80,12 @@ impl super::ToolInvocation for Edit {
             commands: vec![],
             reason: Some("edit file".into()),
         };
-        Box::pin(std::future::ready(Some(super::PermissionScopes::single_with_context(
-            crate::permissions::canonicalize_scope_path(&self.path),
-            ctx,
-        ))))
+        Box::pin(std::future::ready(Some(
+            super::PermissionScopes::single_with_context(
+                crate::permissions::canonicalize_scope_path(&self.path),
+                ctx,
+            ),
+        )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
         Box::pin(async move { Edit::execute(&self, ctx).await })
@@ -175,4 +177,3 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), updated);
     }
 }
-

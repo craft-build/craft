@@ -4,7 +4,10 @@ use std::sync::Arc;
 pub type EmbedChannel = Arc<flume::Sender<EmbedRequest>>;
 
 #[cfg(feature = "onnx")]
-pub(crate) fn create_embed_table(lua: &mlua::Lua, embed_tx: EmbedChannel) -> mlua::Result<mlua::Table> {
+pub(crate) fn create_embed_table(
+    lua: &mlua::Lua,
+    embed_tx: EmbedChannel,
+) -> mlua::Result<mlua::Table> {
     use mlua::{Table, Value};
 
     let table = lua.create_table()?;
@@ -15,7 +18,8 @@ pub(crate) fn create_embed_table(lua: &mlua::Lua, embed_tx: EmbedChannel) -> mlu
         lua.create_async_function(move |lua, text: String| {
             let tx = embed_tx_clone.clone();
             async move {
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Result<Vec<f32>, String>>();
+                let (reply_tx, reply_rx) =
+                    tokio::sync::oneshot::channel::<Result<Vec<f32>, String>>();
                 if tx.send((text, reply_tx)).is_err() {
                     return Err(mlua::Error::external("embed service unavailable"));
                 }

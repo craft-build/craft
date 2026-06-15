@@ -401,8 +401,8 @@ impl PermissionPrompt {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use craft_agent::permissions::PermissionAnswer;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{PermissionPrompt, PromptState};
 
@@ -416,7 +416,8 @@ mod tests {
             None,
         );
         prompt
-    }    fn ctrl_c() -> KeyEvent {
+    }
+    fn ctrl_c() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
     }
 

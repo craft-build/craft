@@ -4,9 +4,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use include_dir::{Dir, include_dir};
 use craft_agent::tools::ToolRegistry;
 use craft_config::{PluginsConfig, RawConfig};
+use include_dir::{Dir, include_dir};
 
 use crate::api::command::{LuaCommandReader, UiAction};
 use crate::error::PluginError;
@@ -121,7 +121,11 @@ impl PluginHost {
         for global_dir in craft_config::global_config_dirs() {
             self.run_init_file(&global_dir.join("init.lua"), "global/init.lua", &mut merged)?;
         }
-        self.run_init_file(&cwd.join(".craft/init.lua"), "project/init.lua", &mut merged)?;
+        self.run_init_file(
+            &cwd.join(".craft/init.lua"),
+            "project/init.lua",
+            &mut merged,
+        )?;
 
         Ok(merged)
     }
@@ -247,10 +251,20 @@ impl PluginHost {
     }
 
     pub fn load_source(&self, name: &str, source: &str) -> Result<(), PluginError> {
-        self.send_load(Arc::from(name), source.to_owned(), None, PluginPermissions::trusted())
+        self.send_load(
+            Arc::from(name),
+            source.to_owned(),
+            None,
+            PluginPermissions::trusted(),
+        )
     }
 
-    pub fn load_source_with_permissions(&self, name: &str, source: &str, permissions: PluginPermissions) -> Result<(), PluginError> {
+    pub fn load_source_with_permissions(
+        &self,
+        name: &str,
+        source: &str,
+        permissions: PluginPermissions,
+    ) -> Result<(), PluginError> {
         self.send_load(Arc::from(name), source.to_owned(), None, permissions)
     }
 
@@ -524,12 +538,15 @@ mod tests {
         )
         .unwrap();
         let handle = host.event_handle().unwrap();
-        assert!(handle.collect_prompt_slots()
-            .get(
-                craft_agent::prompt::PromptId::System,
-                craft_agent::prompt::Slot::ToolUsage,
-            )
-            .is_empty());
+        assert!(
+            handle
+                .collect_prompt_slots()
+                .get(
+                    craft_agent::prompt::PromptId::System,
+                    craft_agent::prompt::Slot::ToolUsage,
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -576,14 +593,23 @@ mod tests {
         .unwrap();
         let handle = host.event_handle().unwrap();
         let slots = handle.collect_prompt_slots();
-        assert!(slots.get(
-            craft_agent::prompt::PromptId::Research,
-            craft_agent::prompt::Slot::Conventions,
-        ).is_empty());
-        assert_eq!(slots.get(
-            craft_agent::prompt::PromptId::System,
-            craft_agent::prompt::Slot::Conventions,
-        ).len(), 1);
+        assert!(
+            slots
+                .get(
+                    craft_agent::prompt::PromptId::Research,
+                    craft_agent::prompt::Slot::Conventions,
+                )
+                .is_empty()
+        );
+        assert_eq!(
+            slots
+                .get(
+                    craft_agent::prompt::PromptId::System,
+                    craft_agent::prompt::Slot::Conventions,
+                )
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -603,10 +629,14 @@ mod tests {
         .unwrap();
         let handle = host.event_handle().unwrap();
         let slots = handle.collect_prompt_slots();
-        assert!(slots.get(
-            craft_agent::prompt::PromptId::Research,
-            craft_agent::prompt::Slot::AfterInstructions,
-        ).is_empty());
+        assert!(
+            slots
+                .get(
+                    craft_agent::prompt::PromptId::Research,
+                    craft_agent::prompt::Slot::AfterInstructions,
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -626,18 +656,32 @@ mod tests {
         .unwrap();
         let handle = host.event_handle().unwrap();
         let slots = handle.collect_prompt_slots();
-        assert_eq!(slots.get(
-            craft_agent::prompt::PromptId::System,
-            craft_agent::prompt::Slot::ToolUsage,
-        ).len(), 1);
-        assert_eq!(slots.get(
-            craft_agent::prompt::PromptId::Research,
-            craft_agent::prompt::Slot::ToolUsage,
-        ).len(), 1);
-        assert!(slots.get(
-            craft_agent::prompt::PromptId::General,
-            craft_agent::prompt::Slot::ToolUsage,
-        ).is_empty());
+        assert_eq!(
+            slots
+                .get(
+                    craft_agent::prompt::PromptId::System,
+                    craft_agent::prompt::Slot::ToolUsage,
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            slots
+                .get(
+                    craft_agent::prompt::PromptId::Research,
+                    craft_agent::prompt::Slot::ToolUsage,
+                )
+                .len(),
+            1
+        );
+        assert!(
+            slots
+                .get(
+                    craft_agent::prompt::PromptId::General,
+                    craft_agent::prompt::Slot::ToolUsage,
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -671,7 +715,10 @@ mod tests {
             craft_agent::prompt::Slot::ToolUsage,
         );
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].content, "from_aaa", "BTreeMap should sort by plugin name");
+        assert_eq!(
+            entries[0].content, "from_aaa",
+            "BTreeMap should sort by plugin name"
+        );
         assert_eq!(entries[1].content, "from_zzz");
     }
 
@@ -702,12 +749,15 @@ mod tests {
         );
 
         host.unload("temp_plugin").unwrap();
-        assert!(handle.collect_prompt_slots()
-            .get(
-                craft_agent::prompt::PromptId::System,
-                craft_agent::prompt::Slot::ToolUsage,
-            )
-            .is_empty());
+        assert!(
+            handle
+                .collect_prompt_slots()
+                .get(
+                    craft_agent::prompt::PromptId::System,
+                    craft_agent::prompt::Slot::ToolUsage,
+                )
+                .is_empty()
+        );
     }
 
     #[test_case::test_case(

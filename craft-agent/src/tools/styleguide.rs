@@ -2,8 +2,8 @@ use craft_tool_macro::Tool;
 use serde::Deserialize;
 
 use super::ToolContext;
-use crate::styleguide;
 use crate::ToolOutput;
+use crate::styleguide;
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct StyleguideList {
@@ -13,8 +13,7 @@ pub struct StyleguideList {
 
 impl StyleguideList {
     pub const NAME: &str = "styleguide_list";
-    pub const DESCRIPTION: &str =
-        "List available styleguide categories for a language. Use this to discover what styleguides are available before fetching specific rules.";
+    pub const DESCRIPTION: &str = "List available styleguide categories for a language. Use this to discover what styleguides are available before fetching specific rules.";
     pub const EXAMPLES: Option<&str> = Some(r#"[{"language": "rust"}]"#);
 
     pub fn start_header(&self) -> String {
@@ -22,7 +21,9 @@ impl StyleguideList {
     }
 
     pub async fn execute(&self, _ctx: &ToolContext) -> Result<ToolOutput, String> {
-        Ok(ToolOutput::Plain(styleguide::list_categories(&self.language)))
+        Ok(ToolOutput::Plain(styleguide::list_categories(
+            &self.language,
+        )))
     }
 }
 
@@ -30,7 +31,9 @@ super::impl_tool!(StyleguideList, kind = "search");
 
 impl super::ToolInvocation for StyleguideList {
     fn start_header(&self) -> super::HeaderFuture {
-        super::HeaderFuture::Ready(super::HeaderResult::plain(StyleguideList::start_header(self)))
+        super::HeaderFuture::Ready(super::HeaderResult::plain(StyleguideList::start_header(
+            self,
+        )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
         Box::pin(async move { StyleguideList::execute(&self, ctx).await })
@@ -53,8 +56,7 @@ pub struct StyleguideSearch {
 
 impl StyleguideSearch {
     pub const NAME: &str = "styleguide_search";
-    pub const DESCRIPTION: &str =
-        "Search for styleguide rules by keywords, rule IDs, or tags. Returns matching rules sorted by relevance.";
+    pub const DESCRIPTION: &str = "Search for styleguide rules by keywords, rule IDs, or tags. Returns matching rules sorted by relevance.";
     pub const EXAMPLES: Option<&str> = Some(r#"[{"query": "naming", "language": "rust"}]"#);
 
     pub fn start_header(&self) -> String {
@@ -76,9 +78,9 @@ super::impl_tool!(StyleguideSearch, kind = "search");
 
 impl super::ToolInvocation for StyleguideSearch {
     fn start_header(&self) -> super::HeaderFuture {
-        super::HeaderFuture::Ready(super::HeaderResult::plain(
-            StyleguideSearch::start_header(self),
-        ))
+        super::HeaderFuture::Ready(super::HeaderResult::plain(StyleguideSearch::start_header(
+            self,
+        )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
         Box::pin(async move { StyleguideSearch::execute(&self, ctx).await })
@@ -101,8 +103,7 @@ pub struct StyleguideGet {
 
 impl StyleguideGet {
     pub const NAME: &str = "styleguide_get";
-    pub const DESCRIPTION: &str =
-        "Fetch specific styleguide rules or entire categories. Can fetch by category, rule IDs, or auto-detect from file path.";
+    pub const DESCRIPTION: &str = "Fetch specific styleguide rules or entire categories. Can fetch by category, rule IDs, or auto-detect from file path.";
     pub const EXAMPLES: Option<&str> = Some(r#"[{"language": "rust", "category": "naming"}]"#);
 
     pub fn start_header(&self) -> String {
@@ -131,7 +132,9 @@ super::impl_tool!(StyleguideGet, kind = "search");
 
 impl super::ToolInvocation for StyleguideGet {
     fn start_header(&self) -> super::HeaderFuture {
-        super::HeaderFuture::Ready(super::HeaderResult::plain(StyleguideGet::start_header(self)))
+        super::HeaderFuture::Ready(super::HeaderResult::plain(StyleguideGet::start_header(
+            self,
+        )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
         Box::pin(async move { StyleguideGet::execute(&self, ctx).await })

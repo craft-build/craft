@@ -25,8 +25,18 @@ pub fn compress_log(text: &str, max_lines: usize) -> String {
         .collect();
 
     important.dedup_by(|a, b| {
-        let a_trimmed = a.1.trim().chars().filter(|c| !c.is_whitespace()).take(40).collect::<String>();
-        let b_trimmed = b.1.trim().chars().filter(|c| !c.is_whitespace()).take(40).collect::<String>();
+        let a_trimmed =
+            a.1.trim()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .take(40)
+                .collect::<String>();
+        let b_trimmed =
+            b.1.trim()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .take(40)
+                .collect::<String>();
         a_trimmed == b_trimmed
     });
 
@@ -49,4 +59,3 @@ pub fn compress_log(text: &str, max_lines: usize) -> String {
 
     kept.join("\n")
 }
-

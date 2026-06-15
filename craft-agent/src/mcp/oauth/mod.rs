@@ -18,9 +18,9 @@ pub enum OAuthError {
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use reqwest::Client;
 use craft_storage::StateDir;
 use craft_storage::auth::{McpAuthData, load_mcp_auth, save_mcp_auth};
+use reqwest::Client;
 use tracing::{info, warn};
 
 const MAX_REDIRECTS: usize = 10;

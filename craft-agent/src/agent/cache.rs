@@ -75,10 +75,7 @@ impl PrefixCacheTracker {
 }
 
 #[cfg(test)]
-fn filter_frozen<'a>(
-    tracker: &PrefixCacheTracker,
-    candidates: &'a [usize],
-) -> Vec<&'a usize> {
+fn filter_frozen<'a>(tracker: &PrefixCacheTracker, candidates: &'a [usize]) -> Vec<&'a usize> {
     candidates
         .iter()
         .filter(|&&idx| !tracker.is_frozen(idx))

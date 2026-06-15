@@ -33,7 +33,9 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Update { yes, no_color }) => {
-            update::update(yes, no_color).await.map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+            update::update(yes, no_color)
+                .await
+                .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
         }
         Some(Command::Rollback) => {
             update::rollback().map_err(|e| color_eyre::eyre::eyre!("{e}"))?;

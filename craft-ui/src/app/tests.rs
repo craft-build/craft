@@ -6,17 +6,17 @@ use crate::components::keybindings::{KeybindContext, key as kb};
 use crate::components::{ExitRequest, key, test_model};
 use crate::selection::{SelectableZone, SelectionState, SelectionZone};
 use arc_swap::ArcSwap;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
     ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
-    McpSnapshotReader, TaskNode, TodoStatus, ToolDoneEvent, ToolOutput,
-    ToolStartEvent, TurnCompleteEvent,
+    McpSnapshotReader, TaskNode, TodoStatus, ToolDoneEvent, ToolOutput, ToolStartEvent,
+    TurnCompleteEvent,
 };
 use craft_config::{PermissionsConfig, UiConfig};
 use craft_lua::LuaCommandReader;
 use craft_providers::{ContentBlock, Role, TokenUsage};
 use craft_storage::sessions::StoredThinking;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -475,9 +475,8 @@ fn reset_session_clears_drafting_plan_in_build_mode() {
 fn load_session_clears_plan() {
     let tmp = TempDir::new().unwrap();
     let dir = StateDir::from_path(tmp.path().to_path_buf());
-    let writer = Arc::new(StorageWriter::new(StateDir::from_path(
-        tmp.path().to_path_buf(),
-    )).unwrap());
+    let writer =
+        Arc::new(StorageWriter::new(StateDir::from_path(tmp.path().to_path_buf())).unwrap());
     let model = test_model();
     let mut app = App::new(
         &model,
@@ -2390,8 +2389,13 @@ fn agent_error_creates_synthetic_tool_done_with_message() {
 #[test]
 fn ctrl_c_denies_permission_prompt() {
     let mut app = test_app();
-    app.permission_prompt
-        .open("id".into(), "bash".into(), vec!["execute".into()], craft_agent::types::PermissionContext::default(), None);
+    app.permission_prompt.open(
+        "id".into(),
+        "bash".into(),
+        vec!["execute".into()],
+        craft_agent::types::PermissionContext::default(),
+        None,
+    );
     assert!(app.permission_prompt.is_open());
 
     let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
@@ -2572,8 +2576,13 @@ fn permission_prompt_takes_bottom_precedence_over_below_split() {
     open_split_window(&mut app, craft_lua::Split::Below);
     open_split_window(&mut app, craft_lua::Split::Left);
     open_split_window(&mut app, craft_lua::Split::Above);
-    app.permission_prompt
-        .open("perm-1".into(), "bash".into(), vec!["ls".into()], craft_agent::types::PermissionContext::default(), None);
+    app.permission_prompt.open(
+        "perm-1".into(),
+        "bash".into(),
+        vec!["ls".into()],
+        craft_agent::types::PermissionContext::default(),
+        None,
+    );
 
     let (_msg, _bottom, _status, _input, splits) = app.layout_geometry(TEST_AREA);
     assert!(

@@ -43,7 +43,14 @@ impl App {
         messages.push(btw_question(&question));
 
         let session_id = self.state.session.id.clone();
-        tokio::spawn(run_btw(provider, model, messages, tx, (*system).clone(), Some(session_id)));
+        tokio::spawn(run_btw(
+            provider,
+            model,
+            messages,
+            tx,
+            (*system).clone(),
+            Some(session_id),
+        ));
     }
 }
 
@@ -64,7 +71,10 @@ async fn run_btw(
         &system,
         &tools,
         &event_tx,
-        RequestOptions { thinking: ThinkingConfig::Off, fast: false },
+        RequestOptions {
+            thinking: ThinkingConfig::Off,
+            fast: false,
+        },
         session_id.as_deref(),
     );
 
@@ -99,11 +109,18 @@ mod tests {
     #[test]
     fn injects_reminder_before_question() {
         let msg = btw_question("what is foo?");
-        let text = msg.content.first().and_then(|b| match b {
-            craft_providers::ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).unwrap();
-        assert!(text.starts_with("<system-reminder>"), "must start with reminder");
+        let text = msg
+            .content
+            .first()
+            .and_then(|b| match b {
+                craft_providers::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            text.starts_with("<system-reminder>"),
+            "must start with reminder"
+        );
         assert!(text.ends_with("what is foo?"), "must end with question");
     }
 }
