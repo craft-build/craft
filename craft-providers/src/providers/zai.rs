@@ -52,7 +52,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             prefixes: &["glm-5-code"],
             tier: ModelTier::Strong,
             family: ModelFamily::Glm,
-            default: true,
+            default: false,
             pricing: ModelPricing {
                 input: 1.20,
                 output: 5.00,

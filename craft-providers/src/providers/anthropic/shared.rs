@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test_case("claude-opus-4-8-1m", Some(LONG_CONTEXT_WINDOW) ; "suffix_opts_in")]
-    #[test_case("claude-opus-4-8", None ; "plain_id_keeps_base")]
+    #[test_case("claude-haiku-4-5", None ; "plain_id_keeps_base")]
     fn long_context_window_follows_suffix(model_id: &str, expected: Option<u32>) {
         assert_eq!(long_context_window(model_id), expected);
         assert!(LONG_CONTEXT_SUFFIX.ends_with("1m"));

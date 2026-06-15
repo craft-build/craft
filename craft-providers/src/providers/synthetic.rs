@@ -39,7 +39,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             prefixes: &["hf:Qwen/Qwen3.6-27B"],
             tier: ModelTier::Weak,
             family: ModelFamily::Synthetic,
-            default: true,
+            default: false,
             pricing: ModelPricing {
                 input: 0.45,
                 output: 3.6,
