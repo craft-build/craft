@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use craft_storage::version::{self, VersionError};
 use craft_storage::{StateDir, StorageError};
 
-const INSTALL_SCRIPT_URL: &str = "https://gitlab.com/craft-build/craft/-/releases";
+const INSTALL_SCRIPT_URL: &str = "https://github.com/craft-build/craft/releases";
 const BACKUP_FILENAME: &str = "craft_backup";
 
 #[derive(Debug, thiserror::Error)]

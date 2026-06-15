@@ -9,16 +9,14 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-const CONTENT_DIR: &str = "site/docs/content";
+const DOC_SRC_DIR: &str = "site/docs/src";
 
 fn page_path(section: &str) -> std::path::PathBuf {
-    Path::new(CONTENT_DIR).join(section).join("_index.md")
+    Path::new(DOC_SRC_DIR).join(format!("{section}.md"))
 }
 
 fn write_page(section: &str, content: &str) {
-    let dir = Path::new(CONTENT_DIR).join(section);
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("_index.md");
+    let path = page_path(section);
     fs::write(&path, content).unwrap();
     println!("wrote {}", path.display());
 }

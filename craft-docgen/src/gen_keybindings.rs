@@ -1,13 +1,5 @@
 use craft_ui::keybindings::{ALT_SEP, KEYBINDS, KeyLabel, KeybindContext, Platform, all_contexts};
 
-const FRONTMATTER: &str = "\
-+++
-title = \"Keybindings\"
-weight = 7
-[extra]
-group = \"Reference\"
-+++";
-
 const MAIN_CONTEXTS: &[KeybindContext] = &[
     KeybindContext::General,
     KeybindContext::Editing,
@@ -119,8 +111,7 @@ fn write_inheritance(out: &mut String) {
 }
 
 pub fn generate() -> String {
-    let mut out = String::from(FRONTMATTER);
-    out.push_str("\n\n# Keybindings\n\n");
+    let mut out = String::from("# Keybindings\n\n");
     out.push_str("On macOS, some bindings use Option or Fn keys instead (run `/help` for exact keybindings).\n");
 
     for &ctx in MAIN_CONTEXTS {

@@ -6,13 +6,6 @@ use crate::lua_util;
 
 pub fn generate() -> String {
     let mut out = String::new();
-    writeln!(out, "+++").unwrap();
-    writeln!(out, "title = \"Commands\"").unwrap();
-    writeln!(out, "weight = 5").unwrap();
-    writeln!(out, "[extra]").unwrap();
-    writeln!(out, "group = \"Reference\"").unwrap();
-    writeln!(out, "+++").unwrap();
-    writeln!(out).unwrap();
     writeln!(out, "# Commands").unwrap();
     writeln!(out).unwrap();
     writeln!(

@@ -87,12 +87,12 @@ The goal is simple: longer effective sessions, lower cost per turn, and an agent
 ## Installation
 
 ```sh
-cargo install --git https://gitlab.com/craft-build/craft.git craft
+cargo install --git https://github.com/craft-build/craft.git craft
 ```
 
 ## Documentation
 
-More info in the [official docs](https://gitlab.com/craft-build/craft).
+More info in the [official docs](https://github.com/craft-build/craft).
 
 ## Extending with Lua
 

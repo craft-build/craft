@@ -3,13 +3,6 @@ use craft_providers::provider::ProviderKind;
 use std::fmt::Write;
 use strum::IntoEnumIterator;
 
-const FRONT_MATTER: &str = r#"+++
-title = "Providers"
-weight = 5
-[extra]
-group = "Reference"
-+++"#;
-
 const TIER_PICKER_NOTE: &str = r#"Open the model picker with `/model` and press `1`, `2`, or `3` on any row to reassign it to strong, medium, or weak. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions."#;
 
 const AUTH_RELOADING: &str = r#"## Auth Reloading
@@ -300,7 +293,6 @@ fn write_section(out: &mut String, section: &ProviderSection) {
 pub fn generate() -> String {
     let mut out = String::with_capacity(4096);
 
-    let _ = writeln!(out, "{FRONT_MATTER}\n");
     let _ = writeln!(out, "# Providers\n");
     let _ = writeln!(
         out,

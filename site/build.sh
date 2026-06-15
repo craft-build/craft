@@ -2,18 +2,25 @@
 set -e
 
 # Cloudflare Pages build script
-# Assembles the static landing page + Zola docs into a single output dir.
+# Assembles the static landing page + mdBook docs into a single output dir.
 
-ZOLA_VERSION="${ZOLA_VERSION:-0.19.2}"
+MDBOOK_VERSION="${MDBOOK_VERSION:-0.5.3}"
 
-if ! command -v zola >/dev/null 2>&1; then
-  echo "Installing zola ${ZOLA_VERSION}..."
+if ! command -v mdbook >/dev/null 2>&1; then
+  echo "Installing mdbook ${MDBOOK_VERSION}..."
+  case "$(uname -m)-$(uname -s)" in
+    arm64-Darwin)  triple="aarch64-apple-darwin" ;;
+    x86_64-Darwin) triple="x86_64-apple-darwin" ;;
+    x86_64-Linux)  triple="x86_64-unknown-linux-gnu" ;;
+    aarch64-Linux) triple="aarch64-unknown-linux-gnu" ;;
+    *) echo "Unsupported platform: $(uname -m)-$(uname -s)"; exit 1 ;;
+  esac
   mkdir -p .bin
-  curl -sL "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-aarch64-apple-darwin.tar.gz" | tar xz -C .bin
+  curl -sL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-${triple}.tar.gz" | tar xz -C .bin
   export PATH="$PWD/.bin:$PATH"
 fi
 
-echo "Using $(zola --version)"
+echo "Using $(mdbook --version)"
 
 OUT="_build"
 rm -rf "$OUT"
@@ -32,6 +39,5 @@ cp favicon-32x32.png "$OUT/"
 cp favicon.ico "$OUT/"
 cp site.webmanifest "$OUT/"
 
-# 2. Build Zola docs
-cd docs
-zola build -o "../_build/docs"
+# 2. Build mdBook docs
+mdbook build docs --dest-dir "$OUT/docs"

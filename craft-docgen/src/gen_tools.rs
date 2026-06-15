@@ -173,13 +173,6 @@ pub fn generate() -> String {
 
     let total = all_tools.len();
     let mut out = String::new();
-    writeln!(out, "+++").unwrap();
-    writeln!(out, "title = \"Tools\"").unwrap();
-    writeln!(out, "weight = 3").unwrap();
-    writeln!(out, "[extra]").unwrap();
-    writeln!(out, "group = \"Reference\"").unwrap();
-    writeln!(out, "+++").unwrap();
-    writeln!(out).unwrap();
     writeln!(out, "# Tools").unwrap();
     writeln!(out).unwrap();
     writeln!(

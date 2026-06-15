@@ -1,0 +1,5 @@
+# mdBook + landing page build output
+_build/
+
+# downloaded mdbook binary cache
+.bin/

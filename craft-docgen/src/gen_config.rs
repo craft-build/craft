@@ -84,13 +84,6 @@ pub fn generate() -> String {
     writeln!(
         out,
         "\
-+++
-title = \"Configuration\"
-weight = 2
-[extra]
-group = \"Getting Started\"
-+++
-
 # Configuration
 
 Settings go in `init.lua`, a Lua script that calls `craft.setup()`. Same language as plugins.
@@ -247,7 +240,7 @@ Same field names, just Lua syntax instead of TOML.
 - `~/.config/craft/mcp.toml` (global)
 - `.craft/mcp.toml` (per-project)
 
-Same format, just a different file. See [MCP](/docs/mcp/).
+Same format, just a different file. See [MCP](./mcp.md).
 
 **Permissions stay in `permissions.toml`.**"
     )

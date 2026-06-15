@@ -1,0 +1,163 @@
+/* Craft docs - brand styling on top of mdBook */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Nunito:wght@400;600;700;800&family=Fraunces:opsz,wght@9..144,700&display=swap');
+
+:root {
+  --craft-accent: oklch(48% 0.14 275);
+  --craft-accent-soft: oklch(92% 0.05 275);
+  --cream: oklch(97% 0.015 90);
+  --deep-navy: oklch(22% 0.04 270);
+  --sidebar-bg: oklch(95.5% 0.025 278);
+}
+
+html {
+  scroll-padding-top: 5rem;
+}
+
+body {
+  font-family: 'Nunito', system-ui, sans-serif;
+  background: var(--cream);
+}
+
+/* Headings */
+h1, h2, h3, h4 {
+  font-family: 'Fraunces', 'Georgia', serif;
+  letter-spacing: -0.02em;
+  color: var(--deep-navy);
+}
+
+h1 {
+  font-size: 2.1rem;
+  font-weight: 700;
+  line-height: 1.15;
+}
+h1::after {
+  content: '';
+  display: block;
+  width: 48px;
+  height: 3px;
+  margin-top: 0.6rem;
+  background: linear-gradient(90deg, var(--craft-accent), oklch(78% 0.08 275));
+  border-radius: 2px;
+}
+
+h2 {
+  font-size: 1.45rem;
+  margin-top: 2.5rem;
+}
+h3 {
+  font-family: 'Nunito', sans-serif;
+  font-weight: 800;
+  font-size: 1.05rem;
+  letter-spacing: 0;
+  margin-top: 1.75rem;
+}
+h3 code, h4 code {
+  font-size: 0.9em;
+  font-weight: 700;
+  color: var(--craft-accent);
+  background: var(--craft-accent-soft);
+  padding: 0.1rem 0.4rem;
+  border-radius: 5px;
+}
+
+/* Body text */
+p, li {
+  line-height: 1.7;
+}
+.content main {
+  color: oklch(25% 0.03 270);
+}
+
+/* Links */
+a {
+  color: var(--craft-accent);
+  text-decoration-color: oklch(55% 0.12 275 / 0.3);
+  text-underline-offset: 3px;
+}
+a:hover {
+  color: oklch(42% 0.16 275);
+  text-decoration-color: oklch(42% 0.16 275);
+}
+
+/* Inline code */
+code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.84em;
+  background: var(--craft-accent-soft);
+  color: oklch(38% 0.10 275);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+/* Code blocks */
+pre {
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  font-size: 1.2rem;
+  line-height: 1.6;
+}
+pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+
+/* Tables */
+table {
+  display: block;
+  overflow-x: auto;
+  border-radius: 10px;
+  font-size: 1.2rem;
+}
+thead {
+  background: oklch(94% 0.03 278);
+}
+thead th {
+  font-family: 'Nunito', sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 1.3rem;
+  color: oklch(42% 0.05 275);
+}
+td, th {
+  padding: 0.55rem 0.8rem;
+}
+tbody tr {
+  border-top: 1px solid oklch(92% 0.02 280);
+}
+
+/* Sidebar */
+.sidebar {
+  background: var(--sidebar-bg);
+  font-family: 'Nunito', sans-serif;
+}
+.sidebar .chapter {
+  font-weight: 700;
+}
+.sidebar .chapter-item > a, .sidebar .chapter li > a {
+  font-size: 0.88rem;
+}
+.sidebar a:hover {
+  color: var(--craft-accent);
+}
+
+/* Top nav buttons */
+.left-button, #searchbar {
+  font-family: 'Nunito', sans-serif;
+}
+
+/* Headings get a clickable anchor from js/heading-anchors.js */
+h1:hover .header-anchor,
+h2:hover .header-anchor,
+h3:hover .header-anchor {
+  opacity: 1;
+}
+.header-anchor {
+  opacity: 0;
+  margin-left: 0.4rem;
+  color: var(--craft-accent);
+  text-decoration: none;
+  font-weight: 400;
+  transition: opacity 0.15s;
+}

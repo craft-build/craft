@@ -50,7 +50,7 @@ Rust workspace, key crates in root dir:
 - craft-lua: Lua plugin system (API mirrored from neovim for plugin compatibility), built-in plugins in ./plugins dir
 - craft-tool-macro: Derive macro for tool schemas used by craft-agent
 - craft-acp: Agent Client Protocol server (exposes craft as an ACP-compatible agent to external clients like editors)
-- craft-docgen: Bin that generates the user docs in site/docs/content from the workspace metadata
+- craft-docgen: Bin that generates the user docs in site/docs/src from the workspace metadata
 - craft-highlight: Thin wrapper around syntect/two-face for syntax highlighting
 - craft-markdown: Theme-free markdown parser and width-aware renderer, shared by craft-ui and craft-lua
 

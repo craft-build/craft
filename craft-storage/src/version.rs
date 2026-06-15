@@ -2,7 +2,7 @@ use reqwest::Client;
 use std::time::Duration;
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
-const RELEASES_URL: &str = "https://gitlab.com/api/v4/projects/craft-build%2Fcraft/releases";
+const RELEASES_URL: &str = "https://api.github.com/repos/craft-build/craft/releases/latest";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 

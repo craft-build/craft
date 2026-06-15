@@ -1,0 +1,366 @@
+# Changelog
+
+All notable changes to **craft** are documented in this file.
+
+The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+The working version in `Cargo.toml` is `0.5.0` (no tag yet).
+
+### Changed
+
+- **docs**: migrated the documentation site from Zola to mdBook. The doc
+  generator (`craft-docgen`) now emits mdBook markdown into `site/docs/src`
+  without Zola frontmatter, and `site/build.sh` builds with mdBook instead of
+  Zola.
+- **repo**: moved the canonical repository from GitLab to GitHub
+  (`https://github.com/craft-build/craft`). All install commands, release
+  URLs, the docs git link, the landing page, the update/version-check
+  endpoints, and the changelog reference links now point at GitHub.
+
+### Added
+
+- **docs**: new documentation pages covering previously undocumented
+  features: Usage (modes, shell bangs, image paste, palette), Skills
+  (`SKILL.md` format and discovery dirs), Plugins (Lua API and built-ins),
+  Sessions (storage, resume, checkpoints), Themes (25 bundled themes), and
+  CLI (full subcommand and flag reference).
+
+### Fixed
+
+- **sandbox**: allow `/dev/null` and apply the sandbox profile before stdio is
+  configured, so the profile is in effect for the entire session. (`52c76c6`)
+
+## [0.3.17+0.4.2] - 2026-06-14
+
+Tagged `v0.3.17+0.4.2`. Splash screen and version refresh for the tagged
+release. (`a0e0607`)
+
+## [0.3.17+0.4.1] - 2026-06-13
+
+### Added
+
+- **acp**: stable Agent Client Protocol v1 spec support with client delegation.
+  Advertises session capabilities; implements `session/list`, `session/close`,
+  and `session/resume`. Adds `StopReason::Cancelled`, session-update title
+  generation, an id-keyed pending-request registry, and fs + terminal
+  delegation to the client. (`266154e`)
+- **sandbox**: new `craft-sandbox` crate with macOS (`sandbox-exec`/SBPL) and
+  Linux (`bwrap`) backends, `WorkspaceWrite` and `ReadOnly` modes, and network
+  gating. SBPL literals are escaped against injection and `apply()` is
+  fail-closed when the backing binary is missing. Also adds a lifecycle hook
+  bridge (`session_start`, `pre/post_tool_use`), dynamic tool promotion via
+  `list_tools`, and a desktop entry point. (`8be50ca`)
+
+### Changed
+
+- README and banner artwork updated. (`8184736`)
+
+## [0.3.17+0.3.6] - 2026-06-12
+
+### Added
+
+- **providers**: detect native 1M-token context for newer Claude models.
+  (`1499778`)
+- **agent**: long-horizon planning features ported from Mimo-Code, without new
+  dependencies or SQLite:
+  - keyword (TF-IDF) + semantic memory recall with budgeted injection;
+  - hierarchical tasks (`T1`, `T1.1`) replacing flat todos (`LOG_FORMAT_VERSION`
+    bumped to 3, backward-compatible load, tree rendering in the UI);
+  - goal/judge stop condition: a second LLM call verifies the goal before the
+    agent may stop (capped at 5 continuations, fails open);
+  - `/dream` and `/distill` commands for memory consolidation and skill
+    discovery;
+  - `/checkpoint` writes a reviewable markdown checkpoint injected into the
+    system prompt on resume;
+  - subagent context modes (`none`/`summary`/`full`);
+  - a curated 6-skill bundle (tdd, review, debug, verify, plan, execute).
+  (`c055df8`)
+
+## [0.3.17+0.3.5] - 2026-06-12
+
+### Added
+
+- **agent**: port of maki v0.3.17: ACP server over stdio, SDK/stream mode
+  (Conductor / claude-agent-sdk compatibility), live shared `History` via an
+  `ArcSwap` mirror, malformed-JSON tool repair through `jsonrepair` + schema
+  aliases, and `tool_kind` support on the `Tool` trait. (`79ae225`)
+- **acp**: model picker populated from the available providers. (`31171c1`)
+- **acp**: config-option-based mode switching (`mode` + `model` as separate
+  select options). (`0b1542b`)
+- **acp**: MCP server passthrough from ACP clients (e.g. Zed), merged with the
+  local `mcp.toml` and started per session. (`8008b72`)
+
+### Changed
+
+- **Breaking**: `Agent<'h>` now borrows `&mut History` instead of owning it.
+  (`79ae225`)
+- **Breaking**: `craft-acp` rewritten on `agent-client-protocol-schema` 0.13
+  (was 0.14). (`79ae225`)
+- **Breaking**: the question plugin's `multiple` field renamed to `multiSelect`
+  (alias retained). (`79ae225`)
+
+### Fixed
+
+- `flash_duration_ms` now set in `merge_tools_overlay`. (`f24a257`)
+- Three pre-existing Lua test failures. (`14d2682`)
+- Syntax theme loaded in diff context line tests. (`7e264ce`)
+- Eight failing tests across five files after the v0.3.17 port. (`7403968`)
+
+## [0.3.16+0.3.5] - 2026-06-12
+
+### Added
+
+- **agent**: session-scoped **DoomTracker** replacing the per-run `max_turns`
+  budget. Scores pathological behavior (doom loops, stagnation, ineffective
+  compaction, tool errors, validator rejections); decays on success. Injects a
+  one-shot grace prompt at score 15 and hard-stops the run at 25. Long-lived
+  sessions (UI, ACP) share one tracker across runs. (`6337add`)
+
+### Removed
+
+- `max_turns` / `DEFAULT_MAX_TURNS` / `MIN_MAX_TURNS` from `craft-config`.
+  (`6337add`)
+
+## [0.3.16+0.3.4] - 2026-06-12
+
+### Changed
+
+- **agent**: wired up previously-dead cache-aware compression and trust-based
+  tool dropping. (`e6948f0`)
+
+### Fixed
+
+- Time collision bug. (`7df8c63`)
+
+## [0.3.16+0.3.3] - 2026-06-11
+
+### Fixed
+
+- Overflow recovery now uses real token usage, adds per-tool guardrails, and
+  reduces magic numbers. (`b3a1f59`)
+- `read_lifecycle` no longer destroys the active working context. (`4c1c0c1`)
+
+## [0.3.16+0.3.2] - 2026-06-11
+
+### Fixed
+
+- `no_compress` preserved through batch processing; recent reads guarded from
+  compression. (`6a91bd0`)
+
+## [0.3.16+0.3.1] - 2026-06-11
+
+### Added
+
+- **agent**: `apply_patch` tool for Codex-style multi-file patches (`*** Begin
+  Patch` / `*** End Patch` format) with fuzzy context matching, plan-mode
+  protection, `file_tracker` staleness guards on deletes, overlap validation,
+  and trailing-newline preservation. (`ac42e6f`)
+
+### Changed
+
+- tree-sitter dependencies updated. (`444e77c`)
+
+## [0.3.16+0.3.0] - 2026-06-10
+
+### Added
+
+- **agent**: optional semantic intelligence via local ONNX embeddings
+  (`onnx` feature, fastembed BGE-Base model). Adds a `RelevanceScorer`, semantic
+  overlap detection, context curation within the token budget, auto-retrieve of
+  compressed content, stagnation detection, and semantic stale overrides for
+  reads. The keyword classifier was extracted into `keywords.rs` using
+  aho-corasick. (`85d8f71`)
+- **agent**: tool outputs compressed at insertion time (content-type detection
+  applied immediately, originals preserved for the UI). (`48531ab`)
+
+### Fixed
+
+- `ToolDone` events forwarded from the review subagent to the UI. (`d8e87b9`)
+- ONNX models eagerly downloaded before UI startup to avoid blocking. (`ef870fc`)
+- Proactive compaction threshold lowered from 80% to 60%. (`099a4e8`)
+- fastembed models stored in the XDG directory and download progress suppressed.
+  (`01eff6f`)
+
+## [0.3.15+0.2.3] - 2026-06-06
+
+### Added
+
+- Claude Fable 5 model. (`85b3720`)
+- **agent**: review findings persisted in a session-scoped store. (`ef1d53b`)
+
+### Changed
+
+- Port of maki v0.3.15: panicked tools are recovered instead of dropped, writes
+  are allowed when no prior read is recorded, `--model` from the CLI is no
+  longer persisted, and the `code_execution` separator between script and
+  output is restored. (`97e17fd`)
+
+## [0.3.14+0.2.3] - 2026-06-04
+
+### Changed
+
+- Blocking I/O replaced with async equivalents across the workspace. (`dcb9605`)
+
+## [0.3.14+0.2.2] - 2026-06-04
+
+### Fixed
+
+- Agent event build error. (`3255c96`)
+
+## [0.3.14+0.2.1] - 2026-06-04
+
+### Changed
+
+- Port of maki v0.3.14 changes. (`86a9076`)
+
+## [0.3.13+0.2.1] - 2026-06-03
+
+### Added
+
+Six features from the smallcode evaluation plan:
+
+- **tool dedup cache**: caches read-only tool results (read/grep/glob/index),
+  bounded to 64 entries with FIFO eviction, cleared on compaction.
+- **trust decay**: tracks per-tool consecutive failures and demotes/drops tools
+  after configurable thresholds (`warn_after=3`, `drop_after=5`).
+- **snapshot & rollback**: auto-snapshots files before writes, commits on agent
+  Done, rolls back via `/undo`.
+- **post-write validation**: detects project type and runs validation commands
+  after writes (disabled by default).
+- **small model mode**: auto-detects models with context < 32k, reduces tools,
+  uses a compact system prompt, compacts at 50%, and applies aggressive JSON
+  repair.
+- **model escalation**: tracks per-model failure rates and emits a
+  `ModelEscalation` event for automatic tier upgrade.
+
+(`7f0781e`)
+
+### Fixed
+
+- Read supersession uses range overlap instead of a same-file check. (`b716faf`)
+
+## [0.3.13+0.2.0] - 2026-06-02
+
+### Added
+
+- **agent**: multi-stage context compression pipeline (Headroom-inspired):
+  read lifecycle supersession, tool-output pre-compression, progressive
+  compaction, client-side token estimation for proactive compression at 80% of
+  the window, prefix-cache awareness, and reversible compression with a
+  `retrieve` tool for on-demand decompression. (`066335a`)
+
+## [0.3.13+0.1.3] - 2026-06-02
+
+Maintenance: version bump only, no functional change. (`d9902ff`)
+
+## [0.3.13+0.1.2] - 2026-06-02
+
+### Added
+
+- Port of maki v0.3.13: model picker with bare `1`/`2`/`3` tier keys, XDG
+  directories in generated docs, OpenRouter on the site, and a Deno-style
+  permission sandbox for user Lua plugins (`FsRead`/`FsWrite`/`Net`/`Run`/`Env`
+  from `plugin.toml`). (`f28a74f`)
+
+### Fixed
+
+- Nested `CallbackError` traces stripped from Lua tool error messages via
+  `strip_traceback()`. (`f28a74f`)
+
+## [0.3.12+0.1.2] - 2026-06-02
+
+### Added
+
+- **providers**: OpenRouter provider (OpenAI-compatible, with reasoning-effort
+  support). (`113e7a9`)
+- `craft migrate xdg` command to move `~/.craft` into XDG directories.
+  (`113e7a9`)
+- Lua APIs `env.config_dir` and `fn.executable`. (`113e7a9`)
+
+### Changed
+
+- Tool snapshots re-baked on theme change instead of keeping stale renders.
+  (`113e7a9`)
+
+## [0.3.11+0.1.2] - 2026-06-01
+
+### Added
+
+- UI: multi-directional split layouts (above/below/left/right). (`7a4ea31`)
+- Anthropic long context (`-1m` suffix) with the `context-1m` beta header.
+  (`7a4ea31`)
+- `FastPricing` for accurate fast-mode cost calculation. (`7a4ea31`)
+- `always_fast` and `always_thinking` config options. (`7a4ea31`)
+
+### Fixed
+
+- Permission scope matching for space-star patterns and generalized scopes.
+  (`7a4ea31`)
+
+## [0.3.9+0.1.2] - 2026-05-29
+
+### Changed
+
+- **ui**: consolidated the shared-queue mutex lock helper into `pub(crate)` and
+  removed `expect()` from production paths. (`5a21a57`)
+
+## [0.3.9+0.1.1] - 2026-05-29
+
+### Fixed
+
+- **providers**: eliminated panics and magic strings. Google SSE `stop_reason`
+  now uses first-wins semantics; a `lock_unpoison()` helper recovers from
+  poisoned mutexes (38 call sites); `http_client()` returns `Result` instead of
+  panicking on TLS failure. (`a319b23`)
+- **storage**: GitLab API no longer receives a GitHub `Accept` header; errors
+  from `persist_model`/`persist_theme_name` are propagated; theme writes use
+  atomic writes for crash safety. (`9b6034c`)
+
+## [0.3.9+0.1.0] - 2026-05-29
+
+First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
+`craft-*` across the workspace.
+
+### Changed
+
+- **interpreter**: replaced silent `unwrap_or(0.0)` defaults with `expect()`,
+  added doc comments to public types, and reused `limits_with_timeout` in the
+  `limits()` builder. (`fbf8ad1`)
+- **markdown**: extracted `try_extract_table()` from `split_normal_blocks()`,
+  unified `wrap_spans()` and `split_line_with_bar()` into a shared helper, and
+  removed dead table over-consumption logic. (`5a5c65f`)
+
+### Fixed
+
+- **lua**: SSRF DNS-rebinding TOCTOU fixed via `resolve_to_addrs`; sub-second
+  timeouts via `from_secs_f64`; `setsid` return value checked; all global
+  plugin directories now visited on load; plugin name derived from the file stem
+  instead of a hardcoded `"user"`. (`3ceb90c`)
+
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.3.17+0.4.2...HEAD
+[0.3.17+0.4.2]: https://github.com/craft-build/craft/releases/tag/v0.3.17+0.4.2
+[0.3.17+0.4.1]: https://github.com/craft-build/craft/compare/v0.3.17+0.3.6...v0.3.17+0.4.1
+[0.3.17+0.3.6]: https://github.com/craft-build/craft/compare/v0.3.17+0.3.5...v0.3.17+0.3.6
+[0.3.17+0.3.5]: https://github.com/craft-build/craft/compare/v0.3.16+0.3.5...v0.3.17+0.3.5
+[0.3.16+0.3.5]: https://github.com/craft-build/craft/compare/v0.3.16+0.3.4...v0.3.16+0.3.5
+[0.3.16+0.3.4]: https://github.com/craft-build/craft/compare/v0.3.16+0.3.3...v0.3.16+0.3.4
+[0.3.16+0.3.3]: https://github.com/craft-build/craft/compare/v0.3.16+0.3.2...v0.3.16+0.3.3
+[0.3.16+0.3.2]: https://github.com/craft-build/craft/compare/v0.3.16+0.3.1...v0.3.16+0.3.2
+[0.3.16+0.3.1]: https://github.com/craft-build/craft/compare/v0.3.16+0.3.0...v0.3.16+0.3.1
+[0.3.16+0.3.0]: https://github.com/craft-build/craft/compare/v0.3.15+0.2.3...v0.3.16+0.3.0
+[0.3.15+0.2.3]: https://github.com/craft-build/craft/compare/v0.3.14+0.2.3...v0.3.15+0.2.3
+[0.3.14+0.2.3]: https://github.com/craft-build/craft/compare/v0.3.14+0.2.2...v0.3.14+0.2.3
+[0.3.14+0.2.2]: https://github.com/craft-build/craft/compare/v0.3.14+0.2.1...v0.3.14+0.2.2
+[0.3.14+0.2.1]: https://github.com/craft-build/craft/compare/v0.3.13+0.2.1...v0.3.14+0.2.1
+[0.3.13+0.2.1]: https://github.com/craft-build/craft/compare/v0.3.13+0.2.0...v0.3.13+0.2.1
+[0.3.13+0.2.0]: https://github.com/craft-build/craft/compare/v0.3.13+0.1.3...v0.3.13+0.2.0
+[0.3.13+0.1.3]: https://github.com/craft-build/craft/compare/v0.3.13+0.1.2...v0.3.13+0.1.3
+[0.3.13+0.1.2]: https://github.com/craft-build/craft/compare/v0.3.12+0.1.2...v0.3.13+0.1.2
+[0.3.12+0.1.2]: https://github.com/craft-build/craft/compare/v0.3.11+0.1.2...v0.3.12+0.1.2
+[0.3.11+0.1.2]: https://github.com/craft-build/craft/compare/v0.3.9+0.1.2...v0.3.11+0.1.2
+[0.3.9+0.1.2]: https://github.com/craft-build/craft/compare/v0.3.9+0.1.1...v0.3.9+0.1.2
+[0.3.9+0.1.1]: https://github.com/craft-build/craft/compare/v0.3.9+0.1.0...v0.3.9+0.1.1
+[0.3.9+0.1.0]: https://github.com/craft-build/craft/compare/d2f23c83...v0.3.9+0.1.0
