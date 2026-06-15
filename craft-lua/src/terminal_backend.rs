@@ -50,6 +50,20 @@ pub fn local_backend() -> Arc<dyn TerminalBackend> {
 
 fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
     let mut command = shell_command(&spec.cmd);
+
+    if let Some(ref profile) = spec.sandbox {
+        if profile.mode != craft_sandbox::SandboxMode::Off {
+            if !craft_sandbox::available() {
+                return Err(
+                    "sandbox enabled but backing binary not found; refusing to run unsandboxed"
+                        .to_string(),
+                );
+            }
+            craft_sandbox::apply(&mut command, profile)
+                .map_err(|e| format!("sandbox apply failed; refusing to run unsandboxed: {e}"))?;
+        }
+    }
+
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -75,19 +89,6 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
     if let Some(ref env_map) = spec.env {
         for (k, v) in env_map {
             command.env(k, v);
-        }
-    }
-
-    if let Some(ref profile) = spec.sandbox {
-        if profile.mode != craft_sandbox::SandboxMode::Off {
-            if !craft_sandbox::available() {
-                return Err(
-                    "sandbox enabled but backing binary not found; refusing to run unsandboxed"
-                        .to_string(),
-                );
-            }
-            craft_sandbox::apply(&mut command, profile)
-                .map_err(|e| format!("sandbox apply failed; refusing to run unsandboxed: {e}"))?;
         }
     }
 

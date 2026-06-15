@@ -64,6 +64,7 @@ pub(crate) fn build_sbpl(profile: &SandboxProfile) -> String {
         s.push_str("(deny network*)\n");
     }
     s.push_str("(deny file-write*)\n");
+    s.push_str("(allow file-write* (literal \"/dev/null\"))\n");
 
     if profile.mode == SandboxMode::WorkspaceWrite {
         let workspace = normalize(&profile.workspace);
@@ -150,14 +151,24 @@ mod tests {
     }
 
     #[test]
-    fn read_only_denies_all_writes() {
+    fn sbpl_allows_dev_null() {
+        let profile = SandboxProfile::workspace_write("/Users/test/project");
+        let sbpl = build_sbpl(&profile);
+        assert!(
+            sbpl.contains("(allow file-write* (literal \"/dev/null\"))"),
+            "profile must allow writes to /dev/null"
+        );
+    }
+
+    #[test]
+    fn read_only_denies_workspace_writes() {
         let mut profile = SandboxProfile::workspace_write("/Users/test/project");
         profile.mode = SandboxMode::ReadOnly;
         let sbpl = build_sbpl(&profile);
         assert!(sbpl.contains("(deny file-write*)"));
         assert!(
-            !sbpl.contains("(allow file-write*"),
-            "read-only profile must not re-allow any writes"
+            !sbpl.contains("/Users/test/project"),
+            "read-only profile must not allow writes to the workspace"
         );
     }
 
