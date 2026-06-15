@@ -1164,6 +1164,10 @@ async fn bash_timeout_round_trip() {
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
         .unwrap();
+    host.set_sandbox_config(craft_config::SandboxConfig {
+        mode: craft_config::SandboxMode::Off,
+        ..Default::default()
+    });
 
     let input = serde_json::json!({"command": "sleep 30", "timeout": 1});
     let err = exec_tool(&reg, "bash", input.clone()).await.unwrap_err();
