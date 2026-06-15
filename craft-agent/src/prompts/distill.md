@@ -9,7 +9,7 @@ Review the recent conversation and identify reusable workflows that could be pac
 3. For high-confidence candidates, draft a `SKILL.md` with:
    - YAML frontmatter: `name`, `description`, `when_to_use`.
    - Markdown body: step-by-step instructions a future agent could follow.
-4. Use `memory write skills/<name>.md` to save each proposed skill draft for the user to review.
+4. Write each draft to `.craft/skills/<name>/SKILL.md` in the project root using the `write` tool, creating the directory if needed. One skill per subdirectory, never use the `memory` tool for skills.
 
 ## Rules
 
