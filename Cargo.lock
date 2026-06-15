@@ -892,6 +892,7 @@ dependencies = [
  "craft-config",
  "craft-highlight",
  "craft-markdown",
+ "craft-sandbox",
  "craft-storage",
  "crossterm",
  "event-listener",
@@ -970,6 +971,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "wait-timeout",
+]
+
+[[package]]
+name = "craft-sandbox"
+version = "0.3.17+0.4.1"
+dependencies = [
+ "tempfile",
+ "test-case",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

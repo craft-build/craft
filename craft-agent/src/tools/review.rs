@@ -144,6 +144,9 @@ impl Review {
                 system,
                 event_tx: sub_event_tx,
                 tools,
+                promoted: crate::tools::PromotedTools::new(),
+                tool_build: None,
+                hooks: None,
             },
         )
         .with_cancel(child_cancel)

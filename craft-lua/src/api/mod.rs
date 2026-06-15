@@ -6,6 +6,7 @@ pub(crate) mod env;
 pub(crate) mod embed;
 pub(crate) mod fn_api;
 pub(crate) mod fs;
+pub(crate) mod hooks;
 pub(crate) mod json;
 pub(crate) mod log;
 pub(crate) mod net;

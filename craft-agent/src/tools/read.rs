@@ -136,7 +136,7 @@ impl Read {
     }
 }
 
-super::impl_tool!(Read, kind = "read");
+super::impl_tool!(Read, kind = "read", tier = super::ToolTier::Core);
 
 impl super::ToolInvocation for Read {
     fn start_header(&self) -> super::HeaderFuture {

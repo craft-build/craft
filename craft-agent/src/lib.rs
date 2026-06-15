@@ -61,6 +61,9 @@ pub trait InterruptSource: Send + Sync {
     fn poll(&self) -> Option<ExtractedCommand>;
 }
 
+pub mod hooks;
+pub use hooks::{HookDecision, HookFuture, Hooks, ToolUseEvent};
+
 #[derive(Clone)]
 pub struct McpPromptRef {
     pub qualified_name: String,

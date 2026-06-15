@@ -348,6 +348,7 @@ super::impl_tool!(
         | super::ToolAudience::RESEARCH_SUB
         | super::ToolAudience::GENERAL_SUB,
     kind = "execute",
+    tier = super::ToolTier::Core,
 );
 
 impl super::ToolInvocation for Batch {

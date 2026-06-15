@@ -34,6 +34,7 @@ super::impl_tool!(
         | super::ToolAudience::RESEARCH_SUB
         | super::ToolAudience::GENERAL_SUB,
     kind = "think",
+    tier = super::ToolTier::Core,
 );
 
 impl super::ToolInvocation for TodoWrite {

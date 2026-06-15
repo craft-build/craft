@@ -1,0 +1,12 @@
+[package]
+name = "craft-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+test-case = { workspace = true }
+tempfile = { workspace = true }

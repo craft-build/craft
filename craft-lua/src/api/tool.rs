@@ -343,6 +343,16 @@ pub(crate) fn create_api_table(
         )?;
     }
 
+    {
+        let plugin = Arc::clone(&plugin);
+        t.set(
+            "register_hook",
+            lua.create_function(move |lua, spec: Table| {
+                register_hook_from_lua(lua, &spec, Arc::clone(&plugin))
+            })?,
+        )?;
+    }
+
     t.set(
         "register_command",
         lua.create_function(move |lua, spec: Table| {
@@ -573,6 +583,34 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         .app_data_ref::<LuaCommandWriter>()
         .ok_or_else(|| mlua::Error::runtime("register_command: not initialized"))?;
     publish_command_snapshot(&map, &writer);
+
+    Ok(())
+}
+
+fn register_hook_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaResult<()> {
+    let event: String = spec
+        .get("event")
+        .map_err(|_| mlua::Error::runtime("register_hook: missing 'event'"))?;
+    let valid = matches!(
+        event.as_str(),
+        super::hooks::EVENT_SESSION_START
+            | super::hooks::EVENT_PRE_TOOL_USE
+            | super::hooks::EVENT_POST_TOOL_USE
+    );
+    if !valid {
+        return Err(mlua::Error::runtime(format!(
+            "register_hook: invalid event '{event}'. Must be session_start, pre_tool_use, or post_tool_use."
+        )));
+    }
+    let handler: Function = spec
+        .get("handler")
+        .map_err(|_| mlua::Error::runtime("register_hook: missing 'handler'"))?;
+    let handler_key = lua.create_registry_value(handler)?;
+
+    let mut map = lua
+        .app_data_mut::<super::hooks::HookHandlerMap>()
+        .ok_or_else(|| mlua::Error::runtime("register_hook: not initialized"))?;
+    map.entry(event).or_default().push((plugin, handler_key));
 
     Ok(())
 }

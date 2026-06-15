@@ -33,12 +33,18 @@ pub async fn run(yolo: bool) -> Result<()> {
 
     if yolo || config.always_yolo {
         config.permissions.allow_all = true;
+        config.sandbox.mode = craft_config::SandboxMode::Off;
+        config.sandbox.enabled = false;
     }
     config.validate()?;
 
     plugin_host
         .load_builtins(&config.plugins)
         .context("load builtin plugins")?;
+
+    if let Some(handle) = plugin_host.event_handle().as_ref() {
+        handle.set_sandbox_config(config.sandbox.clone());
+    }
 
     let timeouts = craft_providers::Timeouts {
         connect: config.provider.connect_timeout,

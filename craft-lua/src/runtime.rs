@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwap;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -53,6 +55,10 @@ fn strip_traceback(err: &mlua::Error) -> String {
 }
 
 pub type LoadResult = Result<(), PluginError>;
+
+/// Shared sandbox config readable from the VM thread, updatable from the host.
+pub type SharedSandboxConfig = Arc<ArcSwap<craft_config::SandboxConfig>>;
+
 pub(crate) enum HintContent {
     Static(String),
     Callback(RegistryKey),
@@ -131,6 +137,17 @@ pub enum Request {
     RestoreToolBatch {
         items: Vec<RestoreItem>,
         reply: flume::Sender<Vec<Option<RestoreReply>>>,
+    },
+    RunHook {
+        event: String,
+        tool: String,
+        input: Value,
+        output: String,
+        is_error: bool,
+        reply: flume::Sender<crate::api::hooks::HookReply>,
+    },
+    SetSandboxConfig {
+        config: craft_config::SandboxConfig,
     },
 }
 
@@ -627,6 +644,10 @@ impl LuaRuntime {
         lua.set_app_data(SpawnQueue::default());
         lua.set_app_data(command_writer);
         lua.set_app_data(PromptHintCallbacks::default());
+        lua.set_app_data(crate::api::hooks::HookHandlerMap::new());
+        lua.set_app_data::<SharedSandboxConfig>(Arc::new(ArcSwap::from_pointee(
+            craft_config::SandboxConfig::default(),
+        )));
         lua.set_app_data::<Arc<dyn TerminalBackend>>(Arc::clone(&terminal_backend));
 
         Ok(Self {
@@ -1689,10 +1710,15 @@ pub fn spawn(
                             let slots = rt.collect_prompt_slots().await;
                             let _ = reply.send(slots);
                         }
-                        Request::SetTerminalBackend { backend } => {
-                            gate.drain().await;
-                            rt.lua.set_app_data::<Arc<dyn TerminalBackend>>(backend);
+                    Request::SetTerminalBackend { backend } => {
+                        gate.drain().await;
+                        rt.lua.set_app_data::<Arc<dyn TerminalBackend>>(backend);
+                    }
+                    Request::SetSandboxConfig { config } => {
+                        if let Some(shared) = rt.lua.app_data_ref::<SharedSandboxConfig>() {
+                            shared.store(Arc::new(config));
                         }
+                    }
                     Request::RestoreToolAsync { item, event_tx } => {
                         let id = item.tool_use_id.clone();
                         let theme_gen = item.theme_gen;
@@ -1709,6 +1735,26 @@ pub fn spawn(
                         }
                         drain_spawn_queue(&rt.lua, &gate);
                         let _ = reply.send(replies);
+                    }
+                    Request::RunHook {
+                        event,
+                        tool,
+                        input,
+                        output,
+                        is_error,
+                        reply,
+                    } => {
+                        let result = crate::api::hooks::run_hooks_in_vm(
+                            &rt.lua,
+                            &event,
+                            &tool,
+                            &input,
+                            &output,
+                            is_error,
+                        )
+                        .await;
+                        drain_spawn_queue(&rt.lua, &gate);
+                        let _ = reply.send(result);
                     }
                     }
                 }

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
@@ -14,7 +14,7 @@ use crate::mcp::{McpHandle, UNKNOWN_MCP};
 use crate::task_set::TaskSet;
 use crate::tools::ToolContext;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
-use crate::{AgentError, AgentEvent, AgentMode, ToolDoneEvent, ToolOutput, ToolStartEvent};
+use crate::{AgentError, AgentEvent, AgentMode, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent};
 
 use super::dedup::ToolDedupCache;
 use super::trust::TrustTracker;
@@ -32,6 +32,8 @@ const MCP_BLOCKED_IN_PLAN: &str = "MCP tools are not available in plan mode";
 const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
 const MCP_SCOPE_PREVIEW_BYTES: usize = 200;
 const NULL_VALUE: Value = Value::Null;
+const PRE_TOOL_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
+const POST_TOOL_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub(super) struct RecentCalls(VecDeque<(String, u64)>);
@@ -87,6 +89,33 @@ pub async fn run(
         output: ToolOutput::Plain(msg),
         is_error: true,
     };
+
+    let hook_input: Option<Value> = if ctx.config.hooks_enabled
+        && let Some(hooks) = &ctx.hooks
+    {
+        let event = ToolUseEvent {
+            tool: name.to_string(),
+            input: input.clone(),
+        };
+        let hooks_clone = Arc::clone(hooks);
+        let join = tokio::spawn(async move { hooks_clone.pre_tool_use(event).await });
+        match tokio::time::timeout(PRE_TOOL_HOOK_TIMEOUT, join).await {
+            Ok(Ok(HookDecision::Allow)) => None,
+            Ok(Ok(HookDecision::Transform { input: new })) => Some(new),
+            Ok(Ok(HookDecision::Deny { message })) => return done_error(message),
+            Ok(Err(join_err)) => {
+                warn!(tool = %name, error = %join_err, "pre_tool_use hook task failed, allowing");
+                None
+            }
+            Err(_) => {
+                warn!(tool = %name, "pre_tool_use hook timed out, allowing");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let input: &Value = hook_input.as_ref().unwrap_or(input);
 
     if let Some(entry) = entry {
         let invocation = match entry.tool.parse(input) {
@@ -159,7 +188,7 @@ pub async fn run(
         let result = invocation.execute(ctx).await;
 
         let elapsed = started.elapsed();
-        match result {
+        let done = match result {
             Ok(output) => {
                 debug!(
                     tool = %name,
@@ -185,7 +214,9 @@ pub async fn run(
                 );
                 done_error(message)
             }
-        }
+        };
+        fire_post_tool_use(ctx, name, input, &done);
+        done
     } else if mcp.is_some_and(|m| m.has_tool(name)) {
         // MCP tools skip parsing, so we assemble the start event manually.
         let start = ToolStartEvent {
@@ -201,12 +232,40 @@ pub async fn run(
         if matches!(emit, Emit::Notify) {
             let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
         }
-        execute_mcp_tool(ctx, &id, tool_id, name, input).await
+        let done = execute_mcp_tool(ctx, &id, tool_id, name, input).await;
+        fire_post_tool_use(ctx, name, input, &done);
+        done
     } else {
         let msg = format!("{UNKNOWN_TOOL_PREFIX}: {name}");
         warn!(tool = %name, "unknown tool");
         done_error(msg)
     }
+}
+
+/// Best-effort `post_tool_use` dispatch. Runs on a background task with a hard
+/// timeout so a slow/throwing hook can never stall the agent turn.
+fn fire_post_tool_use(ctx: &ToolContext, name: &str, input: &Value, done: &ToolDoneEvent) {
+    if !ctx.config.hooks_enabled {
+        return;
+    }
+    let Some(hooks) = ctx.hooks.clone() else {
+        return;
+    };
+    let event = ToolUseEvent {
+        tool: name.to_string(),
+        input: input.clone(),
+    };
+    let output_text = done.output.as_text();
+    let is_error = done.is_error;
+    let tool_name = event.tool.clone();
+    let join = tokio::spawn(async move {
+        hooks.post_tool_use(event, output_text, is_error).await
+    });
+    tokio::spawn(async move {
+        if tokio::time::timeout(POST_TOOL_HOOK_TIMEOUT, join).await.is_err() {
+            warn!(tool = %tool_name, "post_tool_use hook timed out");
+        }
+    });
 }
 
 async fn enforce_permission(
@@ -634,6 +693,7 @@ fn record_tool_result(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use test_case::test_case;
@@ -759,5 +819,141 @@ mod tests {
             "error should be the permission-denied message, got: {}",
             done.output.as_text()
         );
+    }
+
+    use crate::hooks::test_support::RecordingHooks;
+    use crate::hooks::HookDecision;
+    use crate::tools::test_support::stub_ctx_with_hooks;
+
+    const DENY_MESSAGE: &str = "blocked by hook";
+
+    #[tokio::test]
+    async fn pre_tool_use_deny_blocks_execution() {
+        let hooks = RecordingHooks::with_decision(HookDecision::Deny {
+            message: DENY_MESSAGE.into(),
+        });
+        let ctx = stub_ctx_with_hooks(&AgentMode::Build, hooks.clone());
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("never.txt");
+        let done = run(
+            ToolRegistry::native(),
+            None,
+            "t1".into(),
+            crate::tools::WRITE_TOOL_NAME,
+            &serde_json::json!({"path": path.to_str().unwrap(), "content": "x"}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(done.is_error);
+        assert_eq!(done.output.as_text(), DENY_MESSAGE);
+        assert!(!path.exists(), "denied tool must not run");
+        assert!(
+            hooks.snapshot().iter().any(|e| e.starts_with("pre:")),
+            "pre hook must fire"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_transform_replaces_input() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real.rs");
+        fs::write(&real, "fn real() {}").unwrap();
+        let decoy = dir.path().join("decoy.rs");
+        fs::write(&decoy, "fn decoy() {}").unwrap();
+        let real_str = real.to_str().unwrap().to_string();
+
+        let hooks = RecordingHooks::with_decision(HookDecision::Transform {
+            input: serde_json::json!({"path": real_str}),
+        });
+        let ctx = stub_ctx_with_hooks(&AgentMode::Build, hooks);
+        ctx.file_tracker.record_read(Path::new(&real_str));
+
+        let done = run(
+            ToolRegistry::native(),
+            None,
+            "t1".into(),
+            crate::tools::READ_TOOL_NAME,
+            &serde_json::json!({"path": decoy.to_str().unwrap()}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(!done.is_error, "transformed read should succeed");
+        let text = done.output.as_text();
+        assert!(
+            text.contains("fn real()"),
+            "transformed input should be used, got: {text}"
+        );
+        assert!(
+            !text.contains("fn decoy()"),
+            "original input must not be used"
+        );
+    }
+
+    #[tokio::test]
+    async fn hooks_disabled_skips_dispatch() {
+        let hooks = RecordingHooks::with_decision(HookDecision::Deny {
+            message: DENY_MESSAGE.into(),
+        });
+        let mut ctx = stub_ctx_with_hooks(&AgentMode::Build, hooks.clone());
+        ctx.config.hooks_enabled = false;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ok.txt");
+        let path_str = path.to_str().unwrap().to_string();
+        fs::write(&path, "hello").unwrap();
+        ctx.file_tracker.record_read(Path::new(&path_str));
+        let done = run(
+            ToolRegistry::native(),
+            None,
+            "t1".into(),
+            crate::tools::READ_TOOL_NAME,
+            &serde_json::json!({"path": path_str}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(!done.is_error, "deny must be ignored when hooks disabled");
+        assert!(hooks.snapshot().is_empty(), "no hooks fire when disabled");
+    }
+
+    #[tokio::test]
+    async fn timing_out_hook_does_not_crash_agent() {
+        struct HangingHooks;
+        impl crate::Hooks for HangingHooks {
+            fn pre_tool_use(
+                &self,
+                _event: crate::ToolUseEvent,
+            ) -> crate::HookFuture<'_, crate::HookDecision> {
+                Box::pin(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    crate::HookDecision::Deny {
+                        message: "should never arrive".into(),
+                    }
+                })
+            }
+        }
+        let hooks: Arc<dyn crate::Hooks> = Arc::new(HangingHooks);
+        let ctx = stub_ctx_with_hooks(&AgentMode::Build, hooks);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ok.txt");
+        let path_str = path.to_str().unwrap().to_string();
+        fs::write(&path, "hello").unwrap();
+        ctx.file_tracker.record_read(Path::new(&path_str));
+
+        let done = run(
+            ToolRegistry::native(),
+            None,
+            "t1".into(),
+            crate::tools::READ_TOOL_NAME,
+            &serde_json::json!({"path": path_str}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(!done.is_error, "timing-out hook must not crash the agent");
     }
 }

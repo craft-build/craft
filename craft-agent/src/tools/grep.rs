@@ -173,7 +173,7 @@ impl Grep {
     }
 }
 
-super::impl_tool!(Grep, kind = "search");
+super::impl_tool!(Grep, kind = "search", tier = super::ToolTier::Core);
 
 impl super::ToolInvocation for Grep {
     fn start_header(&self) -> super::HeaderFuture {

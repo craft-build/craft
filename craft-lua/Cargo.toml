@@ -14,6 +14,7 @@ craft-agent = { workspace = true }
 craft-config = { workspace = true }
 craft-highlight = { workspace = true }
 craft-markdown = { workspace = true }
+craft-sandbox = { workspace = true }
 mlua = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

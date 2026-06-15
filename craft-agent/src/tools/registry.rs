@@ -27,6 +27,16 @@ bitflags! {
     }
 }
 
+/// Dynamic tool discovery tier. `Core` tools are advertised every turn; `Extended`
+/// tools are only advertised after the model promotes them via `list_tools`.
+/// Defaults to `Extended` so an unmarked tool is never silently sent every turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolTier {
+    Core,
+    #[default]
+    Extended,
+}
+
 impl Default for ToolAudience {
     fn default() -> Self {
         Self::all()
@@ -201,6 +211,9 @@ pub trait Tool: Send + Sync + 'static {
     fn parse(&self, input: &Value) -> Result<Box<dyn ToolInvocation>, ParseError>;
     fn tool_kind(&self) -> Option<&str> {
         None
+    }
+    fn tier(&self) -> ToolTier {
+        ToolTier::Extended
     }
 }
 

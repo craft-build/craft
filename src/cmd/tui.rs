@@ -98,6 +98,8 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     if cli.yolo || config.always_yolo {
         config.permissions.allow_all = true;
+        config.sandbox.mode = craft_config::SandboxMode::Off;
+        config.sandbox.enabled = false;
     }
     if !cli.allowed_tools.is_empty() {
         config.agent.allowed_tools = cli
@@ -111,6 +113,10 @@ pub async fn run(cli: Cli) -> Result<()> {
     plugin_host
         .load_builtins(&config.plugins)
         .context("load builtin plugins")?;
+
+    if let Some(handle) = plugin_host.event_handle().as_ref() {
+        handle.set_sandbox_config(config.sandbox.clone());
+    }
 
     let lua_command_reader = plugin_host.command_reader();
     let ui_action_rx = plugin_host.ui_action_rx();

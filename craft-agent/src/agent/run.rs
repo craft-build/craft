@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 use tracing::{error, info, warn};
@@ -29,6 +30,7 @@ use crate::{
 use craft_config::ToolOutputLines;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
+const HOOK_BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
 const DEFAULT_SMALL_MODEL_RATIO: f64 = 0.60;
 const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
@@ -66,6 +68,9 @@ pub struct AgentRunParams<'h> {
     pub system: String,
     pub event_tx: EventSender,
     pub tools: Value,
+    pub promoted: crate::tools::PromotedTools,
+    pub tool_build: Option<crate::tools::ToolBuild>,
+    pub hooks: Option<Arc<dyn crate::Hooks>>,
 }
 
 pub struct Agent<'h> {
@@ -106,6 +111,10 @@ pub struct Agent<'h> {
     snapshot: SnapshotManager,
     validator: Validator,
     escalation: EscalationTracker,
+    promoted: crate::tools::PromotedTools,
+    dynamic: crate::tools::DynamicContext,
+    tool_build: Option<crate::tools::ToolBuild>,
+    hooks: Option<Arc<dyn crate::Hooks>>,
     #[cfg(feature = "onnx")]
     scorer: Option<super::semantic::RelevanceScorer>,
     #[cfg(feature = "onnx")]
@@ -119,6 +128,7 @@ const MAX_JUDGE_CONTINUATIONS: u8 = 5;
 
 impl<'h> Agent<'h> {
     pub fn new(params: AgentParams, run: AgentRunParams<'h>) -> Self {
+        let dynamic = crate::tools::DynamicContext::from_config(&params.config);
         Self {
             provider: params.provider,
             model: Arc::new(params.model),
@@ -160,6 +170,10 @@ impl<'h> Agent<'h> {
                 craft_config::ValidationConfig::default(),
             ),
             escalation: EscalationTracker::new(Default::default()),
+            promoted: run.promoted,
+            dynamic,
+            tool_build: run.tool_build,
+            hooks: run.hooks,
             #[cfg(feature = "onnx")]
             scorer: if params.compression.semantic_enabled {
                 Some(super::semantic::RelevanceScorer::new())
@@ -258,6 +272,15 @@ impl<'h> Agent<'h> {
             "agent run started"
         );
 
+        if self.config.hooks_enabled
+            && let Some(hooks) = &self.hooks
+            && tokio::time::timeout(HOOK_BEST_EFFORT_TIMEOUT, hooks.session_start())
+                .await
+                .is_err()
+        {
+            warn!("session_start hook timed out");
+        }
+
         let result = self.run_loop().await;
 
         if matches!(result, Err(AgentError::Cancelled)) {
@@ -311,6 +334,16 @@ impl<'h> Agent<'h> {
     async fn turn(&mut self) -> Result<TurnOutcome, AgentError> {
         if self.cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
+        }
+
+        if let Some(build) = &self.tool_build {
+            self.tools = crate::tools::build_active_tools(
+                build,
+                &self.model,
+                &self.config,
+                &self.dynamic,
+                &self.promoted,
+            );
         }
 
         #[cfg(feature = "onnx")]
@@ -624,6 +657,9 @@ impl<'h> Agent<'h> {
             findings_store: self.findings_store.clone(),
             fs: Arc::clone(&self.fs),
             parent_messages: Arc::from(self.history.as_slice()),
+            promoted: self.promoted.clone(),
+            dynamic: self.dynamic.clone(),
+            hooks: self.hooks.clone(),
         }
     }
 
@@ -933,6 +969,9 @@ mod tests {
                 system: "system".into(),
                 event_tx: EventSender::new(raw_tx, 0),
                 tools: serde_json::json!([]),
+                promoted: crate::tools::PromotedTools::new(),
+                tool_build: None,
+                hooks: None,
             },
             event_rx,
         )

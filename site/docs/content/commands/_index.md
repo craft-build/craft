@@ -28,6 +28,10 @@ Type `/` in the input box to open the command palette.
 | `/thinking` | Toggle extended thinking (off, adaptive, or budget) |
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/exit` | Exit the application |
+| `/goal` | Set a goal the agent must meet before stopping (blank to clear) |
+| `/dream` | Consolidate and curate project memory |
+| `/distill` | Discover reusable workflows and propose skills |
+| `/checkpoint` | Write a session checkpoint for smooth resume |
 | `/memory` | View, edit, and delete memory files |
 
 ## Custom commands

@@ -7,7 +7,7 @@ use craft_agent::mcp::config::McpServerStatus;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::template;
 use craft_agent::template::Vars;
-use craft_agent::tools::{DescriptionContext, FileReadTracker, ToolFilter, ToolRegistry};
+use craft_agent::tools::{FileReadTracker};
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelToken,
     CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History, Instructions,
@@ -29,6 +29,7 @@ pub(super) struct AgentLoop {
     vars: Vars,
     instructions: Instructions,
     tools: Value,
+    promoted: craft_agent::tools::PromotedTools,
     mcp_handle: Option<McpHandle>,
     history: History,
     cancel_map: Arc<Mutex<CancelMap>>,
@@ -76,6 +77,7 @@ impl AgentLoop {
             vars: Vars::default(),
             instructions: Instructions::default(),
             tools: Value::Null,
+            promoted: craft_agent::tools::PromotedTools::new(),
             mcp_handle,
             history: History::new(initial_history).with_mirror(shared_history),
             cancel_map,
@@ -145,9 +147,8 @@ impl AgentLoop {
         }
 
         let slot = self.model_slot.load();
-        self.tools = self.build_tools(&slot.model);
+        self.rebuild_tools(&slot.model);
         if let Some(ref mcp) = self.mcp_handle {
-            mcp.extend_tools(&mut self.tools);
             spawn_oauth_for_needs_auth(mcp);
         }
         !self.init_cancel.is_cancelled()
@@ -247,6 +248,15 @@ impl AgentLoop {
                 system,
                 event_tx,
                 tools: self.tools.clone(),
+                promoted: self.promoted.clone(),
+                tool_build: Some(craft_agent::tools::ToolBuild {
+                    vars: self.vars.clone(),
+                    excluded: Vec::new(),
+                    mcp: self.mcp_handle.clone(),
+                }),
+                hooks: self.lua_handle.as_ref().map(|h| {
+                    craft_lua::LuaHooks::new(h.clone()) as Arc<dyn craft_agent::Hooks>
+                }),
             },
         )
         .with_loaded_instructions(self.instructions.loaded.clone())
@@ -267,18 +277,19 @@ impl AgentLoop {
     }
 
     fn rebuild_tools(&mut self, model: &Model) {
-        let mut tools = self.build_tools(model);
-        if let Some(ref mcp) = self.mcp_handle {
-            mcp.extend_tools(&mut tools);
-        }
-        self.tools = tools;
-    }
-
-    fn build_tools(&self, model: &Model) -> Value {
-        let examples = model.supports_tool_examples();
-        let filter = ToolFilter::from_config(&self.config, &[]);
-        let ctx = DescriptionContext { filter: &filter };
-        ToolRegistry::native().definitions(&self.vars, &ctx, examples)
+        let tool_build = craft_agent::tools::ToolBuild {
+            vars: self.vars.clone(),
+            excluded: Vec::new(),
+            mcp: self.mcp_handle.clone(),
+        };
+        let dynamic = craft_agent::tools::DynamicContext::from_config(&self.config);
+        self.tools = craft_agent::tools::build_active_tools(
+            &tool_build,
+            model,
+            &self.config,
+            &dynamic,
+            &self.promoted,
+        );
     }
 
     async fn reload_instructions(&mut self) {

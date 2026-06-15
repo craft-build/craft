@@ -18,7 +18,7 @@ use crate::cancel::CancelToken;
 use crate::permissions::PermissionManager;
 use crate::prompt::ResolvedSlots;
 use crate::template;
-use crate::tools::{DescriptionContext, FileReadTracker, FsBackend, ToolFilter, ToolRegistry};
+use crate::tools::{FileReadTracker, FsBackend};
 use crate::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
     Envelope, EventSender, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
@@ -108,6 +108,8 @@ struct AgentSetup {
     vars: template::Vars,
     instructions: agent::Instructions,
     tools: Value,
+    tool_build: crate::tools::ToolBuild,
+    promoted: crate::tools::PromotedTools,
 }
 
 fn setup(
@@ -118,31 +120,21 @@ fn setup(
 ) -> AgentSetup {
     let vars = template::env_vars();
     let instructions = agent::load_instructions(&vars.apply("{cwd}"));
-    let tools = tool_definitions(&vars, model, config, excluded_tools, mcp_handle);
-
+    let tool_build = crate::tools::ToolBuild {
+        vars: vars.clone(),
+        excluded: excluded_tools.to_vec(),
+        mcp: mcp_handle.cloned(),
+    };
+    let dynamic = crate::tools::DynamicContext::from_config(config);
+    let promoted = crate::tools::PromotedTools::new();
+    let tools = crate::tools::build_active_tools(&tool_build, model, config, &dynamic, &promoted);
     AgentSetup {
         vars,
         instructions,
         tools,
+        tool_build,
+        promoted,
     }
-}
-
-fn tool_definitions(
-    vars: &template::Vars,
-    model: &Model,
-    config: &AgentConfig,
-    excluded_tools: &[&'static str],
-    mcp_handle: Option<&McpHandle>,
-) -> Value {
-    let filter = ToolFilter::from_config(config, excluded_tools);
-    let ctx = DescriptionContext { filter: &filter };
-    let mut tools = ToolRegistry::native().definitions(vars, &ctx, model.supports_tool_examples());
-
-    if let Some(handle) = mcp_handle {
-        handle.extend_tools(&mut tools);
-    }
-
-    tools
 }
 
 pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
@@ -152,6 +144,8 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         vars,
         instructions,
         tools,
+        tool_build,
+        promoted,
     } = setup(
         &params.model,
         &params.config,
@@ -213,6 +207,9 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     system,
                     event_tx,
                     tools,
+                    promoted,
+                    tool_build: Some(tool_build),
+                    hooks: None,
                 },
             )
             .with_loaded_instructions(instructions.loaded)
@@ -280,6 +277,8 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         vars,
         instructions,
         mut tools,
+        tool_build,
+        promoted,
     } = setup(
         &params.model,
         &params.config,
@@ -341,12 +340,13 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                     match provider::from_model(&new_model, params.timeouts).await {
                         Ok(p) => {
                             provider = Arc::from(p);
-                            tools = tool_definitions(
-                                &vars,
+                            let dynamic = crate::tools::DynamicContext::from_config(&params.config);
+                            tools = crate::tools::build_active_tools(
+                                &tool_build,
                                 &new_model,
                                 &params.config,
-                                &params.excluded_tools,
-                                params.mcp_handle.as_ref(),
+                                &dynamic,
+                                &promoted,
                             );
                             model = new_model;
                         }
@@ -410,6 +410,9 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         system,
                         event_tx,
                         tools: tools.clone(),
+                        promoted: promoted.clone(),
+                        tool_build: Some(tool_build.clone()),
+                        hooks: None,
                     },
                 )
                 .with_loaded_instructions(instructions.loaded.clone())

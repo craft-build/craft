@@ -190,6 +190,12 @@ impl PluginHost {
             .map_err(|_| PluginError::HostDead)
     }
 
+    pub fn set_sandbox_config(&self, config: craft_config::SandboxConfig) {
+        if let Ok(tx) = self.tx() {
+            let _ = tx.send(Request::SetSandboxConfig { config });
+        }
+    }
+
     fn send_load(
         &self,
         name: Arc<str>,
@@ -286,6 +292,14 @@ pub struct EventHandle {
 }
 
 impl EventHandle {
+    pub(crate) fn tx(&self) -> &flume::Sender<Request> {
+        &self.tx
+    }
+
+    pub fn set_sandbox_config(&self, config: craft_config::SandboxConfig) {
+        let _ = self.tx.send(Request::SetSandboxConfig { config });
+    }
+
     pub fn fire_click(&self, tool_id: &str, row: u32) -> Option<ClickReply> {
         let (tx, rx) = flume::bounded(1);
         let _ = self.tx.try_send(Request::FireBufClick {

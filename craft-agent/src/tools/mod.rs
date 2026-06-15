@@ -9,11 +9,13 @@
 mod apply_patch;
 mod batch;
 mod code_execution;
+mod dynamic;
 mod edit;
 mod file_tracker;
 pub mod fs_backend;
 mod fuzzy_replace;
 mod grep;
+mod list_tools;
 mod multiedit;
 mod read;
 mod read_findings;
@@ -31,7 +33,9 @@ pub use fs_backend::{FsBackend, FsFuture, LocalFs};
 pub use registry::{
     BoxFuture, ExecFuture, HeaderFuture, HeaderResult, Native, ParseError, PermissionScopes,
     RegisteredTool, RegistryError, Tool, ToolAudience, ToolInvocation, ToolRegistry, ToolSource,
+    ToolTier,
 };
+pub use dynamic::{DynamicContext, PromotedTools, ToolBuild, build_active_tools, filter_to_active};
 
 use std::collections::HashSet;
 use std::env;
@@ -155,6 +159,7 @@ pub const TODOWRITE_TOOL_NAME: &str = todowrite::TodoWrite::NAME;
 pub const WRITE_TOOL_NAME: &str = write::Write::NAME;
 pub const CODE_EXECUTION_TOOL_NAME: &str = code_execution::CodeExecution::NAME;
 pub const READ_FINDINGS_TOOL_NAME: &str = read_findings::ReadFindings::NAME;
+pub const LIST_TOOLS_TOOL_NAME: &str = list_tools::ListTools::NAME;
 
 pub(crate) const PLAN_WRITE_RESTRICTED: &str = "write restricted to plan file in plan mode";
 pub(crate) const DEADLINE_EXCEEDED: &str = "timeout exceeded";
@@ -230,6 +235,9 @@ pub struct ToolContext {
     pub findings_store: Option<crate::agent::SharedFindingsStore>,
     pub fs: Arc<dyn FsBackend>,
     pub parent_messages: Arc<[craft_providers::Message]>,
+    pub promoted: crate::tools::dynamic::PromotedTools,
+    pub dynamic: crate::tools::dynamic::DynamicContext,
+    pub hooks: Option<Arc<dyn crate::Hooks>>,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -517,10 +525,13 @@ macro_rules! impl_tool {
     (@audience_body $aud:expr) => { $aud };
     (@kind_body) => { None };
     (@kind_body $kind:expr) => { Some($kind) };
+    (@tier_body) => { $crate::tools::registry::ToolTier::Extended };
+    (@tier_body $tier:expr) => { $tier };
     (
         $ty:ty
         $(, audience = $aud:expr)?
         $(, kind = $kind:expr)?
+        $(, tier = $tier:expr)?
         $(, augment = $augment:expr)?
         $(,)?
     ) => {
@@ -552,6 +563,10 @@ macro_rules! impl_tool {
 
             fn tool_kind(&self) -> Option<&str> {
                 $crate::tools::impl_tool!(@kind_body $($kind)?)
+            }
+
+            fn tier(&self) -> $crate::tools::registry::ToolTier {
+                $crate::tools::impl_tool!(@tier_body $($tier)?)
             }
 
             fn parse(&self, input: &serde_json::Value)
@@ -612,6 +627,7 @@ register_tools! {
     task::Task,
     batch::Batch,
     code_execution::CodeExecution,
+    list_tools::ListTools,
     styleguide::StyleguideList,
     styleguide::StyleguideSearch,
     styleguide::StyleguideGet,
@@ -690,6 +706,9 @@ pub(crate) fn interpreter_ctx(
         findings_store: None,
         fs: Arc::new(LocalFs),
         parent_messages: Arc::from(Vec::new()),
+        promoted: crate::tools::dynamic::PromotedTools::new(),
+        dynamic: crate::tools::dynamic::DynamicContext::disabled(),
+        hooks: None,
     }
 }
 
@@ -780,6 +799,17 @@ pub mod test_support {
     #[cfg(test)]
     pub(crate) fn pre_read(ctx: &ToolContext, path: &str) {
         ctx.file_tracker.record_read(Path::new(path));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stub_ctx_with_hooks(
+        mode: &AgentMode,
+        hooks: Arc<dyn crate::Hooks>,
+    ) -> ToolContext {
+        let mut ctx = stub_ctx(mode);
+        ctx.hooks = Some(hooks);
+        ctx.config.hooks_enabled = true;
+        ctx
     }
 }
 

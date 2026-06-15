@@ -196,6 +196,7 @@ super::impl_tool!(
         | super::ToolAudience::GENERAL_SUB
         | super::ToolAudience::INTERPRETER,
     kind = "edit",
+    tier = super::ToolTier::Core,
 );
 
 impl super::ToolInvocation for ApplyPatch {

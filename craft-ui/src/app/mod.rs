@@ -1123,6 +1123,18 @@ impl App {
             "/cd" => self.cmd_cd(&cmd.args),
             "/yolo" => {
                 let enabled = self.permissions.toggle_yolo();
+                let sandbox_cfg = if enabled {
+                    craft_config::SandboxConfig {
+                        enabled: false,
+                        mode: craft_config::SandboxMode::Off,
+                        network: true,
+                    }
+                } else {
+                    craft_config::SandboxConfig::default()
+                };
+                if let Some(handle) = &self.lua_event_handle {
+                    handle.set_sandbox_config(sandbox_cfg);
+                }
                 let msg = if enabled {
                     "YOLO mode enabled"
                 } else {

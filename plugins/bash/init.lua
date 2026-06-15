@@ -370,6 +370,7 @@ craft.api.register_tool({
     craft.fn.jobstart(command, {
       cwd = workdir,
       env = { GIT_TERMINAL_PROMPT = "0" },
+      sandbox = true,
       on_stdout = function(_, line)
         if not has_output then
           has_output = true

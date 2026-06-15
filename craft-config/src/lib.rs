@@ -229,6 +229,8 @@ pub struct RawConfig {
     pub index: IndexFileConfig,
     #[serde(default)]
     pub compression: CompressionFileConfig,
+    #[serde(default)]
+    pub sandbox: SandboxFileConfig,
     pub tools: HashMap<String, ToolFileConfig>,
 }
 
@@ -241,6 +243,7 @@ impl RawConfig {
         self.storage.merge(overlay.storage);
         self.index.merge(overlay.index);
         self.compression.merge(overlay.compression);
+        self.sandbox.merge(overlay.sandbox);
         self.tools.extend(overlay.tools);
     }
 
@@ -263,6 +266,7 @@ impl RawConfig {
             provider: ProviderConfig::from_file(self.provider),
             storage: StorageConfig::from_file(self.storage),
             compression: CompressionConfig::from_file(self.compression),
+            sandbox: SandboxConfig::from_file(self.sandbox),
             permissions: PermissionsConfig::default(),
             plugins: PluginsConfig::from_tools(self.tools),
         })
@@ -356,6 +360,9 @@ pub struct AgentFileConfig {
     pub validation: ValidationConfig,
     #[serde(default)]
     pub small_model: SmallModelConfig,
+    #[serde(default)]
+    pub dynamic_tools: DynamicToolsConfig,
+    pub hooks_enabled: Option<bool>,
     pub judge_model: Option<String>,
 }
 
@@ -374,6 +381,7 @@ impl AgentFileConfig {
               compaction_buffer,
             search_result_limit,
             interpreter_max_memory_mb,
+            hooks_enabled,
             judge_model
         );
     }
@@ -469,6 +477,20 @@ impl CompressionFileConfig {
     }
 }
 
+#[derive(Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxFileConfig {
+    pub enabled: Option<bool>,
+    pub mode: Option<SandboxMode>,
+    pub network: Option<bool>,
+}
+
+impl SandboxFileConfig {
+    fn merge(&mut self, overlay: SandboxFileConfig) {
+        merge_option!(self, overlay, enabled, mode, network);
+    }
+}
+
 #[derive(Default)]
 struct PermissionsFileConfig {
     allow_all: Option<bool>,
@@ -550,6 +572,7 @@ pub struct Config {
     pub provider: ProviderConfig,
     pub storage: StorageConfig,
     pub compression: CompressionConfig,
+    pub sandbox: SandboxConfig,
     pub permissions: PermissionsConfig,
     pub plugins: PluginsConfig,
 }
@@ -820,6 +843,23 @@ impl SmallModelConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DynamicToolsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub core: Vec<String>,
+}
+
+impl Default for DynamicToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            core: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, ConfigSection, Serialize)]
 #[config(section = "agent")]
 pub struct AgentConfig {
@@ -873,6 +913,12 @@ pub struct AgentConfig {
 
     #[config(skip, default = "SmallModelConfig::default()")]
     pub small_model: SmallModelConfig,
+
+    #[config(skip, default = "DynamicToolsConfig::default()")]
+    pub dynamic_tools: DynamicToolsConfig,
+
+    #[config(skip, default = "true")]
+    pub hooks_enabled: bool,
 
     #[config(skip, default = "None")]
     pub max_turns: Option<u32>,
@@ -932,6 +978,8 @@ impl AgentConfig {
             trust_decay: file.trust_decay,
             validation: file.validation,
             small_model: file.small_model,
+            dynamic_tools: file.dynamic_tools,
+            hooks_enabled: file.hooks_enabled.unwrap_or(true),
             max_turns: None,
             judge_model: file.judge_model,
         }
@@ -1110,6 +1158,46 @@ impl CompressionConfig {
             semantic_enabled: f
                 .semantic_enabled
                 .unwrap_or(DEFAULT_SEMANTIC_ENABLED),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    #[default]
+    WorkspaceWrite,
+    ReadOnly,
+    DangerFullAccess,
+    Off,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SandboxConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: SandboxMode,
+    #[serde(default)]
+    pub network: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: SandboxMode::WorkspaceWrite,
+            network: false,
+        }
+    }
+}
+
+impl SandboxConfig {
+    fn from_file(f: SandboxFileConfig) -> Self {
+        Self {
+            enabled: f.enabled.unwrap_or(true),
+            mode: f.mode.unwrap_or_default(),
+            network: f.network.unwrap_or(false),
         }
     }
 }
@@ -1540,6 +1628,7 @@ mod tests {
             provider: ProviderConfig::default(),
             storage: StorageConfig::default(),
             compression: CompressionConfig::default(),
+            sandbox: SandboxConfig::default(),
             permissions: PermissionsConfig::default(),
             plugins: PluginsConfig::default(),
         };

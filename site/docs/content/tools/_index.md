@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Craft ships with 25 built-in tools. This is the full reference.
+Craft ships with 26 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -31,7 +31,7 @@ Read a file or directory. Returns contents with line numbers (1-indexed).
 |-----------|------|----------|-------------|
 | `limit` | integer | no | Max number of lines to read. Omitting the limit reads up to 2000 lines. |
 | `offset` | integer | no | Line number to start from (1-indexed) |
-| `path` | string | yes | Absolute path to the file or directory |
+| `path` | string | yes |  |
 
 ### `write`
 
@@ -40,7 +40,7 @@ Write content to a file, replacing existing content.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `content` | string | yes | The complete file content to write |
-| `path` | string | yes | Absolute path to the file |
+| `path` | string | yes |  |
 
 ### `edit`
 
@@ -50,7 +50,7 @@ Replace an exact string match in a file.
 |-----------|------|----------|---------|-------------|
 | `new_string` | string | yes |  | Replacement string |
 | `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |
-| `path` | string | yes |  | Absolute path to the file |
+| `path` | string | yes |  |  |
 | `replace_all` | boolean | no | false | Replace all occurrences |
 
 ### `multiedit`
@@ -61,7 +61,7 @@ Prefer this over edit when making multiple changes to the same file.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `edits` | array | yes | Array of edit operations to apply sequentially |
-| `path` | string | yes | Absolute path to the file |
+| `path` | string | yes |  |
 
 ### `glob` *(lua plugin)*
 
@@ -80,7 +80,7 @@ Search file contents using regex.
 |-----------|------|----------|---------|-------------|
 | `context_after` | integer | no |  | Context lines after match |
 | `context_before` | integer | no |  | Context lines before match |
-| `include` | string | no |  | File glob filter (e.g. *.c) |
+| `include` | string | no |  |  |
 | `limit` | integer | no |  | Max match groups to return |
 | `path` | string | no | cwd | Directory to search in |
 | `pattern` | string | yes |  | Regex pattern |
@@ -132,6 +132,7 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `context_mode` | string | no | Parent context to pass to the subagent:<br>- "none" (default): fresh, no parent history.<br>- "summary": last few parent messages for context.<br>- "full": full parent conversation history. |
 | `description` | string | yes | Short (3-5 words) description of the task |
 | `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
@@ -139,11 +140,11 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 ### `todo_write`
 
-Create or update a structured todo list to track tasks.
+Create or update a hierarchical task list to track multi-step work.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `todos` | array | yes | The updated todo list |
+| `todos` | array | yes | The updated task list (replace-all). Use hierarchical ids (T1, T1.1). |
 
 ### `memory` *(lua plugin)*
 

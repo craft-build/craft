@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,12 +8,44 @@ use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
 
 use crate::api::fs::expand_tilde;
 use crate::plugin_permissions::{Permission::{Env, Run}, PluginPermissions};
-use crate::runtime::with_task_jobs;
+use crate::runtime::{SharedSandboxConfig, with_task_jobs};
 use crate::terminal_backend::{
     JobEvent, TerminalBackend, TerminalHandle, TerminalSpec,
 };
 #[cfg(test)]
 use crate::terminal_backend::LocalTerminal;
+
+fn build_sandbox_profile(
+    lua: &Lua,
+    cwd: Option<&Path>,
+) -> Option<craft_sandbox::SandboxProfile> {
+    let shared = lua.app_data_ref::<SharedSandboxConfig>()?;
+    let config = shared.load();
+    if !config.enabled || matches!(config.mode, craft_config::SandboxMode::Off) {
+        return None;
+    }
+    let workspace = cwd
+        .and_then(|p| p.canonicalize().ok())
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mode = match config.mode {
+        craft_config::SandboxMode::WorkspaceWrite => craft_sandbox::SandboxMode::WorkspaceWrite,
+        craft_config::SandboxMode::ReadOnly => craft_sandbox::SandboxMode::ReadOnly,
+        craft_config::SandboxMode::DangerFullAccess => craft_sandbox::SandboxMode::DangerFullAccess,
+        craft_config::SandboxMode::Off => return None,
+    };
+    let network = if config.network {
+        craft_sandbox::NetworkPolicy::Allowed
+    } else {
+        craft_sandbox::NetworkPolicy::Denied
+    };
+    Some(craft_sandbox::SandboxProfile {
+        mode,
+        network,
+        workspace,
+        writable_roots: Vec::new(),
+    })
+}
 
 struct JobMeta {
     alive: bool,
@@ -159,7 +191,7 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 if !p.is_allowed(Run) {
                     return Err(crate::plugin_permissions::denied_error(Run));
                 }
-                let (cwd, env, on_stdout, on_stderr, on_exit) = match opts {
+                let (cwd, env, on_stdout, on_stderr, on_exit, want_sandbox) = match opts {
                     Some(ref opts) => {
                         let cwd: Option<String> = opts.get("cwd").ok();
                         let env: Option<HashMap<String, String>> = opts
@@ -183,9 +215,10 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                             .ok()
                             .map(|f| lua.create_registry_value(f))
                             .transpose()?;
-                        (cwd, env, on_stdout, on_stderr, on_exit)
+                        let want_sandbox: bool = opts.get("sandbox").unwrap_or(false);
+                        (cwd, env, on_stdout, on_stderr, on_exit, want_sandbox)
                     }
-                    None => (None, None, None, None, None),
+                    None => (None, None, None, None, None, false),
                 };
 
                 let (backend, id) = with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
@@ -198,7 +231,12 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                         dir.display()
                     )));
                 }
-                let spec = TerminalSpec { cmd, cwd: cwd.map(|p| p.to_string_lossy().into_owned()), env };
+                let sandbox = if want_sandbox {
+                    build_sandbox_profile(&lua, cwd.as_deref())
+                } else {
+                    None
+                };
+                let spec = TerminalSpec { cmd, cwd: cwd.map(|p| p.to_string_lossy().into_owned()), env, sandbox };
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
                     store.register(id, handle, on_stdout, on_stderr, on_exit);
@@ -300,6 +338,7 @@ mod tests {
                 cmd: "echo hello".into(),
                 cwd: None,
                 env: None,
+                sandbox: None,
             })
             .await
             .unwrap();
@@ -315,6 +354,7 @@ mod tests {
                 cmd: "echo hello".into(),
                 cwd: Some("/nonexistent_dir_abc_xyz_123".into()),
                 env: None,
+                sandbox: None,
             })
             .await;
         assert!(result.is_err());

@@ -194,6 +194,9 @@ impl Task {
                 system,
                 event_tx: sub_event_tx,
                 tools,
+                promoted: crate::tools::PromotedTools::new(),
+                tool_build: None,
+                hooks: None,
             },
         )
         .with_user_response_rx(answer_rx)
@@ -237,7 +240,7 @@ impl Task {
     }
 }
 
-super::impl_tool!(Task, audience = super::ToolAudience::MAIN, kind = "think");
+super::impl_tool!(Task, audience = super::ToolAudience::MAIN, kind = "think", tier = super::ToolTier::Core);
 
 impl super::ToolInvocation for Task {
     fn start_header(&self) -> super::HeaderFuture {
@@ -286,6 +289,7 @@ mod tests {
             (super::super::BATCH_TOOL_NAME, MAIN | RES | GEN),
             (super::super::CODE_EXECUTION_TOOL_NAME, MAIN | RES | GEN),
             (super::super::TODOWRITE_TOOL_NAME, MAIN | RES | GEN),
+            (super::super::LIST_TOOLS_TOOL_NAME, MAIN | RES | GEN),
             (super::super::TASK_TOOL_NAME, MAIN),
         ]);
 
