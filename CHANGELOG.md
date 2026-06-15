@@ -4,13 +4,13 @@ All notable changes to **craft** are documented in this file.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [Unreleased]
 
-The working version in `Cargo.toml` is `0.5.0` (no tag yet).
+## [0.5.0] - 2026-06-14
 
 ### Changed
-
+- **versioning**: dropping maki version base from main version. 
+  Maki base versions will be mentioned in release notes.
 - **docs**: migrated the documentation site from Zola to mdBook. The doc
   generator (`craft-docgen`) now emits mdBook markdown into `site/docs/src`
   without Zola frontmatter, and `site/build.sh` builds with mdBook instead of
@@ -340,7 +340,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.3.17+0.4.2...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/craft-build/craft/releases/tag/v0.5.0
 [0.3.17+0.4.2]: https://github.com/craft-build/craft/releases/tag/v0.3.17+0.4.2
 [0.3.17+0.4.1]: https://github.com/craft-build/craft/compare/v0.3.17+0.3.6...v0.3.17+0.4.1
 [0.3.17+0.3.6]: https://github.com/craft-build/craft/compare/v0.3.17+0.3.5...v0.3.17+0.3.6
