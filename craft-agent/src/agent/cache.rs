@@ -68,7 +68,7 @@ impl PrefixCacheTracker {
         new_cost < original_cost
     }
 
-    #[cfg(feature = "onnx")]
+    #[cfg(any(test, feature = "onnx"))]
     pub(super) fn frozen_count(&self) -> usize {
         self.frozen_count
     }
@@ -86,7 +86,6 @@ fn filter_frozen<'a>(tracker: &PrefixCacheTracker, candidates: &'a [usize]) -> V
 mod tests {
     use super::*;
 
-    #[cfg(feature = "onnx")]
     #[test]
     fn new_tracker_has_zero_frozen() {
         let tracker = PrefixCacheTracker::new();
