@@ -1,100 +1,107 @@
 <img src="./banner.png">
 
-**Craft** is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik — an AI coding agent optimized for minimal use of context tokens, while providing a great user experience. This fork ported the original project to use tokio and reqwest instead of smol and isahc.
+**Craft** is an AI coding agent built from the ground up in Rust to spend as few tokens as possible, without giving up the speed and ergonomics that make a coding agent feel good to use. Native terminal UI, instant startup, 60 FPS, and a small memory footprint.
 
-Full attribution and thanks to the original project: [github.com/tontinton/maki](https://github.com/tontinton/maki.git)
+## Why craft
 
-## Differences to Maki
+Most coding agents burn context reactively, waiting until they hit the limit, then summarizing everything in one expensive pass. Craft is built around a different idea: keep the context lean at every step, so the model spends tokens on your work instead of on stale reads, verbose tool output, and duplicated history.
 
-* `tokio` runtime instead of `smol`. This change was done for compatibility with async Rust libraries and to take advantage of tokio's performance optimizations.
-* `reqwest` instead of `isahc`. This change was done for better synergy with `tokio` and builtin streaming support.
-* **Semantic intelligence** (optional, `onnx` feature) — local ONNX embeddings via fastembed for smarter context management:
-  - **Relevance scoring** — builds an intent embedding from recent user messages and scores all history by relevance, protecting high-value content during compaction.
-  - **Semantic context curation** — selects the most relevant messages within the token budget instead of a simple window, filling gaps with omission markers.
-  - **Semantic overlap detection** — finds old tool results that semantically duplicate newer ones and aggressively compresses the older copies.
-  - **Auto-retrieve** — restores compressed content from the LRU store when it becomes semantically relevant to the current intent.
-  - **Stagnation detection** — flags when consecutive turns have high embedding similarity, emitting a `StagnationDetected` event.
-  - **Semantic stale override** — prevents marking reads as stale when edits are still semantically similar to the original content.
-  - **Targeted compaction** — compaction prompts include relevance-ranked topics for better summarization focus.
-  - **Magika content detection** — uses ONNX-based file type detection instead of extension-based heuristics for more accurate compression routing.
-  - Models are downloaded eagerly at startup before the TUI takes over the terminal.
-* **Keyword scoring** — shared aho-corasick based line classifier replaces hand-rolled scoring for code and log compression, with explicit categories (error, warning, security, code definition, import, module, comment, closing brace).
-* **Embed API for Lua plugins** — exposes `embed(text)` and `similarity(a, b)` to the Lua plugin host via a channel-based request/response bridge.
-* **Review workflow** has been added for utilizing yaml based styleguide files to enforce code style.
-* Multi-stage compression pipeline inspired by [Headroom](https://github.com/knuffic/headroom), which proactively reduces context usage instead of relying solely on reactive compaction:
-  - **Read lifecycle management** — stale and superseded file reads are replaced with compact markers before every LLM turn, so outdated reads don't waste tokens.
-  - **Tool output pre-compression** — code, logs, search results, diffs, and JSON arrays are compressed before entering history, using content type detection and keyword-aware line scoring.
-  - **Progressive compaction** — when context reaches 60% of the window, old tool outputs are compressed in-place (aggressive compression for old, summary markers for very old) without an expensive LLM summarization call.
-  - **Token estimation** — client-side character-based heuristic enables proactive compression before overflow.
-  - **Prefix cache awareness** — messages confirmed to be in the provider's KV cache (via `cache_read` tokens) are skipped during compression to preserve cache read discounts.
-  - **Reversible compression (CCR)** — original content is stored in an in-memory LRU store, and a `retrieve` tool lets the LLM fetch originals on demand via content hashes embedded in compressed output.
-* **Tool dedup cache** — caches read-only tool results (`read`/`grep`/`glob`/`index`) keyed by hash(tool+args), bounded to 64 entries with FIFO eviction, cleared on compaction. Cache hits are prefixed with `[cached]`.
-* **Trust decay** — tracks per-tool consecutive failures and demotes or drops tools after configurable thresholds (`warn_after=3`, `drop_after=5`). A `min_tools` safeguard prevents dropping below a minimum. Configurable via `[agent.trust_decay]`.
-* **Snapshot & rollback** — auto-snapshots files before `write`/`edit`/`multiedit` operations, commits on agent Done, and supports rollback via `/undo`. Files >5MB and outside the workdir are skipped.
-* **Post-write validation** — detects project type (Rust/TS/Go/Python) from config files and runs validation commands after writes. Disabled by default, configurable via `[agent.validation]`.
-* **Small model mode** — auto-detects models with context window <32k and reduces tools to a core set, uses a compact system prompt, triggers compaction at 50% instead of 80%, and adds aggressive JSON repair on parse failures. Configurable via `[agent.small_model]`.
-* **Model escalation** — tracks per-model failure rates and emits a `ModelEscalation` event when the rate reaches 60% after 5 calls, prompting automatic tier upgrade (haiku/flash → sonnet → opus).
+That shows up across the whole agent:
+
+- A multi-stage compression pipeline trims context continuously, not just when it overflows.
+- Optional semantic intelligence scores history by relevance so the important parts survive compaction.
+- Tools are designed to return skeletons, summaries, and filtered results instead of raw dumps.
+- Subagents carry their own context windows, so delegation does not pollute the main session.
+
+The goal is simple: longer effective sessions, lower cost per turn, and an agent that stays fast and readable as a task grows.
 
 ## Features
 
 ### Context efficiency
 
-* `index` tool - uses [tree-sitter](https://tree-sitter.github.io/tree-sitter) to parse supported programming languages to produce a high level skeleton of a file, with exact start-end lines of each item (e.g. a function's implementation is in lines 150-165). Encouraged to be used before reads. For my usage it adds 59 tok/turn but saves 224 tok/turn on read calls, saving 165 tok/turn.
-* `code_execution` tool - uses [monty](https://github.com/pydantic/monty) to run an interpreter that has all other tools available as async functions. Craft uses it to filter / summarize / transform / pipe data to other tools as input, without it ever reaching and polluting the context window. Sandbox limited by time & memory.
-* `task` tool - when delegating work to subagents, the AI chooses whether to run weak / medium / strong model of used provider. Think haiku / sonnet / opus.
-* System prompt, tool descriptions, and tool examples are all concise, I've made sure not to bloat your context.
-* Uses [rtk](https://github.com/rtk-ai/rtk) if you have it installed, disable with `--no-rtk`. Saves ~50% of bash output tokens. Remember bash is just 12% of total token usage, so 6% is nice, but saving on reads (65% of total) by using `index` gave me more benefit. I think I'll do bash output filtering like this myself in a future release.
+- **`index` tool** - uses [tree-sitter](https://tree-sitter.github.io/tree-sitter) to parse supported languages into a high-level skeleton with exact line ranges for every item. Encouraged before reads, since a compact outline replaces scrolling through a full file.
+- **`code_execution` tool** - runs [monty](https://github.com/pydantic/monty), a minimal Python sandbox with every other tool available as an async function. Use it to filter, summarize, transform, and pipe data between tools without that data ever reaching the context window. Bounded by time and memory.
+- **`task` tool** - delegate work to subagents and let the agent pick the right tier for the job (weak, medium, or strong model). Each subagent runs in its own context window.
+- **Multi-stage compression pipeline** (inspired by [Headroom](https://github.com/knuffic/headroom)):
+  - **Read lifecycle** - stale and superseded file reads are replaced with compact markers before each turn.
+  - **Tool output pre-compression** - code, logs, search results, diffs, and JSON arrays are compressed before entering history, using content-type detection and keyword-aware line scoring.
+  - **Progressive compaction** - at 60% of the window, old tool outputs are compressed in place, avoiding an expensive summarization call until it is truly needed.
+  - **Prefix-cache awareness** - messages confirmed to be in the provider KV cache (via `cache_read` tokens) are skipped, preserving cache-read discounts.
+  - **Reversible compression** - originals are kept in an in-memory LRU store, and a `retrieve` tool lets the model fetch them back on demand via content hashes.
+- **Semantic intelligence** (optional, `onnx` feature) - local ONNX embeddings via [fastembed](https://github.com/Anush008/fastembed-rs) for smarter context management:
+  - Relevance scoring builds an intent embedding from recent messages and ranks history by relevance.
+  - Semantic context curation picks the most relevant messages within budget instead of a flat window.
+  - Overlap detection finds old tool results that duplicate newer ones and compresses the older copies.
+  - Auto-retrieve restores compressed content from the LRU store when it becomes relevant again.
+  - Stagnation detection flags high-similarity consecutive turns.
+  - [Magika](https://github.com/google/magika) content detection routes compression more accurately than file extensions.
+  - Models download eagerly at startup, before the TUI takes over the terminal.
+- **Keyword scoring** - a shared aho-corasick line classifier with explicit categories (error, warning, security, code definition, import, module, comment, closing brace) replaces hand-rolled scoring for code and log compression.
+- **Tool dedup cache** - caches read-only tool results (`read`, `grep`, `glob`, `index`) keyed by argument hash, bounded to 64 entries with FIFO eviction and cleared on compaction. Cache hits are prefixed with `[cached]`.
+- **Lua embed API** - `embed(text)` and `similarity(a, b)` are exposed to the Lua plugin host through a channel-based bridge.
+- Compact system prompt, tool descriptions, and examples throughout.
+- Optional [rtk](https://github.com/rtk-ai/rtk) support to cut bash output tokens (disable with `--no-rtk`).
 
-### User experience
+### Reliability and guardrails
 
-* SUPER fast startup, 60 FPS, and light on memory. Not running any JavaScript, using [ratatui](https://ratatui.rs) for TUI. Even the splash screen animation uses SIMD.
-* Philosophy of not hiding anything - while other coding agents hide information as models improve (e.g. not showing number of lines read), craft leaves you in control.
-* UI fits everything well on my small screen laptop.
-* Full visibility of subagents - each subagent gets their own "chat window" you can easily navigate between using `/tasks` (Ctrl-X), or Ctrl-N/P.
-* Sensible permission system - when the agent runs `git diff && rm -rf /`, what do you think will happen in your current coding agent? It will treat it as `git *`. Craft uses tree-sitter to parse the bash command and figure out the permissions requested are `git *` and `rm *`. Disable using `--yolo`.
-* SSRF protection on `webfetch` calls.
-* A `memory` tool to keep long term context, just tell craft to remember something (sometimes it uses it automatically). Managed via `/memory` (view / edit / delete memories).
-* Fuzzy search with Ctrl-F.
-* `/btw` to run a command with the chat history without interfering with the current session.
-* Rewind on Escape-Escape (no code rewind yet, only chat history).
-* Attach images in prompts.
-* 26 of the most popular themes.
-* Resume sessions.
-* Skills & MCPs.
-* Plan mode.
-* Run bash commands using `!`, or `!!` if you want craft to not know about it.
-* `/cd` to change dir.
-* Use `--print --output-format stream-json` to run UI-less. Output is compatible with Claude Code, so you can easily replace your existing solutions (although I wouldn't recommend that, craft is very new).
+- **Trust decay** - tracks per-tool consecutive failures and demotes or drops tools after configurable thresholds (`warn_after=3`, `drop_after=5`), with a `min_tools` safeguard. Configurable via `[agent.trust_decay]`.
+- **Snapshot and rollback** - auto-snapshots files before `write`, `edit`, and `multiedit`, commits on agent Done, and supports rollback via `/undo`. Files larger than 5 MB or outside the workdir are skipped.
+- **Post-write validation** - detects the project type (Rust, TypeScript, Go, Python) from config files and runs validation commands after writes. Disabled by default, configurable via `[agent.validation]`.
+- **Small model mode** - auto-detects models with a context window under 32k and adapts: reduces tools to a core set, uses a compact system prompt, triggers compaction at 50% instead of 80%, and applies aggressive JSON repair on parse failures. Configurable via `[agent.small_model]`.
+- **Model escalation** - tracks per-model failure rates and emits a `ModelEscalation` event at 60% after 5 calls, prompting an automatic tier upgrade (haiku/flash to sonnet to opus).
+- **Review workflow** - YAML-based styleguide files drive a code review pass that enforces project conventions.
+- **Permissions** - when the agent runs `git diff && rm -rf /`, other agents may treat that as `git *`. Craft parses the bash command with tree-sitter and requests `git *` and `rm *` separately. Disable with `--yolo`.
+- **SSRF protection** on `webfetch` calls.
+
+### Experience
+
+- Fast startup, 60 FPS, and a small memory footprint. No JavaScript anywhere, just [ratatui](https://ratatui.rs) for the TUI. Even the splash animation uses SIMD.
+- Philosophy of not hiding anything. Where other agents stop showing details as models improve (for example, number of lines read), craft leaves you in control.
+- Layouts that fit comfortably on a small laptop screen.
+- Full subagent visibility - each subagent gets its own chat window. Navigate them with `/tasks` (Ctrl-X) or Ctrl-N / Ctrl-P.
+- `memory` tool for long-term context. Tell craft to remember something, or let it decide on its own. Manage memories with `/memory`.
+- Fuzzy search with Ctrl-F.
+- `/btw` runs a command against the chat history without disturbing the current session.
+- Rewind on Escape-Escape (chat history only for now).
+- Attach images in prompts.
+- 26 of the most popular themes.
+- Resume sessions.
+- Skills and MCPs.
+- Plan mode.
+- Run bash with `!`, or `!!` to run it without telling the agent.
+- `/cd` to change directory.
+- `--print --output-format stream-json` for a UI-less run, with output compatible with Claude Code.
 
 ## Supported providers
 
-* Anthropic - `ANTHROPIC_API_KEY` only (using OAuth is against TOS).
-* OpenAI - `OPENAI_API_KEY` and OAuth via `craft auth login openai`.
-* Copilot - `GH_COPILOT_TOKEN` or an existing GitHub Copilot sign-in at `~/.config/github-copilot/`.
-* Ollama - `OLLAMA_HOST` for local (e.g. `http://localhost:11434`), or `OLLAMA_API_KEY` for cloud.
-* Mistral - `MISTRAL_API_KEY`.
-* Z.AI - `ZHIPU_API_KEY`.
-* Synthetic - `SYNTHETIC_API_KEY`.
+- Anthropic - `ANTHROPIC_API_KEY` only (OAuth is against the TOS).
+- OpenAI - `OPENAI_API_KEY`, or OAuth via `craft auth login openai`.
+- Copilot - `GH_COPILOT_TOKEN`, or an existing sign-in at `~/.config/github-copilot/`.
+- Ollama - `OLLAMA_HOST` for local (for example `http://localhost:11434`), or `OLLAMA_API_KEY` for cloud.
+- Mistral - `MISTRAL_API_KEY`.
+- Z.AI - `ZHIPU_API_KEY`.
+- Synthetic - `SYNTHETIC_API_KEY`.
 
-**Dynamic providers** - drop an executable script into `~/.config/craft/providers/` to add custom providers or proxies.
+**Dynamic providers** - drop an executable script into `~/.config/craft/providers/` to add a custom provider or proxy.
 
 ## Installation
 
 ```sh
-cargo install --locked --git https://gitlab.com/craft-build/craft.git craft
+cargo install --git https://gitlab.com/craft-build/craft.git craft
 ```
-
-Or download a pre-built binary from [GitLab Releases](https://gitlab.com/craft-build/craft/-/releases).
 
 ## Documentation
 
-More info at the [official docs](https://gitlab.com/craft-build/craft).
-
-> DISCLAIMER: >90% of code in maki was written by maki, guided by humans. The code is not as good as what I would've made in the artisanal hand-made style. But it's also not slop / vibe coded. I just think people should be honest about their use of AI in projects in this era.
+More info in the [official docs](https://gitlab.com/craft-build/craft).
 
 ## Extending with Lua
 
-Currently working on a refactor so craft is a core agent UI loop with features like tools, UI elements, and storage all controlled by Lua plugins.
-This will allow you to customize the hell out of craft.
+Craft ships a Lua plugin host with an API mirrored from Neovim, so existing plugin authors feel at home. Tools, UI elements, and storage can all be driven by plugins, which lets you customize craft heavily.
 
-Status: webfetch, websearch, index, bash, skill, and memory tools are Lua plugins (in the `./plugins` dir).
+Today the `index`, `bash`, `glob`, `question`, `skill`, `memory`, `webfetch`, and `websearch` tools are Lua plugins living in [`./plugins`](./plugins).
+
+## Attribution
+
+Craft is a fork of [maki](https://github.com/tontinton/maki) by **Tony Solomonik**, and the vast majority of the foundation is his work. Full credit and thanks to the original project. Craft builds on that base with a tokio and reqwest runtime, a multi-stage compression pipeline, semantic intelligence, a Lua plugin system, an ACP server, and a range of other additions.
+
+> Honesty note: a large share of the codebase was written by an AI, guided by humans. It is not hand-rolled artisanal code, but it is not vibe-coded slop either. In this era, being upfront about how software is made matters.
