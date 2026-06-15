@@ -16,7 +16,7 @@ use agent_client_protocol_schema::{
     SessionInfo as AcpSessionInfo, SessionInfoUpdate, SessionModeId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
     SetSessionModeRequest, SetSessionModeResponse, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, TextContent, ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate,
+    TerminalOutputResponse, TextContent, ToolCallId, ToolCallUpdate,
     ToolCallUpdateFields, WriteTextFileRequest, WriteTextFileResponse,
 };
 use color_eyre::eyre::Context;
@@ -1042,6 +1042,7 @@ fn start_event_pump(
 ) {
     tokio::spawn(async move {
         let sid = SessionId::from(session_id);
+        let mut sub_buffers: HashMap<String, String> = HashMap::new();
 
         while let Ok(Envelope {
             event, subagent, ..
@@ -1060,43 +1061,33 @@ fn start_event_pump(
                 let parent_id = &info.parent_tool_use_id;
                 match &event {
                     AgentEvent::TextDelta { text } => {
-                        let update = translate::text_delta(text);
-                        session_update(&out_tx, &sid, update);
-                    }
-                    AgentEvent::ThinkingDelta { text } => {
-                        let update = translate::thinking_delta(text);
-                        session_update(&out_tx, &sid, update);
-                    }
-                    AgentEvent::ToolStart(ts) => {
-                        let prefixed_id = format!("{}__{}", parent_id, ts.id);
-                        let mut fields =
-                            ToolCallUpdateFields::new().status(ToolCallStatus::InProgress);
-                        if let Some(raw) = &ts.raw_input {
-                            fields = fields.raw_input(raw.clone());
-                        }
-                        let tool_call = ToolCall::new(
-                            ToolCallId::from(prefixed_id),
-                            format!("{} (subagent)", ts.tool),
-                        )
-                        .kind(translate::tool_kind(ts.tool.as_ref()))
-                        .status(ToolCallStatus::InProgress);
-                        session_update(&out_tx, &sid, SessionUpdate::ToolCall(tool_call));
-                    }
-                    AgentEvent::ToolDone(event) => {
-                        let prefixed_id = format!("{}__{}", parent_id, event.id);
-                        let status = if event.is_error {
-                            ToolCallStatus::Failed
-                        } else {
-                            ToolCallStatus::Completed
-                        };
-                        let fields = ToolCallUpdateFields::new().status(status);
+                        let buf = sub_buffers.entry(parent_id.clone()).or_default();
+                        buf.push_str(text);
                         session_update(
                             &out_tx,
                             &sid,
-                            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                                ToolCallId::from(prefixed_id),
-                                fields,
-                            )),
+                            translate::subagent_content_update(parent_id, buf),
+                        );
+                    }
+                    AgentEvent::ThinkingDelta { .. } => continue,
+                    AgentEvent::ToolStart(ts) => {
+                        let buf = sub_buffers.entry(parent_id.clone()).or_default();
+                        buf.push_str(&translate::subagent_breadcrumb(&ts.summary));
+                        session_update(
+                            &out_tx,
+                            &sid,
+                            translate::subagent_content_update(parent_id, buf),
+                        );
+                    }
+                    AgentEvent::ToolDone(event) if event.is_error => {
+                        let buf = sub_buffers.entry(parent_id.clone()).or_default();
+                        buf.push_str("\n  ");
+                        buf.push_str(translate::SUBAGENT_FAILURE_MARKER);
+                        buf.push('\n');
+                        session_update(
+                            &out_tx,
+                            &sid,
+                            translate::subagent_content_update(parent_id, buf),
                         );
                     }
                     _ => {}

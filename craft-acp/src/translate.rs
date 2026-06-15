@@ -9,6 +9,8 @@ use craft_agent::{TaskNode, TodoStatus, flatten_task_tree};
 use craft_providers::{ContentBlock as MsgBlock, ImageMediaType, Message, Role as MsgRole};
 
 const MIN_FENCE_LEN: usize = 3;
+pub const SUBAGENT_BREADCRUMB_ARROW: &str = "▸ ";
+pub const SUBAGENT_FAILURE_MARKER: &str = "(failed)";
 
 fn fenced(text: &str) -> String {
     let longest_backtick_run = text
@@ -64,6 +66,20 @@ pub fn user_message_chunk(text: &str) -> SessionUpdate {
     SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
         text.to_string(),
     ))))
+}
+
+pub fn subagent_breadcrumb(label: &str) -> String {
+    format!("\n{SUBAGENT_BREADCRUMB_ARROW}{label}\n")
+}
+
+pub fn subagent_content_update(parent_id: &str, content: &str) -> SessionUpdate {
+    let fields = ToolCallUpdateFields::new().content(vec![ToolCallContent::Content(Content::new(
+        ContentBlock::Text(TextContent::new(content.to_string())),
+    ))]);
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+        ToolCallId::from(parent_id.to_string()),
+        fields,
+    ))
 }
 
 pub fn tool_pending(id: &str, name: &str) -> SessionUpdate {
@@ -312,6 +328,26 @@ mod tests {
     #[test_case("has ```rust\ncode\n``` inside", "````\nhas ```rust\ncode\n``` inside\n````" ; "fence_longer_than_inner_backticks")]
     fn fenced_wraps_in_code_block(input: &str, expected: &str) {
         assert_eq!(fenced(input), expected);
+    }
+
+    #[test]
+    fn breadcrumb_wraps_label_with_arrow() {
+        assert_eq!(subagent_breadcrumb("grep: x"), "\n\u{25b8} grep: x\n");
+    }
+
+    #[test]
+    fn breadcrumb_failure_marker_is_text() {
+        assert_eq!(SUBAGENT_FAILURE_MARKER, "(failed)");
+    }
+
+    #[test]
+    fn subagent_content_update_targets_parent_id() {
+        let json = serde_json::to_value(subagent_content_update("parent_tu", "narration")).unwrap();
+        assert_eq!(json["sessionUpdate"], "tool_call_update");
+        assert_eq!(json["toolCallId"], "parent_tu");
+        assert_eq!(json["content"][0]["content"]["text"], "narration");
+        let text = json["content"][0]["content"]["text"].as_str().unwrap();
+        assert!(!text.starts_with('`'), "text must not be a code fence");
     }
 
     #[test_case(Some("import"), "import"; "summary_becomes_title")]
