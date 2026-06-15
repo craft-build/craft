@@ -62,7 +62,7 @@ impl ChildGuard {
     #[cfg(not(unix))]
     fn signal_kill(&mut self) {
         if let Some(child) = &mut self.child {
-            let _ = child.kill().await;
+            let _ = child.start_kill();
         }
     }
 
