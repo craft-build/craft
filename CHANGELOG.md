@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-16
+
+### Added
+
+- **index**: HTML and Nix language indexers with tree-sitter grammars.
+  (`260b203`)
+- **lua**: `fs`/`text`/`treesitter` APIs now return `(value, err)` instead of
+  throwing; dropped error-event emission. (`260b203`)
+- **lua**: `text_input` wraps long lines at the view edge. (`260b203`)
+- **highlight**: `theme_color()` helper, `craft.ui.theme_color` Lua binding,
+  and `color` Lua plugin. (`260b203`)
+- **agent**: `ToolExecResult` with optional annotation; `ToolDoneEvent` gains
+  annotation field. (`260b203`)
+- **agent**: extracted `grep_search()` and exposed `craft.fs.grep()` Lua
+  binding. (`260b203`)
+- **grep**: migrated from native Rust tool to Lua plugin using
+  `craft.fs.grep`. (`260b203`)
+- **ui**: restore spinner in the status bar with `RestoreComplete` sentinel;
+  session restore is now non-blocking via async channel.
+  (`260b203`)
+
+### Changed
+
+- **storage**: session meta read from file tail instead of full scan.
+  (`260b203`)
+- **providers**: `max_tokens` omitted for llama.cpp when output budget is 0.
+  (`260b203`)
+- Removed `--demo` flag and `mock.rs`; `--all-features` kept for onnx.
+  (`260b203`)
+
+### Fixed
+
+- **sandbox**: network is now available by default. (`ea2410e`)
+- **sandbox**: reordered bwrap mounts so read-only root (`--ro-bind / /`)
+  precedes writable binds (`--bind`), preventing EROFS on workspace
+  directories like `.cargo-lock`. (`7f2ff21`)
+
 ## [0.5.1] - 2026-06-15
 
 ### Added
@@ -361,7 +398,9 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/craft-build/craft/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/craft-build/craft/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/craft-build/craft/releases/tag/v0.5.0
 [0.3.17+0.4.2]: https://github.com/craft-build/craft/releases/tag/v0.3.17+0.4.2
 [0.3.17+0.4.1]: https://github.com/craft-build/craft/compare/v0.3.17+0.3.6...v0.3.17+0.4.1
