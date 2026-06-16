@@ -270,7 +270,7 @@ impl super::ToolInvocation for Task {
         ))))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { Task::execute(&self, ctx).await })
+        Box::pin(async move { Task::execute(&self, ctx).await.into() })
     }
 }
 
@@ -292,7 +292,6 @@ mod tests {
 
         let expected: BTreeMap<&str, ToolAudience> = BTreeMap::from([
             (super::super::READ_TOOL_NAME, all),
-            (super::super::GREP_TOOL_NAME, all),
             (super::super::STYLEGUIDE_LIST_TOOL_NAME, all),
             (super::super::STYLEGUIDE_SEARCH_TOOL_NAME, all),
             (super::super::STYLEGUIDE_GET_TOOL_NAME, all),

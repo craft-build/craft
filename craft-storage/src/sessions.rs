@@ -10,7 +10,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use tracing::warn;
@@ -27,6 +27,7 @@ pub const SESSIONS_DIR: &str = "sessions";
 const CWD_INDEX_FILE: &str = "cwd_latest.json";
 const DEFAULT_TITLE: &str = "New session";
 const MAX_TITLE_LEN: usize = 60;
+const TAIL_BUF: u64 = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -672,12 +673,12 @@ fn scan_headers(cwd: Option<&str>, dir: &Path) -> Result<Vec<SessionSummary>, St
 }
 
 fn scan_jsonl_header(cwd: Option<&str>, path: &Path) -> Option<SessionSummary> {
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
+    let mut file = File::open(path).ok()?;
+    let mut reader = BufReader::new(&mut file);
 
-    let first_line = lines.next()?.ok()?;
-    let header: JsonlHeader = serde_json::from_str(&first_line).ok()?;
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line).ok()?;
+    let header: JsonlHeader = serde_json::from_str(first_line.trim_end()).ok()?;
     if header.v > LOG_FORMAT_VERSION {
         return None;
     }
@@ -687,20 +688,8 @@ fn scan_jsonl_header(cwd: Option<&str>, path: &Path) -> Option<SessionSummary> {
         return None;
     }
 
-    let mut title = DEFAULT_TITLE.to_string();
-    let mut updated_at = 0u64;
-
-    for line in lines {
-        let Ok(line) = line else { break };
-        if let Ok(ScanRecord::Meta {
-            title: t,
-            updated_at: u,
-        }) = serde_json::from_str(&line)
-        {
-            title = t;
-            updated_at = u;
-        }
-    }
+    let (title, updated_at) =
+        read_last_meta(&mut file).unwrap_or_else(|| (DEFAULT_TITLE.to_string(), 0));
 
     Some(SessionSummary {
         id: header.id,
@@ -708,6 +697,27 @@ fn scan_jsonl_header(cwd: Option<&str>, path: &Path) -> Option<SessionSummary> {
         cwd: header.cwd,
         updated_at,
     })
+}
+
+/// Walks the file tail backwards to find the last `Meta` record without scanning every line.
+fn read_last_meta(file: &mut File) -> Option<(String, u64)> {
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+
+    let start = len.saturating_sub(TAIL_BUF);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.take(len - start).read_to_end(&mut buf).ok()?;
+
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines().rev() {
+        if let Ok(ScanRecord::Meta { title, updated_at }) = serde_json::from_str(line) {
+            return Some((title, updated_at));
+        }
+    }
+    None
 }
 
 fn scan_legacy_header(cwd: Option<&str>, path: &Path) -> Option<SessionSummary> {
@@ -1221,6 +1231,29 @@ mod tests {
 
         let list = TestSession::list_in(Some("/project"), dir).unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn scan_jsonl_reads_trailing_meta_from_tail() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let mut session: TestSession = Session::new("m", "/project");
+        session.save_to(dir).unwrap();
+        let path = dir.join(format!("{}.jsonl", session.id));
+
+        let header_line = fs::read_to_string(&path).unwrap();
+        let mut buf = header_line;
+        for i in 0..5000u64 {
+            buf.push_str(&format!("{{\"t\":\"out\",\"id\":\"tool-{i}\"}}\n"));
+        }
+        buf.push_str("{\"t\":\"meta\",\"title\":\"final-title\",\"updated_at\":99999}\n");
+        fs::write(&path, buf).unwrap();
+
+        let list = TestSession::list_in(Some("/project"), dir).unwrap();
+        let summary = list.iter().find(|s| s.id == session.id).unwrap();
+        assert_eq!(summary.title, "final-title");
+        assert_eq!(summary.updated_at, 99999);
     }
 
     #[test]

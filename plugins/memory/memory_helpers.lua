@@ -192,12 +192,12 @@ function M.load_vectors(dir)
     return {}
   end
   local path = craft.fs.joinpath(dir, M.VECTORS_FILE)
-  local ok, raw = pcall(craft.fs.read, path)
-  if not ok then
+  local raw = craft.fs.read(path)
+  if not raw then
     return {}
   end
-  local ok2, data = pcall(craft.json.decode, raw)
-  if not ok2 or type(data) ~= "table" then
+  local data = craft.json.decode(raw)
+  if not data or type(data) ~= "table" then
     return {}
   end
   return data
@@ -284,8 +284,8 @@ function M.keyword_search(dir, query, top_k)
     local filename = entry[1]
     local fp = M.safe_resolve(dir, filename)
     if fp then
-      local ok, content = pcall(craft.fs.read, fp)
-      if ok and content then
+      local content = craft.fs.read(fp)
+      if content then
         local terms = tokenize(content)
         local tf = {}
         for _, t in ipairs(terms) do

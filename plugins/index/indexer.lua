@@ -14,6 +14,8 @@ local EXT_TO_LANG = {
   cjs = "javascript",
   gleam = "gleam",
   go = "go",
+  html = "html",
+  htm = "html",
   java = "java",
   c = "c",
   h = "c",
@@ -42,6 +44,7 @@ local EXT_TO_LANG = {
   md = "markdown",
   markdown = "markdown",
   bzl = "bazel_bzl",
+  nix = "nix",
   zig = "zig",
 }
 
@@ -514,6 +517,29 @@ local function detect_module_doc(root, source, is_module_doc_fn, is_attr_fn)
   return nil
 end
 
+local render_item_lines
+
+render_item_lines = function(entry, out, indent)
+  local prefix = string.rep(" ", indent)
+  for _, attr in ipairs(entry.attrs or {}) do
+    out[#out + 1] = prefix .. attr
+  end
+  out[#out + 1] = prefix .. entry.text .. " " .. format_range(entry.line_start, entry.line_end)
+  if entry.child_kind == CHILD_BRIEF and #(entry.children or {}) > 0 then
+    for _, line in ipairs(wrap_csv(entry.children, prefix .. "  ")) do
+      out[#out + 1] = line
+    end
+  else
+    for _, child in ipairs(entry.children or {}) do
+      if type(child) == "table" then
+        render_item_lines(child, out, indent + 2)
+      else
+        out[#out + 1] = prefix .. "  " .. child
+      end
+    end
+  end
+end
+
 local function format_skeleton(entries, test_lines, module_doc, import_sep)
   local out = {}
 
@@ -617,19 +643,7 @@ local function format_skeleton(entries, test_lines, module_doc, import_sep)
         out[#out + 1] = header
         for _, entry in ipairs(items) do
           if entry.kind == "item" then
-            for _, attr in ipairs(entry.attrs) do
-              out[#out + 1] = "  " .. attr
-            end
-            out[#out + 1] = "  " .. entry.text .. " " .. format_range(entry.line_start, entry.line_end)
-            if entry.child_kind == CHILD_BRIEF and #entry.children > 0 then
-              for _, line in ipairs(wrap_csv(entry.children, "    ")) do
-                out[#out + 1] = line
-              end
-            else
-              for _, child in ipairs(entry.children) do
-                out[#out + 1] = "    " .. child
-              end
-            end
+            render_item_lines(entry, out, 2)
           end
         end
       end

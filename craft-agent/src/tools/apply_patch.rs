@@ -233,7 +233,7 @@ impl super::ToolInvocation for ApplyPatch {
         )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { ApplyPatch::execute(&self, ctx).await })
+        Box::pin(async move { ApplyPatch::execute(&self, ctx).await.into() })
     }
 }
 

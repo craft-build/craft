@@ -91,6 +91,7 @@ pub async fn run(
         tool: Arc::clone(&tool_id),
         output: ToolOutput::Plain(msg),
         is_error: true,
+        annotation: None,
     };
 
     let hook_input: Option<Value> = if ctx.config.hooks_enabled
@@ -124,6 +125,7 @@ pub async fn run(
         let invocation = match entry.tool.parse(input) {
             Ok(inv) => inv,
             Err(first_err) => {
+                let mut recovered = None;
                 if ctx.config.small_model.enabled && ctx.config.small_model.forgiving_parsing {
                     let aggressive = crate::tools::sanitize_tool_input_aggressive(input);
                     if let Ok(inv) = entry.tool.parse(&aggressive) {
@@ -132,8 +134,12 @@ pub async fn run(
                             original_error = %first_err,
                             "recovered from parse error with aggressive sanitization"
                         );
-                        inv
-                    } else {
+                        recovered = Some(inv);
+                    }
+                }
+                match recovered {
+                    Some(inv) => inv,
+                    None => {
                         warn!(
                             tool = %name,
                             source = %entry.source.as_log_field(),
@@ -143,15 +149,6 @@ pub async fn run(
                         );
                         return done_error(first_err.to_string());
                     }
-                } else {
-                    warn!(
-                        tool = %name,
-                        source = %entry.source.as_log_field(),
-                        input_preview = %crate::tools::schema::preview(&input.to_string()),
-                        error = %first_err,
-                        "tool input parse failed"
-                    );
-                    return done_error(first_err.to_string());
                 }
             }
         };
@@ -191,7 +188,7 @@ pub async fn run(
         let result = invocation.execute(ctx).await;
 
         let elapsed = started.elapsed();
-        let done = match result {
+        let done = match result.output {
             Ok(output) => {
                 debug!(
                     tool = %name,
@@ -205,6 +202,7 @@ pub async fn run(
                     tool: tool_id,
                     output,
                     is_error: false,
+                    annotation: result.annotation,
                 }
             }
             Err(message) => {
@@ -306,6 +304,7 @@ async fn execute_mcp_tool(
         tool: Arc::clone(&tool_id),
         output: ToolOutput::Plain(output),
         is_error,
+        annotation: None,
     };
 
     if matches!(ctx.mode, AgentMode::Plan(_)) {
@@ -480,6 +479,7 @@ pub(super) async fn process_tool_calls(
                 tool: Arc::from(name.as_str()),
                 output: cached_output,
                 is_error: false,
+                annotation: None,
             };
             event_tx.try_send(AgentEvent::ToolDone(Box::new(done.clone())));
             trust.record_success(&name);
@@ -600,6 +600,7 @@ pub(super) async fn process_tool_calls(
                             "post-write validation failed:\n{errors}"
                         )),
                         is_error: true,
+                        annotation: None,
                     };
                     all_results.push(validation_result);
                 }

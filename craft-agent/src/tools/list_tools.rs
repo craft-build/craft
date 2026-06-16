@@ -174,7 +174,7 @@ impl super::ToolInvocation for ListTools {
         super::HeaderFuture::Ready(super::HeaderResult::plain(label))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { ListTools::execute(&self, ctx).await })
+        Box::pin(async move { ListTools::execute(&self, ctx).await.into() })
     }
 }
 

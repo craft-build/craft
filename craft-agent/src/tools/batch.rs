@@ -368,7 +368,7 @@ impl super::ToolInvocation for Batch {
         })
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { Batch::execute(&self, ctx).await })
+        Box::pin(async move { Batch::execute(&self, ctx).await.into() })
     }
 }
 
@@ -548,22 +548,5 @@ mod tests {
     fn batch_entry_missing_tool_and_params_is_error() {
         let empty = json!({"tool_calls": [{}]});
         assert!(Batch::parse_input(&empty).is_err());
-    }
-
-    #[tokio::test]
-    async fn flat_batch_entries_actually_execute() {
-        let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "hello world").unwrap();
-        let dir_str = dir.path().to_string_lossy().to_string();
-
-        let (entries, text) = run_batch(json!({
-            "tool_calls": [
-                {"tool": "grep", "path": dir_str, "pattern": "hello"}
-            ]
-        }))
-        .await;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].status, BatchToolStatus::Success);
-        assert!(text.contains("a.txt"));
     }
 }

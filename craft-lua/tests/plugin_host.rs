@@ -19,7 +19,7 @@ async fn exec_tool(
         .unwrap_or_else(|| panic!("tool {name} not registered"));
     let inv = entry.tool.parse(&input).expect("parse failed");
     let ctx = craft_agent::tools::test_support::stub_ctx(&craft_agent::AgentMode::Build);
-    inv.execute(&ctx).await.map(|out| match out {
+    inv.execute(&ctx).await.output.map(|out| match out {
         craft_agent::ToolOutput::Plain(s) => s,
         other => panic!("unexpected output: {other:?}"),
     })
@@ -225,7 +225,7 @@ craft.api.register_tool({{
 
     let result = inv.execute(&ctx).await;
 
-    assert!(result.is_err(), "expected error from timed-out loop");
+    assert!(result.output.is_err(), "expected error from timed-out loop");
 
     let ok = exec_tool(&reg, "noop_after_loop", serde_json::json!({})).await;
     assert!(ok.is_ok(), "VM poisoned after interrupt: {ok:?}");
@@ -1174,18 +1174,27 @@ async fn bash_timeout_round_trip() {
     assert_eq!(err, BASH_TIMEOUT_MSG);
 
     let handle = host.event_handle().expect("event handle available");
-    let reply = handle
-        .restore_tool(
-            "bash",
-            "test_id",
-            BASH_TIMEOUT_MSG,
-            &input,
-            true,
-            &ToolOutputLines::default(),
-        )
-        .expect("restore should return a reply");
-    let body = reply.body.expect("restore body present");
-    let last = body.lines.last().expect("at least one line");
+    let (tx, rx) = flume::unbounded();
+    let event_tx = craft_agent::EventSender::new(tx, 0);
+    handle.request_restore(
+        craft_lua::RestoreItem {
+            tool: Arc::from("bash"),
+            tool_use_id: "test_id".to_owned(),
+            output: BASH_TIMEOUT_MSG.to_owned(),
+            input,
+            is_error: true,
+            tool_output_lines: ToolOutputLines::default(),
+            theme_gen: None,
+        },
+        event_tx,
+    );
+    let _ = handle.collect_prompt_slots_async().await;
+    let snapshots: Vec<craft_agent::Envelope> = rx.drain().collect();
+    let env = snapshots.into_iter().next().expect("at least one snapshot");
+    let craft_agent::AgentEvent::ToolSnapshot { snapshot, .. } = env.event else {
+        panic!("expected ToolSnapshot event");
+    };
+    let last = snapshot.lines.last().expect("at least one line");
     let text: String = last.spans.iter().map(|s| s.text.as_str()).collect();
     assert!(
         text.contains(BASH_TIMEOUT_MARKER),
@@ -1203,7 +1212,7 @@ async fn exec_tool_with_perms(
         .unwrap_or_else(|| panic!("tool {name} not registered"));
     let inv = entry.tool.parse(&input).expect("parse failed");
     let ctx = craft_agent::tools::test_support::stub_ctx(&craft_agent::AgentMode::Build);
-    inv.execute(&ctx).await.map(|out| match out {
+    inv.execute(&ctx).await.output.map(|out| match out {
         craft_agent::ToolOutput::Plain(s) => s,
         other => panic!("unexpected output: {other:?}"),
     })

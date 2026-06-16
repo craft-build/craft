@@ -272,13 +272,6 @@ impl Chat {
         self.messages_panel.drain_pending_restores()
     }
 
-    pub fn set_restore_channel(
-        &mut self,
-        _handle: Option<craft_lua::EventHandle>,
-        _tx: Option<craft_agent::EventSender>,
-    ) {
-    }
-
     pub fn register_live_buf(&mut self, id: String, buf: Arc<SharedBuf>) {
         self.messages_panel.register_live_buf(id, buf);
     }
@@ -385,11 +378,11 @@ pub fn history_to_display(
     messages: &[Message],
     tool_outputs: &HashMap<String, ToolOutput>,
     tool_output_lines: &ToolOutputLines,
-    event_handle: Option<&craft_lua::EventHandle>,
-) -> Vec<DisplayMessage> {
+) -> (Vec<DisplayMessage>, Vec<craft_lua::RestoreItem>) {
     let registry = RenderHintsRegistry::new();
     let results = build_tool_results_map(messages);
     let mut display = Vec::new();
+    let mut restore_items: Vec<craft_lua::RestoreItem> = Vec::new();
     for msg in messages {
         match msg.role {
             Role::User => {
@@ -440,32 +433,22 @@ pub fn history_to_display(
                             {
                                 append_annotation(&mut annotation, &ta);
                             }
-                            let (mut render_snapshot, mut render_header) = (None, None);
-                            if let Some(eh) = event_handle {
-                                let is_error = status == ToolStatus::Error;
-                                let output_text = tool_outputs
-                                    .get(id.as_str())
-                                    .map(|o| o.as_text())
-                                    .or_else(|| result_text.map(|t| t.to_string()))
-                                    .unwrap_or_default();
-                                if let Some(reply) = eh.restore_tool(
-                                    name,
-                                    id,
-                                    &output_text,
-                                    input,
-                                    is_error,
-                                    tool_output_lines,
-                                ) {
-                                    render_snapshot = reply.body;
-                                    render_header = reply.header;
-                                }
-                            }
-                            let theme_gen = if render_snapshot.is_some() || render_header.is_some()
-                            {
-                                crate::theme::generation()
-                            } else {
-                                0
-                            };
+                            let (render_snapshot, render_header) = (None, None);
+                            let output = tool_outputs
+                                .get(id.as_str())
+                                .map(|o| o.as_text())
+                                .or_else(|| result_text.map(|t| t.to_string()))
+                                .unwrap_or_default();
+                            restore_items.push(craft_lua::RestoreItem {
+                                tool: Arc::from(static_name),
+                                tool_use_id: id.clone(),
+                                output,
+                                input: input.clone(),
+                                is_error: status == ToolStatus::Error,
+                                tool_output_lines: *tool_output_lines,
+                                theme_gen: None,
+                            });
+                            let theme_gen = 0;
                             display.push(DisplayMessage {
                                 role: DisplayRole::Tool(Box::new(ToolRole {
                                     id: id.clone(),
@@ -493,7 +476,7 @@ pub fn history_to_display(
             }
         }
     }
-    display
+    (display, restore_items)
 }
 
 /// Mirrors the live `tool_done` path so loaded tools look the same as streamed ones.
@@ -609,6 +592,7 @@ mod tests {
             tool: tool.into(),
             output,
             is_error: false,
+            annotation: None,
         }))
     }
 
@@ -705,7 +689,8 @@ mod tests {
             ..Default::default()
         }];
         assert!(
-            history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default(), None)
+            history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default())
+                .0
                 .is_empty()
         );
     }
@@ -747,8 +732,7 @@ mod tests {
             "output",
             is_error,
         );
-        let display =
-            history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default(), None);
+        let display = history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default()).0;
         assert_eq!(display.len(), 1);
         assert!(matches!(&display[0].role, DisplayRole::Tool(t) if t.status == expected));
     }
@@ -788,8 +772,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let display =
-            history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default(), None);
+        let display = history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default()).0;
         assert_eq!(display.len(), 4);
         assert_eq!(display[0].role, DisplayRole::User);
         assert_eq!(display[1].role, DisplayRole::Assistant);
@@ -838,7 +821,7 @@ mod tests {
             let discriminant = std::mem::discriminant(&output);
             let msgs = tool_use_pair(tool_name, input_json, "ok", false);
             let outputs = HashMap::from([("t1".into(), output)]);
-            let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default(), None);
+            let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default()).0;
             assert_eq!(
                 std::mem::discriminant(display[0].tool_output.as_deref().unwrap()),
                 discriminant,
@@ -861,7 +844,7 @@ mod tests {
             false,
         );
         let outputs = HashMap::from([("t1".into(), write_output)]);
-        let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default(), None);
+        let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default()).0;
         assert!(display[0].annotation.is_some());
     }
 
@@ -875,8 +858,7 @@ mod tests {
             &joined,
             false,
         );
-        let display =
-            history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default(), None);
+        let display = history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default()).0;
         let line_count = display[0].text.lines().count();
         assert!(
             line_count < long_output.len(),
@@ -912,7 +894,7 @@ mod tests {
         };
         let msgs = tool_use_pair("batch", serde_json::json!({"tool_calls": []}), "", false);
         let outputs = HashMap::from([("t1".into(), batch_output)]);
-        let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default(), None);
+        let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default()).0;
         let ToolOutput::Batch { entries, .. } = display[0].tool_output.as_deref().unwrap() else {
             panic!("expected Batch output");
         };
@@ -929,8 +911,7 @@ mod tests {
             "1: fn main() {}",
             false,
         );
-        let display =
-            history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default(), None);
+        let display = history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default()).0;
         assert!(display[0].tool_output.is_none());
         assert!(display[0].text.contains("fn main"));
     }
@@ -951,7 +932,7 @@ mod tests {
             ],
             ..Default::default()
         }];
-        let display = history_to_display(&msgs, &HashMap::new(), &ToolOutputLines::default(), None);
+        let display = history_to_display(&msgs, &HashMap::new(), &ToolOutputLines::default()).0;
         assert_eq!(display.len(), 2);
         assert_eq!(display[0].role, DisplayRole::Thinking);
         assert_eq!(display[0].text, "reasoning");

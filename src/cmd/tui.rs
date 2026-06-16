@@ -230,8 +230,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             provider,
             mcp_handle,
             mcp_config_errors,
-            #[cfg(feature = "demo")]
-            demo: cli.demo,
             #[cfg(feature = "onnx")]
             embed_rx,
         };

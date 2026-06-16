@@ -48,6 +48,6 @@ impl crate::tools::ToolInvocation for Retrieve {
         ctx: &'a crate::tools::ToolContext,
     ) -> crate::tools::ExecFuture<'a> {
         let store = Arc::clone(&ctx.compression_store);
-        Box::pin(async move { Retrieve::execute(&self, &store).await })
+        Box::pin(async move { Retrieve::execute(&self, &store).await.into() })
     }
 }

@@ -16,6 +16,7 @@ pub(crate) mod view;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -175,6 +176,7 @@ pub struct App {
     pub(crate) lua_event_handle: Option<EventHandle>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
     pub(crate) restore_event_tx: Option<craft_agent::EventSender>,
+    pub(super) restoring: Arc<AtomicBool>,
 }
 
 macro_rules! define_overlays {
@@ -258,6 +260,7 @@ impl App {
             lua_event_handle: None,
             subagent_answers: HashMap::new(),
             restore_event_tx: None,
+            restoring: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -278,7 +281,7 @@ impl App {
             return;
         };
         for item in items {
-            handle.restore_tool_async(item, event_tx);
+            handle.request_restore(item, event_tx.clone());
         }
     }
 
@@ -1073,7 +1076,6 @@ impl App {
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
         }
-        chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
         self.chats.push(chat);
         idx
     }
@@ -1389,6 +1391,7 @@ impl App {
                 .selection_state
                 .as_ref()
                 .is_some_and(|s| s.is_edge_scrolling())
+            || self.restoring.load(Ordering::Relaxed)
             || self.chats.iter().any(|c| c.is_animating())
     }
 

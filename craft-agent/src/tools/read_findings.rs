@@ -50,11 +50,11 @@ impl ReadFindings {
         };
 
         let limit = self.limit.unwrap_or(DEFAULT_LIMIT).max(1);
-        let entries =
-            store
-                .lock()
-                .unwrap()
-                .filter(priority, self.file_path_contains.as_deref(), limit);
+        let entries = store.lock().unwrap_or_else(|e| e.into_inner()).filter(
+            priority,
+            self.file_path_contains.as_deref(),
+            limit,
+        );
 
         if entries.is_empty() {
             return Ok(ToolOutput::Markdown(NO_FINDINGS_MSG.to_owned()));
@@ -86,7 +86,7 @@ impl ToolInvocation for ReadFindings {
         super::HeaderFuture::Ready(super::HeaderResult::plain(ReadFindings::start_header(self)))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { ReadFindings::execute(&self, ctx).await })
+        Box::pin(async move { ReadFindings::execute(&self, ctx).await.into() })
     }
 }
 

@@ -172,9 +172,9 @@ Return a compact overview of a source file: imports, type definitions, function 
         .. "). Use read with offset/limit instead."
     end
 
-    local ok, source = pcall(craft.fs.read, path)
-    if not ok then
-      return "error: " .. tostring(source)
+    local source, err = craft.fs.read(path)
+    if not source then
+      return "error: " .. err
     end
 
     local skeleton, err = indexer.index_source(source, lang)

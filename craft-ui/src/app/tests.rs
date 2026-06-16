@@ -249,6 +249,7 @@ fn tool_done_transitions_plan_to_ready(output: ToolOutput, expect_ready: bool) {
         tool: "write".into(),
         output,
         is_error: false,
+        annotation: None,
     }))));
 
     assert_eq!(app.state.plan.is_ready(), expect_ready);
@@ -664,6 +665,7 @@ fn finish_subagent(app: &mut App, id: &str, is_error: bool) {
         tool: "task".into(),
         output: ToolOutput::Plain("result".into()),
         is_error,
+        annotation: None,
     }))));
 }
 
@@ -2070,6 +2072,7 @@ fn plan_app() -> App {
             lines: vec![],
         },
         is_error: false,
+        annotation: None,
     }))));
     app
 }
@@ -2091,6 +2094,7 @@ fn tool_done_write_opens_plan_form(mode: Mode, expect_form: bool) {
             lines: vec![],
         },
         is_error: false,
+        annotation: None,
     }))));
     assert_eq!(app.plan_form.is_visible(), expect_form);
     if expect_form {
@@ -2125,6 +2129,7 @@ fn re_edit_keeps_plan_form_visible() {
             lines: vec![],
         },
         is_error: false,
+        annotation: None,
     }))));
     assert!(matches!(app.state.plan, PlanState::Ready(_)));
     assert!(app.plan_form.is_visible());
@@ -2193,6 +2198,7 @@ fn rewrite_plan(app: &mut App) {
             lines: vec![],
         },
         is_error: false,
+        annotation: None,
     }))));
 }
 
@@ -2233,6 +2239,7 @@ fn send_subagent_todo(app: &mut App, items: Vec<TaskNode>) {
             tool: "todo_write".into(),
             output: ToolOutput::TodoList(items),
             is_error: false,
+            annotation: None,
         })),
         "task1",
         Some("research"),

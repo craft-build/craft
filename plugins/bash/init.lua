@@ -250,8 +250,8 @@ craft.api.register_tool({
       return nil
     end
 
-    local ok, parser = pcall(craft.treesitter.get_parser, command, "bash")
-    if not ok then
+    local parser = craft.treesitter.get_parser(command, "bash")
+    if not parser then
       return { scopes = { command }, force_prompt = true }
     end
 

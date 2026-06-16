@@ -65,7 +65,7 @@ Find files by glob pattern.
 | `path` | string | no | cwd | Directory to search in |
 | `pattern` | string | no |  | Glob pattern (e.g. **/*.rs, src/**/*.ts) |
 
-### `grep`
+### `grep` *(lua plugin)*
 
 Search file contents using regex.
 
@@ -73,7 +73,7 @@ Search file contents using regex.
 |-----------|------|----------|---------|-------------|
 | `context_after` | integer | no |  | Context lines after match |
 | `context_before` | integer | no |  | Context lines before match |
-| `include` | string | no |  |  |
+| `include` | string | no |  | File glob filter (e.g. *.c) |
 | `limit` | integer | no |  | Max match groups to return |
 | `path` | string | no | cwd | Directory to search in |
 | `pattern` | string | yes |  | Regex pattern |

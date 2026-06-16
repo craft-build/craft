@@ -36,7 +36,7 @@ impl super::ToolInvocation for StyleguideList {
         )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { StyleguideList::execute(&self, ctx).await })
+        Box::pin(async move { StyleguideList::execute(&self, ctx).await.into() })
     }
 }
 
@@ -83,7 +83,7 @@ impl super::ToolInvocation for StyleguideSearch {
         )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { StyleguideSearch::execute(&self, ctx).await })
+        Box::pin(async move { StyleguideSearch::execute(&self, ctx).await.into() })
     }
 }
 
@@ -137,6 +137,6 @@ impl super::ToolInvocation for StyleguideGet {
         )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { StyleguideGet::execute(&self, ctx).await })
+        Box::pin(async move { StyleguideGet::execute(&self, ctx).await.into() })
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::chat::{Chat, DONE_TEXT, history_to_display};
 use crate::components::DisplayRole;
 use crate::components::rewind_picker::RewindEntry;
@@ -89,14 +91,17 @@ impl App {
         self.last_esc = None;
         self.chats[0].todo_panel.reset();
         self.plan_form.reset();
+        self.restoring = Arc::new(std::sync::atomic::AtomicBool::new(false));
     }
 
     pub(crate) fn restore_display(&mut self) {
-        let display_msgs = history_to_display(
+        let restoring = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.restoring = restoring.clone();
+
+        let (display_msgs, restore_items) = history_to_display(
             &self.state.session.messages,
             &self.state.session.tool_outputs,
             &self.ui_config.tool_output_lines,
-            self.lua_event_handle.as_ref(),
         );
         self.main_chat().load_messages(display_msgs);
         self.main_chat().token_usage = self.state.token_usage;
@@ -119,22 +124,42 @@ impl App {
             self.queue_and_notify(msg);
         }
 
+        self.fire_restore_items(restore_items);
+
         for sa in std::mem::take(&mut self.state.session.meta.subagents) {
             let idx = self.chats.len();
             self.chat_index.insert(sa.tool_use_id.clone(), idx);
             let mut chat = Chat::new(sa.name, self.ui_config);
             chat.model_id = sa.model;
             if let Some(messages) = self.state.session.subagent_messages.get(&sa.tool_use_id) {
-                let display = history_to_display(
+                let (display, items) = history_to_display(
                     messages,
                     &self.state.session.tool_outputs,
                     &self.ui_config.tool_output_lines,
-                    self.lua_event_handle.as_ref(),
                 );
                 chat.load_messages(display);
                 chat.mark_finished(DisplayRole::Done, DONE_TEXT);
+                self.fire_restore_items(items);
             }
             self.chats.push(chat);
+        }
+
+        if let Some(eh) = &self.lua_event_handle {
+            eh.send_restore_complete(restoring);
+        } else {
+            self.restoring
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn fire_restore_items(&self, items: Vec<craft_lua::RestoreItem>) {
+        let (Some(eh), Some(tx)) = (&self.lua_event_handle, &self.restore_event_tx) else {
+            return;
+        };
+        let theme_gen = crate::theme::generation();
+        for mut item in items {
+            item.theme_gen = Some(theme_gen);
+            eh.request_restore(item, tx.clone());
         }
     }
 

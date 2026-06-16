@@ -75,6 +75,7 @@ pub const DEFAULT_SEMANTIC_ENABLED: bool = false;
 pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
     "glob",
+    "grep",
     "index",
     "memory",
     "question",

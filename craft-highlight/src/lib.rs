@@ -41,6 +41,18 @@ pub fn theme() -> Arc<Theme> {
         .clone()
 }
 
+pub fn theme_color(name: &str) -> Option<(u8, u8, u8)> {
+    let settings = &theme().settings;
+    let map = serde_json::to_value(settings).ok()?;
+    let obj = map.as_object()?;
+    let val = obj.get(name)?;
+    let obj = val.as_object()?;
+    let r = obj.get("r")?.as_u64()? as u8;
+    let g = obj.get("g")?.as_u64()? as u8;
+    let b = obj.get("b")?.as_u64()? as u8;
+    Some((r, g, b))
+}
+
 pub fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
@@ -177,6 +189,13 @@ pub fn highlight_code(lang: &str, code: &str) -> Vec<Vec<StyledSegment>> {
     let mut hl = Highlighter::for_token(lang);
     LinesWithEndings::from(code)
         .map(|raw| hl.highlight_line(raw))
+        .collect()
+}
+
+pub fn highlight_lines_independent(lang: &str, code: &str) -> Vec<Vec<StyledSegment>> {
+    let syntax = syntax_for_token(lang);
+    LinesWithEndings::from(code)
+        .map(|raw| Highlighter::for_syntax(syntax).highlight_line(raw))
         .collect()
 }
 
@@ -321,6 +340,28 @@ mod tests {
         let trailing = highlight_code("rust", "let x = 1;\n\n\n");
         assert_eq!(trailing.len(), 3);
         assert_eq!(segments_text(&trailing[1]), "");
+    }
+
+    #[test]
+    fn highlight_lines_independent_ignores_cross_line_state() {
+        warmup();
+        let context_line = "/* start of block comment\n";
+        let target_line = "let x = 42;\n";
+        let combined = format!("{context_line}{target_line}");
+
+        let stateful = highlight_code("rust", &combined);
+        let independent = highlight_lines_independent("rust", &combined);
+
+        assert_eq!(
+            stateful.len(),
+            independent.len(),
+            "both should produce the same number of lines"
+        );
+        assert_ne!(
+            stateful[1], independent[1],
+            "inside a block comment the stateful highlighter should parse \
+             `let x = 42;` differently than a fresh independent highlighter"
+        );
     }
 
     #[test]

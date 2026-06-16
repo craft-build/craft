@@ -4,7 +4,7 @@ use std::fs::FileType;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-use mlua::{Lua, Result as LuaResult, Table};
+use mlua::{IntoLua, Lua, Result as LuaResult, Table};
 
 use crate::plugin_permissions::{
     Permission::{FsRead, FsWrite},
@@ -92,9 +92,12 @@ fn collect_dir_entries(
     }
 }
 
-fn io_result(lua: &Lua, result: std::io::Result<()>) -> LuaResult<(mlua::Value, mlua::Value)> {
+fn io_result<T: mlua::IntoLua>(
+    lua: &Lua,
+    result: std::io::Result<T>,
+) -> LuaResult<(mlua::Value, mlua::Value)> {
     match result {
-        Ok(()) => Ok((mlua::Value::Boolean(true), mlua::Value::Nil)),
+        Ok(val) => Ok((val.into_lua(lua)?, mlua::Value::Nil)),
         Err(e) => Ok((
             mlua::Value::Nil,
             mlua::Value::String(lua.create_string(e.to_string())?),
@@ -109,20 +112,23 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
     let p = perms.clone();
     t.set(
         "read",
-        lua.create_async_function(move |_, path: String| {
+        lua.create_async_function(move |lua, path: String| {
             let p = p.clone();
             async move {
                 if !p.is_allowed(FsRead) {
                     return Err(crate::plugin_permissions::denied_error(FsRead));
                 }
                 let abs = make_absolute(&path)?;
-                tokio::fs::read_to_string(&abs).await.map_err(|e| {
-                    if e.kind() == ErrorKind::InvalidData {
-                        mlua::Error::runtime("non-utf8 content; use read_bytes")
-                    } else {
-                        mlua::Error::runtime(format!("fs.read({path}): {e}"))
+                match tokio::fs::read_to_string(&abs).await {
+                    Ok(s) => Ok((s.into_lua(&lua)?, mlua::Value::Nil)),
+                    Err(e) if e.kind() == ErrorKind::InvalidData => {
+                        Err(mlua::Error::runtime("non-utf8 content; use read_bytes"))
                     }
-                })
+                    Err(e) => Ok((
+                        mlua::Value::Nil,
+                        mlua::Value::String(lua.create_string(e.to_string())?),
+                    )),
+                }
             }
         })?,
     )?;
@@ -137,10 +143,13 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                     return Err(crate::plugin_permissions::denied_error(FsRead));
                 }
                 let abs = make_absolute(&path)?;
-                let bytes = tokio::fs::read(&abs)
-                    .await
-                    .map_err(|e| mlua::Error::runtime(format!("fs.read_bytes({path}): {e}")))?;
-                lua.create_buffer(bytes)
+                match tokio::fs::read(&abs).await {
+                    Ok(bytes) => Ok((lua.create_buffer(bytes)?.into_lua(&lua)?, mlua::Value::Nil)),
+                    Err(e) => Ok((
+                        mlua::Value::Nil,
+                        mlua::Value::String(lua.create_string(e.to_string())?),
+                    )),
+                }
             }
         })?,
     )?;
@@ -161,10 +170,15 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                         tbl.set("size", meta.len())?;
                         tbl.set("is_file", meta.is_file())?;
                         tbl.set("is_dir", meta.is_dir())?;
-                        Ok(mlua::Value::Table(tbl))
+                        Ok((mlua::Value::Table(tbl), mlua::Value::Nil))
                     }
-                    Err(e) if e.kind() == ErrorKind::NotFound => Ok(mlua::Value::Nil),
-                    Err(e) => Err(mlua::Error::runtime(format!("fs.metadata({path}): {e}"))),
+                    Err(e) if e.kind() == ErrorKind::NotFound => {
+                        Ok((mlua::Value::Nil, mlua::Value::Nil))
+                    }
+                    Err(e) => Ok((
+                        mlua::Value::Nil,
+                        mlua::Value::String(lua.create_string(e.to_string())?),
+                    )),
                 }
             }
         })?,
@@ -378,8 +392,7 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                     return Err(crate::plugin_permissions::denied_error(FsWrite));
                 }
                 let abs = make_absolute(&path)?;
-                let result = tokio::fs::write(&abs, content).await;
-                io_result(&lua, result)
+                io_result(&lua, tokio::fs::write(&abs, content).await.map(|()| true))
             }
         })?,
     )?;
@@ -394,8 +407,7 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                     return Err(crate::plugin_permissions::denied_error(FsWrite));
                 }
                 let abs = make_absolute(&path)?;
-                let result = tokio::fs::remove_file(&abs).await;
-                io_result(&lua, result)
+                io_result(&lua, tokio::fs::remove_file(&abs).await.map(|()| true))
             }
         })?,
     )?;
@@ -419,12 +431,12 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 } else {
                     tokio::fs::create_dir(&abs).await
                 };
-                io_result(&lua, result)
+                io_result(&lua, result.map(|()| true))
             }
         })?,
     )?;
 
-    let p = perms;
+    let p = perms.clone();
     t.set(
         "glob",
         lua.create_async_function(move |lua, (patterns, opts): (mlua::Value, Option<Table>)| {
@@ -506,6 +518,75 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                     tbl.set(i + 1, path.as_str())?;
                 }
                 Ok(tbl)
+            }
+        })?,
+    )?;
+
+    let p = perms.clone();
+    t.set(
+        "grep",
+        lua.create_async_function(move |lua, (pattern, opts): (String, Option<Table>)| {
+            let p = p.clone();
+            async move {
+                if !p.is_allowed(FsRead) {
+                    return Err(crate::plugin_permissions::denied_error(FsRead));
+                }
+
+                let mut params = craft_agent::tools::grep::GrepParams::new(pattern);
+                if let Some(opts) = opts {
+                    if let Ok(v) = opts.get::<String>("path") {
+                        params.path = Some(v);
+                    }
+                    if let Ok(v) = opts.get::<String>("include") {
+                        params.include = Some(v);
+                    }
+                    if let Ok(v) = opts.get::<usize>("context_before") {
+                        params.context_before = v;
+                    }
+                    if let Ok(v) = opts.get::<usize>("context_after") {
+                        params.context_after = v;
+                    }
+                    if let Ok(v) = opts.get::<usize>("limit") {
+                        params.limit = v;
+                    }
+                    if let Ok(v) = opts.get::<usize>("max_line_bytes") {
+                        params.max_line_bytes = v;
+                    }
+                }
+
+                let result = tokio::task::spawn_blocking(move || {
+                    craft_agent::tools::grep::grep_search(params)
+                })
+                .await
+                .map_err(|e| mlua::Error::runtime(format!("task failed: {e}")))?;
+
+                match result {
+                    Ok((base, entries)) => {
+                        let arr = lua.create_table()?;
+                        for (i, entry) in entries.iter().enumerate() {
+                            let etbl = lua.create_table()?;
+                            etbl.set("path", base.join(&entry.path).to_string_lossy().as_ref())?;
+                            let groups_tbl = lua.create_table()?;
+                            for (gi, group) in entry.groups.iter().enumerate() {
+                                let gtbl = lua.create_table()?;
+                                let lines_tbl = lua.create_table()?;
+                                for (li, line) in group.lines.iter().enumerate() {
+                                    let ltbl = lua.create_table()?;
+                                    ltbl.set("line_nr", line.line_nr)?;
+                                    ltbl.set("text", line.text.as_str())?;
+                                    ltbl.set("is_match", line.is_match)?;
+                                    lines_tbl.set(li + 1, ltbl)?;
+                                }
+                                gtbl.set("lines", lines_tbl)?;
+                                groups_tbl.set(gi + 1, gtbl)?;
+                            }
+                            etbl.set("groups", groups_tbl)?;
+                            arr.set(i + 1, etbl)?;
+                        }
+                        Ok((mlua::Value::Table(arr), mlua::Value::Nil))
+                    }
+                    Err(e) => Ok((mlua::Value::Nil, mlua::Value::String(lua.create_string(e)?))),
+                }
             }
         })?,
     )?;
@@ -723,6 +804,23 @@ mod tests {
             len < 20,
             "symlink cycle produced {len} entries, expected bounded"
         );
+    }
+
+    #[tokio::test]
+    async fn read_missing_returns_nil_err() {
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+
+        for func_name in ["read", "read_bytes"] {
+            let f: mlua::Function = tbl.get(func_name).unwrap();
+            let (val, err): (mlua::Value, mlua::Value) =
+                f.call_async("/nonexistent/path").await.unwrap();
+            assert_eq!(val, mlua::Value::Nil, "{func_name} should return nil");
+            assert!(
+                matches!(err, mlua::Value::String(_)),
+                "{func_name} should return error"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1073,5 +1171,109 @@ mod tests {
         }
         assert_eq!(paths.len(), 1);
         assert!(paths[0].ends_with("inner.rs"));
+    }
+
+    #[tokio::test]
+    async fn grep_returns_matches_with_context_and_limit() {
+        let tmp = TempDir::new().unwrap();
+        let mut content = String::new();
+        for i in 1..=20 {
+            content.push_str(&format!("line_{i}\n"));
+        }
+        std::fs::write(tmp.path().join("data.txt"), &content).unwrap();
+        std::fs::write(tmp.path().join("other.txt"), "no hits here\n").unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let grep: mlua::Function = tbl.get("grep").unwrap();
+
+        let opts = lua.create_table().unwrap();
+        opts.set("path", tmp.path().to_str().unwrap()).unwrap();
+        let result: Table = grep.call_async::<Table>(("line_", opts)).await.unwrap();
+        assert_eq!(result.len().unwrap(), 1);
+        let entry: Table = result.get(1).unwrap();
+        let path = entry.get::<String>("path").unwrap();
+        assert!(path.ends_with("data.txt"));
+        assert!(Path::new(&path).is_absolute());
+        let groups: Table = entry.get("groups").unwrap();
+        assert!(groups.len().unwrap() > 0);
+        let line: Table = groups
+            .get::<Table>(1)
+            .unwrap()
+            .get::<Table>("lines")
+            .unwrap()
+            .get(1)
+            .unwrap();
+        assert!(line.get::<bool>("is_match").unwrap());
+        assert!(line.get::<usize>("line_nr").unwrap() > 0);
+
+        let opts = lua.create_table().unwrap();
+        opts.set("path", tmp.path().to_str().unwrap()).unwrap();
+        opts.set("context_before", 1).unwrap();
+        opts.set("context_after", 1).unwrap();
+        let result: Table = grep.call_async::<Table>(("line_10", opts)).await.unwrap();
+        let lines: Table = result
+            .get::<Table>(1)
+            .unwrap()
+            .get::<Table>("groups")
+            .unwrap()
+            .get::<Table>(1)
+            .unwrap()
+            .get("lines")
+            .unwrap();
+        assert_eq!(lines.len().unwrap(), 3);
+        assert!(
+            !lines
+                .get::<Table>(1)
+                .unwrap()
+                .get::<bool>("is_match")
+                .unwrap()
+        );
+        assert!(
+            lines
+                .get::<Table>(2)
+                .unwrap()
+                .get::<bool>("is_match")
+                .unwrap()
+        );
+        assert!(
+            !lines
+                .get::<Table>(3)
+                .unwrap()
+                .get::<bool>("is_match")
+                .unwrap()
+        );
+
+        let opts = lua.create_table().unwrap();
+        opts.set("path", tmp.path().to_str().unwrap()).unwrap();
+        opts.set("limit", 5).unwrap();
+        let result: Table = grep.call_async::<Table>(("line_", opts)).await.unwrap();
+        let groups: Table = result.get::<Table>(1).unwrap().get("groups").unwrap();
+        assert_eq!(groups.len().unwrap(), 5);
+
+        let opts = lua.create_table().unwrap();
+        opts.set("path", tmp.path().to_str().unwrap()).unwrap();
+        let result: Table = grep
+            .call_async::<Table>(("zzz_no_match", opts))
+            .await
+            .unwrap();
+        assert_eq!(result.len().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn grep_invalid_regex_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("x.txt"), "hello\n").unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let grep: mlua::Function = tbl.get("grep").unwrap();
+
+        let opts = lua.create_table().unwrap();
+        opts.set("path", tmp.path().to_str().unwrap()).unwrap();
+        let (entries, err): (mlua::Value, String) =
+            grep.call_async(("[invalid", opts)).await.unwrap();
+        assert!(matches!(entries, mlua::Value::Nil));
+        assert!(err.contains("invalid regex pattern"));
     }
 }

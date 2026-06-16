@@ -82,8 +82,8 @@ craft.api.register_prompt_hint({
     if not meta then
       return nil
     end
-    local ok, content = pcall(craft.fs.read, fp)
-    if not ok or not content or content == "" then
+    local content = craft.fs.read(fp)
+    if not content or content == "" then
       return nil
     end
     return "\n\n## Checkpoint (from last session)\n\n" .. content .. "\n"
@@ -127,8 +127,8 @@ local function semantic_view(query, dir, ctx)
     lines[#lines + 1] = "## " .. filename .. " (similarity: " .. string.format("%.2f", sim) .. ")"
     local fp = helpers.safe_resolve(dir, filename)
     if fp then
-      local ok, content = pcall(craft.fs.read, fp)
-      if ok then
+      local content = craft.fs.read(fp)
+      if content then
         lines[#lines + 1] = content
         lines[#lines + 1] = ""
         rendered[#rendered + 1] = content
@@ -155,8 +155,8 @@ local function lexical_view(query, dir, ctx)
     lines[#lines + 1] = "## " .. filename .. " (score: " .. string.format("%.2f", score) .. ")"
     local fp = helpers.safe_resolve(dir, filename)
     if fp then
-      local ok, content = pcall(craft.fs.read, fp)
-      if ok then
+      local content = craft.fs.read(fp)
+      if content then
         lines[#lines + 1] = content
         lines[#lines + 1] = ""
         rendered[#rendered + 1] = content
@@ -177,13 +177,14 @@ local function cmd_view(path, dir, ctx)
   end
   local file_path, err = helpers.safe_resolve(dir, path)
   if file_path then
-    local ok, content = pcall(craft.fs.read, file_path)
-    if ok then
+    local content, read_err = craft.fs.read(file_path)
+    if content then
       return {
         llm_output = content,
         body = render_content(content, path, ctx),
       }
     end
+    return nil, "read error: " .. tostring(read_err)
   end
   local lexical = lexical_view(path, dir, ctx)
   if lexical then

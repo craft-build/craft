@@ -41,7 +41,6 @@ tempfile = { workspace = true }
 shell-words = { workspace = true }
 
 [features]
-demo = []
 onnx = ["craft-agent/onnx", "craft-lua/onnx"]
 
 [dev-dependencies]

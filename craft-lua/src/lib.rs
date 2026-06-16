@@ -16,7 +16,7 @@ pub use api::hooks::LuaHooks;
 pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost};
 pub use plugin_permissions::{Permission, PluginPermissions, denied_error};
-pub use runtime::{ClickReply, RestoreItem, RestoreReply, SharedSandboxConfig};
+pub use runtime::{ClickReply, RestoreItem, SharedSandboxConfig};
 pub use terminal_backend::{
     JobEvent as TerminalEvent, LocalTerminal, TerminalBackend, TerminalFuture, TerminalHandle,
     TerminalSpec, local_backend,

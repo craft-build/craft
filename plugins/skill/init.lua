@@ -28,8 +28,8 @@ local function scan_skill_dir(dir, skills)
   for _, entry in ipairs(entries) do
     if entry[2] == "directory" then
       local skill_path = craft.fs.joinpath(dir, entry[1], SKILL_FILE)
-      local ok, content = pcall(craft.fs.read, skill_path)
-      if ok and content then
+      local content = craft.fs.read(skill_path)
+      if content then
         local fm, body = parse_frontmatter(content)
         if body and #body > 0 then
           local name = (fm and fm.name) or entry[1]

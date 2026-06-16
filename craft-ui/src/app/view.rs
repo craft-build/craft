@@ -279,6 +279,7 @@ impl App {
             retry_info: self.retry_info.as_ref(),
             thinking_label: self.state.thinking.status_label(),
             fast: self.state.fast,
+            restoring: self.restoring.load(std::sync::atomic::Ordering::Relaxed),
         };
         self.status_bar.view(frame, status_area, &ctx);
     }

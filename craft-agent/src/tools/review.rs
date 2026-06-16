@@ -186,7 +186,7 @@ impl Review {
 
         let findings = match Arc::try_unwrap(findings) {
             Ok(m) => m.into_inner().unwrap_or_default(),
-            Err(arc) => arc.lock().unwrap().clone(),
+            Err(arc) => arc.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         };
 
         if !findings.is_empty()
@@ -194,7 +194,7 @@ impl Review {
         {
             store
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .extend(&self.task, findings.iter().cloned());
         }
 
@@ -212,7 +212,7 @@ impl super::ToolInvocation for Review {
         super::HeaderFuture::Ready(super::HeaderResult::plain(Review::start_header(self)))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { Review::execute(&self, ctx).await })
+        Box::pin(async move { Review::execute(&self, ctx).await.into() })
     }
 }
 
@@ -227,7 +227,10 @@ fn filter_subagent_envelope(
     match &envelope.event {
         AgentEvent::ToolDone(done) => {
             if let ToolOutput::Findings(f) = &done.output {
-                findings.lock().unwrap().extend(f.clone());
+                findings
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(f.clone());
             }
             false
         }
@@ -276,6 +279,7 @@ mod tests {
             tool: "report_finding".into(),
             output: ToolOutput::Findings(vec![finding("a"), finding("b")]),
             is_error: false,
+            annotation: None,
         })));
         assert!(!filter_subagent_envelope(&env, &bucket));
         assert_eq!(bucket.lock().unwrap().len(), 2);
@@ -289,6 +293,7 @@ mod tests {
             tool: "read".into(),
             output: ToolOutput::Plain("x".into()),
             is_error: false,
+            annotation: None,
         })));
         assert!(!filter_subagent_envelope(&env, &bucket));
         assert!(bucket.lock().unwrap().is_empty());

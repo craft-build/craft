@@ -34,14 +34,35 @@ pub(crate) fn create_ui_table(
         lua.create_function(|lua, ()| Ok(with_task_bufs(lua, |store| store.create_live())))?,
     )?;
     t.set(
-        "highlight",
-        lua.create_async_function(|lua, (code, lang): (String, String)| async move {
-            let segments =
-                tokio::task::spawn_blocking(move || craft_highlight::highlight_code(&lang, &code))
-                    .await
-                    .map_err(|e| mlua::Error::runtime(format!("highlight task failed: {e}")))?;
-            segments_to_lua_lines(&lua, &segments)
+        "theme_color",
+        lua.create_function(|lua, name: String| {
+            let Some((r, g, b)) = craft_highlight::theme_color(&name) else {
+                return Ok(mlua::Value::Nil);
+            };
+            Ok(mlua::Value::String(
+                lua.create_string(format!("#{r:02x}{g:02x}{b:02x}"))?,
+            ))
         })?,
+    )?;
+    t.set(
+        "highlight",
+        lua.create_async_function(
+            |lua, (code, lang, opts): (String, String, Option<mlua::Table>)| async move {
+                let independent = opts
+                    .and_then(|t| t.get::<bool>("independent").ok())
+                    .unwrap_or(false);
+                let segments = tokio::task::spawn_blocking(move || {
+                    if independent {
+                        craft_highlight::highlight_lines_independent(&lang, &code)
+                    } else {
+                        craft_highlight::highlight_code(&lang, &code)
+                    }
+                })
+                .await
+                .map_err(|e| mlua::Error::runtime(format!("highlight task failed: {e}")))?;
+                segments_to_lua_lines(&lua, &segments)
+            },
+        )?,
     )?;
     // craft.ui.markdown(text, width) -> lines.
     // Each line is `{ {text, style}, ... }`. Async because highlighting

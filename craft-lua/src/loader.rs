@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -11,9 +11,8 @@ use include_dir::{Dir, include_dir};
 use crate::api::command::{LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
-use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem, RestoreReply};
+use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem};
 use crate::terminal_backend::{LocalTerminal, TerminalBackend};
-use serde_json::Value;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -40,6 +39,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "bash",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/bash"),
+    },
+    BundledPlugin {
+        name: "grep",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/grep"),
     },
     BundledPlugin {
         name: "glob",
@@ -344,36 +347,14 @@ impl EventHandle {
         rx.recv_async().await.unwrap_or_default()
     }
 
-    pub fn restore_tool(
-        &self,
-        tool: &str,
-        tool_use_id: &str,
-        output: &str,
-        input: &Value,
-        is_error: bool,
-        tool_output_lines: &craft_config::ToolOutputLines,
-    ) -> Option<RestoreReply> {
-        let (tx, rx) = flume::bounded(1);
-        let _ = self.tx.send(Request::RestoreToolBatch {
-            items: vec![RestoreItem {
-                tool: Arc::from(tool),
-                tool_use_id: tool_use_id.to_owned(),
-                output: output.to_owned(),
-                input: input.clone(),
-                is_error,
-                tool_output_lines: *tool_output_lines,
-                theme_gen: None,
-            }],
-            reply: tx,
-        });
-        rx.recv().unwrap_or_default().into_iter().next().flatten()
+    pub fn request_restore(&self, item: RestoreItem, event_tx: craft_agent::EventSender) {
+        let _ = self
+            .tx
+            .try_send(Request::RestoreToolAsync { item, event_tx });
     }
 
-    pub fn restore_tool_async(&self, item: RestoreItem, event_tx: &craft_agent::EventSender) {
-        let _ = self.tx.try_send(Request::RestoreToolAsync {
-            item,
-            event_tx: event_tx.clone(),
-        });
+    pub fn send_restore_complete(&self, flag: Arc<AtomicBool>) {
+        let _ = self.tx.send(Request::RestoreComplete { flag });
     }
 }
 

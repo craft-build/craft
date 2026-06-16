@@ -134,9 +134,8 @@ pub enum Request {
         item: RestoreItem,
         event_tx: craft_agent::EventSender,
     },
-    RestoreToolBatch {
-        items: Vec<RestoreItem>,
-        reply: flume::Sender<Vec<Option<RestoreReply>>>,
+    RestoreComplete {
+        flag: Arc<AtomicBool>,
     },
     RunHook {
         event: String,
@@ -151,8 +150,8 @@ pub enum Request {
     },
 }
 
-/// Single source of truth for re-running a lua restore callback, shared by
-/// session load, batch load, and theme re-bake.
+/// Everything needed to re-run a lua restore callback. Used by session
+/// restore and theme re-bake so both paths share a single struct.
 pub struct RestoreItem {
     pub tool: Arc<str>,
     pub tool_use_id: String,
@@ -163,13 +162,13 @@ pub struct RestoreItem {
     pub theme_gen: Option<u64>,
 }
 
-pub struct RestoreReply {
+pub(crate) struct RestoreReply {
     pub body: Option<BufferSnapshot>,
     pub header: Option<BufferSnapshot>,
 }
 
 impl RestoreReply {
-    pub fn emit(
+    pub(crate) fn emit(
         self,
         tool_use_id: &str,
         theme_gen: Option<u64>,
@@ -1127,22 +1126,14 @@ impl LuaRuntime {
         }
     }
 
-    async fn restore_tool(
-        &self,
-        tool: &str,
-        tool_use_id: &str,
-        output: &str,
-        input: Value,
-        is_error: bool,
-        tool_output_lines: craft_config::ToolOutputLines,
-    ) -> Option<RestoreReply> {
+    async fn restore_item(&self, item: RestoreItem) -> Option<RestoreReply> {
         let func = {
             let plugins = self.plugins.borrow();
-            let tk = plugins.values().find_map(|tools| tools.get(tool))?;
+            let tk = plugins.values().find_map(|tools| tools.get(&*item.tool))?;
             let key = tk.restore.as_ref()?;
             self.lua.registry_value::<Function>(key).ok()?
         };
-        let input_lua = json_to_lua(&self.lua, &input).ok()?;
+        let input_lua = json_to_lua(&self.lua, &item.input).ok()?;
         let thread = self.lua.create_thread(func).ok()?;
 
         let (dummy_tx, _) = flume::unbounded();
@@ -1151,38 +1142,31 @@ impl LuaRuntime {
             None,
             Some(LiveCtx {
                 event_tx: craft_agent::EventSender::new(dummy_tx, 0),
-                tool_use_id: tool_use_id.to_owned(),
+                tool_use_id: item.tool_use_id.clone(),
             }),
             Arc::clone(&self.terminal_backend),
         );
 
         let ctx_ud = self
             .lua
-            .create_userdata(crate::api::ctx::RestoreCtx { tool_output_lines })
+            .create_userdata(crate::api::ctx::RestoreCtx {
+                tool_output_lines: item.tool_output_lines,
+            })
             .ok()?;
         let inner = thread
-            .into_async::<LuaValue>((input_lua, output, is_error, ctx_ud))
+            .into_async::<LuaValue>((input_lua, &*item.output, item.is_error, ctx_ud))
             .ok()?;
         let scope = TaskScope::new(&self.lua, cell);
         let ret = scope
             .scope_future(inner)
             .await
-            .inspect_err(|e| tracing::warn!(tool, error = %e, "restore callback failed"))
+            .inspect_err(
+                |e| tracing::warn!(tool = &*item.tool, error = %e, "restore callback failed"),
+            )
             .ok()?;
+        drop(scope);
 
         extract_restore_reply(&ret)
-    }
-
-    async fn restore_item(&self, item: RestoreItem) -> Option<RestoreReply> {
-        self.restore_tool(
-            &item.tool,
-            &item.tool_use_id,
-            &item.output,
-            item.input,
-            item.is_error,
-            item.tool_output_lines,
-        )
-        .await
     }
 
     fn compute_permission_scopes(
@@ -1403,6 +1387,7 @@ fn timeout_reply(handle: &TaskHandle, plugin: &str, tool: &str) -> ToolCallReply
         header: None,
         live_buf,
         format: LuaOutputFormat::default(),
+        annotation: None,
     }
 }
 
@@ -1740,13 +1725,8 @@ pub fn spawn(
                             reply.emit(&id, theme_gen, &event_tx);
                         }
                     }
-                    Request::RestoreToolBatch { items, reply } => {
-                        let mut replies = Vec::with_capacity(items.len());
-                        for item in items {
-                            replies.push(rt.restore_item(item).await);
-                        }
-                        drain_spawn_queue(&rt.lua, &gate);
-                        let _ = reply.send(replies);
+                    Request::RestoreComplete { flag } => {
+                        flag.store(false, Ordering::Relaxed);
                     }
                     Request::RunHook {
                         event,

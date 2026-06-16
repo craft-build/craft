@@ -104,10 +104,7 @@ impl AgentHandles {
 
         let restore_tx =
             craft_agent::EventSender::new(self.agent_tx.clone(), crate::app::RESTORE_RUN_ID);
-        app.restore_event_tx = Some(restore_tx.clone());
-        for chat in &mut app.chats {
-            chat.set_restore_channel(app.lua_event_handle.clone(), Some(restore_tx.clone()));
-        }
+        app.restore_event_tx = Some(restore_tx);
     }
 
     pub(crate) fn send_cancel_all(&self) {
