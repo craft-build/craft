@@ -17,6 +17,18 @@ The goal is simple: longer effective sessions, lower cost per turn, and an agent
 
 ## Features
 
+### Whats different from maki
+
+While the below sections call out all the features of craft both inherited from maki and unique to craft. The following features are unique to craft:
+
+- Multi-stage compression pipeline
+- Semantic intelligence
+- Keyword scoring
+- Tool deduplication
+- Most of Reliability and Guardrails
+
+Runtime difference - Craft also significantly retools the async runtime and network stack of maki by converting it from smol and isahc to tokio and reqwest. This was done primarily for the comfort of the craft developer, but also for reqwest's robustness and stability.
+
 ### Context efficiency
 
 - **`index` tool** - uses [tree-sitter](https://tree-sitter.github.io/tree-sitter) to parse supported languages into a high-level skeleton with exact line ranges for every item. Encouraged before reads, since a compact outline replaces scrolling through a full file.
