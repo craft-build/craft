@@ -42,22 +42,8 @@ pub fn apply(command: &mut Command, profile: &SandboxProfile) -> Result<(), Sand
         wrapped.arg("--unshare-net");
     }
 
-    if !read_only {
-        let mut roots = profile.writable_roots.clone();
-        if roots.is_empty() {
-            roots = default_writable_roots();
-        }
-        for r in &roots {
-            let r = normalize(r);
-            wrapped.arg("--bind").arg(&r).arg(&r);
-        }
-    }
-
-    let ws_flag = if read_only { "--ro-bind" } else { "--bind" };
+    // Read-only base first — later --bind mounts override it for their paths.
     wrapped
-        .arg(ws_flag)
-        .arg(&workspace)
-        .arg(&workspace)
         .arg("--ro-bind")
         .arg("/")
         .arg("/")
@@ -68,6 +54,21 @@ pub fn apply(command: &mut Command, profile: &SandboxProfile) -> Result<(), Sand
         .arg("--ro-bind")
         .arg("/run")
         .arg("/run");
+
+    if !read_only {
+        let ws = normalize(&workspace);
+        wrapped.arg("--bind").arg(&ws).arg(&ws);
+        let mut roots = profile.writable_roots.clone();
+        if roots.is_empty() {
+            roots = default_writable_roots();
+        }
+        for r in &roots {
+            let r = normalize(r);
+            wrapped.arg("--bind").arg(&r).arg(&r);
+        }
+    } else {
+        wrapped.arg("--ro-bind").arg(&workspace).arg(&workspace);
+    }
 
     wrapped.arg("--");
     for a in &argv {
@@ -161,5 +162,32 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn ro_bind_root_precedes_writable_binds() {
+        if which(BWRAP).is_none() {
+            warn!("bwrap not present, skipping ordering test");
+            return;
+        }
+        let mut cmd = Command::new("echo");
+        let profile = SandboxProfile::workspace_write("/tmp/craft-order-test");
+        apply(&mut cmd, &profile).unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let ro_root = args
+            .iter()
+            .position(|a| a == "--ro-bind")
+            .and_then(|i| args.get(i + 1).filter(|v| *v == "/"));
+        let ws_bind = args
+            .iter()
+            .position(|a| a == "--bind")
+            .and_then(|i| args.get(i + 1).filter(|v| *v == "/tmp/craft-order-test"));
+        assert!(
+            ro_root.is_some() && ws_bind.is_some() && ro_root.unwrap() < ws_bind.unwrap(),
+            "--ro-bind / must come before --bind <workspace> so writable mounts override the read-only root"
+        );
     }
 }
