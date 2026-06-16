@@ -51,16 +51,17 @@ impl SandboxMode {
     }
 }
 
-/// Network access inside the sandbox. Defaults to off (gated).
+/// Network access inside the sandbox. Defaults to allowed so standard build
+/// tools and network pulls into the workspace/temp work without reconfiguration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkPolicy {
     #[default]
-    Denied,
     Allowed,
+    Denied,
 }
 
 /// Resolved sandbox configuration. Built from the `[sandbox]` config section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SandboxProfile {
     pub mode: SandboxMode,
     pub network: NetworkPolicy,
@@ -72,9 +73,8 @@ impl SandboxProfile {
     pub fn workspace_write(workspace: impl Into<PathBuf>) -> Self {
         Self {
             mode: SandboxMode::WorkspaceWrite,
-            network: NetworkPolicy::Denied,
             workspace: workspace.into(),
-            writable_roots: Vec::new(),
+            ..Default::default()
         }
     }
 }

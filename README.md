@@ -104,7 +104,7 @@ cargo install --git https://github.com/craft-build/craft.git craft
 
 ## Documentation
 
-More info in the [official docs](https://github.com/craft-build/craft).
+More info in the [official docs](https://craft-build.github.io/craft/index.html).
 
 ## Extending with Lua
 

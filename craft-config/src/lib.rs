@@ -1177,7 +1177,7 @@ pub struct SandboxConfig {
     pub enabled: bool,
     #[serde(default)]
     pub mode: SandboxMode,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub network: bool,
 }
 
@@ -1186,7 +1186,7 @@ impl Default for SandboxConfig {
         Self {
             enabled: true,
             mode: SandboxMode::WorkspaceWrite,
-            network: false,
+            network: true,
         }
     }
 }
@@ -1196,7 +1196,7 @@ impl SandboxConfig {
         Self {
             enabled: f.enabled.unwrap_or(true),
             mode: f.mode.unwrap_or_default(),
-            network: f.network.unwrap_or(false),
+            network: f.network.unwrap_or(true),
         }
     }
 }

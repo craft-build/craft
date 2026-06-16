@@ -108,7 +108,8 @@ mod tests {
 
     #[test]
     fn sbpl_denies_network_and_writes_outside_workspace() {
-        let profile = SandboxProfile::workspace_write("/Users/test/project");
+        let mut profile = SandboxProfile::workspace_write("/Users/test/project");
+        profile.network = NetworkPolicy::Denied;
         let sbpl = build_sbpl(&profile);
         assert!(sbpl.contains("(deny network*)"), "must deny network");
         assert!(
