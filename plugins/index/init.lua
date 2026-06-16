@@ -17,6 +17,9 @@ local KEYWORDS = {
   class = true,
   interface = true,
   export = true,
+  extension = true,
+  mixin = true,
+  typedef = true,
   ["macro_rules!"] = true,
 }
 

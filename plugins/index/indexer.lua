@@ -46,6 +46,7 @@ local EXT_TO_LANG = {
   bzl = "bazel_bzl",
   nix = "nix",
   zig = "zig",
+  dart = "dart",
 }
 
 local FILENAME_TO_LANG = {
