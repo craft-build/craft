@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
+pub mod providers;
+
 const PROJECT_DIR: &str = ".craft";
 const PERMISSIONS_FILE: &str = "permissions.toml";
 
@@ -79,6 +81,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "memory",
     "question",
     "skill",
+    "todo_write",
     "webfetch",
     "websearch",
 ];
@@ -817,6 +820,9 @@ impl SmallModelConfig {
 pub struct DynamicToolsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Deprecated: all builtin tools are now always advertised. Only MCP server
+    /// tools are gated behind promotion. This field is kept for config compatibility
+    /// and ignored.
     #[serde(default)]
     pub core: Vec<String>,
 }

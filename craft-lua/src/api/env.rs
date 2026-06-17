@@ -46,5 +46,17 @@ pub(crate) fn create_env_table(lua: &Lua, perms: &PluginPermissions) -> LuaResul
         })?,
     )?;
 
+    t.set(
+        "tmpdir",
+        lua.create_function({
+            let perms = perms.clone();
+            move |lua, ()| {
+                perms.guard(Env, lua, |_| {
+                    Ok(std::env::temp_dir().to_str().map(String::from))
+                })
+            }
+        })?,
+    )?;
+
     Ok(t)
 }

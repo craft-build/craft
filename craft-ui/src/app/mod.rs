@@ -30,8 +30,9 @@ use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
-use crate::components::keybindings::key;
+use crate::components::keybindings::{key, normalize_key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
+use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
@@ -57,7 +58,7 @@ use craft_agent::{
     SubagentInfo, ToolOutput,
 };
 use craft_config::UiConfig;
-use craft_lua::{EventHandle, LuaCommandReader};
+use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader};
 use craft_providers::{Message, Model, ThinkingConfig};
 use craft_storage::StateDir;
 use craft_storage::input_history::InputHistory;
@@ -137,6 +138,7 @@ pub struct App {
     pub(super) task_picker_original: Option<usize>,
     pub(super) theme_picker: ThemePicker,
     pub(super) model_picker: ModelPicker,
+    pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
     pub(super) session_picker: SessionPicker,
     pub(super) rewind_picker: RewindPicker,
@@ -174,6 +176,8 @@ pub struct App {
     pub(crate) permissions: Arc<PermissionManager>,
     pub(super) buf_click: Option<BufClickHandler>,
     pub(crate) lua_event_handle: Option<EventHandle>,
+    pub(super) keymap_reader: KeymapReader,
+    pub(super) hint_reader: HintReader,
     subagent_answers: HashMap<String, flume::Sender<String>>,
     pub(crate) restore_event_tx: Option<craft_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
@@ -200,6 +204,8 @@ impl App {
         mcp_reader: McpSnapshotReader,
         mcp_config_errors: McpConfigErrors,
         lua_command_reader: LuaCommandReader,
+        keymap_reader: KeymapReader,
+        hint_reader: HintReader,
         storage_writer: Arc<StorageWriter>,
         ui_config: UiConfig,
         input_history_size: usize,
@@ -222,6 +228,7 @@ impl App {
             task_picker_original: None,
             theme_picker: ThemePicker::new(),
             model_picker: ModelPicker::new(available_models),
+            login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
             session_picker: SessionPicker::new(),
             rewind_picker: RewindPicker::new(),
@@ -258,6 +265,8 @@ impl App {
             permissions,
             buf_click: None,
             lua_event_handle: None,
+            keymap_reader,
+            hint_reader,
             subagent_answers: HashMap::new(),
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
@@ -646,6 +655,19 @@ impl App {
             });
         }
 
+        if self.login_picker.is_open() {
+            return Some(match self.login_picker.handle_key(key) {
+                LoginPickerAction::Consumed => vec![],
+                LoginPickerAction::Close => vec![],
+                LoginPickerAction::Authenticated { model_spec } => {
+                    vec![Action::ChangeModel(model_spec), Action::RefreshModels]
+                }
+                LoginPickerAction::Configured { slug } => {
+                    vec![Action::RefreshProvider { slug }, Action::RefreshModels]
+                }
+            });
+        }
+
         if self.mcp_picker.is_open() {
             return Some(match self.mcp_picker.handle_key(key) {
                 McpPickerAction::Consumed => vec![],
@@ -677,18 +699,32 @@ impl App {
             return actions;
         }
 
+        if self.dispatch_plugin_keymap(key) {
+            return vec![];
+        }
+
         if !self.is_main_chat() {
             return match key.code {
                 KeyCode::Tab if !self.is_bash_input() => self.toggle_mode(),
-                _ if key::TODO_PANEL.matches(key) => {
-                    self.chats[self.active_chat].todo_panel.toggle();
-                    vec![]
-                }
                 _ => vec![],
             };
         }
 
         self.handle_main_chat_key(key)
+    }
+
+    fn dispatch_plugin_keymap(&self, key: KeyEvent) -> bool {
+        let key = normalize_key(key);
+        let snap = self.keymap_reader.load();
+        for entry in &snap.entries {
+            if entry.key == key.code && entry.modifiers == key.modifiers {
+                if let Some(ref handle) = self.lua_event_handle {
+                    handle.run_keybind_callback(entry.id);
+                }
+                return true;
+            }
+        }
+        false
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
@@ -706,10 +742,10 @@ impl App {
                         vec![]
                     }
                 };
-            } else if key::TODO_PANEL.matches(key) {
+            } else if key::PLAN_TOGGLE.matches(key) {
                 match self.state.mode {
                     Mode::Plan => self.plan_form.toggle(),
-                    Mode::Build => self.chats[self.active_chat].todo_panel.toggle(),
+                    _ => self.float_mgr.toggle_panel_visibility(),
                 }
             } else if key::SEARCH.matches(key) {
                 let top = self.chats[self.active_chat].scroll_top();
@@ -930,9 +966,6 @@ impl App {
             if let Some(ref outputs) = self.shared_tool_outputs {
                 lock(outputs).insert(e.id.clone(), e.output.clone());
             }
-            if let ToolOutput::TodoList(ref items) = e.output {
-                self.chats[chat_idx].todo_panel.on_todowrite(items);
-            }
             if let Some(&sub_idx) = self.chat_index.get(&e.id) {
                 let (role, text) = if e.is_error {
                     (DisplayRole::Error, ERROR_TEXT)
@@ -1024,12 +1057,14 @@ impl App {
         if chat_idx == 0 {
             match result {
                 ChatEventResult::Done => {
-                    self.chats[0].todo_panel.on_turn_done();
                     self.status_bar.clear_flash();
                     self.save_session();
                     self.chat_index.clear();
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
+                    if let Some(ref handle) = self.lua_event_handle {
+                        handle.fire_autocmd("TurnEnd", serde_json::json!({}));
+                    }
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Success;
                     }
@@ -1043,6 +1078,9 @@ impl App {
                     self.finish_subagents(DisplayRole::Error, ERROR_TEXT);
                     for chat in &mut self.chats {
                         chat.fail_in_progress_with_message(message.clone());
+                    }
+                    if let Some(ref handle) = self.lua_event_handle {
+                        handle.fire_autocmd("TurnError", serde_json::json!({ "message": message }));
                     }
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Error;
@@ -1124,6 +1162,10 @@ impl App {
             }
             "/mcp" => {
                 self.mcp_picker.open();
+                vec![]
+            }
+            "/login" => {
+                self.login_picker.open(self.storage.clone());
                 vec![]
             }
             "/cd" => self.cmd_cd(&cmd.args),
@@ -1365,6 +1407,7 @@ impl App {
         rewind_picker,
         theme_picker,
         model_picker,
+        login_picker,
         mcp_picker,
         permission_prompt,
     );
@@ -1439,6 +1482,7 @@ impl App {
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
         try_picker!(self.model_picker);
+        try_picker!(self.login_picker);
         try_picker!(self.mcp_picker);
         if !self.is_main_chat() {
             return;

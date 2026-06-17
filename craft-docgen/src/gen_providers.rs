@@ -5,7 +5,34 @@ use strum::IntoEnumIterator;
 
 const TIER_PICKER_NOTE: &str = r#"Open the model picker with `/model` and press `1`, `2`, or `3` on any row to reassign it to strong, medium, or weak. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions."#;
 
-const AUTH_RELOADING: &str = r#"## Auth Reloading
+const AUTH_SECTION: &str = r#"## Authentication
+
+Craft supports several ways to authenticate with providers. Run `craft auth login` to set up a provider interactively. It will prompt for the provider, API key, and any plan or host URL if needed.
+
+Run `craft auth status` to see which providers are configured. A green check means stored credentials, a yellow tilde means an env var is set, and a red cross means no auth was found.
+
+Run `craft auth logout <provider>` to remove stored credentials.
+
+### API Key
+
+Most providers use a simple API key. During `craft auth login`, Craft opens the provider's key page in your browser and asks you to paste the key. Keys are stored in `~/.local/state/craft/credentials/` and are never logged.
+
+You can also skip the login prompt and set the key via the provider's env var. See each provider below for the exact variable name.
+
+### OAuth Device Flow
+
+OpenAI supports OAuth via device code flow. Running `craft auth login openai` opens a browser URL, shows a code to enter, and polls for authorization. Tokens are stored securely and refreshed automatically when they expire.
+
+### Copilot Token Discovery
+
+Copilot does not need a separate login if you already use GitHub Copilot. Craft looks for tokens in this order:
+
+1. `GH_COPILOT_TOKEN` or `COPILOT_GITHUB_TOKEN` env var
+2. Stored credentials from `craft auth login copilot`
+3. `~/.config/github-copilot/hosts.json` or `apps.json`
+4. `~/.config/gh/hosts.yml`
+
+### Auth Reloading
 
 Craft re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `craft auth login` in another terminal or change an env var, the next session picks it up without a restart.
 
@@ -35,10 +62,66 @@ Models are referenced as `provider/model_id`:
 ```
 anthropic/claude-sonnet-4-6
 openai/gpt-4.1
-zai/glm-4.7
 ```
 
 If the model name is unique across providers, the prefix can be omitted."#;
+
+const CUSTOM_PROVIDERS_SECTION: &str = r#"## Custom Providers
+
+You can add providers that are not built in by editing `~/.config/craft/providers.toml`. Custom providers use one of three supported protocols: `openai`, `anthropic`, or `google`.
+
+### Configuration Shape
+
+Each entry under `providers.toml` is a table keyed by the provider slug:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `display_name` | string | No | Human readable name shown in the UI |
+| `protocol` | string | Yes | One of: `openai`, `anthropic`, `google` |
+| `base_url` | string | Yes | API endpoint URL |
+| `plan` | string | No | Plan name for providers with multiple plans |
+| `api_key_env` | string | No | Env var name for the API key (defaults to `{SLUG}_API_KEY`) |
+| `api_key` | string | No | API key stored inline (not recommended; use `craft auth login` instead) |
+| `default_model` | string | No | Default model identifier without the provider prefix |
+| `discover_models` | bool | No | Query the provider for model list at startup (default `false`) |
+| `models` | array of tables | No | Override context window and max output for specific models |
+
+The `models` table is useful when a provider's `/models` endpoint does not report context sizes, or reports incorrect ones. Each entry has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Model identifier (without the provider prefix) |
+| `context_window` | integer | Context window in tokens |
+| `max_output_tokens` | integer | Max output tokens |
+
+Craft tries three sources in priority order when resolving a custom model:
+
+1. Explicit `models` entry in `providers.toml`
+2. Metadata discovered from the provider's `/models` endpoint (when `discover_models = true`)
+3. Protocol fallback values
+
+### Example
+
+```toml
+[my-proxy]
+protocol = "openai"
+base_url = "https://api.my-proxy.com/v1"
+api_key_env = "MY_PROXY_API_KEY"
+discover_models = true
+
+[[my-proxy.models]]
+id = "glm-5.2"
+context_window = 1_000_000
+max_output_tokens = 32_768
+```
+
+Use the provider with:
+
+```
+craft -m my-proxy/gpt-4.1
+```
+
+Custom providers appear in `craft auth login` and the model picker just like built-in ones."#;
 
 fn dynamic_providers_section() -> String {
     let valid_values: Vec<String> = ProviderKind::iter().map(|k| format!("`{k}`")).collect();
@@ -46,7 +129,7 @@ fn dynamic_providers_section() -> String {
     format!(
         r#"## Dynamic Providers
 
-To add a custom provider or proxy, drop an executable script into `~/.config/craft/providers/`. The script must handle these subcommands:
+To add a provider proxy via an executable script, drop it into `~/.config/craft/providers/`. The script must handle these subcommands:
 
 | Subcommand | Timeout | What it does |
 |------------|---------|--------|
@@ -119,33 +202,9 @@ fn format_auth(kind: ProviderKind) -> String {
 
 fn build_sections() -> Vec<ProviderSection> {
     let mut sections = Vec::new();
-    let mut zai_done = false;
 
     for kind in ProviderKind::iter() {
         match kind {
-            ProviderKind::Zai => {
-                if zai_done {
-                    continue;
-                }
-                zai_done = true;
-                sections.push(ProviderSection {
-                    name: "Z.AI",
-                    kind: ProviderKind::Zai,
-                    auth_line: format!(
-                        "{} (shared across both endpoints)",
-                        format_auth(ProviderKind::Zai)
-                    ),
-                    urls: vec![
-                        ProviderKind::Zai.base_url(),
-                        ProviderKind::ZaiCodingPlan.base_url(),
-                    ],
-                    features: ProviderKind::Zai.features(),
-                    entries: models_for_provider(ProviderKind::Zai),
-                });
-            }
-            ProviderKind::ZaiCodingPlan => {
-                zai_done = true;
-            }
             ProviderKind::OpenAi => {
                 sections.push(ProviderSection {
                     name: kind.display_name(),
@@ -309,7 +368,7 @@ pub fn generate() -> String {
          **medium** (balanced), and **strong** (highest capability, highest cost).\n"
     );
     let _ = writeln!(out, "{TIER_PICKER_NOTE}\n");
-    let _ = writeln!(out, "{AUTH_RELOADING}\n");
+    let _ = writeln!(out, "{AUTH_SECTION}\n");
     let _ = writeln!(out, "## Built-in Providers\n");
 
     for section in &build_sections() {
@@ -318,6 +377,7 @@ pub fn generate() -> String {
     }
 
     let _ = writeln!(out, "{MODEL_IDENTIFIERS}\n");
+    let _ = writeln!(out, "{CUSTOM_PROVIDERS_SECTION}\n");
     let _ = writeln!(out, "{}", dynamic_providers_section());
 
     out

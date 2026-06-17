@@ -30,6 +30,18 @@ const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 
 const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 
+inventory::submit!(craft_config::providers::BuiltInProvider {
+    slug: "anthropic",
+    display_name: "Anthropic",
+    protocol: craft_config::providers::Protocol::Anthropic,
+    default_base_url: "https://api.anthropic.com/v1/messages",
+    default_api_key_env: ENV_VAR,
+    default_model: "anthropic/claude-sonnet-4-6",
+    plans: None,
+    login_url: Some("https://console.anthropic.com/settings/keys"),
+    needs_url: false,
+});
+
 pub(crate) use shared::models;
 
 fn resolve_auth_from_key(key: &str) -> super::ResolvedAuth {
@@ -65,7 +77,7 @@ pub struct Anthropic {
 
 impl Anthropic {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::from_env(ENV_VAR)?;
+        let pool = KeyPool::resolve("anthropic", ENV_VAR)?;
         let resolved = resolve_auth_from_key(pool.current());
         debug!(keys = pool.len(), "using API key authentication");
         Ok(Self {
@@ -146,7 +158,7 @@ impl Anthropic {
         }
     }
 
-    async fn do_list_models(&self) -> Result<Vec<String>, AgentError> {
+    async fn do_list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
         let mut models = Vec::new();
         let mut after_id: Option<String> = None;
 
@@ -164,12 +176,18 @@ impl Anthropic {
             let body_text = response.text().await?;
             let page: ModelsPage = serde_json::from_str(&body_text)?;
             for m in page.data {
-                // The API never tells us about `-1m`, so we mint it ourselves for
-                // any model that reports a 1M window.
                 if m.max_input_tokens >= shared::LONG_CONTEXT_WINDOW {
-                    models.push(format!("{}{}", m.id, shared::LONG_CONTEXT_SUFFIX));
+                    let mut long = crate::model::ModelInfo::new(format!(
+                        "{}{}",
+                        m.id,
+                        shared::LONG_CONTEXT_SUFFIX
+                    ));
+                    long.context_window = Some(shared::LONG_CONTEXT_WINDOW);
+                    models.push(long);
                 }
-                models.push(m.id);
+                let mut info = crate::model::ModelInfo::new(m.id);
+                info.context_window = Some(m.max_input_tokens);
+                models.push(info);
             }
 
             if !page.has_more {
@@ -178,7 +196,7 @@ impl Anthropic {
             after_id = page.last_id;
         }
 
-        models.sort();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(models)
     }
 }
@@ -238,12 +256,21 @@ impl Provider for Anthropic {
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(self.do_list_models())
+        Box::pin(async {
+            let infos = self.do_list_models_with_info().await?;
+            Ok(infos.into_iter().map(|i| i.id).collect())
+        })
+    }
+
+    fn list_models_with_info(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
+        Box::pin(self.do_list_models_with_info())
     }
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async {
-            let pool = KeyPool::from_env(ENV_VAR)?;
+            let pool = KeyPool::resolve("anthropic", ENV_VAR)?;
             *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
             debug!("reloaded Anthropic auth from env");
             Ok(())
@@ -261,7 +288,7 @@ impl Provider for Anthropic {
 }
 
 #[derive(Deserialize)]
-struct ModelInfo {
+struct AnthropicModelInfo {
     id: String,
     #[serde(default)]
     max_input_tokens: u32,
@@ -269,7 +296,7 @@ struct ModelInfo {
 
 #[derive(Deserialize)]
 struct ModelsPage {
-    data: Vec<ModelInfo>,
+    data: Vec<AnthropicModelInfo>,
     has_more: bool,
     last_id: Option<String>,
 }

@@ -789,6 +789,7 @@ dependencies = [
  "craft-ui",
  "flume",
  "libc",
+ "open",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -912,6 +913,7 @@ dependencies = [
  "craft-config-macro",
  "craft-storage",
  "dotenvy",
+ "inventory",
  "serde",
  "tempfile",
  "test-case",
@@ -1045,11 +1047,13 @@ name = "craft-providers"
 version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
+ "craft-config",
  "craft-storage",
  "fastrand",
  "flume",
  "futures",
  "hmac",
+ "inventory",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -1127,6 +1131,7 @@ dependencies = [
  "notify",
  "nucleo",
  "nucleo-matcher",
+ "open",
  "ratatui",
  "serde",
  "serde_json",
@@ -2663,6 +2668,15 @@ name = "interpolator"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71dd52191aae121e8611f1e8dc3e324dd0dd1dee1e6dd91d10ee07a3cfb4d9d8"
+
+[[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "ipnet"

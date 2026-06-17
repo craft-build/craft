@@ -133,23 +133,47 @@ impl OpenAiCompatProvider {
         }
     }
 
-    pub async fn do_list_models(&self, auth: &ResolvedAuth) -> Result<Vec<String>, AgentError> {
+    pub async fn do_list_models_with_info(
+        &self,
+        auth: &ResolvedAuth,
+    ) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
         let response = self.build_request("GET", "/models", auth).send().await?;
         if response.status().as_u16() != 200 {
             return Err(AgentError::from_response(response).await);
         }
 
         let body: Value = serde_json::from_str(&response.text().await?)?;
-        let mut models: Vec<String> = body["data"]
+        let mut models: Vec<crate::model::ModelInfo> = body["data"]
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .filter_map(|m| {
+                        let id = m["id"].as_str()?.to_string();
+                        let mut info = crate::model::ModelInfo::new(id);
+                        if let Some(n) = m.get("context_window").and_then(|v| v.as_u64()) {
+                            info.context_window = Some(n as u32);
+                        } else if let Some(n) = m.get("context_length").and_then(|v| v.as_u64()) {
+                            info.context_window = Some(n as u32);
+                        } else if let Some(n) = m.get("max_input_tokens").and_then(|v| v.as_u64()) {
+                            info.context_window = Some(n as u32);
+                        }
+                        if let Some(n) = m.get("max_output_tokens").and_then(|v| v.as_u64()) {
+                            info.max_output_tokens = Some(n as u32);
+                        } else if let Some(n) = m.get("max_tokens").and_then(|v| v.as_u64()) {
+                            info.max_output_tokens = Some(n as u32);
+                        }
+                        Some(info)
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        models.sort();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(models)
+    }
+
+    pub async fn do_list_models(&self, auth: &ResolvedAuth) -> Result<Vec<String>, AgentError> {
+        let infos = self.do_list_models_with_info(auth).await?;
+        Ok(infos.into_iter().map(|i| i.id).collect())
     }
 }
 

@@ -8,7 +8,7 @@ It is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik, wri
 
 - **TUI** built on ratatui with syntax highlighting, inline image rendering, and fuzzy search.
 - **Built-in tools** for file ops, search, code execution, web access, and more. See [Tools](./tools.md).
-- **Multiple providers.** Anthropic, OpenAI, Google, Copilot, Z.AI, DeepSeek, Mistral, Ollama, llama.cpp, OpenRouter, Synthetic, and a dynamic provider system for plugging in your own. See [Providers](./providers.md).
+- **Multiple providers.** Anthropic, OpenAI, Google, Copilot, DeepSeek, Mistral, Ollama, llama.cpp, OpenRouter, Synthetic, and a dynamic provider system for plugging in your own. See [Providers](./providers.md).
 - **MCP support.** Connect external tool servers over stdio or HTTP. See [MCP](./mcp.md).
 - **Permissions.** Fine-grained allow/deny rules, plus a YOLO mode. See [Permissions](./permissions.md).
 - **Sub-agents.** Spin up read-only research agents or full-access workers that run in parallel.

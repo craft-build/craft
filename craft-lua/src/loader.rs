@@ -8,7 +8,8 @@ use craft_agent::tools::ToolRegistry;
 use craft_config::{PluginsConfig, RawConfig};
 use include_dir::{Dir, include_dir};
 
-use crate::api::command::{LuaCommandReader, UiAction};
+use crate::api::command::{HintReader, LuaCommandReader, UiAction};
+use crate::api::keymap::KeymapReader;
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem};
@@ -55,6 +56,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "question",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/question"),
+    },
+    BundledPlugin {
+        name: "todo_write",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/todo_write"),
     },
     BundledPlugin {
         name: "lib",
@@ -294,6 +299,20 @@ impl PluginHost {
             .unwrap_or_else(LuaCommandReader::empty)
     }
 
+    pub fn keymap_reader(&self) -> KeymapReader {
+        self.inner
+            .as_ref()
+            .map(|t| t.keymap_reader.clone())
+            .unwrap_or_else(KeymapReader::empty)
+    }
+
+    pub fn hint_reader(&self) -> HintReader {
+        self.inner
+            .as_ref()
+            .map(|t| t.hint_reader.clone())
+            .unwrap_or_else(HintReader::empty)
+    }
+
     pub fn ui_action_rx(&self) -> Option<flume::Receiver<UiAction>> {
         self.inner.as_ref().map(|t| t.ui_action_rx.clone())
     }
@@ -351,6 +370,17 @@ impl EventHandle {
 
     pub fn send_restore_complete(&self, flag: Arc<AtomicBool>) {
         let _ = self.tx.send(Request::RestoreComplete { flag });
+    }
+
+    pub fn fire_autocmd(&self, event: &str, data: serde_json::Value) {
+        let _ = self.tx.try_send(Request::FireAutocmd {
+            event: event.to_owned(),
+            data,
+        });
+    }
+
+    pub fn run_keybind_callback(&self, id: u64) {
+        let _ = self.tx.try_send(Request::RunKeybindCallback { id });
     }
 }
 

@@ -447,10 +447,7 @@ impl Splash {
 
         let theme = theme::current();
         let bg = theme.background;
-        let tip_rgb = extract_rgb(
-            theme.todo_in_progress.fg.unwrap_or(Color::Yellow),
-            (249, 226, 175),
-        );
+        let tip_rgb = extract_rgb(theme.accent.fg.unwrap_or(Color::Yellow), (249, 226, 175));
         let ac = extract_rgb(accent, (100, 140, 255));
         let fg = extract_rgb(theme.foreground, (200, 200, 200));
         let bg_rgb = extract_rgb(bg, (15, 15, 25));

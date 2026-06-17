@@ -130,7 +130,15 @@ pub async fn run(cli: Cli) -> Result<()> {
         stream: config.provider.stream_timeout,
     };
 
-    let model = setup::resolve_model(cli.model.as_deref(), &config.provider, &storage).await?;
+    let model_result = setup::resolve_model(cli.model.as_deref(), &config.provider, &storage).await;
+    let (model, needs_login) = match model_result {
+        Ok(m) => (m, false),
+        Err(_) if !cli.print => {
+            let fallback = Model::from_spec("anthropic/claude-sonnet-4-6").expect("fallback model");
+            (fallback, true)
+        }
+        Err(e) => return Err(e),
+    };
 
     setup::init_logging(&storage, &config.storage);
     setup::install_panic_log_hook();
@@ -196,14 +204,19 @@ pub async fn run(cli: Cli) -> Result<()> {
         let initial_prompt = read_initial_prompt(cli.prompt)?;
         let cwd_for_mcp = cwd.clone();
         let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd_for_mcp).await;
-        let provider: Arc<dyn craft_providers::provider::Provider> = Arc::from(
-            craft_providers::provider::from_model(&model, timeouts)
-                .await
-                .context("create provider")?,
-        );
+        let provider: Arc<dyn craft_providers::provider::Provider> = if needs_login {
+            Arc::from(craft_providers::provider::from_model_fallback(&model, timeouts).await)
+        } else {
+            Arc::from(
+                craft_providers::provider::from_model(&model, timeouts)
+                    .await
+                    .context("create provider")?,
+            )
+        };
         let handle = tokio::runtime::Handle::current();
         let params = craft_ui::EventLoopParams {
             model,
+            needs_login,
             commands,
             session,
             storage,
@@ -218,6 +231,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             timeouts,
             exit_on_done: cli.exit_on_done,
             lua_command_reader,
+            keymap_reader: plugin_host.keymap_reader(),
+            hint_reader: plugin_host.hint_reader(),
             ui_action_rx,
             lua_event_handle: plugin_host.event_handle(),
             buf_click: plugin_host.event_handle().map(|eh| {

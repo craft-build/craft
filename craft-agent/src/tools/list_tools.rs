@@ -149,7 +149,8 @@ fn is_active(ctx: &super::ToolContext, name: &str) -> bool {
     if !ctx.dynamic.enabled {
         return true;
     }
-    ctx.dynamic.core.contains(name) || ctx.promoted.contains(name)
+    let is_mcp = ctx.mcp.as_ref().is_some_and(|h| h.has_tool(name));
+    !is_mcp || ctx.promoted.contains(name)
 }
 
 fn first_line_str(s: &str) -> String {

@@ -24,7 +24,7 @@ use craft_agent::headless::{self, InteractiveHandle, InteractiveParams};
 use craft_agent::mcp;
 use craft_agent::mcp::config::{McpConfig, ServerConfig, Transport};
 use craft_agent::tools::{FsBackend, FsFuture, LocalFs};
-use craft_agent::types::{AgentEvent, BatchToolStatus, ToolOutput};
+use craft_agent::types::{AgentEvent, BatchToolStatus};
 use craft_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
 use craft_lua::{
     LocalTerminal, TerminalBackend, TerminalEvent, TerminalFuture, TerminalHandle, TerminalSpec,
@@ -1101,12 +1101,7 @@ fn start_event_pump(
                 AgentEvent::ToolPending { id, name } => translate::tool_pending(&id, &name),
                 AgentEvent::ToolStart(event) => translate::tool_start(&event),
                 AgentEvent::ToolOutput { id, content } => translate::tool_output(&id, &content),
-                AgentEvent::ToolDone(event) => {
-                    if let ToolOutput::TodoList(items) = &event.output {
-                        session_update(&out_tx, &sid, translate::todo_list_to_plan(items));
-                    }
-                    translate::tool_done(&event)
-                }
+                AgentEvent::ToolDone(event) => translate::tool_done(&event),
                 AgentEvent::BatchProgress(event) => {
                     if event.status != BatchToolStatus::InProgress {
                         continue;
@@ -1197,6 +1192,7 @@ fn json_str(e: &(impl std::fmt::Display + ?Sized)) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use craft_agent::ToolOutput;
     use craft_providers::{ContentBlock as MsgBlock, Role, TokenUsage};
     use craft_storage::StateDir;
     use craft_storage::sessions::Session;

@@ -8,6 +8,7 @@ use test_case::test_case;
 #[test_case("memory", include_str!("../../plugins/memory/tests/spec.lua") ; "memory_plugin_spec")]
 #[test_case("question", include_str!("../../plugins/question/tests/spec.lua") ; "question_plugin_spec")]
 #[test_case("skill", include_str!("../../plugins/skill/tests/spec.lua") ; "skill_plugin_spec")]
+#[test_case("todo_write", include_str!("../../plugins/todo_write/tests/spec.lua") ; "todo_write_plugin_spec")]
 #[test_case("webfetch", include_str!("../../plugins/webfetch/tests/spec.lua") ; "webfetch_plugin_spec")]
 #[test_case("websearch", include_str!("../../plugins/websearch/tests/spec.lua") ; "websearch_plugin_spec")]
 fn plugin_spec(name: &str, spec: &str) {

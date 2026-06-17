@@ -1,4 +1,5 @@
 mod async_api;
+pub(crate) mod autocmd;
 pub(crate) mod buf;
 pub(crate) mod command;
 pub(crate) mod ctx;
@@ -8,6 +9,7 @@ pub(crate) mod fn_api;
 pub(crate) mod fs;
 pub(crate) mod hooks;
 pub(crate) mod json;
+pub(crate) mod keymap;
 pub(crate) mod log;
 pub(crate) mod net;
 pub(crate) mod setup;
@@ -38,22 +40,28 @@ pub(crate) fn create_craft_global(
 ) -> LuaResult<Table> {
     let craft = lua.create_table()?;
 
-    craft.set(
-        "api",
-        tool::create_api_table(lua, pending, Arc::clone(&plugin))?,
-    )?;
+    let api = tool::create_api_table(lua, pending, Arc::clone(&plugin))?;
+    autocmd::add_autocmd_methods(&api, lua, Arc::clone(&plugin))?;
+    craft.set("api", api)?;
     craft.set("env", env::create_env_table(lua, permissions)?)?;
     craft.set("fs", fs::create_fs_table(lua, permissions)?)?;
-    craft.set("log", log::create_log_table(lua, plugin)?)?;
+    craft.set("log", log::create_log_table(lua, Arc::clone(&plugin))?)?;
     craft.set("treesitter", treesitter::create_treesitter_table(lua)?)?;
     craft.set("uv", uv::create_uv_table(lua, permissions)?)?;
     craft.set("json", json::create_json_table(lua)?)?;
     craft.set("yaml", yaml::create_yaml_table(lua)?)?;
     craft.set("net", net::create_net_table(lua, permissions)?)?;
     craft.set("text", text::create_text_table(lua)?)?;
-    craft.set("ui", ui::create_ui_table(lua, ui_action_tx)?)?;
+    craft.set(
+        "ui",
+        ui::create_ui_table(lua, ui_action_tx, Arc::clone(&plugin))?,
+    )?;
     craft.set("fn", fn_api::create_fn_table(lua, permissions)?)?;
     craft.set("async", async_api::create_async_table(lua)?)?;
+    craft.set(
+        "keymap",
+        keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
+    )?;
 
     #[cfg(feature = "onnx")]
     if let Some(tx) = embed_tx {

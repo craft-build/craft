@@ -12,39 +12,13 @@ Craft is a fork of [maki](https://github.com/tontinton/maki.git) by Tony Solomon
 
 ## Steps
 
-1. Confirm the commit. Ask the user for the SHA if not given. Fetch it:
-   ```sh
-   git fetch upstream && git log upstream/main
-   ```
-   If there is no `upstream` remote, ask the user how to reach the maki history before continuing.
+1. Confirm the commit. Ask the user for the SHA if not given. Fetch the diff from github repository at https://github.com/tontinton/maki
 
-2. Make the patch:
-   ```sh
-   git format-patch -1 <sha> --stdout > /tmp/maki-patch.diff
-   ```
-   For a range, use the appropriate `-<n>` or commit range.
+2. Gather context for the craft code to understand what changes will be needed to implement the same changes of the maki diff inside craft.
 
-3. Translate the diff header paths using the directory mapping below (`maki-agent/` -> `craft-agent/`, etc.).
+3. Manually implement the change inside of craft
 
-4. Translate the file contents:
-   - Crate names in `Cargo.toml`: `maki-*` -> `craft-*`.
-   - Rust imports: `maki_*` -> `craft_*`.
-   - Rust crate references: `maki_agent::` -> `craft_agent::`, `maki_config::` -> `craft_config::`, etc.
-   - Lua namespace: `maki.` -> `craft.` in `.lua` files and in embedded Lua strings in Rust.
-   - Function names: `create_maki_global` -> `create_craft_global`.
-   - Lua runtime local variables named `maki` -> `craft`.
-   - Thread names: `"maki-lua"` -> `"craft-lua"`.
-   - Config dir: `.maki` -> `.craft` in string literals.
-   - CLI name: `"maki"` -> `"craft"` in string literals.
-
-5. Apply the translated patch:
-   ```sh
-   git am /tmp/maki-patch.diff
-   ```
-
-6. Resolve conflicts if any, then run the full verification block (see Verification).
-
-7. For any tool touched by the commit, run the placement check below and diverge from maki if the commit moves a tool the wrong way. Note the reason in the commit message when you diverge.
+4. For any tool touched by the commit, run the placement check below and diverge from maki if the commit moves a tool the wrong way. Note the reason in the commit message when you diverge.
 
 ## Crate mapping
 

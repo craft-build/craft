@@ -278,6 +278,17 @@ impl McpHandle {
         }
     }
 
+    /// Names of every MCP-sourced tool currently registered. Dynamic discovery
+    /// uses this to gate only MCP tools behind promotion; all builtins stay active.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.index
+            .load()
+            .tools
+            .keys()
+            .map(|k| k.as_ref().to_string())
+            .collect()
+    }
+
     pub async fn shutdown(&self) {
         let (ack_tx, ack_rx) = flume::bounded(1);
         self.send(McpCommand::Shutdown { ack: ack_tx });

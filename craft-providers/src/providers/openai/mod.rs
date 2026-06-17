@@ -220,3 +220,15 @@ pub(crate) fn models() -> &'static [ModelEntry] {
         },
     ]
 }
+
+inventory::submit!(craft_config::providers::BuiltInProvider {
+    slug: "openai",
+    display_name: "OpenAI",
+    protocol: craft_config::providers::Protocol::Openai,
+    default_base_url: "https://api.openai.com/v1",
+    default_api_key_env: "OPENAI_API_KEY",
+    default_model: "openai/gpt-4.1",
+    plans: None,
+    login_url: Some("https://platform.openai.com/settings/organization/api-keys"),
+    needs_url: false,
+});

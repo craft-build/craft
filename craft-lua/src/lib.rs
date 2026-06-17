@@ -7,12 +7,13 @@ mod runtime;
 pub mod terminal_backend;
 
 pub use api::command::{
-    Anchor, Axis, Border, Dimension, Edge, FloatConfig, FloatConfigPatch, LuaCommandInfo,
-    LuaCommandReader, Split, TitlePos, UiAction, WinCommand, WinEvent,
+    Anchor, Axis, Border, Dimension, Edge, FloatConfig, FloatConfigPatch, HintReader, HintSnapshot,
+    LuaCommandInfo, LuaCommandReader, Split, TitlePos, UiAction, WinCommand, WinEvent,
 };
 #[cfg(feature = "onnx")]
 pub use api::embed::EmbedChannel;
 pub use api::hooks::LuaHooks;
+pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost};
 pub use plugin_permissions::{Permission, PluginPermissions, denied_error};

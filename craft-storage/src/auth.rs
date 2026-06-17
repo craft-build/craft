@@ -111,6 +111,35 @@ pub fn delete_mcp_auth(dir: &StateDir, server_name: &str) -> Result<bool, Storag
     delete_auth(&auth_path(dir, &format!("mcp-{server_name}")))
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProviderCredentials {
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for ProviderCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderCredentials")
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
+pub fn load_provider_credentials(dir: &StateDir, provider: &str) -> Option<ProviderCredentials> {
+    load_auth(&auth_path(dir, provider))
+}
+
+pub fn save_provider_credentials(
+    dir: &StateDir,
+    provider: &str,
+    creds: &ProviderCredentials,
+) -> Result<(), StorageError> {
+    save_auth(&auth_path(dir, provider), creds)
+}
+
+pub fn delete_provider_credentials(dir: &StateDir, slug: &str) -> Result<bool, StorageError> {
+    delete_auth(&auth_path(dir, slug))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

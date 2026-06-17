@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use craft_providers::{ContentBlock, Message, Role};
+use tracing::warn;
 
 const CANCEL_MARKER: &str = "[Cancelled by user]";
 const UNAVAILABLE_RESULT: &str = "[Tool result not available]";
@@ -15,6 +16,14 @@ pub struct History {
 
 impl History {
     pub fn new(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            mirror: None,
+        }
+    }
+
+    pub fn restored(mut messages: Vec<Message>) -> Self {
+        sanitize_restored(&mut messages);
         Self {
             messages,
             mirror: None,
@@ -144,6 +153,51 @@ impl History {
     }
 }
 
+/// Restored sessions can have orphaned tool_results or unclosed tool_uses
+/// (e.g. the process was killed mid-turn). The API returns 400 if it sees those.
+fn sanitize_restored(messages: &mut Vec<Message>) {
+    let len_before = messages.len();
+    let mut i = 0;
+    while i < messages.len() {
+        if !matches!(messages[i].role, Role::User) {
+            i += 1;
+            continue;
+        }
+
+        let valid_ids: Vec<String> = if i > 0 && matches!(messages[i - 1].role, Role::Assistant) {
+            messages[i - 1]
+                .tool_uses()
+                .map(|(id, _, _)| id.to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        messages[i].content.retain(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => {
+                valid_ids.iter().any(|id| id == tool_use_id)
+            }
+            _ => true,
+        });
+
+        if messages[i].content.is_empty() {
+            messages.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    close_dangling_tool_calls(messages, UNAVAILABLE_RESULT);
+
+    if messages.len() != len_before {
+        warn!(
+            before = len_before,
+            after = messages.len(),
+            "sanitized restored history"
+        );
+    }
+}
+
 fn close_dangling_tool_calls(messages: &mut Vec<Message>, note: &str) {
     let Some(last) = messages.last() else { return };
     if !matches!(last.role, Role::Assistant) || !last.has_tool_calls() {
@@ -181,6 +235,44 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+
+    fn make_tool_use_msg(ids: &[&str]) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: ids
+                .iter()
+                .map(|id| ContentBlock::ToolUse {
+                    id: id.to_string(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn make_tool_result_msg(ids: &[&str]) -> Message {
+        Message {
+            role: Role::User,
+            content: ids
+                .iter()
+                .map(|id| ContentBlock::ToolResult {
+                    tool_use_id: id.to_string(),
+                    content: "ok".into(),
+                    is_error: false,
+                })
+                .collect(),
+            display_text: Some(String::new()),
+        }
+    }
+
+    fn text_msg(role: Role, text: &str) -> Message {
+        Message {
+            role,
+            content: vec![ContentBlock::Text { text: text.into() }],
+            ..Default::default()
+        }
+    }
 
     #[track_caller]
     fn assert_ends_with_cancel_marker(history: &History) {
@@ -270,24 +362,54 @@ mod tests {
         assert_ends_with_cancel_marker(&history);
     }
 
+    #[test_case(
+        vec![make_tool_result_msg(&["t1"])],
+        0
+        ; "orphan_at_start_removed"
+    )]
+    #[test_case(
+        vec![
+            Message::user("go".into()),
+            text_msg(Role::Assistant, "done"),
+            make_tool_result_msg(&["orphan1", "orphan2"]),
+        ],
+        2
+        ; "orphans_after_non_tool_assistant_removed"
+    )]
+    #[test_case(
+        vec![
+            Message::user("go".into()),
+            make_tool_use_msg(&["t1", "t2"]),
+            make_tool_result_msg(&["t1", "t2"]),
+        ],
+        3
+        ; "valid_pairing_preserved"
+    )]
+    #[test_case(
+        vec![Message::user("go".into()), make_tool_use_msg(&["t1"])],
+        3
+        ; "dangling_tool_use_closed_with_synthetic_result"
+    )]
+    fn sanitize_restored_cases(messages: Vec<Message>, expected_len: usize) {
+        let history = History::restored(messages);
+        assert_eq!(history.len(), expected_len);
+    }
+
     #[test]
-    fn estimate_tokens_counts_history() {
-        let model =
-            craft_providers::Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
-        let history = History::new(vec![
-            Message::user("hello world".into()),
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: "hi there".into(),
-                }],
-                ..Default::default()
-            },
+    fn sanitize_restored_partial_orphan_keeps_matched_ids() {
+        let history = History::restored(vec![
+            Message::user("go".into()),
+            make_tool_use_msg(&["t1"]),
+            make_tool_result_msg(&["t1", "t2"]),
         ]);
-        let tokens = history.estimate_tokens(&model);
-        assert!(
-            tokens > 0,
-            "should estimate some tokens for non-empty history"
-        );
+        let results: Vec<&str> = history.as_slice()[2]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, ["t1"]);
     }
 }

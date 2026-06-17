@@ -106,6 +106,9 @@ pub(crate) fn tool_output_annotation(output: &ToolOutput) -> Option<String> {
             Some(format!("{n} entries"))
         }
         ToolOutput::Plain(text) | ToolOutput::Markdown(text) => {
+            if text.is_empty() {
+                return None;
+            }
             let n = text.lines().count();
             Some(format!("{n} lines"))
         }
@@ -268,7 +271,6 @@ impl HighlightRequest {
             ToolOutput::Plain(_)
             | ToolOutput::Markdown(_)
             | ToolOutput::ReadDir { .. }
-            | ToolOutput::TodoList(_)
             | ToolOutput::Batch { .. }
             | ToolOutput::Findings(_)
             | ToolOutput::ReviewResult { .. } => None,

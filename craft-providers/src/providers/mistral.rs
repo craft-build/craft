@@ -18,6 +18,37 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "Mistral",
 };
 
+inventory::submit!(craft_config::providers::BuiltInProvider {
+    slug: "mistral",
+    display_name: "Mistral",
+    protocol: craft_config::providers::Protocol::Openai,
+    default_base_url: "https://api.mistral.ai/v1",
+    default_api_key_env: "MISTRAL_API_KEY",
+    default_model: "mistral/devstral-latest",
+    plans: Some(&[
+        (
+            "standard",
+            craft_config::providers::ProviderPlan {
+                display_name: "Standard",
+                base_url: "https://api.mistral.ai/v1",
+                default_model: Some("mistral/devstral-latest"),
+                login_url: None,
+            }
+        ),
+        (
+            "coding",
+            craft_config::providers::ProviderPlan {
+                display_name: "Vibe / Coding",
+                base_url: "https://api.mistral.ai/v1",
+                default_model: Some("mistral/mistral-vibe-cli-latest"),
+                login_url: Some("https://console.mistral.ai/codestral/cli"),
+            }
+        ),
+    ]),
+    login_url: Some("https://admin.mistral.ai/organization/api-keys"),
+    needs_url: false,
+});
+
 pub(crate) fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
@@ -77,7 +108,7 @@ pub struct Mistral {
 
 impl Mistral {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::from_env(CONFIG.api_key_env)?;
+        let pool = KeyPool::resolve("mistral", CONFIG.api_key_env)?;
         Ok(Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
@@ -140,6 +171,15 @@ impl Provider for Mistral {
         Box::pin(async move {
             let auth = lock_unpoison(&self.auth).clone();
             self.compat.do_list_models(&auth).await
+        })
+    }
+
+    fn list_models_with_info(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
+        Box::pin(async move {
+            let auth = lock_unpoison(&self.auth).clone();
+            self.compat.do_list_models_with_info(&auth).await
         })
     }
 

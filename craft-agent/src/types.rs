@@ -8,7 +8,7 @@ use craft_providers::{AgentError, ContentBlock, Message, Role, StopReason, Token
 use flume::Sender;
 
 use crate::compression;
-use craft_tool_macro::{ArgEnum, Args};
+use craft_tool_macro::ArgEnum;
 use serde::{Deserialize, Serialize};
 
 pub const NO_FILES_FOUND: &str = "No files found";
@@ -64,97 +64,6 @@ impl GrepMatchGroup {
 impl GrepFileEntry {
     pub fn match_count(&self) -> usize {
         self.groups.iter().map(|g| g.match_count()).sum()
-    }
-}
-
-#[derive(Args, Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskNode {
-    #[param(description = "Hierarchical id: T1, T1.1, T1.1.2 (top-level starts at T1)")]
-    #[serde(default)]
-    pub id: String,
-    #[param(description = "Parent task id; omit for top-level tasks")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
-    #[param(description = "Task description")]
-    pub content: String,
-    pub status: TodoStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[param(description = "Subagent name owning this task, if delegated")]
-    pub owner: Option<String>,
-}
-
-impl TaskNode {
-    pub fn is_valid_id(id: &str) -> bool {
-        let Some(rest) = id.strip_prefix('T') else {
-            return false;
-        };
-        !rest.is_empty()
-            && rest.split('.').all(|comp| {
-                !comp.is_empty()
-                    && !comp.starts_with('0')
-                    && comp.bytes().all(|b| b.is_ascii_digit())
-            })
-    }
-}
-
-pub fn flatten_task_tree(items: &[TaskNode]) -> Vec<(usize, &TaskNode)> {
-    let id_exists = |id: &str| !id.is_empty() && items.iter().any(|t| t.id == id);
-    let mut visited = vec![false; items.len()];
-    let mut out = Vec::new();
-    fn visit<'a>(
-        items: &'a [TaskNode],
-        parent_id: Option<&str>,
-        id_exists: &impl Fn(&str) -> bool,
-        depth: usize,
-        visited: &mut [bool],
-        out: &mut Vec<(usize, &'a TaskNode)>,
-    ) {
-        for (i, node) in items.iter().enumerate() {
-            if visited[i] {
-                continue;
-            }
-            let mine = match (&node.parent, parent_id) {
-                (None, None) => true,
-                (Some(np), Some(p)) => np == p,
-                (Some(np), None) => !id_exists(np),
-                (None, Some(_)) => false,
-            };
-            if !mine {
-                continue;
-            }
-            visited[i] = true;
-            out.push((depth, node));
-            if !node.id.is_empty() {
-                visit(items, Some(&node.id), id_exists, depth + 1, visited, out);
-            }
-        }
-    }
-    visit(items, None, &id_exists, 0, &mut visited, &mut out);
-    for (i, node) in items.iter().enumerate() {
-        if !visited[i] {
-            out.push((0, node));
-        }
-    }
-    out
-}
-
-#[derive(ArgEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-
-impl TodoStatus {
-    pub fn marker(self) -> &'static str {
-        match self {
-            Self::Completed => "[✓]",
-            Self::InProgress => "[•]",
-            Self::Pending => "[ ]",
-            Self::Cancelled => "[x]",
-        }
     }
 }
 
@@ -250,7 +159,6 @@ pub enum ToolOutput {
         after: String,
         summary: String,
     },
-    TodoList(Vec<TaskNode>),
     WriteCode {
         path: String,
         byte_count: usize,
@@ -316,7 +224,6 @@ impl ToolOutput {
             | Self::ReadDir { .. }
             | Self::WriteCode { .. }
             | Self::GrepResult { .. }
-            | Self::TodoList(_)
             | Self::Findings(_)
             | Self::ReviewResult { .. } => Some(self.as_display_text()),
             _ => None,
@@ -355,7 +262,6 @@ impl ToolOutput {
     pub fn as_text(&self) -> String {
         match self {
             Self::Diff { summary, .. } => summary.clone(),
-            Self::TodoList(_) => "ok".into(),
             Self::Findings(findings) => findings_text(findings),
             Self::ReviewResult { findings, verdict } => {
                 let mut out = findings_text(findings);
@@ -418,34 +324,6 @@ impl ToolOutput {
                 summary,
                 &crate::tools::relative_path(path),
             ),
-            Self::TodoList(items) => {
-                if items.is_empty() {
-                    return "No tasks.".into();
-                }
-                let mut out = String::new();
-                for (depth, node) in flatten_task_tree(items) {
-                    if !out.is_empty() {
-                        out.push('\n');
-                    }
-                    let indent = "  ".repeat(depth);
-                    let id = if node.id.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{} ", node.id)
-                    };
-                    let owner = node
-                        .owner
-                        .as_deref()
-                        .map(|o| format!(" (@{o})"))
-                        .unwrap_or_default();
-                    out.push_str(&format!(
-                        "{indent}{id}{} {}{owner}",
-                        node.status.marker(),
-                        node.content
-                    ));
-                }
-                out
-            }
             Self::WriteCode {
                 path, byte_count, ..
             } => {
@@ -795,6 +673,10 @@ impl BufferSnapshot {
         Self { lines }
     }
 
+    pub fn plain_text(text: String) -> Self {
+        Self::from_arc(Arc::new(vec![SnapshotLine::plain(text)]))
+    }
+
     pub fn first_line_text(&self) -> String {
         self.lines
             .first()
@@ -806,6 +688,17 @@ impl BufferSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SnapshotLine {
     pub spans: Vec<SnapshotSpan>,
+}
+
+impl SnapshotLine {
+    pub fn plain(text: String) -> Self {
+        Self {
+            spans: vec![SnapshotSpan {
+                text,
+                style: SpanStyle::Default,
+            }],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -938,116 +831,6 @@ mod tests {
         assert!(display.contains("- old"));
         assert!(display.contains("+ new"));
         assert_eq!(output.as_text(), "Updated value");
-    }
-
-    #[test]
-    fn as_display_text_todolist_formats_hierarchy() {
-        let output = ToolOutput::TodoList(vec![
-            TaskNode {
-                id: "T1".into(),
-                parent: None,
-                content: "done".into(),
-                status: TodoStatus::Completed,
-                owner: None,
-            },
-            TaskNode {
-                id: "T1.1".into(),
-                parent: Some("T1".into()),
-                content: "wip".into(),
-                status: TodoStatus::InProgress,
-                owner: Some("research".into()),
-            },
-            TaskNode {
-                id: "T2".into(),
-                parent: None,
-                content: "todo".into(),
-                status: TodoStatus::Pending,
-                owner: None,
-            },
-        ]);
-        let display = output.as_display_text();
-        assert!(display.contains("T1 [✓] done"));
-        assert!(display.contains("  T1.1 [•] wip (@research)"));
-        assert!(display.contains("T2 [ ] todo"));
-        assert_eq!(output.as_text(), "ok");
-    }
-
-    #[test_case("T1"; "single")]
-    #[test_case("T1.1"; "two levels")]
-    #[test_case("T1.1.2"; "three levels")]
-    #[test_case("T10"; "two digit")]
-    fn task_id_valid(id: &str) {
-        assert!(TaskNode::is_valid_id(id));
-    }
-
-    #[test_case("T0"; "zero root")]
-    #[test_case("T1.0"; "zero child")]
-    #[test_case("T1..1"; "empty component")]
-    #[test_case("T01"; "leading zero")]
-    #[test_case("T"; "no digits")]
-    #[test_case("" ; "empty")]
-    #[test_case("1"; "missing t prefix")]
-    fn task_id_invalid(id: &str) {
-        assert!(!TaskNode::is_valid_id(id));
-    }
-
-    #[test]
-    fn flatten_task_tree_orders_by_depth() {
-        let items = vec![
-            TaskNode {
-                id: "T2".into(),
-                parent: None,
-                content: "two".into(),
-                status: TodoStatus::Pending,
-                owner: None,
-            },
-            TaskNode {
-                id: "T1".into(),
-                parent: None,
-                content: "one".into(),
-                status: TodoStatus::Pending,
-                owner: None,
-            },
-            TaskNode {
-                id: "T1.1".into(),
-                parent: Some("T1".into()),
-                content: "one-one".into(),
-                status: TodoStatus::Pending,
-                owner: None,
-            },
-        ];
-        let flat: Vec<(usize, String)> = flatten_task_tree(&items)
-            .into_iter()
-            .map(|(d, n)| (d, n.content.clone()))
-            .collect();
-        assert_eq!(
-            flat,
-            vec![(0, "two".into()), (0, "one".into()), (1, "one-one".into())]
-        );
-    }
-
-    #[test]
-    fn task_list_round_trips_through_serde() {
-        let output = ToolOutput::TodoList(vec![
-            TaskNode {
-                id: "T1".into(),
-                parent: None,
-                content: "root".into(),
-                status: TodoStatus::Completed,
-                owner: None,
-            },
-            TaskNode {
-                id: "T1.1".into(),
-                parent: Some("T1".into()),
-                content: "child".into(),
-                status: TodoStatus::InProgress,
-                owner: Some("general".into()),
-            },
-        ]);
-        let json = serde_json::to_string(&output).unwrap();
-        let back: ToolOutput = serde_json::from_str(&json).unwrap();
-        let json2 = serde_json::to_string(&back).unwrap();
-        assert_eq!(json, json2);
     }
 
     #[test]

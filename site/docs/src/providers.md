@@ -4,7 +4,34 @@ Craft talks to LLM providers over their HTTP APIs. Models are split into three t
 
 Open the model picker with `/model` and press `1`, `2`, or `3` on any row to reassign it to strong, medium, or weak. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions.
 
-## Auth Reloading
+## Authentication
+
+Craft supports several ways to authenticate with providers. Run `craft auth login` to set up a provider interactively. It will prompt for the provider, API key, and any plan or host URL if needed.
+
+Run `craft auth status` to see which providers are configured. A green check means stored credentials, a yellow tilde means an env var is set, and a red cross means no auth was found.
+
+Run `craft auth logout <provider>` to remove stored credentials.
+
+### API Key
+
+Most providers use a simple API key. During `craft auth login`, Craft opens the provider's key page in your browser and asks you to paste the key. Keys are stored in `~/.local/state/craft/credentials/` and are never logged.
+
+You can also skip the login prompt and set the key via the provider's env var. See each provider below for the exact variable name.
+
+### OAuth Device Flow
+
+OpenAI supports OAuth via device code flow. Running `craft auth login openai` opens a browser URL, shows a code to enter, and polls for authorization. Tokens are stored securely and refreshed automatically when they expire.
+
+### Copilot Token Discovery
+
+Copilot does not need a separate login if you already use GitHub Copilot. Craft looks for tokens in this order:
+
+1. `GH_COPILOT_TOKEN` or `COPILOT_GITHUB_TOKEN` env var
+2. Stored credentials from `craft auth login copilot`
+3. `~/.config/github-copilot/hosts.json` or `apps.json`
+4. `~/.config/gh/hosts.yml`
+
+### Auth Reloading
 
 Craft re-reads auth from storage and environment variables each time a new agent spawns (`/new`, retry, session load). If you run `craft auth login` in another terminal or change an env var, the next session picks it up without a restart.
 
@@ -113,21 +140,6 @@ Connects to any OpenAI-compatible `/v1` endpoint. Craft asks the server for the 
 
 Defaults: devstral-latest (strong), mistral-large-latest (medium), mistral-small-latest (weak)
 
-### Z.AI
-
-- **Env var**: `ZHIPU_API_KEY` (shared across both endpoints)
-- **API endpoints**:
-  - `https://api.z.ai/api/paas/v4`
-  - `https://api.z.ai/api/coding/paas/v4`
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **glm-4.7-flash** (default), glm-4.5-flash, glm-4.5-air | $0.00 / $0.00 | 200K ctx / 131K out |
-| Medium | **glm-4.7, glm-4.6** (default), glm-4.5 | $0.60 / $2.20 | 200K ctx / 131K out |
-| Strong | **glm-5.2** (default), glm-5-code, glm-5 | $1.20 / $5.00 | 1000K ctx / 131K out |
-
-Defaults: glm-5.2 (strong), glm-4.7-flash (weak), glm-4.7 (medium)
-
 ### DeepSeek
 
 - **Env var**: `DEEPSEEK_API_KEY`
@@ -157,11 +169,11 @@ OpenRouter aggregates models from many providers behind a single API. Craft asks
 
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
-| Weak | hf:Qwen/Qwen3.6-27B, **hf:zai-org/GLM-4.7-Flash** (default) | $0.45 / $3.60 | 256K ctx / 131K out |
+| Weak | syn:small:vision, hf:Qwen/Qwen3.6-27B, **syn:small:text, hf:zai-org/GLM-4.7-Flash** (default) | $0.45 / $3.60 | 256K ctx / 131K out |
 | Medium | **hf:MiniMaxAI/MiniMax-M3** (default) | $0.60 / $1.20 | 512K ctx / 131K out |
-| Strong | **hf:moonshotai/Kimi-K2.6** (default) | $0.95 / $4.00 | 256K ctx / 131K out |
+| Strong | **syn:large:vision, hf:moonshotai/Kimi-K2.6** (default), syn:large:text, hf:zai-org/GLM-5.2 | $0.95 / $4.00 | 256K ctx / 131K out |
 
-Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), hf:moonshotai/Kimi-K2.6 (strong), hf:zai-org/GLM-4.7-Flash (weak)
+Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), syn:large:vision (strong), syn:small:text (weak)
 
 ## Model Identifiers
 
@@ -170,14 +182,70 @@ Models are referenced as `provider/model_id`:
 ```
 anthropic/claude-sonnet-4-6
 openai/gpt-4.1
-zai/glm-4.7
 ```
 
 If the model name is unique across providers, the prefix can be omitted.
 
+## Custom Providers
+
+You can add providers that are not built in by editing `~/.config/craft/providers.toml`. Custom providers use one of three supported protocols: `openai`, `anthropic`, or `google`.
+
+### Configuration Shape
+
+Each entry under `providers.toml` is a table keyed by the provider slug:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `display_name` | string | No | Human readable name shown in the UI |
+| `protocol` | string | Yes | One of: `openai`, `anthropic`, `google` |
+| `base_url` | string | Yes | API endpoint URL |
+| `plan` | string | No | Plan name for providers with multiple plans |
+| `api_key_env` | string | No | Env var name for the API key (defaults to `{SLUG}_API_KEY`) |
+| `api_key` | string | No | API key stored inline (not recommended; use `craft auth login` instead) |
+| `default_model` | string | No | Default model identifier without the provider prefix |
+| `discover_models` | bool | No | Query the provider for model list at startup (default `false`) |
+| `models` | array of tables | No | Override context window and max output for specific models |
+
+The `models` table is useful when a provider's `/models` endpoint does not report context sizes, or reports incorrect ones. Each entry has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Model identifier (without the provider prefix) |
+| `context_window` | integer | Context window in tokens |
+| `max_output_tokens` | integer | Max output tokens |
+
+Craft tries three sources in priority order when resolving a custom model:
+
+1. Explicit `models` entry in `providers.toml`
+2. Metadata discovered from the provider's `/models` endpoint (when `discover_models = true`)
+3. Protocol fallback values
+
+### Example
+
+```toml
+[my-proxy]
+protocol = "openai"
+base_url = "https://api.my-proxy.com/v1"
+api_key_env = "MY_PROXY_API_KEY"
+discover_models = true
+
+[[my-proxy.models]]
+id = "glm-5.2"
+context_window = 1_000_000
+max_output_tokens = 32_768
+```
+
+Use the provider with:
+
+```
+craft -m my-proxy/gpt-4.1
+```
+
+Custom providers appear in `craft auth login` and the model picker just like built-in ones.
+
 ## Dynamic Providers
 
-To add a custom provider or proxy, drop an executable script into `~/.config/craft/providers/`. The script must handle these subcommands:
+To add a provider proxy via an executable script, drop it into `~/.config/craft/providers/`. The script must handle these subcommands:
 
 | Subcommand | Timeout | What it does |
 |------------|---------|--------|
@@ -190,7 +258,7 @@ To add a custom provider or proxy, drop an executable script into `~/.config/cra
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `zai-coding-plan`, `deepseek`, `openrouter`, `synthetic`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `deepseek`, `openrouter`, `synthetic`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 

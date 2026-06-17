@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use crate::components::messages::MessagesPanel;
 use crate::components::render_hints::RenderHintsRegistry;
-use crate::components::todo_panel::TodoPanel;
 use crate::components::tool_display::{
     append_annotation, output_limits_from_hints, tool_output_annotation,
 };
@@ -53,7 +52,6 @@ pub struct Chat {
     pub token_usage: TokenUsage,
     pub context_size: u32,
     pub model_id: Option<String>,
-    pub(crate) todo_panel: TodoPanel,
     pending_turn_usage: Option<String>,
     messages_panel: MessagesPanel,
     finished: bool,
@@ -66,7 +64,6 @@ impl Chat {
             token_usage: TokenUsage::default(),
             context_size: 0,
             model_id: None,
-            todo_panel: TodoPanel::new(),
             pending_turn_usage: None,
             messages_panel: MessagesPanel::new(ui_config),
             finished: false,
@@ -812,9 +809,12 @@ mod tests {
                 ToolOutput::GrepResult { entries: vec![] },
             ),
             (
-                "todo_write",
-                serde_json::json!({"todos": []}),
-                ToolOutput::TodoList(vec![]),
+                "review",
+                serde_json::json!({"verdict": "pass"}),
+                ToolOutput::ReviewResult {
+                    findings: vec![],
+                    verdict: "pass".into(),
+                },
             ),
         ];
         for (tool_name, input_json, output) in variants {

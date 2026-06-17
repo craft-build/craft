@@ -7,6 +7,9 @@ use arc_swap::ArcSwap;
 use craft_agent::SharedBuf;
 use mlua::RegistryKey;
 
+pub(crate) const DEFAULT_ZINDEX: u16 = 50;
+pub(crate) const DEFAULT_ORDER: u16 = 50;
+
 #[derive(Clone)]
 pub struct LuaCommandInfo {
     pub name: Arc<str>,
@@ -68,6 +71,53 @@ impl LuaCommandWriter {
     }
 }
 
+pub type HintEntries = Vec<(Arc<str>, Vec<(String, String)>)>;
+
+#[derive(Clone, Default)]
+pub struct HintSnapshot {
+    pub entries: HintEntries,
+    pub generation: u64,
+}
+
+#[derive(Clone)]
+pub struct HintReader(Arc<ArcSwap<HintSnapshot>>);
+
+impl HintReader {
+    pub fn empty() -> Self {
+        Self(Arc::new(ArcSwap::from_pointee(HintSnapshot::default())))
+    }
+
+    pub fn load(&self) -> arc_swap::Guard<Arc<HintSnapshot>> {
+        self.0.load()
+    }
+}
+
+pub(crate) struct HintWriter {
+    store: Arc<ArcSwap<HintSnapshot>>,
+    generation: AtomicU64,
+}
+
+impl HintWriter {
+    pub fn new() -> (Self, HintReader) {
+        let inner = Arc::new(ArcSwap::from_pointee(HintSnapshot::default()));
+        (
+            Self {
+                store: Arc::clone(&inner),
+                generation: AtomicU64::new(0),
+            },
+            HintReader(inner),
+        )
+    }
+
+    pub fn publish(&self, entries: HintEntries) {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.store.store(Arc::new(HintSnapshot {
+            entries,
+            generation,
+        }));
+    }
+}
+
 pub(crate) struct CommandEntry {
     pub handler: RegistryKey,
     pub description: Arc<str>,
@@ -76,7 +126,7 @@ pub(crate) struct CommandEntry {
 pub(crate) type CommandHandlerMap = HashMap<Arc<str>, HashMap<Arc<str>, CommandEntry>>;
 
 pub(crate) fn publish_command_snapshot(map: &CommandHandlerMap, writer: &LuaCommandWriter) {
-    let commands = map
+    let mut commands: Vec<LuaCommandInfo> = map
         .iter()
         .flat_map(|(plugin, cmds)| {
             cmds.iter().map(move |(name, entry)| LuaCommandInfo {
@@ -86,6 +136,7 @@ pub(crate) fn publish_command_snapshot(map: &CommandHandlerMap, writer: &LuaComm
             })
         })
         .collect();
+    commands.sort_by(|a, b| a.plugin.cmp(&b.plugin).then(a.name.cmp(&b.name)));
     writer.publish(commands);
 }
 
@@ -170,6 +221,7 @@ pub enum Split {
     Below,
     Left,
     Right,
+    Panel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,13 +243,14 @@ impl Split {
             "below" => Self::Below,
             "left" => Self::Left,
             "right" => Self::Right,
+            "panel" => Self::Panel,
             _ => Self::None,
         }
     }
 
     pub fn edge(self) -> Option<Edge> {
         Some(match self {
-            Self::None => return None,
+            Self::None | Self::Panel => return None,
             Self::Above => Edge {
                 axis: Axis::Vertical,
                 at_start: true,
@@ -236,6 +289,8 @@ pub struct FloatConfig {
     pub reserved_bottom: usize,
     pub reserved_top: usize,
     pub split: Split,
+    pub order: u16,
+    pub visible: bool,
 }
 
 impl Default for FloatConfig {
@@ -250,11 +305,13 @@ impl Default for FloatConfig {
             title: String::new(),
             title_pos: TitlePos::default(),
             footer: Vec::new(),
-            zindex: 50,
+            zindex: DEFAULT_ZINDEX,
             cursor_line: false,
             reserved_bottom: 0,
             reserved_top: 0,
             split: Split::default(),
+            order: DEFAULT_ORDER,
+            visible: true,
         }
     }
 }
@@ -283,7 +340,9 @@ impl FloatConfig {
             cursor_line,
             reserved_bottom,
             reserved_top,
-            split
+            split,
+            order,
+            visible
         );
     }
 }
@@ -304,6 +363,8 @@ pub struct FloatConfigPatch {
     pub reserved_bottom: Option<usize>,
     pub reserved_top: Option<usize>,
     pub split: Option<Split>,
+    pub order: Option<u16>,
+    pub visible: Option<bool>,
 }
 
 pub enum WinEvent {
@@ -316,6 +377,7 @@ pub enum WinEvent {
 pub enum WinCommand {
     SetConfig(FloatConfigPatch),
     SetCursor(usize),
+    SetVisible(bool),
     Close,
 }
 
@@ -370,17 +432,12 @@ mod tests {
         assert_eq!(snap.commands.len(), 3);
         assert_eq!(snap.generation, 1);
 
-        let names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
-        assert!(names.contains(&"/cmd1"));
-        assert!(names.contains(&"/cmd2"));
-        assert!(names.contains(&"/cmd3"));
-
-        let plug_a_cmds: Vec<_> = snap
-            .commands
-            .iter()
-            .filter(|c| c.plugin.as_ref() == "plugA")
-            .collect();
-        assert_eq!(plug_a_cmds.len(), 2);
+        assert_eq!(snap.commands[0].plugin.as_ref(), "plugA");
+        assert_eq!(snap.commands[0].name.as_ref(), "/cmd1");
+        assert_eq!(snap.commands[1].plugin.as_ref(), "plugA");
+        assert_eq!(snap.commands[1].name.as_ref(), "/cmd2");
+        assert_eq!(snap.commands[2].plugin.as_ref(), "plugB");
+        assert_eq!(snap.commands[2].name.as_ref(), "/cmd3");
     }
 
     #[test]
@@ -432,6 +489,7 @@ mod tests {
     #[test_case("below" => Split::Below ; "below")]
     #[test_case("left" => Split::Left ; "left")]
     #[test_case("right" => Split::Right ; "right")]
+    #[test_case("panel" => Split::Panel ; "panel")]
     #[test_case("none" => Split::None ; "none")]
     #[test_case("" => Split::None ; "empty_defaults_none")]
     #[test_case("Below" => Split::None ; "exact_match_is_case_sensitive")]
@@ -439,6 +497,7 @@ mod tests {
         Split::parse(s)
     }
 
+    #[test_case(Split::Panel => None ; "panel_has_no_edge")]
     #[test_case(Split::None => None ; "none_has_no_edge")]
     #[test_case(Split::Above => Some(Edge { axis: Axis::Vertical, at_start: true }) ; "above_is_vertical_start")]
     #[test_case(Split::Below => Some(Edge { axis: Axis::Vertical, at_start: false }) ; "below_is_vertical_end")]
@@ -448,6 +507,7 @@ mod tests {
         split.edge()
     }
 
+    #[test_case(Split::Panel)]
     #[test_case(Split::None)]
     #[test_case(Split::Above)]
     #[test_case(Split::Below)]
@@ -501,5 +561,20 @@ mod tests {
         let mut cfg = original.clone();
         cfg.apply_patch(FloatConfigPatch::default());
         assert_eq!(cfg, original);
+    }
+
+    #[test]
+    fn hint_snapshot_publish_and_read() {
+        let (writer, reader) = HintWriter::new();
+        assert!(reader.load().entries.is_empty());
+
+        writer.publish(vec![(
+            Arc::from("plugA"),
+            vec![(" 2/4 ".into(), "fg".into())],
+        )]);
+
+        let snap = reader.load();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.generation, 1);
     }
 }

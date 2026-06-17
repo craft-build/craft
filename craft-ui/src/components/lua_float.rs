@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::components::split_layout::SplitReq;
 use crate::components::{
-    Overlay, hint_line, keybindings::key_event_to_string, scrollbar::render_vertical_scrollbar,
+    Overlay, keybindings::key_event_to_string, scrollbar::render_vertical_scrollbar,
     tool_display::resolve_span_style,
 };
 use crate::theme;
@@ -63,6 +63,7 @@ struct FloatWindow {
     viewport_h: u16,
     last_content: Rect,
     cursor: usize,
+    visible: bool,
     event_tx: flume::Sender<WinEvent>,
     cmd_rx: flume::Receiver<WinCommand>,
 }
@@ -154,6 +155,7 @@ impl FloatManager {
         self.next_id += 1;
 
         let split_dir = config.split;
+        let visible = config.visible;
         let win = FloatWindow {
             id,
             buf,
@@ -163,6 +165,7 @@ impl FloatManager {
             viewport_h: 1,
             last_content: Rect::default(),
             cursor: 0,
+            visible,
             event_tx,
             cmd_rx,
         };
@@ -209,6 +212,9 @@ impl FloatManager {
                     Ok(WinCommand::SetCursor(row)) => {
                         win.set_cursor(row);
                     }
+                    Ok(WinCommand::SetVisible(v)) => {
+                        win.visible = v;
+                    }
                     Ok(WinCommand::Close) => {
                         let _ = win.event_tx.try_send(WinEvent::Close);
                         closed_ids.push(win.id);
@@ -228,7 +234,11 @@ impl FloatManager {
             if let Some(fid) = self.focused_id
                 && !self.windows.iter().any(|w| w.id == fid)
             {
-                self.focused_id = self.windows.last().map(|w| w.id);
+                self.focused_id = self
+                    .windows
+                    .iter()
+                    .rfind(|w| w.config.split == Split::None)
+                    .map(|w| w.id);
                 self.focused_rect = None;
             }
         }
@@ -336,6 +346,36 @@ impl FloatManager {
         }
     }
 
+    pub fn panel_reqs(&self, area: Rect) -> Vec<(usize, u16)> {
+        let mut reqs: Vec<(usize, u16)> = self
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.config.split == Split::Panel && w.visible)
+            .map(|(i, w)| (i, w.config.height.resolve(area.height)))
+            .collect();
+        reqs.sort_by_key(|(i, _)| self.windows[*i].config.order);
+        reqs
+    }
+
+    pub fn toggle_panel_visibility(&mut self) {
+        for win in &mut self.windows {
+            if win.config.split == Split::Panel {
+                win.visible = !win.visible;
+            }
+        }
+    }
+
+    pub fn view_panel(&mut self, frame: &mut Frame, idx: usize, rect: Rect) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let Some(win) = self.windows.get_mut(idx) else {
+            return;
+        };
+        render_window(frame, win, rect);
+    }
+
     fn split_window_idx(&self, dir: Split) -> Option<usize> {
         self.windows.iter().position(|w| w.config.split == dir)
     }
@@ -350,7 +390,11 @@ impl FloatManager {
         if let Some(fid) = self.focused_id
             && !self.windows.iter().any(|w| w.id == fid)
         {
-            self.focused_id = self.windows.last().map(|w| w.id);
+            self.focused_id = self
+                .windows
+                .iter()
+                .rfind(|w| w.config.split == Split::None)
+                .map(|w| w.id);
             self.focused_rect = None;
         }
     }
@@ -384,6 +428,9 @@ fn render_window(frame: &mut Frame, win: &mut FloatWindow, popup: Rect) {
                 .title_alignment(alignment)
                 .title_style(t.panel_title);
         }
+        if !win.config.footer.is_empty() {
+            b = b.title_bottom(hint_footer(&win.config.footer).right_aligned());
+        }
         b
     } else {
         Block::default().style(ratatui::style::Style::new().bg(t.background))
@@ -392,24 +439,7 @@ fn render_window(frame: &mut Frame, win: &mut FloatWindow, popup: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let footer_h = u16::from(!win.config.footer.is_empty());
-    let content_area = if footer_h > 0 && inner.height > footer_h {
-        let footer_rect = Rect {
-            x: inner.x,
-            y: inner.y + inner.height - footer_h,
-            width: inner.width,
-            height: footer_h,
-        };
-        frame.render_widget(hint_line(&win.config.footer), footer_rect);
-        Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: inner.height - footer_h,
-        }
-    } else {
-        inner
-    };
+    let content_area = inner;
 
     if win.last_content != content_area {
         let _ = win.event_tx.try_send(WinEvent::Resize {
@@ -495,6 +525,23 @@ fn render_window(frame: &mut Frame, win: &mut FloatWindow, popup: Rect) {
             win.scroll_offset as u16,
         );
     }
+}
+
+fn hint_footer<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)]) -> Line<'static> {
+    let t = crate::theme::current();
+    let mut spans = Vec::with_capacity(pairs.len() * 3);
+    for (key, desc) in pairs {
+        spans.push(Span::raw(" "));
+        for (i, part) in key.as_ref().split('/').enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("/", t.tool_dim));
+            }
+            spans.push(Span::styled(part.to_string(), t.keybind_key));
+        }
+        spans.push(Span::styled(format!(" {}", desc.as_ref()), t.tool_dim));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 fn resolve_rect(config: &FloatConfig, area: Rect) -> Rect {
@@ -904,6 +951,69 @@ mod tests {
         drop(cmd_tx);
         mgr.tick();
         assert!(!mgr.is_open(), "{}", EXPECT_CLOSED);
+    }
+
+    const EXPECT_PANEL_HEIGHT: &str = "panel height must resolve against the area, not a fixed 100";
+    const EXPECT_HIDDEN: &str = "first toggle must hide the panel";
+    const EXPECT_SHOWN: &str = "second toggle must show the panel";
+
+    #[test]
+    fn panel_reqs_resolves_height_against_area() {
+        let mut mgr = FloatManager::new();
+        let cfg = FloatConfig {
+            height: Dimension::Percent(30),
+            split: Split::Panel,
+            ..FloatConfig::default()
+        };
+        let (tx, rx, _, _) = make_channels();
+        mgr.open(make_buf(&["a"]), cfg, false, tx, rx);
+
+        let reqs = mgr.panel_reqs(Rect::new(0, 0, 80, 50));
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].1, 15, "{}", EXPECT_PANEL_HEIGHT);
+    }
+
+    #[test]
+    fn toggle_panel_visibility_flips_panels() {
+        let mut mgr = FloatManager::new();
+        let cfg = FloatConfig {
+            split: Split::Panel,
+            ..FloatConfig::default()
+        };
+        let (tx, rx, _, _) = make_channels();
+        mgr.open(make_buf(&["a"]), cfg, false, tx, rx);
+        assert!(mgr.windows[0].visible);
+
+        let area = Rect::new(0, 0, 80, 50);
+
+        mgr.toggle_panel_visibility();
+        assert!(!mgr.windows[0].visible, "{}", EXPECT_HIDDEN);
+        assert!(mgr.panel_reqs(area).is_empty());
+
+        mgr.toggle_panel_visibility();
+        assert!(mgr.windows[0].visible, "{}", EXPECT_SHOWN);
+        assert!(!mgr.panel_reqs(area).is_empty());
+    }
+
+    const EXPECT_NO_PANIC: &str = "stale panel index must not panic";
+
+    #[test]
+    fn view_panel_stale_index_does_not_panic() {
+        let mut mgr = FloatManager::new();
+        let cfg = FloatConfig {
+            split: Split::Panel,
+            ..FloatConfig::default()
+        };
+        let (tx, rx, _, _) = make_channels();
+        mgr.open(make_buf(&["a"]), cfg, false, tx, rx);
+
+        let backend = ratatui::backend::TestBackend::new(80, 50);
+        let mut frame = ratatui::Terminal::new(backend).unwrap();
+        frame
+            .draw(|f| mgr.view_panel(f, 99, Rect::new(0, 0, 10, 10)))
+            .unwrap();
+        drop(frame);
+        assert!(!mgr.windows.is_empty(), "{}", EXPECT_NO_PANIC);
     }
 
     #[test]
@@ -1450,6 +1560,7 @@ mod tests {
             viewport_h: 1,
             last_content: Rect::default(),
             cursor: 0,
+            visible: true,
             event_tx,
             cmd_rx,
         }

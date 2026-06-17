@@ -22,15 +22,19 @@ use serde_json::Value;
 
 use craft_config::RawConfig;
 
+use crate::api::autocmd::AutocmdStore;
 use crate::api::buf::{BufHandle, BufferStore};
-use crate::api::command::{CommandHandlerMap, publish_command_snapshot};
+use crate::api::command::{CommandHandlerMap, HintWriter, publish_command_snapshot};
 use crate::api::command::{LuaCommandReader, LuaCommandWriter, UiAction};
 use crate::api::create_craft_global;
 use crate::api::ctx::LuaCtx;
 use crate::api::fn_api::{JobMeta, JobStore};
 use crate::api::json_to_lua;
+use crate::api::keymap::KeymapReader;
+use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::setup::ConfigStore;
 use crate::api::tool::{LuaOutputFormat, LuaTool, PendingTool, PendingTools, ToolCallReply};
+use crate::api::ui::HintStore;
 use crate::error::PluginError;
 use crate::plugin_permissions::PluginPermissions;
 use crate::terminal_backend::{JobEvent, TerminalBackend};
@@ -138,6 +142,13 @@ pub enum Request {
     },
     RestoreComplete {
         flag: Arc<AtomicBool>,
+    },
+    FireAutocmd {
+        event: String,
+        data: Value,
+    },
+    RunKeybindCallback {
+        id: u64,
     },
     RunHook {
         event: String,
@@ -634,6 +645,8 @@ impl LuaRuntime {
         bundled_dirs: &'static [&'static Dir<'static>],
         ui_action_tx: Option<flume::Sender<UiAction>>,
         command_writer: LuaCommandWriter,
+        keymap_writer: KeymapWriter,
+        hint_writer: HintWriter,
         embed_tx: Option<crate::api::embed::EmbedChannel>,
         terminal_backend: Arc<dyn TerminalBackend>,
     ) -> Result<Self, PluginError> {
@@ -662,7 +675,12 @@ impl LuaRuntime {
         lua.set_app_data(SpawnQueue::default());
         lua.set_app_data(command_writer);
         lua.set_app_data(PromptHintCallbacks::default());
+        lua.set_app_data(HintStore::new());
         lua.set_app_data(crate::api::hooks::HookHandlerMap::new());
+        lua.set_app_data(AutocmdStore::default());
+        lua.set_app_data(KeymapStore::new());
+        lua.set_app_data(keymap_writer);
+        lua.set_app_data(hint_writer);
         lua.set_app_data::<SharedSandboxConfig>(Arc::new(ArcSwap::from_pointee(
             craft_config::SandboxConfig::default(),
         )));
@@ -726,6 +744,14 @@ impl LuaRuntime {
                         }
                     }
                 }
+            }
+        }
+        if let Some(mut store) = self.lua.app_data_mut::<HintStore>() {
+            store.clear_plugin(name);
+            let entries = store.snapshot_entries();
+            drop(store);
+            if let Some(writer) = self.lua.app_data_ref::<HintWriter>() {
+                writer.publish(entries);
             }
         }
     }
@@ -1087,6 +1113,24 @@ impl LuaRuntime {
     fn clear_plugin(&mut self, plugin: &str) {
         self.registry.clear_plugin(plugin);
         self.drop_plugin_keys(plugin);
+        if let Some(mut store) = self.lua.app_data_mut::<AutocmdStore>() {
+            let keys = store.clear_plugin(plugin);
+            drop(store);
+            for key in keys {
+                let _ = self.lua.remove_registry_value(key);
+            }
+        }
+        if let Some(mut store) = self.lua.app_data_mut::<KeymapStore>() {
+            let keys = store.clear_plugin(plugin);
+            let entries = store.snapshot_entries();
+            drop(store);
+            for key in keys {
+                let _ = self.lua.remove_registry_value(key);
+            }
+            if let Some(writer) = self.lua.app_data_ref::<KeymapWriter>() {
+                writer.publish(entries);
+            }
+        }
     }
 
     fn call_sync_detached<R: mlua::FromLuaMulti>(
@@ -1142,11 +1186,13 @@ impl LuaRuntime {
     }
 
     async fn restore_item(&self, item: RestoreItem) -> Option<RestoreReply> {
-        let func = {
+        let (func, plugin_name) = {
             let plugins = self.plugins.borrow();
-            let tk = plugins.values().find_map(|tools| tools.get(&*item.tool))?;
+            let (pname, tk) = plugins
+                .iter()
+                .find_map(|(pname, tools)| tools.get(&*item.tool).map(|tk| (pname.clone(), tk)))?;
             let key = tk.restore.as_ref()?;
-            self.lua.registry_value::<Function>(key).ok()?
+            (self.lua.registry_value::<Function>(key).ok()?, pname)
         };
         let input_lua = json_to_lua(&self.lua, &item.input).ok()?;
         let thread = self.lua.create_thread(func).ok()?;
@@ -1181,7 +1227,14 @@ impl LuaRuntime {
             .ok()?;
         drop(scope);
 
-        extract_restore_reply(&ret)
+        let mut reply = extract_restore_reply(&ret)?;
+        if reply.header.is_none() {
+            reply.header = Some(
+                self.compute_header(&plugin_name, &item.tool, item.input)
+                    .into_snapshot(),
+            );
+        }
+        Some(reply)
     }
 
     fn compute_permission_scopes(
@@ -1551,6 +1604,8 @@ pub(crate) struct LuaThread {
     pub join: Option<JoinHandle<()>>,
     pub shutdown: Arc<AtomicBool>,
     pub command_reader: LuaCommandReader,
+    pub keymap_reader: KeymapReader,
+    pub hint_reader: crate::api::command::HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
 }
 
@@ -1569,6 +1624,8 @@ pub fn spawn(
     let (init_tx, init_rx) = flume::bounded::<Result<(), PluginError>>(1);
     let (ui_action_tx, ui_action_rx) = flume::unbounded::<UiAction>();
     let (command_writer, command_reader) = LuaCommandWriter::new();
+    let (keymap_writer, keymap_reader) = KeymapWriter::new();
+    let (hint_writer, hint_reader) = HintWriter::new();
 
     let handle = thread::Builder::new()
         .name("craft-lua".to_owned())
@@ -1580,6 +1637,8 @@ pub fn spawn(
                  bundled_dirs,
                  Some(ui_action_tx),
                  command_writer,
+                 keymap_writer,
+                 hint_writer,
                  embed_tx,
                  terminal_backend,
              ) {
@@ -1795,6 +1854,105 @@ pub fn spawn(
                         drain_spawn_queue(&rt.lua, &gate);
                         let _ = reply.send(result);
                     }
+                    Request::FireAutocmd { event, data } => {
+                        let entries = {
+                            let mut store = match rt.lua.app_data_mut::<AutocmdStore>() {
+                                Some(s) => s,
+                                None => continue,
+                            };
+                            store.pending_deletions.clear();
+                            let Some(list) = store.listeners.get_mut(&event) else {
+                                continue;
+                            };
+                            std::mem::take(list)
+                        };
+                        let ctx_table = rt.lua.create_table().ok();
+                        if let Some(ref tbl) = ctx_table
+                            && let Some(obj) = data.as_object()
+                        {
+                            for (k, v) in obj {
+                                let _ = tbl.set(
+                                    k.as_str(),
+                                    json_to_lua(&rt.lua, v).unwrap_or(LuaValue::Nil),
+                                );
+                            }
+                        }
+                        let mut keep = Vec::with_capacity(entries.len());
+                        for entry in entries {
+                            if entry.once {
+                                let _ = rt.lua.remove_registry_value(entry.callback);
+                                continue;
+                            }
+                            let already_deleted = rt
+                                .lua
+                                .app_data_ref::<AutocmdStore>()
+                                .is_some_and(|s| s.pending_deletions.contains(&entry.id));
+                            if !already_deleted
+                                && let Ok(func) =
+                                    rt.lua.registry_value::<Function>(&entry.callback)
+                            {
+                                let arg = ctx_table
+                                    .as_ref()
+                                    .map(|t| LuaValue::Table(t.clone()))
+                                    .unwrap_or(LuaValue::Nil);
+                                if let Err(e) = rt.call_sync_detached::<()>(&func, arg) {
+                                    tracing::warn!(
+                                        event = %event,
+                                        plugin = %entry.plugin,
+                                        error = %e,
+                                        "autocmd callback failed"
+                                    );
+                                }
+                            }
+                            let deleted = rt
+                                .lua
+                                .app_data_ref::<AutocmdStore>()
+                                .is_some_and(|s| s.pending_deletions.contains(&entry.id));
+                            if deleted {
+                                let _ = rt.lua.remove_registry_value(entry.callback);
+                            } else {
+                                keep.push(entry);
+                            }
+                        }
+                        let pending = rt
+                            .lua
+                            .app_data_mut::<AutocmdStore>()
+                            .map(|mut s| std::mem::take(&mut s.pending_deletions))
+                            .unwrap_or_default();
+                        if !pending.is_empty() {
+                            let mut retained = Vec::with_capacity(keep.len());
+                            for e in keep.drain(..) {
+                                if pending.contains(&e.id) {
+                                    let _ = rt.lua.remove_registry_value(e.callback);
+                                } else {
+                                    retained.push(e);
+                                }
+                            }
+                            keep = retained;
+                        }
+                        if let Some(mut store) = rt.lua.app_data_mut::<AutocmdStore>() {
+                            if !keep.is_empty() {
+                                store.listeners.entry(event).or_default().extend(keep);
+                            }
+                        }
+                        drain_spawn_queue(&rt.lua, &gate);
+                    }
+                    Request::RunKeybindCallback { id } => {
+                        let func = rt.lua.app_data_ref::<KeymapStore>().and_then(|store| {
+                            let key = store.callback_for_id(id)?;
+                            rt.lua.registry_value::<Function>(key).ok()
+                        });
+                        if let Some(func) = func {
+                            let lua = rt.lua.clone();
+                            let g = Rc::clone(&gate);
+                            tokio::task::spawn_local(async move {
+                                if let Err(e) = run_detached(&lua, func.call_async::<()>(())).await {
+                                    tracing::warn!(keybind_id = id, error = %e, "keybind callback failed");
+                                }
+                                drain_spawn_queue(&lua, &g);
+                            });
+                        }
+                    }
                     }
                 }
             });
@@ -1814,6 +1972,8 @@ pub fn spawn(
         join: Some(handle),
         shutdown,
         command_reader,
+        keymap_reader,
+        hint_reader,
         ui_action_rx,
     })
 }

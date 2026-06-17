@@ -313,14 +313,6 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 | `prompt` | string | yes | Detailed task prompt for the agent |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
 
-### `todo_write`
-
-Create or update a hierarchical task list to track multi-step work.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `todos` | array | yes | The updated task list (replace-all). Use hierarchical ids (T1, T1.1). |
-
 ### `memory` *(lua plugin)*
 
 Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.

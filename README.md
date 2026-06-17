@@ -91,7 +91,6 @@ Runtime difference - Craft also significantly retools the async runtime and netw
 - Copilot - `GH_COPILOT_TOKEN`, or an existing sign-in at `~/.config/github-copilot/`.
 - Ollama - `OLLAMA_HOST` for local (for example `http://localhost:11434`), or `OLLAMA_API_KEY` for cloud.
 - Mistral - `MISTRAL_API_KEY`.
-- Z.AI - `ZHIPU_API_KEY`.
 - Synthetic - `SYNTHETIC_API_KEY`.
 
 **Dynamic providers** - drop an executable script into `~/.config/craft/providers/` to add a custom provider or proxy.

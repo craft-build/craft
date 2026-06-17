@@ -305,7 +305,6 @@ mod tests {
             (super::super::APPLY_PATCH_TOOL_NAME, MAIN | GEN | INT),
             (super::super::BATCH_TOOL_NAME, MAIN | RES | GEN),
             (super::super::CODE_EXECUTION_TOOL_NAME, MAIN | RES | GEN),
-            (super::super::TODOWRITE_TOOL_NAME, MAIN | RES | GEN),
             (super::super::LIST_TOOLS_TOOL_NAME, MAIN | RES | GEN),
             (super::super::TASK_TOOL_NAME, MAIN),
             (super::super::OUTLINE_TOOL_NAME, all),

@@ -40,7 +40,6 @@ const TOOL_NAME_MAP: &[(&str, &str)] = &[
     ("write", "Write"),
     ("grep", "Grep"),
     ("glob", "Glob"),
-    ("todo_write", "TodoWrite"),
     ("webfetch", "WebFetch"),
     ("websearch", "WebSearch"),
     ("task", "Task"),
@@ -1030,13 +1029,12 @@ mod tests {
     #[test_case("write", "Write")]
     #[test_case("grep", "Grep")]
     #[test_case("glob", "Glob")]
-    #[test_case("todo_write", "TodoWrite")]
     #[test_case("webfetch", "WebFetch")]
     #[test_case("websearch", "WebSearch")]
     #[test_case("task", "Task")]
     #[test_case("multiedit", "MultiEdit")]
     #[test_case("code_execution", "CodeExecution")]
-    #[test_case("index", "Index")]
+    #[test_case("outline", "Outline")]
     #[test_case("memory", "Memory")]
     #[test_case("question", "Question")]
     fn craft_to_claude_roundtrip(craft: &str, claude: &str) {

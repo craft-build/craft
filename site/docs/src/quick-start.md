@@ -21,7 +21,6 @@ Export a key for at least one provider:
 | Google | `GEMINI_API_KEY` |
 | Copilot | `GH_COPILOT_TOKEN` |
 | Mistral | `MISTRAL_API_KEY` |
-| Z.AI | `ZHIPU_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Synthetic | `SYNTHETIC_API_KEY` |

@@ -40,6 +40,7 @@ reqwest = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 libc = { workspace = true }
+open = { workspace = true }
 
 
 [dev-dependencies]
@@ -187,6 +188,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 futures = "0.3"
 
+inventory = "0.3"
 wait-timeout = "0.2"
 aho-corasick = "1"
 time = ">=0.3, <0.3.48"

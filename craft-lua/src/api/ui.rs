@@ -1,14 +1,60 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use humantime::format_duration;
 use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::api::command::{
-    Anchor, Border, Dimension, FloatConfig, Split, TitlePos, UiAction, WinCommand, WinEvent,
+    Anchor, Border, DEFAULT_ORDER, DEFAULT_ZINDEX, Dimension, FloatConfig, HintEntries, HintWriter,
+    Split, TitlePos, UiAction, WinCommand, WinEvent,
 };
 use crate::api::win::WinHandle;
 use crate::runtime::with_task_bufs;
+
+const FALLBACK_TERM_COLS: u16 = 80;
+const FALLBACK_TERM_ROWS: u16 = 24;
+
+pub(crate) struct HintStore {
+    hints: BTreeMap<Arc<str>, Vec<(String, String)>>,
+}
+
+impl HintStore {
+    pub fn new() -> Self {
+        Self {
+            hints: BTreeMap::new(),
+        }
+    }
+
+    pub fn set(&mut self, plugin: Arc<str>, spans: Vec<(String, String)>) {
+        if spans.is_empty() {
+            self.hints.remove(&plugin);
+        } else {
+            self.hints.insert(plugin, spans);
+        }
+    }
+
+    pub fn clear_plugin(&mut self, plugin: &str) {
+        self.hints.retain(|k, _| k.as_ref() != plugin);
+    }
+
+    pub fn snapshot_entries(&self) -> HintEntries {
+        self.hints
+            .iter()
+            .map(|(k, v)| (Arc::clone(k), v.clone()))
+            .collect()
+    }
+}
+
+fn publish_hint_snapshot(lua: &Lua) {
+    if let Some(store) = lua.app_data_ref::<HintStore>() {
+        let entries = store.snapshot_entries();
+        if let Some(writer) = lua.app_data_ref::<HintWriter>() {
+            writer.publish(entries);
+        }
+    }
+}
 
 pub(crate) fn parse_footer(tbl: &Table) -> LuaResult<Vec<(String, String)>> {
     let footer_tbl: Table = match tbl.get("footer") {
@@ -27,6 +73,7 @@ pub(crate) fn parse_footer(tbl: &Table) -> LuaResult<Vec<(String, String)>> {
 pub(crate) fn create_ui_table(
     lua: &Lua,
     ui_action_tx: Option<flume::Sender<UiAction>>,
+    plugin: Arc<str>,
 ) -> LuaResult<Table> {
     let t = lua.create_table()?;
     t.set(
@@ -74,6 +121,7 @@ pub(crate) fn create_ui_table(
     //
     // Named styles: "", "dim", "active", "accent", "selected",
     // "success", "warning", "item", "match", "match_selected",
+    // "todo_completed", "todo_in_progress", "todo_pending", "todo_cancelled",
     // "bold", "italic", "bold_italic", "strikethrough", "inline_code",
     // "code_gutter", "heading", "list_marker", "table_border",
     // "horizontal_rule".
@@ -99,7 +147,8 @@ pub(crate) fn create_ui_table(
     t.set(
         "terminal_size",
         lua.create_function(|lua, ()| {
-            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+            let (cols, rows) =
+                crossterm::terminal::size().unwrap_or((FALLBACK_TERM_COLS, FALLBACK_TERM_ROWS));
             let tbl = lua.create_table()?;
             tbl.set("cols", cols)?;
             tbl.set("rows", rows)?;
@@ -154,7 +203,9 @@ pub(crate) fn create_ui_table(
                         .ok()
                         .flatten()
                         .unwrap_or(true);
-                    let zindex: u16 = opts_tbl.get("zindex").unwrap_or(50);
+                    let zindex: u16 = opts_tbl.get("zindex").unwrap_or(DEFAULT_ZINDEX);
+                    let order: u16 = opts_tbl.get("order").unwrap_or(DEFAULT_ORDER);
+                    let visible: bool = opts_tbl.get("visible").unwrap_or(true);
 
                     let width = parse_dimension(&opts_tbl, "width", Dimension::Percent(60));
                     let height = parse_dimension(&opts_tbl, "height", Dimension::Percent(70));
@@ -180,14 +231,16 @@ pub(crate) fn create_ui_table(
                         reserved_bottom,
                         reserved_top,
                         split,
+                        order,
+                        visible,
                     };
 
-                    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let (term_cols, term_rows) = crossterm::terminal::size()
+                        .unwrap_or((FALLBACK_TERM_COLS, FALLBACK_TERM_ROWS));
                     let border_chrome = match config.border {
                         Border::None => 0,
                         _ => 2,
                     };
-                    let footer_h = u16::from(!config.footer.is_empty());
                     let est_w = config
                         .width
                         .resolve(term_cols)
@@ -195,10 +248,12 @@ pub(crate) fn create_ui_table(
                     let est_h = config
                         .height
                         .resolve(term_rows)
-                        .saturating_sub(border_chrome + footer_h);
+                        .saturating_sub(border_chrome);
 
                     let (event_tx, event_rx) = flume::bounded::<WinEvent>(8);
                     let (cmd_tx, cmd_rx) = flume::bounded::<WinCommand>(8);
+
+                    let win_visible = config.visible;
 
                     let _ = open_win_tx.try_send(UiAction::OpenWin {
                         buf: buf_handle.buf.clone(),
@@ -208,9 +263,45 @@ pub(crate) fn create_ui_table(
                         cmd_rx,
                     });
 
-                    Ok(WinHandle::new(event_rx, cmd_tx, est_w, est_h))
+                    Ok(WinHandle::new(event_rx, cmd_tx, est_w, est_h, win_visible))
                 },
             )?,
+        )?;
+
+        let p = Arc::clone(&plugin);
+        t.set(
+            "set_status_hint",
+            lua.create_function(move |lua, value: mlua::Value| {
+                match value {
+                    mlua::Value::Nil => {
+                        if let Some(mut store) = lua.app_data_mut::<HintStore>() {
+                            store.clear_plugin(&p);
+                        }
+                    }
+                    mlua::Value::Table(tbl) => {
+                        let spans: Vec<(String, String)> = tbl
+                            .sequence_values::<Table>()
+                            .map(|entry| {
+                                let entry = entry?;
+                                Ok((
+                                    entry.get::<String>(1)?,
+                                    entry.get::<String>(2).unwrap_or_default(),
+                                ))
+                            })
+                            .collect::<LuaResult<_>>()?;
+                        if let Some(mut store) = lua.app_data_mut::<HintStore>() {
+                            store.set(Arc::clone(&p), spans);
+                        }
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "set_status_hint expects a table or nil",
+                        ));
+                    }
+                }
+                publish_hint_snapshot(lua);
+                Ok(())
+            })?,
         )?;
     }
 
@@ -365,6 +456,8 @@ fn markdown_lines_to_lua(lua: &Lua, lines: &[craft_markdown::render::Line]) -> L
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use craft_highlight::StyledSegment;
     use mlua::Lua;
@@ -989,5 +1082,33 @@ mod tests {
 
         let list_line: Table = result.get(5).unwrap();
         assert_eq!(span_style(&list_line, 1), STYLE_LIST_MARKER);
+    }
+
+    #[test]
+    fn hint_store_set_and_clear() {
+        let mut store = HintStore::new();
+        store.set(Arc::from("plug"), vec![("a".into(), "b".into())]);
+        assert_eq!(store.snapshot_entries().len(), 1);
+
+        store.clear_plugin("plug");
+        assert!(store.snapshot_entries().is_empty());
+    }
+
+    #[test]
+    fn hint_store_deterministic_order() {
+        let mut store = HintStore::new();
+        store.set(Arc::from("zzz"), vec![("z".into(), "z".into())]);
+        store.set(Arc::from("aaa"), vec![("a".into(), "a".into())]);
+        let entries = store.snapshot_entries();
+        assert_eq!(entries[0].0.as_ref(), "aaa");
+        assert_eq!(entries[1].0.as_ref(), "zzz");
+    }
+
+    #[test]
+    fn hint_store_empty_clears() {
+        let mut store = HintStore::new();
+        store.set(Arc::from("plug"), vec![("a".into(), "b".into())]);
+        store.set(Arc::from("plug"), vec![]);
+        assert!(store.snapshot_entries().is_empty());
     }
 }

@@ -79,7 +79,7 @@ impl AgentLoop {
             tools: Value::Null,
             promoted: craft_agent::tools::PromotedTools::new(),
             mcp_handle,
-            history: History::new(initial_history).with_mirror(shared_history),
+            history: History::restored(initial_history).with_mirror(shared_history),
             cancel_map,
             init_cancel,
             permissions,

@@ -236,16 +236,18 @@ pub enum McpAction {
 
 #[derive(Subcommand)]
 pub enum AuthAction {
-    /// Authenticate with a provider
+    /// Authenticate with a provider (interactive if no provider specified)
     Login {
-        /// Provider slug (e.g. openai)
-        provider: String,
+        /// Provider slug (e.g. openai, anthropic). Omit for interactive selection.
+        provider: Option<String>,
     },
     /// Remove stored credentials for a provider
     Logout {
         /// Provider slug (e.g. openai)
         provider: String,
     },
+    /// Show authentication status for all providers
+    Status,
 }
 
 pub fn normalize_tool_name(name: &str) -> Result<String> {
@@ -279,8 +281,6 @@ mod tests {
     #[test_case("Bash", "bash")]
     #[test_case("CodeExecution", "code_execution")]
     #[test_case("code_execution", "code_execution"; "snake_passthrough")]
-    #[test_case("TodoWrite", "todo_write")]
-    #[test_case("todo_write", "todo_write"; "todo_write_already_snake_case")]
     fn normalize_tool_name_valid_inputs(input: &str, expected: &str) {
         assert_eq!(normalize_tool_name(input).unwrap(), expected);
     }

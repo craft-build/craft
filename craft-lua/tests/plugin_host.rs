@@ -1188,11 +1188,24 @@ async fn bash_timeout_round_trip() {
     );
     let _ = handle.collect_prompt_slots_async().await;
     let snapshots: Vec<craft_agent::Envelope> = rx.drain().collect();
-    let env = snapshots.into_iter().next().expect("at least one snapshot");
-    let craft_agent::AgentEvent::ToolSnapshot { snapshot, .. } = env.event else {
-        panic!("expected ToolSnapshot event");
-    };
-    let last = snapshot.lines.last().expect("at least one line");
+    assert_eq!(
+        snapshots.len(),
+        2,
+        "bash restore emits body + header snapshot"
+    );
+    let body_snapshot = snapshots
+        .iter()
+        .filter_map(|env| match &env.event {
+            craft_agent::AgentEvent::ToolSnapshot { snapshot, .. } => Some(snapshot),
+            _ => None,
+        })
+        .find(|snapshot| {
+            let last = snapshot.lines.last().expect("at least one line");
+            let text: String = last.spans.iter().map(|s| s.text.as_str()).collect();
+            text.contains(BASH_TIMEOUT_MARKER)
+        })
+        .expect("body snapshot with timeout marker");
+    let last = body_snapshot.lines.last().expect("at least one line");
     let text: String = last.spans.iter().map(|s| s.text.as_str()).collect();
     assert!(
         text.contains(BASH_TIMEOUT_MARKER),

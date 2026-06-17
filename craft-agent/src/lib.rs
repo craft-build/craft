@@ -16,6 +16,7 @@ pub use agent::EmbeddingService;
 pub use agent::{
     Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
     LoadedInstructions, SharedDoomTracker, SharedFindingsStore, SharedMessages, StoredFinding,
+    find_subdirectory_instructions, is_instruction_file,
 };
 pub use cancel::{CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
@@ -40,8 +41,7 @@ pub use types::{
     AgentEvent, BatchProgressEvent, BatchToolEntry, BatchToolStatus, BufferSnapshot, Envelope,
     EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock,
     NO_FILES_FOUND, Priority, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo,
-    TaskNode, TodoStatus, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
-    flatten_task_tree,
+    ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

@@ -21,6 +21,18 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "OpenRouter",
 };
 
+inventory::submit!(craft_config::providers::BuiltInProvider {
+    slug: "openrouter",
+    display_name: "OpenRouter",
+    protocol: craft_config::providers::Protocol::Openai,
+    default_base_url: "https://openrouter.ai/api/v1",
+    default_api_key_env: "OPENROUTER_API_KEY",
+    default_model: "openrouter/anthropic/claude-sonnet-4",
+    plans: None,
+    login_url: Some("https://openrouter.ai/settings/keys"),
+    needs_url: false,
+});
+
 /// OpenRouter exposes 300+ models — too many to enumerate statically.
 /// Use explicit model names (e.g. `openrouter:anthropic/claude-sonnet-4`).
 pub(crate) fn models() -> &'static [ModelEntry] {
@@ -36,7 +48,7 @@ pub struct OpenRouter {
 
 impl OpenRouter {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::from_env(CONFIG.api_key_env)?;
+        let pool = KeyPool::resolve("openrouter", CONFIG.api_key_env)?;
         Ok(Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
@@ -99,6 +111,12 @@ impl Provider for OpenRouter {
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn list_models_with_info(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
         Box::pin(async { Ok(vec![]) })
     }
 

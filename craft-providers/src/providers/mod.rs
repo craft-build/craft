@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use serde::Deserialize;
+use tracing::debug;
 
 use crate::AgentError;
 
@@ -13,17 +14,18 @@ pub(crate) fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub(crate) mod anthropic;
 pub(crate) mod copilot;
+pub mod custom;
 pub(crate) mod deepseek;
 pub mod dynamic;
 pub(crate) mod google;
 pub(crate) mod llama_cpp;
+pub(crate) mod local;
 pub(crate) mod mistral;
 pub(crate) mod ollama;
 pub(crate) mod openai;
 pub(crate) mod openai_compat;
 pub(crate) mod openrouter;
 pub(crate) mod synthetic;
-pub(crate) mod zai;
 
 pub(crate) const MIME_JSON: &str = "application/json";
 pub(crate) const MIME_FORM: &str = "application/x-www-form-urlencoded";
@@ -150,7 +152,7 @@ pub(crate) fn http_client(timeouts: Timeouts) -> Result<reqwest::Client, AgentEr
         })
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct KeyPool {
     keys: Arc<Vec<String>>,
     index: Arc<AtomicUsize>,
@@ -177,8 +179,38 @@ impl KeyPool {
         })
     }
 
-    #[cfg(test)]
-    pub fn from_keys(keys: Vec<String>) -> Self {
+    pub fn resolve(slug: &str, env_var: &str) -> Result<Self, AgentError> {
+        if let Ok(pool) = Self::from_env(env_var) {
+            debug!(slug, keys = pool.len(), "resolved API key from env");
+            return Ok(pool);
+        }
+        if let Some(key) = Self::key_from_file(slug) {
+            debug!(slug, "resolved API key from saved credentials");
+            return Ok(Self::from_keys(vec![key]));
+        }
+        if let Some(key) = Self::key_from_config(slug) {
+            debug!(slug, "resolved API key from providers.toml");
+            return Ok(Self::from_keys(vec![key]));
+        }
+        Err(AgentError::Config {
+            message: format!(
+                "{env_var} not set and no saved credentials for '{slug}' — run `craft auth login {slug}`"
+            ),
+        })
+    }
+
+    fn key_from_file(slug: &str) -> Option<String> {
+        let dir = craft_storage::StateDir::resolve().ok()?;
+        craft_storage::auth::load_provider_credentials(&dir, slug).map(|c| c.api_key)
+    }
+
+    fn key_from_config(slug: &str) -> Option<String> {
+        craft_config::providers::ProvidersConfig::load()
+            .get(slug)
+            .and_then(|d| d.api_key.clone())
+    }
+
+    pub(crate) fn from_keys(keys: Vec<String>) -> Self {
         Self {
             keys: Arc::new(keys),
             index: Arc::new(AtomicUsize::new(0)),
@@ -303,5 +335,35 @@ mod tests {
         pool.rotate();
         pool.rotate();
         assert_eq!(pool.current(), "a");
+    }
+
+    #[test]
+    fn resolve_from_env() {
+        let env_var = format!("MAKI_TEST_KEY_{}", fastrand::u32(..));
+        unsafe { std::env::set_var(&env_var, "from-env") };
+        let pool = KeyPool::resolve("test_slug", &env_var).unwrap();
+        unsafe { std::env::remove_var(&env_var) };
+        assert_eq!(pool.current(), "from-env");
+    }
+
+    #[test]
+    fn resolve_env_supports_comma_separated() {
+        let env_var = format!("MAKI_TEST_MULTI_{}", fastrand::u32(..));
+        unsafe { std::env::set_var(&env_var, "sk-1, sk-2, sk-3") };
+        let pool = KeyPool::resolve("test_slug", &env_var).unwrap();
+        unsafe { std::env::remove_var(&env_var) };
+        assert_eq!(pool.current(), "sk-1");
+        assert!(pool.rotate());
+        assert_eq!(pool.current(), "sk-2");
+    }
+
+    #[test]
+    fn resolve_returns_error_when_nothing_found() {
+        let slug = format!("test_resolve_none_{}", fastrand::u32(..));
+        let env_var = format!("MAKI_TEST_KEY_NONE_{}", fastrand::u32(..));
+        let result = KeyPool::resolve(&slug, &env_var);
+        assert!(result.is_err());
+        let msg = format!("{result:?}");
+        assert!(msg.contains(&env_var) || msg.contains(&slug));
     }
 }

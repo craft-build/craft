@@ -8,7 +8,7 @@ use craft_agent::command::CustomCommand;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle};
 use craft_config::UiConfig;
-use craft_lua::{EventHandle, LuaCommandReader, UiAction};
+use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, UiAction};
 use craft_providers::Timeouts;
 use craft_providers::provider::{Provider, fetch_all_models, from_model};
 use craft_providers::{Message, Model};
@@ -67,6 +67,7 @@ type RunResult = Result<ShutdownResult>;
 
 pub struct EventLoopParams {
     pub model: Model,
+    pub needs_login: bool,
     pub commands: Vec<CustomCommand>,
     pub session: AppSession,
     pub storage: StateDir,
@@ -78,6 +79,8 @@ pub struct EventLoopParams {
     pub timeouts: Timeouts,
     pub exit_on_done: bool,
     pub lua_command_reader: LuaCommandReader,
+    pub keymap_reader: KeymapReader,
+    pub hint_reader: HintReader,
     pub ui_action_rx: Option<flume::Receiver<UiAction>>,
     pub lua_event_handle: Option<EventHandle>,
     pub buf_click: Option<BufClickHandler>,
@@ -104,37 +107,51 @@ pub(crate) struct EventLoop<'t> {
     ui_action_rx: Option<flume::Receiver<UiAction>>,
     action_rx: flume::Receiver<Action>,
     action_tx: flume::Sender<Action>,
+    warn_tx: flume::Sender<String>,
+    available_models: Arc<ArcSwapOption<Vec<String>>>,
     _model_fetch_task: tokio::task::JoinHandle<()>,
 }
 
 struct BackgroundModels {
     available: Arc<ArcSwapOption<Vec<String>>>,
     warn_rx: flume::Receiver<String>,
+    warn_tx: flume::Sender<String>,
     task: tokio::task::JoinHandle<()>,
+}
+
+fn merge_batch(
+    available: &Arc<ArcSwapOption<Vec<String>>>,
+    batch: craft_providers::provider::ModelBatch,
+    warn_tx: &flume::Sender<String>,
+) {
+    for w in batch.warnings {
+        let _ = warn_tx.try_send(w);
+    }
+    if batch.models.is_empty() {
+        return;
+    }
+    let mut merged = available.load().as_deref().cloned().unwrap_or_default();
+    for spec in &batch.models {
+        if !merged.contains(spec) {
+            merged.push(spec.clone());
+        }
+    }
+    available.store(Some(Arc::new(merged)));
 }
 
 fn spawn_model_fetch() -> BackgroundModels {
     let available: Arc<ArcSwapOption<Vec<String>>> = Arc::new(ArcSwapOption::empty());
     let bg = Arc::clone(&available);
     let (warn_tx, warn_rx) = flume::unbounded::<String>();
+    let warn_tx_bg = warn_tx.clone();
     let task = tokio::spawn(async move {
-        let warn_tx = warn_tx;
-        fetch_all_models(|batch| {
-            for w in batch.warnings {
-                let _ = warn_tx.try_send(w);
-            }
-            if batch.models.is_empty() {
-                return;
-            }
-            let mut merged = bg.load().as_deref().cloned().unwrap_or_default();
-            merged.extend(batch.models);
-            bg.store(Some(Arc::new(merged)));
-        })
-        .await;
+        let warn_tx = warn_tx_bg;
+        fetch_all_models(|batch| merge_batch(&bg, batch, &warn_tx)).await;
     });
     BackgroundModels {
         available,
         warn_rx,
+        warn_tx,
         task,
     }
 }
@@ -161,6 +178,7 @@ impl<'t> EventLoop<'t> {
     ) -> Result<Self> {
         let EventLoopParams {
             model,
+            needs_login,
             commands,
             session,
             storage,
@@ -172,6 +190,8 @@ impl<'t> EventLoop<'t> {
             timeouts,
             exit_on_done,
             lua_command_reader,
+            keymap_reader,
+            hint_reader,
             ui_action_rx,
             lua_event_handle,
             buf_click,
@@ -214,6 +234,7 @@ impl<'t> EventLoop<'t> {
         );
 
         let custom_commands: Arc<[CustomCommand]> = Arc::from(commands);
+        let available_models = Arc::clone(&bg.available);
         let mut app = App::new(
             &model,
             session,
@@ -222,6 +243,8 @@ impl<'t> EventLoop<'t> {
             handles.mcp_reader(),
             handles.mcp_config_errors.clone(),
             lua_command_reader,
+            keymap_reader,
+            hint_reader,
             Arc::clone(&storage_writer),
             ui_config,
             input_history_size,
@@ -231,6 +254,10 @@ impl<'t> EventLoop<'t> {
         app.exit_on_done = exit_on_done;
         app.buf_click = buf_click;
         app.lua_event_handle = lua_event_handle;
+
+        if needs_login {
+            app.login_picker.open(app.storage.clone());
+        }
 
         handles.apply_to_app(&mut app);
 
@@ -258,6 +285,8 @@ impl<'t> EventLoop<'t> {
             ui_action_rx,
             action_rx,
             action_tx,
+            warn_tx: bg.warn_tx,
+            available_models,
             _model_fetch_task: bg.task,
         })
     }
@@ -494,6 +523,7 @@ impl<'t> EventLoop<'t> {
                 }
             }
             Action::ChangeModel(spec) => self.change_model(spec),
+            Action::RefreshProvider { slug } => self.refresh_provider(slug),
             Action::AssignTier(spec, tier) => {
                 craft_providers::tier_map::set_and_persist(spec, tier, &self.app.storage);
             }
@@ -542,6 +572,7 @@ impl<'t> EventLoop<'t> {
                     .start_btw(question, Arc::clone(&slot.provider), slot.model.clone());
             }
             Action::Suspend => terminal::suspend(self.terminal),
+            Action::RefreshModels => self.refresh_models(),
             Action::Quit => {}
             Action::ProviderReady {
                 model_spec,
@@ -589,6 +620,39 @@ impl<'t> EventLoop<'t> {
                 });
             }
             Err(e) => self.app.flash(format!("Invalid model: {e}")),
+        }
+    }
+
+    fn refresh_models(&self) {
+        let available = Arc::clone(&self.available_models);
+        let warn_tx = self.warn_tx.clone();
+        available.store(None);
+        tokio::spawn(async move {
+            fetch_all_models(|batch| merge_batch(&available, batch, &warn_tx)).await;
+        });
+    }
+
+    fn refresh_provider(&mut self, slug: String) {
+        let current = self.model_slot.load();
+        let current_model = current.model.clone();
+
+        if current_model.provider.to_string() == slug {
+            let timeouts = self.timeouts;
+            let tx = self.action_tx.clone();
+            tokio::spawn(async move {
+                let result = craft_providers::provider::from_model(&current_model, timeouts)
+                    .await
+                    .map(|p| Arc::from(p) as Arc<dyn Provider>)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(Action::ProviderReady {
+                    model_spec: current_model.spec(),
+                    provider: result,
+                    pending_load_session: None,
+                });
+            });
+        } else if let Some(builtin) = craft_config::providers::builtin_provider(&slug) {
+            let spec = builtin.default_model.to_string();
+            self.change_model(spec);
         }
     }
 

@@ -14,8 +14,6 @@ const PROVIDER_PRIORITY: &[ProviderKind] = &[
     ProviderKind::Anthropic,
     ProviderKind::OpenAi,
     ProviderKind::Copilot,
-    ProviderKind::Zai,
-    ProviderKind::ZaiCodingPlan,
     ProviderKind::Synthetic,
     ProviderKind::DeepSeek,
 ];

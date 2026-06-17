@@ -54,7 +54,7 @@ pub enum ModelPickerAction {
 struct ModelEntry {
     spec: String,
     id: String,
-    provider_display: &'static str,
+    provider_display: String,
     tier: String,
     tier_override: bool,
 }
@@ -69,7 +69,7 @@ impl PickerItem for ModelEntry {
     }
 
     fn section(&self) -> Option<&str> {
-        Some(self.provider_display)
+        Some(&self.provider_display)
     }
 
     fn is_highlighted(&self) -> bool {
@@ -184,9 +184,13 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
     let (provider_str, model_id) = spec.split_once('/')?;
 
     let provider_display = if let Ok(kind) = provider_str.parse::<ProviderKind>() {
-        kind.display_name()
+        kind.display_name().to_string()
+    } else if let Some(name) = dynamic::display_name(provider_str) {
+        name.to_string()
     } else {
-        dynamic::display_name(provider_str)?
+        let config = craft_config::providers::ProvidersConfig::load();
+        config.get(provider_str)?;
+        craft_config::providers::resolve_display_name(provider_str, config.get(provider_str))
     };
 
     let tier = match craft_providers::Model::from_spec(spec) {
@@ -220,7 +224,6 @@ mod tests {
         models.store(Some(Arc::new(vec![
             "anthropic/claude-sonnet-4-20250514".into(),
             "anthropic/claude-opus-4-6-20260101".into(),
-            "zai/glm-5".into(),
         ])));
         models
     }

@@ -9,11 +9,10 @@ use arc_swap::ArcSwap;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
     ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
-    McpSnapshotReader, TaskNode, TodoStatus, ToolDoneEvent, ToolOutput, ToolStartEvent,
-    TurnCompleteEvent,
+    McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use craft_config::{PermissionsConfig, UiConfig};
-use craft_lua::LuaCommandReader;
+use craft_lua::{HintReader, KeymapReader, LuaCommandReader};
 use craft_providers::{ContentBlock, Role, TokenUsage};
 use craft_storage::sessions::StoredThinking;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
@@ -49,6 +48,8 @@ fn test_app() -> App {
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
         LuaCommandReader::empty(),
+        KeymapReader::empty(),
+        HintReader::empty(),
         writer,
         UiConfig::default(),
         100,
@@ -487,6 +488,8 @@ fn load_session_clears_plan() {
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
         LuaCommandReader::empty(),
+        KeymapReader::empty(),
+        HintReader::empty(),
         writer,
         UiConfig::default(),
         100,
@@ -2225,58 +2228,11 @@ fn ctrl_t_toggles_plan_form_in_plan_mode() {
     let mut app = plan_app();
     assert!(app.plan_form.is_visible());
 
-    app.update(Msg::Key(kb::TODO_PANEL.to_key_event()));
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
     assert!(!app.plan_form.is_visible());
 
-    app.update(Msg::Key(kb::TODO_PANEL.to_key_event()));
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
     assert!(app.plan_form.is_visible());
-}
-
-fn send_subagent_todo(app: &mut App, items: Vec<TaskNode>) {
-    app.update(subagent_msg(
-        AgentEvent::ToolDone(Box::new(ToolDoneEvent {
-            id: "tw1".into(),
-            tool: "todo_write".into(),
-            output: ToolOutput::TodoList(items),
-            is_error: false,
-            annotation: None,
-        })),
-        "task1",
-        Some("research"),
-    ));
-}
-
-#[test]
-fn ctrl_t_toggles_todo_panel_on_subagent_chat() {
-    let mut app = app_with_subagent();
-    send_subagent_todo(
-        &mut app,
-        vec![TaskNode {
-            id: "T1".into(),
-            parent: None,
-            content: "task".into(),
-            status: TodoStatus::Pending,
-            owner: None,
-        }],
-    );
-    app.active_chat = 1;
-    assert!(
-        app.chats[1].todo_panel.height() > 0,
-        "panel should be visible after todo_write"
-    );
-
-    app.update(Msg::Key(kb::TODO_PANEL.to_key_event()));
-    assert_eq!(
-        app.chats[1].todo_panel.height(),
-        0,
-        "panel should hide after toggle"
-    );
-
-    app.update(Msg::Key(kb::TODO_PANEL.to_key_event()));
-    assert!(
-        app.chats[1].todo_panel.height() > 0,
-        "panel should reappear after second toggle"
-    );
 }
 
 #[test]
@@ -2424,7 +2380,7 @@ fn has_content(messages: bool, ephemeral: bool) -> bool {
             .push(craft_providers::Message::user("hello".into()));
     }
     if ephemeral {
-        app.state.session.meta.todo_dismissed = true;
+        app.state.session.meta.input_draft = Some("draft".into());
     }
     app.has_content()
 }

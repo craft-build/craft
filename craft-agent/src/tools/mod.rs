@@ -33,7 +33,6 @@ pub mod safety;
 pub mod schema;
 mod styleguide;
 mod task;
-mod todowrite;
 mod validation;
 mod write;
 mod zoom;
@@ -162,7 +161,6 @@ pub const STYLEGUIDE_LIST_TOOL_NAME: &str = styleguide::StyleguideList::NAME;
 pub const STYLEGUIDE_SEARCH_TOOL_NAME: &str = styleguide::StyleguideSearch::NAME;
 pub const STYLEGUIDE_GET_TOOL_NAME: &str = styleguide::StyleguideGet::NAME;
 pub const TASK_TOOL_NAME: &str = task::Task::NAME;
-pub const TODOWRITE_TOOL_NAME: &str = todowrite::TodoWrite::NAME;
 pub const WRITE_TOOL_NAME: &str = write::Write::NAME;
 pub const CODE_EXECUTION_TOOL_NAME: &str = code_execution::CodeExecution::NAME;
 pub const READ_FINDINGS_TOOL_NAME: &str = read_findings::ReadFindings::NAME;
@@ -639,7 +637,6 @@ register_tools! {
     edit::Edit,
     multiedit::MultiEdit,
     apply_patch::ApplyPatch,
-    todowrite::TodoWrite,
     task::Task,
     batch::Batch,
     code_execution::CodeExecution,

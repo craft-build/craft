@@ -18,6 +18,18 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "Synthetic",
 };
 
+inventory::submit!(craft_config::providers::BuiltInProvider {
+    slug: "synthetic",
+    display_name: "Synthetic",
+    protocol: craft_config::providers::Protocol::Openai,
+    default_base_url: "https://api.synthetic.new/openai/v1",
+    default_api_key_env: "SYNTHETIC_API_KEY",
+    default_model: "synthetic/hf:moonshotai/Kimi-K2.6",
+    plans: None,
+    login_url: None,
+    needs_url: false,
+});
+
 pub(crate) fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
@@ -36,7 +48,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             context_window: 512_000,
         },
         ModelEntry {
-            prefixes: &["hf:Qwen/Qwen3.6-27B"],
+            prefixes: &["syn:small:vision", "hf:Qwen/Qwen3.6-27B"],
             tier: ModelTier::Weak,
             family: ModelFamily::Synthetic,
             default: false,
@@ -51,7 +63,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             context_window: 256_000,
         },
         ModelEntry {
-            prefixes: &["hf:moonshotai/Kimi-K2.6"],
+            prefixes: &["syn:large:vision", "hf:moonshotai/Kimi-K2.6"],
             tier: ModelTier::Strong,
             family: ModelFamily::Synthetic,
             default: true,
@@ -66,7 +78,22 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             context_window: 256_000,
         },
         ModelEntry {
-            prefixes: &["hf:zai-org/GLM-4.7-Flash"],
+            prefixes: &["syn:large:text", "hf:zai-org/GLM-5.2"],
+            tier: ModelTier::Strong,
+            family: ModelFamily::Synthetic,
+            default: false,
+            pricing: ModelPricing {
+                input: 1.40,
+                output: 4.40,
+                cache_write: 0.00,
+                cache_read: 0.00,
+                fast: None,
+            },
+            max_output_tokens: 131_072,
+            context_window: 512_000,
+        },
+        ModelEntry {
+            prefixes: &["syn:small:text", "hf:zai-org/GLM-4.7-Flash"],
             tier: ModelTier::Weak,
             family: ModelFamily::Synthetic,
             default: true,
@@ -92,7 +119,7 @@ pub struct Synthetic {
 
 impl Synthetic {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::from_env(CONFIG.api_key_env)?;
+        let pool = KeyPool::resolve("synthetic", CONFIG.api_key_env)?;
         Ok(Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
             auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
@@ -146,6 +173,15 @@ impl Provider for Synthetic {
         Box::pin(async move {
             let auth = lock_unpoison(&self.auth).clone();
             self.compat.do_list_models(&auth).await
+        })
+    }
+
+    fn list_models_with_info(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
+        Box::pin(async move {
+            let auth = lock_unpoison(&self.auth).clone();
+            self.compat.do_list_models_with_info(&auth).await
         })
     }
 

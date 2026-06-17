@@ -142,7 +142,7 @@ pub mod key {
     pub const SEARCH: Bind = ctrl_bind!('f');
     pub const FILE_PICKER: Bind = ctrl_bind!('s');
     pub const OPEN_EDITOR: Bind = ctrl_bind!('o');
-    pub const TODO_PANEL: Bind = ctrl_bind!('t');
+    pub const PLAN_TOGGLE: Bind = ctrl_bind!('t');
     pub const TASKS: Bind = ctrl_bind!('x');
     pub const SUSPEND: Bind = ctrl_bind!('z');
     pub const DELETE: Bind = ctrl_bind!('d');
@@ -341,7 +341,7 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
-        label: KeyLabel::Single(key::TODO_PANEL.label),
+        label: KeyLabel::Single(key::PLAN_TOGGLE.label),
         description: "Toggle todo / plan panel",
         context: KeybindContext::General,
         platform: Platform::All,
@@ -545,6 +545,16 @@ pub fn all_contexts() -> impl Iterator<Item = KeybindContext> {
     KeybindContext::iter()
 }
 
+pub(crate) fn normalize_key(key: KeyEvent) -> KeyEvent {
+    match key.code {
+        KeyCode::BackTab => KeyEvent::new(KeyCode::Tab, key.modifiers | KeyModifiers::SHIFT),
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), key.modifiers)
+        }
+        _ => key,
+    }
+}
+
 pub(crate) fn key_event_to_string(key: &KeyEvent) -> String {
     let mut s = String::new();
     let mods = key.modifiers;
@@ -602,6 +612,17 @@ mod tests {
     #[test_case(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), "a")]
     fn key_event_to_string_cases(input: KeyEvent, expected: &str) {
         assert_eq!(key_event_to_string(&input), expected);
+    }
+
+    #[test_case(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT), KeyCode::Char('a'), KeyModifiers::SHIFT ; "shift_letter_lowercased")]
+    #[test_case(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), KeyCode::Tab, KeyModifiers::SHIFT ; "backtab_with_shift")]
+    #[test_case(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE), KeyCode::Tab, KeyModifiers::SHIFT ; "backtab_without_shift")]
+    #[test_case(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL), KeyCode::Char('a'), KeyModifiers::CONTROL ; "ctrl_letter_unchanged")]
+    #[test_case(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), KeyCode::Char('a'), KeyModifiers::NONE ; "plain_letter_unchanged")]
+    fn normalize_key_cases(input: KeyEvent, expected_code: KeyCode, expected_mods: KeyModifiers) {
+        let normalized = normalize_key(input);
+        assert_eq!(normalized.code, expected_code);
+        assert_eq!(normalized.modifiers, expected_mods);
     }
 
     #[test]

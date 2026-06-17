@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::provider::ProviderKind;
 use crate::providers::{
     anthropic, copilot, deepseek, dynamic, google, llama_cpp, mistral, ollama, openai, openrouter,
-    synthetic, zai,
+    synthetic,
 };
 
 const PER_MILLION: f64 = 1_000_000.0;
@@ -130,7 +130,6 @@ pub fn models_for_provider(provider: ProviderKind) -> &'static [ModelEntry] {
         ProviderKind::LlamaCpp => llama_cpp::models(),
         ProviderKind::Mistral => mistral::models(),
         ProviderKind::Google => google::models(),
-        ProviderKind::Zai | ProviderKind::ZaiCodingPlan => zai::models(),
         ProviderKind::OpenRouter => openrouter::models(),
         ProviderKind::Synthetic => synthetic::models(),
         ProviderKind::DeepSeek => deepseek::models(),
@@ -150,6 +149,26 @@ impl ModelFamily {
             Self::Claude => (base as f32 * 1.1) as u32,
             Self::Gemini => (base as f32 * 1.05) as u32,
             _ => base,
+        }
+    }
+}
+
+/// Minimal metadata returned by a provider's model listing endpoint.
+/// Used to augment discovered models with correct parameters instead of
+/// relying on protocol fallbacks.
+#[derive(Debug, Clone, Default)]
+pub struct ModelInfo {
+    pub id: String,
+    pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ModelInfo {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            context_window: None,
+            max_output_tokens: None,
         }
     }
 }
@@ -265,6 +284,10 @@ impl Model {
 
         if let Ok(provider) = ProviderKind::from_str(provider_str) {
             return Ok(Self::from_base(provider, model_id, None));
+        }
+
+        if let Some(model) = crate::providers::custom::lookup_model(provider_str, model_id) {
+            return Ok(model);
         }
 
         if let Some(base) = dynamic::base_for_slug(provider_str) {
@@ -509,7 +532,6 @@ mod tests {
     }
 
     #[test_case("anthropic/claude-99-turbo", ProviderKind::Anthropic, "claude-99-turbo" ; "unknown_anthropic_model_accepted")]
-    #[test_case("zai/glm-99", ProviderKind::Zai, "glm-99" ; "unknown_zai_model_accepted")]
     #[test_case("openai/gpt-99", ProviderKind::OpenAi, "gpt-99" ; "unknown_openai_model_accepted")]
     #[test_case("synthetic/hf:nonexistent", ProviderKind::Synthetic, "hf:nonexistent" ; "unknown_synthetic_model_accepted")]
     #[test_case("ollama/my-custom-model", ProviderKind::Ollama, "my-custom-model" ; "unknown_ollama_model_accepted")]

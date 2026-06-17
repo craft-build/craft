@@ -302,8 +302,10 @@ pub fn style_by_name(name: &str) -> Style {
         "cursor" => t.cursor,
         "accent" => t.accent,
         "active" => t.active,
-        "success" => t.todo_completed,
-        "warning" => t.todo_in_progress,
+        "success" | "todo_completed" => t.todo_completed,
+        "warning" | "todo_in_progress" => t.todo_in_progress,
+        "todo_pending" => t.todo_pending,
+        "todo_cancelled" => t.todo_cancelled,
         _ => Style::default(),
     }
 }
@@ -327,6 +329,10 @@ pub struct Theme {
     pub tool_dim: Style,
     pub error: Style,
     pub status_dim: Style,
+    pub todo_completed: Style,
+    pub todo_in_progress: Style,
+    pub todo_pending: Style,
+    pub todo_cancelled: Style,
     pub bold: Style,
     pub italic: Style,
     pub bold_italic: Style,
@@ -344,10 +350,6 @@ pub struct Theme {
     pub diff_old_emphasis: Style,
     pub diff_new_emphasis: Style,
     pub diff_line_nr: Style,
-    pub todo_completed: Style,
-    pub todo_in_progress: Style,
-    pub todo_pending: Style,
-    pub todo_cancelled: Style,
     pub item_selected: Style,
     pub item: Style,
     pub item_desc: Style,
@@ -658,6 +660,10 @@ impl Theme {
             tool_dim: style("tool_dim"),
             error: style("error"),
             status_dim: style("status_dim"),
+            todo_completed: style("todo_completed"),
+            todo_in_progress: style("todo_in_progress"),
+            todo_pending: style("todo_pending"),
+            todo_cancelled: style("todo_cancelled"),
             bold: bold_style,
             italic: ui
                 .get("italic")
@@ -697,10 +703,6 @@ impl Theme {
             diff_old_emphasis: style("diff_old_emphasis"),
             diff_new_emphasis: style("diff_new_emphasis"),
             diff_line_nr: style("diff_line_nr"),
-            todo_completed: style("todo_completed"),
-            todo_in_progress: style("todo_in_progress"),
-            todo_pending: style("todo_pending"),
-            todo_cancelled: style("todo_cancelled"),
             item_selected: style("item_selected"),
             item: style("item"),
             item_desc: style("item_desc"),
@@ -830,6 +832,15 @@ mod tests {
         assert_eq!(t.diff_old.bg, Some(Color::Rgb(0x4D, 0x1F, 0x1F)));
         assert_eq!(t.diff_new.bg, Some(Color::Rgb(0x1F, 0x3D, 0x1F)));
         assert_eq!(t.input_border.fg, Some(Color::Rgb(0x62, 0x72, 0xa4)));
+        assert_eq!(t.todo_completed.fg, Some(Color::Rgb(0x50, 0xfa, 0x7b)));
+        assert_eq!(t.todo_in_progress.fg, Some(Color::Rgb(0xf1, 0xfa, 0x8c)));
+        assert_eq!(t.todo_pending.fg, Some(Color::Rgb(0x62, 0x72, 0xa4)));
+        assert_eq!(t.todo_cancelled.fg, Some(Color::Rgb(0xff, 0x55, 0x55)));
+        assert!(
+            t.todo_cancelled
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
     }
 
     #[test]
@@ -1066,11 +1077,15 @@ mode_build = "#112233"
         assert_eq!(style_by_name("accent"), t.accent);
         assert_eq!(style_by_name("active"), t.active);
         assert_eq!(style_by_name("selected"), t.item_selected);
-        assert_eq!(style_by_name("success"), t.todo_completed);
-        assert_eq!(style_by_name("warning"), t.todo_in_progress);
         assert_eq!(style_by_name("item"), t.item);
         assert_eq!(style_by_name("match"), t.item_match);
         assert_eq!(style_by_name("match_selected"), t.item_match_selected);
+        assert_eq!(style_by_name("todo_completed"), t.todo_completed);
+        assert_eq!(style_by_name("success"), t.todo_completed);
+        assert_eq!(style_by_name("todo_in_progress"), t.todo_in_progress);
+        assert_eq!(style_by_name("warning"), t.todo_in_progress);
+        assert_eq!(style_by_name("todo_pending"), t.todo_pending);
+        assert_eq!(style_by_name("todo_cancelled"), t.todo_cancelled);
     }
 
     #[test_case("nonexistent_style")]

@@ -14,13 +14,11 @@ use crate::providers::copilot::Copilot;
 use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
 use crate::providers::google::Google;
-use crate::providers::llama_cpp::LlamaCpp;
+use crate::providers::local::{LLAMACPP, LocalEndpoint, OLLAMA};
 use crate::providers::mistral::Mistral;
-use crate::providers::ollama::Ollama;
 use crate::providers::openai::OpenAi;
 use crate::providers::openrouter::OpenRouter;
 use crate::providers::synthetic::Synthetic;
-use crate::providers::zai::{Zai, ZaiPlan};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
@@ -34,8 +32,6 @@ pub enum ProviderKind {
     Ollama,
     LlamaCpp,
     Mistral,
-    Zai,
-    ZaiCodingPlan,
     #[strum(serialize = "deepseek")]
     DeepSeek,
     #[strum(serialize = "openrouter")]
@@ -53,8 +49,6 @@ impl ProviderKind {
             Self::Ollama => "Ollama",
             Self::LlamaCpp => "LlamaCpp",
             Self::Mistral => "Mistral",
-            Self::Zai => "Z.AI",
-            Self::ZaiCodingPlan => "Z.AI Coding",
             Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
             Self::Synthetic => "Synthetic",
@@ -70,7 +64,6 @@ impl ProviderKind {
             Self::Ollama => "OLLAMA_API_KEY",
             Self::LlamaCpp => "LLAMA_CPP_API_KEY",
             Self::Mistral => "MISTRAL_API_KEY",
-            Self::Zai | Self::ZaiCodingPlan => "ZHIPU_API_KEY",
             Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::Synthetic => "SYNTHETIC_API_KEY",
@@ -88,8 +81,6 @@ impl ProviderKind {
             Self::Ollama => "http://localhost:11434/v1",
             Self::LlamaCpp => "http://localhost:8080/v1",
             Self::Mistral => "https://api.mistral.ai/v1",
-            Self::Zai => "https://api.z.ai/api/paas/v4",
-            Self::ZaiCodingPlan => "https://api.z.ai/api/coding/paas/v4",
             Self::DeepSeek => "https://api.deepseek.com",
             Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
@@ -142,7 +133,6 @@ impl ProviderKind {
             Self::Ollama => ModelFamily::Generic,
             Self::LlamaCpp => ModelFamily::Generic,
             Self::Mistral => ModelFamily::Generic,
-            Self::Zai | Self::ZaiCodingPlan => ModelFamily::Glm,
             Self::DeepSeek => ModelFamily::Generic,
             Self::OpenRouter => ModelFamily::Generic,
             Self::Synthetic => ModelFamily::Synthetic,
@@ -165,7 +155,6 @@ impl ProviderKind {
             Self::Ollama => 16_384,
             Self::LlamaCpp => 0,
             Self::Mistral => 32_000,
-            Self::Zai | Self::ZaiCodingPlan => 16_000,
             Self::DeepSeek => 384_000,
             Self::OpenRouter => 128_000,
             Self::Synthetic => 32_000,
@@ -181,7 +170,6 @@ impl ProviderKind {
             Self::Ollama => 128_000,
             Self::LlamaCpp => 128_000,
             Self::Mistral => 128_000,
-            Self::Zai | Self::ZaiCodingPlan => 128_000,
             Self::DeepSeek => 1_000_000,
             Self::OpenRouter => 200_000,
             Self::Synthetic => 128_000,
@@ -200,11 +188,9 @@ impl ProviderKind {
             Self::OpenAi => Ok(Box::new(OpenAi::new(timeouts).await?)),
             Self::Google => Ok(Box::new(Google::new(timeouts)?)),
             Self::Copilot => Ok(Box::new(Copilot::new(timeouts)?)),
-            Self::Ollama => Ok(Box::new(Ollama::new(timeouts)?)),
-            Self::LlamaCpp => Ok(Box::new(LlamaCpp::new(timeouts)?)),
+            Self::Ollama => Ok(Box::new(LocalEndpoint::new(&OLLAMA, timeouts)?)),
+            Self::LlamaCpp => Ok(Box::new(LocalEndpoint::new(&LLAMACPP, timeouts)?)),
             Self::Mistral => Ok(Box::new(Mistral::new(timeouts)?)),
-            Self::Zai => Ok(Box::new(Zai::new(ZaiPlan::Standard, timeouts)?)),
-            Self::ZaiCodingPlan => Ok(Box::new(Zai::new(ZaiPlan::Coding, timeouts)?)),
             Self::DeepSeek => Ok(Box::new(DeepSeek::new(timeouts)?)),
             Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
@@ -233,6 +219,17 @@ pub trait Provider: Send + Sync {
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>>;
 
+    /// Richer variant of `list_models` that may include per-model metadata
+    /// discovered from the provider's API. Defaults to wrapping `list_models`.
+    fn list_models_with_info(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
+        Box::pin(async {
+            let ids = self.list_models().await?;
+            Ok(ids.into_iter().map(crate::model::ModelInfo::new).collect())
+        })
+    }
+
     fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async { Ok(()) })
     }
@@ -251,13 +248,57 @@ pub async fn from_model(
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
     if let Some(slug) = &model.dynamic_slug {
-        let provider = dynamic::create(slug, timeouts).await?;
-        debug!(slug, model = %model.id, "dynamic provider created");
-        return Ok(provider);
+        if dynamic::display_name(slug).is_some() {
+            debug!(slug, model = %model.id, "dynamic provider created");
+            return dynamic::create(slug, timeouts).await;
+        }
+        debug!(slug, model = %model.id, "custom provider created");
+        return crate::providers::custom::create(slug, timeouts);
     }
     let provider = model.provider.create(timeouts).await?;
     debug!(provider = %model.provider, model = %model.id, "provider created");
     Ok(provider)
+}
+
+pub async fn from_model_fallback(model: &Model, timeouts: Timeouts) -> Box<dyn Provider> {
+    match from_model(model, timeouts).await {
+        Ok(provider) => provider,
+        Err(e) => {
+            warn!(error = %e, "provider creation failed, using unconfigured provider");
+            Box::new(UnconfiguredProvider)
+        }
+    }
+}
+
+struct UnconfiguredProvider;
+
+const NOT_CONFIGURED: &str = "no provider configured — run /login or `craft auth login`";
+
+impl Provider for UnconfiguredProvider {
+    fn stream_message<'a>(
+        &'a self,
+        _model: &'a Model,
+        _messages: &'a [Message],
+        _system: &'a str,
+        _tools: &'a Value,
+        _event_tx: &'a Sender<ProviderEvent>,
+        _opts: RequestOptions,
+        _session_id: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+        Box::pin(async {
+            Err(AgentError::Config {
+                message: NOT_CONFIGURED.to_string(),
+            })
+        })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
+        Box::pin(async {
+            Err(AgentError::Config {
+                message: NOT_CONFIGURED.to_string(),
+            })
+        })
+    }
 }
 
 pub struct ModelBatch {
@@ -284,8 +325,18 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
                             .unwrap()
                             .set_known_models(kind, ids.clone());
                     }
+                    let mut models: Vec<String> =
+                        ids.into_iter().map(|id| format!("{kind}/{id}")).collect();
+                    for entry in models_for_provider(kind) {
+                        for prefix in entry.prefixes {
+                            let spec = format!("{kind}/{prefix}");
+                            if !models.contains(&spec) {
+                                models.push(spec);
+                            }
+                        }
+                    }
                     ModelBatch {
-                        models: ids.into_iter().map(|id| format!("{kind}/{id}")).collect(),
+                        models,
                         warnings: Vec::new(),
                     }
                 }
@@ -334,6 +385,19 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
             }
         }));
     }
+
+    futs.push(Box::pin(async move {
+        match crate::providers::custom::discover_models(timeouts).await {
+            models if !models.is_empty() => ModelBatch {
+                models,
+                warnings: Vec::new(),
+            },
+            _ => ModelBatch {
+                models: Vec::new(),
+                warnings: Vec::new(),
+            },
+        }
+    }));
 
     use futures::StreamExt;
     while let Some(batch) = futs.next().await {

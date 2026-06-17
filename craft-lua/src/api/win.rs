@@ -1,14 +1,13 @@
 use mlua::{Table, UserData, UserDataMethods};
 
-use crate::api::command::{
-    Anchor, Border, FloatConfigPatch, Split, TitlePos, WinCommand, WinEvent,
-};
+use crate::api::command::{Anchor, Border, FloatConfigPatch, TitlePos, WinCommand, WinEvent};
 use crate::api::ui::{parse_footer, try_parse_dimension};
 
 pub(crate) struct WinHandle {
     event_rx: flume::Receiver<WinEvent>,
     cmd_tx: flume::Sender<WinCommand>,
     closed: bool,
+    visible: bool,
     init_width: u16,
     init_height: u16,
 }
@@ -19,13 +18,21 @@ impl WinHandle {
         cmd_tx: flume::Sender<WinCommand>,
         init_width: u16,
         init_height: u16,
+        visible: bool,
     ) -> Self {
         Self {
             event_rx,
             cmd_tx,
             closed: false,
+            visible,
             init_width,
             init_height,
+        }
+    }
+
+    fn send(&mut self, cmd: WinCommand) {
+        if let Err(flume::TrySendError::Disconnected(_)) = self.cmd_tx.try_send(cmd) {
+            self.closed = true;
         }
     }
 
@@ -34,7 +41,9 @@ impl WinHandle {
             return;
         }
         self.closed = true;
-        let _ = self.cmd_tx.try_send(WinCommand::Close);
+        if let Err(flume::TrySendError::Full(cmd)) = self.cmd_tx.try_send(WinCommand::Close) {
+            let _ = self.cmd_tx.send(cmd);
+        }
     }
 }
 
@@ -48,6 +57,7 @@ impl UserData for WinHandle {
     fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("width", |_, this| Ok(this.init_width));
         fields.add_field_method_get("height", |_, this| Ok(this.init_height));
+        fields.add_field_method_get("visible", |_, this| Ok(this.visible));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -113,18 +123,12 @@ impl UserData for WinHandle {
             if let Ok(z) = opts.get::<u16>("zindex") {
                 patch.zindex = Some(z);
             }
-            if let Ok(cl) = opts.get::<bool>("cursor_line") {
-                patch.cursor_line = Some(cl);
-            }
-            if let Ok(rt) = opts.get::<usize>("reserved_top") {
-                patch.reserved_top = Some(rt);
-            }
-            if let Ok(s) = opts.get::<String>("split") {
-                patch.split = Some(Split::parse(&s));
+            if let Ok(o) = opts.get::<u16>("order") {
+                patch.order = Some(o);
             }
             patch.width = try_parse_dimension(&opts, "width");
             patch.height = try_parse_dimension(&opts, "height");
-            let _ = this.cmd_tx.try_send(WinCommand::SetConfig(patch));
+            this.send(WinCommand::SetConfig(patch));
             Ok(())
         });
 
@@ -132,9 +136,7 @@ impl UserData for WinHandle {
             if this.closed {
                 return Ok(());
             }
-            let _ = this
-                .cmd_tx
-                .try_send(WinCommand::SetCursor(row.saturating_sub(1)));
+            this.send(WinCommand::SetCursor(row.saturating_sub(1)));
             Ok(())
         });
 
@@ -143,7 +145,37 @@ impl UserData for WinHandle {
             Ok(())
         });
 
-        methods.add_method("is_open", |_, this, ()| Ok(!this.closed));
+        methods.add_method_mut("is_open", |_, this, ()| {
+            if !this.closed && this.cmd_tx.is_disconnected() {
+                this.closed = true;
+            }
+            Ok(!this.closed)
+        });
+
+        methods.add_method_mut("show", |_, this, ()| {
+            if this.closed {
+                return Ok(());
+            }
+            this.visible = true;
+            this.send(WinCommand::SetVisible(true));
+            Ok(())
+        });
+
+        methods.add_method_mut("hide", |_, this, ()| {
+            if this.closed {
+                return Ok(());
+            }
+            this.visible = false;
+            this.send(WinCommand::SetVisible(false));
+            Ok(())
+        });
+
+        methods.add_method_mut("is_visible", |_, this, ()| {
+            if !this.closed && this.cmd_tx.is_disconnected() {
+                this.closed = true;
+            }
+            Ok(this.visible && !this.closed)
+        });
     }
 }
 
@@ -158,7 +190,7 @@ mod tests {
     ) {
         let (event_tx, event_rx) = flume::bounded::<WinEvent>(8);
         let (cmd_tx, cmd_rx) = flume::bounded::<WinCommand>(8);
-        let handle = WinHandle::new(event_rx, cmd_tx, 80, 24);
+        let handle = WinHandle::new(event_rx, cmd_tx, 80, 24, true);
         (event_tx, cmd_rx, handle)
     }
 
@@ -193,10 +225,49 @@ mod tests {
     fn close_does_not_panic_when_receiver_dropped() {
         let (event_tx, event_rx) = flume::bounded::<WinEvent>(8);
         let (cmd_tx, cmd_rx) = flume::bounded::<WinCommand>(8);
-        let mut handle = WinHandle::new(event_rx, cmd_tx, 80, 24);
+        let mut handle = WinHandle::new(event_rx, cmd_tx, 80, 24, true);
         drop(cmd_rx);
         handle.close();
         assert!(handle.closed);
         drop(event_tx);
+    }
+
+    #[test]
+    fn send_detects_disconnect() {
+        let (_event_tx, cmd_rx, mut handle) = make_channels();
+        drop(cmd_rx);
+        assert!(!handle.closed);
+        handle.send(WinCommand::SetVisible(true));
+        assert!(handle.closed);
+    }
+
+    #[test]
+    fn close_delivers_when_channel_full() {
+        let (_event_tx, cmd_rx, mut handle) = make_channels();
+        for _ in 0..8 {
+            handle.send(WinCommand::SetVisible(true));
+        }
+        let rx = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if let Ok(WinCommand::Close) = cmd_rx.try_recv() {
+                    return true;
+                }
+                if std::time::Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+        });
+        handle.close();
+        assert!(rx.join().unwrap());
+    }
+
+    #[test]
+    fn is_disconnected_marks_closed() {
+        let (_event_tx, cmd_rx, handle) = make_channels();
+        drop(cmd_rx);
+        assert!(!handle.closed);
+        assert!(handle.cmd_tx.is_disconnected());
     }
 }

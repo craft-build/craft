@@ -7,6 +7,7 @@ pub(crate) mod help_modal;
 pub mod input;
 pub mod keybindings;
 pub(crate) mod list_picker;
+pub(crate) mod login_picker;
 pub(crate) mod lua_float;
 pub(crate) mod mcp_picker;
 pub mod messages;
@@ -24,19 +25,7 @@ pub(crate) mod split_layout;
 pub mod status_bar;
 pub(crate) mod streaming_content;
 pub(crate) mod theme_picker;
-pub(crate) mod todo_panel;
 pub(crate) mod tool_display;
-
-pub(crate) const CHEVRON: &str = "❯ ";
-
-pub(crate) trait Overlay {
-    fn is_open(&self) -> bool;
-    fn close(&mut self);
-    /// Modal overlays block mouse interaction behind them.
-    fn is_modal(&self) -> bool {
-        true
-    }
-}
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -49,6 +38,21 @@ use craft_providers::provider::Provider;
 use craft_providers::{Message, ModelTier};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
+
+pub(crate) const CHEVRON: &str = "❯ ";
+
+pub(crate) fn chevron_span() -> Span<'static> {
+    Span::styled(CHEVRON, crate::theme::current().tool_dim)
+}
+
+pub(crate) trait Overlay {
+    fn is_open(&self) -> bool;
+    fn close(&mut self);
+    /// Modal overlays block mouse interaction behind them.
+    fn is_modal(&self) -> bool {
+        true
+    }
+}
 
 pub(crate) fn hint_line<K: AsRef<str>, V: AsRef<str>>(pairs: &[(K, V)]) -> Line<'static> {
     let t = crate::theme::current();
@@ -190,6 +194,9 @@ pub enum Action {
     NewSession,
     LoadSession(Box<LoadedSession>),
     ChangeModel(String),
+    RefreshProvider {
+        slug: String,
+    },
     AssignTier(String, ModelTier),
     Compact,
     ToggleMcp(String, bool),
@@ -197,6 +204,7 @@ pub enum Action {
     EditInputInEditor,
     Btw(String),
     Suspend,
+    RefreshModels,
     Quit,
     ProviderReady {
         model_spec: String,
