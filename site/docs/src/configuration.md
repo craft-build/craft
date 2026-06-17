@@ -105,6 +105,27 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `max_log_files` | u32 | `10` | 1 | Max number of log files to keep |
 | `input_history_size` | usize | `100` | 10 | Number of input history entries to retain |
 
+### `compression`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `enabled` | bool | `true` | - | Enable tool output compression |
+| `max_log_lines` | usize | `50` | 10 | Max lines in compressed log output |
+| `max_search_files` | usize | `20` | 5 | Max files in compressed search output |
+| `max_matches_per_file` | usize | `5` | 1 | Max matches per file in search output |
+| `max_diff_lines` | usize | `100` | 10 | Max lines in compressed diff output |
+| `max_json_items` | usize | `15` | 5 | Max items in compressed JSON array output |
+| `protect_recent_tool_outputs` | usize | `2` | 1 | Never compress the last N tool outputs |
+| `semantic_enabled` | bool | `false` | - | Enable semantic relevance scoring (requires onnx feature) |
+
+### `sandbox`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable sandbox restrictions on tools |
+| `mode` | string | `"workspace_write"` | Sandbox mode. One of: `workspace_write`, `read_only`, `danger_full_access`, `off` |
+| `network` | bool | `true` | Allow network access in sandboxed tools |
+
 ## Tools
 
 The `tools` table lets you turn tools on or off. By default `webfetch` and `websearch` are on. `bash` is off by default.

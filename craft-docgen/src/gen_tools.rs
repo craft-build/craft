@@ -15,14 +15,36 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "write",
             "edit",
             "multiedit",
+            "apply_patch",
+            "delete",
+            "move",
             "glob",
             "grep",
             "outline",
         ],
     ),
     (
+        "Navigation & Analysis",
+        &["zoom", "ast_grep", "callgraph", "inspect", "conflicts"],
+    ),
+    ("Safety", &["safety"]),
+    (
         "Execution & Control",
-        &["batch", "code_execution", "question"],
+        &[
+            "batch",
+            "code_execution",
+            "question",
+            "list_tools",
+            "retrieve",
+        ],
+    ),
+    (
+        "Review & Findings",
+        &["review", "report_finding", "read_findings"],
+    ),
+    (
+        "Styleguide",
+        &["styleguide_list", "styleguide_search", "styleguide_get"],
     ),
     (
         "Agent & Knowledge",

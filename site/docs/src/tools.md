@@ -58,6 +58,32 @@ Prefer this over edit when making multiple changes to the same file.
 | `edits` | array | yes | Array of edit operations to apply sequentially |
 | `path` | string | yes |  |
 
+### `apply_patch`
+
+Apply a Codex-style patch to one or more files.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `patch_text` | string | yes | Codex-style patch text with *** Begin Patch / *** End Patch markers |
+
+### `delete`
+
+Delete files or directories. Text file contents are auto-backed up (use `safety undo` to recover).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `files` | array | yes | Files or directories to delete |
+| `recursive` | boolean | no | Delete directories recursively (required for non-empty dirs) |
+
+### `move`
+
+Move/rename a file or directory and update import references across the project.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `destination` | string | yes | Destination path |
+| `source` | string | yes | Source file or directory path |
+
 ### `glob` *(lua plugin)*
 
 Find files by glob pattern.
@@ -89,6 +115,73 @@ Return a structural outline of a file or directory.
 | `files` | boolean | no | When path is a directory, return a flat file table instead of nested symbols |
 | `path` | string | yes |  |
 
+## Navigation & Analysis
+
+### `zoom`
+
+Zoom into a specific symbol or line range in a file.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `context_lines` | integer | no | 3 | Lines of context around the symbol body |
+| `end_line` | integer | no |  | End line (1-indexed) for line-range mode |
+| `path` | string | yes |  |  |
+| `start_line` | integer | no |  | Start line (1-indexed) for line-range mode |
+| `symbol` | string | no |  | Symbol name to zoom into (function, struct, class, heading, etc.) |
+
+### `ast_grep`
+
+Search and replace code using AST patterns. More precise than regex for code.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `apply` | boolean | no | dry-run, show diffs only | Apply replacement |
+| `globs` | array | no |  | Glob patterns to include (e.g. ["*.rs", "src/**"]) |
+| `lang` | string | yes |  | Language: rust, typescript, tsx, python, go |
+| `path` | string | no | cwd | Directory or file to search |
+| `pattern` | string | yes |  | AST pattern with $VAR and $$$BODY metavariables |
+| `rewrite` | string | no |  | Replacement pattern (omitting = search-only mode). Uses $VAR refs from pattern. |
+
+### `callgraph`
+
+Intra-file call graph analysis. Traces function/method call relationships within a single file.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `depth` | integer | no | 5 | Max depth for call_tree |
+| `op` | string | yes |  | Operation: call_tree, callers, or impact |
+| `path` | string | yes |  | File path |
+| `symbol` | string | yes |  | Symbol name (function/method/struct) |
+
+### `inspect`
+
+Quick project health check. Scans for TODOs, FIXMEs, HACKs, and git status.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `scope` | string | no | cwd | File or directory to scope |
+| `sections` | string | no | all | Sections: todos, git_status, or all |
+
+### `conflicts`
+
+Find git merge conflicts in the project.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | no | cwd | Directory to scan |
+
+## Safety
+
+### `safety`
+
+Create and restore file-system checkpoints, undo file edits, and view backup history.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | string | yes | Action: checkpoint, restore, list, undo, or history |
+| `name` | string | no | Checkpoint name (for checkpoint and restore actions) |
+| `path` | string | no | File path (for undo and history actions) |
+
 ## Execution & Control
 
 ### `batch`
@@ -119,6 +212,92 @@ Use this tool when you need to ask the user questions during execution. This all
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `questions` | array | yes | List of questions to ask the user |
+
+### `list_tools`
+
+List the tools available in this session, or enable and inspect a specific tool.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `detail` | string | no | Optional tool name to inspect. Returns the full input schema and enables the tool for the rest of the session. Omit to list every tool with a short description. |
+
+### `retrieve`
+
+Retrieve the original (uncompressed) content for a previously compressed tool output. Use the hash value from a compression marker in the conversation. Compression markers appear as [N lines compressed from M. Retrieve original: hash=HASH] or in stale/superseded read markers that include a hash.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `hash` | string | yes | Hash of the compressed content to retrieve |
+
+## Review & Findings
+
+### `review`
+
+Spawn a code review subagent that reads files, checks against styleguide rules, and reports structured findings with priorities (P0-P3) and a verdict.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `focus_files` | array | no | Files to focus on (optional) |
+| `task` | string | yes | What to review (e.g., 'Review the auth module for security issues') |
+
+### `report_finding`
+
+Report a code review finding with priority, location, and optional rule references.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `body` | string | yes | Markdown body: what, why, rule, fix |
+| `confidence` | number | yes | Confidence 0.0-1.0 |
+| `file_path` | string | yes | Absolute file path |
+| `line_end` | integer | yes | End line number |
+| `line_start` | integer | yes | Start line number |
+| `priority` | string | yes | Priority: P0, P1, P2, or P3 |
+| `rule_ids` | array | no | Styleguide rule IDs |
+| `suggestion` | string | no | Suggested fix or code snippet |
+| `title` | string | yes | Imperative title, prefixed with priority (e.g. '[P1] Add error handling') |
+
+### `read_findings`
+
+Retrieve detailed code review findings recorded by review subagents during this session. Use this when you need the original priority, file path, line numbers, body, suggested fix, and rule IDs after a review tool has finished.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `file_path_contains` | string | no |  | Optional substring match against file_path |
+| `limit` | integer | no | 50 | Maximum findings to return |
+| `priority` | string | no |  | Optional priority filter (P0, P1, P2, P3) |
+
+## Styleguide
+
+### `styleguide_list`
+
+List available styleguide categories for a language. Use this to discover what styleguides are available before fetching specific rules.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `language` | string | yes | Language to list styleguides for (e.g., 'rust', 'general') |
+
+### `styleguide_search`
+
+Search for styleguide rules by keywords, rule IDs, or tags. Returns matching rules sorted by relevance.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `category` | string | no |  | Filter by category (e.g., 'naming'). Omit to search all. |
+| `language` | string | no |  | Filter by language (e.g., 'rust'). Omit to search all. |
+| `limit` | integer | no | 10 | Maximum results |
+| `query` | string | yes |  | Search query — rule ID, keyword, or phrase |
+| `tags` | array | no |  | Filter by tags. |
+
+### `styleguide_get`
+
+Fetch specific styleguide rules or entire categories. Can fetch by category, rule IDs, or auto-detect from file path.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `category` | string | no | Category to fetch (e.g., 'naming'). Required unless using rule_ids or file_path. |
+| `file_path` | string | no | File path to auto-detect language and get minimal context. |
+| `language` | string | yes | Language code (e.g., 'rust', 'general') |
+| `rule_ids` | array | no | Specific rule IDs to fetch. |
 
 ## Agent & Knowledge
 

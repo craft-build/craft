@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use craft_config::{
-    AgentConfig, ConfigField, DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_MAX_LOG_FILES,
+    AgentConfig, CompressionConfig, ConfigField, DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_MAX_LOG_FILES,
     DEFAULT_MAX_OUTPUT_LINES, DEFAULT_MOUSE_SCROLL_LINES, MIN_TOOL_OUTPUT_LINES, ProviderConfig,
     StorageConfig, TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
 };
@@ -143,6 +143,27 @@ All fields are optional. Typos in field names cause an error right away.
     write_section(&mut out, "[agent]", AgentConfig::FIELDS);
     write_section(&mut out, "[provider]", ProviderConfig::FIELDS);
     write_section(&mut out, "[storage]", StorageConfig::FIELDS);
+    write_section(&mut out, "[compression]", CompressionConfig::FIELDS);
+
+    writeln!(out, "### `sandbox`\n").unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `enabled` | bool | `true` | Enable sandbox restrictions on tools |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `mode` | string | `\"workspace_write\"` | Sandbox mode. One of: `workspace_write`, `read_only`, `danger_full_access`, `off` |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `network` | bool | `true` | Allow network access in sandboxed tools |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
 
     writeln!(out, "## Tools\n").unwrap();
     writeln!(
