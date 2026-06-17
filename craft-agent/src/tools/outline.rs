@@ -155,6 +155,15 @@ pub enum LangId {
     Nix,
     Zig,
     Markdown,
+    Css,
+    Fish,
+    Gdscript,
+    Gdshader,
+    GodotResource,
+    ObjC,
+    Perl,
+    SvelteNext,
+    Zsh,
 }
 
 impl LangId {
@@ -189,6 +198,15 @@ impl LangId {
             "nix" => Some(Self::Nix),
             "zig" => Some(Self::Zig),
             "md" | "mdx" => Some(Self::Markdown),
+            "css" => Some(Self::Css),
+            "fish" => Some(Self::Fish),
+            "gd" => Some(Self::Gdscript),
+            "gdshader" => Some(Self::Gdshader),
+            "tscn" | "tres" => Some(Self::GodotResource),
+            "objc" => Some(Self::ObjC),
+            "perl" => Some(Self::Perl),
+            "svelte-next" => Some(Self::SvelteNext),
+            "zsh" => Some(Self::Zsh),
             _ => None,
         }
     }
@@ -218,6 +236,15 @@ impl LangId {
             Self::Nix => tree_sitter_nix::LANGUAGE.into(),
             Self::Zig => tree_sitter_zig::LANGUAGE.into(),
             Self::Markdown => tree_sitter_md::LANGUAGE.into(),
+            Self::Css => tree_sitter_css::LANGUAGE.into(),
+            Self::Fish => tree_sitter_fish::language(),
+            Self::Gdscript => tree_sitter_gdscript::LANGUAGE.into(),
+            Self::Gdshader => tree_sitter_gdshader::LANGUAGE.into(),
+            Self::GodotResource => tree_sitter_godot_resource::LANGUAGE.into(),
+            Self::ObjC => tree_sitter_objc::LANGUAGE.into(),
+            Self::Perl => tree_sitter_perl::LANGUAGE.into(),
+            Self::SvelteNext => tree_sitter_svelte_next::LANGUAGE.into(),
+            Self::Zsh => tree_sitter_zsh::LANGUAGE.into(),
         }
     }
 
@@ -246,6 +273,15 @@ impl LangId {
             Self::Nix => "nix",
             Self::Zig => "zig",
             Self::Markdown => "markdown",
+            Self::Css => "css",
+            Self::Fish => "fish",
+            Self::Gdscript => "gd",
+            Self::Gdshader => "gdshader",
+            Self::GodotResource => "godot-resource",
+            Self::ObjC => "objc",
+            Self::Perl => "perl",
+            Self::SvelteNext => "svelte",
+            Self::Zsh => "zsh",
         }
     }
 
@@ -257,6 +293,20 @@ impl LangId {
             Self::Ruby => "::",
             Self::Php => "\\",
             Self::CSharp => ".",
+            Self::Dart => ".",
+            Self::Starlark => ".",
+            Self::Nix => ".",
+            Self::Zig => ".",
+            Self::Markdown => ".",
+            Self::Css => ".",
+            Self::Fish => ".",
+            Self::Gdscript => ".",
+            Self::Gdshader => ".",
+            Self::GodotResource => ".",
+            Self::ObjC => ".",
+            Self::Perl => ".",
+            Self::SvelteNext => ".",
+            Self::Zsh => ".",
             _ => "/",
         }
     }
@@ -1029,6 +1079,15 @@ fn lang_query(lang: LangId) -> Option<&'static Query> {
         LangId::Nix => Some(&NIX_QUERY),
         LangId::Zig => Some(&ZIG_QUERY),
         LangId::Markdown => Some(&MD_QUERY),
+        LangId::Css => Some(&CSS_QUERY),
+        LangId::Fish => Some(&FISH_QUERY),
+        LangId::Gdscript => Some(&GDSCRIPT_QUERY),
+        LangId::Gdshader => Some(&GDSHADER_QUERY),
+        LangId::GodotResource => Some(&GODOT_RESOURCE_QUERY),
+        LangId::ObjC => Some(&OBJC_QUERY),
+        LangId::Perl => Some(&PERL_QUERY),
+        LangId::SvelteNext => Some(&SVELTE_NEXT_QUERY),
+        LangId::Zsh => Some(&ZSH_QUERY),
     }
 }
 
@@ -1306,6 +1365,103 @@ static MD_QUERY: LazyLock<Query> = LazyLock::new(|| {
 "#,
     )
     .expect("markdown query")
+});
+
+static CSS_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_css::LANGUAGE.into(),
+        r#"
+(rule_set (selectors) @class.name) @class.def
+"#,
+    )
+    .expect("css query")
+});
+
+static FISH_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_fish::language(),
+        r#"
+(function_definition name: (word) @fn.name) @fn.def
+"#,
+    )
+    .expect("fish query")
+});
+
+static GDSCRIPT_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_gdscript::LANGUAGE.into(),
+        r#"
+(class_definition name: (name) @class.name) @class.def
+(function_definition name: (name) @fn.name) @fn.def
+"#,
+    )
+    .expect("gdscript query")
+});
+
+static GDSHADER_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_gdshader::LANGUAGE.into(),
+        r#"
+(function_definition declarator: (identifier) @fn.name) @fn.def
+(struct_definition name: (identifier) @struct.name) @struct.def
+"#,
+    )
+    .expect("gdshader query")
+});
+
+static GODOT_RESOURCE_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_godot_resource::LANGUAGE.into(),
+        r#"
+(section (identifier) @class.name) @class.def
+"#,
+    )
+    .expect("godot resource query")
+});
+
+static OBJC_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_objc::LANGUAGE.into(),
+        r#"
+(class_interface (identifier) @class.name) @class.def
+(class_implementation (identifier) @class.name) @class.def
+(protocol_declaration (identifier) @iface.name) @iface.def
+(method_declaration) @method.def
+(function_definition) @fn.def
+"#,
+    )
+    .expect("objc query")
+});
+
+static PERL_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_perl::LANGUAGE.into(),
+        r#"
+(package_statement (package_name) @mod.name) @mod.def
+(require_statement package_name: (package_name) @import.name) @import.def
+"#,
+    )
+    .expect("perl query")
+});
+
+static SVELTE_NEXT_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_svelte_next::LANGUAGE.into(),
+        r#"
+(element (start_tag (tag_name) @heading.name)) @heading.def
+"#,
+    )
+    .expect("svelte-next query")
+});
+
+static ZSH_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    Query::new(
+        &tree_sitter_zsh::LANGUAGE.into(),
+        r#"
+(function_definition name: (word) @fn.name) @fn.def
+"#,
+    )
+    .expect("zsh query")
 });
 
 super::impl_tool!(Outline, kind = "outline", tier = super::ToolTier::Core);

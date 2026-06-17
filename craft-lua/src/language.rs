@@ -26,6 +26,15 @@ pub enum Language {
     Starlark,
     Zig,
     Dart,
+    Css,
+    Fish,
+    Gdscript,
+    Gdshader,
+    GodotResource,
+    ObjC,
+    Perl,
+    SvelteNext,
+    Zsh,
 }
 
 impl Language {
@@ -55,6 +64,15 @@ impl Language {
             "starlark" => Some(Self::Starlark),
             "zig" => Some(Self::Zig),
             "dart" => Some(Self::Dart),
+            "css" => Some(Self::Css),
+            "fish" => Some(Self::Fish),
+            "gd" => Some(Self::Gdscript),
+            "gdshader" => Some(Self::Gdshader),
+            "godot-resource" => Some(Self::GodotResource),
+            "objc" => Some(Self::ObjC),
+            "perl" => Some(Self::Perl),
+            "svelte-next" => Some(Self::SvelteNext),
+            "zsh" => Some(Self::Zsh),
             _ => None,
         }
     }
@@ -77,13 +95,22 @@ impl Language {
             "swift" => Some(Self::Swift),
             "kt" | "kts" => Some(Self::Kotlin),
             "scala" | "sc" => Some(Self::Scala),
-            "sh" | "bash" | "zsh" => Some(Self::Bash),
+            "sh" | "bash" => Some(Self::Bash),
             "lua" => Some(Self::Lua),
             "ex" | "exs" => Some(Self::Elixir),
             "md" | "markdown" => Some(Self::Markdown),
             "bzl" => Some(Self::Starlark),
             "zig" => Some(Self::Zig),
             "dart" => Some(Self::Dart),
+            "css" => Some(Self::Css),
+            "fish" => Some(Self::Fish),
+            "gd" => Some(Self::Gdscript),
+            "gdshader" => Some(Self::Gdshader),
+            "tscn" | "tres" => Some(Self::GodotResource),
+            "m" | "mm" => Some(Self::ObjC),
+            "pl" | "pm" => Some(Self::Perl),
+            "svelte" => Some(Self::SvelteNext),
+            "zsh" => Some(Self::Zsh),
             _ => None,
         }
     }
@@ -114,6 +141,15 @@ impl Language {
             Self::Starlark => tree_sitter_starlark::LANGUAGE.into(),
             Self::Zig => tree_sitter_zig::LANGUAGE.into(),
             Self::Dart => tree_sitter_dart::LANGUAGE.into(),
+            Self::Css => tree_sitter_css::LANGUAGE.into(),
+            Self::Fish => tree_sitter_fish::language(),
+            Self::Gdscript => tree_sitter_gdscript::LANGUAGE.into(),
+            Self::Gdshader => tree_sitter_gdshader::LANGUAGE.into(),
+            Self::GodotResource => tree_sitter_godot_resource::LANGUAGE.into(),
+            Self::ObjC => tree_sitter_objc::LANGUAGE.into(),
+            Self::Perl => tree_sitter_perl::LANGUAGE.into(),
+            Self::SvelteNext => tree_sitter_svelte_next::LANGUAGE.into(),
+            Self::Zsh => tree_sitter_zsh::LANGUAGE.into(),
         }
     }
 }

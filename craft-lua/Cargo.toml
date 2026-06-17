@@ -56,6 +56,15 @@ tree-sitter-starlark = { workspace = true }
 tree-sitter-swift = { workspace = true }
 tree-sitter-typescript = { workspace = true }
 tree-sitter-zig = { workspace = true }
+tree-sitter-css = { workspace = true }
+tree-sitter-fish = { workspace = true }
+tree-sitter-gdscript = { workspace = true }
+tree-sitter-gdshader = { workspace = true }
+tree-sitter-godot-resource = { workspace = true }
+tree-sitter-objc = { workspace = true }
+tree-sitter-perl = { workspace = true }
+tree-sitter-svelte-next = { workspace = true }
+tree-sitter-zsh = { workspace = true }
 
 [features]
 default = []
