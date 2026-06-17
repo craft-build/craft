@@ -7,26 +7,36 @@
 //! rejects writes to anything but the plan file before they reach the tool.
 
 mod apply_patch;
+mod astgrep;
 mod batch;
+mod callgraph;
 mod code_execution;
+mod conflicts;
+mod delete;
 mod dynamic;
 mod edit;
 mod file_tracker;
 pub mod fs_backend;
 mod fuzzy_replace;
 pub mod grep;
+mod inspect;
 mod list_tools;
+mod move_file;
 mod multiedit;
+mod outline;
 mod read;
 mod read_findings;
 pub mod registry;
 mod report_finding;
 mod review;
+pub mod safety;
 pub mod schema;
 mod styleguide;
 mod task;
 mod todowrite;
+mod validation;
 mod write;
+mod zoom;
 
 pub use dynamic::{DynamicContext, PromotedTools, ToolBuild, build_active_tools, filter_to_active};
 pub use file_tracker::FileReadTracker;
@@ -122,7 +132,7 @@ impl ToolFilter {
                 config
                     .allowed_tools
                     .iter()
-                    .filter(|s| is_builtin_tool(s))
+                    .filter(|s| NATIVE_TOOL_NAMES.contains(&s.as_str()))
                     .cloned()
                     .collect(),
             )
@@ -157,6 +167,15 @@ pub const WRITE_TOOL_NAME: &str = write::Write::NAME;
 pub const CODE_EXECUTION_TOOL_NAME: &str = code_execution::CodeExecution::NAME;
 pub const READ_FINDINGS_TOOL_NAME: &str = read_findings::ReadFindings::NAME;
 pub const LIST_TOOLS_TOOL_NAME: &str = list_tools::ListTools::NAME;
+pub const AST_GREP_TOOL_NAME: &str = astgrep::AstGrep::NAME;
+pub const CALLGRAPH_TOOL_NAME: &str = callgraph::Callgraph::NAME;
+pub const CONFLICTS_TOOL_NAME: &str = conflicts::Conflicts::NAME;
+pub const DELETE_TOOL_NAME: &str = delete::Delete::NAME;
+pub const INSPECT_TOOL_NAME: &str = inspect::Inspect::NAME;
+pub const MOVE_TOOL_NAME: &str = move_file::MoveFile::NAME;
+pub const OUTLINE_TOOL_NAME: &str = outline::Outline::NAME;
+pub const SAFETY_TOOL_NAME: &str = safety::Safety::NAME;
+pub const ZOOM_TOOL_NAME: &str = zoom::Zoom::NAME;
 
 pub(crate) const PLAN_WRITE_RESTRICTED: &str = "write restricted to plan file in plan mode";
 pub(crate) const DEADLINE_EXCEEDED: &str = "timeout exceeded";
@@ -231,6 +250,7 @@ pub struct ToolContext {
     pub(crate) compression_store: crate::agent::compression_store::SharedCompressionStore,
     pub findings_store: Option<crate::agent::SharedFindingsStore>,
     pub fs: Arc<dyn FsBackend>,
+    pub snapshot_store: Arc<safety::SnapshotStore>,
     pub parent_messages: Arc<[craft_providers::Message]>,
     pub promoted: crate::tools::dynamic::PromotedTools,
     pub dynamic: crate::tools::dynamic::DynamicContext,
@@ -631,10 +651,15 @@ register_tools! {
     read_findings::ReadFindings,
     review::Review,
     crate::agent::retrieve::Retrieve,
-}
-
-pub fn is_builtin_tool(name: &str) -> bool {
-    NATIVE_TOOL_NAMES.contains(&name) || craft_config::DEFAULT_BUILTINS.contains(&name)
+    outline::Outline,
+    safety::Safety,
+    zoom::Zoom,
+    astgrep::AstGrep,
+    callgraph::Callgraph,
+    conflicts::Conflicts,
+    delete::Delete,
+    inspect::Inspect,
+    move_file::MoveFile,
 }
 
 pub fn all_builtin_tool_names() -> Vec<&'static str> {
@@ -643,6 +668,10 @@ pub fn all_builtin_tool_names() -> Vec<&'static str> {
         .chain(craft_config::DEFAULT_BUILTINS.iter())
         .copied()
         .collect()
+}
+
+pub fn is_builtin_tool(name: &str) -> bool {
+    NATIVE_TOOL_NAMES.contains(&name) || craft_config::DEFAULT_BUILTINS.contains(&name)
 }
 
 use craft_providers::{Message, ProviderEvent, StreamResponse};
@@ -705,10 +734,11 @@ pub(crate) fn interpreter_ctx(
         promoted: crate::tools::dynamic::PromotedTools::new(),
         dynamic: crate::tools::dynamic::DynamicContext::disabled(),
         hooks: None,
+        snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
     }
 }
 
-/// Minimal ToolContext for CLI one-shot tool execution (e.g. `craft index`).
+/// Minimal ToolContext for CLI one-shot tool execution (e.g. `craft outline`).
 /// Allows everything, sends events to a dummy channel, uses no model.
 pub fn cli_tool_ctx() -> ToolContext {
     let (tx, _rx) = flume::unbounded::<crate::Envelope>();

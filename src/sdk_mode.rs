@@ -46,7 +46,7 @@ const TOOL_NAME_MAP: &[(&str, &str)] = &[
     ("task", "Task"),
     ("multiedit", "MultiEdit"),
     ("code_execution", "CodeExecution"),
-    ("index", "Index"),
+    ("outline", "Outline"),
     ("memory", "Memory"),
     ("question", "Question"),
     ("skill", "Skill"),

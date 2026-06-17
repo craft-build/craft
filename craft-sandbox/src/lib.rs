@@ -169,6 +169,12 @@ pub fn default_writable_roots() -> Vec<PathBuf> {
     if let Ok(tmp) = std::env::temp_dir().canonicalize() {
         roots.push(tmp);
     }
+
+    // On Unix, /tmp is a common writable root for build tools.
+    #[cfg(unix)]
+    {
+        roots.push(PathBuf::from("/tmp"));
+    }
     roots.extend(cache_dirs());
 
     for (env_var, fallback) in BUILD_TOOL_HOMES {
@@ -240,7 +246,10 @@ fn cache_dirs() -> Vec<PathBuf> {
 
 fn dedup_preserving_order(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
-    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
+    paths
+        .into_iter()
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 
 /// Normalize a path for inclusion in a profile. Canonicalizes when possible so
@@ -283,12 +292,14 @@ mod tests {
     fn resolve_tool_home_returns_none_when_path_missing() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().canonicalize().unwrap();
-        assert!(resolve_tool_home(
-            Some("CRAFT_SANDBOX_DEFINITELY_UNSET_ENV_43"),
-            ".does-not-exist",
-            Some(&home),
-        )
-        .is_none());
+        assert!(
+            resolve_tool_home(
+                Some("CRAFT_SANDBOX_DEFINITELY_UNSET_ENV_43"),
+                ".does-not-exist",
+                Some(&home),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -296,6 +307,9 @@ mod tests {
         let a = PathBuf::from("/a");
         let b = PathBuf::from("/b");
         let input = vec![a.clone(), b.clone(), a, b];
-        assert_eq!(dedup_preserving_order(input), vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(
+            dedup_preserving_order(input),
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
     }
 }

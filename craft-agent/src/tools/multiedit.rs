@@ -53,8 +53,10 @@ impl MultiEdit {
                 &edit.old_string,
                 &edit.new_string,
                 edit.replace_all.unwrap_or(false),
+                None,
             )
-            .map_err(|e| format!("edit {i}: {e}"))?;
+            .map_err(|e| format!("edit {i}: {e}"))?
+            .content;
         }
         Ok(content)
     }
@@ -66,15 +68,30 @@ impl MultiEdit {
 
         let before = ctx.fs.read_text_file(p).await?;
         let after = self.apply_edits(&before)?;
-        ctx.fs.write_text_file(p, &after).await?;
 
+        let validation = super::validation::validate_edit(p, &before, &after);
+        if validation.introduced_errors {
+            return Err(format!(
+                "multiedit introduced {} syntax error(s); rolled back. Check the edits for correctness",
+                validation.error_count
+            ));
+        }
+
+        ctx.fs.write_text_file(p, &after).await?;
         ctx.file_tracker.record_read(p);
+
+        let warn = if !validation.syntax_valid {
+            format!(" [{} pre-existing error(s)]", validation.error_count)
+        } else {
+            String::new()
+        };
 
         Ok(ToolOutput::Diff {
             summary: format!(
-                "applied {} to {}",
+                "applied {} to {}{}",
                 self.edit_count_label(),
-                relative_path(&path)
+                relative_path(&path),
+                warn,
             ),
             path,
             before,
@@ -192,5 +209,25 @@ mod tests {
         pre_read(&ctx, &path);
         let tool = MultiEdit::parse_input(&json!({ "path": path, "edits": [] })).unwrap();
         assert_eq!(tool.execute(&ctx).await.unwrap_err(), EMPTY_ERR);
+    }
+
+    #[tokio::test]
+    async fn syntax_error_is_rolled_back() {
+        const ROLLBACK_ERR: &str = "rolled back";
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let original = "fn greet() {}";
+        let path = temp_file(&dir, "f.rs", original);
+        pre_read(&ctx, &path);
+        let tool = MultiEdit::parse_input(&json!({
+            "path": path,
+            "edits": [
+                { "old_string": "fn greet()", "new_string": "fn greet(" }
+            ]
+        }))
+        .unwrap();
+        let err = tool.execute(&ctx).await.unwrap_err();
+        assert!(err.contains(ROLLBACK_ERR), "got: {err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 }

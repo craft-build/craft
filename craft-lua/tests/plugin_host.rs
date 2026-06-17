@@ -939,7 +939,6 @@ fn setup_all_sections_at_once() {
                 agent = { bash_timeout_secs = 120, max_output_lines = 9000 },
                 provider = { default_model = "anthropic/claude-opus-4-6" },
                 storage = { max_log_files = 3 },
-                index = { max_file_size_mb = 8 },
                 tools = { bash = { enabled = true } },
             })"#
             .to_owned(),
@@ -963,7 +962,6 @@ fn setup_all_sections_at_once() {
         Some("anthropic/claude-opus-4-6")
     );
     assert_eq!(raw.storage.max_log_files, Some(3));
-    assert_eq!(raw.index.max_file_size_mb, Some(8));
     assert_eq!(raw.tools["bash"].enabled, Some(true));
 }
 

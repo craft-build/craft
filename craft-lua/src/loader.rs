@@ -25,10 +25,6 @@ struct BundledPlugin {
 /// `require()` shared modules across plugin boundaries.
 static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
-        name: "index",
-        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/index"),
-    },
-    BundledPlugin {
         name: "webfetch",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/webfetch"),
     },

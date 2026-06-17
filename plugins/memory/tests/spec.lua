@@ -25,7 +25,8 @@ end
 local _tmpdir_counter = 0
 local function mktmpdir()
   _tmpdir_counter = _tmpdir_counter + 1
-  local name = "/tmp/craft_spec_" .. tostring(os.clock()):gsub("%.", "") .. "_" .. _tmpdir_counter
+  local tmp = os.getenv("TMPDIR") or "/tmp"
+  local name = tmp .. "/craft_spec_" .. tostring(os.clock()):gsub("%.", "") .. "_" .. _tmpdir_counter
   craft.fs.mkdir(name)
   return name
 end

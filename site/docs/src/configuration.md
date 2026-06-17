@@ -31,9 +31,6 @@ craft.setup({
     storage = {
         max_log_files = 5,
     },
-    index = {
-        max_file_size_mb = 4,
-    },
 })
 ```
 
@@ -70,7 +67,6 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `bash` | 5 |
 | `code_execution` | 5 |
 | `task` | 5 |
-| `index` | 3 |
 | `grep` | 3 |
 | `read` | 3 |
 | `write` | 7 |
@@ -109,15 +105,9 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `max_log_files` | u32 | `10` | 1 | Max number of log files to keep |
 | `input_history_size` | usize | `100` | 10 | Number of input history entries to retain |
 
-### `index`
-
-| Field | Type | Default | Min | Description |
-|-------|------|---------|-----|-------------|
-| `max_file_size_mb` | u64 | `2` | 1 | Max file size for indexing (MB) |
-
 ## Tools
 
-The `tools` table lets you turn tools on or off. By default `index`, `webfetch`, and `websearch` are on. `bash` is off by default.
+The `tools` table lets you turn tools on or off. By default `webfetch` and `websearch` are on. `bash` is off by default.
 
 ```lua
 craft.setup({

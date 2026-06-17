@@ -226,12 +226,12 @@ mod tests {
         let s = slots(
             PromptId::System,
             &[
-                (Slot::EfficientTools, "index"),
+                (Slot::EfficientTools, "outline"),
                 (Slot::EfficientTools, "foo"),
             ],
         );
         let out = assemble(PromptId::System, &s, "");
-        assert!(out.contains(&format!("{NATIVE_EFFICIENT_LINE}, index, foo.")));
+        assert!(out.contains(&format!("{NATIVE_EFFICIENT_LINE}, outline, foo.")));
     }
 
     #[test]

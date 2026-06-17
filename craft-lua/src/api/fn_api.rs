@@ -45,12 +45,13 @@ fn build_sandbox_profile(lua: &Lua, cwd: Option<&Path>) -> Option<craft_sandbox:
     })
 }
 
-struct JobMeta {
-    alive: bool,
+pub(crate) struct JobMeta {
+    pub(crate) alive: bool,
+    pub(crate) background: bool,
     on_stdout: Option<RegistryKey>,
     on_stderr: Option<RegistryKey>,
     on_exit: Option<RegistryKey>,
-    event_rx: Option<flume::Receiver<JobEvent>>,
+    pub(crate) event_rx: Option<flume::Receiver<JobEvent>>,
     kill: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -91,11 +92,13 @@ impl JobStore {
         on_stdout: Option<RegistryKey>,
         on_stderr: Option<RegistryKey>,
         on_exit: Option<RegistryKey>,
+        background: bool,
     ) {
         self.jobs.insert(
             id,
             JobMeta {
                 alive: true,
+                background,
                 on_stdout,
                 on_stderr,
                 on_exit,
@@ -156,7 +159,7 @@ impl JobStore {
 
     pub fn kill_all(&mut self) {
         for meta in self.jobs.values_mut() {
-            if meta.alive {
+            if meta.alive && !meta.background {
                 if let Some(kill) = meta.kill.take() {
                     kill();
                 }
@@ -174,6 +177,34 @@ impl JobStore {
             }
         }
     }
+
+    pub fn drain_background(&mut self) -> HashMap<u32, JobMeta> {
+        let bg_ids: Vec<u32> = self
+            .jobs
+            .iter()
+            .filter(|(_, m)| m.background)
+            .map(|(&id, _)| id)
+            .collect();
+        let mut drained = HashMap::with_capacity(bg_ids.len());
+        for id in bg_ids {
+            if let Some(meta) = self.jobs.remove(&id) {
+                drained.insert(id, meta);
+            }
+        }
+        drained
+    }
+
+    pub fn absorb(&mut self, jobs: HashMap<u32, JobMeta>) {
+        for (id, meta) in jobs {
+            self.jobs.insert(id, meta);
+        }
+    }
+
+    pub fn put_receiver(&mut self, job_id: u32, rx: flume::Receiver<JobEvent>) {
+        if let Some(meta) = self.jobs.get_mut(&job_id) {
+            meta.event_rx = Some(rx);
+        }
+    }
 }
 
 pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult<Table> {
@@ -189,7 +220,8 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 if !p.is_allowed(Run) {
                     return Err(crate::plugin_permissions::denied_error(Run));
                 }
-                let (cwd, env, on_stdout, on_stderr, on_exit, want_sandbox) = match opts {
+                let (cwd, env, on_stdout, on_stderr, on_exit, want_sandbox, background) = match opts
+                {
                     Some(ref opts) => {
                         let cwd: Option<String> = opts.get("cwd").ok();
                         let env: Option<HashMap<String, String>> = opts
@@ -212,9 +244,18 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                             .map(|f| lua.create_registry_value(f))
                             .transpose()?;
                         let want_sandbox: bool = opts.get("sandbox").unwrap_or(false);
-                        (cwd, env, on_stdout, on_stderr, on_exit, want_sandbox)
+                        let background: bool = opts.get("background").unwrap_or(false);
+                        (
+                            cwd,
+                            env,
+                            on_stdout,
+                            on_stderr,
+                            on_exit,
+                            want_sandbox,
+                            background,
+                        )
                     }
-                    None => (None, None, None, None, None, false),
+                    None => (None, None, None, None, None, false, false),
                 };
 
                 let (backend, id) =
@@ -241,7 +282,7 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 };
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
-                    store.register(id, handle, on_stdout, on_stderr, on_exit);
+                    store.register(id, handle, on_stdout, on_stderr, on_exit, background);
                 });
                 Ok(id)
             }
@@ -284,7 +325,10 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                     };
 
                     match event {
-                        None => return Ok(mlua::Value::Nil),
+                        None => {
+                            with_task_jobs(&lua, |store| store.put_receiver(job_id, rx));
+                            return Ok(mlua::Value::Nil);
+                        }
                         Some(JobEvent::Stdout(line)) => stdout_lines.push(line),
                         Some(JobEvent::Stderr(line)) => stderr_lines.push(line),
                         Some(JobEvent::Exit(code)) => {
@@ -292,6 +336,8 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                         }
                     }
                 };
+
+                with_task_jobs(&lua, |store| store.put_receiver(job_id, rx));
 
                 let result = lua.create_table()?;
                 result.set("stdout", stdout_lines.join("\n"))?;
@@ -341,7 +387,7 @@ mod tests {
             })
             .await
             .unwrap();
-        store.register(id, handle, None, None, None);
+        store.register(id, handle, None, None, None, false);
         id
     }
 

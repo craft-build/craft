@@ -17,6 +17,10 @@ pub struct Edit {
     new_string: String,
     #[param(description = "Replace all occurrences (default false)")]
     replace_all: Option<bool>,
+    #[param(
+        description = "When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error."
+    )]
+    occurrence: Option<usize>,
 }
 
 impl Edit {
@@ -35,21 +39,45 @@ impl Edit {
         ctx.file_tracker.check_before_edit(p)?;
 
         let before = ctx.fs.read_text_file(p).await?;
-        let after = fuzzy_replace::replace(
+        let result = fuzzy_replace::replace(
             &before,
             &self.old_string,
             &self.new_string,
             self.replace_all.unwrap_or(false),
+            self.occurrence,
         )?;
-        ctx.fs.write_text_file(p, &after).await?;
+
+        let validation = super::validation::validate_edit(p, &before, &result.content);
+
+        if validation.introduced_errors {
+            ctx.fs.write_text_file(p, &before).await?;
+            return Err(format!(
+                "edit introduced {} syntax error(s); rolled back. Check the old_string/new_string for correctness",
+                validation.error_count
+            ));
+        }
+
+        ctx.fs.write_text_file(p, &result.content).await?;
 
         ctx.file_tracker.record_read(p);
 
+        let pass_label = if result.pass == fuzzy_replace::Pass::Exact {
+            String::new()
+        } else {
+            format!(" (fuzzy match pass {})", result.pass.number())
+        };
+
+        let warn = if !validation.syntax_valid {
+            format!(" [{} pre-existing error(s)]", validation.error_count)
+        } else {
+            String::new()
+        };
+
         Ok(ToolOutput::Diff {
-            summary: format!("edited {}", relative_path(&path)),
+            summary: format!("edited {}{}{}", relative_path(&path), pass_label, warn),
             path,
             before,
-            after,
+            after: result.content,
         })
     }
 
@@ -121,6 +149,7 @@ mod tests {
             old_string: "fn old() {}".into(),
             new_string: "fn new() {}".into(),
             replace_all: None,
+            occurrence: None,
         }
         .execute(&ctx)
         .await
@@ -137,6 +166,7 @@ mod tests {
             old_string: "let x = 1;".into(),
             new_string: "let x = 9;".into(),
             replace_all: Some(true),
+            occurrence: None,
         }
         .execute(&ctx)
         .await
@@ -164,6 +194,7 @@ mod tests {
             old_string: "const A: u8 = 1;\\nconst B: u8 = 2;".into(),
             new_string: "const A: u8 = 9;\\nconst B: u8 = 2;".into(),
             replace_all: None,
+            occurrence: None,
         }
         .execute(&ctx)
         .await

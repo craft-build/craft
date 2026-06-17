@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 26 built-in tools. This is the full reference.
+Craft ships with 34 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -11,6 +11,7 @@ Commands run in
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `background` | boolean | no |  | Run in background, return task_id for later polling |
 | `command` | string | yes |  | The bash command to execute |
 | `description` | string | no |  | Short description (3-5 words) of what the command does |
 | `timeout` | integer | no | 120 | Timeout in seconds |
@@ -42,6 +43,7 @@ Replace an exact string match in a file.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `new_string` | string | yes |  | Replacement string |
+| `occurrence` | integer | no |  | When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error. |
 | `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |
 | `path` | string | yes |  |  |
 | `replace_all` | boolean | no | false | Replace all occurrences |
@@ -78,13 +80,14 @@ Search file contents using regex.
 | `path` | string | no | cwd | Directory to search in |
 | `pattern` | string | yes |  | Regex pattern |
 
-### `index` *(lua plugin)*
+### `outline`
 
-Return a compact overview of a source file: imports, type definitions, function signatures, and structure with their line numbers surrounded by []. ~70-90% more efficient than reading the full file.
+Return a structural outline of a file or directory.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | yes | Absolute path to the file |
+| `files` | boolean | no | When path is a directory, return a flat file table instead of nested symbols |
+| `path` | string | yes |  |
 
 ## Execution & Control
 

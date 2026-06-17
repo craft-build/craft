@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -467,6 +467,9 @@ pub(super) async fn process_tool_calls(
             }
             for p in &write_paths {
                 snapshot.note(Path::new(p)).await;
+                if let Ok(content) = std::fs::read_to_string(p) {
+                    ctx.snapshot_store.push_backup(PathBuf::from(p), content);
+                }
             }
         }
 
@@ -649,6 +652,9 @@ fn is_write_tool(name: &str) -> bool {
             | crate::tools::EDIT_TOOL_NAME
             | crate::tools::MULTIEDIT_TOOL_NAME
             | crate::tools::APPLY_PATCH_TOOL_NAME
+            | crate::tools::DELETE_TOOL_NAME
+            | crate::tools::MOVE_TOOL_NAME
+            | crate::tools::AST_GREP_TOOL_NAME
     )
 }
 
@@ -695,6 +701,42 @@ fn extract_write_paths(name: &str, input: &Value) -> Vec<String> {
     if !is_write_tool(name) {
         return Vec::new();
     }
+
+    if name == crate::tools::DELETE_TOOL_NAME
+        && let Some(files) = input.get("files").and_then(|v| v.as_array())
+    {
+        return files
+            .iter()
+            .filter_map(|f| f.as_str().map(String::from))
+            .collect();
+    }
+
+    if name == crate::tools::MOVE_TOOL_NAME {
+        let mut out = Vec::new();
+        if let Some(s) = input.get("source").and_then(|v| v.as_str()) {
+            out.push(s.into());
+        }
+        if let Some(d) = input.get("destination").and_then(|v| v.as_str()) {
+            out.push(d.into());
+        }
+        return out;
+    }
+
+    if name == crate::tools::AST_GREP_TOOL_NAME {
+        let apply = input
+            .get("apply")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_replace = input.get("rewrite").is_some();
+        if apply
+            && is_replace
+            && let Some(p) = input.get("path").and_then(|v| v.as_str())
+        {
+            return vec![p.into()];
+        }
+        return Vec::new();
+    }
+
     if let Some(p) = extract_file_path(input) {
         return vec![p];
     }

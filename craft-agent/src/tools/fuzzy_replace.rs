@@ -1,8 +1,9 @@
 use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
 
 pub(super) const NO_MATCH: &str = "old_string not found in file";
-pub(super) const MULTIPLE_MATCHES: &str =
-    "old_string matches multiple locations; add surrounding context to make it unique";
+pub(super) const MULTIPLE_MATCHES: &str = "old_string matches multiple locations; add surrounding context to make it unique, or use occurrence param to select which match";
+pub(super) const OCCURRENCE_OUT_OF_RANGE: &str = "occurrence number exceeds number of matches";
 
 const SINGLE_CANDIDATE_THRESHOLD: f64 = 0.0;
 const MULTI_CANDIDATE_THRESHOLD: f64 = 0.3;
@@ -11,67 +12,156 @@ const CONTEXT_AWARE_MATCH_RATIO: f64 = 0.5;
 
 type Replacer = fn(&str, &str) -> Vec<String>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Pass {
+    Exact = 1,
+    LineTrimmed = 2,
+    BlockAnchor = 3,
+    WhitespaceNormalized = 4,
+    IndentationFlexible = 5,
+    UnicodeNormalized = 6,
+    TrimmedBoundary = 7,
+    ContextAware = 8,
+    EscapeNormalized = 9,
+}
+
+impl Pass {
+    pub fn number(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ReplaceResult {
+    pub content: String,
+    pub pass: Pass,
+}
+
 pub(super) fn replace(
     content: &str,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-) -> Result<String, String> {
-    const REPLACERS: &[Replacer] = &[
-        exact,
-        line_trimmed,
-        block_anchor,
-        whitespace_normalized,
-        indentation_flexible,
+    occurrence: Option<usize>,
+) -> Result<ReplaceResult, String> {
+    const PASSES: &[(Replacer, Pass)] = &[
+        (exact, Pass::Exact),
+        (line_trimmed, Pass::LineTrimmed),
+        (block_anchor, Pass::BlockAnchor),
+        (whitespace_normalized, Pass::WhitespaceNormalized),
+        (indentation_flexible, Pass::IndentationFlexible),
+        (unicode_normalized, Pass::UnicodeNormalized),
+        (trimmed_boundary, Pass::TrimmedBoundary),
+        (context_aware, Pass::ContextAware),
     ];
-    const LATE_REPLACERS: &[Replacer] = &[trimmed_boundary, context_aware];
 
     let mut any_found = false;
+    let mut total_match_count: usize = 0;
 
-    let mut try_match = |candidates: Vec<String>, replacement: &str| -> Option<String> {
+    let collect_positions = |candidates: &[String]| -> Vec<(usize, usize)> {
+        let mut positions = Vec::new();
         for matched in candidates {
-            let Some(first) = content.find(&*matched) else {
-                continue;
-            };
-            any_found = true;
-
-            if replace_all {
-                return Some(content.replace(&*matched, replacement));
+            for (start, _) in content.match_indices(matched.as_str()) {
+                positions.push((start, start + matched.len()));
             }
-
-            if content[first + matched.len()..].contains(&*matched) {
-                continue;
-            }
-
-            let mut result = String::with_capacity(content.len() + replacement.len());
-            result.push_str(&content[..first]);
-            result.push_str(replacement);
-            result.push_str(&content[first + matched.len()..]);
-            return Some(result);
         }
+        positions.sort();
+        positions.dedup();
+        positions
+    };
+
+    let apply_at = |start: usize, end: usize, replacement: &str| -> String {
+        let mut result = String::with_capacity(content.len() + replacement.len());
+        result.push_str(&content[..start]);
+        result.push_str(replacement);
+        result.push_str(&content[end..]);
+        result
+    };
+
+    let try_pass = |candidates: Vec<String>,
+                    replacement: &str,
+                    pass: Pass,
+                    any_found: &mut bool,
+                    total_count: &mut usize|
+     -> Option<ReplaceResult> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        if replace_all {
+            if content.contains(&candidates[0]) {
+                return Some(ReplaceResult {
+                    content: content.replace(&candidates[0], replacement),
+                    pass,
+                });
+            }
+            return None;
+        }
+
+        let positions = collect_positions(&candidates);
+        if positions.is_empty() {
+            return None;
+        }
+        *any_found = true;
+        *total_count = positions.len();
+
+        if let Some(occ) = occurrence {
+            if occ > 0 && occ <= positions.len() {
+                let (start, end) = positions[occ - 1];
+                return Some(ReplaceResult {
+                    content: apply_at(start, end, replacement),
+                    pass,
+                });
+            }
+            return None;
+        }
+
+        if positions.len() == 1 {
+            let (start, end) = positions[0];
+            return Some(ReplaceResult {
+                content: apply_at(start, end, replacement),
+                pass,
+            });
+        }
+
         None
     };
 
-    for r in REPLACERS {
-        if let Some(res) = try_match(r(content, old_string), new_string) {
-            return Ok(res);
+    for &(r, pass) in PASSES {
+        let candidates = r(content, old_string);
+        if let Some(result) = try_pass(
+            candidates,
+            new_string,
+            pass,
+            &mut any_found,
+            &mut total_match_count,
+        ) {
+            return Ok(result);
         }
     }
 
     let unescaped = unescape(old_string);
-    if unescaped != old_string
-        && let Some(res) = try_match(
-            escape_normalized(content, &unescaped),
-            &unescape(new_string),
-        )
-    {
-        return Ok(res);
+    if unescaped != old_string {
+        let candidates = escape_normalized(content, &unescaped);
+        let escaped_new = unescape(new_string);
+        if let Some(result) = try_pass(
+            candidates,
+            &escaped_new,
+            Pass::EscapeNormalized,
+            &mut any_found,
+            &mut total_match_count,
+        ) {
+            return Ok(result);
+        }
     }
 
-    for r in LATE_REPLACERS {
-        if let Some(res) = try_match(r(content, old_string), new_string) {
-            return Ok(res);
+    if let Some(occ) = occurrence {
+        if any_found {
+            return Err(format!(
+                "{OCCURRENCE_OUT_OF_RANGE} (found {total_match_count} matches, requested occurrence {occ})"
+            ));
         }
+        return Err(NO_MATCH.into());
     }
 
     if any_found {
@@ -234,6 +324,62 @@ fn whitespace_normalized(content: &str, find: &str) -> Vec<String> {
             let block = content_lines[i..i + find_lines.len()].join("\n");
             if normalize_whitespace(&block) == normalized_find {
                 results.push(block);
+            }
+        }
+    }
+
+    results
+}
+
+fn unicode_normalized(content: &str, find: &str) -> Vec<String> {
+    let nfkd_content: String = content.nfkd().collect();
+    let nfkd_find: String = find.nfkd().collect();
+    if nfkd_content == content && nfkd_find == find {
+        return vec![];
+    }
+
+    let nfkd_find_trimmed = nfkd_find.trim().to_string();
+    if nfkd_find_trimmed.is_empty() {
+        return vec![];
+    }
+
+    let mut results = Vec::new();
+
+    let content_lines: Vec<&str> = content.split('\n').collect();
+    let nfkd_content_lines: Vec<&str> = nfkd_content.split('\n').collect();
+    let find_lines: Vec<&str> = find.split('\n').collect();
+
+    if find_lines.len() == 1 {
+        for (i, nfkd_line) in nfkd_content_lines.iter().enumerate() {
+            if nfkd_line.trim() == nfkd_find_trimmed {
+                results.push(content_lines[i].to_string());
+                continue;
+            }
+            if nfkd_line.trim().contains(&nfkd_find_trimmed)
+                && nfkd_line.trim() != nfkd_find_trimmed
+            {
+                let words: Vec<&str> = nfkd_find_trimmed.split(' ').collect();
+                if !words.is_empty() {
+                    let escaped: Vec<String> = words.iter().map(|w| regex::escape(w)).collect();
+                    let pattern = escaped.join(r"[\s\u00a0]+");
+                    if let Ok(re) = Regex::new(&pattern)
+                        && let Some(m) = re.find(nfkd_line.trim())
+                    {
+                        let byte_start = m.start();
+                        let byte_end = m.end();
+                        let trimmed = content_lines[i].trim();
+                        if byte_end <= trimmed.len() {
+                            results.push(trimmed[byte_start..byte_end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    } else if find_lines.len() > 1 && find_lines.len() <= content_lines.len() {
+        for i in 0..=nfkd_content_lines.len() - find_lines.len() {
+            let nfkd_block = nfkd_content_lines[i..i + find_lines.len()].join("\n");
+            if nfkd_block.trim() == nfkd_find_trimmed {
+                results.push(content_lines[i..i + find_lines.len()].join("\n"));
             }
         }
     }
@@ -446,19 +592,38 @@ mod tests {
 
     const R: &str = "REPLACED";
 
+    fn replace_simple(content: &str, search: &str, replacement: &str) -> Result<String, String> {
+        replace(content, search, replacement, false, None).map(|r| r.content)
+    }
+
     #[test_case("fn foo() {}\nfn bar() {}", "fn foo() {}", R ; "exact")]
     #[test_case("fn foo() {}", "\nfn foo() {}\n", R ; "trimmed_boundary")]
     #[test_case("    fn f() {\n        bar();\n    }", "fn f() {\n    bar();\n}", R ; "different_indentation")]
     #[test_case("let   x  =   1;", "let x = 1;", R ; "whitespace_collapsed")]
     #[test_case("fn  foo()  {\n    bar();\n}", "fn foo() {\nbar();\n}", R ; "whitespace_multiline")]
     #[test_case("    let   x  =   compute(a,  b);", "compute(a, b)", R ; "whitespace_substring")]
-    #[test_case("let s = \"hello\nworld\";", "let s = \"hello\\nworld\";", R ; "escaped_newline")]
+    #[test_case(
+        "let s = \"hello\nworld\";",
+        "let s = \"hello\\nworld\";",
+        R ;
+        "escaped_newline"
+    )]
     #[test_case("col1\tcol2\tcol3", "col1\\tcol2\\tcol3", R ; "escaped_tab")]
-    #[test_case("fn test() {\n    let x = 1;\n    let y = 2;\n}", "fn test() {\n    let x = 99;\n    let y = 2;\n}", R ; "block_anchor_fuzzy_middle")]
-    #[test_case("fn h() {\n    validate();\n    process();\n    save();\n    respond();\n}", "fn h() {\n    validate();\n    WRONG();\n    save();\n    respond();\n}", R ; "context_aware_partial_middle")]
+    #[test_case(
+        "fn test() {\n    let x = 1;\n    let y = 2;\n}",
+        "fn test() {\n    let x = 99;\n    let y = 2;\n}",
+        R ;
+        "block_anchor_fuzzy_middle"
+    )]
+    #[test_case(
+        "fn h() {\n    validate();\n    process();\n    save();\n    respond();\n}",
+        "fn h() {\n    validate();\n    WRONG();\n    save();\n    respond();\n}",
+        R ;
+        "context_aware_partial_middle"
+    )]
     fn fuzzy_match_succeeds(content: &str, search: &str, replacement: &str) {
         assert!(
-            replace(content, search, replacement, false)
+            replace_simple(content, search, replacement)
                 .unwrap()
                 .contains(R)
         );
@@ -468,22 +633,55 @@ mod tests {
     #[test_case("let x = 1;\nlet x = 1;", "let x = 1;", MULTIPLE_MATCHES ; "ambiguous")]
     fn replace_rejects(content: &str, search: &str, expected_err: &str) {
         assert_eq!(
-            replace(content, search, "x", false).unwrap_err(),
+            replace_simple(content, search, "x").unwrap_err(),
             expected_err
         );
     }
 
     #[test]
+    fn occurrence_selects_nth_match() {
+        let content = "let x = 1;\nlet y = 2;\nlet x = 3;";
+        let result = replace(content, "let x", "REPLACED", false, Some(2)).unwrap();
+        assert!(result.content.contains("let y = 2;"));
+        assert!(result.content.contains("REPLACED = 3;"));
+    }
+
+    #[test]
+    fn occurrence_out_of_range_returns_error() {
+        let content = "let x = 1;\nlet x = 2;";
+        let err = replace(content, "let x", "R", false, Some(5)).unwrap_err();
+        assert!(err.contains(OCCURRENCE_OUT_OF_RANGE));
+    }
+
+    #[test]
+    fn pass_number_returned() {
+        let result = replace("fn foo() {}", "fn foo() {}", "R", false, None).unwrap();
+        assert_eq!(result.pass, Pass::Exact);
+
+        // Whitespace difference forces a fuzzy pass
+        let result = replace("let   x  =   1;", "let x = 1;", "R", false, None).unwrap();
+        assert_ne!(result.pass.number(), 1);
+    }
+
+    #[test]
+    fn unicode_normalization_matches_fullwidth() {
+        // U+FF21 is FULLWIDTH LATIN CAPITAL LETTER A, NFKD decomposes to "A"
+        let content = "let \u{ff21} = 1;";
+        let result = replace_simple(content, "let A = 1;", "REPLACED");
+        assert!(result.unwrap().contains("REPLACED"));
+    }
+
+    #[test]
     fn block_anchor_picks_best_among_multiple() {
         let content = "fn a() {\n    unrelated();\n}\nfn a() {\n    target();\n}";
-        let result = replace(content, "fn a() {\n    target();\n}", R, false).unwrap();
+        let result = replace_simple(content, "fn a() {\n    target();\n}", R).unwrap();
         assert!(result.contains(R));
         assert!(result.contains("unrelated()"));
     }
 
     #[test]
     fn leading_whitespace_disambiguates() {
-        let result = replace("fn foo() {}\n  fn foo() {}", "  fn foo() {}", R, false).unwrap();
+        let result = replace_simple("fn foo() {}\n  fn foo() {}", "  fn foo() {}", R).unwrap();
         assert!(result.starts_with("fn foo() {}"));
         assert!(result.ends_with(R));
     }
@@ -521,7 +719,7 @@ mod tests {
         let content = r#"print("hello")"#;
         let old = r#"print(\"hello\")"#;
         let new = r#"print(\"world\")"#;
-        let result = replace(content, old, new, false).unwrap();
+        let result = replace_simple(content, old, new).unwrap();
         assert_eq!(result, r#"print("world")"#);
     }
 
@@ -530,13 +728,13 @@ mod tests {
         let content = "say(\"a\")\nsay(\"b\")";
         let old = r#"say(\"a\")"#;
         let new = r#"say(\"x\")"#;
-        let result = replace(content, old, new, true).unwrap();
-        assert_eq!(result, "say(\"x\")\nsay(\"b\")");
+        let result = replace(content, old, new, true, None).unwrap();
+        assert_eq!(result.content, "say(\"x\")\nsay(\"b\")");
     }
 
     #[test]
     fn replace_all_replaces_every_occurrence() {
-        let all = replace("aXbXc", "X", "Y", true).unwrap();
+        let all = replace("aXbXc", "X", "Y", true, None).unwrap().content;
         assert_eq!(all, "aYbYc");
     }
 }

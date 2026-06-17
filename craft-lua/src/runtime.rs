@@ -27,7 +27,7 @@ use crate::api::command::{CommandHandlerMap, publish_command_snapshot};
 use crate::api::command::{LuaCommandReader, LuaCommandWriter, UiAction};
 use crate::api::create_craft_global;
 use crate::api::ctx::LuaCtx;
-use crate::api::fn_api::JobStore;
+use crate::api::fn_api::{JobMeta, JobStore};
 use crate::api::json_to_lua;
 use crate::api::setup::ConfigStore;
 use crate::api::tool::{LuaOutputFormat, LuaTool, PendingTool, PendingTools, ToolCallReply};
@@ -58,6 +58,8 @@ pub type LoadResult = Result<(), PluginError>;
 
 /// Shared sandbox config readable from the VM thread, updatable from the host.
 pub type SharedSandboxConfig = Arc<ArcSwap<craft_config::SandboxConfig>>;
+
+type BgJobMap = HashMap<u32, JobMeta>;
 
 pub(crate) enum HintContent {
     Static(String),
@@ -281,6 +283,12 @@ pub(crate) struct TaskScope {
 impl TaskScope {
     pub(crate) fn new(lua: &Lua, cell: TaskCell) -> Self {
         let handle: TaskHandle = Arc::new(Mutex::new(cell));
+        if let Some(bg) = lua.app_data_ref::<RefCell<BgJobMap>>() {
+            let live_bg: HashMap<_, _> = bg.borrow_mut().drain().filter(|(_, m)| m.alive).collect();
+            if !live_bg.is_empty() {
+                lock_cell(&handle).jobs.absorb(live_bg);
+            }
+        }
         let prev = lua.set_app_data::<TaskHandle>(Arc::clone(&handle));
         Self {
             lua: lua.clone(),
@@ -324,6 +332,12 @@ pub(crate) async fn run_detached<F: std::future::Future>(lua: &Lua, fut: F) -> F
 impl Drop for TaskScope {
     fn drop(&mut self) {
         {
+            let bg_jobs = lock_cell(&self.handle).jobs.drain_background();
+            if !bg_jobs.is_empty() {
+                if let Some(bg) = self.lua.app_data_ref::<RefCell<BgJobMap>>() {
+                    bg.borrow_mut().extend(bg_jobs);
+                }
+            }
             let mut cell = lock_cell(&self.handle);
             cell.jobs.kill_all();
             cell.jobs.clear(&self.lua);
@@ -653,6 +667,7 @@ impl LuaRuntime {
             craft_config::SandboxConfig::default(),
         )));
         lua.set_app_data::<Arc<dyn TerminalBackend>>(Arc::clone(&terminal_backend));
+        lua.set_app_data::<RefCell<BgJobMap>>(RefCell::new(BgJobMap::new()));
 
         Ok(Self {
             lua,
@@ -1262,6 +1277,36 @@ fn extract_restore_reply(ret: &LuaValue) -> Option<RestoreReply> {
     Some(RestoreReply { body, header })
 }
 
+/// Drains pending events from background jobs and fires their Lua
+/// callbacks synchronously. Called before each tool handler starts so
+/// that `output_parts` / `bg_jobs` are up-to-date.
+fn drain_bg_job_events(lua: &Lua, handle: &TaskHandle) {
+    let mut event_buf = Vec::new();
+    lock_cell(handle).jobs.drain_events(&mut event_buf);
+    for (job_id, event) in event_buf {
+        let is_exit = matches!(event, JobEvent::Exit(_));
+        let callback = lock_cell(handle)
+            .jobs
+            .callback_key(job_id, &event)
+            .and_then(|k| lua.registry_value::<Function>(k).ok());
+        if let Some(func) = callback {
+            let arg: LuaValue = match &event {
+                JobEvent::Stdout(line) | JobEvent::Stderr(line) => lua
+                    .create_string(line)
+                    .map(LuaValue::String)
+                    .unwrap_or(LuaValue::Nil),
+                JobEvent::Exit(code) => LuaValue::Integer(*code as i64),
+            };
+            if let Err(e) = func.call::<()>((job_id, arg)) {
+                tracing::warn!(job_id, error = %strip_traceback(&e), "bg job callback error");
+            }
+        }
+        if is_exit {
+            lock_cell(handle).jobs.mark_dead(job_id);
+        }
+    }
+}
+
 /// Nil from the handler means "I went async". Polls job events until
 /// `ctx:finish()`, all jobs die, or the deadline (possibly set
 /// mid-flight via `ctx:set_deadline`) expires.
@@ -1444,6 +1489,8 @@ async fn run_tool_call(
         TaskCell::new(cancel, deadline, live, active_terminal_backend(&lua)),
     );
     let handle = Arc::clone(scope.handle());
+
+    drain_bg_job_events(&lua, &handle);
 
     let async_thread = match thread.into_async::<LuaValue>((input_lua, ctx_ud)) {
         Ok(at) => at,

@@ -181,6 +181,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ast-grep-core"
+version = "0.43.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce81c07a23ebe5012b2053ba72af27e36699bf5f8ae6c204cdc2906aa277e5a6"
+dependencies = [
+ "bit-set 0.10.0",
+ "regex",
+ "thiserror 2.0.18",
+ "tree-sitter",
+]
+
+[[package]]
+name = "ast-grep-language"
+version = "0.43.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07b41f5cc1c89eaef8330a873ba26030dbb5b917076de5890d0446e549e4187c"
+dependencies = [
+ "ast-grep-core",
+ "ignore",
+ "serde",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "atomic"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -323,6 +351,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
+dependencies = [
+ "bit-vec 0.9.1",
+]
+
+[[package]]
 name = "bit-vec"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -333,6 +370,15 @@ name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
+
+[[package]]
+name = "bit-vec"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bitflags"
@@ -782,6 +828,8 @@ version = "0.5.2"
 dependencies = [
  "aho-corasick",
  "arc-swap",
+ "ast-grep-core",
+ "ast-grep-language",
  "base64 0.22.1",
  "bitflags 2.13.0",
  "craft-config",
@@ -806,6 +854,7 @@ dependencies = [
  "open",
  "regex",
  "reqwest 0.13.4",
+ "rstest",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -819,6 +868,31 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-dart",
+ "tree-sitter-elixir",
+ "tree-sitter-gleam",
+ "tree-sitter-go",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-kotlin-ng",
+ "tree-sitter-lua",
+ "tree-sitter-md",
+ "tree-sitter-nix",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-starlark",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "tree-sitter-zig",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -1843,6 +1917,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
 
 [[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
+
+[[package]]
 name = "futures-util"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1958,6 +2038,12 @@ name = "gimli"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "globset"
@@ -4036,6 +4122,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-crate"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
+dependencies = [
+ "toml_edit",
+]
+
+[[package]]
 name = "proc-macro-error-attr2"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4528,6 +4623,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relative-path"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4621,6 +4722,35 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rstest"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5a3193c063baaa2a95a33f03035c8a72b83d97a54916055ba22d35ed3839d49"
+dependencies = [
+ "futures-timer",
+ "futures-util",
+ "rstest_macros",
+]
+
+[[package]]
+name = "rstest_macros"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c845311f0ff7951c5506121a9ad75aec44d083c31583b2ea5a30bcb0b0abba0"
+dependencies = [
+ "cfg-if",
+ "glob",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "relative-path",
+ "rustc_version",
+ "syn 2.0.117",
+ "unicode-ident",
 ]
 
 [[package]]

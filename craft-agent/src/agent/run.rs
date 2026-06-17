@@ -122,6 +122,7 @@ pub struct Agent<'h> {
     fs: Arc<dyn crate::tools::FsBackend>,
     goal: Option<String>,
     judge_continuations: u8,
+    snapshot_store: Arc<crate::tools::safety::SnapshotStore>,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -185,6 +186,7 @@ impl<'h> Agent<'h> {
             fs: params.fs,
             goal: None,
             judge_continuations: 0,
+            snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
         }
     }
 
@@ -690,6 +692,7 @@ impl<'h> Agent<'h> {
             promoted: self.promoted.clone(),
             dynamic: self.dynamic.clone(),
             hooks: self.hooks.clone(),
+            snapshot_store: Arc::clone(&self.snapshot_store),
         }
     }
 

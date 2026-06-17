@@ -22,7 +22,7 @@ use super::{DescriptionContext, ToolFilter};
 /// Lua/builtin plugins that ship in the core tier. Native core tools declare their
 /// tier via `impl_tool!(..., tier = ToolTier::Core)`; plugins go through the Lua
 /// `Tool` impl which has no tier metadata, so they are listed here instead.
-pub const DEFAULT_CORE_PLUGINS: &[&str] = &["bash", "glob", "index"];
+pub const DEFAULT_CORE_PLUGINS: &[&str] = &["bash", "glob"];
 
 /// Per-session handle for tools the model has promoted via `list_tools`. Cloning is
 /// cheap (one `Arc`), so it flows through `ToolContext` into the `list_tools` tool.

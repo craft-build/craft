@@ -19,8 +19,8 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                 AuthAction::Logout { provider } => subcmd::auth_logout(&provider, &storage)?,
             }
         }
-        Some(Command::Index { path }) => {
-            subcmd::index(&path, cli.no_plugins).await?;
+        Some(Command::Outline { path }) => {
+            subcmd::outline(&path, cli.no_plugins).await?;
         }
         Some(Command::Models) => {
             subcmd::models().await;

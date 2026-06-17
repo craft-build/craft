@@ -76,7 +76,6 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
     "glob",
     "grep",
-    "index",
     "memory",
     "question",
     "skill",
@@ -137,14 +136,6 @@ pub const TOP_LEVEL_FIELDS: &[ConfigField] = &[
         description: "Start every session with extended thinking (true/\"adaptive\", \"off\", or a token budget)",
     },
 ];
-
-pub const INDEX_FIELDS: &[ConfigField] = &[ConfigField {
-    name: "max_file_size_mb",
-    ty: "u64",
-    default: ConfigValue::U64(DEFAULT_MAX_FILE_SIZE_MB),
-    min: Some(MIN_MAX_FILE_SIZE_MB),
-    description: "Max file size for indexing (MB)",
-}];
 
 /// Error type for permission file operations.
 #[derive(Debug, Error)]
@@ -227,7 +218,6 @@ pub struct RawConfig {
     pub agent: AgentFileConfig,
     pub provider: ProviderFileConfig,
     pub storage: StorageFileConfig,
-    pub index: IndexFileConfig,
     #[serde(default)]
     pub compression: CompressionFileConfig,
     #[serde(default)]
@@ -242,7 +232,6 @@ impl RawConfig {
         self.agent.merge(overlay.agent);
         self.provider.merge(overlay.provider);
         self.storage.merge(overlay.storage);
-        self.index.merge(overlay.index);
         self.compression.merge(overlay.compression);
         self.sandbox.merge(overlay.sandbox);
         self.tools.extend(overlay.tools);
@@ -263,7 +252,7 @@ impl RawConfig {
                 .map(AlwaysThinking::resolve)
                 .transpose()?,
             ui: UiConfig::from_file(self.ui),
-            agent: AgentConfig::from_file(self.agent, no_rtk, &self.index, disabled_tools),
+            agent: AgentConfig::from_file(self.agent, no_rtk, disabled_tools),
             provider: ProviderConfig::from_file(self.provider),
             storage: StorageConfig::from_file(self.storage),
             compression: CompressionConfig::from_file(self.compression),
@@ -316,7 +305,6 @@ pub struct ToolOutputLinesFile {
     pub bash: Option<usize>,
     pub code_execution: Option<usize>,
     pub task: Option<usize>,
-    pub index: Option<usize>,
     pub grep: Option<usize>,
     pub read: Option<usize>,
     pub write: Option<usize>,
@@ -332,7 +320,6 @@ impl ToolOutputLinesFile {
             bash,
             code_execution,
             task,
-            index,
             grep,
             read,
             write,
@@ -427,18 +414,6 @@ impl StorageFileConfig {
             max_log_files,
             input_history_size
         );
-    }
-}
-
-#[derive(Deserialize, Default, Debug)]
-#[serde(default, deny_unknown_fields)]
-pub struct IndexFileConfig {
-    pub max_file_size_mb: Option<u64>,
-}
-
-impl IndexFileConfig {
-    fn merge(&mut self, overlay: IndexFileConfig) {
-        merge_option!(self, overlay, max_file_size_mb);
     }
 }
 
@@ -630,7 +605,6 @@ pub struct ToolOutputLines {
     pub bash: usize,
     pub code_execution: usize,
     pub task: usize,
-    pub index: usize,
     pub grep: usize,
     pub read: usize,
     pub write: usize,
@@ -643,7 +617,6 @@ impl ToolOutputLines {
         bash: 5,
         code_execution: 5,
         task: 5,
-        index: 3,
         grep: 3,
         read: 3,
         write: 7,
@@ -655,7 +628,6 @@ impl ToolOutputLines {
         ("bash", Self::DEFAULT.bash),
         ("code_execution", Self::DEFAULT.code_execution),
         ("task", Self::DEFAULT.task),
-        ("index", Self::DEFAULT.index),
         ("grep", Self::DEFAULT.grep),
         ("read", Self::DEFAULT.read),
         ("write", Self::DEFAULT.write),
@@ -670,7 +642,6 @@ impl ToolOutputLines {
             bash: f.bash.unwrap_or(d.bash),
             code_execution: f.code_execution.unwrap_or(d.code_execution),
             task: f.task.unwrap_or(d.task),
-            index: f.index.unwrap_or(d.index),
             grep: f.grep.unwrap_or(d.grep),
             read: f.read.unwrap_or(d.read),
             write: f.write.unwrap_or(d.write),
@@ -679,12 +650,11 @@ impl ToolOutputLines {
         }
     }
 
-    fn fields(&self) -> [(&'static str, usize); 9] {
+    fn fields(&self) -> [(&'static str, usize); 8] {
         [
             ("bash", self.bash),
             ("code_execution", self.code_execution),
             ("task", self.task),
-            ("index", self.index),
             ("grep", self.grep),
             ("read", self.read),
             ("write", self.write),
@@ -710,7 +680,6 @@ impl ToolOutputLines {
             "bash" => self.bash,
             "code_execution" => self.code_execution,
             "task" => self.task,
-            "index" => self.index,
             "grep" | "glob" => self.grep,
             "read" => self.read,
             "write" | "edit" | "multiedit" | "memory" => self.write,
@@ -897,9 +866,6 @@ pub struct AgentConfig {
     #[config(skip, default = false)]
     pub no_rtk: bool,
 
-    #[config(skip, default = "DEFAULT_MAX_FILE_SIZE_MB * 1024 * 1024")]
-    pub index_max_file_size: u64,
-
     #[config(skip, default = "Vec::new()")]
     pub allowed_tools: Vec<String>,
 
@@ -941,12 +907,7 @@ impl AgentConfig {
             (self.max_output_lines as f64 * factor) as usize,
         )
     }
-    fn from_file(
-        file: AgentFileConfig,
-        no_rtk: bool,
-        index_file_config: &IndexFileConfig,
-        disabled_tools: Vec<String>,
-    ) -> Self {
+    fn from_file(file: AgentFileConfig, no_rtk: bool, disabled_tools: Vec<String>) -> Self {
         Self {
             no_rtk,
             max_output_bytes: file.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES),
@@ -969,11 +930,6 @@ impl AgentConfig {
             interpreter_max_memory_mb: file
                 .interpreter_max_memory_mb
                 .unwrap_or(DEFAULT_INTERPRETER_MAX_MEMORY_MB),
-            index_max_file_size: index_file_config
-                .max_file_size_mb
-                .unwrap_or(DEFAULT_MAX_FILE_SIZE_MB)
-                * 1024
-                * 1024,
             allowed_tools: Vec::new(),
             disabled_tools,
             trust_decay: file.trust_decay,
@@ -988,12 +944,6 @@ impl AgentConfig {
 
     pub fn validate_all(&self) -> Result<(), ConfigError> {
         self.validate()?;
-        check(
-            "agent",
-            "max_file_size_mb",
-            self.index_max_file_size / (1024 * 1024),
-            MIN_MAX_FILE_SIZE_MB,
-        )?;
         Ok(())
     }
 }
@@ -1603,14 +1553,13 @@ mod tests {
         assert_eq!(config.ui.tool_output_lines.bash, 20);
         assert_eq!(config.ui.tool_output_lines.read, 20);
         assert_eq!(
-            config.ui.tool_output_lines.index,
-            ToolOutputLines::DEFAULT.index
+            config.ui.tool_output_lines.grep,
+            ToolOutputLines::DEFAULT.grep
         );
     }
 
     #[test_case("provider", "connect_timeout_secs", 0 ; "provider_zero_connect_timeout")]
     #[test_case("storage",  "max_log_files",        0 ; "storage_zero_log_files")]
-    #[test_case("agent",    "max_file_size_mb",     0 ; "agent_zero_file_size")]
     #[test_case("ui",       "mouse_scroll_lines",   0 ; "ui_zero_scroll_lines")]
     #[test_case("agent",    "bash_timeout_secs",    1 ; "agent_bash_timeout_too_low")]
     fn validate_rejects_invalid_sections(section: &str, field: &str, value: u64) {
@@ -1632,7 +1581,6 @@ mod tests {
                 config.provider.connect_timeout = Duration::from_secs(value)
             }
             ("storage", "max_log_files") => config.storage.max_log_files = value as u32,
-            ("agent", "max_file_size_mb") => config.agent.index_max_file_size = value * 1024 * 1024,
             ("ui", "mouse_scroll_lines") => config.ui.mouse_scroll_lines = value as u32,
             ("agent", "bash_timeout_secs") => config.agent.bash_timeout_secs = value,
             _ => unreachable!(),
@@ -1867,7 +1815,7 @@ mod tests {
             ..Default::default()
         };
         base.tools.insert(
-            "index".to_string(),
+            "glob".to_string(),
             ToolFileConfig {
                 enabled: Some(true),
             },
@@ -2006,7 +1954,7 @@ mod tests {
             "disabled builtin removed"
         );
         assert!(
-            plugins.tools.contains(&"index".to_string()),
+            plugins.tools.contains(&"glob".to_string()),
             "untouched builtin stays"
         );
         assert!(
@@ -2100,7 +2048,7 @@ mod tests {
 
         assert!(config.plugins.tools.contains(&"bash".to_string()));
         assert!(!config.plugins.tools.contains(&"websearch".to_string()));
-        assert!(config.plugins.tools.contains(&"index".to_string()));
+        assert!(config.plugins.tools.contains(&"glob".to_string()));
     }
 
     #[test]

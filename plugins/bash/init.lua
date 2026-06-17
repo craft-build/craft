@@ -20,6 +20,9 @@ local SEPARATOR = "──────"
 
 local rtk_available
 
+local bg_jobs = {}
+local bg_next_id = 1
+
 local function shell_quote(s)
   return "'" .. s:gsub("'", "'\\''") .. "'"
 end
@@ -136,6 +139,28 @@ local function rtk_rewrite(command, ctx)
   return rewritten
 end
 
+local function strip_ansi(s)
+  return s:gsub("\27%[[%d;]*m", "")
+end
+
+local function compress_output(s)
+  s = strip_ansi(s)
+  local lines = {}
+  local prev_blank = false
+  for line in (s .. "\n"):gmatch("([^\n]*)\n") do
+    if line:match("^%s*$") then
+      if not prev_blank then
+        lines[#lines + 1] = ""
+        prev_blank = true
+      end
+    else
+      lines[#lines + 1] = line
+      prev_blank = false
+    end
+  end
+  return table.concat(lines, "\n")
+end
+
 local function append_line(output, line)
   if #output > 0 then
     output[#output + 1] = "\n"
@@ -220,7 +245,7 @@ local function collect_commands(node, source)
   return out
 end
 
-local description = [[Execute a bash command.
+local bash_description = [[Execute a bash command.
 Commands run in ]] .. cwd .. [[ by default.
 
 - **DO NOT** use for file ops! Only git, builds, tests, and system commands.
@@ -229,12 +254,13 @@ Commands run in ]] .. cwd .. [[ by default.
 - Chain dependent commands with `&&`. Use batch for independent ones.
 - Provide a short `description` (3-5 words).
 - Output truncated beyond 2000 lines or 50KB.
-- Interactive commands (sudo, ssh prompts) fail immediately.]]
+- Interactive commands (sudo, ssh prompts) fail immediately.
+- Set `background=true` for long-running commands. Returns a `task_id` for use with bash_status, bash_watch, bash_kill.]]
 
 craft.api.register_tool({
   name = "bash",
   kind = "execute",
-  description = description,
+  description = bash_description,
   schema = {
     type = "object",
     properties = {
@@ -242,6 +268,7 @@ craft.api.register_tool({
       timeout = { type = "integer", description = "Timeout in seconds (default 120)" },
       workdir = { type = "string", description = "Working directory (default: cwd)" },
       description = { type = "string", description = "Short description (3-5 words) of what the command does" },
+      background = { type = "boolean", description = "Run in background, return task_id for later polling" },
     },
   },
   permission_scopes = function(input)
@@ -270,6 +297,9 @@ craft.api.register_tool({
   header = function(input)
     local command, workdir = parse_cd_hint(input)
     local s = input.description or command
+    if input.background then
+      s = s .. " (bg)"
+    end
     if workdir then
       s = s .. " in " .. relative_path(workdir)
     end
@@ -287,6 +317,14 @@ craft.api.register_tool({
     local timeout_secs = output:match("^tool bash timed out after (%d+)s$")
     if timeout_secs then
       view:append({ { "Timed out after " .. timeout_secs .. "s", "dim" } })
+    elseif output:match("^Background task:") then
+      view:clear()
+      for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+        if line ~= "" then
+          view:append({ { line, "dim" } })
+        end
+      end
+      view:finish()
     elseif is_error then
       local body, code = output:match("^(.-)\nExit code: (%d+)$")
       if body then
@@ -324,7 +362,9 @@ craft.api.register_tool({
     local max_lines = (config and config.max_output_lines) or 2000
     local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
 
-    ctx:set_deadline(timeout_secs)
+    if not input.background then
+      ctx:set_deadline(timeout_secs)
+    end
 
     local rewritten = rtk_rewrite(command, ctx)
     if rewritten then
@@ -332,12 +372,16 @@ craft.api.register_tool({
     end
 
     local buf, view = create_bash_view(command, ctx)
-
     local output_parts = {}
     local has_output = false
+    local bg_task_id = input.background and ("bg_" .. bg_next_id) or nil
+    if bg_task_id then
+      bg_next_id = bg_next_id + 1
+    end
 
     local function finish(exit_code)
       local output = table.concat(output_parts)
+      output = compress_output(output)
       output = truncate(output, max_lines, max_bytes)
 
       local is_error = exit_code ~= 0
@@ -365,12 +409,11 @@ craft.api.register_tool({
       ctx:finish({ llm_output = llm_output, is_error = is_error, body = buf })
     end
 
-    view:append({ { "Waiting for output...", "dim" } })
-
-    craft.fn.jobstart(command, {
+    local job_opts = {
       cwd = workdir,
       env = { GIT_TERMINAL_PROMPT = "0" },
       sandbox = true,
+      background = input.background or false,
       on_stdout = function(_, line)
         if not has_output then
           has_output = true
@@ -388,11 +431,243 @@ craft.api.register_tool({
         view:append(line)
       end,
       on_exit = function(_, code)
+        if bg_task_id then
+          bg_jobs[bg_task_id].status = "exited"
+          bg_jobs[bg_task_id].exit_code = code
+          return
+        end
         finish(code)
       end,
-    })
+    }
+    local job_id = craft.fn.jobstart(command, job_opts)
 
+    if bg_task_id then
+      bg_jobs[bg_task_id] = {
+        job_id = job_id,
+        command = command,
+        status = "running",
+        exit_code = nil,
+        output_parts = output_parts,
+      }
+
+      view:append({ { "Background task: " .. bg_task_id, "dim" } })
+      view:finish()
+
+      local llm_output = "Background task: "
+        .. bg_task_id
+        .. "\n"
+        .. 'use bash_status(task_id="'
+        .. bg_task_id
+        .. '") to check output\n'
+        .. 'use bash_kill(task_id="'
+        .. bg_task_id
+        .. '") to terminate'
+
+      return { llm_output = llm_output, is_error = false, body = buf }
+    end
+
+    view:append({ { "Waiting for output...", "dim" } })
     return nil
+  end,
+})
+
+-- bash_status: poll a background task
+craft.api.register_tool({
+  name = "bash_status",
+  kind = "execute",
+  description = "Check status and current output of a background bash task.",
+  schema = {
+    type = "object",
+    properties = {
+      task_id = { type = "string", description = "The task_id returned by bash", required = true },
+    },
+  },
+  permission_scopes = function()
+    return { scopes = { "bash_status" }, force_prompt = false }
+  end,
+  header = function(input)
+    return "status " .. (input.task_id or "?")
+  end,
+  handler = function(input, ctx)
+    local id = input.task_id
+    if not id then
+      return { llm_output = "error: task_id is required", is_error = true }
+    end
+    local job = bg_jobs[id]
+    if not job then
+      return { llm_output = 'error: unknown task_id "' .. id .. '"', is_error = true }
+    end
+
+    local config = ctx:config()
+    local max_lines = (config and config.max_output_lines) or 2000
+    local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
+
+    local output = table.concat(job.output_parts)
+    output = compress_output(output)
+    output = truncate(output, max_lines, max_bytes)
+
+    local status_line = "status: " .. job.status
+    if job.exit_code then
+      status_line = status_line .. " (exit code: " .. job.exit_code .. ")"
+    end
+
+    local llm_output
+    if output == "" then
+      llm_output = status_line .. "\nno output yet"
+    else
+      llm_output = status_line .. "\n" .. output
+    end
+
+    return { llm_output = llm_output, is_error = job.status == "exited" and (job.exit_code or 0) ~= 0 }
+  end,
+})
+
+-- bash_watch: wait for a pattern in a background task's output
+craft.api.register_tool({
+  name = "bash_watch",
+  kind = "execute",
+  description = "Wait for a pattern (substring or Lua pattern) in a background bash task's output, or for the task to exit. Polls until match found, task exits, or timeout.",
+  schema = {
+    type = "object",
+    properties = {
+      task_id = { type = "string", description = "The task_id returned by bash", required = true },
+      pattern = { type = "string", description = "Substring or Lua pattern to wait for in task output" },
+      timeout = { type = "integer", description = "Max seconds to wait (default 60)" },
+    },
+  },
+  permission_scopes = function()
+    return { scopes = { "bash_watch" }, force_prompt = false }
+  end,
+  header = function(input)
+    return "watch " .. (input.task_id or "?")
+  end,
+  handler = function(input, ctx)
+    local id = input.task_id
+    if not id then
+      return { llm_output = "error: task_id is required", is_error = true }
+    end
+    local job = bg_jobs[id]
+    if not job then
+      return { llm_output = 'error: unknown task_id "' .. id .. '"', is_error = true }
+    end
+
+    local config = ctx:config()
+    local max_lines = (config and config.max_output_lines) or 2000
+    local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
+    local timeout_secs = input.timeout or 60
+    local pattern = input.pattern
+
+    ctx:set_deadline(timeout_secs)
+
+    -- Check current output immediately
+    local current = table.concat(job.output_parts)
+
+    if pattern and current:find(pattern) then
+      current = compress_output(current)
+      current = truncate(current, max_lines, max_bytes)
+      return {
+        llm_output = "pattern found\n" .. current,
+        is_error = false,
+      }
+    end
+
+    if job.status == "exited" then
+      current = compress_output(current)
+      current = truncate(current, max_lines, max_bytes)
+      local llm_output = "task exited (code: " .. (job.exit_code or "?") .. ")"
+      if current ~= "" then
+        llm_output = llm_output .. "\n" .. current
+      end
+      return { llm_output = llm_output, is_error = (job.exit_code or 0) ~= 0 }
+    end
+
+    -- No match yet and task still running. Use craft.fn.jobwait to block
+    -- until the job exits or timeout, then check output.
+    local result = craft.fn.jobwait(job.job_id, timeout_secs * 1000)
+
+    -- jobwait read events directly, bypassing on_stdout/on_stderr callbacks.
+    -- Merge any output from jobwait into output_parts so bash_status sees it.
+    if result then
+      if result.stdout ~= "" then
+        for line in result.stdout:gmatch("[^\n]+") do
+          append_line(job.output_parts, line)
+        end
+      end
+      if result.stderr ~= "" then
+        for line in result.stderr:gmatch("[^\n]+") do
+          append_line(job.output_parts, line)
+        end
+      end
+    end
+
+    -- Re-read output after waiting
+    local output = table.concat(job.output_parts)
+    output = compress_output(output)
+    output = truncate(output, max_lines, max_bytes)
+
+    if result then
+      -- jobwait returned: task exited
+      job.status = "exited"
+      job.exit_code = result.exit_code
+      local llm_output = "task exited (code: " .. result.exit_code .. ")"
+      if output ~= "" then
+        llm_output = llm_output .. "\n" .. output
+      end
+      if pattern and output:find(pattern) then
+        llm_output = "pattern found (task exited)\n" .. output
+      end
+      return { llm_output = llm_output, is_error = result.exit_code ~= 0 }
+    else
+      -- jobwait timed out: task still running
+      if pattern and output:find(pattern) then
+        return {
+          llm_output = "pattern found (task still running)\n" .. output,
+          is_error = false,
+        }
+      end
+      return {
+        llm_output = "timed out after " .. timeout_secs .. "s (task still running)\n" .. output,
+        is_error = false,
+      }
+    end
+  end,
+})
+
+-- bash_kill: terminate a background task
+craft.api.register_tool({
+  name = "bash_kill",
+  kind = "execute",
+  description = "Terminate a background bash task.",
+  schema = {
+    type = "object",
+    properties = {
+      task_id = { type = "string", description = "The task_id returned by bash", required = true },
+    },
+  },
+  permission_scopes = function()
+    return { scopes = { "bash_kill" }, force_prompt = true }
+  end,
+  header = function(input)
+    return "kill " .. (input.task_id or "?")
+  end,
+  handler = function(input, ctx)
+    local id = input.task_id
+    if not id then
+      return { llm_output = "error: task_id is required", is_error = true }
+    end
+    local job = bg_jobs[id]
+    if not job then
+      return { llm_output = 'error: unknown task_id "' .. id .. '"', is_error = true }
+    end
+
+    if job.status == "exited" then
+      return { llm_output = "task already exited (code: " .. (job.exit_code or "?") .. ")", is_error = false }
+    end
+
+    craft.fn.jobstop(job.job_id)
+    job.status = "killed"
+
+    return { llm_output = "task " .. id .. " killed", is_error = false }
   end,
 })
 

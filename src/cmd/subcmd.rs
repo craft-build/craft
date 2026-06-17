@@ -45,7 +45,7 @@ pub async fn models() {
     .await;
 }
 
-pub async fn index(path: &str, no_plugins: bool) -> Result<()> {
+pub async fn outline(path: &str, no_plugins: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
@@ -74,17 +74,17 @@ pub async fn index(path: &str, no_plugins: bool) -> Result<()> {
     let input = serde_json::json!({"path": abs_path.to_str().unwrap_or(path)});
     let reg = ToolRegistry::native_arc();
     let entry = reg
-        .get("index")
-        .ok_or_else(|| color_eyre::eyre::eyre!("index tool not registered"))?;
+        .get("outline")
+        .ok_or_else(|| color_eyre::eyre::eyre!("outline tool not registered"))?;
     let inv = entry
         .tool
         .parse(&input)
-        .map_err(|e| color_eyre::eyre::eyre!("parse index input: {e}"))?;
+        .map_err(|e| color_eyre::eyre::eyre!("parse outline input: {e}"))?;
     let ctx = craft_agent::tools::cli_tool_ctx();
     let result = inv.execute(&ctx).await;
     match result.output {
         Ok(output) => print!("{}", output.as_text()),
-        Err(e) => bail!("index failed: {e}"),
+        Err(e) => bail!("outline failed: {e}"),
     }
     Ok(())
 }

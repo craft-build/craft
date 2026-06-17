@@ -1,10 +1,9 @@
 use std::fmt::Write;
 
 use craft_config::{
-    AgentConfig, ConfigField, DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_MAX_FILE_SIZE_MB,
-    DEFAULT_MAX_LOG_FILES, DEFAULT_MAX_OUTPUT_LINES, DEFAULT_MOUSE_SCROLL_LINES, INDEX_FIELDS,
-    MIN_TOOL_OUTPUT_LINES, ProviderConfig, StorageConfig, TOP_LEVEL_FIELDS, ToolOutputLines,
-    UiConfig,
+    AgentConfig, ConfigField, DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_MAX_LOG_FILES,
+    DEFAULT_MAX_OUTPUT_LINES, DEFAULT_MOUSE_SCROLL_LINES, MIN_TOOL_OUTPUT_LINES, ProviderConfig,
+    StorageConfig, TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
 };
 
 fn write_table_with_min(out: &mut String, fields: &[ConfigField]) {
@@ -117,9 +116,6 @@ craft.setup({{
     storage = {{
         max_log_files = {max_log_files},
     }},
-    index = {{
-        max_file_size_mb = {max_file_size},
-    }},
 }})
 ```
 
@@ -135,7 +131,6 @@ All fields are optional. Typos in field names cause an error right away.
         bash_timeout = DEFAULT_BASH_TIMEOUT_SECS + 60,
         max_output_lines = DEFAULT_MAX_OUTPUT_LINES + 1000,
         max_log_files = DEFAULT_MAX_LOG_FILES / 2,
-        max_file_size = DEFAULT_MAX_FILE_SIZE_MB + 2,
     )
     .unwrap();
 
@@ -148,13 +143,12 @@ All fields are optional. Typos in field names cause an error right away.
     write_section(&mut out, "[agent]", AgentConfig::FIELDS);
     write_section(&mut out, "[provider]", ProviderConfig::FIELDS);
     write_section(&mut out, "[storage]", StorageConfig::FIELDS);
-    write_section(&mut out, "[index]", INDEX_FIELDS);
 
     writeln!(out, "## Tools\n").unwrap();
     writeln!(
         out,
         "The `tools` table lets you turn tools on or off. \
-         By default `index`, `webfetch`, and `websearch` are on. \
+         By default `webfetch` and `websearch` are on. \
          `bash` is off by default.\n"
     )
     .unwrap();

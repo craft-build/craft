@@ -308,6 +308,15 @@ mod tests {
             (super::super::TODOWRITE_TOOL_NAME, MAIN | RES | GEN),
             (super::super::LIST_TOOLS_TOOL_NAME, MAIN | RES | GEN),
             (super::super::TASK_TOOL_NAME, MAIN),
+            (super::super::OUTLINE_TOOL_NAME, all),
+            (super::super::ZOOM_TOOL_NAME, MAIN | GEN | INT),
+            (super::super::AST_GREP_TOOL_NAME, MAIN),
+            (super::super::CALLGRAPH_TOOL_NAME, all),
+            (super::super::CONFLICTS_TOOL_NAME, all),
+            (super::super::DELETE_TOOL_NAME, MAIN | GEN | INT),
+            (super::super::INSPECT_TOOL_NAME, all),
+            (super::super::MOVE_TOOL_NAME, MAIN | GEN | INT),
+            (super::super::SAFETY_TOOL_NAME, MAIN),
         ]);
 
         let snapshot = ToolRegistry::native().iter();

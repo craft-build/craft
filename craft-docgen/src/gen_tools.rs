@@ -17,7 +17,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "multiedit",
             "glob",
             "grep",
-            "index",
+            "outline",
         ],
     ),
     (

@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ToolOutput;
 
-const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob", "index"];
+const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob"];
 const CACHED_PREFIX: &str = "[cached] ";
 const MAX_CACHE_ENTRIES: usize = 64;
 
@@ -168,7 +168,6 @@ mod tests {
         assert!(ToolDedupCache::is_read_only("read"));
         assert!(ToolDedupCache::is_read_only("grep"));
         assert!(ToolDedupCache::is_read_only("glob"));
-        assert!(ToolDedupCache::is_read_only("index"));
         assert!(!ToolDedupCache::is_read_only("write"));
         assert!(!ToolDedupCache::is_read_only("edit"));
         assert!(!ToolDedupCache::is_read_only("bash"));
