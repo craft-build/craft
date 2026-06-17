@@ -4,7 +4,46 @@ All notable changes to **craft** are documented in this file.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## [Unreleased]
+
+## [0.6.0] - 2026-06-17
+
+### Added
+
+- **index**: Dart language indexer with tree-sitter grammar. (`97e2445`)
+- **agent**: nine new built-in tools:
+  - `outline`: tree-sitter structural outline (24 languages).
+  - `zoom`: symbol-aware file reader with AST lookup.
+  - `fuzzy_replace`: occurrence parameter and Unicode normalization pass.
+  - `ast_grep`: AST pattern search/replace (ast-grep-core, 4 languages).
+  - `callgraph`: intra-file call graph (`call_tree`, `callers`, `impact`).
+  - `delete`: file and directory deletion with auto-backup.
+  - `move`: rename with import reference updates across the project.
+  - `inspect`: TODO/FIXME/HACK scanner plus git status.
+  - `conflicts`: git merge conflict marker parser. (`50d046e`)
+- **agent**: post-edit tree-sitter validation with automatic rollback. (`50d046e`)
+- **agent**: checkpoint/restore/list/undo/history commands and per-file
+  auto-backup. (`50d046e`)
+- **agent**: `background=true` parameter for `bash`, plus `bash_status`,
+  `bash_watch`, and `bash_kill` for background task management. (`50d046e`)
+- **agent**: `bash` output compression (ANSI stripping, blank line collapse).
+  (`50d046e`)
+- **agent**: tree-sitter grammars for CSS, Fish, GDScript, GDShader,
+  Godot Resource, Objective-C, Perl, Svelte, and Zsh. (`a5bf08e`)
+
+### Changed
+
+- **sandbox**: expanded default writable roots to include per-tool data homes
+  (`CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`, `GRADLE_USER_HOME`, `YARN_CACHE_FOLDER`,
+  `.npm`, `.m2`), environment-only roots (`CARGO_TARGET_DIR`, `GOMODCACHE`),
+  and platform cache homes. (`443aa09`)
+
+### Fixed
+
+- **agent**: corrected tree-sitter draft queries for CSS, Fish, GDScript,
+  GDShader, Godot Resource, and Objective-C that referenced wrong node types.
+  (`a5bf08e`)
 
 ## [0.5.2] - 2026-06-16
 
@@ -398,7 +437,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/craft-build/craft/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/craft-build/craft/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/craft-build/craft/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/craft-build/craft/releases/tag/v0.5.0
