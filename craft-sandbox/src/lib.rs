@@ -156,28 +156,146 @@ fn warn_once_unsupported() {
     }
 }
 
-/// Common writable roots every profile grants so builds and standard tools work:
-/// the system temp dir and the user's cache home.
+/// Common writable roots every profile grants so builds and standard package
+/// managers work without per-tool configuration: the system temp dir, the user
+/// cache home(s), and the per-tool data homes used by cargo, rustup, go, npm,
+/// yarn, gradle and maven. Env overrides are honored where tools define them.
 pub fn default_writable_roots() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|h| h.canonicalize().ok());
+
     let mut roots = Vec::new();
     if let Ok(tmp) = std::env::temp_dir().canonicalize() {
         roots.push(tmp);
     }
-    if let Some(cache) = etcetera_cache_dir() {
-        roots.push(cache);
+    roots.extend(cache_dirs());
+
+    for (env_var, fallback) in BUILD_TOOL_HOMES {
+        if let Some(p) = resolve_tool_home(*env_var, fallback, home.as_deref()) {
+            roots.push(p);
+        }
     }
-    roots
+    for env_var in ENV_ONLY_ROOTS {
+        if let Some(p) = std::env::var_os(env_var)
+            .map(PathBuf::from)
+            .and_then(|p| p.canonicalize().ok())
+        {
+            roots.push(p);
+        }
+    }
+
+    dedup_preserving_order(roots)
 }
 
-fn etcetera_cache_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .and_then(|p| p.canonicalize().ok())
+/// Per-tool data homes. The env override wins over the default subdir under
+/// `$HOME`; a `None` env var means the tool has no standard override and always
+/// uses its default subdir.
+const BUILD_TOOL_HOMES: &[(Option<&str>, &str)] = &[
+    (Some("CARGO_HOME"), ".cargo"),
+    (Some("RUSTUP_HOME"), ".rustup"),
+    (Some("GOPATH"), "go"),
+    (Some("GRADLE_USER_HOME"), ".gradle"),
+    (Some("YARN_CACHE_FOLDER"), ".yarn"),
+    (None, ".npm"),
+    (None, ".m2"),
+];
+
+/// Roots with no fixed default under `$HOME`: their default already lives inside
+/// an allowed root (the workspace or `GOPATH`), so they only matter when the env
+/// var points them elsewhere (e.g. a shared `CARGO_TARGET_DIR`).
+const ENV_ONLY_ROOTS: &[&str] = &["CARGO_TARGET_DIR", "GOMODCACHE"];
+
+fn resolve_tool_home(
+    env_var: Option<&str>,
+    fallback: &str,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let path = match (env_var.and_then(std::env::var_os), home) {
+        (Some(v), _) => PathBuf::from(v),
+        (None, Some(h)) => h.join(fallback),
+        (None, None) => return None,
+    };
+    path.canonicalize().ok()
+}
+
+/// User cache homes across platforms: `$XDG_CACHE_HOME`, `~/.cache` (Linux/XDG)
+/// and `~/Library/Caches` (macOS; Homebrew, pip, cocoapods, yarn, etc.).
+fn cache_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(p) = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
+        && let Ok(c) = p.canonicalize()
+    {
+        dirs.push(c);
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for sub in [".cache", "Library/Caches"] {
+            if let Ok(c) = home.join(sub).canonicalize() {
+                dirs.push(c);
+            }
+        }
+    }
+    dirs
+}
+
+fn dedup_preserving_order(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
 }
 
 /// Normalize a path for inclusion in a profile. Canonicalizes when possible so
 /// symlinks resolve, falling back to the original on failure.
 pub(crate) fn normalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_roots_include_temp_dir_without_duplicates() {
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        let roots = default_writable_roots();
+        assert!(roots.contains(&tmp), "system temp dir must be writable");
+        let mut sorted = roots.clone();
+        sorted.sort();
+        let mut deduped = sorted.clone();
+        deduped.dedup();
+        assert_eq!(sorted, deduped, "roots must not contain duplicates");
+    }
+
+    #[test]
+    fn resolve_tool_home_falls_back_under_home_when_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        let resolved = resolve_tool_home(
+            Some("CRAFT_SANDBOX_DEFINITELY_UNSET_ENV_42"),
+            ".cargo",
+            Some(&home),
+        )
+        .expect("must resolve when the default subdir exists under home");
+        assert_eq!(resolved, home.join(".cargo"));
+    }
+
+    #[test]
+    fn resolve_tool_home_returns_none_when_path_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        assert!(resolve_tool_home(
+            Some("CRAFT_SANDBOX_DEFINITELY_UNSET_ENV_43"),
+            ".does-not-exist",
+            Some(&home),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn dedup_preserves_first_occurrence_order() {
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        let input = vec![a.clone(), b.clone(), a, b];
+        assert_eq!(dedup_preserving_order(input), vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+    }
 }
