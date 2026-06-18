@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "craft"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "clap",
  "color-eyre",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "craft-acp"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "agent-client-protocol-schema",
  "color-eyre",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "craft-agent"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "craft-config"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "craft-config-macro",
  "craft-storage",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "craft-config-macro"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "craft-docgen"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "craft-agent",
  "craft-config",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "craft-highlight"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "serde_json",
  "syntect",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "craft-interpreter"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "monty",
  "serde_json",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "craft-lua"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "craft-agent",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "craft-markdown"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "craft-highlight",
  "fastrand",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "craft-providers"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64 0.22.1",
  "craft-config",
@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "craft-sandbox"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "tempfile",
  "test-case",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "craft-storage"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "etcetera",
  "getrandom 0.4.3",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "craft-tool-macro"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "craft-ui"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arboard",
  "arc-swap",

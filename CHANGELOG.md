@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-18
+
+### Fixed
+
+- **agent**: corrected the tree-sitter Go query that panicked the `outline`
+  tool, and hardened query construction across `outline`/`zoom`/`callgraph` so a
+  malformed query degrades to a skipped language instead of crashing the TUI.
+  Also fixed latent `nix`, `typescript`, `kotlin`, `elixir`, `gleam`, and `dart`
+  queries. (`319d11a`, `f7997f8`)
+
 ## [0.6.1] - 2026-06-18
 
 ### Added
