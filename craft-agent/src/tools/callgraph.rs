@@ -121,11 +121,21 @@ struct RawCall {
 fn extract_calls(content: &str, lang: LangId) -> Vec<RawCall> {
     let source = content.as_bytes();
     let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&lang.ts_language())
-        .expect("language set");
+    if parser.set_language(&lang.ts_language()).is_err() {
+        tracing::error!(
+            lang = lang.name(),
+            "callgraph parser rejected language abi, skipping"
+        );
+        return Vec::new();
+    }
 
-    let tree = parser.parse(source, None).expect("parse succeeded");
+    let Some(tree) = parser.parse(source, None) else {
+        tracing::error!(
+            lang = lang.name(),
+            "callgraph parser returned no tree, skipping"
+        );
+        return Vec::new();
+    };
     let root = tree.root_node();
 
     let mut calls = Vec::new();

@@ -5,7 +5,8 @@ use std::sync::LazyLock;
 use crate::ToolOutput;
 use craft_tool_macro::Tool;
 use serde::Deserialize;
-use tree_sitter::{Query, StreamingIterator};
+use tracing::error;
+use tree_sitter::{Language, Query, StreamingIterator};
 
 use super::relative_path;
 
@@ -248,7 +249,7 @@ impl LangId {
         }
     }
 
-    fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Rust => "rust",
             Self::TypeScript => "typescript",
@@ -399,12 +400,19 @@ struct DirEntry {
 
 pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
     let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&lang.ts_language())
-        .expect("language grammar error");
+    if parser.set_language(&lang.ts_language()).is_err() {
+        error!(
+            lang = lang.name(),
+            "outline parser rejected language abi, skipping"
+        );
+        return vec![];
+    }
 
-    let tree = parser.parse(content, None);
-    let Some(tree) = tree else {
+    let Some(tree) = parser.parse(content, None) else {
+        error!(
+            lang = lang.name(),
+            "outline parser returned no tree, skipping"
+        );
         return vec![];
     };
 
@@ -1054,47 +1062,99 @@ fn walk_source_files(dir: &str) -> Vec<String> {
     files
 }
 
-fn lang_query(lang: LangId) -> Option<&'static Query> {
+fn lang_parts(lang: LangId) -> (&'static LazyLock<Option<Query>>, &'static str) {
     match lang {
-        LangId::Rust => Some(&RUST_QUERY),
-        LangId::TypeScript => Some(&TS_QUERY),
-        LangId::Python => Some(&PY_QUERY),
-        LangId::Go => Some(&GO_QUERY),
-        LangId::Java => Some(&JAVA_QUERY),
-        LangId::C => Some(&C_QUERY),
-        LangId::Cpp => Some(&CPP_QUERY),
-        LangId::Ruby => Some(&RUBY_QUERY),
-        LangId::Lua => Some(&LUA_QUERY),
-        LangId::Bash => Some(&BASH_QUERY),
-        LangId::Kotlin => Some(&KT_QUERY),
-        LangId::Swift => Some(&SWIFT_QUERY),
-        LangId::CSharp => Some(&CSHARP_QUERY),
-        LangId::Elixir => Some(&ELIXIR_QUERY),
-        LangId::Scala => Some(&SCALA_QUERY),
-        LangId::Php => Some(&PHP_QUERY),
-        LangId::Html => Some(&HTML_QUERY),
-        LangId::Gleam => Some(&GLEAM_QUERY),
-        LangId::Dart => Some(&DART_QUERY),
-        LangId::Starlark => Some(&STARLARK_QUERY),
-        LangId::Nix => Some(&NIX_QUERY),
-        LangId::Zig => Some(&ZIG_QUERY),
-        LangId::Markdown => Some(&MD_QUERY),
-        LangId::Css => Some(&CSS_QUERY),
-        LangId::Fish => Some(&FISH_QUERY),
-        LangId::Gdscript => Some(&GDSCRIPT_QUERY),
-        LangId::Gdshader => Some(&GDSHADER_QUERY),
-        LangId::GodotResource => Some(&GODOT_RESOURCE_QUERY),
-        LangId::ObjC => Some(&OBJC_QUERY),
-        LangId::Perl => Some(&PERL_QUERY),
-        LangId::SvelteNext => Some(&SVELTE_NEXT_QUERY),
-        LangId::Zsh => Some(&ZSH_QUERY),
+        LangId::Rust => (&RUST_QUERY, RUST_SRC),
+        LangId::TypeScript => (&TS_QUERY, TS_SRC),
+        LangId::Python => (&PY_QUERY, PY_SRC),
+        LangId::Go => (&GO_QUERY, GO_SRC),
+        LangId::Java => (&JAVA_QUERY, JAVA_SRC),
+        LangId::C => (&C_QUERY, C_SRC),
+        LangId::Cpp => (&CPP_QUERY, CPP_SRC),
+        LangId::Ruby => (&RUBY_QUERY, RUBY_SRC),
+        LangId::Lua => (&LUA_QUERY, LUA_SRC),
+        LangId::Bash => (&BASH_QUERY, BASH_SRC),
+        LangId::Kotlin => (&KT_QUERY, KT_SRC),
+        LangId::Swift => (&SWIFT_QUERY, SWIFT_SRC),
+        LangId::CSharp => (&CSHARP_QUERY, CSHARP_SRC),
+        LangId::Elixir => (&ELIXIR_QUERY, ELIXIR_SRC),
+        LangId::Scala => (&SCALA_QUERY, SCALA_SRC),
+        LangId::Php => (&PHP_QUERY, PHP_SRC),
+        LangId::Html => (&HTML_QUERY, HTML_SRC),
+        LangId::Gleam => (&GLEAM_QUERY, GLEAM_SRC),
+        LangId::Dart => (&DART_QUERY, DART_SRC),
+        LangId::Starlark => (&STARLARK_QUERY, STARLARK_SRC),
+        LangId::Nix => (&NIX_QUERY, NIX_SRC),
+        LangId::Zig => (&ZIG_QUERY, ZIG_SRC),
+        LangId::Markdown => (&MD_QUERY, MD_SRC),
+        LangId::Css => (&CSS_QUERY, CSS_SRC),
+        LangId::Fish => (&FISH_QUERY, FISH_SRC),
+        LangId::Gdscript => (&GDSCRIPT_QUERY, GDSCRIPT_SRC),
+        LangId::Gdshader => (&GDSHADER_QUERY, GDSHADER_SRC),
+        LangId::GodotResource => (&GODOT_RESOURCE_QUERY, GODOT_RESOURCE_SRC),
+        LangId::ObjC => (&OBJC_QUERY, OBJC_SRC),
+        LangId::Perl => (&PERL_QUERY, PERL_SRC),
+        LangId::SvelteNext => (&SVELTE_NEXT_QUERY, SVELTE_NEXT_SRC),
+        LangId::Zsh => (&ZSH_QUERY, ZSH_SRC),
     }
 }
 
-static RUST_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_rust::LANGUAGE.into(),
-        r#"
+fn lang_query(lang: LangId) -> Option<&'static Query> {
+    lang_parts(lang).0.as_ref()
+}
+
+#[cfg(test)]
+fn query_source(lang: LangId) -> &'static str {
+    lang_parts(lang).1
+}
+
+fn build_query(lang: &'static str, language: &Language, src: &'static str) -> Option<Query> {
+    match Query::new(language, src) {
+        Ok(q) => Some(q),
+        Err(e) => {
+            error!(error = %e, lang, "outline query failed to compile, language will be skipped");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+const ALL_LANGS: &[LangId] = &[
+    LangId::Rust,
+    LangId::TypeScript,
+    LangId::Python,
+    LangId::Go,
+    LangId::Java,
+    LangId::C,
+    LangId::Cpp,
+    LangId::Ruby,
+    LangId::Lua,
+    LangId::Bash,
+    LangId::Kotlin,
+    LangId::Swift,
+    LangId::CSharp,
+    LangId::Elixir,
+    LangId::Scala,
+    LangId::Php,
+    LangId::Html,
+    LangId::Gleam,
+    LangId::Dart,
+    LangId::Starlark,
+    LangId::Nix,
+    LangId::Zig,
+    LangId::Markdown,
+    LangId::Css,
+    LangId::Fish,
+    LangId::Gdscript,
+    LangId::Gdshader,
+    LangId::GodotResource,
+    LangId::ObjC,
+    LangId::Perl,
+    LangId::SvelteNext,
+    LangId::Zsh,
+];
+
+const RUST_SRC: &str = r#"
 (function_item name: (identifier) @fn.name) @fn.def
 (impl_item type: (type_identifier) @impl.name) @impl.def
 (struct_item name: (type_identifier) @struct.name) @struct.def
@@ -1107,363 +1167,272 @@ static RUST_QUERY: LazyLock<Query> = LazyLock::new(|| {
 (use_declaration) @import.def
 (field_declaration_list (field_declaration name: (field_identifier) @field.name)) @field.def
 (enum_variant_list (enum_variant name: (identifier) @variant.name)) @variant.def
-"#,
-    )
-    .expect("rust query")
-});
+"#;
+static RUST_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("rust", &tree_sitter_rust::LANGUAGE.into(), RUST_SRC));
 
-static TS_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        r#"
+const TS_SRC: &str = r#"
 (function_declaration name: (identifier) @fn.name) @fn.def
 (method_definition name: (property_identifier) @method.name) @method.def
 (class_declaration name: (type_identifier) @class.name) @class.def
 (interface_declaration name: (type_identifier) @iface.name) @iface.def
 (type_alias_declaration name: (type_identifier) @type.name) @type.def
-(variable_declaration declarator: (variable_declarator name: (identifier) @var.name)) @var.def
-(lexical_declaration declarator: (variable_declarator name: (identifier) @var.name)) @var.def
+(variable_declarator name: (identifier) @var.name) @var.def
 (import_statement) @import.def
 (class_body (public_field_definition name: (property_identifier) @field.name)) @field.def
-"#,
+"#;
+static TS_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    build_query(
+        "typescript",
+        &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        TS_SRC,
     )
-    .expect("typescript query")
 });
 
-static PY_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_python::LANGUAGE.into(),
-        r#"
+const PY_SRC: &str = r#"
 (function_definition name: (identifier) @fn.name) @fn.def
 (class_definition name: (identifier) @class.name) @class.def
 (import_statement) @import.def
 (import_from_statement) @import.def
-"#,
-    )
-    .expect("python query")
-});
+"#;
+static PY_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("python", &tree_sitter_python::LANGUAGE.into(), PY_SRC));
 
-static GO_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_go::LANGUAGE.into(),
-        r#"
+const GO_SRC: &str = r#"
 (function_declaration name: (identifier) @fn.name) @fn.def
 (method_declaration name: (field_identifier) @method.name) @method.def
 (type_declaration (type_spec name: (type_identifier) @type.name)) @type.def
 (type_declaration (type_alias name: (type_identifier) @type.name)) @type.def
 (import_declaration) @import.def
-"#,
-    )
-    .expect("go query")
-});
+"#;
+static GO_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("go", &tree_sitter_go::LANGUAGE.into(), GO_SRC));
 
-static JAVA_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_java::LANGUAGE.into(),
-        r#"
+const JAVA_SRC: &str = r#"
 (class_declaration name: (identifier) @class.name) @class.def
 (method_declaration name: (identifier) @method.name) @method.def
 (interface_declaration name: (identifier) @iface.name) @iface.def
 (import_declaration) @import.def
-"#,
-    )
-    .expect("java query")
-});
+"#;
+static JAVA_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("java", &tree_sitter_java::LANGUAGE.into(), JAVA_SRC));
 
-static C_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_c::LANGUAGE.into(),
-        r#"
+const C_SRC: &str = r#"
 (function_definition declarator: (function_declarator declarator: (identifier) @fn.name)) @fn.def
-"#,
-    )
-    .expect("c query")
-});
+"#;
+static C_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("c", &tree_sitter_c::LANGUAGE.into(), C_SRC));
 
-static CPP_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_cpp::LANGUAGE.into(),
-        r#"
+const CPP_SRC: &str = r#"
 (function_definition declarator: (function_declarator declarator: (identifier) @fn.name)) @fn.def
 (class_specifier name: (type_identifier) @class.name) @class.def
-"#,
-    )
-    .expect("cpp query")
-});
+"#;
+static CPP_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("cpp", &tree_sitter_cpp::LANGUAGE.into(), CPP_SRC));
 
-static RUBY_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_ruby::LANGUAGE.into(),
-        r#"
+const RUBY_SRC: &str = r#"
 (method name: (identifier) @method.name) @method.def
 (class name: (constant) @class.name) @class.def
 (module name: (constant) @mod.name) @mod.def
 (call method: (identifier) @_require arguments: (argument_list (string) @import.name) (#eq? @_require "require")) @import.def
-"#,
-    )
-    .expect("ruby query")
-});
+"#;
+static RUBY_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("ruby", &tree_sitter_ruby::LANGUAGE.into(), RUBY_SRC));
 
-static LUA_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_lua::LANGUAGE.into(),
-        r#"
+const LUA_SRC: &str = r#"
 (function_declaration name: (identifier) @fn.name) @fn.def
-"#,
-    )
-    .expect("lua query")
-});
+"#;
+static LUA_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("lua", &tree_sitter_lua::LANGUAGE.into(), LUA_SRC));
 
-static BASH_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_bash::LANGUAGE.into(),
-        r#"
+const BASH_SRC: &str = r#"
 (function_definition name: (word) @fn.name) @fn.def
-"#,
-    )
-    .expect("bash query")
-});
+"#;
+static BASH_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("bash", &tree_sitter_bash::LANGUAGE.into(), BASH_SRC));
 
-static KT_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_kotlin_ng::LANGUAGE.into(),
-        r#"
-(function_declaration (simple_identifier) @fn.name) @fn.def
-(class_declaration (type_identifier) @class.name) @class.def
-"#,
-    )
-    .expect("kotlin query")
-});
-
-static SWIFT_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_swift::LANGUAGE.into(),
-        r#"
+const KT_SRC: &str = r#"
 (function_declaration name: (identifier) @fn.name) @fn.def
-"#,
-    )
-    .expect("swift query")
-});
+(class_declaration name: (identifier) @class.name) @class.def
+"#;
+static KT_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("kotlin", &tree_sitter_kotlin_ng::LANGUAGE.into(), KT_SRC));
 
-static CSHARP_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_c_sharp::LANGUAGE.into(),
-        r#"
+const SWIFT_SRC: &str = r#"
+(function_declaration name: (identifier) @fn.name) @fn.def
+"#;
+static SWIFT_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("swift", &tree_sitter_swift::LANGUAGE.into(), SWIFT_SRC));
+
+const CSHARP_SRC: &str = r#"
 (class_declaration name: (identifier) @class.name) @class.def
 (method_declaration name: (identifier) @method.name) @method.def
 (struct_declaration name: (identifier) @struct.name) @struct.def
 (interface_declaration name: (identifier) @iface.name) @iface.def
 (enum_declaration name: (identifier) @enum.name) @enum.def
 (using_directive) @import.def
-"#,
-    )
-    .expect("csharp query")
-});
+"#;
+static CSHARP_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("csharp", &tree_sitter_c_sharp::LANGUAGE.into(), CSHARP_SRC));
 
-static ELIXIR_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_elixir::LANGUAGE.into(),
-        r#"
-(call target: (identifier) @_def arguments: (arguments (alias) @fn.name) (#eq? @_def "def")) @fn.def
-"#,
-    )
-    .expect("elixir query")
-});
+const ELIXIR_SRC: &str = r#"
+(call target: (identifier) @_def (arguments (alias) @fn.name) (#eq? @_def "def")) @fn.def
+"#;
+static ELIXIR_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("elixir", &tree_sitter_elixir::LANGUAGE.into(), ELIXIR_SRC));
 
-static SCALA_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_scala::LANGUAGE.into(),
-        r#"
+const SCALA_SRC: &str = r#"
 (function_definition name: (identifier) @fn.name) @fn.def
 (class_definition name: (identifier) @class.name) @class.def
 (object_definition name: (identifier) @mod.name) @mod.def
-"#,
-    )
-    .expect("scala query")
-});
+"#;
+static SCALA_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("scala", &tree_sitter_scala::LANGUAGE.into(), SCALA_SRC));
 
-static PHP_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_php::LANGUAGE_PHP.into(),
-        r#"
+const PHP_SRC: &str = r#"
 (function_definition name: (name) @fn.name) @fn.def
 (class_declaration name: (name) @class.name) @class.def
 (method_declaration name: (name) @method.name) @method.def
 (use_declaration) @import.def
-"#,
-    )
-    .expect("php query")
-});
+"#;
+static PHP_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("php", &tree_sitter_php::LANGUAGE_PHP.into(), PHP_SRC));
 
-static HTML_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_html::LANGUAGE.into(),
-        r#"
+const HTML_SRC: &str = r#"
 (element (start_tag (tag_name) @heading.name)) @heading.def
-"#,
-    )
-    .expect("html query")
-});
+"#;
+static HTML_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("html", &tree_sitter_html::LANGUAGE.into(), HTML_SRC));
 
-static GLEAM_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_gleam::LANGUAGE.into(),
-        r#"
-(function_definition name: (identifier) @fn.name) @fn.def
-"#,
-    )
-    .expect("gleam query")
-});
+const GLEAM_SRC: &str = r#"
+(function name: (identifier) @fn.name) @fn.def
+(constant name: (identifier) @const.name) @const.def
+(type name: (type_identifier) @type.name) @type.def
+(import) @import.def
+"#;
+static GLEAM_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("gleam", &tree_sitter_gleam::LANGUAGE.into(), GLEAM_SRC));
 
-static DART_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_dart::LANGUAGE.into(),
-        r#"
+const DART_SRC: &str = r#"
 (function_signature name: (identifier) @fn.name) @fn.def
-(class_definition name: (identifier) @class.name) @class.def
-"#,
-    )
-    .expect("dart query")
-});
+(class_declaration name: (identifier) @class.name) @class.def
+(enum_declaration name: (identifier) @enum.name) @enum.def
+(import_specification) @import.def
+"#;
+static DART_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("dart", &tree_sitter_dart::LANGUAGE.into(), DART_SRC));
 
-static STARLARK_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
+const STARLARK_SRC: &str = r#"
+(function_definition name: (identifier) @fn.name) @fn.def
+"#;
+static STARLARK_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    build_query(
+        "starlark",
         &tree_sitter_starlark::LANGUAGE.into(),
-        r#"
-(function_definition name: (identifier) @fn.name) @fn.def
-"#,
+        STARLARK_SRC,
     )
-    .expect("starlark query")
 });
 
-static NIX_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_nix::LANGUAGE.into(),
-        r#"
-(function_definition name: (identifier) @fn.name) @fn.def
-"#,
-    )
-    .expect("nix query")
-});
+const NIX_SRC: &str = r#"
+(binding attrpath: (attrpath) @var.name) @var.def
+"#;
+static NIX_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("nix", &tree_sitter_nix::LANGUAGE.into(), NIX_SRC));
 
-static ZIG_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_zig::LANGUAGE.into(),
-        r#"
+const ZIG_SRC: &str = r#"
 (function_declaration name: (identifier) @fn.name) @fn.def
-"#,
-    )
-    .expect("zig query")
-});
+"#;
+static ZIG_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("zig", &tree_sitter_zig::LANGUAGE.into(), ZIG_SRC));
 
-static MD_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_md::LANGUAGE.into(),
-        r#"
+const MD_SRC: &str = r#"
 (atx_heading (atx_h1_marker) (inline) @heading.name) @heading.def
 (atx_heading (atx_h2_marker) (inline) @heading.name) @heading.def
 (atx_heading (atx_h3_marker) (inline) @heading.name) @heading.def
-"#,
-    )
-    .expect("markdown query")
-});
+"#;
+static MD_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("markdown", &tree_sitter_md::LANGUAGE.into(), MD_SRC));
 
-static CSS_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_css::LANGUAGE.into(),
-        r#"
+const CSS_SRC: &str = r#"
 (rule_set (selectors) @class.name) @class.def
-"#,
-    )
-    .expect("css query")
-});
+"#;
+static CSS_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("css", &tree_sitter_css::LANGUAGE.into(), CSS_SRC));
 
-static FISH_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_fish::language(),
-        r#"
+const FISH_SRC: &str = r#"
 (function_definition name: (word) @fn.name) @fn.def
-"#,
-    )
-    .expect("fish query")
-});
+"#;
+static FISH_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("fish", &tree_sitter_fish::language(), FISH_SRC));
 
-static GDSCRIPT_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_gdscript::LANGUAGE.into(),
-        r#"
+const GDSCRIPT_SRC: &str = r#"
 (class_definition name: (name) @class.name) @class.def
 (function_definition name: (name) @fn.name) @fn.def
-"#,
+"#;
+static GDSCRIPT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    build_query(
+        "gdscript",
+        &tree_sitter_gdscript::LANGUAGE.into(),
+        GDSCRIPT_SRC,
     )
-    .expect("gdscript query")
 });
 
-static GDSHADER_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_gdshader::LANGUAGE.into(),
-        r#"
+const GDSHADER_SRC: &str = r#"
 (function_definition declarator: (identifier) @fn.name) @fn.def
 (struct_definition name: (identifier) @struct.name) @struct.def
-"#,
+"#;
+static GDSHADER_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    build_query(
+        "gdshader",
+        &tree_sitter_gdshader::LANGUAGE.into(),
+        GDSHADER_SRC,
     )
-    .expect("gdshader query")
 });
 
-static GODOT_RESOURCE_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_godot_resource::LANGUAGE.into(),
-        r#"
+const GODOT_RESOURCE_SRC: &str = r#"
 (section (identifier) @class.name) @class.def
-"#,
+"#;
+static GODOT_RESOURCE_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    build_query(
+        "godot-resource",
+        &tree_sitter_godot_resource::LANGUAGE.into(),
+        GODOT_RESOURCE_SRC,
     )
-    .expect("godot resource query")
 });
 
-static OBJC_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_objc::LANGUAGE.into(),
-        r#"
+const OBJC_SRC: &str = r#"
 (class_interface (identifier) @class.name) @class.def
 (class_implementation (identifier) @class.name) @class.def
 (protocol_declaration (identifier) @iface.name) @iface.def
 (method_declaration) @method.def
 (function_definition) @fn.def
-"#,
-    )
-    .expect("objc query")
-});
+"#;
+static OBJC_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("objc", &tree_sitter_objc::LANGUAGE.into(), OBJC_SRC));
 
-static PERL_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_perl::LANGUAGE.into(),
-        r#"
+const PERL_SRC: &str = r#"
 (package_statement (package_name) @mod.name) @mod.def
 (require_statement package_name: (package_name) @import.name) @import.def
-"#,
-    )
-    .expect("perl query")
-});
+"#;
+static PERL_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("perl", &tree_sitter_perl::LANGUAGE.into(), PERL_SRC));
 
-static SVELTE_NEXT_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_svelte_next::LANGUAGE.into(),
-        r#"
+const SVELTE_NEXT_SRC: &str = r#"
 (element (start_tag (tag_name) @heading.name)) @heading.def
-"#,
+"#;
+static SVELTE_NEXT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    build_query(
+        "svelte-next",
+        &tree_sitter_svelte_next::LANGUAGE.into(),
+        SVELTE_NEXT_SRC,
     )
-    .expect("svelte-next query")
 });
 
-static ZSH_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    Query::new(
-        &tree_sitter_zsh::LANGUAGE.into(),
-        r#"
+const ZSH_SRC: &str = r#"
 (function_definition name: (word) @fn.name) @fn.def
-"#,
-    )
-    .expect("zsh query")
-});
+"#;
+static ZSH_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("zsh", &tree_sitter_zsh::LANGUAGE.into(), ZSH_SRC));
 
 super::impl_tool!(Outline, kind = "outline", tier = super::ToolTier::Core);
 
@@ -1610,5 +1579,58 @@ type Alias = int
                 .any(|s| s.name == "Alias" && s.kind == SymbolKind::TypeAlias)
         );
         assert!(symbols.iter().any(|s| s.kind == SymbolKind::Import));
+    }
+
+    #[test]
+    fn all_queries_compile_against_grammar() {
+        for lang in ALL_LANGS {
+            let src = query_source(*lang);
+            let result = Query::new(&lang.ts_language(), src);
+            assert!(
+                result.is_ok(),
+                "{} query failed to compile against installed grammar: {:?}",
+                lang.name(),
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn broken_query_degrades_gracefully_without_panic() {
+        let symbols = extract_symbols("garbage :: source", LangId::Nix);
+        assert!(symbols.iter().all(|s| s.kind == SymbolKind::Variable));
+    }
+
+    #[test]
+    fn nix_outline_extracts_bindings() {
+        let src = "{ a = 1; b.c = 2; }";
+        let symbols = extract_symbols(src, LangId::Nix);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"a"), "expected binding a, got {names:?}");
+        assert!(
+            names.iter().any(|n| n.contains("b")),
+            "expected binding b.c, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn typescript_outline_extracts_var_declarator() {
+        let src = "const x = 1;\nlet y: number = 2;\nfunction foo() {}\nclass Bar {}\n";
+        let symbols = extract_symbols(src, LangId::TypeScript);
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "x" && s.kind == SymbolKind::Variable)
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "y" && s.kind == SymbolKind::Variable)
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "foo" && s.kind == SymbolKind::Function)
+        );
     }
 }
