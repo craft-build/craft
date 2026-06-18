@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-18
+
+### Added
+
+- **providers**: configurable custom and local provider infrastructure with an
+  interactive provider login picker and credential storage. (`be6abec`)
+- **lua**: `autocmd` and `keymap` APIs. (`be6abec`)
+- **lua**: bottom panel window placement added to the window API. (`be6abec`)
+
+### Changed
+
+- **providers**: replaced the dedicated `zai`, `ollama`, and `llama_cpp`
+  providers with a single generic local provider. (`be6abec`)
+- **ui**: migrated the todo panel from a Rust component to a Lua plugin.
+  (`be6abec`)
+
+### Removed
+
+- built-in `todo_write` tool, now provided by a Lua plugin. (`be6abec`)
+
 ## [0.6.0] - 2026-06-17
 
 ### Added
@@ -437,7 +457,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/craft-build/craft/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/craft-build/craft/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/craft-build/craft/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/craft-build/craft/compare/v0.5.0...v0.5.1
