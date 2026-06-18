@@ -1147,9 +1147,10 @@ static GO_QUERY: LazyLock<Query> = LazyLock::new(|| {
     Query::new(
         &tree_sitter_go::LANGUAGE.into(),
         r#"
-(function_declaration name: (field_identifier) @fn.name) @fn.def
+(function_declaration name: (identifier) @fn.name) @fn.def
 (method_declaration name: (field_identifier) @method.name) @method.def
-(type_declaration name: (type_identifier) @type.name) @type.def
+(type_declaration (type_spec name: (type_identifier) @type.name)) @type.def
+(type_declaration (type_alias name: (type_identifier) @type.name)) @type.def
 (import_declaration) @import.def
 "#,
     )
@@ -1571,5 +1572,43 @@ fn main() {
                 .iter()
                 .any(|s| s.name == "baz" && s.kind == SymbolKind::Function)
         );
+    }
+
+    #[test]
+    fn go_outline_extracts_fn_method_type_and_alias() {
+        let src = "\
+package main
+
+import \"fmt\"
+
+func foo() {}
+
+func (r T) bar() {}
+
+type Struct struct{ a int }
+type Alias = int
+";
+        let symbols = extract_symbols(src, LangId::Go);
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "foo" && s.kind == SymbolKind::Function)
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "bar" && s.kind == SymbolKind::Method)
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Struct" && s.kind == SymbolKind::TypeAlias)
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Alias" && s.kind == SymbolKind::TypeAlias)
+        );
+        assert!(symbols.iter().any(|s| s.kind == SymbolKind::Import));
     }
 }
