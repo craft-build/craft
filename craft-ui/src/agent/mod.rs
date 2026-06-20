@@ -11,12 +11,12 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
-    AgentConfig, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle, McpSnapshotReader,
-    ToolOutput, ToolOutputLines,
+    AgentConfig, CancelMap, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle,
+    McpSnapshotReader, ToolOutput, ToolOutputLines,
 };
 use craft_lua::EventHandle;
 
-use self::cancel_map::CancelMap;
+use self::cancel_map::new_run_cancel_map;
 use craft_providers::provider::Provider;
 use craft_providers::{Message, Model};
 use tracing::{info, warn};
@@ -35,6 +35,7 @@ pub(crate) struct ModelSlot {
 pub(crate) enum AgentCommand {
     Cancel { run_id: u64 },
     CancelAll,
+    CancelSubagent { tool_use_id: String },
 }
 
 pub(crate) struct AgentHandles {
@@ -208,11 +209,16 @@ fn spawn_agent_internal(
     let shared_tool_outputs: Arc<Mutex<HashMap<String, ToolOutput>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let (init_trigger, init_cancel) = CancelToken::new();
-    let cancel_map = Arc::new(Mutex::new(CancelMap::new(0, init_trigger)));
+    let cancel_map = Arc::new(new_run_cancel_map(0, init_trigger));
+    let subagent_cancels: Arc<CancelMap<String>> = Arc::new(CancelMap::new());
 
     let btw_system: Arc<ArcSwap<String>> = Arc::new(ArcSwap::from_pointee(String::new()));
 
-    spawn_command_router(cmd_rx, Arc::clone(&cancel_map));
+    spawn_command_router(
+        cmd_rx,
+        Arc::clone(&cancel_map),
+        Arc::clone(&subagent_cancels),
+    );
 
     let agent_loop = AgentLoop::new(
         Arc::clone(model_slot),
@@ -232,6 +238,7 @@ fn spawn_agent_internal(
         lua_handle,
         Arc::clone(&btw_system),
         compression,
+        subagent_cancels,
     );
 
     let task = tokio::spawn(agent_loop.run());

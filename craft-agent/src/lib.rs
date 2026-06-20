@@ -18,7 +18,7 @@ pub use agent::{
     LoadedInstructions, SharedDoomTracker, SharedFindingsStore, SharedMessages, StoredFinding,
     find_subdirectory_instructions, is_instruction_file,
 };
-pub use cancel::{CancelToken, CancelTrigger};
+pub use cancel::{CancelMap, CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
 pub mod command;
 pub mod compression;

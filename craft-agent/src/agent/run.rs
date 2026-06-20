@@ -19,7 +19,7 @@ use super::streaming::stream_with_retry;
 use super::tool_dispatch::{self, ToolBatchOutcome};
 use super::trust::TrustTracker;
 use super::validation::Validator;
-use crate::cancel::CancelToken;
+use crate::cancel::{CancelMap, CancelToken};
 use crate::mcp::McpHandle;
 use crate::permissions::PermissionManager;
 use crate::tools::{Deadline, FileReadTracker, ToolContext};
@@ -57,6 +57,7 @@ pub struct AgentParams {
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    pub subagent_cancels: Arc<CancelMap<String>>,
     pub compression: craft_config::CompressionConfig,
     pub findings_store: Option<super::findings_store::SharedFindingsStore>,
     pub fs: Arc<dyn crate::tools::FsBackend>,
@@ -102,6 +103,7 @@ pub struct Agent<'h> {
     timeouts: craft_providers::Timeouts,
     file_tracker: Arc<FileReadTracker>,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    subagent_cancels: Arc<CancelMap<String>>,
     compression: craft_config::CompressionConfig,
     findings_store: Option<super::findings_store::SharedFindingsStore>,
     cache_tracker: super::cache::PrefixCacheTracker,
@@ -159,6 +161,7 @@ impl<'h> Agent<'h> {
             session_id: params.session_id,
             file_tracker: params.file_tracker,
             prompt_slots: params.prompt_slots,
+            subagent_cancels: params.subagent_cancels,
             compression: params.compression.clone(),
             findings_store: params.findings_store,
             cache_tracker: super::cache::PrefixCacheTracker::new(),
@@ -683,6 +686,7 @@ impl<'h> Agent<'h> {
             timeouts: self.timeouts,
             file_tracker: Arc::clone(&self.file_tracker),
             prompt_slots: Arc::clone(&self.prompt_slots),
+            subagent_cancels: Arc::clone(&self.subagent_cancels),
             opts: self.opts,
             compression: self.compression.clone(),
             compression_store: Arc::clone(&self.compression_store),
@@ -1024,6 +1028,7 @@ mod tests {
             timeouts: craft_providers::Timeouts::default(),
             file_tracker: FileReadTracker::fresh(),
             prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+            subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
             compression: craft_config::CompressionConfig::default(),
             findings_store: None,
             fs: Arc::new(crate::tools::LocalFs),

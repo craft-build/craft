@@ -140,6 +140,7 @@ impl Review {
                 timeouts: ctx.timeouts,
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
+                subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                 compression: ctx.compression.clone(),
                 findings_store: None,
                 fs: Arc::new(crate::tools::LocalFs),

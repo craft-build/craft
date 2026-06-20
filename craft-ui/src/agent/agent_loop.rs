@@ -9,7 +9,7 @@ use craft_agent::template;
 use craft_agent::template::Vars;
 use craft_agent::tools::FileReadTracker;
 use craft_agent::{
-    Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
+    Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History,
     Instructions, McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
 };
@@ -19,7 +19,7 @@ use serde_json::Value;
 use tracing::error;
 
 use super::ModelSlot;
-use super::cancel_map::CancelMap;
+use super::cancel_map::RunCancelMap;
 use super::shared_queue::{QueueItem, QueueReceiver};
 
 pub(super) struct AgentLoop {
@@ -32,7 +32,7 @@ pub(super) struct AgentLoop {
     promoted: craft_agent::tools::PromotedTools,
     mcp_handle: Option<McpHandle>,
     history: History,
-    cancel_map: Arc<Mutex<CancelMap>>,
+    cancel_map: Arc<RunCancelMap>,
     init_cancel: CancelToken,
     permissions: Arc<PermissionManager>,
     file_tracker: Arc<FileReadTracker>,
@@ -47,6 +47,7 @@ pub(super) struct AgentLoop {
     btw_system: Arc<ArcSwap<String>>,
     compression: craft_config::CompressionConfig,
     doom: SharedDoomTracker,
+    subagent_cancels: Arc<CancelMap<String>>,
 }
 
 impl AgentLoop {
@@ -62,13 +63,14 @@ impl AgentLoop {
         agent_tx: flume::Sender<Envelope>,
         answer_rx: flume::Receiver<String>,
         queue: Arc<QueueReceiver>,
-        cancel_map: Arc<Mutex<CancelMap>>,
+        cancel_map: Arc<RunCancelMap>,
         init_cancel: CancelToken,
         session_id: Option<String>,
         timeouts: craft_providers::Timeouts,
         lua_handle: Option<EventHandle>,
         btw_system: Arc<ArcSwap<String>>,
         compression: craft_config::CompressionConfig,
+        subagent_cancels: Arc<CancelMap<String>>,
     ) -> Self {
         Self {
             model_slot,
@@ -95,6 +97,7 @@ impl AgentLoop {
             btw_system,
             compression,
             doom: Arc::new(Mutex::new(DoomTracker::new())),
+            subagent_cancels,
         }
     }
 
@@ -241,6 +244,7 @@ impl AgentLoop {
                 timeouts: self.timeouts,
                 file_tracker: Arc::clone(&self.file_tracker),
                 prompt_slots: std::sync::Arc::new(prompt_slots),
+                subagent_cancels: Arc::clone(&self.subagent_cancels),
                 compression: self.compression.clone(),
                 findings_store: Some(Arc::clone(&self.findings_store)),
                 fs: Arc::new(craft_agent::tools::LocalFs),
@@ -307,17 +311,11 @@ impl AgentLoop {
     }
 
     fn set_cancel_trigger(&self, run_id: u64, trigger: CancelTrigger) {
-        self.cancel_map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(run_id, trigger);
+        self.cancel_map.insert(run_id, trigger);
     }
 
     fn clear_cancel_trigger(&self, run_id: u64) {
-        self.cancel_map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(run_id);
+        self.cancel_map.remove(&run_id);
     }
 
     fn publish_btw_system(&self, slots: &craft_agent::prompt::ResolvedSlots) {
