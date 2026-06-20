@@ -257,7 +257,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         let exit_code = result.exit_code();
         result.cleanup().await;
         if let Some(session_id) = session_id {
-            eprintln!("session: {session_id}");
+            eprintln!("Resume session:\n\n  craft -s {session_id}");
         }
         if exit_code != 0 {
             std::process::exit(exit_code);
