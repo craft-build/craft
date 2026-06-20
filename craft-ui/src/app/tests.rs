@@ -251,6 +251,7 @@ fn tool_done_transitions_plan_to_ready(output: ToolOutput, expect_ready: bool) {
         output,
         is_error: false,
         annotation: None,
+        written_path: None,
     }))));
 
     assert_eq!(app.state.plan.is_ready(), expect_ready);
@@ -669,6 +670,7 @@ fn finish_subagent(app: &mut App, id: &str, is_error: bool) {
         output: ToolOutput::Plain("result".into()),
         is_error,
         annotation: None,
+        written_path: None,
     }))));
 }
 
@@ -2076,6 +2078,7 @@ fn plan_app() -> App {
         },
         is_error: false,
         annotation: None,
+        written_path: None,
     }))));
     app
 }
@@ -2098,6 +2101,7 @@ fn tool_done_write_opens_plan_form(mode: Mode, expect_form: bool) {
         },
         is_error: false,
         annotation: None,
+        written_path: None,
     }))));
     assert_eq!(app.plan_form.is_visible(), expect_form);
     if expect_form {
@@ -2133,6 +2137,7 @@ fn re_edit_keeps_plan_form_visible() {
         },
         is_error: false,
         annotation: None,
+        written_path: None,
     }))));
     assert!(matches!(app.state.plan, PlanState::Ready(_)));
     assert!(app.plan_form.is_visible());
@@ -2202,6 +2207,7 @@ fn rewrite_plan(app: &mut App) {
         },
         is_error: false,
         annotation: None,
+        written_path: None,
     }))));
 }
 

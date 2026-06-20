@@ -467,6 +467,7 @@ impl MessagesPanel {
                 output: ToolOutput::Plain(message.clone()),
                 is_error: true,
                 annotation: None,
+                written_path: None,
             });
         }
     }

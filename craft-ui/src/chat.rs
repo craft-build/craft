@@ -590,6 +590,7 @@ mod tests {
             output,
             is_error: false,
             annotation: None,
+            written_path: None,
         }))
     }
 

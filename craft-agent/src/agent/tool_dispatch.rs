@@ -92,6 +92,7 @@ pub async fn run(
         output: ToolOutput::Plain(msg),
         is_error: true,
         annotation: None,
+        written_path: None,
     };
 
     let hook_input: Option<Value> = if ctx.config.hooks_enabled
@@ -203,6 +204,7 @@ pub async fn run(
                     output,
                     is_error: false,
                     annotation: result.annotation,
+                    written_path: result.written_path,
                 }
             }
             Err(message) => {
@@ -305,6 +307,7 @@ async fn execute_mcp_tool(
         output: ToolOutput::Plain(output),
         is_error,
         annotation: None,
+        written_path: None,
     };
 
     if matches!(ctx.mode, AgentMode::Plan(_)) {
@@ -483,6 +486,7 @@ pub(super) async fn process_tool_calls(
                 output: cached_output,
                 is_error: false,
                 annotation: None,
+                written_path: None,
             };
             event_tx.try_send(AgentEvent::ToolDone(Box::new(done.clone())));
             trust.record_success(&name);
@@ -604,6 +608,7 @@ pub(super) async fn process_tool_calls(
                         )),
                         is_error: true,
                         annotation: None,
+                        written_path: None,
                     };
                     all_results.push(validation_result);
                 }

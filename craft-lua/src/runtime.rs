@@ -1069,6 +1069,7 @@ impl LuaRuntime {
                     plugin: Arc::clone(&name),
                     has_header_fn: t.header_key.is_some(),
                     permission_scope_kind: t.permission_scope_kind.clone(),
+                    mutable_path_field: t.mutable_path_field.clone(),
                     timeout: t.timeout,
                     kind: t.kind.clone(),
                 });
@@ -1486,6 +1487,7 @@ fn timeout_reply(handle: &TaskHandle, plugin: &str, tool: &str) -> ToolCallReply
         live_buf,
         format: LuaOutputFormat::default(),
         annotation: None,
+        written_path: None,
     }
 }
 

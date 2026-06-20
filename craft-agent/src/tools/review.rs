@@ -280,6 +280,7 @@ mod tests {
             output: ToolOutput::Findings(vec![finding("a"), finding("b")]),
             is_error: false,
             annotation: None,
+            written_path: None,
         })));
         assert!(!filter_subagent_envelope(&env, &bucket));
         assert_eq!(bucket.lock().unwrap().len(), 2);
@@ -294,6 +295,7 @@ mod tests {
             output: ToolOutput::Plain("x".into()),
             is_error: false,
             annotation: None,
+            written_path: None,
         })));
         assert!(!filter_subagent_envelope(&env, &bucket));
         assert!(bucket.lock().unwrap().is_empty());

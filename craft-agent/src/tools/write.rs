@@ -87,7 +87,11 @@ impl super::ToolInvocation for Write {
         )))
     }
     fn execute<'a>(self: Box<Self>, ctx: &'a super::ToolContext) -> super::ExecFuture<'a> {
-        Box::pin(async move { Write::execute(&self, ctx).await.into() })
+        Box::pin(async move {
+            let path = super::resolve_path(&self.path).ok();
+            let result: super::ToolExecResult = Write::execute(&self, ctx).await.into();
+            result.with_written_path(path)
+        })
     }
 }
 
