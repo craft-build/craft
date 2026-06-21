@@ -76,7 +76,7 @@ fn read_initial_prompt(cli_prompt: Option<String>) -> Result<Option<String>> {
 
 pub async fn run(args: DesktopArgs) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
-    craft_providers::tier_map::load_from_storage(&storage);
+    craft_providers::model_registry::load_from_storage(&storage);
 
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
 

@@ -193,11 +193,10 @@ impl Model {
             Some(slug) => format!("{slug}/{model_id}"),
             None => format!("{provider}/{model_id}"),
         };
-        let tier = crate::tier_map::tier_map().read().unwrap().tier_for(
-            &spec,
-            provider,
-            static_entry.map(|e| e.tier),
-        );
+        let tier = crate::model_registry::model_registry()
+            .read()
+            .unwrap()
+            .tier_for(&spec, provider, static_entry.map(|e| e.tier));
         let (family, pricing, max_output_tokens, context_window) = match static_entry {
             Some(e) => (
                 e.family,
@@ -205,12 +204,20 @@ impl Model {
                 e.max_output_tokens,
                 anthropic::shared::long_context_window(model_id).unwrap_or(e.context_window),
             ),
-            None => (
-                provider.family(),
-                ModelPricing::ZERO,
-                provider.fallback_max_output(),
-                provider.fallback_context_window(),
-            ),
+            None => {
+                let guard = crate::model_registry::model_registry().read().unwrap();
+                let discovered = guard.discovered(provider, model_id);
+                (
+                    provider.family(),
+                    ModelPricing::ZERO,
+                    discovered
+                        .and_then(|d| d.max_output_tokens)
+                        .unwrap_or_else(|| provider.fallback_max_output()),
+                    discovered
+                        .and_then(|d| d.context_window)
+                        .unwrap_or_else(|| provider.fallback_context_window()),
+                )
+            }
         };
         Self {
             id: model_id.to_string(),
@@ -247,7 +254,7 @@ impl Model {
     }
 
     pub fn from_tier(provider: ProviderKind, tier: ModelTier) -> Result<Self, ModelError> {
-        if let Some(spec) = crate::tier_map::tier_map()
+        if let Some(spec) = crate::model_registry::model_registry()
             .read()
             .unwrap()
             .spec_for_tier(provider, tier)
@@ -614,5 +621,26 @@ mod tests {
             claude > gpt,
             "Claude estimate ({claude}) should exceed GPT ({gpt})"
         );
+    }
+
+    #[test]
+    fn discovered_context_window_flows_into_from_base_for_unknown_model() {
+        use crate::model_registry::model_registry;
+
+        let provider = ProviderKind::Ollama;
+        let model_id = "test-discovered-context-window-model";
+        let expected_window: u32 = 131_072;
+
+        {
+            let mut reg = model_registry().write().unwrap();
+            let mut info = crate::model::ModelInfo::new(model_id.to_string());
+            info.context_window = Some(expected_window);
+            reg.set_known_models(provider, vec![info]);
+        }
+
+        let model = Model::from_base(provider, model_id, None);
+        assert_eq!(model.id, model_id);
+        assert_eq!(model.context_window, expected_window);
+        assert_eq!(model.max_output_tokens, provider.fallback_max_output());
     }
 }

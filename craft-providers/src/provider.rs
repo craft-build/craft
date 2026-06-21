@@ -306,7 +306,10 @@ pub struct ModelBatch {
     pub warnings: Vec<String>,
 }
 
-pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
+pub async fn fetch_all_models(
+    mut on_ready: impl FnMut(ModelBatch),
+    on_done: Option<Box<dyn FnOnce() + Send>>,
+) {
     let timeouts = Timeouts::default();
     let mut futs: futures::stream::FuturesUnordered<BoxFuture<'static, ModelBatch>> =
         futures::stream::FuturesUnordered::new();
@@ -317,26 +320,26 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
             continue;
         };
         futs.push(Box::pin(async move {
-            match provider.list_models().await {
-                Ok(ids) => {
+            match provider.list_models_with_info().await {
+                Ok(models) => {
                     if kind.accepts_arbitrary_models() {
-                        crate::tier_map::tier_map()
+                        crate::model_registry::model_registry()
                             .write()
                             .unwrap()
-                            .set_known_models(kind, ids.clone());
+                            .set_known_models(kind, models.clone());
                     }
-                    let mut models: Vec<String> =
-                        ids.into_iter().map(|id| format!("{kind}/{id}")).collect();
+                    let mut specs: Vec<String> =
+                        models.iter().map(|m| format!("{kind}/{}", m.id)).collect();
                     for entry in models_for_provider(kind) {
                         for prefix in entry.prefixes {
                             let spec = format!("{kind}/{prefix}");
-                            if !models.contains(&spec) {
-                                models.push(spec);
+                            if !specs.contains(&spec) {
+                                specs.push(spec);
                             }
                         }
                     }
                     ModelBatch {
-                        models,
+                        models: specs,
                         warnings: Vec::new(),
                     }
                 }
@@ -374,9 +377,9 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
                 }
             };
             match dynamic::create(&slug, timeouts).await {
-                Ok(provider) => match provider.list_models().await {
-                    Ok(ids) => ModelBatch {
-                        models: ids.into_iter().map(|id| format!("{slug}/{id}")).collect(),
+                Ok(provider) => match provider.list_models_with_info().await {
+                    Ok(models) => ModelBatch {
+                        models: models.iter().map(|m| format!("{slug}/{}", m.id)).collect(),
                         warnings: Vec::new(),
                     },
                     Err(e) => static_fallback(e.to_string()),
@@ -402,5 +405,8 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
     use futures::StreamExt;
     while let Some(batch) = futs.next().await {
         on_ready(batch);
+    }
+    if let Some(done) = on_done {
+        done();
     }
 }

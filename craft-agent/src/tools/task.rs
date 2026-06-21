@@ -10,8 +10,8 @@ use std::time::Instant;
 use crate::{AgentEvent, EventSender, SubagentInfo, ToolOutput};
 use craft_config::ToolOutputLines;
 use craft_providers::model::ModelTier;
+use craft_providers::model_registry;
 use craft_providers::provider;
-use craft_providers::tier_map;
 use craft_providers::{ContentBlock, Model, ModelError, Role};
 use craft_tool_macro::Tool;
 use serde::Deserialize;
@@ -72,7 +72,7 @@ impl Task {
                 (Model::clone(&ctx.model), Arc::clone(&ctx.provider))
             } else {
                 let resolved_model = {
-                    let map = tier_map::tier_map()
+                    let map = model_registry::model_registry()
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
                     map.spec_for_tier(ctx.model.provider, effective)

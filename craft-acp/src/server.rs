@@ -402,28 +402,31 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
     let bg_out = out_tx.clone();
 
     let _bg_fetch = tokio::spawn(async move {
-        craft_providers::provider::fetch_all_models(|batch| {
-            if batch.models.is_empty() {
-                return;
-            }
-            let mut specs = bg_specs.lock().unwrap_or_else(|e| e.into_inner());
-            specs.extend(batch.models);
-            let guard = specs.clone();
-            drop(specs);
+        craft_providers::provider::fetch_all_models(
+            |batch| {
+                if batch.models.is_empty() {
+                    return;
+                }
+                let mut specs = bg_specs.lock().unwrap_or_else(|e| e.into_inner());
+                specs.extend(batch.models);
+                let guard = specs.clone();
+                drop(specs);
 
-            let sess = bg_session.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(info) = &*sess {
-                let sid = SessionId::from(info.session_id.clone());
-                session_update(
-                    &bg_out,
-                    &sid,
-                    SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![
-                        methods::mode_config_option(methods::MODE_BUILD),
-                        methods::model_config_option(&info.current_model, &guard),
-                    ])),
-                );
-            }
-        })
+                let sess = bg_session.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(info) = &*sess {
+                    let sid = SessionId::from(info.session_id.clone());
+                    session_update(
+                        &bg_out,
+                        &sid,
+                        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![
+                            methods::mode_config_option(methods::MODE_BUILD),
+                            methods::model_config_option(&info.current_model, &guard),
+                        ])),
+                    );
+                }
+            },
+            None,
+        )
         .await;
     });
 

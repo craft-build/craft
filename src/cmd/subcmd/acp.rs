@@ -13,7 +13,7 @@ use crate::setup;
 
 pub async fn run(yolo: bool) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
-    craft_providers::tier_map::load_from_storage(&storage);
+    craft_providers::model_registry::load_from_storage(&storage);
 
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);

@@ -139,14 +139,42 @@ fn merge_batch(
     available.store(Some(Arc::new(merged)));
 }
 
-fn spawn_model_fetch() -> BackgroundModels {
+fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -> BackgroundModels {
     let available: Arc<ArcSwapOption<Vec<String>>> = Arc::new(ArcSwapOption::empty());
     let bg = Arc::clone(&available);
     let (warn_tx, warn_rx) = flume::unbounded::<String>();
     let warn_tx_bg = warn_tx.clone();
+    let model_slot = Arc::clone(model_slot);
     let task = tokio::spawn(async move {
         let warn_tx = warn_tx_bg;
-        fetch_all_models(|batch| merge_batch(&bg, batch, &warn_tx)).await;
+        let done = Box::new(move || {
+            let spec = model_slot.load().model.spec();
+            let model_slot = Arc::clone(&model_slot);
+            tokio::spawn(async move {
+                let resolved = match Model::from_spec(&spec) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(spec = %spec, error = %e, "failed to resolve model after discovery");
+                        return;
+                    }
+                };
+                let provider = match from_model(&resolved, timeouts)
+                    .await
+                    .map(|p| Arc::from(p) as Arc<dyn Provider>)
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(spec = %spec, error = %e, "failed to create provider after discovery");
+                        return;
+                    }
+                };
+                model_slot.store(Arc::new(ModelSlot {
+                    model: resolved,
+                    provider,
+                }));
+            });
+        });
+        fetch_all_models(|batch| merge_batch(&bg, batch, &warn_tx), Some(done)).await;
     });
     BackgroundModels {
         available,
@@ -205,7 +233,6 @@ impl<'t> EventLoop<'t> {
         std::thread::spawn(crate::highlight::warmup);
         crate::update::spawn_check();
 
-        let bg = spawn_model_fetch();
         let storage_writer = Arc::new(StorageWriter::new(storage.clone())?);
         let (shell_tx, shell_rx) = flume::unbounded::<ShellEvent>();
         let (action_tx, action_rx) = flume::unbounded::<Action>();
@@ -217,6 +244,7 @@ impl<'t> EventLoop<'t> {
             model: model.clone(),
             provider,
         }));
+        let bg = spawn_model_fetch(&model_slot, timeouts);
         let handles = AgentHandles::spawn(
             &model_slot,
             initial_history,
@@ -531,10 +559,10 @@ impl<'t> EventLoop<'t> {
             Action::ChangeModel(spec) => self.change_model(spec),
             Action::RefreshProvider { slug } => self.refresh_provider(slug),
             Action::AssignTier(spec, tier) => {
-                craft_providers::tier_map::set_and_persist(spec, tier, &self.app.storage);
+                craft_providers::model_registry::set_and_persist(spec, tier, &self.app.storage);
             }
             Action::UnassignTier(spec, tier) => {
-                craft_providers::tier_map::unset_and_persist(&spec, tier, &self.app.storage);
+                craft_providers::model_registry::unset_and_persist(&spec, tier, &self.app.storage);
             }
             Action::Compact => {
                 self.handles.queue.push(QueueItem::Compact {
@@ -637,7 +665,7 @@ impl<'t> EventLoop<'t> {
         let warn_tx = self.warn_tx.clone();
         available.store(None);
         tokio::spawn(async move {
-            fetch_all_models(|batch| merge_batch(&available, batch, &warn_tx)).await;
+            fetch_all_models(|batch| merge_batch(&available, batch, &warn_tx), None).await;
         });
     }
 

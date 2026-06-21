@@ -445,14 +445,17 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
 }
 
 pub async fn models() {
-    fetch_all_models(|batch| {
-        for model in batch.models {
-            println!("{model}");
-        }
-        for warning in batch.warnings {
-            eprintln!("warning: {warning}");
-        }
-    })
+    fetch_all_models(
+        |batch| {
+            for model in batch.models {
+                println!("{model}");
+            }
+            for warning in batch.warnings {
+                eprintln!("warning: {warning}");
+            }
+        },
+        None,
+    )
     .await;
 }
 

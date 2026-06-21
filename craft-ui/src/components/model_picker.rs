@@ -8,8 +8,8 @@ use ratatui::text::{Line, Span};
 
 use craft_providers::ModelTier;
 use craft_providers::dynamic;
+use craft_providers::model_registry;
 use craft_providers::provider::ProviderKind;
-use craft_providers::tier_map;
 
 use crate::components::Overlay;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
@@ -197,7 +197,7 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
         craft_config::providers::resolve_display_name(provider_str, config.get(provider_str))
     };
 
-    let map = tier_map::tier_map().read().unwrap();
+    let map = model_registry::model_registry().read().unwrap();
     let override_tiers: Vec<ModelTier> = [ModelTier::Strong, ModelTier::Medium, ModelTier::Weak]
         .into_iter()
         .filter(|&t| map.has_override(spec, t))
