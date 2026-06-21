@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-06-21
+
+### Added
+
+- **providers**: renamed `tier_map` to `model_registry` across all call sites;
+  `known_models` now holds `ModelInfo` enabling discovered `context_window` and
+  `max_output_tokens` lookups, `Model::from_base` consults discovered metadata
+  for unknown models, `write_overrides` emits the human-readable
+  `{"spec": "tier"}` disk format, and the active model is re-resolved after
+  discovery completes. (`d3338eb`)
+- **providers**: one model per tier is now enforced via a structural invariant.
+  (`e8e4ca`)
+- **agent**: `written_path` field on `ToolExecResult` and `ToolDoneEvent`,
+  preferred over the legacy `ToolOutput::WriteCode`/`Diff` path, reported by
+  `edit`/`multiedit`/`write` and threaded through native, MCP, dedup-cache, and
+  validation constructors. The Lua tool API gains a `mutable_path` spec field
+  for plan-mode enforcement. (`6f73a4`)
+- **agent**: the full `craft resume` command is printed on exit when a session
+  can be resumed. (`84b683`)
+- **ui, agent**: double-escape cancels an individual subagent when viewing its
+  chat. (`62506f`, credit: tontinton)
+- **ui**: pressing `1`/`2`/`3` toggles the tier override on a model that
+  already has that exact tier. (`e6c8ce`)
+- **ui**: the `/models` popup shows all assigned tiers per model. (`0f706f`)
+- **config**: `always_thinking` accepts a numeric token budget (e.g.
+  `always_thinking = 8192`). (`ef54fd)
+
+### Changed
+
+- **agent**: hardened `file_tracker` - `get_mtime` returns `Option`,
+  `record_read` warns and skips on missing mtime, `check_before_edit` drops
+  deleted files and tolerates untracked paths, with new tests for stale reads,
+  re-reads, deleted and nonexistent files. (`6f73a4`)
+
 ## [0.6.2] - 2026-06-18
 
 ### Fixed
@@ -467,7 +501,9 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/craft-build/craft/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/craft-build/craft/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/craft-build/craft/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/craft-build/craft/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/craft-build/craft/compare/v0.5.1...v0.5.2
