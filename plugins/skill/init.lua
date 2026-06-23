@@ -47,6 +47,9 @@ end
 
 local function find_project_ancestors()
   local cwd = craft.uv.cwd()
+  if not cwd then
+    return {}
+  end
   local dirs = { cwd }
   for _, parent in ipairs(craft.fs.parents(cwd)) do
     dirs[#dirs + 1] = parent
