@@ -5,7 +5,9 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use craft_providers::provider::Provider;
-use craft_providers::{Message, Model, RequestOptions, StopReason, StreamResponse, TokenUsage};
+use craft_providers::{
+    Message, Model, ModelTier, RequestOptions, StopReason, StreamResponse, TokenUsage,
+};
 
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
 use super::dedup::ToolDedupCache;
@@ -40,6 +42,24 @@ const MANDATORY_RECENT_MESSAGES: usize = 6;
 const STAGNATION_WINDOW_SIZE: usize = 5;
 #[cfg(feature = "onnx")]
 const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
+
+pub async fn resolve_compaction_model(
+    provider: &Arc<dyn Provider>,
+    model: &Model,
+    timeouts: craft_providers::Timeouts,
+) -> (Arc<dyn Provider>, Model) {
+    let compact_spec = craft_providers::model_registry::model_registry()
+        .read()
+        .unwrap()
+        .spec_for_tier_any(ModelTier::Compaction);
+    if let Some(spec) = compact_spec
+        && let Ok(m) = Model::from_spec(&spec)
+        && let Ok(p) = craft_providers::provider::from_model(&m, timeouts).await
+    {
+        return (Arc::from(p), m);
+    }
+    (Arc::clone(provider), model.clone())
+}
 
 enum TurnOutcome {
     Continue,
@@ -834,9 +854,11 @@ impl<'h> Agent<'h> {
     }
 
     async fn do_compact(&mut self) -> Result<(), AgentError> {
+        let (compact_provider, compact_model) =
+            resolve_compaction_model(&self.provider, &self.model, self.timeouts).await;
         self.total_usage += compaction::compact_history(
-            &*self.provider,
-            &self.model,
+            &*compact_provider,
+            &compact_model,
             self.history,
             &self.event_tx,
             &self.cancel,

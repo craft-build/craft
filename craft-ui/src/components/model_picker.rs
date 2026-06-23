@@ -28,18 +28,21 @@ fn footer_line() -> Line<'static> {
         Span::styled("medium", t.tool_dim),
         Span::styled("  3 ", t.keybind_key),
         Span::styled("weak", t.tool_dim),
+        Span::styled("  4 ", t.keybind_key),
+        Span::styled("compaction", t.tool_dim),
     ])
 }
 
 fn tier_for_shortcut(key: KeyEvent) -> Option<ModelTier> {
     let digit = match key.code {
-        KeyCode::Char(c @ '1'..='3') => c,
+        KeyCode::Char(c @ '1'..='4') => c,
         _ => return None,
     };
     match digit {
         '1' => Some(ModelTier::Strong),
         '2' => Some(ModelTier::Medium),
         '3' => Some(ModelTier::Weak),
+        '4' => Some(ModelTier::Compaction),
         _ => None,
     }
 }
@@ -198,10 +201,15 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
     };
 
     let map = model_registry::model_registry().read().unwrap();
-    let override_tiers: Vec<ModelTier> = [ModelTier::Strong, ModelTier::Medium, ModelTier::Weak]
-        .into_iter()
-        .filter(|&t| map.has_override(spec, t))
-        .collect();
+    let override_tiers: Vec<ModelTier> = [
+        ModelTier::Strong,
+        ModelTier::Medium,
+        ModelTier::Weak,
+        ModelTier::Compaction,
+    ]
+    .into_iter()
+    .filter(|&t| map.has_override(spec, t))
+    .collect();
     let override_label = map.override_tier_label(spec);
     drop(map);
     let tier = override_label.unwrap_or_else(|| match craft_providers::Model::from_spec(spec) {
@@ -329,12 +337,13 @@ mod tests {
         assert!(parse_model_entry("no-slash").is_none());
     }
 
-    #[test_case(key(KeyCode::Char('1')),            ModelTier::Strong ; "bare_1_strong")]
-    #[test_case(key(KeyCode::Char('2')),            ModelTier::Medium ; "bare_2_medium")]
-    #[test_case(key(KeyCode::Char('3')),            ModelTier::Weak   ; "bare_3_weak")]
-    #[test_case(alt_key(KeyCode::Char('1')),       ModelTier::Strong ; "alt_1_strong")]
-    #[test_case(alt_key(KeyCode::Char('2')),       ModelTier::Medium ; "alt_2_medium")]
-    #[test_case(alt_key(KeyCode::Char('3')),       ModelTier::Weak   ; "alt_3_weak")]
+    #[test_case(key(KeyCode::Char('1')),            ModelTier::Strong     ; "bare_1_strong")]
+    #[test_case(key(KeyCode::Char('2')),            ModelTier::Medium     ; "bare_2_medium")]
+    #[test_case(key(KeyCode::Char('3')),            ModelTier::Weak       ; "bare_3_weak")]
+    #[test_case(key(KeyCode::Char('4')),            ModelTier::Compaction ; "bare_4_compaction")]
+    #[test_case(alt_key(KeyCode::Char('1')),       ModelTier::Strong     ; "alt_1_strong")]
+    #[test_case(alt_key(KeyCode::Char('2')),       ModelTier::Medium     ; "alt_2_medium")]
+    #[test_case(alt_key(KeyCode::Char('3')),       ModelTier::Weak       ; "alt_3_weak")]
     fn tier_shortcut_assigns_and_keeps_picker_open(k: KeyEvent, want: ModelTier) {
         let mut p = ModelPicker::new(test_models());
         p.open("");
