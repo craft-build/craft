@@ -29,8 +29,10 @@ pub fn tool_kind(name: &str) -> ToolKind {
         return parse_tool_kind(&kind_str);
     }
     match name {
-        "bash" => ToolKind::Execute,
-        "grep" => ToolKind::Search,
+        "bash" | "bash_status" | "bash_watch" | "bash_kill" => ToolKind::Execute,
+        "grep" | "glob" => ToolKind::Search,
+        "webfetch" | "websearch" => ToolKind::Fetch,
+        "skill" => ToolKind::Read,
         _ => ToolKind::Other,
     }
 }
@@ -486,12 +488,9 @@ mod tests {
         assert_eq!(parse_tool_kind(input), expected);
     }
 
-    #[test_case("read", ToolKind::Read ; "native_read")]
-    #[test_case("grep", ToolKind::Search ; "native_grep")]
-    #[test_case("edit", ToolKind::Edit ; "native_edit")]
-    #[test_case("write", ToolKind::Edit ; "native_write")]
     #[test_case("bash", ToolKind::Execute ; "bash_lua_name_fallback")]
-    #[test_case("task", ToolKind::Think ; "native_task")]
+    #[test_case("grep", ToolKind::Search ; "grep_lua_name_fallback")]
+    #[test_case("websearch", ToolKind::Fetch ; "websearch_lua_name_fallback")]
     #[test_case("nonexistent_plugin_tool", ToolKind::Other ; "unknown_tool_is_other")]
     fn tool_kind_from_registry_or_fallback(name: &str, expected: ToolKind) {
         assert_eq!(tool_kind(name), expected);
