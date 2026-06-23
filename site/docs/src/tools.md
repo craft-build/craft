@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 34 built-in tools. This is the full reference.
+Craft ships with 37 built-in tools. This is the full reference.
 
 ## File Operations
 
