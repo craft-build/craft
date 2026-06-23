@@ -4,7 +4,7 @@ use crate::components::keybindings::KeybindContext;
 use crate::components::queue_panel;
 use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
 use crate::components::status_bar::{StatusBarContext, UsageStats};
-use crate::selection::{self, SelectableZone, SelectionZone};
+use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use craft_lua::Split;
 use ratatui::Frame;
@@ -23,15 +23,14 @@ struct ViewLayout {
     input_area: Rect,
     splits: SplitLayout,
     content_area: Rect,
+    bottom_takeover: bool,
 }
 
 impl App {
     pub fn view(&mut self, frame: &mut Frame) {
         self.status_bar.clear_expired_hint();
 
-        let in_plan = self.state.mode == Mode::Plan;
-        let form_visible =
-            self.permission_prompt.is_open() || (in_plan && self.plan_form.is_visible());
+        let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
         let layout = self.compute_layout(frame, form_visible);
         let render_chat = self.resolve_render_chat();
 
@@ -136,6 +135,7 @@ impl App {
             input_area,
             splits,
             content_area: content,
+            bottom_takeover,
         }
     }
 
@@ -162,7 +162,6 @@ impl App {
     }
 
     fn render_bottom_panel(&mut self, frame: &mut Frame, layout: &ViewLayout) {
-        let in_plan = self.state.mode == Mode::Plan;
         if self.permission_prompt.is_open() {
             self.permission_prompt.view(frame, layout.bottom_area);
         } else if !self.is_main_chat() {
@@ -194,7 +193,7 @@ impl App {
                 .borders(Borders::TOP)
                 .border_style(self.separator_style());
             frame.render_widget(sep, sep_area);
-        } else if in_plan && self.plan_form.is_visible() {
+        } else if self.plan_form_active() {
             self.plan_form.view(frame, layout.bottom_area);
         } else if layout.bottom_area.height > 0 {
             let queue_entries = self.queue.panel_entries();
@@ -203,7 +202,7 @@ impl App {
                 self.float_mgr.view_panel(frame, idx, rect);
             }
             let streaming = self.status == Status::Streaming;
-            let panel_hint = in_plan
+            let panel_hint = (self.state.mode == Mode::Plan)
                 .then(|| self.plan_form.hint_line())
                 .flatten()
                 .or_else(|| self.lua_hint_line());
@@ -319,55 +318,62 @@ impl App {
     }
 
     fn register_zones(&mut self, layout: &ViewLayout, overlay_rect: Rect) {
-        self.zones[SelectionZone::Messages.idx()] = Some(SelectableZone {
+        // Push order = z-order. zone_at() walks in reverse, so later entries win.
+        self.zones = ZoneRegistry::new();
+
+        self.zones.push(SelectableZone {
             area: layout.msg_area,
-            highlight_area: Rect::new(
-                layout.msg_area.x,
-                layout.msg_area.y,
-                layout.msg_area.width.saturating_sub(1),
-                layout.msg_area.height,
-            ),
             zone: SelectionZone::Messages,
         });
 
-        if layout.input_area.height > 0 {
+        if layout.input_area.height > 0 && !layout.bottom_takeover && self.is_main_chat() {
             let input_inner = Rect::new(
                 layout.input_area.x,
                 layout.input_area.y + 1,
                 layout.input_area.width,
                 layout.input_area.height.saturating_sub(2),
             );
-            self.zones[SelectionZone::Input.idx()] = Some(SelectableZone {
+            self.zones.push(SelectableZone {
                 area: input_inner,
-                highlight_area: input_inner,
                 zone: SelectionZone::Input,
             });
-        } else {
-            self.zones[SelectionZone::Input.idx()] = None;
         }
 
-        self.zones[SelectionZone::StatusBar.idx()] = Some(SelectableZone {
-            area: layout.status_area,
-            highlight_area: layout.status_area,
-            zone: SelectionZone::StatusBar,
-        });
+        self.zones.push_overlay(layout.status_area);
+
+        if self.permission_prompt.is_open() || self.plan_form_active() {
+            self.zones.push_overlay(layout.bottom_area);
+        }
+
+        for &(_, rect) in &layout.panel_windows {
+            self.zones.push_overlay(selection::inset_border(rect));
+        }
+
+        if !self.is_main_chat() && layout.bottom_area.height > 0 {
+            self.zones.push_overlay(layout.bottom_area);
+        }
+
+        if layout.queue_area.height > 0 && !layout.bottom_takeover {
+            self.zones.push_overlay(layout.queue_area);
+        }
+
+        for dir in Split::ALL {
+            if let Some(rect) = layout.splits.rect(dir) {
+                self.zones.push_overlay(selection::inset_border(rect));
+            }
+        }
 
         if overlay_rect.width > 0 {
-            let inner = selection::inset_border(overlay_rect);
-            self.zones[SelectionZone::Overlay.idx()] = Some(SelectableZone {
-                area: inner,
-                highlight_area: inner,
-                zone: SelectionZone::Overlay,
-            });
-        } else {
-            self.zones[SelectionZone::Overlay.idx()] = None;
-            if self
-                .selection_state
-                .as_ref()
-                .is_some_and(|s| s.sel().zone == SelectionZone::Overlay)
-            {
-                self.selection_state = None;
-            }
+            self.zones
+                .push_overlay(selection::inset_border(overlay_rect));
+        }
+
+        // Overlay zone was removed (e.g. dialog closed), drop the dangling selection
+        if let Some(ref state) = self.selection_state
+            && state.sel().zone == SelectionZone::Overlay
+            && self.zones.find_area(state.sel().area).is_none()
+        {
+            self.selection_state = None;
         }
     }
 
@@ -377,13 +383,9 @@ impl App {
         };
 
         let sel = state.sel();
-        let zone = sel.zone;
-        let scroll = self.scroll_offset(zone);
+        let scroll = self.scroll_offset(sel.zone);
         if let Some(screen_sel) = sel.to_screen(scroll) {
-            let highlight_area = self.zones[zone.idx()]
-                .map(|z| z.highlight_area)
-                .unwrap_or_default();
-            selection::apply_highlight(frame.buffer_mut(), highlight_area, &screen_sel);
+            selection::apply_highlight(frame.buffer_mut(), sel.highlight_area(), &screen_sel);
         }
         if state.is_pending_copy() {
             let sel = *sel;
@@ -409,7 +411,7 @@ impl App {
     #[cfg(test)]
     pub(super) fn active_keybind_contexts(&self) -> Vec<KeybindContext> {
         let mut contexts = vec![KeybindContext::General];
-        if self.state.mode == Mode::Plan && self.plan_form.is_visible() {
+        if self.plan_form_active() {
             contexts.push(KeybindContext::FormInput);
         } else if self.queue.focus().is_some() {
             contexts.push(KeybindContext::QueueFocus);
@@ -440,9 +442,7 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn layout_geometry(&self, area: Rect) -> (Rect, Rect, Rect, Rect, SplitLayout) {
-        let in_plan = self.state.mode == Mode::Plan;
-        let form_visible =
-            self.permission_prompt.is_open() || (in_plan && self.plan_form.is_visible());
+        let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
         let layout = self.compute_layout_raw(area, form_visible);
         (
             layout.msg_area,
