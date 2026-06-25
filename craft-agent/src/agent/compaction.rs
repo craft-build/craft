@@ -100,34 +100,47 @@ pub(super) async fn compact_history(
     compaction_history.push(build_compaction_user_message(relevance_scores));
 
     let empty_tools = serde_json::json!([]);
-    let result = stream_with_retry(
-        provider,
-        model,
-        &compaction_history,
-        crate::prompt::COMPACTION_SYSTEM,
-        &empty_tools,
-        event_tx,
-        cancel,
-        RequestOptions::default(),
-        None,
-    )
-    .await;
+    const MAX_OVERFLOW_RETRIES: usize = 3;
+    let mut overflow_retries = 0;
 
-    let response = match result {
-        Ok(r) => r,
-        Err(e) => {
-            info!(error = %e, "LLM compaction failed, using static fallback");
-            let summary = build_static_summary(history.as_slice());
-            let new_history = vec![
-                Message::user(COMPACT_USER_PROMPT.into()),
-                Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::Text { text: summary }],
-                    ..Default::default()
-                },
-            ];
-            history.replace(new_history);
-            return Ok(TokenUsage::default());
+    let response = loop {
+        match stream_with_retry(
+            provider,
+            model,
+            &compaction_history,
+            crate::prompt::COMPACTION_SYSTEM,
+            &empty_tools,
+            event_tx,
+            cancel,
+            RequestOptions::default(),
+            None,
+        )
+        .await
+        {
+            Ok(r) => break r,
+            Err(e)
+                if e.is_overflow()
+                    && overflow_retries < MAX_OVERFLOW_RETRIES
+                    && compaction_history.len() > 1 =>
+            {
+                overflow_retries += 1;
+                truncate_oldest_round(&mut compaction_history);
+                continue;
+            }
+            Err(e) => {
+                info!(error = %e, "LLM compaction failed, using static fallback");
+                let summary = build_static_summary(history.as_slice());
+                let new_history = vec![
+                    Message::user(COMPACT_USER_PROMPT.into()),
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text { text: summary }],
+                        ..Default::default()
+                    },
+                ];
+                history.replace(new_history);
+                return Ok(TokenUsage::default());
+            }
         }
     };
 
@@ -455,6 +468,47 @@ fn strip_old_tool_results(messages: &mut [Message]) {
                 seen += 1;
             }
         }
+    }
+}
+
+fn truncate_oldest_round(messages: &mut Vec<Message>) {
+    if messages.len() <= 1 {
+        return;
+    }
+
+    let mut remove_count = 1;
+
+    if matches!(messages.first().map(|m| &m.role), Some(Role::Assistant)) {
+        let has_tool_calls = messages[0].has_tool_calls();
+        if has_tool_calls {
+            let next_has_tool_results = messages.get(1).is_some_and(|m| {
+                matches!(m.role, Role::User)
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            });
+            if next_has_tool_results {
+                remove_count = 2;
+            }
+        }
+    } else if matches!(messages.first().map(|m| &m.role), Some(Role::User))
+        && matches!(messages.get(1).map(|m| &m.role), Some(Role::Assistant))
+    {
+        // Dropping a lone user message would leave assistant-first, which some providers reject.
+        // Remove the assistant too to keep the conversation well-formed.
+        remove_count = 2;
+    }
+
+    messages.drain(..remove_count);
+
+    // After draining, the first message might still be an assistant (e.g. consecutive
+    // assistant messages). Keep draining until the first message is user or we're empty.
+    while messages.len() > 1 && matches!(messages.first().map(|m| &m.role), Some(Role::Assistant)) {
+        let mut drop = 1;
+        if matches!(messages.get(1).map(|m| &m.role), Some(Role::User)) {
+            drop = 2;
+        }
+        messages.drain(..drop);
     }
 }
 
@@ -960,5 +1014,130 @@ mod tests {
             !is_proactive_threshold(&history, &model, 0.75),
             "should not exceed 75% threshold"
         );
+    }
+
+    #[test]
+    fn truncate_oldest_round_removes_single_user_message() {
+        let mut messages = vec![
+            Message::user("first".into()),
+            Message::user("second".into()),
+        ];
+        truncate_oldest_round(&mut messages);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "second"));
+    }
+
+    #[test]
+    fn truncate_oldest_round_removes_assistant_tool_pair() {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "output".into(),
+                    is_error: false,
+                }],
+                ..Default::default()
+            },
+            Message::user("keep me".into()),
+        ];
+        truncate_oldest_round(&mut messages);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "keep me")
+        );
+    }
+
+    #[test]
+    fn truncate_oldest_round_removes_assistant_without_matching_tool_result() {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                }],
+                ..Default::default()
+            },
+            Message::user("no tool result".into()),
+        ];
+        truncate_oldest_round(&mut messages);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "no tool result")
+        );
+    }
+
+    #[test]
+    fn truncate_oldest_round_noop_on_single_message() {
+        let mut messages = vec![Message::user("only".into())];
+        truncate_oldest_round(&mut messages);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn truncate_oldest_round_removes_plain_assistant() {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "reply".into(),
+                }],
+                ..Default::default()
+            },
+            Message::user("keep me".into()),
+        ];
+        truncate_oldest_round(&mut messages);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::Text { text } if text == "keep me")
+        );
+    }
+
+    #[test]
+    fn truncate_oldest_round_consecutive_assistants_drains_until_user() {
+        // [Assistant(no tools), Assistant(tools), User(results)] drains the first
+        // assistant, leaving Assistant-first — keep draining until first is User.
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "plain reply".into(),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "output".into(),
+                    is_error: false,
+                }],
+                ..Default::default()
+            },
+            Message::user("keep me".into()),
+        ];
+        truncate_oldest_round(&mut messages);
+        assert!(!messages.is_empty());
+        assert!(matches!(messages[0].role, Role::User));
     }
 }

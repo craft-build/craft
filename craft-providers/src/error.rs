@@ -108,14 +108,9 @@ impl AgentError {
             Self::Api {
                 status: 400,
                 message,
-            } if message.contains("context_length_exceeded")
-                || message.contains("context window")
-                || (message.contains("max_tokens") && message.contains("reduce")) =>
-            {
-                Self::ContextOverflow {
-                    message: message.clone(),
-                }
-            }
+            } if Self::is_context_overflow_body(message) => Self::ContextOverflow {
+                message: message.clone(),
+            },
             Self::Api {
                 status: 413,
                 message,
@@ -141,6 +136,33 @@ impl AgentError {
             }
             _ => self,
         }
+    }
+
+    /// Detects context-window overflow in a 400 API error body across providers.
+    ///
+    /// Provider error formats:
+    /// - Anthropic:  413 "prompt is too long"  <https://docs.anthropic.com/en/docs/errors>
+    /// - OpenAI:     400 "maximum context length is X tokens"  <https://platform.openai.com/docs/guides/error-codes>
+    /// - Gemini:     400 "input token count exceeds" / "too many tokens"  <https://ai.google.dev/gemini-api/docs/troubleshooting>
+    /// - Ollama:     400 "context length exceeded"  <https://docs.ollama.com/api/errors>
+    /// - llama.cpp:  400 "exceeds the available context size"  <https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-context.cpp>
+    /// - Bedrock:    400 ValidationException "Input is too long for requested model"  <https://repost.aws/knowledge-center/bedrock-validation-exception-errors>
+    /// - DeepSeek:   400 "maximum context length is X tokens"  <https://api-docs.deepseek.com/quick_start/pricing>
+    /// - Mistral:    400 "too large for model with X maximum context length"  <https://docs.mistral.ai/resources/known-limitations>
+    /// - OpenRouter: 400 "endpoint's maximum context length is X tokens"  <https://openrouter.ai/docs/api/reference/errors-and-debugging.mdx>
+    fn is_context_overflow_body(message: &str) -> bool {
+        let m = message.to_lowercase();
+        let is_scope = m.contains("context")
+            || m.contains("token")
+            || m.contains("prompt")
+            || m.contains("input");
+        let is_overflow = m.contains("exceeds")
+            || m.contains("exceeded")
+            || m.contains("too long")
+            || m.contains("too many")
+            || m.contains("maximum")
+            || m.contains("context_length_exceeded");
+        is_scope && is_overflow
     }
 
     pub fn retry_message(&self) -> String {
@@ -224,5 +246,55 @@ mod tests {
     #[test]
     fn timeout_is_retryable() {
         assert!(AgentError::Timeout { secs: 30 }.is_retryable());
+    }
+
+    fn api_msg(status: u16, message: &str) -> AgentError {
+        AgentError::Api {
+            status,
+            message: message.into(),
+        }
+    }
+
+    // llama.cpp: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/server-context.cpp
+    #[test_case(400, "request (268914 tokens) exceeds the available context size (262144 tokens)", true   ; "llama_cpp_overshoot")]
+    // OpenAI: https://platform.openai.com/docs/guides/error-codes
+    #[test_case(400, "Input exceeds context limit", true                                                 ; "openai_style")]
+    // OpenAI: https://platform.openai.com/docs/guides/error-codes
+    #[test_case(400, "This model's maximum context length is 8192 tokens. However, you requested 9850 tokens", true ; "openai_max_context")]
+    // Gemini: https://ai.google.dev/gemini-api/docs/troubleshooting
+    #[test_case(400, "The input token count exceeds the maximum number of tokens allowed", true           ; "gemini_exceeds")]
+    // Gemini: https://ai.google.dev/gemini-api/docs/troubleshooting
+    #[test_case(400, "Request contains too many tokens. Please reduce the input size.", true              ; "gemini_too_many")]
+    // Gemini: https://ai.google.dev/gemini-api/docs/troubleshooting
+    #[test_case(400, "Your input context is too long.", true                                              ; "gemini_500_input")]
+    // Ollama: https://docs.ollama.com/api/errors
+    #[test_case(400, "context length exceeded", true                                                      ; "ollama")]
+    // Anthropic: https://docs.anthropic.com/en/docs/errors
+    #[test_case(413, "prompt is too long", true                                                           ; "anthropic_413")]
+    // HTTP 413: https://www.rfc-editor.org/rfc/rfc9110.html#name-413-content-too-large
+    #[test_case(413, "Payload too large", true                                                            ; "generic_413")]
+    // DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
+    #[test_case(400, "This model's maximum context length is 131072 tokens. However, you requested 168754 tokens", true ; "deepseek")]
+    // Mistral: https://docs.mistral.ai/resources/known-limitations
+    #[test_case(400, "Prompt contains 321774 tokens and 0 draft tokens, too large for model with 262144 maximum context length", true ; "mistral")]
+    // OpenRouter: https://openrouter.ai/docs/api/reference/errors-and-debugging.mdx
+    #[test_case(400, "This endpoint's maximum context length is 200000 tokens. However, you requested about 5028244 tokens", true ; "openrouter")]
+    // Bedrock: https://repost.aws/knowledge-center/bedrock-validation-exception-errors
+    #[test_case(400, "Input is too long for requested model.", true                                       ; "bedrock")]
+    #[test_case(400, "Input is too long for the model", true                                              ; "too_long_input")]
+    #[test_case(400, "Rate limit exceeded", false                                                         ; "not_context")]
+    #[test_case(400, "Invalid API key", false                                                             ; "auth_error")]
+    #[test_case(500, "Internal server error", false                                                       ; "server_error")]
+    #[test_case(400, "The output is too long", false                                                      ; "output_not_context")]
+    fn classify_context_overflow(status: u16, message: &str, expected: bool) {
+        let classified = api_msg(status, message).classify();
+        assert_eq!(classified.is_overflow(), expected);
+    }
+
+    #[test]
+    fn context_overflow_is_not_retryable() {
+        let err = api_msg(400, "request exceeds the available context size").classify();
+        assert!(err.is_overflow());
+        assert!(!err.is_retryable());
     }
 }
