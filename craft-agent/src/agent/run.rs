@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 
 use craft_providers::provider::Provider;
 use craft_providers::{
-    Message, Model, ModelTier, RequestOptions, StopReason, StreamResponse, TokenUsage,
+    ContentBlock, Message, Model, ModelTier, RequestOptions, StopReason, StreamResponse, TokenUsage,
 };
 
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
@@ -106,6 +106,7 @@ pub struct Agent<'h> {
     interrupt_source: Option<Arc<dyn InterruptSource>>,
     cancel: CancelToken,
     total_usage: TokenUsage,
+    context_size: u32,
     num_turns: u32,
     doom: SharedDoomTracker,
     guardrails: ToolGuardrails,
@@ -168,6 +169,7 @@ impl<'h> Agent<'h> {
             interrupt_source: None,
             cancel: CancelToken::none(),
             total_usage: TokenUsage::default(),
+            context_size: 0,
             num_turns: 0,
             doom: params.doom,
             guardrails: ToolGuardrails::new(),
@@ -370,7 +372,10 @@ impl<'h> Agent<'h> {
                 }
                 TurnOutcome::Overflow => {
                     info!("context overflow detected, attempting auto-compact and retry");
-                    let usage = self.total_usage;
+                    let usage = TokenUsage {
+                        input: self.context_size,
+                        ..Default::default()
+                    };
                     self.try_auto_compact(&usage, true).await?;
                 }
             }
@@ -472,6 +477,7 @@ impl<'h> Agent<'h> {
         self.emit_turn_complete(&response)?;
         let usage = response.usage;
         self.total_usage += usage;
+        self.context_size = usage.total_input();
         self.cache_tracker.update(&usage, self.history.len());
 
         #[cfg(feature = "onnx")]
@@ -502,7 +508,10 @@ impl<'h> Agent<'h> {
         }
 
         if has_tools {
+            let history_len_before = self.history.len();
             let batch = self.process_tool_calls(response).await?;
+            self.context_size +=
+                estimate_message_tokens(&self.history.as_slice()[history_len_before..]);
             {
                 let mut doom = self.doom.lock().unwrap_or_else(|e| e.into_inner());
                 for _ in 0..batch.doom_loops {
@@ -538,7 +547,13 @@ impl<'h> Agent<'h> {
             }
         }
 
-        if self.try_auto_compact(&usage, false).await? || self.handle_queued_command().await? {
+        let cumulative_usage = TokenUsage {
+            input: self.context_size,
+            ..Default::default()
+        };
+        if self.try_auto_compact(&cumulative_usage, false).await?
+            || self.handle_queued_command().await?
+        {
             return Ok(TurnOutcome::Continue);
         }
 
@@ -910,6 +925,22 @@ impl<'h> Agent<'h> {
     }
 }
 
+const CHARS_PER_TOKEN: usize = 4;
+
+fn estimate_message_tokens(messages: &[Message]) -> u32 {
+    let total_bytes: usize = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.len()),
+            ContentBlock::ToolResult { content, .. } => Some(content.len()),
+            ContentBlock::ToolUse { input, .. } => Some(input.to_string().len()),
+            _ => None,
+        })
+        .sum();
+    (total_bytes.max(CHARS_PER_TOKEN) / CHARS_PER_TOKEN) as u32
+}
+
 /// Removes a trailing GRACE_CALL_PROMPT user message and any synthetic
 /// assistant reply that follows it. Called when a fresh user message is
 /// about to be appended so the "Do NOT call any tools" instruction does
@@ -1252,11 +1283,11 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test_case(true,  900, true  ; "enabled_and_over_threshold")]
-    #[test_case(true,  100, false ; "enabled_but_below_threshold")]
-    #[test_case(false, 900, false ; "disabled_even_over_threshold")]
+    #[test_case(true,  170_000, true  ; "enabled_and_over_threshold")]
+    #[test_case(true,  150_000, false ; "enabled_but_below_threshold")]
+    #[test_case(false, 170_000, false ; "disabled_even_over_threshold")]
     #[tokio::test]
-    async fn try_auto_compact_behavior(enabled: bool, total_input: u32, expected: bool) {
+    async fn try_auto_compact_behavior(enabled: bool, context_size: u32, expected: bool) {
         let responses = if expected {
             vec![text_response(StopReason::EndTurn)]
         } else {
@@ -1266,13 +1297,13 @@ mod tests {
         let (run_params, event_rx) = make_run_params(&mut history);
         let mut params = make_agent_params();
         params.provider = Arc::new(MockProvider::new(responses));
-        params.model = small_context_model(1000, 200);
         let mut agent = Agent::new(params, run_params);
-        agent.model = Arc::new(small_context_model(1000, 200));
+        agent.model = Arc::new(small_context_model(200_000, 8_192));
         agent.auto_compact = enabled;
+        agent.context_size = context_size;
 
         let usage = TokenUsage {
-            input: total_input,
+            input: context_size,
             ..Default::default()
         };
         let result = agent.try_auto_compact(&usage, false).await.unwrap();
