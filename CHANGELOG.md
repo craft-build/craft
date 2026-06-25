@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-06-25
+
+### Added
+
+- **providers**: ported llama.cpp model discovery for all 3 server modes.
+  (`e8874f77`)
+- **agent**: compaction now retries on context overflow before falling back to
+  the static compaction. (`fa5ad220`)
+
+### Changed
+
+- **agent**: old tool results are stripped before compaction, reducing wasted
+  context. (`65de3bd3`)
+- **agent**: context size is tracked more accurately for auto-compaction.
+  (`734f8f99`)
+- **config**: default `max_line_bytes` bumped from 500 to 3000. (`98adcf74`)
+- **config**: permissions are now deny-by-default via the `default` key in
+  `permissions.toml`. (`857ef2c9`)
+
+### Fixed
+
+- **providers**: model lookup now uses longest-prefix matching, and the Codex
+  plan context window is respected. (`a0491185`)
+- **ui**: discovered context window is now applied to app state on startup.
+  (`031ad37f`)
+- **highlight**: prefix lines are fed into the parser when reading files from an
+  offset, fixing mis-highlighted continuation reads. (`43ed4598`)
+- **ui**: platform-appropriate word-move labels are shown on all platforms.
+  (`9d2108e2`)
+- **ui**: `Ctrl+E` now jumps to end of line on all platforms instead of the old
+  scroll-down binding. (`5671e6d4`)
+
+### Refactored
+
+- **providers**: deduplicated llama.cpp HTTP GET into `OpenAiCompatProvider`.
+  (`bfe264fd`)
+
 ## [0.6.4] - 2026-06-23
 
 ### Added
