@@ -12,6 +12,8 @@ use crate::{AgentError, AgentEvent, EventSender, TurnCompleteEvent};
 
 pub(super) const CONTINUE_AFTER_COMPACT: &str = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed. If you learned important project context during this session, consider saving it to memory before it's lost.";
 const IMAGE_PLACEHOLDER: &str = "[image]";
+const TOOL_RESULT_PLACEHOLDER: &str = "[tool result]";
+const KEEP_LAST_TOOL_RESULTS: usize = 3;
 const SUMMARY_MARKER_PREFIX: &str = "[Summary: ";
 
 const AGGRESSIVE_CODE_RATE: f32 = 0.15;
@@ -94,6 +96,7 @@ pub(super) async fn compact_history(
     let mut compaction_history: Vec<Message> = history.as_slice().to_vec();
     strip_images(&mut compaction_history);
     strip_thinking(&mut compaction_history);
+    strip_old_tool_results(&mut compaction_history);
     compaction_history.push(build_compaction_user_message(relevance_scores));
 
     let empty_tools = serde_json::json!([]);
@@ -432,6 +435,26 @@ fn strip_thinking(messages: &mut [Message]) {
                 ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
             )
         });
+    }
+}
+
+fn strip_old_tool_results(messages: &mut [Message]) {
+    let total: usize = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        .count();
+
+    let mut seen = 0;
+    for msg in messages {
+        for block in &mut msg.content {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                if seen < total.saturating_sub(KEEP_LAST_TOOL_RESULTS) {
+                    *content = TOOL_RESULT_PLACEHOLDER.into();
+                }
+                seen += 1;
+            }
+        }
     }
 }
 
@@ -824,6 +847,91 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn strip_old_tool_results_keeps_newest() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "old result 1".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t2".into(),
+                    content: "old result 2".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t3".into(),
+                    content: "keep 1".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t4".into(),
+                    content: "keep 2".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t5".into(),
+                    content: "keep 3".into(),
+                    is_error: false,
+                },
+                ContentBlock::Text {
+                    text: "keep me".into(),
+                },
+            ],
+            ..Default::default()
+        }];
+        strip_old_tool_results(&mut messages);
+        assert_eq!(messages[0].content.len(), 6);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::ToolResult { content, tool_use_id, .. } if content == TOOL_RESULT_PLACEHOLDER && tool_use_id == "t1")
+        );
+        assert!(
+            matches!(&messages[0].content[1], ContentBlock::ToolResult { content, tool_use_id, .. } if content == TOOL_RESULT_PLACEHOLDER && tool_use_id == "t2")
+        );
+        assert!(
+            matches!(&messages[0].content[2], ContentBlock::ToolResult { content, tool_use_id, .. } if content == "keep 1" && tool_use_id == "t3")
+        );
+        assert!(
+            matches!(&messages[0].content[3], ContentBlock::ToolResult { content, tool_use_id, .. } if content == "keep 2" && tool_use_id == "t4")
+        );
+        assert!(
+            matches!(&messages[0].content[4], ContentBlock::ToolResult { content, tool_use_id, .. } if content == "keep 3" && tool_use_id == "t5")
+        );
+        assert!(
+            matches!(&messages[0].content[5], ContentBlock::Text { text } if text == "keep me")
+        );
+    }
+
+    #[test]
+    fn strip_old_tool_results_keeps_all_when_fewer_than_threshold() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "only result".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t2".into(),
+                    content: "second".into(),
+                    is_error: false,
+                },
+            ],
+            ..Default::default()
+        }];
+        strip_old_tool_results(&mut messages);
+        assert!(
+            matches!(&messages[0].content[0], ContentBlock::ToolResult { content, .. } if content == "only result")
+        );
+        assert!(
+            matches!(&messages[0].content[1], ContentBlock::ToolResult { content, .. } if content == "second")
+        );
     }
 
     #[test]
