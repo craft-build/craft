@@ -321,6 +321,10 @@ impl TextBuffer {
                     self.move_home();
                     EditResult::Moved
                 }
+                KeyCode::Char('e') => {
+                    self.move_end();
+                    EditResult::Moved
+                }
                 _ => EditResult::Ignored,
             };
         }
@@ -655,6 +659,7 @@ mod tests {
     #[test_case(plain(KeyCode::F(1)),            EditResult::Ignored ; "plain_ignored")]
     #[test_case(ctrl(KeyCode::Char('k')),        EditResult::Changed ; "ctrl_changed")]
     #[test_case(ctrl(KeyCode::Char('a')),        EditResult::Moved   ; "ctrl_moved")]
+    #[test_case(ctrl(KeyCode::Char('e')),        EditResult::Moved   ; "ctrl_e_moved")]
     #[test_case(ctrl(KeyCode::Char('z')),        EditResult::Ignored ; "ctrl_ignored")]
     #[test_case(alt(KeyCode::Backspace),         EditResult::Changed ; "alt_changed")]
     #[test_case(alt(KeyCode::Left),              EditResult::Moved   ; "alt_moved")]
