@@ -178,8 +178,9 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         let working_dir_path = params.initial_wd.clone();
         async move {
             let event_tx = EventSender::new(raw_tx, 0);
+            let mut model = params.model;
             let provider: Arc<dyn Provider> =
-                match provider::from_model(&params.model, params.timeouts).await {
+                match provider::from_model(&mut model, params.timeouts).await {
                     Ok(p) => Arc::from(p),
                     Err(e) => {
                         error!(error = %e, "provider error");
@@ -194,7 +195,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             let agent = Agent::new(
                 AgentParams {
                     provider,
-                    model: params.model,
+                    model,
                     config: params.config,
                     tool_output_lines: ToolOutputLines::default(),
                     permissions: Arc::new(PermissionManager::new(
@@ -324,7 +325,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         async move {
             let mut model = params.model;
             let mut provider: Arc<dyn Provider> =
-                match provider::from_model(&model, params.timeouts).await {
+                match provider::from_model(&mut model, params.timeouts).await {
                     Ok(p) => Arc::from(p),
                     Err(e) => {
                         error!(error = %e, "provider error");
@@ -343,10 +344,10 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 let event_tx = EventSender::new(raw_tx.clone(), run_id);
                 let error_tx = event_tx.clone();
 
-                if let Some(new_model) = model_rx.try_iter().last()
+                if let Some(mut new_model) = model_rx.try_iter().last()
                     && new_model.spec() != model.spec()
                 {
-                    match provider::from_model(&new_model, params.timeouts).await {
+                    match provider::from_model(&mut new_model, params.timeouts).await {
                         Ok(p) => {
                             provider = Arc::from(p);
                             let dynamic = crate::tools::DynamicContext::from_config(&params.config);

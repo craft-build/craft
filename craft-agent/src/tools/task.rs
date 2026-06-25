@@ -71,7 +71,7 @@ impl Task {
             if effective == ctx.model.tier {
                 (Model::clone(&ctx.model), Arc::clone(&ctx.provider))
             } else {
-                let resolved_model = {
+                let mut resolved_model = {
                     let map = model_registry::model_registry()
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
@@ -88,7 +88,7 @@ impl Task {
                         })
                         .ok_or_else(|| format!("no model available for tier {effective}"))?
                 };
-                let resolved_provider = provider::from_model(&resolved_model, ctx.timeouts)
+                let resolved_provider = provider::from_model(&mut resolved_model, ctx.timeouts)
                     .await
                     .map_err(|e| e.to_string())?;
                 (resolved_model, Arc::from(resolved_provider))

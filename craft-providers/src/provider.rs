@@ -242,10 +242,12 @@ pub trait Provider: Send + Sync {
     fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
         Box::pin(async { Ok(false) })
     }
+
+    fn adjust_model(&self, _model: &mut Model) {}
 }
 
 pub async fn from_model(
-    model: &Model,
+    model: &mut Model,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
     if let Some(slug) = &model.dynamic_slug {
@@ -257,11 +259,12 @@ pub async fn from_model(
         return crate::providers::custom::create(slug, timeouts);
     }
     let provider = model.provider.create(timeouts).await?;
+    provider.adjust_model(model);
     debug!(provider = %model.provider, model = %model.id, "provider created");
     Ok(provider)
 }
 
-pub async fn from_model_fallback(model: &Model, timeouts: Timeouts) -> Box<dyn Provider> {
+pub async fn from_model_fallback(model: &mut Model, timeouts: Timeouts) -> Box<dyn Provider> {
     match from_model(model, timeouts).await {
         Ok(provider) => provider,
         Err(e) => {

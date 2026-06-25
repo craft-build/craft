@@ -53,8 +53,8 @@ pub async fn resolve_compaction_model(
         .unwrap()
         .spec_for_tier_any(ModelTier::Compaction);
     if let Some(spec) = compact_spec
-        && let Ok(m) = Model::from_spec(&spec)
-        && let Ok(p) = craft_providers::provider::from_model(&m, timeouts).await
+        && let Ok(mut m) = Model::from_spec(&spec)
+        && let Ok(p) = craft_providers::provider::from_model(&mut m, timeouts).await
     {
         return (Arc::from(p), m);
     }

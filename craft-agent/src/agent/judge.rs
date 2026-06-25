@@ -77,10 +77,10 @@ async fn resolve_judge(
     spec: &str,
     timeouts: craft_providers::Timeouts,
 ) -> Result<(Model, Box<dyn Provider>), CrateAgentError> {
-    let model = Model::from_spec(spec).map_err(|e| AgentError::Config {
+    let mut model = Model::from_spec(spec).map_err(|e| AgentError::Config {
         message: format!("invalid judge_model spec: {e}"),
     })?;
-    let provider = craft_providers::provider::from_model(&model, timeouts).await?;
+    let provider = craft_providers::provider::from_model(&mut model, timeouts).await?;
     Ok((model, provider))
 }
 

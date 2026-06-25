@@ -136,8 +136,9 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
 
     let cwd_for_mcp = cwd.clone();
     let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd_for_mcp).await;
+    let mut model = model;
     let provider: Arc<dyn craft_providers::provider::Provider> = Arc::from(
-        craft_providers::provider::from_model(&model, timeouts)
+        craft_providers::provider::from_model(&mut model, timeouts)
             .await
             .context("create provider")?,
     );

@@ -196,7 +196,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 session.meta.thinking = Some(thinking);
             }
         }
-        let model = if session.messages.is_empty() {
+        let mut model = if session.messages.is_empty() {
             model
         } else {
             Model::from_spec(&session.model).unwrap_or(model)
@@ -205,10 +205,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         let cwd_for_mcp = cwd.clone();
         let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd_for_mcp).await;
         let provider: Arc<dyn craft_providers::provider::Provider> = if needs_login {
-            Arc::from(craft_providers::provider::from_model_fallback(&model, timeouts).await)
+            Arc::from(craft_providers::provider::from_model_fallback(&mut model, timeouts).await)
         } else {
             Arc::from(
-                craft_providers::provider::from_model(&model, timeouts)
+                craft_providers::provider::from_model(&mut model, timeouts)
                     .await
                     .context("create provider")?,
             )

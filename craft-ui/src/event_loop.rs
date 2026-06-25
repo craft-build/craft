@@ -151,14 +151,14 @@ fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -
             let spec = model_slot.load().model.spec();
             let model_slot = Arc::clone(&model_slot);
             tokio::spawn(async move {
-                let resolved = match Model::from_spec(&spec) {
+                let mut resolved = match Model::from_spec(&spec) {
                     Ok(m) => m,
                     Err(e) => {
                         warn!(spec = %spec, error = %e, "failed to resolve model after discovery");
                         return;
                     }
                 };
-                let provider = match from_model(&resolved, timeouts)
+                let provider = match from_model(&mut resolved, timeouts)
                     .await
                     .map(|p| Arc::from(p) as Arc<dyn Provider>)
                 {
@@ -545,7 +545,7 @@ impl<'t> EventLoop<'t> {
                     let tx = self.action_tx.clone();
                     tokio::spawn(async move {
                         let result = match Model::from_spec(&model_spec) {
-                            Ok(model) => from_model(&model, timeouts)
+                            Ok(mut model) => from_model(&mut model, timeouts)
                                 .await
                                 .map(|p| Arc::from(p) as Arc<dyn Provider>)
                                 .map_err(|e| e.to_string()),
@@ -642,7 +642,7 @@ impl<'t> EventLoop<'t> {
 
     fn change_model(&mut self, spec: String) {
         match Model::from_spec(&spec) {
-            Ok(new_model) => {
+            Ok(mut new_model) => {
                 let model_spec = new_model.spec();
                 if model_spec == self.model_slot.load().model.spec() {
                     return;
@@ -650,7 +650,7 @@ impl<'t> EventLoop<'t> {
                 let timeouts = self.timeouts;
                 let tx = self.action_tx.clone();
                 tokio::spawn(async move {
-                    let result = from_model(&new_model, timeouts)
+                    let result = from_model(&mut new_model, timeouts)
                         .await
                         .map(|p| Arc::from(p) as Arc<dyn Provider>)
                         .map_err(|e| e.to_string());
@@ -679,15 +679,16 @@ impl<'t> EventLoop<'t> {
         let current_model = current.model.clone();
 
         if current_model.provider.to_string() == slug {
+            let mut m = current_model.clone();
             let timeouts = self.timeouts;
             let tx = self.action_tx.clone();
             tokio::spawn(async move {
-                let result = craft_providers::provider::from_model(&current_model, timeouts)
+                let result = craft_providers::provider::from_model(&mut m, timeouts)
                     .await
                     .map(|p| Arc::from(p) as Arc<dyn Provider>)
                     .map_err(|e| e.to_string());
                 let _ = tx.send(Action::ProviderReady {
-                    model_spec: current_model.spec(),
+                    model_spec: m.spec(),
                     provider: result,
                     pending_load_session: None,
                 });
