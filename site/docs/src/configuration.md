@@ -80,7 +80,7 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `max_output_bytes` | usize | `51200` | 1024 | Max tool output size (bytes) |
 | `max_output_lines` | usize | `2000` | 10 | Max tool output lines |
 | `max_response_bytes` | usize | `5242880` | 1024 | Max LLM response size (bytes) |
-| `max_line_bytes` | usize | `500` | 80 | Max bytes per line before truncation |
+| `max_line_bytes` | usize | `3000` | 80 | Max bytes per line before truncation |
 | `bash_timeout_secs` | u64 | `120` | 5 | Bash command timeout (seconds) |
 | `code_execution_timeout_secs` | u64 | `30` | 5 | Code execution timeout (seconds) |
 | `max_continuation_turns` | u32 | `3` | 1 | Max automatic continuation turns |
