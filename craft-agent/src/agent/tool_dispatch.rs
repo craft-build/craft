@@ -881,12 +881,12 @@ mod tests {
         use crate::permissions::{PERMISSION_DENIED_PREFIX, PermissionManager};
 
         let deny_all_write = PermissionsConfig {
-            allow_all: false,
             rules: vec![PermissionRule {
                 tool: crate::tools::WRITE_TOOL_NAME.into(),
                 scope: None,
                 effect: Effect::Deny,
             }],
+            ..Default::default()
         };
         let dir = TempDir::new().unwrap();
         let permissions = Arc::new(PermissionManager::new(

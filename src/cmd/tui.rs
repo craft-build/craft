@@ -100,7 +100,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     config.permissions = load_permissions(&cwd);
 
     if cli.yolo || config.always_yolo {
-        config.permissions.allow_all = true;
+        config.permissions.yolo = true;
         config.sandbox.mode = craft_config::SandboxMode::Off;
         config.sandbox.enabled = false;
     }

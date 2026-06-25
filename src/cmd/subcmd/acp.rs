@@ -32,7 +32,7 @@ pub async fn run(yolo: bool) -> Result<()> {
     config.permissions = load_permissions(&cwd);
 
     if yolo || config.always_yolo {
-        config.permissions.allow_all = true;
+        config.permissions.yolo = true;
         config.sandbox.mode = craft_config::SandboxMode::Off;
         config.sandbox.enabled = false;
     }

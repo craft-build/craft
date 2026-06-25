@@ -31,8 +31,8 @@ fn test_app() -> App {
     let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir())).unwrap());
     let permissions = Arc::new(PermissionManager::new(
         PermissionsConfig {
-            allow_all: false,
             rules: vec![],
+            ..Default::default()
         },
         PathBuf::from("/tmp"),
     ));
@@ -493,8 +493,8 @@ fn load_session_clears_plan() {
         100,
         Arc::new(PermissionManager::new(
             PermissionsConfig {
-                allow_all: false,
                 rules: vec![],
+                ..Default::default()
             },
             PathBuf::from("/tmp"),
         )),

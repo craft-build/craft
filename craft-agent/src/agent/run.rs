@@ -1072,8 +1072,9 @@ mod tests {
             tool_output_lines: ToolOutputLines::default(),
             permissions: Arc::new(PermissionManager::new(
                 craft_config::PermissionsConfig {
-                    allow_all: true,
+                    default: craft_config::DefaultEffect::Allow,
                     rules: vec![],
+                    ..Default::default()
                 },
                 std::path::PathBuf::from("/tmp"),
             )),
