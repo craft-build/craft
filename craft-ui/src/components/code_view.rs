@@ -108,6 +108,7 @@ fn render_code(
     mut hl: Option<craft_highlight::Highlighter>,
     start_line: usize,
     code_lines: &[String],
+    prefix: &str,
     total_count: usize,
     max_lines: usize,
 ) -> (Vec<Line<'static>>, bool) {
@@ -121,6 +122,12 @@ fn render_code(
     };
     let max_nr = start_line + display_count.saturating_sub(1);
     let w = nr_width(max_nr);
+
+    if let Some(hl) = &mut hl {
+        for line in LinesWithEndings::from(prefix) {
+            hl.advance(line);
+        }
+    }
 
     let mut lines: Vec<Line<'static>> = code_lines
         .iter()
@@ -446,7 +453,7 @@ pub(crate) fn render_instructions(
         let total = code_lines.len();
         let remaining = max_lines.saturating_sub(used);
         let hl = highlight.then(|| craft_highlight::Highlighter::for_path(&block.path));
-        let (rendered, was_truncated) = render_code(hl, 1, &code_lines, total, remaining);
+        let (rendered, was_truncated) = render_code(hl, 1, &code_lines, "", total, remaining);
         used += rendered.len();
         truncated |= was_truncated;
         lines.extend(rendered);
@@ -518,7 +525,7 @@ pub fn render_tool_content(
             .collect();
         let total = code_lines.len();
         let hl = highlight.then(|| craft_highlight::Highlighter::for_token(language));
-        let (code_result, trunc) = render_code(hl, 1, &code_lines, total, limits.script);
+        let (code_result, trunc) = render_code(hl, 1, &code_lines, "", total, limits.script);
         truncation.script = trunc;
         lines.extend(code_result);
     }
@@ -527,11 +534,13 @@ pub fn render_tool_content(
             path,
             start_line,
             lines: code_lines,
+            prefix,
             ..
         }) => render_code(
             highlight.then(|| craft_highlight::Highlighter::for_path(path)),
             *start_line,
             code_lines,
+            prefix,
             code_lines.len(),
             limits.output,
         ),
@@ -543,6 +552,7 @@ pub fn render_tool_content(
             highlight.then(|| craft_highlight::Highlighter::for_path(path)),
             1,
             code_lines,
+            "",
             code_lines.len(),
             limits.output,
         ),
@@ -663,6 +673,7 @@ mod tests {
             Some(craft_highlight::Highlighter::for_path("test.rs")),
             1,
             &code_lines,
+            "",
             total,
             READ_MAX_LINES,
         );
@@ -738,6 +749,48 @@ mod tests {
         ensure_theme();
         let expected = fg_in_context("test.rs", "/*\ndoc\n", "fn x() {}", "fn");
         assert_eq!(diff_fg(&lines, "fn x() {}"), expected);
+    }
+
+    /// Reading a file from an offset must carry the parser state from the
+    /// skipped lines, so a line inside a block comment is colored as a
+    /// comment rather than as code.
+    #[test]
+    fn read_code_offset_uses_prefix_state() {
+        ensure_theme();
+        let prefix = "/*\ndoc line one\ndoc line two\n";
+        let output = ToolOutput::ReadCode {
+            path: "test.rs".into(),
+            start_line: 4,
+            lines: vec!["let x = 1;".into()],
+            prefix: prefix.into(),
+            total_lines: 5,
+            instructions: None,
+            no_compress: false,
+        };
+        let content = render_tool_content(
+            None,
+            Some(&output),
+            true,
+            RenderLimits {
+                script: usize::MAX,
+                output: usize::MAX,
+            },
+        );
+        ensure_theme();
+        let expected = fg_in_context("test.rs", prefix, "let x = 1;", "let");
+        assert_eq!(first_output_fg(&content.lines, "let"), expected);
+    }
+
+    fn first_output_fg(lines: &[Line<'static>], substr: &str) -> ratatui::style::Color {
+        lines
+            .iter()
+            .find_map(|l| {
+                l.spans
+                    .iter()
+                    .find(|s| s.content.contains(substr))
+                    .and_then(|s| s.style.fg)
+            })
+            .unwrap_or_else(|| panic!("no fg-styled span containing {substr:?}"))
     }
 
     #[test]

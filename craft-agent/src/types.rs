@@ -142,6 +142,8 @@ pub enum ToolOutput {
         start_line: usize,
         lines: Vec<String>,
         #[serde(default)]
+        prefix: String,
+        #[serde(default)]
         total_lines: usize,
         #[serde(default)]
         instructions: Option<Vec<InstructionBlock>>,
@@ -954,6 +956,7 @@ mod tests {
             path: "a.rs".into(),
             start_line,
             lines,
+            prefix: String::new(),
             total_lines: 100,
             instructions,
             no_compress: false,
@@ -967,6 +970,7 @@ mod tests {
             path: "a.rs".into(),
             start_line: 1,
             lines: vec!["fn main()".into()],
+            prefix: String::new(),
             total_lines: 1,
             instructions: Some(vec![InstructionBlock {
                 path: "AGENTS.md".into(),

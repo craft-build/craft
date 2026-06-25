@@ -799,6 +799,7 @@ mod tests {
                     path: "/src/main.rs".into(),
                     start_line: 1,
                     lines: vec!["fn main() {}".into()],
+                    prefix: String::new(),
                     total_lines: 1,
                     instructions: None,
                     no_compress: false,

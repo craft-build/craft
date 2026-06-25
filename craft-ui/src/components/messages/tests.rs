@@ -1029,6 +1029,7 @@ fn read_code_with_instructions(blocks: Vec<InstructionBlock>) -> ToolOutput {
         path: "file.rs".into(),
         start_line: 1,
         lines: vec!["fn main() {}".into()],
+        prefix: String::new(),
         total_lines: 1,
         instructions: Some(blocks),
         no_compress: false,

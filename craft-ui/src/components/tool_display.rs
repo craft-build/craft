@@ -981,6 +981,7 @@ mod tests {
             path: "test.rs".into(),
             start_line: 1,
             lines: vec!["fn main() {}".into()],
+            prefix: String::new(),
             total_lines: 1,
             instructions: None,
             no_compress: false,
@@ -1196,6 +1197,7 @@ mod tests {
                 path: "src/main.rs".into(),
                 start_line: 1,
                 lines: vec!["x".into(); 42],
+                prefix: String::new(),
                 total_lines: 42,
                 instructions: None,
                 no_compress: false,
@@ -1267,8 +1269,8 @@ mod tests {
 
     #[test_case("bash",  ToolOutput::Plain("ok".into()),                      Some("1 lines")     ; "plain_short_annotates")]
     #[test_case("bash",  ToolOutput::Plain((0..20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n")), Some("20 lines") ; "plain_long_annotates")]
-    #[test_case("read",  ToolOutput::ReadCode { path: "a.rs".into(), start_line: 1, lines: vec!["x".into(); 5], total_lines: 5, instructions: None, no_compress: false }, Some("5 lines") ; "read_code_full_file")]
-    #[test_case("read",  ToolOutput::ReadCode { path: "a.rs".into(), start_line: 10, lines: vec!["x".into(); 5], total_lines: 100, instructions: None, no_compress: false }, Some("5 of 100 lines") ; "read_code_partial")]
+    #[test_case("read",  ToolOutput::ReadCode { path: "a.rs".into(), start_line: 1, lines: vec!["x".into(); 5], prefix: String::new(), total_lines: 5, instructions: None, no_compress: false }, Some("5 lines") ; "read_code_full_file")]
+    #[test_case("read",  ToolOutput::ReadCode { path: "a.rs".into(), start_line: 10, lines: vec!["x".into(); 5], prefix: String::new(), total_lines: 100, instructions: None, no_compress: false }, Some("5 of 100 lines") ; "read_code_partial")]
     #[test_case("write", ToolOutput::WriteCode { path: "a.rs".into(), byte_count: 99, lines: vec![] }, Some("99 bytes") ; "write_code_bytes")]
     #[test_case("grep",  ToolOutput::GrepResult { entries: vec![GrepFileEntry { path: "a.rs".into(), groups: vec![GrepMatchGroup::single(1, "hit")] }] }, Some("1 matches in 1 file") ; "grep_file_count")]
     #[test_case("edit",  ToolOutput::Diff { path: "a.rs".into(), before: String::new(), after: String::new(), summary: "ok".into() }, None ; "diff_no_annotation")]
@@ -1549,7 +1551,7 @@ mod tests {
         ; "readdir_uses_text_field"
     )]
     #[test_case(
-        Some(ToolOutput::ReadCode { path: "a.rs".into(), start_line: 1, lines: vec![], total_lines: 0, instructions: None, no_compress: false }),
+        Some(ToolOutput::ReadCode { path: "a.rs".into(), start_line: 1, lines: vec![], prefix: String::new(), total_lines: 0, instructions: None, no_compress: false }),
         None, "read", false
         ; "structured_output_resolves_to_none"
     )]
@@ -1720,6 +1722,7 @@ mod tests {
                 path: "main.rs".into(),
                 start_line: 1,
                 lines,
+                prefix: String::new(),
                 total_lines: line_count,
                 instructions,
                 no_compress: false,

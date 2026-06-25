@@ -57,6 +57,11 @@ impl Read {
         let limit = self.limit.unwrap_or(max_output_lines);
 
         let total_lines = raw.lines().count();
+        let prefix: String = if start == 0 {
+            String::new()
+        } else {
+            raw.lines().take(start).map(|l| format!("{l}\n")).collect()
+        };
         let lines: Vec<String> = raw
             .lines()
             .skip(start)
@@ -81,6 +86,7 @@ impl Read {
             path,
             start_line: start + 1,
             lines,
+            prefix,
             total_lines,
             instructions,
             no_compress: true,
