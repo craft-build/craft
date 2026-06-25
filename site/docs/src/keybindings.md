@@ -24,7 +24,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Tab` | Toggle mode |
 | `/command` | Open command palette |
 | `Ctrl+W` | Delete word backward |
-| `⌥←` / `⌥→` | Move word left / right |
+| `Alt+←` / `Alt+→` | Move word left / right |
 | `Ctrl+A` | Jump to start of line |
 | `Home` / `End` | Jump to start/end of line |
 | `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
