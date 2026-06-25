@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
 use flume::Sender;
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -210,7 +209,6 @@ impl LocalEndpoint {
         &self,
         auth: &ResolvedAuth,
     ) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
-        let client = self.compat.client();
         let base = auth
             .base_url
             .as_deref()
@@ -218,10 +216,16 @@ impl LocalEndpoint {
         let root = base.strip_suffix("/v1").unwrap_or(base);
 
         let props: serde_json::Value = serde_json::from_str(
-            &get_text(client, auth, &format!("{root}/props?autoload=false")).await?,
+            &self
+                .compat
+                .get_text(auth, &format!("{root}/props?autoload=false"))
+                .await?,
         )?;
 
-        let models_text = get_text(client, auth, &format!("{root}/v1/models")).await?;
+        let models_text = self
+            .compat
+            .get_text(auth, &format!("{root}/v1/models"))
+            .await?;
         let body: LlamaCppModelsResponse = serde_json::from_str(&models_text)?;
 
         let mode = if props["role"].as_str() == Some("router") {
@@ -288,18 +292,6 @@ fn extract_ctx_from_model(model: &LlamaCppModelData, mode: &ServerMode, props_n_
 fn extract_ctx_arg(args: &[String], flag: &str) -> Option<u32> {
     let idx = args.iter().position(|a| a == flag)?;
     args.get(idx + 1)?.parse().ok()
-}
-
-async fn get_text(client: &Client, auth: &ResolvedAuth, url: &str) -> Result<String, AgentError> {
-    let mut request = client.get(url);
-    for (key, value) in &auth.headers {
-        request = request.header(key.as_str(), value.as_str());
-    }
-    let response = request.send().await?;
-    if response.status().as_u16() != 200 {
-        return Err(AgentError::from_response(response).await);
-    }
-    Ok(response.text().await?)
 }
 
 pub(crate) const OLLAMA: LocalEndpointConfig = LocalEndpointConfig {

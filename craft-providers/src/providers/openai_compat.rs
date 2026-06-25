@@ -55,6 +55,22 @@ impl OpenAiCompatProvider {
         self.stream_timeout
     }
 
+    pub(crate) async fn get_text(
+        &self,
+        auth: &ResolvedAuth,
+        url: &str,
+    ) -> Result<String, AgentError> {
+        let mut request = self.client.get(url);
+        for (key, value) in &auth.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+        let response = request.send().await?;
+        if response.status().as_u16() != 200 {
+            return Err(AgentError::from_response(response).await);
+        }
+        Ok(response.text().await?)
+    }
+
     pub fn build_body(
         &self,
         model: &crate::model::Model,
