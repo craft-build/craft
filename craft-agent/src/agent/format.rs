@@ -26,7 +26,9 @@ fn formatter_for_extension(ext: &str) -> Option<(&'static str, &'static [&'stati
         "py" => ("black", BLACK_ARGS),
         "go" => ("gofmt", GOFMT_ARGS),
         "sh" | "bash" => ("shfmt", SHFMT_ARGS),
-        "c" | "h" | "cpp" | "cc" | "hpp" => ("clang-format", CLANG_FORMAT_ARGS),
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" | "ixx" => {
+            ("clang-format", CLANG_FORMAT_ARGS)
+        }
         "lua" => ("stylua", STYLUA_ARGS),
         _ => return None,
     })
@@ -298,7 +300,8 @@ mod tests {
     fn formatter_table_covers_all_documented_extensions() {
         for ext in [
             "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "css", "scss", "html", "md",
-            "yml", "yaml", "py", "go", "sh", "bash", "c", "h", "cpp", "cc", "hpp", "lua",
+            "yml", "yaml", "py", "go", "sh", "bash", "c", "h", "cpp", "cc", "cxx", "hpp", "hxx",
+            "hh", "ixx", "lua",
         ] {
             assert!(formatter_for_extension(ext).is_some(), "missing {ext}");
         }

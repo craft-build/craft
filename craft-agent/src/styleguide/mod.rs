@@ -223,7 +223,7 @@ pub fn detect_language(file_path: &str) -> Option<&'static str> {
         "py" | "pyw" | "pyi" => Some("python"),
         "go" => Some("go"),
         "c" | "h" => Some("c"),
-        "cpp" | "hpp" | "cc" | "cxx" => Some("cpp"),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" | "ixx" => Some("cpp"),
         "java" => Some("java"),
         "cs" => Some("csharp"),
         "rb" | "erb" => Some("ruby"),

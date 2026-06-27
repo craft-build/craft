@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-27
+
+### Added
+
+- **providers**: Ollama model discovery via `POST /api/show`, detecting context
+  window size per model with a two-tier fallback (`model_info.*.context_length`,
+  then `num_ctx` parsed from the parameters string). Adds a `post_text()`
+  helper to `OpenAiCompatProvider` and consolidates discovery modes into a
+  `DiscoveryMode` enum (`None`, `LlamaCpp`, `Ollama`).
+  (`cef7c2f2`, credit: Gabriel FORTE)
+- **providers**: custom-provider models can now be declared statically in
+  `providers.toml` via a `models` array on each `ProviderDef` (`[[slug.models]]`),
+  so the model picker is populated without a `GET /models` round trip on every
+  startup. Declared values carry `context_window`, `max_output_tokens`,
+  `supports_tool_examples`, and flattened pricing through to `ModelInfo` and
+  `Model::from_spec`. (`cf4f16d8`, credit: cybershape)
+- **providers**: every provider HTTP request now sends a custom
+  `craft/v<version>-g<git-short-hash>` User-Agent instead of reqwest's default,
+  with the git short hash captured at compile time via a build script.
+  (`50055b9d`, credit: Chris Lee)
+- **permissions**: "Allow always" on an MCP tool (`mcp:<tool>`) now generalizes
+  the stored scope to `*`, mirroring how `bash` generalizes `cargo test` to
+  `cargo *`. The rule's `mcp:<tool_name>` tool field still gates which tool it
+  applies to, so distinct MCP tools stay distinct. (`07fe8d65`, credit: Matt
+  Van Horn)
+- **ui**: the dollar cost is hidden from the status bar and per-turn usage when
+  all pricing fields are zero (e.g. local Ollama/llama.cpp providers), instead
+  of showing a meaningless `$0.000`. (`c38b2b30`, credit: g4bwy)
+- **ui**: "Refine plan" option at the top of the plan-completion menu, which
+  dismisses the form so the user can keep iterating on the plan before
+  committing to implementation. (`4fc32ad3`)
+- **languages**: `.ixx` (C++ module interface) recognized as C++ across the
+  tree-sitter parser lists, the formatter, and the styleguide language
+  resolver, harmonizing the C++ extension set
+  (`cpp cc cxx hpp hxx hh ixx`) across all surfaces. (`0dd93c7d`, `db9c3bf7`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the
+  lockfile (e.g. `ast-grep-core` 0.43.0, `clap` 4.6.1, `cc` 1.2.65,
+  `fastembed` 5.17.2, `criterion` 0.8.2, `ratatui` 0.30, `reqwest` 0.13.4,
+  `syn` 2.0.118, `time` 0.3.x).
+- **providers**: configured model tiers are now validated.
+  (`ae8507e1`, credit: cybershape)
+- **agent**: improved wording in the `read`, `outline`, and `grep` tool
+  descriptions. (`942734c6`, credit: sdroege)
+- **docs**: added MCP tools to the scope-generalization list in the permissions
+  page, noting that `*` is per-tool so allowing `mcp:fetch` does not cover
+  `mcp:exec`. (`3c92dc5a`)
+
+### Fixed
+
+- **ui**: opening `/model` now refetches the model list from providers instead
+  of showing the stale list cached at startup. (`3bb62b60`, credit: g4bwy)
+- **providers**: dynamic providers use the models declared by their own
+  `models` script (with `context_window` / `max_output_tokens`) when listing
+  models, instead of bypassing them and re-fetching from the upstream provider,
+  which had dropped per-model metadata for IDs the upstream did not know.
+  (`68c996c3`, credit: Chris Lee)
+- **providers**: dynamic-provider slugs on Windows no longer include the
+  trailing `.exe` / `.bat` / `.cmd` / `.ps1` suffix, which previously failed
+  the valid-slug check. (`05b2211f`, credit: TheGoddessInari)
+
 ## [0.7.0] - 2026-06-27
 
 ### Added
@@ -614,7 +677,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/craft-build/craft/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/craft-build/craft/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/craft-build/craft/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/craft-build/craft/compare/v0.6.3...v0.6.4
