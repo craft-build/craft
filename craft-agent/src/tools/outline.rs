@@ -182,7 +182,7 @@ impl LangId {
             "go" => Some(Self::Go),
             "java" => Some(Self::Java),
             "c" | "h" => Some(Self::C),
-            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Self::Cpp),
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "ixx" => Some(Self::Cpp),
             "rb" => Some(Self::Ruby),
             "lua" => Some(Self::Lua),
             "sh" | "bash" => Some(Self::Bash),
