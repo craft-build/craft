@@ -8,3 +8,4 @@ With `files=true` on a directory: returns a flat table of files with language, s
 - Unsupported files are reported as skipped.
 - Output is capped at 30KB with narrowing hints on truncation.
 - Prefer this over `read` for getting an overview of a file's structure.
+- Use **outline** first on individual files to get their skeleton, then use the **read** tool with offset/limit for the specific section you need.
