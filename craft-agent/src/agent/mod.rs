@@ -5,6 +5,7 @@ mod dedup;
 mod doom;
 mod escalation;
 pub mod findings_store;
+mod format;
 mod guardrails;
 mod history;
 mod instructions;

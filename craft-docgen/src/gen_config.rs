@@ -77,6 +77,58 @@ fn write_tool_output_section(out: &mut String) {
     writeln!(out).unwrap();
 }
 
+fn write_nested_agent_sections(out: &mut String) {
+    writeln!(out, "### `agent.validation`\n").unwrap();
+    writeln!(
+        out,
+        "Run a project-level compile check after the agent writes files. Disabled by default.\n"
+    )
+    .unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `enabled` | bool | `false` | Enable post-write compile validation |"
+    )
+    .unwrap();
+    writeln!(out, "| `command` | string | `none` | Custom validation command, overriding the detected project command |").unwrap();
+    writeln!(
+        out,
+        "| `max_iterations` | u8 | `3` | Max validation retry iterations |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `timeout_secs` | u64 | `30` | Validation command timeout (seconds) |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "### `agent.format`\n").unwrap();
+    writeln!(out, "Auto-format files in place after the agent writes them, before the compile check. \
+                    Runs the formatter mapped to each file's extension, for example `rustfmt` for `.rs` \
+                    and `prettier --write` for `.ts` or `.json`. A missing formatter is silently skipped. \
+                    Set `command` to run one custom command for every formattable file.\n").unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `enabled` | bool | `false` | Enable post-write auto-formatting |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `command` | string | `none` | Custom formatter command, overriding the extension table |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `timeout_secs` | u64 | `15` | Formatter command timeout (seconds) |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+}
+
 pub fn generate() -> String {
     let mut out = String::with_capacity(4096);
 
@@ -141,6 +193,7 @@ All fields are optional. Typos in field names cause an error right away.
     write_section(&mut out, "[ui]", UiConfig::FIELDS);
     write_tool_output_section(&mut out);
     write_section(&mut out, "[agent]", AgentConfig::FIELDS);
+    write_nested_agent_sections(&mut out);
     write_section(&mut out, "[provider]", ProviderConfig::FIELDS);
     write_section(&mut out, "[storage]", StorageConfig::FIELDS);
     write_section(&mut out, "[compression]", CompressionConfig::FIELDS);

@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agent**: compaction now progressively drops tool responses (10/20/50/100%,
   oldest first, originals stored for `retrieve`) when the LLM compaction call
   itself overflows, after round truncation is exhausted.
+- **config**: `agent.format` — opt-in auto-format-on-edit. After the agent
+  writes files, runs the formatter mapped to each file's extension (`rustfmt`
+  for `.rs`, `prettier --write` for `.ts`/`.json`, `black` for `.py`, `gofmt`
+  for `.go`, `shfmt` for `.sh`/`.bash`, `clang-format -i` for C/C++, `stylua`
+  for `.lua`), in place and before the compile check. Missing formatters are
+  silently skipped; a custom `command` overrides the extension table. Surfaces
+  a terse `format` tool result listing changed paths, or an error event on
+  failure (no doom-loop signal). Default off.
 
 ## [0.6.5] - 2026-06-25
 

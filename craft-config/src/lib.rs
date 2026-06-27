@@ -352,6 +352,8 @@ pub struct AgentFileConfig {
     #[serde(default)]
     pub validation: ValidationConfig,
     #[serde(default)]
+    pub format: FormatConfig,
+    #[serde(default)]
     pub small_model: SmallModelConfig,
     #[serde(default)]
     pub dynamic_tools: DynamicToolsConfig,
@@ -789,6 +791,29 @@ impl Default for ValidationConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FormatConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub command: Option<String>,
+    #[serde(default = "default_format_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_format_timeout_secs() -> u64 {
+    15
+}
+
+impl Default for FormatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: None,
+            timeout_secs: default_format_timeout_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct SmallModelConfig {
     #[serde(default)]
@@ -905,6 +930,9 @@ pub struct AgentConfig {
     #[config(skip, default = "ValidationConfig::default()")]
     pub validation: ValidationConfig,
 
+    #[config(skip, default = "FormatConfig::default()")]
+    pub format: FormatConfig,
+
     #[config(skip, default = "SmallModelConfig::default()")]
     pub small_model: SmallModelConfig,
 
@@ -961,6 +989,7 @@ impl AgentConfig {
             disabled_tools,
             trust_decay: file.trust_decay,
             validation: file.validation,
+            format: file.format,
             small_model: file.small_model,
             dynamic_tools: file.dynamic_tools,
             hooks_enabled: file.hooks_enabled.unwrap_or(true),

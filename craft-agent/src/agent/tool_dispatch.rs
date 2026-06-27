@@ -20,6 +20,7 @@ use crate::{
 };
 
 use super::dedup::ToolDedupCache;
+use super::format::{FORMAT_TOOL_NAME, FormatResult, Formatter};
 use super::trust::TrustTracker;
 use super::validation::{ValidationResult, Validator};
 
@@ -381,6 +382,7 @@ pub(super) async fn process_tool_calls(
     trust: &mut TrustTracker,
     snapshot: &super::snapshot::SnapshotManager,
     validator: &Validator,
+    formatter: &Formatter,
 ) -> Result<ToolBatchOutcome, AgentError> {
     let tool_uses: Vec<(String, String, Value)> = response
         .message
@@ -588,6 +590,9 @@ pub(super) async fn process_tool_calls(
         .any(|r| !r.is_error && is_write_tool(&r.tool));
 
     if had_write_edits {
+        if let Some(format_event) = collect_format_events(formatter, &all_results).await {
+            all_results.push(format_event);
+        }
         let should_validate = all_results.iter().any(|r| {
             if !is_write_tool(&r.tool) || r.is_error {
                 return false;
@@ -661,6 +666,59 @@ fn is_write_tool(name: &str) -> bool {
             | crate::tools::MOVE_TOOL_NAME
             | crate::tools::AST_GREP_TOOL_NAME
     )
+}
+
+/// Runs the configured formatter over every path the batch just wrote and
+/// returns a synthetic `format` event when files were reformatted or
+/// formatting errored. Returns `None` for a clean/skipped batch.
+async fn collect_format_events(
+    formatter: &Formatter,
+    all_results: &[ToolDoneEvent],
+) -> Option<ToolDoneEvent> {
+    let mut reformatted: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for r in all_results {
+        if r.is_error || !is_write_tool(&r.tool) {
+            continue;
+        }
+        let Some(p) = r.written_path() else {
+            continue;
+        };
+        let path = Path::new(p);
+        if !formatter.should_format(path) {
+            continue;
+        }
+        match formatter.format(path).await {
+            FormatResult::Reformatted => reformatted.push(p.to_string()),
+            FormatResult::Errors(e) => errors.push(format!("{p}: {e}")),
+            FormatResult::Skipped | FormatResult::Clean => {}
+        }
+    }
+    let base_id = all_results
+        .first()
+        .map(|r| r.id.as_str())
+        .unwrap_or(FORMAT_TOOL_NAME);
+    if !errors.is_empty() {
+        Some(ToolDoneEvent {
+            id: format!("format-{base_id}"),
+            tool: Arc::from(FORMAT_TOOL_NAME),
+            output: crate::ToolOutput::Plain(format!("format failed:\n{}", errors.join("\n"))),
+            is_error: true,
+            annotation: None,
+            written_path: None,
+        })
+    } else if !reformatted.is_empty() {
+        Some(ToolDoneEvent {
+            id: format!("format-{base_id}"),
+            tool: Arc::from(FORMAT_TOOL_NAME),
+            output: crate::ToolOutput::Plain(format!("reformatted {}", reformatted.join(", "))),
+            is_error: false,
+            annotation: None,
+            written_path: None,
+        })
+    } else {
+        None
+    }
 }
 
 const UNTRUSTED_TOOLS: &[&str] = &["websearch", "webfetch"];
@@ -1053,5 +1111,129 @@ mod tests {
         )
         .await;
         assert!(!done.is_error, "timing-out hook must not crash the agent");
+    }
+
+    fn write_done(id: &str, path: &str) -> ToolDoneEvent {
+        ToolDoneEvent {
+            id: id.into(),
+            tool: Arc::from(crate::tools::WRITE_TOOL_NAME),
+            output: crate::ToolOutput::Plain("wrote".into()),
+            is_error: false,
+            annotation: None,
+            written_path: Some(path.into()),
+        }
+    }
+
+    fn rustfmt_available() -> bool {
+        std::process::Command::new("rustfmt")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn collect_format_events_no_event_when_disabled() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("f.rs");
+        fs::write(&path, "fn main ( ) { }").unwrap();
+        let formatter = Formatter::new(
+            dir.path().to_path_buf(),
+            craft_config::FormatConfig::default(),
+        );
+        let results = vec![write_done("t1", path.to_str().unwrap())];
+        assert!(collect_format_events(&formatter, &results).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_format_events_reformatted_emits_event() {
+        if !rustfmt_available() {
+            eprintln!("skipping: rustfmt unavailable");
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("bad.rs");
+        fs::write(&path, "fn main ( ) { }").unwrap();
+        let formatter = Formatter::new(
+            dir.path().to_path_buf(),
+            craft_config::FormatConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let results = vec![write_done("t1", path.to_str().unwrap())];
+        let event = collect_format_events(&formatter, &results)
+            .await
+            .expect("format event");
+        assert!(!event.is_error);
+        assert_eq!(event.tool.as_ref(), FORMAT_TOOL_NAME);
+        let text = event.output.as_text();
+        assert!(text.contains("reformatted"), "got: {text}");
+        assert!(text.contains("bad.rs"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn collect_format_events_errors_emits_error_event() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("f.rs");
+        fs::write(&path, "fn main() {}\n").unwrap();
+        let formatter = Formatter::new(
+            dir.path().to_path_buf(),
+            craft_config::FormatConfig {
+                enabled: true,
+                command: Some("false".into()),
+                ..Default::default()
+            },
+        );
+        let results = vec![write_done("t1", path.to_str().unwrap())];
+        let event = collect_format_events(&formatter, &results)
+            .await
+            .expect("format error event");
+        assert!(event.is_error);
+        assert_eq!(event.tool.as_ref(), FORMAT_TOOL_NAME);
+        let text = event.output.as_text();
+        assert!(text.contains("format failed"), "got: {text}");
+        assert!(text.contains("f.rs"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn collect_format_events_clean_emits_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("f.rs");
+        fs::write(&path, "fn main() {}\n").unwrap();
+        let formatter = Formatter::new(
+            dir.path().to_path_buf(),
+            craft_config::FormatConfig {
+                enabled: true,
+                command: Some("true".into()),
+                ..Default::default()
+            },
+        );
+        let results = vec![write_done("t1", path.to_str().unwrap())];
+        assert!(collect_format_events(&formatter, &results).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_format_events_skips_non_write_tools() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("f.rs");
+        fs::write(&path, "fn main ( ) { }").unwrap();
+        let formatter = Formatter::new(
+            dir.path().to_path_buf(),
+            craft_config::FormatConfig {
+                enabled: true,
+                command: Some("false".into()),
+                ..Default::default()
+            },
+        );
+        let results = vec![ToolDoneEvent {
+            id: "t1".into(),
+            tool: Arc::from(crate::tools::READ_TOOL_NAME),
+            output: crate::ToolOutput::Plain("read".into()),
+            is_error: false,
+            annotation: None,
+            written_path: None,
+        }];
+        assert!(collect_format_events(&formatter, &results).await.is_none());
     }
 }

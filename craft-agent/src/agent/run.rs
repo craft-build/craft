@@ -13,6 +13,7 @@ use super::compaction::{self, CONTINUE_AFTER_COMPACT};
 use super::dedup::ToolDedupCache;
 use super::doom::SharedDoomTracker;
 use super::escalation::EscalationTracker;
+use super::format::Formatter;
 use super::guardrails::ToolGuardrails;
 use super::history::{History, sanitize_cancelled_history};
 use super::instructions::LoadedInstructions;
@@ -133,6 +134,7 @@ pub struct Agent<'h> {
     trust_tracker: TrustTracker,
     snapshot: SnapshotManager,
     validator: Validator,
+    formatter: Formatter,
     escalation: EscalationTracker,
     promoted: crate::tools::PromotedTools,
     dynamic: crate::tools::DynamicContext,
@@ -195,6 +197,10 @@ impl<'h> Agent<'h> {
                 std::env::current_dir().unwrap_or_default(),
                 craft_config::ValidationConfig::default(),
             ),
+            formatter: Formatter::new(
+                std::env::current_dir().unwrap_or_default(),
+                craft_config::FormatConfig::default(),
+            ),
             escalation: EscalationTracker::new(Default::default()),
             promoted: run.promoted,
             dynamic,
@@ -220,6 +226,10 @@ impl<'h> Agent<'h> {
         self.validator = Validator::new(
             std::env::current_dir().unwrap_or_default(),
             self.config.validation.clone(),
+        );
+        self.formatter = Formatter::new(
+            std::env::current_dir().unwrap_or_default(),
+            self.config.format.clone(),
         );
         self.mcp = mcp;
         self
@@ -681,6 +691,7 @@ impl<'h> Agent<'h> {
             &mut self.trust_tracker,
             &self.snapshot,
             &self.validator,
+            &self.formatter,
         )
         .await;
         {
