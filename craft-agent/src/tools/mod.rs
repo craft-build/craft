@@ -131,7 +131,10 @@ impl ToolFilter {
                 config
                     .allowed_tools
                     .iter()
-                    .filter(|s| NATIVE_TOOL_NAMES.contains(&s.as_str()))
+                    .filter(|s| {
+                        NATIVE_TOOL_NAMES.contains(&s.as_str())
+                            || craft_config::DEFAULT_BUILTINS.contains(&s.as_str())
+                    })
                     .cloned()
                     .collect(),
             )

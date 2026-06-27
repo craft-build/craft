@@ -2,6 +2,8 @@ mod migrate;
 mod subcmd;
 mod tui;
 
+pub(crate) mod headless;
+
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 
@@ -48,6 +50,18 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         },
         Some(Command::Acp { yolo }) => {
             subcmd::acp::run(yolo).await?;
+        }
+        Some(Command::Run(args)) => {
+            subcmd::run::run(args).await?;
+        }
+        Some(Command::Review(args)) => {
+            subcmd::review::run(args).await?;
+        }
+        Some(Command::Term { action }) => {
+            subcmd::term::run(action).await?;
+        }
+        Some(Command::Doctor { export }) => {
+            subcmd::doctor::run(export).await?;
         }
         None => {
             tui::run(cli).await?;

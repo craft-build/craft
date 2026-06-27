@@ -207,11 +207,118 @@ pub enum Command {
         #[arg(long)]
         yolo: bool,
     },
+    /// Run a headless agent query (a prompt or a recipe file) and print the result
+    Run(RunCommand),
+    /// Run deterministic review checks against the current diff
+    Review(ReviewCommand),
+    /// Terminal shell integration: transparent command logging and `@craft` alias
+    Term {
+        #[command(subcommand)]
+        action: TermAction,
+    },
+    /// Diagnose and self-heal provider configuration
+    Doctor {
+        /// Export a JSON diagnostics report instead of running self-heal
+        #[arg(long)]
+        export: bool,
+    },
     /// Data migration utilities
     Migrate {
         #[command(subcommand)]
         action: MigrateAction,
     },
+}
+
+#[derive(Parser)]
+pub struct RunCommand {
+    /// A prompt to run, or a path to a recipe file (.yaml/.yml/.json)
+    pub prompt: Option<String>,
+    /// Model spec (provider/model-id)
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+    /// Output format for the result
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
+    /// Don't persist a session log for this run
+    #[arg(long)]
+    pub no_session: bool,
+    /// Suppress non-essential diagnostic output
+    #[arg(long)]
+    pub quiet: bool,
+    /// Skip all permission prompts (allow everything)
+    #[arg(long)]
+    pub yolo: bool,
+    /// Disable the Lua plugin system
+    #[arg(long)]
+    pub no_plugins: bool,
+    /// Recipe parameter overrides (key=value), repeatable
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub param: Vec<String>,
+    /// Maximum number of agent turns
+    #[arg(long)]
+    pub max_turns: Option<u32>,
+    /// Pre-approve tools (comma-separated), accepts PascalCase or snake_case
+    #[arg(long, value_delimiter = ',')]
+    pub allowed_tools: Vec<String>,
+}
+
+#[derive(Parser)]
+pub struct ReviewCommand {
+    /// List discovered checks without executing them
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip the file-sharded main pass over the current diff
+    #[arg(long)]
+    pub no_file_pass: bool,
+    /// Exit non-zero if any findings are produced (for CI)
+    #[arg(long)]
+    pub fail_on_findings: bool,
+    /// Only run checks whose name matches this regex
+    #[arg(long)]
+    pub check_filter: Option<String>,
+    /// Minimum severity to include (low, medium, high, critical)
+    #[arg(long)]
+    pub severity: Option<String>,
+    /// Model spec (provider/model-id) for checks that don't specify one
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum TermAction {
+    /// Print a shell init script that logs every command and defines `@craft`
+    Init {
+        /// Target shell
+        shell: ShellKind,
+        /// Also install a command_not_found handler that asks craft on miss
+        #[arg(long)]
+        with_not_found: bool,
+    },
+    /// Append a shell command to the current directory's command history
+    Log {
+        /// The command that was run
+        command: String,
+    },
+    /// Run a headless agent query with recent shell history injected as context
+    Run {
+        /// The query for craft
+        query: Vec<String>,
+        /// Model spec (provider/model-id)
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+        /// Output format for the result
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output_format: OutputFormat,
+    },
+    /// Show the active session id and recent logged commands for this directory
+    Info,
+}
+
+#[derive(Clone, ValueEnum)]
+pub enum ShellKind {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 #[derive(Subcommand)]

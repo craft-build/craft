@@ -20,11 +20,14 @@ pub use agent::{
 };
 pub use cancel::{CancelMap, CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
+pub mod checks;
 pub mod command;
 pub mod compression;
 pub mod diff;
+pub mod discovery;
 pub mod permissions;
 pub mod prompt;
+pub mod recipe;
 pub mod styleguide;
 pub mod template;
 pub mod tools;

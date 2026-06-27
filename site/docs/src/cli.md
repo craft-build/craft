@@ -73,6 +73,43 @@ craft mcp logout <server-name>   # remove stored tokens
 
 Run Craft as an [ACP](./acp.md) server over stdio for editor integration. Accepts `--yolo`.
 
+### `run`
+
+Run a single headless agent query from a prompt or a [recipe](./recipes.md) file and print the result. See [Run](./run.md).
+
+```bash
+craft run "explain the auth module"
+craft run .craft/recipes/audit.yaml --param focus=security
+```
+
+### `review`
+
+Run deterministic, parallel review [checks](./review.md) against the current diff.
+
+```bash
+craft review              # run all discovered checks
+craft review --dry-run    # list checks without executing
+```
+
+### `term`
+
+Terminal [integration](./terminal.md): log shell commands, inject history into queries, and define an `@craft` alias.
+
+```bash
+eval "$(craft term init bash)"   # set up integration
+craft term run "why did that fail?"
+craft term info                  # show recent logged commands
+```
+
+### `doctor`
+
+Diagnose and self-heal provider configuration. See [Doctor](./doctor.md).
+
+```bash
+craft doctor          # ping current model, heal on failure
+craft doctor --export # print a JSON diagnostics report
+```
+
 ### `update`
 
 Update Craft to the latest release. `-y` skips the confirmation prompt; `--no-color` disables highlighting.

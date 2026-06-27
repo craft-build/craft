@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **agent**: unified project-scoped discovery module that walks the working
+  directory ancestors plus the global config dir, with closer scopes shadowing
+  farther ones by name. Shared by checks, recipes, and skills.
+- **agent**: recipes — declarative, parameterized session blueprints (YAML or
+  JSON) with typed parameters, `minijinja` templating, sub-recipe composition,
+  and settings overrides. Run via `craft run recipe.yaml`.
+- **cli**: `craft review` runs deterministic, parallel review checks discovered
+  from `.agents/checks/*.md` (project-scoped, shadowing global), with a
+  file-sharded main pass over the current diff. Findings reuse the shared
+  `Finding`/`Priority` types so they render through the same pipeline as the
+  `review` tool; check frontmatter `turn-limit` and `tools` are passed through
+  to each subprocess as `--max-turns` and `--allowed-tools`; the styleguide
+  tools and `report_finding` are enabled by default so checks can ground
+  findings in rule IDs. Supports `--dry-run`, `--check-filter`, `--severity`,
+  and `-m`.
+- **cli**: `craft term` shell integration. `craft term init <bash|zsh|fish>`
+  prints a hook script that logs every command to a per-directory history and
+  defines an `@craft` alias; `craft term run` injects recent history into a
+  headless query; `craft term log` and `craft term info` round out the surface.
+- **cli**: `craft doctor` diagnoses the current provider/model, self-heals by
+  iterating alternative providers and persisting the first working one, and
+  exports a structured JSON diagnostics report with `--export`.
+- **cli**: `craft run` runs a headless agent query from a prompt or a recipe
+  file, with `--param key=value` overrides, `--no-session`, `--quiet`, and
+  `--output-format`.
+- **agent**: compaction now progressively drops tool responses (10/20/50/100%,
+  oldest first, originals stored for `retrieve`) when the LLM compaction call
+  itself overflows, after round truncation is exhausted.
+
 ## [0.6.5] - 2026-06-25
 
 ### Added

@@ -24,6 +24,10 @@ use craft_storage::auth::{
 use craft_storage::model::persist_model;
 
 pub mod acp;
+pub mod doctor;
+pub mod review;
+pub mod run;
+pub mod term;
 
 fn credential_path(slug: &str) -> String {
     match StateDir::resolve() {

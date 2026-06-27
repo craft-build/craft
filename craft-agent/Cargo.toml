@@ -39,6 +39,7 @@ getrandom = { workspace = true }
 uuid = { workspace = true }
 once_cell = { workspace = true }
 include_dir = { workspace = true }
+minijinja = { workspace = true }
 aho-corasick = { workspace = true }
 unicode-normalization = { workspace = true }
 tree-sitter = { workspace = true }

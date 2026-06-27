@@ -15,6 +15,9 @@ const IMAGE_PLACEHOLDER: &str = "[image]";
 const TOOL_RESULT_PLACEHOLDER: &str = "[tool result]";
 const KEEP_LAST_TOOL_RESULTS: usize = 3;
 const SUMMARY_MARKER_PREFIX: &str = "[Summary: ";
+/// Fraction of remaining tool responses to drop (oldest first) on each LLM
+/// compaction overflow retry, after round truncation is exhausted.
+const PROGRESSIVE_TOOL_REMOVAL_RATIOS: &[f32] = &[0.10, 0.20, 0.50, 1.00];
 
 const AGGRESSIVE_CODE_RATE: f32 = 0.15;
 const AGGRESSIVE_MAX_LOG_LINES: usize = 20;
@@ -102,6 +105,7 @@ pub(super) async fn compact_history(
     let empty_tools = serde_json::json!([]);
     const MAX_OVERFLOW_RETRIES: usize = 3;
     let mut overflow_retries = 0;
+    let mut removal_step = 0;
 
     let response = loop {
         match stream_with_retry(
@@ -118,28 +122,32 @@ pub(super) async fn compact_history(
         .await
         {
             Ok(r) => break r,
-            Err(e)
-                if e.is_overflow()
-                    && overflow_retries < MAX_OVERFLOW_RETRIES
-                    && compaction_history.len() > 1 =>
-            {
-                overflow_retries += 1;
-                truncate_oldest_round(&mut compaction_history);
-                continue;
+            Err(e) if e.is_overflow() => {
+                if overflow_retries < MAX_OVERFLOW_RETRIES && compaction_history.len() > 1 {
+                    overflow_retries += 1;
+                    truncate_oldest_round(&mut compaction_history);
+                    info!(
+                        attempt = overflow_retries,
+                        "truncated oldest round for compaction overflow"
+                    );
+                    continue;
+                }
+                if removal_step < PROGRESSIVE_TOOL_REMOVAL_RATIOS.len() {
+                    let ratio = PROGRESSIVE_TOOL_REMOVAL_RATIOS[removal_step];
+                    removal_step += 1;
+                    let dropped = strip_tool_results_by_ratio(&mut compaction_history, ratio);
+                    info!(
+                        removal_pct = format!("{:.0}%", ratio * 100.0),
+                        dropped, "progressively removed tool responses for compaction overflow"
+                    );
+                    continue;
+                }
+                info!(error = %e, "LLM compaction failed, using static fallback");
+                return Ok(static_fallback(history));
             }
             Err(e) => {
                 info!(error = %e, "LLM compaction failed, using static fallback");
-                let summary = build_static_summary(history.as_slice());
-                let new_history = vec![
-                    Message::user(COMPACT_USER_PROMPT.into()),
-                    Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::Text { text: summary }],
-                        ..Default::default()
-                    },
-                ];
-                history.replace(new_history);
-                return Ok(TokenUsage::default());
+                return Ok(static_fallback(history));
             }
         }
     };
@@ -469,6 +477,47 @@ fn strip_old_tool_results(messages: &mut [Message]) {
             }
         }
     }
+}
+
+fn strip_tool_results_by_ratio(messages: &mut [Message], ratio: f32) -> usize {
+    let mut indices: Vec<(usize, usize)> = Vec::new();
+    for (mi, m) in messages.iter().enumerate() {
+        for (bi, b) in m.content.iter().enumerate() {
+            if let ContentBlock::ToolResult { content, .. } = b
+                && content.as_str() != TOOL_RESULT_PLACEHOLDER
+            {
+                indices.push((mi, bi));
+            }
+        }
+    }
+    let total = indices.len();
+    if total == 0 {
+        return 0;
+    }
+    let target = (total as f32 * ratio).ceil() as usize;
+    let mut dropped = 0;
+    for (mi, bi) in indices.into_iter().take(target) {
+        if let ContentBlock::ToolResult { content, .. } = &mut messages[mi].content[bi]
+            && content.as_str() != TOOL_RESULT_PLACEHOLDER
+        {
+            *content = TOOL_RESULT_PLACEHOLDER.into();
+            dropped += 1;
+        }
+    }
+    dropped
+}
+
+fn static_fallback(history: &mut History) -> TokenUsage {
+    let summary = build_static_summary(history.as_slice());
+    history.replace(vec![
+        Message::user(COMPACT_USER_PROMPT.into()),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: summary }],
+            ..Default::default()
+        },
+    ]);
+    TokenUsage::default()
 }
 
 fn truncate_oldest_round(messages: &mut Vec<Message>) {
@@ -1139,5 +1188,174 @@ mod tests {
         truncate_oldest_round(&mut messages);
         assert!(!messages.is_empty());
         assert!(matches!(messages[0].role, Role::User));
+    }
+
+    #[test]
+    fn strip_tool_results_by_ratio_removes_oldest_first() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "old1".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t2".into(),
+                    content: "old2".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t3".into(),
+                    content: "keep".into(),
+                    is_error: false,
+                },
+            ],
+            ..Default::default()
+        }];
+        let dropped = strip_tool_results_by_ratio(&mut messages, 0.5);
+        assert_eq!(dropped, 2);
+        assert!(matches!(
+            &messages[0].content[0],
+            ContentBlock::ToolResult { content, .. } if content == TOOL_RESULT_PLACEHOLDER
+        ));
+        assert!(matches!(
+            &messages[0].content[1],
+            ContentBlock::ToolResult { content, .. } if content == TOOL_RESULT_PLACEHOLDER
+        ));
+        assert!(matches!(
+            &messages[0].content[2],
+            ContentBlock::ToolResult { content, .. } if content == "keep"
+        ));
+    }
+
+    #[test]
+    fn strip_tool_results_by_ratio_full_removes_all() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "a".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t2".into(),
+                    content: "b".into(),
+                    is_error: false,
+                },
+            ],
+            ..Default::default()
+        }];
+        let dropped = strip_tool_results_by_ratio(&mut messages, 1.0);
+        assert_eq!(dropped, 2);
+        assert!(messages[0].content.iter().all(|b| matches!(
+            b,
+            ContentBlock::ToolResult { content, .. } if content == TOOL_RESULT_PLACEHOLDER
+        )));
+    }
+
+    #[test]
+    fn strip_tool_results_by_ratio_skips_already_placeholder() {
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: TOOL_RESULT_PLACEHOLDER.into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t2".into(),
+                    content: "real".into(),
+                    is_error: false,
+                },
+            ],
+            ..Default::default()
+        }];
+        let dropped = strip_tool_results_by_ratio(&mut messages, 1.0);
+        assert_eq!(dropped, 1);
+        assert!(matches!(
+            &messages[0].content[1],
+            ContentBlock::ToolResult { content, .. } if content == TOOL_RESULT_PLACEHOLDER
+        ));
+    }
+
+    struct OverflowProvider {
+        overflows_left: Mutex<usize>,
+    }
+
+    impl Provider for OverflowProvider {
+        fn stream_message<'a>(
+            &'a self,
+            _: &'a Model,
+            _: &'a [Message],
+            _: &'a str,
+            _: &'a Value,
+            _: &'a flume::Sender<ProviderEvent>,
+            _: RequestOptions,
+            _: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+            Box::pin(async move {
+                let mut left = self.overflows_left.lock().unwrap();
+                if *left > 0 {
+                    *left -= 1;
+                    return Err(AgentError::ContextOverflow {
+                        message: "too long".into(),
+                    });
+                }
+                Ok(text_response(StopReason::EndTurn))
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
+            Box::pin(async { unimplemented!() })
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_history_recovers_from_overflow_via_progressive_removal() {
+        let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(OverflowProvider {
+            overflows_left: Mutex::new(5),
+        });
+        let model = default_model();
+        let (raw_tx, _rx) = flume::unbounded();
+        let mut history = History::new(vec![
+            Message::user("do it".into()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "cat huge"}),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "x".repeat(500),
+                    is_error: false,
+                }],
+                ..Default::default()
+            },
+        ]);
+
+        compact_history(
+            &*provider,
+            &model,
+            &mut history,
+            &EventSender::new(raw_tx, 0),
+            &CancelToken::none(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let msgs = history.as_slice();
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(msgs[0].role, Role::User));
+        assert!(matches!(msgs[1].role, Role::Assistant));
     }
 }
