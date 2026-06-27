@@ -125,7 +125,10 @@ impl Google {
 
     fn build_request(&self, method: &str, url: &str) -> reqwest::RequestBuilder {
         let auth = lock_unpoison(&self.auth);
-        let mut builder = self.client.request(method.parse().unwrap(), url);
+        let mut builder = self
+            .client
+            .request(method.parse().unwrap(), url)
+            .header("user-agent", super::user_agent());
         for (key, value) in &auth.headers {
             builder = builder.header(key.as_str(), value.as_str());
         }

@@ -30,6 +30,15 @@ pub(crate) mod synthetic;
 pub(crate) const MIME_JSON: &str = "application/json";
 pub(crate) const MIME_FORM: &str = "application/x-www-form-urlencoded";
 
+pub(crate) fn user_agent() -> &'static str {
+    concat!(
+        "craft/v",
+        env!("CARGO_PKG_VERSION"),
+        "-g",
+        env!("GIT_SHORT_HASH")
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Timeouts {
     pub connect: Duration,

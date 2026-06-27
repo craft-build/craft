@@ -107,7 +107,8 @@ impl OpenAiCompatProvider {
         let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
         let mut builder = self
             .client
-            .request(method.parse().unwrap(), format!("{base}{path}"));
+            .request(method.parse().unwrap(), format!("{base}{path}"))
+            .header("user-agent", super::user_agent());
         for (key, value) in &auth.headers {
             builder = builder.header(key.as_str(), value.as_str());
         }

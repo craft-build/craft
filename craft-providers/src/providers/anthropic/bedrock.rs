@@ -603,7 +603,10 @@ impl Provider for Bedrock {
                 AuthKind::None => None,
             };
 
-            let mut builder = self.client.post(&url);
+            let mut builder = self
+                .client
+                .post(&url)
+                .header("user-agent", super::super::user_agent());
             for (k, v) in &extra_headers {
                 builder = builder.header(*k, *v);
             }
