@@ -1,0 +1,12 @@
+name: release
+description: Prepare a release of craft
+parameters:
+  - name: version
+    type: string
+    description: The version number to release
+instructions: |
+  Prepare the repository for a release by
+  - Bumping the version in Cargo.toml to {{ version }}
+  - Run cargo update to update dependencies and Cargo.lock
+  - Create the release section in CHANGELOG.md
+  - Create the conventional commit

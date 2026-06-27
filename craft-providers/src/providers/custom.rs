@@ -64,7 +64,7 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
         .models
         .as_ref()?
         .iter()
-        .find(|m| m.tier.parse::<ModelTier>().ok() == Some(tier))?;
+        .find(|m| ModelTier::from(m.tier) == tier)?;
     lookup_model(slug, &declared.id)
 }
 
@@ -137,7 +137,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
     let cached = discovered_cache().read().unwrap().get(&cache_key).cloned();
 
     let tier = declared
-        .and_then(|m| m.tier.parse::<ModelTier>().ok())
+        .map(|m| ModelTier::from(m.tier))
         .unwrap_or(ModelTier::Medium);
     let max_output_tokens = declared
         .and_then(|m| m.max_output_tokens)
