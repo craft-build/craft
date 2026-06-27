@@ -47,7 +47,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
         &["styleguide_list", "styleguide_search", "styleguide_get"],
     ),
     ("Agent & Knowledge", &["task", "memory", "skill"]),
-    ("Web", &["webfetch", "websearch"]),
+    ("Web", &["browser_screenshot", "webfetch", "websearch"]),
 ];
 
 struct Param {

@@ -1,13 +1,33 @@
 use std::fmt::Write;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::agent::{self, LoadedInstructions};
-use crate::{InstructionBlock, ToolOutput};
+use crate::{ImageMediaType, ImageSource, InstructionBlock, ToolOutput};
+use base64::Engine;
 use craft_tool_macro::Tool;
 use serde::Deserialize;
 
 use super::{relative_path, truncate_bytes};
+
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+const IMAGE_EXTENSIONS: &[(&str, ImageMediaType)] = &[
+    ("png", ImageMediaType::Png),
+    ("jpg", ImageMediaType::Jpeg),
+    ("jpeg", ImageMediaType::Jpeg),
+    ("gif", ImageMediaType::Gif),
+    ("webp", ImageMediaType::Webp),
+];
+
+fn image_media_type(path: &Path) -> Option<ImageMediaType> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    IMAGE_EXTENSIONS
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, mt)| *mt)
+}
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct Read {
@@ -50,6 +70,10 @@ impl Read {
             return Self::list_dir(&path, cwd.as_deref(), &ctx.loaded_instructions);
         }
 
+        if let Some(media_type) = image_media_type(p) {
+            return Self::read_image(&path, p, media_type);
+        }
+
         let raw = ctx.fs.read_text_file(p).await?;
         let max_output_lines = ctx.config.max_output_lines;
         let max_line_bytes = ctx.config.max_line_bytes;
@@ -90,6 +114,27 @@ impl Read {
             total_lines,
             instructions,
             no_compress: true,
+        })
+    }
+
+    fn read_image(
+        display_path: &str,
+        path: &Path,
+        media_type: ImageMediaType,
+    ) -> Result<ToolOutput, String> {
+        let bytes = fs::read(path).map_err(|e| format!("read error: {e}"))?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "image file is {} bytes, exceeds {} byte limit",
+                bytes.len(),
+                MAX_IMAGE_BYTES
+            ));
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let caption = format!("[image {display_path}]");
+        Ok(ToolOutput::Image {
+            caption,
+            source: ImageSource::new(media_type, Arc::from(data)),
         })
     }
 
@@ -229,5 +274,51 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("limit"), "should mention field: {msg}");
         assert!(msg.contains(EXPECTED_INTEGER), "should mention type: {msg}");
+    }
+
+    #[test_case("test.png",  ImageMediaType::Png  ; "png")]
+    #[test_case("test.jpg",  ImageMediaType::Jpeg ; "jpg")]
+    #[test_case("test.jpeg", ImageMediaType::Jpeg ; "jpeg")]
+    #[test_case("test.gif",  ImageMediaType::Gif  ; "gif")]
+    #[test_case("test.webp", ImageMediaType::Webp ; "webp")]
+    #[test_case("TEST.PNG",  ImageMediaType::Png  ; "uppercase_ext")]
+    fn image_media_type_detects_extensions(name: &str, expected: ImageMediaType) {
+        assert_eq!(image_media_type(Path::new(name)), Some(expected));
+    }
+
+    #[test_case("readme.md"   ; "non_image")]
+    #[test_case("noext"       ; "no_extension")]
+    fn image_media_type_none(name: &str) {
+        assert_eq!(image_media_type(Path::new(name)), None);
+    }
+
+    #[test]
+    fn read_image_returns_image_source() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("photo.png");
+        std::fs::write(&path, b"fake png bytes").unwrap();
+        let display = path.to_string_lossy().to_string();
+
+        let output = Read::read_image(&display, &path, ImageMediaType::Png).unwrap();
+        match output {
+            ToolOutput::Image { caption, source } => {
+                assert!(caption.contains("photo.png"), "caption: {caption}");
+                assert_eq!(source.media_type, ImageMediaType::Png);
+                assert!(
+                    source.data.len() > b"fake png bytes".len(),
+                    "should be base64"
+                );
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_image_rejects_oversized() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("big.png");
+        std::fs::write(&path, vec![0u8; MAX_IMAGE_BYTES + 1]).unwrap();
+        let err = Read::read_image("/big.png", &path, ImageMediaType::Png).unwrap_err();
+        assert!(err.contains("exceeds"), "got: {err}");
     }
 }

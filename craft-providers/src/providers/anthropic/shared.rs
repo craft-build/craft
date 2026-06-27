@@ -152,9 +152,9 @@ pub(super) struct SystemBlock<'a> {
 }
 
 #[derive(Serialize)]
-pub(super) struct WireContentBlock<'a> {
+pub(super) struct WireContentBlock {
     #[serde(flatten)]
-    pub inner: &'a ContentBlock,
+    pub inner: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
@@ -162,7 +162,34 @@ pub(super) struct WireContentBlock<'a> {
 #[derive(Serialize)]
 pub(super) struct WireMessage<'a> {
     pub role: &'a Role,
-    pub content: Vec<WireContentBlock<'a>>,
+    pub content: Vec<WireContentBlock>,
+}
+
+fn anthropic_block_value(block: &ContentBlock) -> Value {
+    match block {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            images,
+            is_error,
+        } if !images.is_empty() => {
+            let mut parts = Vec::with_capacity(images.len() + 1);
+            parts.push(json!({"type": "text", "text": content}));
+            for source in images {
+                parts.push(json!({"type": "image", "source": source}));
+            }
+            let mut v = json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": parts,
+            });
+            if *is_error {
+                v["is_error"] = json!(true);
+            }
+            v
+        }
+        _ => serde_json::to_value(block).unwrap_or_else(|_| json!({})),
+    }
 }
 
 pub(super) fn build_wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
@@ -181,7 +208,7 @@ pub(super) fn build_wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> 
                     .iter()
                     .enumerate()
                     .map(|(block_idx, block)| WireContentBlock {
-                        inner: block,
+                        inner: anthropic_block_value(block),
                         cache_control: if cache_last_block && block_idx + 1 == msg.content.len() {
                             Some(EPHEMERAL)
                         } else {

@@ -89,6 +89,7 @@ craft-config-macro = { path = "craft-config-macro" }
 craft-highlight = { path = "craft-highlight" }
 craft-markdown = { path = "craft-markdown" }
 craft-sandbox = { path = "craft-sandbox" }
+chromiumoxide = { version = "0.9", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 uuid = { version = "1", default-features = false, features = ["v4"] }

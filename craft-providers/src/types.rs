@@ -26,6 +26,17 @@ pub enum ImageMediaType {
     Webp,
 }
 
+impl ImageMediaType {
+    pub fn as_mime(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImageSource {
     pub media_type: ImageMediaType,
@@ -49,13 +60,7 @@ impl ImageSource {
     }
 
     pub fn to_data_url(&self) -> String {
-        let mime = match self.media_type {
-            ImageMediaType::Png => "image/png",
-            ImageMediaType::Jpeg => "image/jpeg",
-            ImageMediaType::Gif => "image/gif",
-            ImageMediaType::Webp => "image/webp",
-        };
-        format!("data:{mime};base64,{}", self.data)
+        format!("data:{};base64,{}", self.media_type.as_mime(), self.data)
     }
 }
 
@@ -95,6 +100,8 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip)]
+        images: Vec<ImageSource>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },

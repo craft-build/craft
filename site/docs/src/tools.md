@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 37 built-in tools. This is the full reference.
+Craft ships with 38 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -332,6 +332,18 @@ Load a skill that provides instructions and workflows for specific tasks.
 | `name` | string | yes | Name of the skill to load |
 
 ## Web
+
+### `browser_screenshot`
+
+Renders a web page in headless Chromium and returns a full-page PNG screenshot so you can visually inspect the current state of a frontend. Use this for visual feedback when working on UI/CSS/layout, verifying a dev server, or checking what a page actually looks like.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `full_page` | boolean | no | true | Capture the full scrollable page |
+| `height` | integer | no | 720 | Viewport height in pixels |
+| `url` | string | yes |  | Absolute http(s) URL of the page to render |
+| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
+| `width` | integer | no | 1280 | Viewport width in pixels |
 
 ### `webfetch` *(lua plugin)*
 

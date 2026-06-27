@@ -208,6 +208,7 @@ fn close_dangling_tool_calls(messages: &mut Vec<Message>, note: &str) {
         .map(|(id, _, _)| ContentBlock::ToolResult {
             tool_use_id: id.to_owned(),
             content: note.to_owned(),
+            images: vec![],
             is_error: true,
         })
         .collect();
@@ -259,6 +260,7 @@ mod tests {
                 .map(|id| ContentBlock::ToolResult {
                     tool_use_id: id.to_string(),
                     content: "ok".into(),
+                    images: vec![],
                     is_error: false,
                 })
                 .collect(),

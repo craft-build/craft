@@ -273,7 +273,8 @@ impl HighlightRequest {
             | ToolOutput::ReadDir { .. }
             | ToolOutput::Batch { .. }
             | ToolOutput::Findings(_)
-            | ToolOutput::ReviewResult { .. } => None,
+            | ToolOutput::ReviewResult { .. }
+            | ToolOutput::Image { .. } => None,
         });
         if input.is_none() && output.is_none() {
             return None;

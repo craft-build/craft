@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use craft_config::CompressionConfig;
-use craft_providers::{AgentError, ContentBlock, Message, Role, StopReason, TokenUsage};
+use craft_providers::{
+    AgentError, ContentBlock, ImageSource, Message, Role, StopReason, TokenUsage,
+};
 use flume::Sender;
 
 use crate::compression;
@@ -184,6 +186,10 @@ pub enum ToolOutput {
     Instructions {
         blocks: Vec<InstructionBlock>,
     },
+    Image {
+        caption: String,
+        source: ImageSource,
+    },
 }
 
 /// Saturating arithmetic so callers can't overflow with any combination of inputs.
@@ -243,6 +249,13 @@ impl ToolOutput {
         }
         let ct = compression::detect_content_type(&raw);
         compression::compress(&raw, ct, &compression::CompressionConfig::from(config))
+    }
+
+    pub fn image_source(&self) -> Option<&ImageSource> {
+        match self {
+            Self::Image { source, .. } => Some(source),
+            _ => None,
+        }
     }
 
     pub(crate) fn skip_compress(&self) -> bool {
@@ -372,6 +385,7 @@ impl ToolOutput {
                 }
                 out
             }
+            Self::Image { caption, .. } => caption.clone(),
         }
     }
 }
@@ -494,10 +508,18 @@ pub fn tool_results(results: Vec<ToolDoneEvent>, config: &CompressionConfig) -> 
         role: Role::User,
         content: results
             .into_iter()
-            .map(|r| ContentBlock::ToolResult {
-                tool_use_id: r.id,
-                content: r.output.as_text_for_llm(config),
-                is_error: r.is_error,
+            .map(|r| {
+                let images = r
+                    .output
+                    .image_source()
+                    .map(|s| vec![s.clone()])
+                    .unwrap_or_default();
+                ContentBlock::ToolResult {
+                    tool_use_id: r.id,
+                    content: r.output.as_text_for_llm(config),
+                    images,
+                    is_error: r.is_error,
+                }
             })
             .collect(),
         ..Default::default()

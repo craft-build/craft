@@ -552,6 +552,7 @@ fn build_tool_results_map(messages: &[Message]) -> HashMap<&str, (bool, &str)> {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } = block
             {
                 map.insert(tool_use_id.as_str(), (*is_error, content.as_str()));
@@ -714,6 +715,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: result.into(),
+                    images: vec![],
                     is_error,
                 }],
                 ..Default::default()
@@ -758,6 +760,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "hi".into(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()

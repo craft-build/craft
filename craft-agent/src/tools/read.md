@@ -1,6 +1,7 @@
 Read a file or directory. Returns contents with line numbers (1-indexed).
 
 - Supports absolute, relative, and ~/ paths.
+- Image files (png, jpg, jpeg, gif, webp) are returned inline; offset/limit do not apply to them.
 - **Always include offset and limit** if possible. Defaults: no offset = start at 1; no limit = up to 2000 lines.
 - Use the **outline** tool or **grep** tool first to find the offset and limit.
 - Only read the sections you actually need.

@@ -63,13 +63,30 @@ pub(crate) fn convert_input(messages: &[Message]) -> Value {
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
+                            images,
                             ..
                         } => {
-                            input.push(json!({
-                                "type": "function_call_output",
-                                "call_id": tool_use_id,
-                                "output": content,
-                            }));
+                            if images.is_empty() {
+                                input.push(json!({
+                                    "type": "function_call_output",
+                                    "call_id": tool_use_id,
+                                    "output": content,
+                                }));
+                            } else {
+                                let mut parts = Vec::with_capacity(images.len() + 1);
+                                parts.push(json!({"type": "input_text", "text": content}));
+                                for source in images {
+                                    parts.push(json!({
+                                        "type": "input_image",
+                                        "image_url": source.to_data_url()
+                                    }));
+                                }
+                                input.push(json!({
+                                    "type": "function_call_output",
+                                    "call_id": tool_use_id,
+                                    "output": parts,
+                                }));
+                            }
                         }
                         ContentBlock::ToolUse { .. }
                         | ContentBlock::Thinking { .. }
@@ -637,6 +654,7 @@ data: {\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":10,\"
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tc_1".to_string(),
                     content: "file.txt".to_string(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -685,5 +703,52 @@ data: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"ou
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].1, "bash");
         assert_eq!(*tools[0].2, Value::Object(Default::default()));
+    }
+
+    #[test]
+    fn convert_input_tool_result_with_image_emits_parts() {
+        use crate::{ImageMediaType, ImageSource};
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_img".into(),
+                    name: "browser_screenshot".into(),
+                    input: json!({}),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_img".into(),
+                    content: "screenshot".into(),
+                    images: vec![ImageSource::new(
+                        ImageMediaType::Png,
+                        std::sync::Arc::from("aGVsbG8="),
+                    )],
+                    is_error: false,
+                }],
+                ..Default::default()
+            },
+        ];
+        let input = convert_input(&messages);
+        let output = input.as_array().unwrap();
+        let fco = output
+            .iter()
+            .find(|v| v["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(fco["call_id"], "call_img");
+        let parts = fco["output"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "screenshot");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert!(
+            parts[1]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 }

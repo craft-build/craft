@@ -315,6 +315,7 @@ mod tests {
             (super::super::CODE_EXECUTION_TOOL_NAME, MAIN | RES | GEN),
             (super::super::LIST_TOOLS_TOOL_NAME, MAIN | RES | GEN),
             (super::super::TASK_TOOL_NAME, MAIN),
+            (super::super::BROWSER_SCREENSHOT_TOOL_NAME, MAIN),
             (super::super::OUTLINE_TOOL_NAME, all),
             (super::super::ZOOM_TOOL_NAME, MAIN | GEN | INT),
             (super::super::AST_GREP_TOOL_NAME, MAIN),

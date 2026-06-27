@@ -238,6 +238,7 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
+                            images,
                             ..
                         } => {
                             tool_results.push(json!({
@@ -245,6 +246,23 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                                 "tool_call_id": tool_use_id,
                                 "content": content,
                             }));
+                            if !images.is_empty() {
+                                let mut parts = Vec::with_capacity(images.len() + 1);
+                                parts.push(json!({
+                                    "type": "text",
+                                    "text": format!("{content}\n[image result of {tool_use_id}]")
+                                }));
+                                for source in images {
+                                    parts.push(json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": source.to_data_url() }
+                                    }));
+                                }
+                                tool_results.push(json!({
+                                    "role": "user",
+                                    "content": parts,
+                                }));
+                            }
                         }
                         ContentBlock::ToolUse { .. }
                         | ContentBlock::Thinking { .. }
@@ -732,6 +750,7 @@ data: [DONE]\n";
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tc_1".to_string(),
                     content: "file.txt".to_string(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -992,5 +1011,59 @@ data: [DONE]\n";
 
         assert_eq!(text_deltas, vec!["Hello"]);
         assert_eq!(thinking_deltas, vec!["Let me think", "..."]);
+    }
+
+    #[test]
+    fn convert_messages_tool_result_with_image_splits_user_message() {
+        use crate::{ImageMediaType, ImageSource};
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tc_img".to_string(),
+                    name: "browser_screenshot".to_string(),
+                    input: json!({"url": "https://example.com"}),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc_img".to_string(),
+                    content: "screenshot of https://example.com".to_string(),
+                    images: vec![ImageSource::new(
+                        ImageMediaType::Png,
+                        std::sync::Arc::from("aGVsbG8="),
+                    )],
+                    is_error: false,
+                }],
+                ..Default::default()
+            },
+        ];
+        let wire = convert_messages(&messages, "be helpful");
+
+        let tool_msg = &wire[2];
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(tool_msg["tool_call_id"], "tc_img");
+        assert_eq!(tool_msg["content"], "screenshot of https://example.com");
+
+        let user_img_msg = &wire[3];
+        assert_eq!(user_img_msg["role"], "user");
+        let parts = user_img_msg["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert!(
+            parts[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[image result of tc_img]")
+        );
+        assert_eq!(parts[1]["type"], "image_url");
+        assert!(
+            parts[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 }

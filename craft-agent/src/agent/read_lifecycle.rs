@@ -221,6 +221,7 @@ pub(super) fn apply_lifecycle(
                 tool_use_id,
                 content,
                 is_error: false,
+                ..
             } = block
                 && let Some((state, file_path)) = stale_ids.get(tool_use_id.as_str())
             {
@@ -394,6 +395,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id.to_owned(),
                 content: content.to_owned(),
+                images: vec![],
                 is_error: false,
             }],
             ..Default::default()

@@ -9,6 +9,7 @@
 mod apply_patch;
 mod astgrep;
 mod batch;
+mod browser;
 mod callgraph;
 mod code_execution;
 mod conflicts;
@@ -151,6 +152,7 @@ pub fn is_tool_enabled(config: &AgentConfig, name: &str) -> bool {
 
 pub const BASH_TOOL_NAME: &str = "bash";
 pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
+pub const BROWSER_SCREENSHOT_TOOL_NAME: &str = browser::BrowserScreenshot::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
 pub const GLOB_TOOL_NAME: &str = "glob";
@@ -643,6 +645,7 @@ register_tools! {
     apply_patch::ApplyPatch,
     task::Task,
     batch::Batch,
+    browser::BrowserScreenshot,
     code_execution::CodeExecution,
     list_tools::ListTools,
     styleguide::StyleguideList,

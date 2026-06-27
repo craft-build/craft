@@ -439,10 +439,16 @@ pub(super) fn is_overflow(usage: &TokenUsage, model: &Model, compaction_buffer: 
 fn strip_images(messages: &mut [Message]) {
     for msg in messages {
         for block in &mut msg.content {
-            if matches!(block, ContentBlock::Image { .. }) {
-                *block = ContentBlock::Text {
-                    text: IMAGE_PLACEHOLDER.into(),
-                };
+            match block {
+                ContentBlock::Image { .. } => {
+                    *block = ContentBlock::Text {
+                        text: IMAGE_PLACEHOLDER.into(),
+                    };
+                }
+                ContentBlock::ToolResult { images, .. } if !images.is_empty() => {
+                    images.clear();
+                }
+                _ => {}
             }
         }
     }
@@ -805,6 +811,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: long_content.clone(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -858,6 +865,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: long_content.clone(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -907,6 +915,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: long_content.clone(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -960,26 +969,31 @@ mod tests {
                 ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "old result 1".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t2".into(),
                     content: "old result 2".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t3".into(),
                     content: "keep 1".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t4".into(),
                     content: "keep 2".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t5".into(),
                     content: "keep 3".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::Text {
@@ -1018,11 +1032,13 @@ mod tests {
                 ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "only result".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t2".into(),
                     content: "second".into(),
+                    images: vec![],
                     is_error: false,
                 },
             ],
@@ -1093,6 +1109,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "output".into(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -1179,6 +1196,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "output".into(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -1198,16 +1216,19 @@ mod tests {
                 ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "old1".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t2".into(),
                     content: "old2".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t3".into(),
                     content: "keep".into(),
+                    images: vec![],
                     is_error: false,
                 },
             ],
@@ -1237,11 +1258,13 @@ mod tests {
                 ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "a".into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t2".into(),
                     content: "b".into(),
+                    images: vec![],
                     is_error: false,
                 },
             ],
@@ -1263,11 +1286,13 @@ mod tests {
                 ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: TOOL_RESULT_PLACEHOLDER.into(),
+                    images: vec![],
                     is_error: false,
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: "t2".into(),
                     content: "real".into(),
+                    images: vec![],
                     is_error: false,
                 },
             ],
@@ -1336,6 +1361,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "x".repeat(500),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()

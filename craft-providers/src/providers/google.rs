@@ -339,6 +339,7 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
+                    images,
                     is_error,
                 } => {
                     let mut response_val = serde_json::from_str(content)
@@ -356,17 +357,19 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
                             "response": response_val,
                         }
                     }));
+                    for source in images {
+                        parts.push(json!({
+                            "inlineData": {
+                                "mimeType": source.media_type.as_mime(),
+                                "data": source.data,
+                            }
+                        }));
+                    }
                 }
                 ContentBlock::Image { source } => {
-                    let mime = match source.media_type {
-                        crate::ImageMediaType::Png => "image/png",
-                        crate::ImageMediaType::Jpeg => "image/jpeg",
-                        crate::ImageMediaType::Gif => "image/gif",
-                        crate::ImageMediaType::Webp => "image/webp",
-                    };
                     parts.push(json!({
                         "inlineData": {
-                            "mimeType": mime,
+                            "mimeType": source.media_type.as_mime(),
                             "data": source.data,
                         }
                     }));
@@ -751,6 +754,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "call_1".into(),
                     content: "file contents".into(),
+                    images: vec![],
                     is_error: false,
                 }],
                 ..Default::default()
@@ -912,5 +916,36 @@ mod tests {
         assert_eq!(result.usage.input, 100);
         assert_eq!(result.usage.output, 10);
         assert_eq!(result.usage.cache_read, 50);
+    }
+
+    #[test]
+    fn convert_messages_tool_result_with_image() {
+        use crate::{ImageMediaType, ImageSource};
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "browser_screenshot".into(),
+                    input: json!({"url": "https://example.com"}),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "screenshot of https://example.com".into(),
+                    images: vec![ImageSource::new(ImageMediaType::Png, Arc::from("aGVsbG8="))],
+                    is_error: false,
+                }],
+                ..Default::default()
+            },
+        ];
+        let result = convert_messages(&messages);
+        let parts = &result[1]["parts"];
+        assert_eq!(parts[0]["functionResponse"]["name"], "browser_screenshot");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "aGVsbG8=");
     }
 }

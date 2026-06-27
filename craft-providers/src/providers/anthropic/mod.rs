@@ -500,6 +500,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n";
                     ContentBlock::ToolResult {
                         tool_use_id: "t1".into(),
                         content: "ok".into(),
+                        images: vec![],
                         is_error: false,
                     },
                     ContentBlock::Text {
@@ -753,6 +754,40 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
                 "claude-opus-4-8".to_string(),
                 "claude-opus-4-8-1m".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn wire_tool_result_with_image_emits_content_array() {
+        use crate::{ImageMediaType, ImageSource};
+        use std::sync::Arc;
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tu1".into(),
+                content: "screenshot of https://example.com".into(),
+                images: vec![ImageSource::new(ImageMediaType::Png, Arc::from("aGVsbG8="))],
+                is_error: false,
+            }],
+            ..Default::default()
+        }];
+        let wire = build_wire_messages(&messages);
+        let json: Value = serde_json::to_value(&wire).unwrap();
+        let block = &json[0]["content"][0];
+        assert_eq!(block["type"], "tool_result");
+        assert_eq!(block["tool_use_id"], "tu1");
+        let content = block["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "screenshot of https://example.com");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "aGVsbG8=");
+        assert!(
+            block.get("images").is_none(),
+            "images field must not leak to Anthropic wire"
         );
     }
 }
