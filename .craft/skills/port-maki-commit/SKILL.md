@@ -20,6 +20,8 @@ Craft is a fork of [maki](https://github.com/tontinton/maki.git) by Tony Solomon
 
 4. For any tool touched by the commit, run the placement check below and diverge from maki if the commit moves a tool the wrong way. Note the reason in the commit message when you diverge.
 
+5. Create a conventional git commit and credit the maki commits authors
+
 ## Crate mapping
 
 | maki crate | craft crate |
@@ -73,8 +75,9 @@ After applying and resolving, run:
 
 ```sh
 cargo clippy --all-features --all --tests -- -D warnings
+cargo fmt --all
 just gen-docs-check
 grep -r "maki" --include="*.rs" --include="*.toml" --include="*.lua"
 ```
-
+Avoid full workspace test runs which tend to be really slow. Only use targetted test runs.
 Any remaining `maki` hits from the grep must be attribution only (URLs, author names). If anything else fails or the grep shows non-attribution matches, fix before reporting done.

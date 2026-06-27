@@ -397,6 +397,7 @@ pub async fn create(
         script_path: &meta.script_path,
         inner,
         auth,
+        models: &meta.models,
     }))
 }
 
@@ -470,6 +471,7 @@ struct DynamicProvider {
     script_path: &'static Path,
     inner: Box<dyn Provider>,
     auth: Arc<Mutex<ResolvedAuth>>,
+    models: &'static [ScriptModel],
 }
 
 impl DynamicProvider {
@@ -513,7 +515,29 @@ impl Provider for DynamicProvider {
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        self.inner.list_models()
+        if self.models.is_empty() {
+            return self.inner.list_models();
+        }
+        let ids = self.models.iter().map(|m| m.id.clone()).collect();
+        Box::pin(async move { Ok(ids) })
+    }
+
+    fn list_models_with_info(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
+        if self.models.is_empty() {
+            return self.inner.list_models_with_info();
+        }
+        let infos = self
+            .models
+            .iter()
+            .map(|m| crate::model::ModelInfo {
+                id: m.id.clone(),
+                context_window: Some(m.context_window),
+                max_output_tokens: Some(m.max_output_tokens),
+            })
+            .collect();
+        Box::pin(async move { Ok(infos) })
     }
 
     fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
