@@ -56,6 +56,10 @@ impl ModelPricing {
         fast: None,
     };
 
+    pub fn is_zero(&self) -> bool {
+        self.input == 0.0 && self.output == 0.0 && self.cache_write == 0.0 && self.cache_read == 0.0
+    }
+
     const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
     const CACHE_READ_MULTIPLIER: f64 = 0.10;
 }
