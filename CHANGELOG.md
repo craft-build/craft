@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-27
+
 ### Added
 
 - **agent**: unified project-scoped discovery module that walks the working
@@ -612,7 +614,10 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/craft-build/craft/compare/v0.6.5...v0.7.0
+[0.6.5]: https://github.com/craft-build/craft/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/craft-build/craft/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/craft-build/craft/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/craft-build/craft/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/craft-build/craft/compare/v0.6.0...v0.6.1
