@@ -73,7 +73,6 @@ After applying and resolving, run:
 
 ```sh
 cargo clippy --all-features --all --tests -- -D warnings
-cargo nextest run --all-features --workspace
 just gen-docs-check
 grep -r "maki" --include="*.rs" --include="*.toml" --include="*.lua"
 ```

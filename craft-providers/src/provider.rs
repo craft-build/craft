@@ -406,6 +406,14 @@ pub async fn fetch_all_models(
         }
     }));
 
+    let declared = crate::providers::custom::declared_model_specs();
+    if !declared.is_empty() {
+        on_ready(ModelBatch {
+            models: declared,
+            warnings: Vec::new(),
+        });
+    }
+
     use futures::StreamExt;
     while let Some(batch) = futs.next().await {
         on_ready(batch);

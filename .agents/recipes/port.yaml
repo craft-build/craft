@@ -1,0 +1,12 @@
+name: port
+description: Port a maki commit into craft
+parameters:
+  - name: sha
+    type: string
+    description: The git commit to port
+  - name: notes
+    type: string
+    default: no notes
+    description: Any additional notes
+instructions: |
+  Use the port-maki-commit skill to port the commit {{ sha }}. {{ notes }}.
