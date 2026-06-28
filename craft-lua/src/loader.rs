@@ -388,6 +388,7 @@ impl EventHandle {
 mod tests {
     use super::*;
     use crate::api::command::{LuaCommandInfo, LuaCommandWriter};
+    use craft_agent::prompt::{PromptId, Slot};
     use craft_agent::tools::ToolRegistry;
 
     #[test]
@@ -620,10 +621,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_prompt_without_slot_is_dropped() {
+    fn register_prompt_hint_rejects_incompatible_slot_prompt() {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-        host.load_source(
+        let r = host.load_source(
             "bad_target",
             r#"
             craft.api.register_prompt_hint({
@@ -632,18 +633,9 @@ mod tests {
                 content = "DROPPED",
             })
             "#,
-        )
-        .unwrap();
-        let handle = host.event_handle().unwrap();
-        let slots = handle.collect_prompt_slots();
-        assert!(
-            slots
-                .get(
-                    craft_agent::prompt::PromptId::Research,
-                    craft_agent::prompt::Slot::AfterInstructions,
-                )
-                .is_empty()
         );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("not available"));
     }
 
     #[test]
@@ -787,5 +779,239 @@ mod tests {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
         assert!(host.load_source("bad_hint", lua_code).is_err());
+    }
+
+    fn hint_contents(
+        slots: &craft_agent::prompt::ResolvedSlots,
+        prompt: craft_agent::prompt::PromptId,
+        slot: craft_agent::prompt::Slot,
+    ) -> Vec<String> {
+        slots
+            .get(prompt, slot)
+            .iter()
+            .map(|e| e.content.clone())
+            .collect()
+    }
+
+    #[test]
+    fn identity_slot_lands_on_system_only() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "id",
+            r#"
+            craft.api.set_prompt({
+                slot = "identity",
+                content = "Custom identity",
+            })
+            "#,
+        )
+        .unwrap();
+        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        assert_eq!(
+            hint_contents(&slots, PromptId::System, Slot::Identity),
+            ["Custom identity".to_string()]
+        );
+        assert!(hint_contents(&slots, PromptId::Research, Slot::Identity).is_empty());
+        assert!(hint_contents(&slots, PromptId::General, Slot::Identity).is_empty());
+    }
+
+    #[test]
+    fn tone_slot_lands_on_system_only() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "tone",
+            r#"
+            craft.api.set_prompt({
+                slot = "tone",
+                content = "Custom tone",
+            })
+            "#,
+        )
+        .unwrap();
+        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        assert_eq!(
+            hint_contents(&slots, PromptId::System, Slot::Tone),
+            ["Custom tone".to_string()]
+        );
+        assert!(hint_contents(&slots, PromptId::Research, Slot::Tone).is_empty());
+        assert!(hint_contents(&slots, PromptId::General, Slot::Tone).is_empty());
+    }
+
+    #[test]
+    fn singleton_last_wins_across_plugins() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "aaa",
+            r#"craft.api.set_prompt({ slot = "identity", content = "AAA" })"#,
+        )
+        .unwrap();
+        host.load_source(
+            "zzz",
+            r#"craft.api.set_prompt({ slot = "identity", content = "ZZZ" })"#,
+        )
+        .unwrap();
+        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let entries = slots.get(PromptId::System, Slot::Identity);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.last().unwrap().content, "ZZZ");
+    }
+
+    #[test]
+    fn set_prompt_content_required() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source("bad", r#"craft.api.set_prompt({ slot = "identity" })"#);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("'content' is required"));
+    }
+
+    #[test]
+    fn set_prompt_sets_identity() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "setter",
+            r#"
+            craft.api.set_prompt({
+                slot = "identity",
+                content = "New identity",
+            })
+            "#,
+        )
+        .unwrap();
+        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        assert_eq!(
+            hint_contents(&slots, PromptId::System, Slot::Identity),
+            ["New identity".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_prompt_explicit_system_prompt() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "setter",
+            r#"
+            craft.api.set_prompt({
+                slot = "identity",
+                prompt = "system",
+                content = "Explicit identity",
+            })
+            "#,
+        )
+        .unwrap();
+        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        assert_eq!(
+            hint_contents(&slots, PromptId::System, Slot::Identity),
+            ["Explicit identity".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_prompt_invalid_prompt_rejected() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source(
+            "bad",
+            r#"craft.api.set_prompt({ slot = "identity", prompt = "nope", content = "x" })"#,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn set_prompt_and_register_prompt_hint_coexist() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "hint",
+            r#"craft.api.register_prompt_hint({ slot = "tool_usage", content = "HINT" })"#,
+        )
+        .unwrap();
+        host.load_source(
+            "setter",
+            r#"craft.api.set_prompt({ slot = "identity", content = "SET" })"#,
+        )
+        .unwrap();
+        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        assert_eq!(
+            hint_contents(&slots, PromptId::System, Slot::ToolUsage),
+            ["HINT".to_string()]
+        );
+        assert_eq!(
+            hint_contents(&slots, PromptId::System, Slot::Identity),
+            ["SET".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_prompt_rejects_aggregate_slot() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source(
+            "bad",
+            r#"craft.api.set_prompt({ slot = "tool_usage", content = "nope" })"#,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn set_prompt_rejects_incompatible_slot_prompt() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source(
+            "bad",
+            r#"craft.api.set_prompt({ slot = "identity", prompt = "research", content = "x" })"#,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("not available"));
+    }
+
+    #[test]
+    fn empty_prompt_table_is_rejected() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source(
+            "bad",
+            r#"craft.api.set_prompt({ slot = "identity", prompt = {}, content = "x" })"#,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("no sequence entries"));
+    }
+
+    #[test]
+    fn set_prompt_content_must_not_be_empty() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source(
+            "bad",
+            r#"craft.api.set_prompt({ slot = "identity", content = "" })"#,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn set_prompt_with_callback() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "setter_cb",
+            r#"
+            craft.api.set_prompt({
+                slot = "identity",
+                content = function() return "Dyn identity" end,
+            })
+            "#,
+        )
+        .unwrap();
+        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        assert_eq!(
+            hint_contents(&slots, PromptId::System, Slot::Identity),
+            ["Dyn identity".to_string()]
+        );
     }
 }

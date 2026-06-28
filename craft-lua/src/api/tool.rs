@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use craft_agent::prompt::{PromptId, Slot, SlotKind, ValidNames};
 use craft_agent::tools::Tool;
 use craft_agent::tools::schema::{ParamSchema, to_json_schema, try_from_json, validate};
 use craft_agent::tools::{
@@ -27,6 +28,7 @@ const TOOL_NAME_MAX: usize = 64;
 const TOOL_HANDLER_RETURN_ERR: &str =
     "tool handler must return string or {output=string, is_error?=bool}";
 const TIMEOUT_PARSE_ERR: &str = "register_tool: 'timeout' must be a positive number, 0, or false";
+const MAX_HINT_CONTENT_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) enum PermissionScopeKind {
@@ -304,6 +306,87 @@ impl ToolInvocation for LuaToolInvocation {
     }
 }
 
+fn parse_slot(spec: &Table) -> LuaResult<Slot> {
+    spec.get::<String>("slot")
+        .map_err(|_| mlua::Error::runtime("'slot' is required"))?
+        .parse()
+        .map_err(|_| {
+            mlua::Error::runtime(format!("unknown 'slot'. Valid: {}", Slot::valid_names()))
+        })
+}
+
+fn parse_prompt_field(spec: &Table) -> LuaResult<Option<Vec<PromptId>>> {
+    let parse_one = |s: &str| -> LuaResult<PromptId> {
+        s.parse().map_err(|_| {
+            mlua::Error::runtime(format!(
+                "unknown 'prompt'. Valid: {}",
+                PromptId::valid_names()
+            ))
+        })
+    };
+    match spec.get::<LuaValue>("prompt") {
+        Ok(LuaValue::String(s)) => Ok(Some(vec![parse_one(&s.to_str()?)?])),
+        Ok(LuaValue::Table(t)) => {
+            let mut ids = Vec::new();
+            for pair in t.sequence_values::<mlua::String>() {
+                ids.push(parse_one(&pair?.to_str()?)?);
+            }
+            if ids.is_empty() {
+                return Err(mlua::Error::runtime(
+                    "'prompt' table is empty or has no sequence entries; expected a list like {\"system\", \"general\"}",
+                ));
+            }
+            Ok(Some(ids))
+        }
+        Ok(LuaValue::Nil) | Err(_) => Ok(None),
+        Ok(_) => Err(mlua::Error::runtime(
+            "'prompt' must be a string or list of strings",
+        )),
+    }
+}
+
+fn validate_slot_prompt_compatibility(
+    slot: Slot,
+    prompts: &Option<Vec<PromptId>>,
+) -> LuaResult<()> {
+    if let Some(prompts) = prompts {
+        for &pid in prompts {
+            if !pid.has_slot(slot) {
+                return Err(mlua::Error::runtime(format!(
+                    "slot '{}' is not available for prompt '{}'",
+                    slot, pid
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_hint_content(lua: &Lua, spec: &Table) -> LuaResult<HintContent> {
+    if !spec.contains_key("content")? {
+        return Err(mlua::Error::runtime("'content' is required"));
+    }
+    match spec.get("content")? {
+        LuaValue::String(s) => {
+            let text = s.to_string_lossy();
+            if text.is_empty() {
+                return Err(mlua::Error::runtime("'content' must not be empty"));
+            }
+            if text.len() > MAX_HINT_CONTENT_SIZE {
+                return Err(mlua::Error::runtime(format!(
+                    "content exceeds the {} byte limit",
+                    MAX_HINT_CONTENT_SIZE
+                )));
+            }
+            Ok(HintContent::Static(text))
+        }
+        LuaValue::Function(f) => Ok(HintContent::Callback(lua.create_registry_value(f)?)),
+        _ => Err(mlua::Error::runtime(
+            "'content' must be a string or function",
+        )),
+    }
+}
+
 pub(crate) fn create_api_table(
     lua: &Lua,
     pending: PendingTools,
@@ -323,46 +406,61 @@ pub(crate) fn create_api_table(
         t.set(
             "register_prompt_hint",
             lua.create_function(move |lua, spec: Table| {
-                let slot_str: String = spec
-                    .get("slot")
-                    .map_err(|_| mlua::Error::runtime("register_prompt_hint: missing 'slot'"))?;
-                let slot: craft_agent::prompt::Slot = slot_str.parse().map_err(|_| {
-                    mlua::Error::runtime(format!("register_prompt_hint: invalid slot '{slot_str}'"))
-                })?;
+                let slot = parse_slot(&spec)?;
+                if slot.kind() == SlotKind::Singleton {
+                    return Err(mlua::Error::runtime(format!(
+                        "register_prompt_hint is for aggregate slots ({}); \
+                         use set_prompt for singleton slots ({})",
+                        Slot::names_for_kind(SlotKind::Aggregate),
+                        Slot::names_for_kind(SlotKind::Singleton),
+                    )));
+                }
+                let prompts = parse_prompt_field(&spec)?;
+                validate_slot_prompt_compatibility(slot, &prompts)?;
 
-                let prompts = parse_prompt_targets(&spec)?;
-
-                let content_val: LuaValue = spec
-                    .get("content")
-                    .map_err(|_| mlua::Error::runtime("register_prompt_hint: missing 'content'"))?;
-                let content = match content_val {
-                    LuaValue::String(s) => HintContent::Static(s.to_string_lossy().to_string()),
-                    LuaValue::Function(f) => {
-                        let key = lua.create_registry_value(f)?;
-                        HintContent::Callback(key)
-                    }
-                    LuaValue::Nil => {
-                        return Err(mlua::Error::runtime(
-                            "register_prompt_hint: missing 'content'",
-                        ));
-                    }
-                    _ => {
-                        return Err(mlua::Error::runtime(
-                            "register_prompt_hint: 'content' must be string or function",
-                        ));
-                    }
+                let content = parse_hint_content(lua, &spec)?;
+                let reg = PromptHintRegistration {
+                    prompts,
+                    slot,
+                    content,
                 };
-
                 let mut map = lua
                     .app_data_mut::<PromptHintCallbacks>()
                     .ok_or_else(|| mlua::Error::runtime("not initialized"))?;
-                map.entry(Arc::clone(&plugin))
-                    .or_default()
-                    .push(PromptHintRegistration {
-                        prompts,
-                        slot,
-                        content,
-                    });
+                map.entry(Arc::clone(&plugin)).or_default().push(reg);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let plugin = Arc::clone(&plugin);
+        t.set(
+            "set_prompt",
+            lua.create_function(move |lua, spec: Table| {
+                let slot = parse_slot(&spec)?;
+                if slot.kind() == SlotKind::Aggregate {
+                    return Err(mlua::Error::runtime(format!(
+                        "set_prompt is for singleton slots ({}); \
+                         use register_prompt_hint for aggregate slots ({})",
+                        Slot::names_for_kind(SlotKind::Singleton),
+                        Slot::names_for_kind(SlotKind::Aggregate),
+                    )));
+                }
+
+                let prompts = parse_prompt_field(&spec)?;
+                validate_slot_prompt_compatibility(slot, &prompts)?;
+
+                let content = parse_hint_content(lua, &spec)?;
+                let reg = PromptHintRegistration {
+                    prompts,
+                    slot,
+                    content,
+                };
+                let mut map = lua
+                    .app_data_mut::<PromptHintCallbacks>()
+                    .ok_or_else(|| mlua::Error::runtime("not initialized"))?;
+                map.entry(Arc::clone(&plugin)).or_default().push(reg);
                 Ok(())
             })?,
         )?;
@@ -386,41 +484,6 @@ pub(crate) fn create_api_table(
     )?;
 
     Ok(t)
-}
-
-fn parse_prompt_targets(spec: &Table) -> LuaResult<Option<Vec<craft_agent::prompt::PromptId>>> {
-    let val: LuaValue = spec.get("prompt").unwrap_or(LuaValue::Nil);
-    match val {
-        LuaValue::Nil => Ok(None),
-        LuaValue::String(s) => {
-            let pid = s.to_str()?.parse().map_err(|_| {
-                mlua::Error::runtime(format!(
-                    "register_prompt_hint: invalid prompt '{}'",
-                    s.to_string_lossy()
-                ))
-            })?;
-            Ok(Some(vec![pid]))
-        }
-        LuaValue::Table(t) => {
-            let mut ids = Vec::new();
-            for item in t.sequence_values::<String>() {
-                let s = item?;
-                let pid = s.parse().map_err(|_| {
-                    mlua::Error::runtime(format!("register_prompt_hint: invalid prompt '{s}'"))
-                })?;
-                ids.push(pid);
-            }
-            if ids.is_empty() {
-                return Err(mlua::Error::runtime(
-                    "register_prompt_hint: 'prompt' list must be non-empty",
-                ));
-            }
-            Ok(Some(ids))
-        }
-        _ => Err(mlua::Error::runtime(
-            "register_prompt_hint: 'prompt' must be string or list of strings",
-        )),
-    }
 }
 
 fn is_valid_tool_name(name: &str) -> bool {
