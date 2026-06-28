@@ -276,7 +276,11 @@ impl App {
         if r.width > 0 {
             overlay_rect = r;
         }
-        let r = self.help_modal.view(frame, full);
+        let r = self.help_modal.view(frame, full, &self.keybindings);
+        if r.width > 0 {
+            overlay_rect = r;
+        }
+        let r = self.stats_modal.view(frame, full);
         if r.width > 0 {
             overlay_rect = r;
         }

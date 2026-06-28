@@ -463,6 +463,62 @@ pub async fn models() {
     .await;
 }
 
+pub fn stats(by_session: bool) -> Result<()> {
+    use craft_storage::stats::{CostLedger, format_tokens, format_usd};
+
+    let dir = StateDir::resolve().context("resolve data directory")?;
+    let ledger = CostLedger::from_state_dir(&dir)?;
+    let summary = ledger.summary().wrap_err("read cost ledger")?;
+
+    if summary.records == 0 {
+        let path = ledger.path().display();
+        println!("No usage recorded yet (ledger: {path}).");
+        return Ok(());
+    }
+
+    println!("Total cost:   {}", format_usd(summary.total_cost));
+    println!("Total tokens: {}", format_tokens(summary.total_tokens));
+    println!(
+        "Records:      {} across {} sessions",
+        summary.records,
+        summary.session_count()
+    );
+
+    println!();
+    if by_session {
+        println!("Per session:");
+        for (id, cost, tokens) in &summary.by_session {
+            println!("  {id}  {}  {}", format_usd(*cost), format_tokens(*tokens));
+        }
+    } else {
+        println!("Per model:");
+        for (model, cost, tokens) in &summary.by_model {
+            println!(
+                "  {model}  {}  {}",
+                format_usd(*cost),
+                format_tokens(*tokens)
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn completions(shell: crate::cli::CompletionShell) -> Result<()> {
+    use clap::CommandFactory;
+    use clap_complete::Shell;
+
+    let mut cmd = crate::cli::Cli::command();
+    let shell = match shell {
+        crate::cli::CompletionShell::Bash => Shell::Bash,
+        crate::cli::CompletionShell::Zsh => Shell::Zsh,
+        crate::cli::CompletionShell::Fish => Shell::Fish,
+        crate::cli::CompletionShell::Elvish => Shell::Elvish,
+        crate::cli::CompletionShell::Powershell => Shell::PowerShell,
+    };
+    clap_complete::generate(shell, &mut cmd, "craft", &mut io::stdout());
+    Ok(())
+}
+
 pub async fn outline(path: &str, no_plugins: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);

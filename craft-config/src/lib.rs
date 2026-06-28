@@ -283,6 +283,24 @@ pub struct UiFileConfig {
     pub typewriter_ms_per_char: Option<u64>,
     pub mouse_scroll_lines: Option<u32>,
     pub tool_output_lines: Option<ToolOutputLinesFile>,
+    pub keybindings: Option<HashMap<String, KeybindingOverride>>,
+}
+
+/// A keybinding override: a single chord, a list of chords, or null/empty to disable.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum KeybindingOverride {
+    Chord(String),
+    Chords(Vec<String>),
+}
+
+impl KeybindingOverride {
+    pub fn into_chords(self) -> Vec<String> {
+        match self {
+            Self::Chord(s) => vec![s],
+            Self::Chords(v) => v,
+        }
+    }
 }
 
 impl UiFileConfig {
@@ -300,6 +318,12 @@ impl UiFileConfig {
             (Some(base), Some(over)) => base.merge(over),
             (None, Some(over)) => self.tool_output_lines = Some(over),
             _ => {}
+        }
+        if let Some(over) = overlay.keybindings {
+            match self.keybindings.as_mut() {
+                Some(base) => base.extend(over),
+                None => self.keybindings = Some(over),
+            }
         }
     }
 }
@@ -579,7 +603,7 @@ pub struct Config {
     pub plugins: PluginsConfig,
 }
 
-#[derive(Debug, Clone, Copy, ConfigSection)]
+#[derive(Debug, Clone, ConfigSection)]
 #[config(section = "ui")]
 pub struct UiConfig {
     #[config(default = true, desc = "Show splash animation on startup")]
@@ -599,6 +623,34 @@ pub struct UiConfig {
 
     #[config(skip, default = "ToolOutputLines::default()")]
     pub tool_output_lines: ToolOutputLines,
+
+    #[config(skip, default = "KeybindingsConfig::default()")]
+    pub keybindings: KeybindingsConfig,
+}
+
+/// Resolved user keybinding overrides as `(snake_case action id, chords)`.
+/// An empty chords list disables the action.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeybindingsConfig {
+    pub entries: Vec<(String, Vec<String>)>,
+}
+
+impl KeybindingsConfig {
+    pub fn from_file(f: Option<HashMap<String, KeybindingOverride>>) -> Self {
+        let Some(map) = f else {
+            return Self::default();
+        };
+        let mut entries: Vec<(String, Vec<String>)> = map
+            .into_iter()
+            .map(|(id, v)| (id, v.into_chords()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Self { entries }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 impl UiConfig {
@@ -616,6 +668,7 @@ impl UiConfig {
                 .unwrap_or(DEFAULT_TYPEWRITER_MS_PER_CHAR),
             mouse_scroll_lines: f.mouse_scroll_lines.unwrap_or(DEFAULT_MOUSE_SCROLL_LINES),
             tool_output_lines: ToolOutputLines::from_file(f.tool_output_lines),
+            keybindings: KeybindingsConfig::from_file(f.keybindings),
         }
     }
 
@@ -1568,6 +1621,38 @@ mod tests {
             config.storage.max_log_bytes,
             DEFAULT_MAX_LOG_BYTES_MB * 1024 * 1024
         );
+        assert!(config.ui.keybindings.is_empty());
+    }
+
+    #[test]
+    fn keybindings_config_toml_rejects_bad() {
+        let raw = r#"
+[ui]
+keybindings = "not a table"
+"#;
+        let result: std::result::Result<RawConfig, toml::de::Error> = toml::from_str(raw);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn keybindings_config_parses_chord_and_list_and_disable() {
+        let raw = r#"
+[ui.keybindings]
+search = "Ctrl+F"
+plan_toggle = ["Ctrl+T", "Alt+T"]
+tasks = []
+"#;
+        let parsed: RawConfig = toml::from_str(raw).unwrap();
+        let config = parsed.into_config(false).unwrap();
+        let entries = &config.ui.keybindings.entries;
+        let by_id: std::collections::HashMap<&str, &Vec<String>> =
+            entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        assert_eq!(by_id["search"], &vec!["Ctrl+F".to_string()]);
+        assert_eq!(
+            by_id["plan_toggle"],
+            &vec!["Ctrl+T".to_string(), "Alt+T".to_string()]
+        );
+        assert_eq!(by_id["tasks"], &Vec::<String>::new());
     }
 
     #[test]

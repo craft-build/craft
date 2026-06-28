@@ -2,11 +2,11 @@ use std::thread;
 
 use crate::AppSession;
 use crate::components::Overlay;
-use crate::components::keybindings::key;
+use crate::components::keybindings::{ActionId, KeybindingResolver, key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 
 use craft_storage::StateDir;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -40,6 +40,7 @@ impl PickerItem for SessionEntry {
 
 pub struct SessionPicker {
     picker: ListPicker<SessionEntry>,
+    keybindings: std::sync::Arc<KeybindingResolver>,
     confirming: Option<(String, u64)>,
     pending_rx: Option<flume::Receiver<Result<Vec<SessionEntry>, String>>>,
     flash: Option<String>,
@@ -49,6 +50,7 @@ impl SessionPicker {
     pub fn new() -> Self {
         Self {
             picker: ListPicker::new().with_footer(FOOTER_HINTS),
+            keybindings: std::sync::Arc::new(KeybindingResolver::new()),
             confirming: None,
             pending_rx: None,
             flash: None,
@@ -120,6 +122,11 @@ impl SessionPicker {
         self.pending_rx = None;
     }
 
+    pub fn set_keybindings(&mut self, resolver: std::sync::Arc<KeybindingResolver>) {
+        self.picker.set_keybindings(resolver.clone());
+        self.keybindings = resolver;
+    }
+
     pub fn remove_entry(&mut self, id: &str) {
         self.picker.retain(|e| e.id != id);
     }
@@ -137,10 +144,7 @@ impl SessionPicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SessionPickerAction {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.contains(KeyModifiers::ALT)
-            && key.code == KeyCode::Char('d')
-        {
+        if self.keybindings.matches(ActionId::Delete, key) {
             return self.handle_delete_key();
         }
 

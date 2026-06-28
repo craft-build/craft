@@ -1,6 +1,6 @@
 use crate::components::form::{render_form, selected_prefix};
 use crate::components::hint_line;
-use crate::components::keybindings::key;
+use crate::components::keybindings::{ActionId, KeybindingResolver, key};
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -73,6 +73,7 @@ pub struct PlanForm {
     visibility: Visibility,
     selected: usize,
     parallel: bool,
+    keybindings: std::sync::Arc<KeybindingResolver>,
 }
 
 impl PlanForm {
@@ -81,7 +82,12 @@ impl PlanForm {
             visibility: Visibility::Hidden,
             selected: 0,
             parallel: false,
+            keybindings: std::sync::Arc::new(KeybindingResolver::new()),
         }
+    }
+
+    pub fn set_keybindings(&mut self, resolver: std::sync::Arc<KeybindingResolver>) {
+        self.keybindings = resolver;
     }
 
     pub fn is_visible(&self) -> bool {
@@ -140,13 +146,13 @@ impl PlanForm {
     }
 
     pub fn handle_key(&mut self, key_event: KeyEvent) -> PlanFormAction {
-        if key::QUIT.matches(key_event)
+        if self.keybindings.matches(ActionId::Quit, key_event)
             || key_event.code == KeyCode::Esc
-            || key::PLAN_TOGGLE.matches(key_event)
+            || self.keybindings.matches(ActionId::PlanToggle, key_event)
         {
             return PlanFormAction::Hide;
         }
-        if key::OPEN_EDITOR.matches(key_event) {
+        if self.keybindings.matches(ActionId::OpenEditor, key_event) {
             return PlanFormAction::OpenEditor;
         }
         match key_event.code {

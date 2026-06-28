@@ -111,6 +111,13 @@ impl McpPicker {
         self.picker.is_open()
     }
 
+    pub fn set_keybindings(
+        &mut self,
+        resolver: std::sync::Arc<crate::components::keybindings::KeybindingResolver>,
+    ) {
+        self.picker.set_keybindings(resolver);
+    }
+
     pub fn handle_paste(&mut self, text: &str) -> bool {
         self.picker.handle_paste(text)
     }

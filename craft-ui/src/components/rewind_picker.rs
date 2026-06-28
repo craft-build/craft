@@ -81,6 +81,13 @@ impl RewindPicker {
         self.picker.close();
     }
 
+    pub fn set_keybindings(
+        &mut self,
+        resolver: std::sync::Arc<crate::components::keybindings::KeybindingResolver>,
+    ) {
+        self.picker.set_keybindings(resolver);
+    }
+
     pub fn contains(&self, pos: Position) -> bool {
         self.picker.contains(pos)
     }

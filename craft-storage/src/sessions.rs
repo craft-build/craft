@@ -22,6 +22,7 @@ use crate::{StateDir, StorageError, atomic_write, now_epoch};
 
 const SESSION_VERSION: u32 = 1;
 const LOG_FORMAT_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub const SESSIONS_DIR: &str = "sessions";
 const CWD_INDEX_FILE: &str = "cwd_latest.json";
 const DEFAULT_TITLE: &str = "New session";
@@ -42,6 +43,8 @@ pub enum SessionError {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionMeta {
+    #[serde(default)]
+    pub schema_version: u32,
     #[serde(default)]
     pub mode: Option<StoredMode>,
     #[serde(default)]

@@ -61,6 +61,13 @@ impl ThemePicker {
         self.original_theme_name = None;
     }
 
+    pub fn set_keybindings(
+        &mut self,
+        resolver: std::sync::Arc<crate::components::keybindings::KeybindingResolver>,
+    ) {
+        self.picker.set_keybindings(resolver);
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> ThemePickerAction {
         match self.picker.handle_key(key) {
             PickerAction::Consumed => {

@@ -316,7 +316,13 @@ impl ToolOutput {
                 let mut out: String = lines
                     .iter()
                     .enumerate()
-                    .map(|(i, line)| format!("{}: {line}", start_line + i))
+                    .map(|(i, line)| {
+                        let mut s = format!("{}: {line}", start_line + i);
+                        if !line.trim().is_empty() {
+                            let _ = write!(s, "  ⟦{}⟧", crate::tools::hashline::anchor_hash(line));
+                        }
+                        s
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 let remaining = lines_remaining_after(*total_lines, *start_line, lines.len());
@@ -954,36 +960,71 @@ mod tests {
         );
     }
 
-    #[test_case(
-        10,
-        vec!["fn foo()".into(), "fn bar()".into()],
-        Some(vec![InstructionBlock { path: "AGENTS.md".into(), content: "do stuff".into() }]),
-        "10: fn foo()\n11: fn bar()\n\n...\n\nTruncated lines: 12-100. Use offset=12 to read further."
-        ; "with_instructions"
-    )]
-    #[test_case(
-        1,
-        vec!["line1".into()],
-        None,
-        "1: line1\n\n...\n\nTruncated lines: 2-100. Use offset=2 to read further."
-        ; "without_instructions"
-    )]
-    fn read_code_display_text(
-        start_line: usize,
-        lines: Vec<String>,
-        instructions: Option<Vec<InstructionBlock>>,
-        expected: &str,
-    ) {
+    #[test]
+    fn read_code_display_text_with_instructions_has_line_anchors() {
+        let lines = vec!["fn foo()".to_string(), "fn bar()".to_string()];
         let output = ToolOutput::ReadCode {
             path: "a.rs".into(),
-            start_line,
-            lines,
+            start_line: 10,
+            lines: lines.clone(),
             prefix: String::new(),
             total_lines: 100,
-            instructions,
+            instructions: Some(vec![InstructionBlock {
+                path: "AGENTS.md".into(),
+                content: "do stuff".into(),
+            }]),
             no_compress: false,
         };
-        assert_eq!(output.as_display_text(), expected);
+        let text = output.as_text();
+        for (i, line) in lines.iter().enumerate() {
+            let marker = format!(
+                "{}: {line}  ⟦{}⟧",
+                10 + i,
+                crate::tools::hashline::anchor_hash(line)
+            );
+            assert!(
+                text.contains(&marker),
+                "expected line anchor marker {marker:?} in:\n{text}"
+            );
+        }
+        assert!(text.contains("Truncated lines: 12-100"));
+        assert!(text.contains("Instructions from: AGENTS.md"));
+    }
+
+    #[test]
+    fn read_code_display_text_appends_per_line_anchor() {
+        let line = "let x = 42;";
+        let output = ToolOutput::ReadCode {
+            path: "a.rs".into(),
+            start_line: 1,
+            lines: vec![line.into()],
+            prefix: String::new(),
+            total_lines: 1,
+            instructions: None,
+            no_compress: false,
+        };
+        let text = output.as_display_text();
+        let expected = format!("1: {line}  ⟦{}⟧", crate::tools::hashline::anchor_hash(line));
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn read_code_display_text_skips_anchor_for_blank_line() {
+        let output = ToolOutput::ReadCode {
+            path: "a.rs".into(),
+            start_line: 1,
+            lines: vec!["a".into(), "".into(), "b".into()],
+            prefix: String::new(),
+            total_lines: 3,
+            instructions: None,
+            no_compress: false,
+        };
+        let text = output.as_display_text();
+        assert!(
+            !text.contains("2:   ⟦"),
+            "blank line should have no anchor, got:\n{text}"
+        );
+        assert!(text.contains("2: "));
     }
 
     #[test]

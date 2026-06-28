@@ -1,8 +1,9 @@
 use crate::components::ModalScroll;
 use crate::components::Overlay;
 use crate::components::keybindings::{
-    ALT_SEP, KEYBINDS, KeybindContext, ResolvedLabel, all_contexts, key,
+    ALT_SEP, KEYBINDS, Keybind, KeybindContext, ResolvedLabel, all_contexts,
 };
+use crate::components::keybindings::{ActionId, KeybindingResolver};
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::theme;
@@ -41,7 +42,7 @@ fn key_spans(label: ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static
             )]
         }
         ResolvedLabel::Alt(a, b) => multi_key_spans(&[a, b], pad, prefix, &theme),
-        ResolvedLabel::Multi(keys) => multi_key_spans(keys, pad, prefix, &theme),
+        ResolvedLabel::Multi(keys) => multi_key_spans(&keys, pad, prefix, &theme),
     }
 }
 
@@ -77,6 +78,28 @@ fn multi_key_spans(
     spans
 }
 
+/// Effective label for a keybind entry, applying user overrides.
+/// Returns `None` when the action is disabled (empty overlay).
+fn effective_label(kb: &Keybind, resolver: &KeybindingResolver) -> Option<ResolvedLabel> {
+    match kb.action_id {
+        Some(id) => {
+            let binds = resolver.binds(id);
+            if binds.is_empty() {
+                return None;
+            }
+            if !resolver.is_overridden(id) {
+                return Some(kb.label.resolve());
+            }
+            let labels: Vec<&'static str> = binds.iter().map(|b| b.label).collect();
+            match labels.len() {
+                1 => Some(ResolvedLabel::Single(labels[0])),
+                _ => Some(ResolvedLabel::Multi(labels.into_boxed_slice())),
+            }
+        }
+        None => Some(kb.label.resolve()),
+    }
+}
+
 impl HelpModal {
     pub fn new() -> Self {
         Self {
@@ -103,10 +126,10 @@ impl HelpModal {
         self.scroll.scroll(delta);
     }
 
-    pub fn handle_key(&mut self, key_event: KeyEvent) -> bool {
+    pub fn handle_key(&mut self, key_event: KeyEvent, resolver: &KeybindingResolver) -> bool {
         let close = key_event.code == KeyCode::Esc
-            || key::HELP.matches(key_event)
-            || key::QUIT.matches(key_event);
+            || resolver.matches(ActionId::Help, key_event)
+            || resolver.matches(ActionId::Quit, key_event);
         if close {
             self.close();
             return true;
@@ -115,7 +138,7 @@ impl HelpModal {
         true
     }
 
-    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
+    pub fn view(&mut self, frame: &mut Frame, area: Rect, resolver: &KeybindingResolver) -> Rect {
         if !self.open {
             return Rect::default();
         }
@@ -126,7 +149,8 @@ impl HelpModal {
         let key_col_width = KEYBINDS
             .iter()
             .filter(|kb| kb.platform.is_visible())
-            .map(|kb| kb.label.resolve().display_width())
+            .filter_map(|kb| effective_label(kb, resolver))
+            .map(|label| label.display_width())
             .max()
             .unwrap_or(0)
             + KEY_COL_GAP;
@@ -150,7 +174,10 @@ impl HelpModal {
                 .iter()
                 .filter(|kb| kb.context == ctx && kb.platform.is_visible())
             {
-                let mut spans = key_spans(kb.label.resolve(), key_col_width, PREFIX_TOP);
+                let Some(label) = effective_label(kb, resolver) else {
+                    continue;
+                };
+                let mut spans = key_spans(label, key_col_width, PREFIX_TOP);
                 spans.push(Span::styled(kb.description, theme.keybind_desc));
                 lines.push(Line::from(spans));
             }
@@ -172,11 +199,10 @@ impl HelpModal {
                     theme.keybind_section,
                 )));
                 for kb in child_binds {
-                    let mut spans = key_spans(
-                        kb.label.resolve(),
-                        key_col_width - KEY_COL_GAP,
-                        PREFIX_CHILD,
-                    );
+                    let Some(label) = effective_label(kb, resolver) else {
+                        continue;
+                    };
+                    let mut spans = key_spans(label, key_col_width - KEY_COL_GAP, PREFIX_CHILD);
                     spans.push(Span::styled(kb.description, theme.keybind_desc));
                     lines.push(Line::from(spans));
                 }
@@ -236,8 +262,13 @@ impl Overlay for HelpModal {
 mod tests {
     use super::*;
     use crate::components::key as key_ev;
+    use crate::components::keybindings::key;
     use crossterm::event::KeyCode;
     use test_case::test_case;
+
+    fn default_resolver() -> KeybindingResolver {
+        KeybindingResolver::new()
+    }
 
     #[test_case(key_ev(KeyCode::Esc)       ; "esc_closes")]
     #[test_case(key::QUIT.to_key_event()    ; "ctrl_c_closes")]
@@ -245,7 +276,7 @@ mod tests {
     fn handle_key_closes(k: KeyEvent) {
         let mut modal = HelpModal::new();
         modal.toggle();
-        assert!(modal.handle_key(k));
+        assert!(modal.handle_key(k, &default_resolver()));
         assert!(!modal.is_open());
     }
 
@@ -253,7 +284,7 @@ mod tests {
     fn handle_key_consumes_all() {
         let mut modal = HelpModal::new();
         modal.toggle();
-        assert!(modal.handle_key(key_ev(KeyCode::Char('a'))));
+        assert!(modal.handle_key(key_ev(KeyCode::Char('a')), &default_resolver()));
         assert!(modal.is_open());
     }
 }

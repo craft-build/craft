@@ -77,6 +77,34 @@ fn write_tool_output_section(out: &mut String) {
     writeln!(out).unwrap();
 }
 
+fn write_keybindings_section(out: &mut String) {
+    use craft_ui::keybindings::all_action_ids;
+
+    writeln!(out, "### `ui.keybindings`\n").unwrap();
+    writeln!(
+        out,
+        "Override the default keybindings. Keys are snake_case action ids; \
+         values are a chord string, a list of chords, or an empty list to disable. \
+         Unknown ids and unparseable chords are warned and dropped.\n"
+    )
+    .unwrap();
+    writeln!(out, "| Action | Chord format |").unwrap();
+    writeln!(out, "|--------|--------------|").unwrap();
+    writeln!(
+        out,
+        "| `<action>` | `\"Ctrl+P\"`, `\"Alt+M\"`, `\"Shift+Tab\"`, `\"F5\"`, or a list |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "Remappable actions:\n").unwrap();
+    writeln!(out, "| Action id |").unwrap();
+    writeln!(out, "|-----------|").unwrap();
+    for id in all_action_ids() {
+        writeln!(out, "| `{}` |", id.snake()).unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
 fn write_nested_agent_sections(out: &mut String) {
     writeln!(out, "### `agent.validation`\n").unwrap();
     writeln!(
@@ -157,6 +185,11 @@ craft.setup({{
             bash = {tol_bash},
             read = {tol_read},
         }},
+        keybindings = {{
+            search = \"Ctrl+F\",
+            plan_toggle = {{\"Ctrl+T\", \"Alt+T\"}},
+            tasks = {{}},  -- disable
+        }},
     }},
     agent = {{
         bash_timeout_secs = {bash_timeout},
@@ -192,6 +225,7 @@ All fields are optional. Typos in field names cause an error right away.
 
     write_section(&mut out, "[ui]", UiConfig::FIELDS);
     write_tool_output_section(&mut out);
+    write_keybindings_section(&mut out);
     write_section(&mut out, "[agent]", AgentConfig::FIELDS);
     write_nested_agent_sections(&mut out);
     write_section(&mut out, "[provider]", ProviderConfig::FIELDS);

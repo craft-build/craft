@@ -30,6 +30,12 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Models) => {
             subcmd::models().await;
         }
+        Some(Command::Completions { shell }) => {
+            subcmd::completions(shell)?;
+        }
+        Some(Command::Stats { sessions }) => {
+            subcmd::stats(sessions)?;
+        }
         Some(Command::Mcp { action }) => {
             let storage = StateDir::resolve().context("resolve data directory")?;
             match action {

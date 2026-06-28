@@ -32,7 +32,9 @@ pub(crate) const CANCELLED_TEXT: &str = "Cancelled";
 
 pub enum ChatEventResult {
     Continue,
-    Done,
+    Done {
+        usage: TokenUsage,
+    },
     QueueItemConsumed {
         text: String,
         image_count: usize,
@@ -123,9 +125,10 @@ impl Chat {
                 return ChatEventResult::QueueItemConsumed { text, image_count };
             }
             AgentEvent::Retry { .. } => unreachable!("handled before handle_event"),
-            AgentEvent::Done { .. } => {
+            AgentEvent::Done { usage, .. } => {
                 self.messages_panel.flush();
-                return ChatEventResult::Done;
+                self.token_usage += usage;
+                return ChatEventResult::Done { usage };
             }
             AgentEvent::Error { message } => {
                 self.messages_panel.flush();

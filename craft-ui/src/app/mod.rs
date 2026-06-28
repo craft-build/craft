@@ -30,7 +30,7 @@ use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
-use crate::components::keybindings::{key, normalize_key};
+use crate::components::keybindings::{ActionId, KeybindingResolver, key, normalize_key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
@@ -42,6 +42,7 @@ use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
 use crate::components::session_picker::{SessionPicker, SessionPickerAction};
+use crate::components::stats_modal::StatsModal;
 use crate::components::status_bar::StatusBar;
 use crate::components::theme_picker::{ThemePicker, ThemePickerAction};
 use crate::components::tool_display::format_turn_usage;
@@ -143,6 +144,7 @@ pub struct App {
     pub(super) session_picker: SessionPicker,
     pub(super) rewind_picker: RewindPicker,
     pub(super) help_modal: HelpModal,
+    pub(super) stats_modal: StatsModal,
     pub(super) btw_modal: BtwModal,
     pub(super) float_mgr: FloatManager,
     pub(super) search_modal: SearchModal,
@@ -173,6 +175,7 @@ pub struct App {
     storage_writer: Arc<StorageWriter>,
     pub(crate) shell: shell::ShellState,
     pub(crate) ui_config: UiConfig,
+    pub(crate) keybindings: Arc<KeybindingResolver>,
     pub(crate) permissions: Arc<PermissionManager>,
     pub(super) buf_click: Option<BufClickHandler>,
     pub(crate) lua_event_handle: Option<EventHandle>,
@@ -214,8 +217,17 @@ impl App {
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
-        Self {
-            chats: vec![Chat::new("Main".into(), ui_config)],
+        let keybindings = {
+            let mut warnings = Vec::new();
+            let resolver =
+                KeybindingResolver::from_overlay(&ui_config.keybindings.entries, &mut warnings);
+            for warning in &warnings {
+                tracing::warn!(%warning, "keybinding config");
+            }
+            Arc::new(resolver)
+        };
+        let mut app = Self {
+            chats: vec![Chat::new("Main".into(), ui_config.clone())],
             active_chat: 0,
             chat_index: HashMap::new(),
             input_box: InputBox::new(InputHistory::load(&storage, input_history_size)),
@@ -233,6 +245,7 @@ impl App {
             session_picker: SessionPicker::new(),
             rewind_picker: RewindPicker::new(),
             help_modal: HelpModal::new(),
+            stats_modal: StatsModal::new(),
             btw_modal: BtwModal::new(ui_config.typewriter_ms_per_char),
             float_mgr: FloatManager::new(),
             search_modal: SearchModal::new(),
@@ -262,6 +275,7 @@ impl App {
             storage_writer,
             shell: shell::ShellState::default(),
             ui_config,
+            keybindings,
             permissions,
             buf_click: None,
             lua_event_handle: None,
@@ -270,7 +284,16 @@ impl App {
             subagent_answers: HashMap::new(),
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
-        }
+        };
+        app.task_picker.set_keybindings(app.keybindings.clone());
+        app.theme_picker.set_keybindings(app.keybindings.clone());
+        app.model_picker.set_keybindings(app.keybindings.clone());
+        app.session_picker.set_keybindings(app.keybindings.clone());
+        app.rewind_picker.set_keybindings(app.keybindings.clone());
+        app.login_picker.set_keybindings(app.keybindings.clone());
+        app.mcp_picker.set_keybindings(app.keybindings.clone());
+        app.plan_form.set_keybindings(app.keybindings.clone());
+        app
     }
 
     pub(crate) fn main_chat(&mut self) -> &mut Chat {
@@ -393,6 +416,10 @@ impl App {
             self.help_modal.scroll(delta);
             return;
         }
+        if self.stats_modal.is_open() {
+            self.stats_modal.scroll(delta);
+            return;
+        }
         let pos = Position::new(column, row);
         if self.float_mgr.is_open() && self.float_mgr.contains(pos) {
             self.float_mgr.scroll(delta);
@@ -438,7 +465,7 @@ impl App {
         if !is_ctrl(&key) {
             return None;
         }
-        if key::QUIT.matches(key) {
+        if self.keybindings.matches(ActionId::Quit, key) {
             self.command_palette.close();
             return Some(if !self.is_main_chat() || self.input_box.is_empty() {
                 if self.status == Status::Streaming {
@@ -450,37 +477,37 @@ impl App {
                 vec![]
             });
         }
-        if key::HELP.matches(key) {
+        if self.keybindings.matches(ActionId::Help, key) {
             self.help_modal.toggle();
             return Some(vec![]);
         }
-        if key::TASKS.matches(key) {
+        if self.keybindings.matches(ActionId::Tasks, key) {
             self.open_tasks();
             return Some(vec![]);
         }
-        if key::PREV_CHAT.matches(key) {
+        if self.keybindings.matches(ActionId::PrevChat, key) {
             self.active_chat = self.active_chat.saturating_sub(1);
             return Some(vec![]);
         }
-        if key::NEXT_CHAT.matches(key) {
+        if self.keybindings.matches(ActionId::NextChat, key) {
             self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
             return Some(vec![]);
         }
-        if key::SCROLL_HALF_UP.matches(key) {
+        if self.keybindings.matches(ActionId::ScrollHalfUp, key) {
             let half = self.chats[self.active_chat].half_page();
             self.active_chat().scroll(half);
             return Some(vec![]);
         }
-        if key::SCROLL_HALF_DOWN.matches(key) {
+        if self.keybindings.matches(ActionId::ScrollHalfDown, key) {
             let half = self.chats[self.active_chat].half_page();
             self.active_chat().scroll(-half);
             return Some(vec![]);
         }
-        if key::SCROLL_TOP.matches(key) {
+        if self.keybindings.matches(ActionId::ScrollTop, key) {
             self.active_chat().scroll_to_top();
             return Some(vec![]);
         }
-        if key::SCROLL_BOTTOM.matches(key) {
+        if self.keybindings.matches(ActionId::ScrollBottom, key) {
             self.active_chat().enable_auto_scroll();
             return Some(vec![]);
         }
@@ -510,7 +537,12 @@ impl App {
         }
 
         if self.help_modal.is_open() {
-            self.help_modal.handle_key(key);
+            self.help_modal.handle_key(key, &self.keybindings);
+            return Some(vec![]);
+        }
+
+        if self.stats_modal.is_open() {
+            self.stats_modal.handle_key(key, &self.keybindings);
             return Some(vec![]);
         }
 
@@ -579,8 +611,8 @@ impl App {
                     self.queue.remove_focused();
                 }
                 KeyCode::Esc => self.queue.unfocus(),
-                _ if key::QUIT.matches(key) => self.queue.unfocus(),
-                _ if key::POP_QUEUE.matches(key) => {
+                _ if self.keybindings.matches(ActionId::Quit, key) => self.queue.unfocus(),
+                _ if self.keybindings.matches(ActionId::PopQueue, key) => {
                     self.queue.remove(0);
                 }
                 _ => {}
@@ -589,7 +621,7 @@ impl App {
         }
 
         if self.task_picker.is_open() {
-            if key::TASKS.matches(key) {
+            if self.keybindings.matches(ActionId::Tasks, key) {
                 self.task_picker.close();
                 return Some(vec![]);
             }
@@ -612,10 +644,14 @@ impl App {
                 SessionPickerAction::Consumed => vec![],
                 SessionPickerAction::Select(id) => self.load_session(id),
                 SessionPickerAction::ConfirmDelete => {
-                    self.status_bar.flash(format!(
-                        "Press {} again to confirm delete",
-                        key::DELETE.label
-                    ));
+                    let label = self
+                        .keybindings
+                        .binds(ActionId::Delete)
+                        .first()
+                        .map(|b| b.label)
+                        .unwrap_or(key::DELETE.label);
+                    self.status_bar
+                        .flash(format!("Press {label} again to confirm delete"));
                     vec![]
                 }
                 SessionPickerAction::Delete(id) => self.delete_session(id),
@@ -686,7 +722,7 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
         self.clear_selection_unless_pending_copy();
 
-        if key::SUSPEND.matches(key) && cfg!(unix) {
+        if self.keybindings.matches(ActionId::Suspend, key) && cfg!(unix) {
             return self.suspend();
         }
 
@@ -738,13 +774,13 @@ impl App {
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        if key::EDIT_INPUT.matches(key) {
+        if self.keybindings.matches(ActionId::EditInput, key) {
             return vec![Action::EditInputInEditor];
         }
         if is_ctrl(&key) {
-            if key::POP_QUEUE.matches(key) {
+            if self.keybindings.matches(ActionId::PopQueue, key) {
                 self.queue.remove(0);
-            } else if key::OPEN_EDITOR.matches(key) {
+            } else if self.keybindings.matches(ActionId::OpenEditor, key) {
                 return match self.state.plan.path() {
                     Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
                     None => {
@@ -752,16 +788,16 @@ impl App {
                         vec![]
                     }
                 };
-            } else if key::PLAN_TOGGLE.matches(key) {
+            } else if self.keybindings.matches(ActionId::PlanToggle, key) {
                 match self.state.mode {
                     Mode::Plan => self.plan_form.toggle(),
                     _ => self.float_mgr.toggle_panel_visibility(),
                 }
-            } else if key::SEARCH.matches(key) {
+            } else if self.keybindings.matches(ActionId::Search, key) {
                 let top = self.chats[self.active_chat].scroll_top();
                 let auto = self.chats[self.active_chat].auto_scroll();
                 self.search_modal.open(top, auto);
-            } else if key::FILE_PICKER.matches(key) {
+            } else if self.keybindings.matches(ActionId::FilePicker, key) {
                 self.file_picker.open(&self.state.session.cwd);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
                 self.start_image_paste();
@@ -1083,9 +1119,13 @@ impl App {
             return vec![];
         }
 
+        if let ChatEventResult::Done { usage } = &result {
+            self.record_cost(chat_idx, *usage);
+        }
+
         if chat_idx == 0 {
             match result {
-                ChatEventResult::Done => {
+                ChatEventResult::Done { .. } => {
                     self.status_bar.clear_flash();
                     self.save_session();
                     self.chat_index.clear();
@@ -1138,7 +1178,7 @@ impl App {
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
         }
-        let mut chat = Chat::new(subagent.name.clone(), self.ui_config);
+        let mut chat = Chat::new(subagent.name.clone(), self.ui_config.clone());
         chat.model_id = subagent.model.clone();
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
@@ -1164,6 +1204,17 @@ impl App {
             }
             "/help" => {
                 self.help_modal.toggle();
+                vec![]
+            }
+            "/stats" => {
+                let ledger = craft_storage::stats::CostLedger::from_state_dir(&self.storage)
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "failed to open cost ledger");
+                    })
+                    .ok();
+                if let Some(ledger) = ledger {
+                    self.stats_modal.toggle(&ledger);
+                }
                 vec![]
             }
             "/btw" => {
@@ -1424,6 +1475,7 @@ impl App {
 
     define_overlays!(
         help_modal,
+        stats_modal,
         btw_modal,
         float_mgr,
         search_modal,

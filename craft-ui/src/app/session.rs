@@ -41,6 +41,33 @@ impl App {
         self.enqueue_save();
     }
 
+    pub(crate) fn record_cost(&self, chat_idx: usize, usage: TokenUsage) {
+        let chat = &self.chats[chat_idx];
+        let resolved = chat
+            .model_id
+            .as_deref()
+            .and_then(|spec| Model::from_spec(spec).ok());
+        let model = resolved.as_ref().unwrap_or(&self.state.model);
+        let cost_usd = usage.cost(&model.pricing, self.state.fast);
+        let provider = model.provider.display_name().to_string();
+        let record = craft_storage::stats::CostRecord {
+            session_id: self.state.session.id.clone(),
+            turn_id: chat.model_id.clone(),
+            ts: craft_storage::now_epoch(),
+            model: model.spec(),
+            provider,
+            usage: craft_storage::stats::CostUsage {
+                input: usage.input as u64,
+                output: usage.output as u64,
+                cache_creation: usage.cache_creation as u64,
+                cache_read: usage.cache_read as u64,
+            },
+            cost_usd,
+            fast: self.state.fast,
+        };
+        self.storage_writer.record_cost(record);
+    }
+
     fn sync_ephemeral_state(&mut self) {
         let draft = self.input_box.buffer.value();
         self.state.session.meta.input_draft = if draft.is_empty() { None } else { Some(draft) };
@@ -76,7 +103,8 @@ impl App {
 
     pub(super) fn reset_ui_chrome(&mut self) {
         self.chats.clear();
-        self.chats.push(Chat::new("Main".into(), self.ui_config));
+        self.chats
+            .push(Chat::new("Main".into(), self.ui_config.clone()));
         self.active_chat = 0;
         self.chat_index.clear();
         self.status = super::Status::Idle;
@@ -121,7 +149,7 @@ impl App {
         for sa in std::mem::take(&mut self.state.session.meta.subagents) {
             let idx = self.chats.len();
             self.chat_index.insert(sa.tool_use_id.clone(), idx);
-            let mut chat = Chat::new(sa.name, self.ui_config);
+            let mut chat = Chat::new(sa.name, self.ui_config.clone());
             chat.model_id = sa.model;
             if let Some(messages) = self.state.session.subagent_messages.get(&sa.tool_use_id) {
                 let (display, items) = history_to_display(

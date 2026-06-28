@@ -20,6 +20,11 @@ craft.setup({
             bash = 8,
             read = 5,
         },
+        keybindings = {
+            search = "Ctrl+F",
+            plan_toggle = {"Ctrl+T", "Alt+T"},
+            tasks = {},  -- disable
+        },
     },
     agent = {
         bash_timeout_secs = 180,
@@ -72,6 +77,42 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `write` | 7 |
 | `web` | 3 |
 | `other` | 3 |
+
+### `ui.keybindings`
+
+Override the default keybindings. Keys are snake_case action ids; values are a chord string, a list of chords, or an empty list to disable. Unknown ids and unparseable chords are warned and dropped.
+
+| Action | Chord format |
+|--------|--------------|
+| `<action>` | `"Ctrl+P"`, `"Alt+M"`, `"Shift+Tab"`, `"F5"`, or a list |
+
+Remappable actions:
+
+| Action id |
+|-----------|
+| `quit` |
+| `help` |
+| `prev_chat` |
+| `next_chat` |
+| `scroll_half_up` |
+| `scroll_half_down` |
+| `scroll_line_up` |
+| `scroll_line_down` |
+| `scroll_to_top` |
+| `scroll_to_bottom` |
+| `pop_queue` |
+| `delete_word` |
+| `search` |
+| `file_picker` |
+| `open_editor` |
+| `plan_toggle` |
+| `tasks` |
+| `suspend` |
+| `delete` |
+| `kill_line` |
+| `line_start` |
+| `line_end` |
+| `edit_input` |
 
 ### `agent`
 

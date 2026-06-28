@@ -28,6 +28,7 @@ craft-providers = { workspace = true }
 craft-storage = { workspace = true }
 craft-lua = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 color-eyre = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -100,6 +101,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 sha2 = { version = "0.11", default-features = false }
 hmac = { version = "0.13", default-features = false }
 base64 = "0.22"

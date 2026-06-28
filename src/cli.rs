@@ -21,6 +21,16 @@ pub enum InputFormat {
     StreamJson,
 }
 
+#[derive(Clone, ValueEnum, Default)]
+pub enum CompletionShell {
+    #[default]
+    Bash,
+    Zsh,
+    Fish,
+    Elvish,
+    Powershell,
+}
+
 #[derive(Parser)]
 #[command(name = "craft", version, about = "AI coding agent for the terminal")]
 pub struct Cli {
@@ -192,6 +202,18 @@ pub enum Command {
     },
     /// List all available models
     Models,
+    /// Generate shell completions for the given shell (print to stdout)
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+    /// Show cost and usage stats from the persistent ledger
+    Stats {
+        /// Show per-session breakdown instead of the default per-model view
+        #[arg(long)]
+        sessions: bool,
+    },
     /// Run the outline tool on a file to see how it looks like
     Outline { path: String },
     /// Manage MCP server authentication
@@ -426,5 +448,47 @@ mod tests {
     #[test]
     fn normalize_tool_name_multi_edit_rejects_snake_variant() {
         assert!(normalize_tool_name("MultiEdit").is_err());
+    }
+
+    #[test_case("bash" ; "bash")]
+    #[test_case("zsh" ; "zsh")]
+    #[test_case("fish" ; "fish")]
+    #[test_case("elvish" ; "elvish")]
+    #[test_case("powershell" ; "powershell")]
+    fn completion_shell_parses(shell: &str) {
+        use clap::ValueEnum;
+        let value = CompletionShell::from_str(shell, true);
+        assert!(value.is_ok(), "failed to parse shell `{shell}`");
+    }
+
+    #[test_case(CompletionShell::Bash ; "bash")]
+    #[test_case(CompletionShell::Zsh ; "zsh")]
+    #[test_case(CompletionShell::Fish ; "fish")]
+    #[test_case(CompletionShell::Elvish ; "elvish")]
+    #[test_case(CompletionShell::Powershell ; "powershell")]
+    fn completions_generate_non_empty_with_subcommands(shell: CompletionShell) {
+        use clap::CommandFactory;
+        use clap_complete::Shell;
+
+        let clap_shell = match shell {
+            CompletionShell::Bash => Shell::Bash,
+            CompletionShell::Zsh => Shell::Zsh,
+            CompletionShell::Fish => Shell::Fish,
+            CompletionShell::Elvish => Shell::Elvish,
+            CompletionShell::Powershell => Shell::PowerShell,
+        };
+        let mut cmd = Cli::command();
+        let mut buf = Vec::<u8>::new();
+        clap_complete::generate(clap_shell, &mut cmd, "craft", &mut buf);
+        let output = String::from_utf8(buf).expect("completions are UTF-8");
+        assert!(!output.is_empty());
+        assert!(
+            output.contains("completions"),
+            "missing `completions` subcommand in output"
+        );
+        assert!(
+            output.contains("stats"),
+            "missing `stats` subcommand in output"
+        );
     }
 }

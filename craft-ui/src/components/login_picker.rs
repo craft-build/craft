@@ -158,6 +158,7 @@ pub struct LoginPicker {
     step: Step,
     provider_items: Vec<ProviderItem>,
     storage: Option<craft_storage::StateDir>,
+    keybindings: std::sync::Arc<crate::components::keybindings::KeybindingResolver>,
 }
 
 impl LoginPicker {
@@ -166,7 +167,17 @@ impl LoginPicker {
             step: Step::Closed,
             provider_items: Vec::new(),
             storage: None,
+            keybindings: std::sync::Arc::new(
+                crate::components::keybindings::KeybindingResolver::new(),
+            ),
         }
+    }
+
+    pub fn set_keybindings(
+        &mut self,
+        resolver: std::sync::Arc<crate::components::keybindings::KeybindingResolver>,
+    ) {
+        self.keybindings = resolver;
     }
 
     pub fn open(&mut self, storage: craft_storage::StateDir) {
@@ -217,7 +228,7 @@ impl LoginPicker {
         });
 
         self.provider_items = items.clone();
-        let mut picker = ListPicker::new();
+        let mut picker = ListPicker::new().with_keybindings(self.keybindings.clone());
         picker.open(items, TITLE);
         self.storage = Some(storage);
         self.step = Step::PickProvider(picker);

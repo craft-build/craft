@@ -1,6 +1,7 @@
 //! Modal list picker with search. Supports immediate (`open`) or lazy loading
 //! (`open_loading` → `resolve`) where a spinner is shown until items arrive.
 
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ use crate::animation::{spinner_frame, spinner_str};
 use crate::components::Overlay;
 use crate::components::hint_line;
 use crate::components::is_ctrl;
-use crate::components::keybindings::key;
+use crate::components::keybindings::{ActionId, KeybindingResolver};
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::text_buffer::TextBuffer;
@@ -98,6 +99,7 @@ pub struct ListPicker<T> {
     generation: u64,
     footer: Option<FooterSpec>,
     error_text: Option<String>,
+    keybindings: Arc<KeybindingResolver>,
 }
 
 enum FooterSpec {
@@ -260,7 +262,17 @@ impl<T: PickerItem> ListPicker<T> {
             generation: 0,
             footer: None,
             error_text: None,
+            keybindings: Arc::new(KeybindingResolver::new()),
         }
+    }
+
+    pub fn with_keybindings(mut self, resolver: Arc<KeybindingResolver>) -> Self {
+        self.keybindings = resolver;
+        self
+    }
+
+    pub fn set_keybindings(&mut self, resolver: Arc<KeybindingResolver>) {
+        self.keybindings = resolver;
     }
 
     pub fn with_max_visible(mut self, max: u16) -> Self {
@@ -394,7 +406,7 @@ impl<T: PickerItem> ListPicker<T> {
         match &self.state {
             None => return PickerAction::Close,
             Some(PickerState::Loading) => {
-                if key::QUIT.matches(key) || key.code == KeyCode::Esc {
+                if self.keybindings.matches(ActionId::Quit, key) || key.code == KeyCode::Esc {
                     self.generation += 1;
                     self.state = None;
                     return PickerAction::Close;
@@ -412,11 +424,11 @@ impl<T: PickerItem> ListPicker<T> {
             return PickerAction::Close;
         };
 
-        if key::QUIT.matches(key) {
+        if self.keybindings.matches(ActionId::Quit, key) {
             self.state = None;
             return PickerAction::Close;
         }
-        if key::DELETE_WORD.matches(key) {
+        if self.keybindings.matches(ActionId::DeleteWord, key) {
             s.search.remove_word_before_cursor();
             s.update_search_and_clamp();
             return PickerAction::Consumed;

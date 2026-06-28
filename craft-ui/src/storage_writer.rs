@@ -11,6 +11,7 @@ use std::time::Duration;
 use color_eyre::Result;
 use craft_storage::StateDir;
 use craft_storage::sessions::{SESSIONS_DIR, SessionError, SessionLog};
+use craft_storage::stats::{CostLedger, CostRecord};
 use tracing::warn;
 
 use crate::AppSession;
@@ -19,7 +20,9 @@ use crate::agent::shared_queue::lock;
 pub struct StorageWriter {
     latest: Arc<Mutex<Option<Box<AppSession>>>>,
     notify: flume::Sender<()>,
+    cost_tx: flume::Sender<CostRecord>,
     done_rx: flume::Receiver<()>,
+    cost_done_rx: flume::Receiver<()>,
 }
 
 impl StorageWriter {
@@ -28,6 +31,28 @@ impl StorageWriter {
         let writer_latest = Arc::clone(&latest);
         let (notify, notify_rx) = flume::bounded::<()>(1);
         let (done_tx, done_rx) = flume::bounded::<()>(1);
+        let (cost_tx, cost_rx) = flume::unbounded::<CostRecord>();
+        let (cost_done_tx, cost_done_rx) = flume::bounded::<()>(1);
+
+        let cost_dir = dir.clone();
+        std::thread::Builder::new()
+            .name("cost-writer".into())
+            .spawn(move || {
+                let ledger = match CostLedger::from_state_dir(&cost_dir) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        warn!(error = %e, "failed to open cost ledger");
+                        return;
+                    }
+                };
+                while let Ok(record) = cost_rx.recv() {
+                    if let Err(e) = ledger.append(&record) {
+                        warn!(error = %e, "cost ledger append failed");
+                    }
+                }
+                let _ = cost_done_tx.send(());
+            })
+            .map_err(|e| color_eyre::eyre::eyre!("failed to spawn cost-writer thread: {e}"))?;
 
         std::thread::Builder::new()
             .name("storage-writer".into())
@@ -77,7 +102,9 @@ impl StorageWriter {
         Ok(Self {
             latest,
             notify,
+            cost_tx,
             done_rx,
+            cost_done_rx,
         })
     }
 
@@ -86,10 +113,18 @@ impl StorageWriter {
         let _ = self.notify.try_send(());
     }
 
+    pub fn record_cost(&self, record: CostRecord) {
+        let _ = self.cost_tx.send(record);
+    }
+
     pub fn shutdown(self, timeout: Duration) {
         drop(self.notify);
         if self.done_rx.recv_timeout(timeout).is_err() {
             warn!("storage writer did not drain within {timeout:?}");
+        }
+        drop(self.cost_tx);
+        if self.cost_done_rx.recv_timeout(timeout).is_err() {
+            warn!("cost writer did not drain within {timeout:?}");
         }
     }
 }
