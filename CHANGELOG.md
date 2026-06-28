@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-28
+
+### Added
+
+- **tools**: `browser_screenshot` tool that renders a URL in headless Chromium
+  and returns a PNG, plus multimodal tool-result support so images from tools
+  reach the model across all provider families (Anthropic content arrays,
+  Google `inlineData`, OpenAI Chat Completions follow-on image messages, and
+  OpenAI Responses parts arrays). Images are stripped on compaction.
+  (`c78da94e`)
+- **providers**: TensorX provider, an OpenAI-compatible open-weight host
+  (zero data retention, prompt caching) with models discovered from
+  `/model/info` and a `thinking` flag for DeepSeek-V4. (`8ddf842c`, credit:
+  Sebastian Dröge)
+- **cli**: `craft prompt` subcommand that prints the fully rendered system
+  prompt (including Lua plugin contributions), with `system`/`research`/
+  `general` variants, `--plan`, and `--tools` / `--tools --names` flags.
+  The positional `prompt` field was renamed to `initial_prompt` to avoid a
+  clap clash. (`1a0d91ba`)
+- **lua**: `craft.api.set_prompt` lets plugins and `init.lua` override the
+  singleton identity and tone prompt slots (last-plugin-wins with built-in
+  defaults), distinct from aggregate slots that join contributions.
+  Registering a hint to a nonexistent slot now errors at registration time;
+  empty static content is rejected. (`80dac83b`, credit: TheGoddessInari)
+- **ui**: fuzzy matching in the list picker via `nucleo_matcher`, replacing
+  substring matching. (`8d5acf90`, credit: Sebastian Dröge)
+
+### Changed
+
+- **agent**: `Slot` already derives `EnumIter`, so the hand-maintained `ALL`
+  array in the prompt assembler was dropped in favor of iterating the enum
+  directly, removing a drift risk where an unhandled variant would leak its
+  `{{marker}}` into the prompt. (`8fc7e01e`)
+
+### Fixed
+
+- **agent**: plan-mode files live outside the cwd, so `check_physical_boundary`
+  rejected them even after the plan-mode gate approved the path. The boundary
+  check was moved out of `enforce_permission()` and co-located with the
+  plan-mode gate, sharing one `mutable_path()` block so the two checks can no
+  longer drift apart. (`f2207468`, credit: Tony Solomonik)
+- **storage/permissions**: Windows path handling and separators. Adds
+  symlink-aware cross-platform path normalization (`normalize_path`,
+  `canonicalize_clean`, `incremental_canonicalize` stripping `\\?\`
+  prefixes), fibonacci-backoff retry renames for atomic writes (Windows virus
+  scanner compatibility), `std::fs::File::lock` replacing `libc::flock`
+  (MSRV bumped to 1.89), component-based `scope_matches`, and
+  `check_physical_boundary` to block symlink-escape on mutable tool paths.
+  Gets permissions, config, and memories working on Windows.
+  (`0a81ba7f`, credit: TheGoddessInari)
+- **providers**: dynamic-vs-custom slug provider resolution centralized into
+  a shared `provider_for_slug` helper so the branching cannot diverge.
+  (`ebf31639`, credit: oldhu)
+
 ## [0.7.1] - 2026-06-27
 
 ### Added
