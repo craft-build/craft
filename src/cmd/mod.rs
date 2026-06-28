@@ -63,6 +63,14 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Doctor { export }) => {
             subcmd::doctor::run(export).await?;
         }
+        Some(Command::Prompt {
+            variant,
+            plan,
+            tools,
+            names,
+        }) => {
+            subcmd::prompt(&variant, plan, tools, names)?;
+        }
         None => {
             tui::run(cli).await?;
         }

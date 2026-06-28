@@ -532,3 +532,78 @@ pub fn mcp_logout(server: &str, storage: &StateDir) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn prompt(
+    variant: &crate::cli::PromptVariant,
+    plan: bool,
+    tools: bool,
+    names: bool,
+) -> Result<()> {
+    use crate::cli::PromptVariant;
+    use craft_agent::AgentMode;
+    use craft_agent::agent::{build_system_prompt, load_instruction_text};
+    use craft_agent::prompt::{PromptId, assemble};
+    use craft_agent::template;
+    use craft_agent::tools::{DescriptionContext, ToolFilter};
+
+    if plan && !matches!(variant, PromptVariant::System) {
+        bail!("--plan can only be used with the 'system' prompt variant");
+    }
+
+    let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
+    load_env_files(&cwd);
+
+    let vars = template::env_vars();
+    let reg = ToolRegistry::native_arc();
+    let mut host = PluginHost::new(Arc::clone(reg), None).context("initialize lua plugin host")?;
+    let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
+    let config = raw_config
+        .unwrap_or_default()
+        .into_config(false)
+        .context("invalid config")?;
+    host.load_builtins(&config.plugins)
+        .context("load builtin plugins")?;
+
+    if tools {
+        let ctx = DescriptionContext {
+            filter: &ToolFilter::All,
+        };
+        let defs = reg.definitions(&vars, &ctx, true);
+        if names {
+            for name in defs
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|d| d["name"].as_str())
+            {
+                println!("{name}");
+            }
+        } else {
+            println!("{}", serde_json::to_string_pretty(&defs)?);
+        }
+        return Ok(());
+    }
+
+    let cwd_str = cwd.to_string_lossy();
+    let instructions = load_instruction_text(&cwd_str);
+    let slots = host
+        .event_handle()
+        .map(|h| h.collect_prompt_slots())
+        .unwrap_or_default();
+
+    let output = match variant {
+        PromptVariant::System => {
+            let mode = if plan {
+                AgentMode::Plan(std::path::PathBuf::from("plan.md"))
+            } else {
+                AgentMode::Build
+            };
+            build_system_prompt(&vars, &mode, &instructions, &slots, false)
+        }
+        PromptVariant::Research => assemble(PromptId::Research, &slots, &instructions),
+        PromptVariant::General => assemble(PromptId::General, &slots, &instructions),
+    };
+
+    print!("{output}");
+    Ok(())
+}

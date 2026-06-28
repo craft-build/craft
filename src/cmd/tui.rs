@@ -168,7 +168,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } else {
             crate::print::run(
                 &model,
-                cli.prompt,
+                cli.initial_prompt,
                 cli.output_format,
                 cli.verbose,
                 config.agent,
@@ -201,7 +201,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         } else {
             Model::from_spec(&session.model).unwrap_or(model)
         };
-        let initial_prompt = read_initial_prompt(cli.prompt)?;
+        let initial_prompt = read_initial_prompt(cli.initial_prompt)?;
         let cwd_for_mcp = cwd.clone();
         let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd_for_mcp).await;
         let provider: Arc<dyn craft_providers::provider::Provider> = if needs_login {
