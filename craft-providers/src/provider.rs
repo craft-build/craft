@@ -246,17 +246,24 @@ pub trait Provider: Send + Sync {
     fn adjust_model(&self, _model: &mut Model) {}
 }
 
+async fn provider_for_slug(
+    slug: &str,
+    timeouts: Timeouts,
+) -> Result<Box<dyn Provider>, AgentError> {
+    if dynamic::display_name(slug).is_some() {
+        dynamic::create(slug, timeouts).await
+    } else {
+        crate::providers::custom::create(slug, timeouts)
+    }
+}
+
 pub async fn from_model(
     model: &mut Model,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
     if let Some(slug) = &model.dynamic_slug {
-        if dynamic::display_name(slug).is_some() {
-            debug!(slug, model = %model.id, "dynamic provider created");
-            return dynamic::create(slug, timeouts).await;
-        }
-        debug!(slug, model = %model.id, "custom provider created");
-        return crate::providers::custom::create(slug, timeouts);
+        debug!(slug, model = %model.id, "slug provider created");
+        return provider_for_slug(slug, timeouts).await;
     }
     let provider = model.provider.create(timeouts).await?;
     provider.adjust_model(model);
