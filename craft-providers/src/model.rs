@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::provider::ProviderKind;
 use crate::providers::{
     anthropic, copilot, deepseek, dynamic, google, llama_cpp, mistral, ollama, openai, openrouter,
-    synthetic,
+    synthetic, tensorx,
 };
 
 const PER_MILLION: f64 = 1_000_000.0;
@@ -155,6 +155,7 @@ pub fn models_for_provider(provider: ProviderKind) -> &'static [ModelEntry] {
         ProviderKind::OpenRouter => openrouter::models(),
         ProviderKind::Synthetic => synthetic::models(),
         ProviderKind::DeepSeek => deepseek::models(),
+        ProviderKind::TensorX => tensorx::models(),
     }
 }
 

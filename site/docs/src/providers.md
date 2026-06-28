@@ -175,6 +175,14 @@ OpenRouter aggregates models from many providers behind a single API. Craft asks
 
 Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), syn:large:vision (strong), syn:small:text (weak)
 
+### TensorX
+
+- **Env var**: `TENSORX_API_KEY`
+- **API**: `https://api.tensorx.ai/v1`
+- **Features**: Open-weight models, zero data retention, prompt caching
+
+Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.
+
 ## Model Identifiers
 
 Models are referenced as `provider/model_id`:
@@ -258,7 +266,7 @@ To add a provider proxy via an executable script, drop it into `~/.config/craft/
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `deepseek`, `openrouter`, `synthetic`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `deepseek`, `openrouter`, `synthetic`, `tensorx`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 

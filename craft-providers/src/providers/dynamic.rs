@@ -26,6 +26,7 @@ use super::mistral::Mistral;
 use super::openai::OpenAi;
 use super::openrouter::OpenRouter;
 use super::synthetic::Synthetic;
+use super::tensorx::TensorX;
 
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -394,6 +395,10 @@ pub async fn create(
         ),
         ProviderKind::DeepSeek => Box::new(
             DeepSeek::with_auth(auth.clone(), timeouts)?
+                .with_system_prefix(meta.system_prefix.clone()),
+        ),
+        ProviderKind::TensorX => Box::new(
+            TensorX::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
     };

@@ -26,6 +26,7 @@ pub(crate) mod openai;
 pub(crate) mod openai_compat;
 pub(crate) mod openrouter;
 pub(crate) mod synthetic;
+pub(crate) mod tensorx;
 
 pub(crate) const MIME_JSON: &str = "application/json";
 pub(crate) const MIME_FORM: &str = "application/x-www-form-urlencoded";
