@@ -4,6 +4,9 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+
 use crate::animation::{spinner_frame, spinner_str};
 use crate::components::Overlay;
 use crate::components::hint_line;
@@ -120,6 +123,7 @@ struct State<T> {
     viewport_height: usize,
     inner_area: Rect,
     enabled: Option<Vec<bool>>,
+    matcher: Matcher,
 }
 
 impl<T: PickerItem> State<T> {
@@ -134,6 +138,7 @@ impl<T: PickerItem> State<T> {
             viewport_height: 20,
             inner_area: Rect::default(),
             enabled: None,
+            matcher: Matcher::new(Config::DEFAULT),
         }
     }
 
@@ -147,16 +152,31 @@ impl<T: PickerItem> State<T> {
         let query = self.search.value();
         if query.is_empty() {
             self.filtered = (0..self.items.len()).collect();
-        } else {
-            let query_lower = query.to_ascii_lowercase();
-            self.filtered = self
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| item.label().to_ascii_lowercase().contains(&query_lower))
-                .map(|(i, _)| i)
-                .collect();
+            return;
         }
+        let atom = Atom::new(
+            &query,
+            CaseMatching::Smart,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+            false,
+        );
+        let mut buf = Vec::new();
+        self.filtered = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                let label = item.label();
+                if label.is_empty() {
+                    return false;
+                }
+                buf.clear();
+                let haystack = Utf32Str::new(label, &mut buf);
+                atom.score(haystack, &mut self.matcher).is_some()
+            })
+            .map(|(i, _)| i)
+            .collect();
     }
 
     fn clamp_selection(&mut self) {
@@ -951,6 +971,30 @@ mod tests {
 
         p.handle_key(key(KeyCode::Char('l')));
         assert_eq!(ready_state(&p).filtered, vec![0]);
+    }
+
+    #[test]
+    fn fuzzy_search_with_nucleo_matcher() {
+        let mut p = ListPicker::new();
+        p.open(
+            entries(&["claude-sonnet", "claude-opus", "gemini-pro", "gpt-4"]),
+            " Test ",
+        );
+
+        p.handle_key(key(KeyCode::Char('c')));
+        p.handle_key(key(KeyCode::Char('l')));
+        p.handle_key(key(KeyCode::Char('u')));
+        let filtered = ready_state(&p).filtered.clone();
+        assert!(filtered.contains(&0));
+        assert!(filtered.contains(&1));
+
+        p.close();
+        p.open(entries(&["claude-sonnet", "gemini-pro", "gpt-4"]), " Test ");
+        p.handle_key(key(KeyCode::Char('c')));
+        p.handle_key(key(KeyCode::Char('l')));
+        p.handle_key(key(KeyCode::Char('u')));
+        let filtered = ready_state(&p).filtered.clone();
+        assert_eq!(filtered, vec![0]);
     }
 
     #[test]
