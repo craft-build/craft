@@ -299,7 +299,7 @@ pub async fn from_model_fallback(model: &mut Model, timeouts: Timeouts) -> Box<d
     }
 }
 
-struct UnconfiguredProvider;
+pub(crate) struct UnconfiguredProvider;
 
 const NOT_CONFIGURED: &str = "no provider configured — run /login or `craft auth login`";
 

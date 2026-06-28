@@ -1,5 +1,14 @@
 Read a file or directory. Returns contents with line numbers (1-indexed).
 
+Internal URL schemes (resolved through this one interface, no extra tools):
+- `skill://<name>`: read a discovered skill body (e.g. `read skill://audit`).
+- `rule://<name>`: read a discovered rule body from `.craft/rules/<name>.md`. `rule://*` lists all.
+- `conflict://N`: read the Nth (1-indexed) merge-conflict hunk in the repo, numbered globally.
+- `conflict://*`: list every conflict hunk across the repo with its global index.
+- `agent://findings`: list structured review findings recorded by subagents.
+- `agent://findings.<i>`: read the ith finding in full (title, file, body).
+Use these to cut down the number of tools you reach for.
+
 - Supports absolute, relative, and ~/ paths.
 - Image files (png, jpg, jpeg, gif, webp) are returned inline; offset/limit do not apply to them.
 - **Always include offset and limit** if possible. Defaults: no offset = start at 1; no limit = up to 2000 lines.

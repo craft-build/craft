@@ -63,6 +63,9 @@ impl Read {
         Some(r#"[{"path": "/project/src/main.rs", "offset": 10, "limit": 20}]"#);
 
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
+        if super::internal_urls::handles(&self.path) {
+            return super::internal_urls::resolve(&self.path, ctx).await;
+        }
         let path = super::resolve_path(&self.path)?;
         let cwd = std::env::current_dir().ok();
         let p = Path::new(&path);

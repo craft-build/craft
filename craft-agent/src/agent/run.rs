@@ -148,6 +148,10 @@ pub struct Agent<'h> {
     goal: Option<String>,
     judge_continuations: u8,
     snapshot_store: Arc<crate::tools::safety::SnapshotStore>,
+    pending_edits: Arc<crate::tools::ast_edit::PendingEditStore>,
+    fallback_chain: Vec<craft_providers::roles::ChainHop>,
+    advisor_state: Option<super::advisor::AdvisorState>,
+    ttsr: Option<Arc<super::ttsr::TtsrManager>>,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -155,6 +159,18 @@ const MAX_JUDGE_CONTINUATIONS: u8 = 5;
 impl<'h> Agent<'h> {
     pub fn new(params: AgentParams, run: AgentRunParams<'h>) -> Self {
         let dynamic = crate::tools::DynamicContext::from_config(&params.config);
+        let advisor_enabled = params.config.advisor.enabled;
+        let advisor_state = advisor_enabled
+            .then(|| super::advisor::AdvisorState::with_dedup(params.config.advisor.dedup_size));
+        let ttsr = params
+            .config
+            .ttsr
+            .enabled
+            .then(|| {
+                let m = super::ttsr::TtsrManager::load_from_discovery();
+                m.enabled().then(|| Arc::new(m))
+            })
+            .flatten();
         Self {
             provider: params.provider,
             model: Arc::new(params.model),
@@ -218,6 +234,10 @@ impl<'h> Agent<'h> {
             goal: None,
             judge_continuations: 0,
             snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
+            pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
+            fallback_chain: Vec::new(),
+            advisor_state,
+            ttsr,
         }
     }
 
@@ -250,6 +270,11 @@ impl<'h> Agent<'h> {
 
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    pub fn with_fallback_chain(mut self, chain: Vec<craft_providers::roles::ChainHop>) -> Self {
+        self.fallback_chain = chain;
         self
     }
 
@@ -377,6 +402,7 @@ impl<'h> Agent<'h> {
                 TurnOutcome::Continue => {}
                 TurnOutcome::Done(stop_reason) => {
                     self.snapshot.commit();
+                    self.run_advisor().await;
                     self.emit_done(stop_reason)?;
                     return Ok(());
                 }
@@ -395,6 +421,9 @@ impl<'h> Agent<'h> {
     async fn turn(&mut self) -> Result<TurnOutcome, AgentError> {
         if self.cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
+        }
+        if let Some(ttsr) = self.ttsr.as_ref() {
+            ttsr.reset_turn();
         }
 
         if let Some(build) = &self.tool_build {
@@ -449,11 +478,17 @@ impl<'h> Agent<'h> {
             &self.cancel,
             self.opts,
             self.session_id.as_deref(),
+            &self.fallback_chain,
+            self.ttsr.clone(),
+            self.num_turns,
         )
         .await
         {
-            Ok(r) => {
+            Ok((r, injection)) => {
                 self.reauth_attempts = 0;
+                if let Some(reminder) = injection {
+                    self.history.push(Message::synthetic(reminder));
+                }
                 r
             }
             Err(e) if e.is_auth_error() => {
@@ -573,6 +608,32 @@ impl<'h> Agent<'h> {
             self.run_goal_judge(goal, stop_reason).await
         } else {
             Ok(TurnOutcome::Done(stop_reason))
+        }
+    }
+
+    async fn run_advisor(&mut self) {
+        let Some(state) = self.advisor_state.as_mut() else {
+            return;
+        };
+        let result = super::advisor::review(
+            state,
+            self.history.as_slice(),
+            &self.config.advisor,
+            &self.provider,
+            &self.model,
+            self.timeouts,
+            self.session_id.as_deref(),
+        )
+        .await;
+        match result {
+            Ok(Some(note)) => {
+                let _ = self.event_tx.send(AgentEvent::AdvisorNote {
+                    severity: note.severity.as_str().to_string(),
+                    message: note.message,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, "advisor review failed"),
         }
     }
 
@@ -743,6 +804,7 @@ impl<'h> Agent<'h> {
             dynamic: self.dynamic.clone(),
             hooks: self.hooks.clone(),
             snapshot_store: Arc::clone(&self.snapshot_store),
+            pending_edits: Arc::clone(&self.pending_edits),
         }
     }
 
@@ -897,6 +959,13 @@ impl<'h> Agent<'h> {
         self.rollback_len = self.history.len();
         self.history
             .push(Message::synthetic(CONTINUE_AFTER_COMPACT.into()));
+        if let Some(state) = self.advisor_state.as_mut() {
+            state.reset(&self.config.advisor);
+        }
+        if let Some(ttsr) = self.ttsr.as_ref() {
+            ttsr.reset();
+        }
+        self.pending_edits.clear();
         Ok(())
     }
 

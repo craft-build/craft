@@ -15,9 +15,12 @@ use craft_providers::provider;
 use craft_providers::{ContentBlock, Model, ModelError, Role};
 use craft_tool_macro::Tool;
 use serde::Deserialize;
-use tracing::info;
+use serde_json::Value;
+use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::schema as tool_schema;
+use super::worktree::Worktree;
 use super::{DescriptionContext, FileReadTracker, ToolContext, ToolFilter};
 use crate::agent;
 use crate::template;
@@ -42,6 +45,14 @@ pub struct Task {
         description = "Parent context to pass to the subagent:\n- \"none\" (default): fresh, no parent history.\n- \"summary\": last few parent messages for context.\n- \"full\": full parent conversation history."
     )]
     context_mode: Option<String>,
+    #[param(
+        description = "Optional JSON Schema (object) describing the structured object the subagent must return as its final message. When set, the subagent is told to emit a final JSON object matching the schema; that object is validated and returned to you as structured data instead of prose. On validation failure the subagent is re-prompted (bounded), then a clean error is surfaced."
+    )]
+    output_schema: Option<Value>,
+    #[param(
+        description = "Isolation mode for a general subagent:\n- \"none\" (default): run in the current working tree.\n- \"worktree\": run inside a fresh linked git worktree so file mutations do not touch the parent tree (sibling subagents cannot clobber each other). Requires a git repo; falls back to none otherwise."
+    )]
+    isolation: Option<String>,
 }
 
 impl Task {
@@ -104,7 +115,8 @@ impl Task {
             "subagent spawning",
         );
 
-        let cwd_owned = vars.apply("{cwd}").into_owned();
+        let vars_cwd = vars.apply("{cwd}").into_owned();
+        let cwd_owned = vars_cwd.clone();
         let instructions =
             tokio::task::spawn_blocking(move || agent::load_instruction_text(&cwd_owned))
                 .await
@@ -169,13 +181,6 @@ impl Task {
         } else {
             drop(child_trigger);
         }
-        let input = AgentInput {
-            message: self.prompt.clone(),
-            mode: AgentMode::Build,
-            thinking: ctx.opts.thinking,
-            fast: ctx.opts.fast,
-            ..Default::default()
-        };
 
         let ctx_mode = self.context_mode.as_deref().unwrap_or("none");
         let seeded: Vec<craft_providers::Message> = match ctx_mode {
@@ -191,74 +196,233 @@ impl Task {
             "full" => ctx.parent_messages.to_vec(),
             other => return Err(format!("unknown context_mode: {other}")),
         };
-        let mut history = crate::History::new(seeded);
-        let agent = Agent::new(
-            AgentParams {
-                provider,
-                model,
-                config: ctx.config.clone(),
-                tool_output_lines: ToolOutputLines::default(),
-                permissions: Arc::clone(&ctx.permissions),
-                session_id: Some(session_id),
-                timeouts: ctx.timeouts,
-                file_tracker: FileReadTracker::fresh(),
-                prompt_slots: Arc::clone(&ctx.prompt_slots),
-                subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
-                compression: ctx.compression.clone(),
-                findings_store: None,
-                fs: Arc::new(crate::tools::LocalFs),
-                doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
-            },
-            AgentRunParams {
-                history: &mut history,
-                system,
-                event_tx: sub_event_tx,
-                tools,
-                promoted: crate::tools::PromotedTools::new(),
-                tool_build: None,
-                hooks: None,
-            },
-        )
-        .with_user_response_rx(answer_rx)
-        .with_cancel(child_cancel)
-        .with_mcp(ctx.mcp.clone());
+
+        let output_schema = match self.output_schema.as_ref() {
+            Some(v) => Some(tool_schema::try_from_json(v).map_err(|e| e.to_string())?),
+            None => None,
+        };
+
+        let isolation = self.isolation.as_deref().unwrap_or("none");
+        let worktree = match isolation {
+            "none" => None,
+            "worktree" => {
+                match Worktree::create(std::path::Path::new(&vars_cwd), &self.description) {
+                    Some(wt) => Some(wt),
+                    None => {
+                        warn!(
+                            description = %self.description,
+                            "worktree isolation requested but unavailable; running in parent cwd"
+                        );
+                        None
+                    }
+                }
+            }
+            other => return Err(format!("unknown isolation mode: {other}")),
+        };
+
+        let mut prompt_text = self.prompt.clone();
+        if let Some(schema) = output_schema {
+            let schema_json = tool_schema::to_json_schema(schema);
+            prompt_text.push_str(SCHEMA_INSTRUCTION_HEAD);
+            prompt_text
+                .push_str(&serde_json::to_string_pretty(&schema_json).map_err(|e| e.to_string())?);
+            prompt_text.push_str(SCHEMA_INSTRUCTION_TAIL);
+        }
+
         let start = Instant::now();
-        let result = agent.run(input).await;
+        let mut conversation: Vec<craft_providers::Message> = seeded.clone();
+        let mut validated: Option<Value> = None;
+        let mut last_text = String::new();
+
+        let max_attempts = if output_schema.is_some() {
+            MAX_SCHEMA_RETRIES + 1
+        } else {
+            1
+        };
+        for attempt in 0..max_attempts {
+            let message = if attempt == 0 {
+                prompt_text.clone()
+            } else {
+                format!(
+                    "{RETRY_PREAMBLE}\n\nReply again with ONLY a JSON object matching the schema."
+                )
+            };
+            let input = AgentInput {
+                message,
+                mode: AgentMode::Build,
+                thinking: ctx.opts.thinking,
+                fast: ctx.opts.fast,
+                ..Default::default()
+            };
+
+            let mut history = crate::History::restored(conversation.clone());
+            let agent = Agent::new(
+                AgentParams {
+                    provider: Arc::clone(&provider),
+                    model: Model::clone(&model),
+                    config: ctx.config.clone(),
+                    tool_output_lines: ToolOutputLines::default(),
+                    permissions: Arc::clone(&ctx.permissions),
+                    session_id: Some(session_id.clone()),
+                    timeouts: ctx.timeouts,
+                    file_tracker: FileReadTracker::fresh(),
+                    prompt_slots: Arc::clone(&ctx.prompt_slots),
+                    subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
+                    compression: ctx.compression.clone(),
+                    findings_store: None,
+                    fs: Arc::new(crate::tools::LocalFs),
+                    doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
+                },
+                AgentRunParams {
+                    history: &mut history,
+                    system: system.clone(),
+                    event_tx: sub_event_tx.clone(),
+                    tools: tools.clone(),
+                    promoted: crate::tools::PromotedTools::new(),
+                    tool_build: None,
+                    hooks: None,
+                },
+            )
+            .with_user_response_rx(Arc::clone(&answer_rx))
+            .with_cancel(child_cancel.clone())
+            .with_mcp(ctx.mcp.clone());
+
+            run_isolated(agent, input, worktree.as_ref())
+                .await
+                .map_err(|e| format!("sub-agent error: {e}"))?;
+
+            conversation = history.into_vec();
+            last_text = final_text(&conversation);
+
+            if let Some(schema) = output_schema {
+                match extract_json(&last_text)
+                    .and_then(|v| tool_schema::validate(schema, v).map_err(|e| e.to_string()))
+                {
+                    Ok(v) => {
+                        validated = Some(v);
+                        break;
+                    }
+                    Err(e) => {
+                        conversation.push(craft_providers::Message::user(format!(
+                            "Your previous response did not match the required output schema: {e}"
+                        )));
+                        warn!(
+                            description = %self.description,
+                            attempt, error = %e,
+                            "subagent output schema validation failed"
+                        );
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
         let duration_ms = start.elapsed().as_millis() as u64;
         if let Some(ref id) = ctx.tool_use_id {
             ctx.subagent_cancels.remove(id);
         }
-        let success = result.is_ok();
-        info!(description = %self.description, duration_ms, success, "subagent completed");
-        result.map_err(|e| format!("sub-agent error: {e}"))?;
-
-        let messages = history.into_vec();
-
-        let text = messages
-            .iter()
-            .rev()
-            .filter(|m| matches!(m.role, Role::Assistant))
-            .flat_map(|m| m.content.iter())
-            .find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .unwrap_or("(no response)")
-            .to_string();
+        drop(worktree);
+        info!(description = %self.description, duration_ms, "subagent completed");
 
         if let Some(tool_use_id) = ctx.tool_use_id.clone() {
             let _ = ctx.event_tx.send(AgentEvent::SubagentHistory {
                 tool_use_id,
-                messages,
+                messages: conversation.clone(),
             });
         }
 
-        Ok(ToolOutput::Plain(text))
+        if let Some(v) = validated {
+            let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+            return Ok(ToolOutput::Plain(pretty));
+        }
+        let _ = last_text;
+        Ok(ToolOutput::Plain(final_text(&conversation)))
     }
 
     pub fn start_header(&self) -> String {
         self.description.clone()
     }
+}
+
+const MAX_SCHEMA_RETRIES: u32 = 1;
+const SCHEMA_INSTRUCTION_HEAD: &str = "\n\nYou MUST end your final reply with a single JSON object matching this JSON Schema (no prose, no markdown fences, just the JSON object):\n";
+const SCHEMA_INSTRUCTION_TAIL: &str = "\nReturn ONLY that JSON object as your final message.";
+const RETRY_PREAMBLE: &str =
+    "Your previous response was not valid JSON matching the required schema.";
+
+/// Extract the last JSON object/array from the model's text. Tolerates leading
+/// prose and markdown fences. Returns `Err` with a short reason when no JSON can
+/// be recovered.
+fn extract_json(text: &str) -> Result<Value, String> {
+    use jsonrepair::{Options as RepairOpts, loads as repair_loads};
+    let trimmed = text.trim();
+    if let Ok(v @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
+        serde_json::from_str::<Value>(trimmed)
+    {
+        return Ok(v);
+    }
+    let start = trimmed
+        .rfind(['{', '['])
+        .ok_or("no JSON object found in subagent response")?;
+    let open = trimmed.as_bytes()[start];
+    let close = if open == b'{' { '}' } else { ']' };
+    let end = trimmed
+        .rfind(close)
+        .ok_or("unterminated JSON in subagent response")?;
+    if end <= start {
+        return Err("malformed JSON in subagent response".into());
+    }
+    let slice = &trimmed[start..=end];
+    if let Ok(v) = serde_json::from_str::<Value>(slice) {
+        return Ok(v);
+    }
+    repair_loads(slice, &RepairOpts::default())
+        .map_err(|e| format!("invalid JSON: {e}"))
+        .and_then(|v| match v {
+            Value::Object(_) | Value::Array(_) => Ok(v),
+            other => Err(format!("expected JSON object or array, got {}", other)),
+        })
+}
+
+fn final_text(messages: &[craft_providers::Message]) -> String {
+    messages
+        .iter()
+        .rev()
+        .filter(|m| matches!(m.role, Role::Assistant))
+        .flat_map(|m| m.content.iter())
+        .find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("(no response)")
+        .to_string()
+}
+
+/// Run an isolated subagent inside a linked git worktree. Because the process
+/// has a single working directory, isolated subagents are serialized on a
+/// global mutex so sibling worktrees never race on `chdir`. When `worktree` is
+/// `None`, the agent runs normally.
+async fn run_isolated<'h>(
+    agent: Agent<'h>,
+    input: AgentInput,
+    worktree: Option<&Worktree>,
+) -> Result<(), crate::AgentError> {
+    static WORKTREE_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let Some(wt) = worktree else {
+        return agent.run(input).await;
+    };
+    let _guard = WORKTREE_GUARD.lock().await;
+    let prev = std::env::current_dir().ok();
+    let target = wt.path();
+    if std::env::set_current_dir(target).is_err() {
+        return agent.run(input).await;
+    }
+    let result = agent.run(input).await;
+    if let Some(prev) = prev {
+        let _ = std::env::set_current_dir(prev);
+    }
+    result
 }
 
 super::impl_tool!(
@@ -285,7 +449,31 @@ impl super::ToolInvocation for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::collections::BTreeMap;
+    use test_case::test_case;
+
+    #[test_case(r#"{"a": 1}"#, 1 ; "pure_json_object")]
+    #[test_case(r#"Here is the result: {"a": 2}"#, 2 ; "trailing_prose")]
+    #[test_case(r#"```json
+    {"a": 3}
+    ```"#, 3 ; "markdown_fenced")]
+    fn extract_json_recovers_value(input: &str, expected: i64) {
+        let v = extract_json(input).expect("should parse JSON");
+        assert_eq!(v["a"], json!(expected));
+    }
+
+    #[test]
+    fn extract_json_recovers_array_with_prose() {
+        let v = extract_json("summary text [1, 2, 3] trailing").expect("should parse array");
+        assert!(v.is_array());
+        assert_eq!(v[0], json!(1));
+    }
+
+    #[test]
+    fn extract_json_rejects_when_absent() {
+        assert!(extract_json("just prose, no json here").is_err());
+    }
 
     /// The audience bitmask decides which agents can call each tool, so flipping a flag is
     /// a behavior change (letting `memory` into the interpreter, say, hands subagents a new

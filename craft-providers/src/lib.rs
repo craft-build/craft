@@ -4,6 +4,7 @@ pub mod model_registry;
 pub mod provider;
 pub(crate) mod providers;
 pub mod retry;
+pub mod roles;
 pub(crate) mod types;
 
 pub use error::AgentError;

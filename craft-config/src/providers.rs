@@ -140,6 +140,8 @@ pub struct ProviderDef {
     pub api_key_env: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -157,6 +159,7 @@ impl std::fmt::Debug for ProviderDef {
             .field("plan", &self.plan)
             .field("api_key_env", &self.api_key_env)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("api_keys", &self.api_keys.len())
             .field("default_model", &self.default_model)
             .field("discover_models", &self.discover_models)
             .field("models", &self.models)

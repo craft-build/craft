@@ -7,6 +7,7 @@
 //! rejects writes to anything but the plan file before they reach the tool.
 
 mod apply_patch;
+pub(crate) mod ast_edit;
 mod astgrep;
 mod batch;
 mod browser;
@@ -20,7 +21,9 @@ mod file_tracker;
 pub mod fs_backend;
 mod fuzzy_replace;
 pub mod grep;
+mod hashline;
 mod inspect;
+mod internal_urls;
 mod list_tools;
 mod move_file;
 mod multiedit;
@@ -29,12 +32,14 @@ mod read;
 mod read_findings;
 pub mod registry;
 mod report_finding;
+mod resolve;
 mod review;
 pub mod safety;
 pub mod schema;
 mod styleguide;
 mod task;
 mod validation;
+mod worktree;
 mod write;
 mod zoom;
 
@@ -155,6 +160,8 @@ pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
 pub const BROWSER_SCREENSHOT_TOOL_NAME: &str = browser::BrowserScreenshot::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
+pub const RESOLVE_TOOL_NAME: &str = resolve::Resolve::NAME;
+pub const AST_EDIT_TOOL_NAME: &str = ast_edit::AstEdit::NAME;
 pub const GLOB_TOOL_NAME: &str = "glob";
 pub const GREP_TOOL_NAME: &str = "grep";
 pub const MULTIEDIT_TOOL_NAME: &str = multiedit::MultiEdit::NAME;
@@ -255,6 +262,7 @@ pub struct ToolContext {
     pub findings_store: Option<crate::agent::SharedFindingsStore>,
     pub fs: Arc<dyn FsBackend>,
     pub snapshot_store: Arc<safety::SnapshotStore>,
+    pub pending_edits: Arc<ast_edit::PendingEditStore>,
     pub parent_messages: Arc<[craft_providers::Message]>,
     pub promoted: crate::tools::dynamic::PromotedTools,
     pub dynamic: crate::tools::dynamic::DynamicContext,
@@ -659,6 +667,8 @@ register_tools! {
     safety::Safety,
     zoom::Zoom,
     astgrep::AstGrep,
+    ast_edit::AstEdit,
+    resolve::Resolve,
     callgraph::Callgraph,
     conflicts::Conflicts,
     delete::Delete,
@@ -740,6 +750,7 @@ pub(crate) fn interpreter_ctx(
         dynamic: crate::tools::dynamic::DynamicContext::disabled(),
         hooks: None,
         snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
+        pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
     }
 }
 

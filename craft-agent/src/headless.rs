@@ -434,6 +434,17 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 .with_cancel(cancel)
                 .with_mcp(params.mcp_handle.clone());
 
+                let agent = {
+                    let role = craft_providers::roles::resolve_role(
+                        craft_config::model_roles::ModelRole::Default,
+                        model.clone(),
+                        Arc::clone(&provider),
+                        params.timeouts,
+                    )
+                    .await;
+                    agent.with_fallback_chain(role.fallbacks)
+                };
+
                 let result = agent.run(input).await;
                 cancel_task.abort();
 

@@ -1,3 +1,4 @@
+mod advisor;
 mod cache;
 mod compaction;
 pub(crate) mod compression_store;
@@ -17,6 +18,7 @@ mod snapshot;
 mod streaming;
 pub mod tool_dispatch;
 pub(crate) mod trust;
+mod ttsr;
 mod validation;
 
 mod embed_types;

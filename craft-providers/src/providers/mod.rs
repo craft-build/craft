@@ -198,9 +198,14 @@ impl KeyPool {
             debug!(slug, "resolved API key from saved credentials");
             return Ok(Self::from_keys(vec![key]));
         }
-        if let Some(key) = Self::key_from_config(slug) {
-            debug!(slug, "resolved API key from providers.toml");
-            return Ok(Self::from_keys(vec![key]));
+        let cfg_keys = Self::keys_from_config(slug);
+        if !cfg_keys.is_empty() {
+            debug!(
+                slug,
+                keys = cfg_keys.len(),
+                "resolved API keys from providers.toml"
+            );
+            return Ok(Self::from_keys(cfg_keys));
         }
         Err(AgentError::Config {
             message: format!(
@@ -214,13 +219,33 @@ impl KeyPool {
         craft_storage::auth::load_provider_credentials(&dir, slug).map(|c| c.api_key)
     }
 
-    fn key_from_config(slug: &str) -> Option<String> {
-        craft_config::providers::ProvidersConfig::load()
-            .get(slug)
-            .and_then(|d| d.api_key.clone())
+    fn keys_from_config(slug: &str) -> Vec<String> {
+        let cfg = craft_config::providers::ProvidersConfig::load();
+        let Some(def) = cfg.get(slug) else {
+            return Vec::new();
+        };
+        let mut keys: Vec<String> = def
+            .api_keys
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if keys.is_empty()
+            && let Some(k) = def.api_key.as_deref()
+        {
+            let k = k.trim();
+            if !k.is_empty() {
+                keys.push(k.to_string());
+            }
+        }
+        keys
     }
 
     pub(crate) fn from_keys(keys: Vec<String>) -> Self {
+        debug_assert!(
+            !keys.is_empty(),
+            "KeyPool::from_keys requires a non-empty key set"
+        );
         Self {
             keys: Arc::new(keys),
             index: Arc::new(AtomicUsize::new(0)),

@@ -275,6 +275,17 @@ impl AgentLoop {
         .with_cancel(cancel)
         .with_mcp(self.mcp_handle.clone());
 
+        let agent = {
+            let role = craft_providers::roles::resolve_role(
+                craft_config::model_roles::ModelRole::Default,
+                slot.model.clone(),
+                Arc::clone(&slot.provider),
+                self.timeouts,
+            )
+            .await;
+            agent.with_fallback_chain(role.fallbacks)
+        };
+
         let result = agent.run(input).await;
 
         self.clear_cancel_trigger(run_id);

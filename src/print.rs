@@ -225,6 +225,7 @@ pub async fn run(
             | AgentEvent::ToolHeaderSnapshot { .. }
             | AgentEvent::LiveToolBuf { .. }
             | AgentEvent::Info { .. }
+            | AgentEvent::AdvisorNote { .. }
             | AgentEvent::ModelEscalation { .. } => {}
             #[cfg(feature = "onnx")]
             AgentEvent::StagnationDetected { .. } => {}

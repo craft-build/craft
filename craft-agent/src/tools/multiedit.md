@@ -7,3 +7,4 @@ Prefer this over edit when making multiple changes to the same file.
 - Edits are applied in sequence - each operates on the result of the previous.
 - If any edit fails, none are written.
 - Ensure earlier edits don't affect text that later edits need to find.
+- Optional per-edit `line_anchor_hash` (12-char hex): when set, the matched lines are hashed and compared before applying; a mismatch rejects the edit with the current content so you can retry. See the `edit` tool for hash details.

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
+pub mod model_roles;
 pub mod providers;
 
 const PROJECT_DIR: &str = ".craft";
@@ -381,6 +382,10 @@ pub struct AgentFileConfig {
     pub small_model: SmallModelConfig,
     #[serde(default)]
     pub dynamic_tools: DynamicToolsConfig,
+    #[serde(default)]
+    pub advisor: AdvisorConfig,
+    #[serde(default)]
+    pub ttsr: TtsrConfig,
     pub hooks_enabled: Option<bool>,
     pub judge_model: Option<String>,
 }
@@ -403,6 +408,12 @@ impl AgentFileConfig {
             hooks_enabled,
             judge_model
         );
+        if overlay.advisor.enabled || overlay.advisor.model.is_some() {
+            self.advisor = overlay.advisor;
+        }
+        if overlay.ttsr.enabled {
+            self.ttsr = overlay.ttsr;
+        }
     }
 }
 
@@ -926,6 +937,45 @@ pub struct DynamicToolsConfig {
     pub core: Vec<String>,
 }
 
+/// Always-on lightweight reviewer that reads the transcript delta each turn and
+/// emits at most one deduped note. Distinct from `judge` (goal-completion) and
+/// `review` (on-demand subagent). Off by default.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdvisorConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// A `provider/model_id` spec. When unset, the advisor role from
+    /// `model_roles.toml` is used; falling back to the active model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Maximum advisor notes kept in the dedup FIFO.
+    #[serde(default = "default_advisor_dedup_size")]
+    pub dedup_size: usize,
+}
+
+fn default_advisor_dedup_size() -> usize {
+    16
+}
+
+/// Time-traveling stream rules. Off by default; when enabled, rules loaded from
+/// `.craft/rules/*.md` (lines prefixed with `rule:`) are matched against the
+/// in-flight stream text each turn, and a firing rule injects a system reminder.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct TtsrConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for AdvisorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: None,
+            dedup_size: default_advisor_dedup_size(),
+        }
+    }
+}
+
 impl Default for DynamicToolsConfig {
     fn default() -> Self {
         Self {
@@ -992,6 +1042,12 @@ pub struct AgentConfig {
     #[config(skip, default = "DynamicToolsConfig::default()")]
     pub dynamic_tools: DynamicToolsConfig,
 
+    #[config(skip, default = "AdvisorConfig::default()")]
+    pub advisor: AdvisorConfig,
+
+    #[config(skip, default = "TtsrConfig::default()")]
+    pub ttsr: TtsrConfig,
+
     #[config(skip, default = "true")]
     pub hooks_enabled: bool,
 
@@ -1045,6 +1101,8 @@ impl AgentConfig {
             format: file.format,
             small_model: file.small_model,
             dynamic_tools: file.dynamic_tools,
+            advisor: file.advisor,
+            ttsr: file.ttsr,
             hooks_enabled: file.hooks_enabled.unwrap_or(true),
             max_turns: None,
             judge_model: file.judge_model,

@@ -118,10 +118,13 @@ pub(super) async fn compact_history(
             cancel,
             RequestOptions::default(),
             None,
+            &[],
+            None,
+            0,
         )
         .await
         {
-            Ok(r) => break r,
+            Ok((r, _)) => break r,
             Err(e) if e.is_overflow() => {
                 if overflow_retries < MAX_OVERFLOW_RETRIES && compaction_history.len() > 1 {
                     overflow_retries += 1;

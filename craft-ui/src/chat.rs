@@ -173,6 +173,12 @@ impl Chat {
                 self.messages_panel
                     .push(DisplayMessage::new(DisplayRole::Assistant, message.clone()));
             }
+            AgentEvent::AdvisorNote { severity, message } => {
+                self.messages_panel.push(DisplayMessage::new(
+                    DisplayRole::Assistant,
+                    format!("[advisor:{severity}] {message}"),
+                ));
+            }
             #[cfg(feature = "onnx")]
             AgentEvent::StagnationDetected { .. } => {}
             AgentEvent::ModelEscalation { .. } => {}

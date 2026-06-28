@@ -980,7 +980,9 @@ impl EventPump {
             AgentEvent::Error { message } => {
                 self.emit_turn_result(true, message.clone(), 0, TokenUsage::default())?;
             }
-            AgentEvent::Info { .. } | AgentEvent::ModelEscalation { .. } => {}
+            AgentEvent::Info { .. }
+            | AgentEvent::AdvisorNote { .. }
+            | AgentEvent::ModelEscalation { .. } => {}
             #[cfg(feature = "onnx")]
             AgentEvent::StagnationDetected { .. } => {}
         }

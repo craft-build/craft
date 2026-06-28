@@ -166,7 +166,7 @@ impl AstGrep {
     }
 }
 
-fn parse_lang(s: &str) -> Result<SupportLang, String> {
+pub(crate) fn parse_lang(s: &str) -> Result<SupportLang, String> {
     s.parse::<SupportLang>().map_err(|_| {
         format!(
             "unsupported language \"{s}\"; use: rust, typescript, tsx, python, go, java, c, cpp, ruby, lua, bash, kotlin, swift, c_sharp, elixir, scala, php, html, dart, starlark, nix, zig"
@@ -174,14 +174,14 @@ fn parse_lang(s: &str) -> Result<SupportLang, String> {
     })
 }
 
-fn has_error_or_missing<D: ast_grep_core::Doc>(node: &ast_grep_core::Node<D>) -> bool {
+pub(crate) fn has_error_or_missing<D: ast_grep_core::Doc>(node: &ast_grep_core::Node<D>) -> bool {
     if node.is_error() || node.is_missing() {
         return true;
     }
     node.dfs().any(|n| n.is_error() || n.is_missing())
 }
 
-fn count_changes(old: &str, new: &str) -> usize {
+pub(crate) fn count_changes(old: &str, new: &str) -> usize {
     let diff = similar::TextDiff::from_lines(old, new);
     diff.iter_all_changes()
         .filter(|c| c.tag() == ChangeTag::Delete || c.tag() == ChangeTag::Insert)
@@ -218,7 +218,7 @@ fn truncate_results(results: &[String], max_bytes: usize) -> String {
     out
 }
 
-fn unified_diff(old: &str, new: &str, path: &str) -> String {
+pub(crate) fn unified_diff(old: &str, new: &str, path: &str) -> String {
     let diff = similar::TextDiff::from_lines(old, new);
     let mut out = String::new();
     for hunk in diff
