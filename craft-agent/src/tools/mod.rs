@@ -264,7 +264,7 @@ pub struct ToolContext {
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
     let expanded = if let Some(rest) = path.strip_prefix("~/") {
         let home = HOME.as_deref().ok_or("cannot expand ~: HOME not set")?;
-        format!("{}/{rest}", home.display())
+        home.join(rest).to_string_lossy().into_owned()
     } else if path == "~" {
         let home = HOME.as_deref().ok_or("cannot expand ~: HOME not set")?;
         home.to_string_lossy().into_owned()
@@ -1254,14 +1254,25 @@ mod tests {
 
         assert_eq!(
             resolve_path("~/foo/bar").unwrap(),
-            format!("{}/foo/bar", home.display())
+            home.join("foo/bar").to_string_lossy()
         );
         assert_eq!(resolve_path("~").unwrap(), home.to_string_lossy());
-        assert_eq!(resolve_path("/etc/hosts").unwrap(), "/etc/hosts");
         assert_eq!(
             resolve_path("src/main.rs").unwrap(),
             cwd.join("src/main.rs").to_string_lossy()
         );
+
+        #[cfg(windows)]
+        {
+            #[allow(clippy::join_absolute_paths)]
+            let expected = cwd.join("/etc/hosts");
+            assert_eq!(
+                resolve_path("/etc/hosts").unwrap(),
+                expected.to_string_lossy()
+            );
+        }
+        #[cfg(not(windows))]
+        assert_eq!(resolve_path("/etc/hosts").unwrap(), "/etc/hosts");
     }
 
     #[test]

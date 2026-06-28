@@ -258,7 +258,7 @@ impl super::ToolInvocation for AstGrep {
                 reason: Some("ast-grep replace".into()),
             };
             Some(super::PermissionScopes::single_with_context(
-                crate::permissions::canonicalize_scope_path(&path),
+                crate::permissions::normalize_scope_path(&path),
                 ctx,
             ))
         } else {

@@ -128,7 +128,7 @@ impl super::ToolInvocation for MultiEdit {
         };
         Box::pin(std::future::ready(Some(
             super::PermissionScopes::single_with_context(
-                crate::permissions::canonicalize_scope_path(&self.path),
+                crate::permissions::normalize_scope_path(&self.path),
                 ctx,
             ),
         )))

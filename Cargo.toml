@@ -9,7 +9,7 @@ repository = "https://github.com/craft-build/craft"
 readme = "README.md"
 keywords = ["ai", "agent", "cli", "tui", "coding"]
 categories = ["command-line-utilities", "development-tools"]
-rust-version = "1.85"
+rust-version = "1.89"
 
 [[bin]]
 name = "craft"
@@ -73,7 +73,7 @@ edition = "2024"
 authors = ["Tony Solomonik <tony.solomonik@gmail.com>", "Jarrett Tierney <akarifur@pm.me>"]
 license = "MIT"
 repository = "https://github.com/craft-build/craft"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [workspace.dependencies]
 craft-acp = { path = "craft-acp" }

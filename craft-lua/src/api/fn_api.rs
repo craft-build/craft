@@ -148,21 +148,21 @@ impl JobStore {
     }
 
     pub fn kill(&mut self, job_id: u32) {
-        if let Some(meta) = self.jobs.get_mut(&job_id) {
-            if meta.alive {
-                if let Some(kill) = meta.kill.take() {
-                    kill();
-                }
-            }
+        if let Some(meta) = self.jobs.get_mut(&job_id)
+            && meta.alive
+            && let Some(kill) = meta.kill.take()
+        {
+            kill();
         }
     }
 
     pub fn kill_all(&mut self) {
         for meta in self.jobs.values_mut() {
-            if meta.alive && !meta.background {
-                if let Some(kill) = meta.kill.take() {
-                    kill();
-                }
+            if meta.alive
+                && !meta.background
+                && let Some(kill) = meta.kill.take()
+            {
+                kill();
             }
         }
     }

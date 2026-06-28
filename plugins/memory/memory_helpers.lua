@@ -171,12 +171,17 @@ function M.safe_resolve(memories_dir, relative)
   if not relative or relative == "" then
     return nil, "path is required"
   end
-  if relative:find("\0") or relative:sub(1, 1) == "/" then
+  local first = relative:sub(1, 1)
+  if relative:find("\0") or first == "/" or first == "\\" then
+    return nil, "path must be relative"
+  end
+  if relative:match("^%a:") then
     return nil, "path must be relative"
   end
   local resolved = craft.fs.normalize(craft.fs.joinpath(memories_dir, relative))
   local norm_base = craft.fs.normalize(memories_dir)
-  local prefix = norm_base .. "/"
+  local sep = norm_base:find("\\") and "\\" or "/"
+  local prefix = norm_base .. sep
   if resolved:sub(1, #prefix) ~= prefix then
     return nil, "path traversal outside memories directory is not allowed"
   end

@@ -226,7 +226,7 @@ impl super::ToolInvocation for ApplyPatch {
             super::PermissionScopes::multiple_with_context(
                 paths
                     .iter()
-                    .map(|p| crate::permissions::canonicalize_scope_path(p))
+                    .map(|p| crate::permissions::normalize_scope_path(p))
                     .collect(),
                 ctx,
             ),

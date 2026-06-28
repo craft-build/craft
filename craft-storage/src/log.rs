@@ -20,21 +20,8 @@ fn file_path(dir: &Path, index: u32) -> PathBuf {
     }
 }
 
-#[cfg(unix)]
 fn flock_exclusive(file: &File) -> io::Result<()> {
-    use std::os::unix::io::AsRawFd;
-    // SAFETY: libc::flock is a simple syscall that acquires an advisory lock on the
-    // file descriptor. The fd is valid and owned by the passed File reference.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn flock_exclusive(_file: &File) -> io::Result<()> {
-    Ok(())
+    file.lock()
 }
 
 pub struct RotatingFileWriter {

@@ -1171,7 +1171,6 @@ version = "0.7.1"
 dependencies = [
  "etcetera",
  "getrandom 0.4.3",
- "libc",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

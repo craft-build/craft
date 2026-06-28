@@ -121,7 +121,7 @@ impl super::ToolInvocation for Delete {
         let scopes = self
             .files
             .iter()
-            .map(|f| crate::permissions::canonicalize_scope_path(f))
+            .map(|f| crate::permissions::normalize_scope_path(f))
             .collect();
         Box::pin(std::future::ready(Some(
             super::PermissionScopes::multiple_with_context(scopes, ctx),

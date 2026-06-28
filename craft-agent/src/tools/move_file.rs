@@ -227,8 +227,8 @@ impl super::ToolInvocation for MoveFile {
             reason: Some("move file".into()),
         };
         let scopes = vec![
-            crate::permissions::canonicalize_scope_path(&self.source),
-            crate::permissions::canonicalize_scope_path(&self.destination),
+            crate::permissions::normalize_scope_path(&self.source),
+            crate::permissions::normalize_scope_path(&self.destination),
         ];
         Box::pin(std::future::ready(Some(
             super::PermissionScopes::multiple_with_context(scopes, ctx),
