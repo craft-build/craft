@@ -195,6 +195,9 @@ impl OpenAiCompatProvider {
                             info.context_window = Some(n as u32);
                         } else if let Some(n) = m.get("max_input_tokens").and_then(|v| v.as_u64()) {
                             info.context_window = Some(n as u32);
+                        } else if let Some(n) = m.get("max_context_length").and_then(|v| v.as_u64())
+                        {
+                            info.context_window = Some(n as u32);
                         }
                         if let Some(n) = m.get("max_output_tokens").and_then(|v| v.as_u64()) {
                             info.max_output_tokens = Some(n as u32);
