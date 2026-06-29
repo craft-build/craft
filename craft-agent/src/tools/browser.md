@@ -10,4 +10,4 @@ Inputs:
 - `wait_ms` (optional): extra milliseconds to wait after navigation before capturing, to let SPA hydration finish. Defaults to 1500.
 - `full_page` (optional): capture the entire scrollable page (default true). Set to false for just the viewport.
 
-The returned image is the tool output. If you need the page's text content or HTML instead of an image, this tool does not provide that, consider a different approach.
+The returned image is the tool output. If you need the page's text instead of an image, use `browser_text` or `browser_navigate`; to click an element use `browser_click`.
