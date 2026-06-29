@@ -23,18 +23,18 @@ use serde_json::Value;
 use craft_config::RawConfig;
 
 use crate::api::autocmd::AutocmdStore;
-use crate::api::buf::{BufHandle, BufferStore};
-use crate::api::command::{CommandHandlerMap, HintWriter, publish_command_snapshot};
-use crate::api::command::{LuaCommandReader, LuaCommandWriter, UiAction};
 use crate::api::create_craft_global;
-use crate::api::ctx::LuaCtx;
-use crate::api::fn_api::{JobMeta, JobStore};
-use crate::api::json_to_lua;
+use crate::api::r#fn::{JobMeta, JobStore};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
-use crate::api::setup::ConfigStore;
 use crate::api::tool::{LuaOutputFormat, LuaTool, PendingTool, PendingTools, ToolCallReply};
 use crate::api::ui::HintStore;
+use crate::api::ui::buf::{BufHandle, BufferStore};
+use crate::api::util::command::{CommandHandlerMap, HintWriter, publish_command_snapshot};
+use crate::api::util::command::{LuaCommandReader, LuaCommandWriter, UiAction};
+use crate::api::util::convert::json_to_lua;
+use crate::api::util::ctx::LuaCtx;
+use crate::api::util::setup::ConfigStore;
 use crate::error::PluginError;
 use crate::plugin_permissions::PluginPermissions;
 use crate::terminal_backend::{JobEvent, TerminalBackend};
@@ -1031,8 +1031,8 @@ impl LuaRuntime {
         .map_err(&map_err)?;
 
         if let Some(cs) = config_store {
-            let setup_fn =
-                crate::api::setup::create_setup_fn(&self.lua, Arc::clone(cs)).map_err(&map_err)?;
+            let setup_fn = crate::api::util::setup::create_setup_fn(&self.lua, Arc::clone(cs))
+                .map_err(&map_err)?;
             craft.set("setup", setup_fn).map_err(&map_err)?;
         }
 
@@ -1211,7 +1211,7 @@ impl LuaRuntime {
 
         let ctx_ud = self
             .lua
-            .create_userdata(crate::api::ctx::RestoreCtx {
+            .create_userdata(crate::api::util::ctx::RestoreCtx {
                 tool_output_lines: item.tool_output_lines,
             })
             .ok()?;
@@ -1607,7 +1607,7 @@ pub(crate) struct LuaThread {
     pub shutdown: Arc<AtomicBool>,
     pub command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,
-    pub hint_reader: crate::api::command::HintReader,
+    pub hint_reader: crate::api::util::command::HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
 }
 

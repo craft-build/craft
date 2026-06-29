@@ -17,11 +17,11 @@ use mlua::{
 };
 use serde_json::Value;
 
-use crate::api::buf::BufHandle;
-use crate::api::command::{
+use crate::api::ui::buf::BufHandle;
+use crate::api::util::command::{
     CommandEntry, CommandHandlerMap, LuaCommandWriter, publish_command_snapshot,
 };
-use crate::api::ctx::LuaCtx;
+use crate::api::util::ctx::LuaCtx;
 use crate::runtime::{HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, Request};
 
 const TOOL_NAME_MAX: usize = 64;

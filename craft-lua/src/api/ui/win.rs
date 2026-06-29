@@ -1,7 +1,7 @@
 use mlua::{Table, UserData, UserDataMethods};
 
-use crate::api::command::{Anchor, Border, FloatConfigPatch, TitlePos, WinCommand, WinEvent};
-use crate::api::ui::{parse_footer, try_parse_dimension};
+use super::{parse_footer, try_parse_dimension};
+use crate::api::util::command::{Anchor, Border, FloatConfigPatch, TitlePos, WinCommand, WinEvent};
 
 pub(crate) struct WinHandle {
     event_rx: flume::Receiver<WinEvent>,

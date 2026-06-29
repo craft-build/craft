@@ -6,11 +6,15 @@ use std::time::Duration;
 use humantime::format_duration;
 use mlua::{Lua, Result as LuaResult, Table};
 
-use crate::api::command::{
+use crate::api::util::command::{
     Anchor, Border, DEFAULT_ORDER, DEFAULT_ZINDEX, Dimension, FloatConfig, HintEntries, HintWriter,
     Split, TitlePos, UiAction, WinCommand, WinEvent,
 };
-use crate::api::win::WinHandle;
+pub(crate) mod buf;
+pub(crate) mod win;
+
+use win::WinHandle;
+
 use crate::runtime::with_task_bufs;
 
 const FALLBACK_TERM_COLS: u16 = 80;
@@ -196,7 +200,7 @@ pub(crate) fn create_ui_table(
             "open_win",
             lua.create_function(
                 move |_lua, (buf_ud, opts_tbl): (mlua::AnyUserData, Table)| {
-                    let buf_handle = buf_ud.borrow::<crate::api::buf::BufHandle>()?;
+                    let buf_handle = buf_ud.borrow::<buf::BufHandle>()?;
                     let title: String = opts_tbl.get("title").unwrap_or_default();
                     let cursor_line: bool = opts_tbl.get("cursor_line").unwrap_or(false);
                     let footer = parse_footer(&opts_tbl)?;

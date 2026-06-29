@@ -1,33 +1,29 @@
-mod async_api;
+mod r#async;
 pub(crate) mod autocmd;
-pub(crate) mod buf;
-pub(crate) mod command;
-pub(crate) mod ctx;
-pub(crate) mod embed;
 pub(crate) mod env;
-pub(crate) mod fn_api;
+pub(crate) mod r#fn;
 pub(crate) mod fs;
 pub(crate) mod hooks;
 pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
 pub(crate) mod net;
-pub(crate) mod setup;
 pub(crate) mod text;
 pub(crate) mod tool;
 pub(crate) mod treesitter;
 pub(crate) mod ui;
+pub(crate) mod util;
 pub(crate) mod uv;
-pub(crate) mod win;
 pub(crate) mod yaml;
+
+pub(crate) mod embed;
 
 use std::sync::Arc;
 
-use mlua::{Lua, Result as LuaResult, Table, Value};
-use serde_json::Value as JsonValue;
+use mlua::{Lua, Result as LuaResult, Table};
 
-use crate::api::command::UiAction;
 use crate::api::tool::PendingTools;
+use crate::api::util::command::UiAction;
 use crate::plugin_permissions::PluginPermissions;
 
 pub(crate) fn create_craft_global(
@@ -56,8 +52,8 @@ pub(crate) fn create_craft_global(
         "ui",
         ui::create_ui_table(lua, ui_action_tx, Arc::clone(&plugin))?,
     )?;
-    craft.set("fn", fn_api::create_fn_table(lua, permissions)?)?;
-    craft.set("async", async_api::create_async_table(lua)?)?;
+    craft.set("fn", r#fn::create_fn_table(lua, permissions)?)?;
+    craft.set("async", r#async::create_async_table(lua)?)?;
     craft.set(
         "keymap",
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
@@ -72,35 +68,4 @@ pub(crate) fn create_craft_global(
     let _ = embed_tx;
 
     Ok(craft)
-}
-
-pub(crate) fn err_pair(lua: &Lua, e: impl std::fmt::Display) -> LuaResult<(Value, Value)> {
-    Ok((Value::Nil, Value::String(lua.create_string(e.to_string())?)))
-}
-
-pub(crate) fn json_to_lua(lua: &Lua, value: &JsonValue) -> LuaResult<Value> {
-    Ok(match value {
-        JsonValue::Null => Value::Nil,
-        JsonValue::Bool(b) => Value::Boolean(*b),
-        JsonValue::Number(n) => match (n.as_i64(), n.as_f64()) {
-            (Some(i), _) => Value::Integer(i),
-            (_, Some(f)) => Value::Number(f),
-            _ => Value::Nil,
-        },
-        JsonValue::String(s) => Value::String(lua.create_string(s)?),
-        JsonValue::Array(items) => {
-            let table = lua.create_table_with_capacity(items.len(), 0)?;
-            for (idx, item) in items.iter().enumerate() {
-                table.set(idx + 1, json_to_lua(lua, item)?)?;
-            }
-            Value::Table(table)
-        }
-        JsonValue::Object(map) => {
-            let table = lua.create_table_with_capacity(0, map.len())?;
-            for (key, val) in map {
-                table.set(key.as_str(), json_to_lua(lua, val)?)?;
-            }
-            Value::Table(table)
-        }
-    })
 }
