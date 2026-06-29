@@ -111,13 +111,55 @@ impl Provider for OpenRouter {
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async { Ok(vec![]) })
+        Box::pin(async move {
+            let models = self.list_models_with_info().await?;
+            Ok(models.into_iter().map(|m| m.id).collect())
+        })
     }
 
     fn list_models_with_info(
         &self,
     ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
-        Box::pin(async { Ok(vec![]) })
+        Box::pin(async move {
+            let auth = lock_unpoison(&self.auth).clone();
+            let base = auth
+                .base_url
+                .as_deref()
+                .unwrap_or(self.compat.config().base_url);
+            let url = format!("{base}/models");
+            let body_text = self.compat.get_text(&auth, &url).await?;
+            let body: Value = serde_json::from_str(&body_text)?;
+            let mut models: Vec<crate::model::ModelInfo> = body["data"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let architecture = m["architecture"].as_object()?;
+                            let input_modalities = architecture["input_modalities"].as_array()?;
+                            let output_modalities = architecture["output_modalities"].as_array()?;
+                            let has_text_input =
+                                input_modalities.iter().any(|m| m.as_str() == Some("text"));
+                            let has_text_output =
+                                output_modalities.iter().any(|m| m.as_str() == Some("text"));
+                            if !has_text_input || !has_text_output {
+                                return None;
+                            }
+                            let id = m["id"].as_str()?;
+                            let context_window = m["context_length"]
+                                .as_u64()
+                                .and_then(|v| u32::try_from(v).ok());
+                            Some(crate::model::ModelInfo {
+                                id: id.to_string(),
+                                context_window,
+                                max_output_tokens: None,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            Ok(models)
+        })
     }
 
     fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
