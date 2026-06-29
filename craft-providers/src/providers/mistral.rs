@@ -10,6 +10,14 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyPool, ResolvedAuth, lock_unpoison};
 
+const ASSISTANT: &str = "assistant";
+const CONTENT: &str = "content";
+const REASONING_CONTENT: &str = "reasoning_content";
+const ROLE: &str = "role";
+const THINKING: &str = "thinking";
+const TEXT: &str = "text";
+const TYPE: &str = "type";
+
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     api_key_env: "MISTRAL_API_KEY",
     base_url: "https://api.mistral.ai/v1",
@@ -110,6 +118,45 @@ pub struct Mistral {
     system_prefix: Option<String>,
 }
 
+fn convert_assistant_messages_in_place(messages: &mut Value) {
+    if let Some(msgs) = messages.as_array_mut() {
+        for msg in msgs {
+            if let Some(obj) = msg.as_object_mut()
+                && obj.get(ROLE).and_then(Value::as_str) == Some(ASSISTANT)
+            {
+                let Some(reasoning_val) = obj.remove(REASONING_CONTENT) else {
+                    continue;
+                };
+                let Some(reasoning_text) = reasoning_val.as_str() else {
+                    continue;
+                };
+
+                let thinking_block = json!({
+                    TYPE: THINKING,
+                    THINKING: [{TYPE: TEXT, TEXT: reasoning_text}]
+                });
+
+                if let Some(content) = obj.get_mut(CONTENT) {
+                    if let Some(content_str) = content.as_str()
+                        && !content_str.is_empty()
+                    {
+                        let text_content = json!({TYPE: TEXT, TEXT: content_str});
+                        *content = json!([thinking_block, text_content]);
+                    } else if content.is_string() {
+                        *content = json!([thinking_block]);
+                    } else if let Some(arr) = content.as_array_mut() {
+                        arr.insert(0, thinking_block);
+                    } else {
+                        *content = json!([thinking_block]);
+                    }
+                } else {
+                    obj.insert(CONTENT.to_string(), json!([thinking_block]));
+                }
+            }
+        }
+    }
+}
+
 impl Mistral {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
         let pool = KeyPool::resolve("mistral", CONFIG.api_key_env)?;
@@ -156,10 +203,12 @@ impl Provider for Mistral {
             let mut buf = String::new();
             let system = super::with_prefix(&self.system_prefix, system, &mut buf);
             let mut body = self.compat.build_body(model, messages, system, tools);
-
-            if !matches!(thinking, ThinkingConfig::Off) {
+            // Ministral does not support reasoning, Mistral Small 4 and Mistral Medium 3.5 do
+            if !matches!(thinking, ThinkingConfig::Off) && !model.id.starts_with("ministral-") {
                 body["reasoning_effort"] = json!("high");
             }
+            // Convert assistant messages to Mistral's expected format with thinking content
+            convert_assistant_messages_in_place(body.get_mut("messages").unwrap());
 
             let mut extra_headers = vec![];
             if let Some(session_id) = session_id {
@@ -194,5 +243,74 @@ impl Provider for Mistral {
                 .as_ref()
                 .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use test_case::test_case;
+
+    #[test_case(
+        json!([
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "text", "reasoning_content": "thinking"}
+        ]),
+        json!([
+            {"role": "system", "content": "sys"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": [{"type": "text", "text": "thinking"}]},
+                    {"type": "text", "text": "text"}
+                ]
+            }
+        ])
+        ; "assistant_text_and_thinking"
+    )]
+    #[test_case(
+        json!([
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "", "reasoning_content": "thinking"}
+        ]),
+        json!([
+            {"role": "system", "content": "sys"},
+            {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": [{"type": "text", "text": "thinking"}]}]
+            }
+        ])
+        ; "assistant_empty_content_with_thinking"
+    )]
+    #[test_case(
+        json!([
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "reasoning_content": "thinking"}
+        ]),
+        json!([
+            {"role": "system", "content": "sys"},
+            {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": [{"type": "text", "text": "thinking"}]}]
+            }
+        ])
+        ; "assistant_no_content_with_thinking"
+    )]
+    #[test_case(
+        json!([
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "text"}
+        ]),
+        json!([
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "text"}
+        ])
+        ; "assistant_text_only_no_thinking"
+    )]
+    fn convert_assistant_messages_in_place_test(input: Value, expected: Value) {
+        let mut input_clone = input.clone();
+        convert_assistant_messages_in_place(&mut input_clone);
+        assert_eq!(input_clone, expected);
     }
 }
