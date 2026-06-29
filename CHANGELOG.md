@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-06-29
+
+### Added
+
+- **providers/openrouter**: model discovery from the API. `GET /models` is
+  parsed into `ModelInfo` entries, skipping anything that is not text-to-text
+  (`architecture.input_modalities` and `output_modalities` both containing
+  `text`) and reading `context_length` into `context_window`. `list_models`
+  now derives from `list_models_with_info`, matching tensorx. (`080de259`,
+  credit: Sebastian Dröge)
+- **providers/copilot**: `claude-opus-4.7` added to the model table with the
+  real Copilot API values (context_window 264_000, max_output_tokens 64_000)
+  instead of falling through to the inflated provider fallback that both
+  over-proposed request size and pushed the compaction trigger past its
+  buffer. (`91d82332`, credit: Noah Baculi)
+- **providers/mistral**: refreshed model list, using mistral-medium as the
+  strong model, mistral-small as medium, and ministral-14b as the weak model
+  (devstral 2 is deprecated in favour of mistral-medium). (`570e4cc6`,
+  credit: Sebastian Dröge)
+- **providers**: Mistral added to `accepts_arbitrary_models()` so every model
+  listed via the `/v1/models` endpoint can be selected and has its information
+  stored. (`be4812db`, credit: Sebastian Dröge)
+- **agent**: the active model spec is now printed in the Environment block of
+  the system prompt (`- Model: <spec>`), so the agent knows which model it is
+  running as. `build_system_prompt` takes a `&Model`; headless, the TUI agent
+  loop, and the `craft prompt` debug subcommand pass the active (or persisted/
+  default) model. (`56de84cb`, credit: Luca Barbato)
+- **websearch**: when `EXA_API_KEY` is set it is sent as the `x-api-key`
+  header. (`88d20887`, credit: oldhu)
+
+### Changed
+
+- **lua**: `api/` reorganized so each file maps 1:1 to a `craft.*` namespace.
+  `async_api.rs` and `fn_api.rs` dropped the `_api` suffix (raw `r#async` /
+  `r#fn` identifiers), `buf.rs` and `win.rs` moved under `ui/`, and
+  `command.rs`, `ctx.rs`, `setup.rs` moved into a new `util/` subdirectory
+  alongside the `err_pair` / `json_to_lua` helpers (formerly in `mod.rs`).
+  **Breaking** for plugins reaching into internal module paths. (`943f25e3`)
+
+### Fixed
+
+- **agent**: compaction overflow check no longer reserves
+  `max_output_tokens` in the context window. On models where
+  `max_output_tokens == context_window` (both 262K) this made usable = 0 and
+  triggered auto-compaction every turn; only the user-configurable
+  `compaction_buffer` is now reserved. (`4f776b26`)
+- **providers/mistral**: reasoning handling. Ministral does not support
+  reasoning and setting `reasoning_effort` for it fails the request; models
+  that do support reasoning now gate the field correctly. (`0f95c4e3`,
+  credit: Sebastian Dröge)
+- **providers**: read the context window from `max_context_length` (the field
+  name Mistral uses) as a fallback, and skip non-chat Mistral models (those
+  without `capabilities.completion_chat: true`, e.g. OCR or voice). (`e8e5d25b`,
+  credit: Sebastian Dröge)
+- **plugins/skill**: honor `tool_output_lines.other`. The skill plugin read a
+  nonexistent `tol.skill` field, so setting `tool_output_lines.other` in
+  `init.lua` silently fell through to the hardcoded 20-line default and
+  setting `tool_output_lines.skill` was rejected at config load. It now reads
+  `tol.other` like glob, grep, and memory, keeping the 20-line fallback.
+  (`671ffba2`, credit: Noah Baculi)
+- **websearch**: the handler called `os.getenv`, which Luau's sandbox sets to
+  nil, failing with "attempt to call a nil value". Added `os_getenv` to the
+  `craft.uv` table (guarded by `Permission::Env`, mirroring `vim.uv.os_getenv`)
+  and switched the plugin to it. (`660570cb`, credit: oldhu)
+
 ## [0.7.3] - 2026-06-29
 
 ### Added
@@ -785,7 +850,10 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/craft-build/craft/compare/v0.7.3...v0.7.4
+[0.7.3]: https://github.com/craft-build/craft/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/craft-build/craft/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/craft-build/craft/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/craft-build/craft/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/craft-build/craft/compare/v0.6.4...v0.6.5
