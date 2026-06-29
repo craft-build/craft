@@ -21,7 +21,7 @@ mod file_tracker;
 pub mod fs_backend;
 mod fuzzy_replace;
 pub mod grep;
-mod hashline;
+pub mod hashline;
 mod inspect;
 mod internal_urls;
 mod list_tools;
@@ -158,6 +158,9 @@ pub fn is_tool_enabled(config: &AgentConfig, name: &str) -> bool {
 pub const BASH_TOOL_NAME: &str = "bash";
 pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
 pub const BROWSER_SCREENSHOT_TOOL_NAME: &str = browser::BrowserScreenshot::NAME;
+pub const BROWSER_NAVIGATE_TOOL_NAME: &str = browser::BrowserNavigate::NAME;
+pub const BROWSER_CLICK_TOOL_NAME: &str = browser::BrowserClick::NAME;
+pub const BROWSER_TEXT_TOOL_NAME: &str = browser::BrowserText::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
 pub const RESOLVE_TOOL_NAME: &str = resolve::Resolve::NAME;

@@ -78,6 +78,7 @@ pub struct MessagesPanel {
     tool_output_lines: ToolOutputLines,
     render_hints: RenderHintsRegistry,
     pending_restores: Vec<RestoreItem>,
+    image_picker: crate::image_render::ImagePicker,
 }
 
 impl MessagesPanel {
@@ -117,6 +118,7 @@ impl MessagesPanel {
             tool_output_lines: ui_config.tool_output_lines,
             render_hints: RenderHintsRegistry::new(),
             pending_restores: Vec::new(),
+            image_picker: crate::image_render::ImagePicker::new(),
         }
     }
 
@@ -409,6 +411,74 @@ impl MessagesPanel {
                 self.cache.insert(parent_idx + 1, Segment::spacer());
                 self.cache.insert(parent_idx + 2, seg);
             }
+        }
+    }
+
+    const IMG_SUFFIX: &'static str = "__img";
+
+    fn image_segment_id(parent_id: &str) -> String {
+        format!("{parent_id}{}", Self::IMG_SUFFIX)
+    }
+
+    /// Insert or refresh a segment that renders an inline image for a
+    /// `ToolOutput::Image`. The caption becomes the segment's single text
+    /// line (linkable via OSC-8 if it contains a path); the image widget
+    /// renders below it.
+    fn upsert_image_segment(
+        &mut self,
+        parent_id: &str,
+        output: Option<&ToolOutput>,
+        msg_index: Option<usize>,
+    ) {
+        let Some(ToolOutput::Image { caption, source }) = output else {
+            self.remove_image_segment(parent_id);
+            return;
+        };
+        let img_id = Self::image_segment_id(parent_id);
+        let render_state = self.image_picker.render_state(source, self.viewport_width);
+        let mut hyperlink = None;
+        if let Some(path) = crate::hyperlink::caption_path(caption) {
+            hyperlink = crate::hyperlink::file_uri(path);
+        }
+        let caption_line = Line::from(Span::styled(caption.to_owned(), theme::current().tool_dim));
+
+        if let Some(seg_idx) = self.cache.find_by_tool_id(&img_id) {
+            let seg = self.cache.get_mut(seg_idx).unwrap();
+            seg.search_text = caption.clone();
+            seg.set_image(render_state.map(std::sync::Arc::new));
+            seg.set_lines(vec![caption_line]);
+            if let Some(uri) = hyperlink {
+                seg.hyperlinks = vec![crate::hyperlink::Hyperlink::new(
+                    0,
+                    0,
+                    caption.len() as u16,
+                    uri,
+                )];
+            } else {
+                seg.hyperlinks.clear();
+            }
+        } else if let Some(parent_idx) = self.cache.find_by_tool_id(parent_id) {
+            let mut seg = Segment::with_tool(img_id, msg_index);
+            seg.search_text = caption.clone();
+            seg.set_image(render_state.map(std::sync::Arc::new));
+            seg.set_lines(vec![caption_line]);
+            if let Some(uri) = hyperlink {
+                seg.hyperlinks = vec![crate::hyperlink::Hyperlink::new(
+                    0,
+                    0,
+                    caption.len() as u16,
+                    uri,
+                )];
+            }
+            self.cache.insert(parent_idx + 1, Segment::spacer());
+            self.cache.insert(parent_idx + 2, seg);
+        }
+    }
+
+    fn remove_image_segment(&mut self, parent_id: &str) {
+        let img_id = Self::image_segment_id(parent_id);
+        while let Some(idx) = self.cache.find_by_tool_id(&img_id) {
+            let _ = self.cache.remove(idx);
         }
     }
 
@@ -796,7 +866,11 @@ impl MessagesPanel {
             let h = seg.height(width);
             let highlight = self.highlight_segment == Some(i);
             let style = seg.tool_id.as_ref().map(|_| theme::current().tool_bg);
-            cursor.render(seg.lines(), h, style, highlight, frame);
+            if let Some(img) = &seg.image {
+                cursor.render_image(img, seg.lines(), style, frame);
+            } else {
+                cursor.render(seg.lines(), h, style, highlight, &seg.hyperlinks, frame);
+            }
         }
 
         let mut height_idx = 0usize;
@@ -807,12 +881,12 @@ impl MessagesPanel {
             if cached_count > 0 || height_idx > 0 {
                 let h = streaming_heights[height_idx];
                 height_idx += 1;
-                cursor.render(&spacer_lines, h, None, false, frame);
+                cursor.render(&spacer_lines, h, None, false, &[], frame);
             }
             if height_idx < streaming_heights.len() {
                 let h = streaming_heights[height_idx];
                 height_idx += 1;
-                cursor.render(sc.cached_lines(), h, None, false, frame);
+                cursor.render(sc.cached_lines(), h, None, false, &[], frame);
             }
         }
 
@@ -1073,6 +1147,10 @@ impl MessagesPanel {
             .tool_output
             .as_deref()
             .and_then(|o| o.owned_instructions());
+        let image_output = msg.tool_output.as_deref().and_then(|o| match o {
+            ToolOutput::Image { .. } => Some(o.clone()),
+            _ => None,
+        });
 
         let seg = self.cache.get_mut(seg_idx).unwrap();
         seg.search_text = tl.search_text.clone();
@@ -1083,6 +1161,7 @@ impl MessagesPanel {
         if let Some(blocks) = instructions {
             self.upsert_instruction_segment(tool_id, &blocks, seg_idx, None);
         }
+        self.upsert_image_segment(tool_id, image_output.as_ref(), None);
     }
 
     fn build_and_upsert_batch_children(&mut self, parent_idx: usize, tool_id: &str) {
@@ -1206,10 +1285,15 @@ impl MessagesPanel {
                         .tool_output
                         .as_deref()
                         .and_then(|o| o.owned_instructions());
+                    let image_output = msg.tool_output.as_deref().and_then(|o| match o {
+                        ToolOutput::Image { .. } => Some(o.clone()),
+                        _ => None,
+                    });
                     if let Some(blocks) = blocks {
                         let last_idx = self.cache.len().saturating_sub(1);
                         self.upsert_instruction_segment(&id, &blocks, last_idx, Some(i));
                     }
+                    self.upsert_image_segment(&id, image_output.as_ref(), Some(i));
                 }
             } else {
                 let style = match &msg.role {

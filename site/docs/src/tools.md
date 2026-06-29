@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 38 built-in tools. This is the full reference.
+Craft ships with 43 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -42,6 +42,7 @@ Replace an exact string match in a file.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `line_anchor_hash` | string | no |  | Optional 12-char hex content-hash anchor of the target line(s). When set, the applier verifies the hash against the current matched lines before writing; a stale anchor is rejected and the current content is returned so you can retry. Compute it by hashing the trim-normalized target lines (blank lines ignored). |
 | `new_string` | string | yes |  | Replacement string |
 | `occurrence` | integer | no |  | When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error. |
 | `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |
@@ -142,6 +143,27 @@ Search and replace code using AST patterns. More precise than regex for code.
 | `pattern` | string | yes |  | AST pattern with $VAR and $$$BODY metavariables |
 | `rewrite` | string | no |  | Replacement pattern (omitting = search-only mode). Uses $VAR refs from pattern. |
 
+### `ast_edit`
+
+Propose a structural AST rewrite, then commit or discard it with `resolve`. Safer than a global `edit` when many call sites need the same change.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `globs` | array | no |  | Glob patterns to include (e.g. ["*.rs", "src/**"]) |
+| `lang` | string | yes |  | Language: rust, typescript, tsx, python, go |
+| `path` | string | no | cwd | Directory or file to search |
+| `pattern` | string | yes |  | AST pattern with $VAR and $$$BODY metavariables |
+| `rewrite` | string | yes |  | Replacement pattern, using $VAR refs from the pattern |
+
+### `resolve`
+
+Commit or discard a pending `ast_edit` proposal by its `edit_id`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | string | yes | "apply" to commit the staged edit, or "discard" to drop it |
+| `edit_id` | string | yes | edit_id returned by a prior ast_edit call |
+
 ### `callgraph`
 
 Intra-file call graph analysis. Traces function/method call relationships within a single file.
@@ -164,11 +186,13 @@ Quick project health check. Scans for TODOs, FIXMEs, HACKs, and git status.
 
 ### `conflicts`
 
-Find git merge conflicts in the project.
+Find and resolve git merge conflicts in the project.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `index` | integer | no |  | Resolve only the Nth conflict (1-indexed) in each file. Omit to resolve all conflicts in scope. |
 | `path` | string | no | cwd | Directory to scan |
+| `resolve` | string | no |  | Resolve conflicts instead of listing. Values: "@theirs" (incoming/their branch), "@ours" (current/our branch), "@base" (remove both sides). Omit to list. |
 
 ## Safety
 
@@ -309,7 +333,9 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 |-----------|------|----------|-------------|
 | `context_mode` | string | no | Parent context to pass to the subagent:<br>- "none" (default): fresh, no parent history.<br>- "summary": last few parent messages for context.<br>- "full": full parent conversation history. |
 | `description` | string | yes | Short (3-5 words) description of the task |
+| `isolation` | string | no | Isolation mode for a general subagent:<br>- "none" (default): run in the current working tree.<br>- "worktree": run inside a fresh linked git worktree so file mutations do not touch the parent tree (sibling subagents cannot clobber each other). Requires a git repo; falls back to none otherwise. |
 | `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
+| `output_schema` | string | no | Optional JSON Schema (object) describing the structured object the subagent must return as its final message. When set, the subagent is told to emit a final JSON object matching the schema; that object is validated and returned to you as structured data instead of prose. On validation failure the subagent is re-prompted (bounded), then a clean error is surfaced. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
 
@@ -342,6 +368,43 @@ Renders a web page in headless Chromium and returns a full-page PNG screenshot s
 | `full_page` | boolean | no | true | Capture the full scrollable page |
 | `height` | integer | no | 720 | Viewport height in pixels |
 | `url` | string | yes |  | Absolute http(s) URL of the page to render |
+| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
+| `width` | integer | no | 1280 | Viewport width in pixels |
+
+### `browser_navigate`
+
+Navigates a headless Chromium browser to a URL and returns the page's URL, title, and visible text as markdown. Use this to confirm a route loaded, capture the document title, or read page text without taking a screenshot.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `height` | integer | no | 720 | Viewport height in pixels |
+| `url` | string | yes |  | Absolute http(s) URL to navigate to |
+| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
+| `width` | integer | no | 1280 | Viewport width in pixels |
+
+### `browser_click`
+
+Navigates a headless Chromium browser to a URL, clicks the first element matching a CSS selector, then returns either the resulting page text or a screenshot. Use this to drive interactions: open a menu, follow a login link, trigger a tab switch.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `full_page` | boolean | no | true | Capture a full-page screenshot when as="screenshot" |
+| `height` | integer | no | 720 | Viewport height in pixels |
+| `r#as` | string | no | "text" | What to return after clicking: "text" or "screenshot" |
+| `selector` | string | yes |  | CSS selector of the element to click (first match) |
+| `url` | string | yes |  | Absolute http(s) URL to navigate to before clicking |
+| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after clicking |
+| `width` | integer | no | 1280 | Viewport width in pixels |
+
+### `browser_text`
+
+Reads the visible text of a web page in headless Chromium and returns it as markdown. Use this to extract page content into the conversation for reading, searching, or summarizing without an image. Optionally scope extraction to a single element via a CSS selector.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `height` | integer | no | 720 | Viewport height in pixels |
+| `selector` | string | no |  | Optional CSS selector to scope the extracted text (defaults to document.body) |
+| `url` | string | yes |  | Absolute http(s) URL of the page to read |
 | `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
 | `width` | integer | no | 1280 | Viewport width in pixels |
 

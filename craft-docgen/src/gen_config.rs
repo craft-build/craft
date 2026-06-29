@@ -155,6 +155,98 @@ fn write_nested_agent_sections(out: &mut String) {
     )
     .unwrap();
     writeln!(out).unwrap();
+
+    writeln!(out, "### `agent.small_model`\n").unwrap();
+    writeln!(
+        out,
+        "Route turns to a cheaper, lower-latency model when the conversation is running on a \
+         small-context model (auto-detected from the context window). Off by default; when \
+         `enabled` is true it always activates, otherwise it activates automatically for models \
+         whose context window is below `auto_detect_context_window`.\n"
+    )
+    .unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `enabled` | bool | `false` | Force small-model mode on (skips auto-detection) |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `reduced_tools` | bool | `false` | Advertise a smaller tool set to save tokens |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `compact_prompt` | bool | `false` | Use a shorter system prompt |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `aggressive_truncation` | bool | `false` | Truncate tool output more aggressively |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `compaction_threshold` | number | `0.50` | Fraction of context window that triggers compaction |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `forgiving_parsing` | bool | `true` | Tolerate minor model output formatting errors |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `auto_detect_context_window` | u32 | `32000` | Context window cutoff (in tokens) below which small-model mode auto-activates |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "### `agent.advisor`\n").unwrap();
+    writeln!(
+        out,
+        "An always-on lightweight reviewer that reads the transcript delta each turn and emits \
+         at most one deduplicated note. Distinct from the `judge` goal-completion check and the \
+         on-demand `review` subagent. Off by default.\n"
+    )
+    .unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `enabled` | bool | `false` | Enable the turn-by-turn advisor reviewer |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `model` | string | `none` | `provider/model_id` spec for the advisor. When unset, the `advisor` role from `model_roles.toml` is used, falling back to the active model |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `dedup_size` | usize | `16` | Maximum advisor notes kept in the dedup FIFO |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "### `agent.ttsr`\n").unwrap();
+    writeln!(
+        out,
+        "Time-traveling stream rules. When enabled, rules loaded from `.craft/rules/*.md` (lines \
+         prefixed with `rule:`) are matched against the in-flight stream text each turn, and a \
+         firing rule injects a system reminder. Off by default.\n"
+    )
+    .unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `enabled` | bool | `false` | Enable time-traveling stream rules |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
 }
 
 pub fn generate() -> String {

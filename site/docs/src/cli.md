@@ -52,6 +52,42 @@ List every available model across all configured providers, with tier and pricin
 craft models
 ```
 
+### `stats`
+
+Show cost and usage stats from the persistent ledger. Every finished turn is appended to a `cost.jsonl` file in your state directory, so totals survive across sessions.
+
+```bash
+craft stats            # per-model breakdown (default)
+craft stats --sessions # per-session breakdown
+```
+
+The same totals are available inside the TUI with the `/stats` command.
+
+### `completions`
+
+Generate shell completion scripts and print them to stdout. Pipe the output into your shell's completion directory.
+
+```bash
+craft completions bash    # bash
+craft completions zsh     # zsh
+craft completions fish    # fish
+craft completions elvish  # elvish
+craft completions powershell
+```
+
+### `prompt`
+
+Print the rendered system prompt, a prompt variant, or the tool definitions as JSON. Useful for inspecting what the model actually sees, including contributions from your `init.lua` and plugins.
+
+```bash
+craft prompt              # full system prompt (default)
+craft prompt research     # research prompt
+craft prompt general      # general prompt
+craft prompt --plan       # system prompt with the plan-mode reminder appended
+craft prompt --tools      # tool definitions as JSON
+craft prompt --tools --names  # just tool names, one per line
+```
+
 ### `index`
 
 Run the built-in `index` tool on a file and print the tree-sitter skeleton. Useful for previewing what the model sees.

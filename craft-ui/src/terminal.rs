@@ -12,6 +12,32 @@ use crossterm::event::{
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 
+/// CSI ?2026h — begin synchronized output. Terminals that support it
+/// batch all subsequent writes until the matching end, eliminating the
+/// partial-frame flicker a full-buffer diff flush can otherwise cause
+/// during rapid redraws. Unknown `?` private modes are ignored by spec,
+/// so unsupported terminals are unaffected.
+const SYNC_BEGIN: &str = "\u{1b}[?2026h";
+const SYNC_END: &str = "\u{1b}[?2026l";
+
+/// Emits the synchronized-output begin sequence and flushes, so the
+/// terminal enters batched-update mode before the next frame diff.
+pub(crate) fn begin_synchronized_output() {
+    let _ = write_and_flush(SYNC_BEGIN);
+}
+
+/// Emits the synchronized-output end sequence and flushes, releasing
+/// the batched frame for display.
+pub(crate) fn end_synchronized_output() {
+    let _ = write_and_flush(SYNC_END);
+}
+
+fn write_and_flush(bytes: &str) -> std::io::Result<()> {
+    let mut out = stdout().lock();
+    out.write_all(bytes.as_bytes())?;
+    out.flush()
+}
+
 pub(crate) struct TerminalGuard;
 
 enum TerminalMux {
@@ -174,9 +200,34 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// True if running inside tmux or screen. Kitty/iTerm2 graphics escapes
+/// don't survive their DCS passthrough, so callers should downgrade to
+/// halfblocks when this returns true. Zellij intercepts OSC52 natively
+/// and is treated as not-muxed.
+pub(crate) fn is_muxed() -> bool {
+    !matches!(
+        TerminalMux::detect(),
+        TerminalMux::None | TerminalMux::Zellij
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_sequences_match_spec() {
+        assert_eq!(SYNC_BEGIN, "\u{1b}[?2026h");
+        assert_eq!(SYNC_END, "\u{1b}[?2026l");
+    }
+
+    #[test]
+    fn sync_sequences_are_private_mode_csi() {
+        assert!(SYNC_BEGIN.starts_with("\u{1b}[?"));
+        assert!(SYNC_BEGIN.ends_with('h'));
+        assert!(SYNC_END.ends_with('l'));
+        assert_eq!(&SYNC_BEGIN[3..SYNC_BEGIN.len() - 1], "2026");
+    }
 
     // Simulates DCS-passthrough parsing: `ESC ESC` becomes one ESC,
     // `ESC \` ends the DCS. Panics on bad input so tests fail loudly.

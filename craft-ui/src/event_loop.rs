@@ -331,7 +331,9 @@ impl<'t> EventLoop<'t> {
         loop {
             self.tick();
             let had_agent_msg = self.drain_channels();
+            crate::terminal::begin_synchronized_output();
             self.terminal.draw(|f| self.app.view(f))?;
+            crate::terminal::end_synchronized_output();
             self.app.dispatch_pending_restores();
 
             if self.app.exit_request != ExitRequest::None {

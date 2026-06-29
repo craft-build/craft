@@ -25,7 +25,15 @@ const SECTIONS: &[(&str, &[&str])] = &[
     ),
     (
         "Navigation & Analysis",
-        &["zoom", "ast_grep", "callgraph", "inspect", "conflicts"],
+        &[
+            "zoom",
+            "ast_grep",
+            "ast_edit",
+            "resolve",
+            "callgraph",
+            "inspect",
+            "conflicts",
+        ],
     ),
     ("Safety", &["safety"]),
     (

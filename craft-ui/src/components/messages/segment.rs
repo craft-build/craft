@@ -56,6 +56,8 @@ pub(super) struct Segment {
     highlight_key: HighlightKey,
     pub spinner_lines: Vec<usize>,
     pub content_indent: &'static str,
+    pub hyperlinks: Vec<crate::hyperlink::Hyperlink>,
+    pub image: Option<std::sync::Arc<crate::image_render::ImageRenderState>>,
 }
 
 impl Segment {
@@ -96,13 +98,26 @@ impl Segment {
         self.invalidate_height();
     }
 
+    pub fn set_image(
+        &mut self,
+        image: Option<std::sync::Arc<crate::image_render::ImageRenderState>>,
+    ) {
+        self.image = image;
+        self.invalidate_height();
+    }
+
     pub fn height(&self, width: u16) -> u16 {
         if let Some(c) = self.cached_height.get()
             && c.at_width == width
         {
             return c.height;
         }
-        let h = wrapped_line_count(&self.lines, width);
+        let h = if let Some(img) = &self.image {
+            let caption = wrapped_line_count(&self.lines, width);
+            caption.saturating_add(img.rows)
+        } else {
+            wrapped_line_count(&self.lines, width)
+        };
         self.cached_height.set(Some(CachedHeight {
             at_width: width,
             height: h,
@@ -147,6 +162,7 @@ impl Segment {
         self.spinner_lines = tl.spinner_lines;
         self.content_indent = tl.content_indent;
         self.truncation = tl.truncation;
+        self.hyperlinks = tl.hyperlinks;
         self.set_lines(tl.lines);
     }
 
@@ -166,6 +182,7 @@ impl Segment {
             self.pending_highlight = None;
             self.spinner_lines = tl.spinner_lines;
             self.content_indent = tl.content_indent;
+            self.hyperlinks = tl.hyperlinks;
         } else {
             self.apply_highlight(tl, worker);
         }
@@ -220,6 +237,10 @@ impl SegmentCache {
 
     pub fn insert(&mut self, pos: usize, seg: Segment) {
         self.segments.insert(pos, seg);
+    }
+
+    pub fn remove(&mut self, idx: usize) -> Segment {
+        self.segments.remove(idx)
     }
 
     pub fn needs_rebuild(&self, msg_len: usize) -> bool {

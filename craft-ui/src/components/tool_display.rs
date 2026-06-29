@@ -132,17 +132,35 @@ fn extract_path_suffix(s: &str) -> Option<(&str, &str)> {
     Some((&s[..i], path))
 }
 
-fn style_command_with_path(header: &str) -> Vec<Span<'static>> {
+/// Authoritative file path from a structured `ToolOutput`, used to build
+/// an OSC-8 link even when the header shows a relative or display path.
+fn output_path_uri(output: &ToolOutput) -> Option<String> {
+    let path = match output {
+        ToolOutput::ReadCode { path, .. }
+        | ToolOutput::WriteCode { path, .. }
+        | ToolOutput::Diff { path, .. } => path.as_str(),
+        _ => return None,
+    };
+    crate::hyperlink::file_uri(path)
+}
+
+fn style_command_with_path(header: &str) -> (Vec<Span<'static>>, Option<String>) {
     match extract_path_suffix(header) {
-        Some((cmd, path)) => vec![
-            Span::styled(format!("{cmd} "), theme::current().tool),
-            Span::styled(path.to_owned(), theme::current().tool_path),
-        ],
-        None => vec![Span::styled(header.to_owned(), theme::current().tool)],
+        Some((cmd, path)) => (
+            vec![
+                Span::styled(format!("{cmd} "), theme::current().tool),
+                Span::styled(path.to_owned(), theme::current().tool_path),
+            ],
+            crate::hyperlink::file_uri(path),
+        ),
+        None => (
+            vec![Span::styled(header.to_owned(), theme::current().tool)],
+            None,
+        ),
     }
 }
 
-fn style_grep_header(header: &str) -> Vec<Span<'static>> {
+fn style_grep_header(header: &str) -> (Vec<Span<'static>>, Option<String>) {
     let (pattern, rest) = match header.find(" [") {
         Some(i) => (&header[..i], &header[i..]),
         None => match header.rfind(" in ") {
@@ -164,21 +182,30 @@ fn style_grep_header(header: &str) -> Vec<Span<'static>> {
         rest
     };
 
+    let mut uri = None;
     if let Some((_, path)) = extract_path_suffix(after_pattern) {
         spans.push(Span::styled(format!(" {path}"), theme::current().tool_path));
+        uri = crate::hyperlink::file_uri(path);
     }
 
-    spans
+    (spans, uri)
 }
 
-fn style_tool_header(header_style: &HeaderStyle, header: &str) -> Vec<Span<'static>> {
+fn style_tool_header(
+    header_style: &HeaderStyle,
+    header: &str,
+) -> (Vec<Span<'static>>, Option<String>) {
     match header_style {
-        HeaderStyle::Path => {
-            vec![Span::styled(header.to_owned(), theme::current().tool_path)]
-        }
+        HeaderStyle::Path => (
+            vec![Span::styled(header.to_owned(), theme::current().tool_path)],
+            crate::hyperlink::file_uri(header),
+        ),
         HeaderStyle::Command => style_command_with_path(header),
         HeaderStyle::Grep => style_grep_header(header),
-        HeaderStyle::Plain => vec![Span::styled(header.to_owned(), theme::current().tool)],
+        HeaderStyle::Plain => (
+            vec![Span::styled(header.to_owned(), theme::current().tool)],
+            None,
+        ),
     }
 }
 
@@ -243,6 +270,7 @@ pub struct ToolLines {
     pub spinner_lines: Vec<usize>,
     pub content_indent: &'static str,
     pub truncation: SectionFlags,
+    pub hyperlinks: Vec<crate::hyperlink::Hyperlink>,
 }
 
 pub struct HighlightRequest {
@@ -476,6 +504,7 @@ struct ToolLineBuilder {
     keep: Keep,
     header_style: HeaderStyle,
     body_format: BodyFormat,
+    hyperlinks: Vec<crate::hyperlink::Hyperlink>,
 }
 
 impl ToolLineBuilder {
@@ -499,6 +528,7 @@ impl ToolLineBuilder {
             keep: output_limits.keep,
             header_style: hints.header_style,
             body_format: hints.body_format,
+            hyperlinks: Vec::new(),
         }
     }
 
@@ -514,11 +544,13 @@ impl ToolLineBuilder {
         header: &str,
         annotation: Option<&str>,
         render_header: Option<&BufferSnapshot>,
+        output: Option<&ToolOutput>,
     ) {
         let mut spans = vec![Span::styled(
             format!("{tool_name}> "),
             theme::current().tool_prefix,
         )];
+        let mut header_uri = None;
         if let Some(snapshot) = render_header {
             if let Some(first_line) = snapshot.lines.first() {
                 for span in &first_line.spans {
@@ -529,7 +561,9 @@ impl ToolLineBuilder {
                 }
             }
         } else {
-            spans.extend(style_tool_header(&self.header_style, header));
+            let (styled, uri) = style_tool_header(&self.header_style, header);
+            header_uri = uri;
+            spans.extend(styled);
         }
         let mut copy = format!("{tool_name}> {header}");
         if let Some(ann) = annotation {
@@ -539,8 +573,35 @@ impl ToolLineBuilder {
             ));
             write!(copy, " ({ann})").unwrap();
         }
+        self.record_header_hyperlink(
+            &spans,
+            header_uri.or_else(|| output.and_then(output_path_uri)),
+        );
         self.lines.push(Line::from(spans));
         self.search_text = copy;
+    }
+
+    fn record_header_hyperlink(&mut self, spans: &[Span<'static>], uri: Option<String>) {
+        let Some(uri) = uri else {
+            return;
+        };
+        let prefix_w: usize = spans
+            .iter()
+            .rev()
+            .skip(1)
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let last = spans.last().expect("header has spans");
+        let last_w = unicode_width::UnicodeWidthStr::width(last.content.as_ref());
+        if last_w == 0 {
+            return;
+        }
+        self.hyperlinks.push(crate::hyperlink::Hyperlink::new(
+            0,
+            prefix_w as u16,
+            (prefix_w + last_w) as u16,
+            uri,
+        ));
     }
 
     fn push_search_text(&mut self, text: &str) {
@@ -685,6 +746,11 @@ impl ToolLineBuilder {
             }
         }
         let highlight = HighlightRequest::new(self.content_range, input, output, self.limits);
+        let indent_w = self.outer_indent.chars().count() as u16;
+        for hl in &mut self.hyperlinks {
+            hl.col_start = hl.col_start.saturating_add(indent_w);
+            hl.col_end = hl.col_end.saturating_add(indent_w);
+        }
         ToolLines {
             lines: self.lines,
             search_text: self.search_text,
@@ -692,6 +758,7 @@ impl ToolLineBuilder {
             spinner_lines: self.spinner_lines,
             content_indent,
             truncation: self.truncation,
+            hyperlinks: self.hyperlinks,
         }
     }
 }
@@ -782,6 +849,7 @@ pub fn build_tool_lines(
         header,
         msg.annotation.as_deref(),
         msg.render_header.as_ref(),
+        msg.tool_output.as_deref(),
     );
     b.prepend_indicator(status.into(), rctx.started_at);
     let has_snapshot = msg.render_snapshot.is_some();
@@ -847,6 +915,7 @@ pub fn build_batch_entry_lines(
         &entry.summary,
         annotation.as_deref(),
         child_state.and_then(|s| s.header.as_ref()),
+        entry.output.as_ref(),
     );
     b.prepend_indicator(entry.status.into(), rctx.started_at);
     b.push_code_content(entry.input.as_ref(), entry.output.as_ref());
@@ -910,7 +979,7 @@ pub fn build_instructions_lines(
         limits,
         &ToolRenderHints::default(),
     );
-    b.push_header("load", header, annotation.as_deref(), None);
+    b.push_header("load", header, annotation.as_deref(), None, None);
     b.prepend_indicator(Indicator::Success, Instant::now());
 
     let start = b.lines.len();
@@ -1060,13 +1129,14 @@ mod tests {
 
     #[test]
     fn style_tool_header_path_first() {
-        let spans = style_tool_header(&HeaderStyle::Path, "src/main.rs");
+        let (spans, uri) = style_tool_header(&HeaderStyle::Path, "src/main.rs");
         assert_eq!(spans_text(&spans), "src/main.rs");
+        assert!(uri.is_some(), "Path header should produce a file:// URI");
     }
 
     #[test]
     fn style_tool_header_in_path() {
-        let spans = style_tool_header(&HeaderStyle::Command, "echo hi in /tmp");
+        let (spans, _) = style_tool_header(&HeaderStyle::Command, "echo hi in /tmp");
         let text = spans_text(&spans);
         assert!(text.contains("echo hi"));
         assert!(has_styled_span(&spans, "/tmp", theme::current().tool_path));
@@ -1074,7 +1144,7 @@ mod tests {
 
     #[test]
     fn style_tool_header_truncates_json_in_path() {
-        let spans = style_tool_header(
+        let (spans, _) = style_tool_header(
             &HeaderStyle::Grep,
             "STRIKETHROUGH_STYLE in /home/tony/c/craft2\", \"pattern\": \"STRIKETHROUGH_STYLE\"}",
         );
@@ -1089,12 +1159,13 @@ mod tests {
     #[test_case("TODO in src/",               "TODO src/"                ; "with_path")]
     #[test_case("\\b(fn|pub)\\s+ [*.rs] in src/", "\\b(fn|pub)\\s+ [*.rs] src/" ; "with_include_and_path")]
     fn grep_header_text_roundtrips(input: &str, expected: &str) {
-        assert_eq!(spans_text(&style_grep_header(input)), expected);
+        let (spans, _) = style_grep_header(input);
+        assert_eq!(spans_text(&spans), expected);
     }
 
     #[test]
     fn grep_header_styles_filter_and_path() {
-        let spans = style_grep_header("TODO [*.rs] in src/");
+        let (spans, _) = style_grep_header("TODO [*.rs] in src/");
         assert!(has_styled_span(
             &spans,
             "[*.rs]",

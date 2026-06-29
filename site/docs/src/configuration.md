@@ -150,6 +150,38 @@ Auto-format files in place after the agent writes them, before the compile check
 | `command` | string | `none` | Custom formatter command, overriding the extension table |
 | `timeout_secs` | u64 | `15` | Formatter command timeout (seconds) |
 
+### `agent.small_model`
+
+Route turns to a cheaper, lower-latency model when the conversation is running on a small-context model (auto-detected from the context window). Off by default; when `enabled` is true it always activates, otherwise it activates automatically for models whose context window is below `auto_detect_context_window`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Force small-model mode on (skips auto-detection) |
+| `reduced_tools` | bool | `false` | Advertise a smaller tool set to save tokens |
+| `compact_prompt` | bool | `false` | Use a shorter system prompt |
+| `aggressive_truncation` | bool | `false` | Truncate tool output more aggressively |
+| `compaction_threshold` | number | `0.50` | Fraction of context window that triggers compaction |
+| `forgiving_parsing` | bool | `true` | Tolerate minor model output formatting errors |
+| `auto_detect_context_window` | u32 | `32000` | Context window cutoff (in tokens) below which small-model mode auto-activates |
+
+### `agent.advisor`
+
+An always-on lightweight reviewer that reads the transcript delta each turn and emits at most one deduplicated note. Distinct from the `judge` goal-completion check and the on-demand `review` subagent. Off by default.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the turn-by-turn advisor reviewer |
+| `model` | string | `none` | `provider/model_id` spec for the advisor. When unset, the `advisor` role from `model_roles.toml` is used, falling back to the active model |
+| `dedup_size` | usize | `16` | Maximum advisor notes kept in the dedup FIFO |
+
+### `agent.ttsr`
+
+Time-traveling stream rules. When enabled, rules loaded from `.craft/rules/*.md` (lines prefixed with `rule:`) are matched against the in-flight stream text each turn, and a firing rule injects a system reminder. Off by default.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable time-traveling stream rules |
+
 ### `provider`
 
 | Field | Type | Default | Min | Description |

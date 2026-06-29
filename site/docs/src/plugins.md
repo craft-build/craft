@@ -20,6 +20,7 @@ Project settings override global ones. See [Configuration](./configuration.md).
 | `register_tool({ ... })` | A tool the model can call. Takes `name`, `kind`, `description`, `schema`, and a handler |
 | `register_command({ ... })` | A slash command shown in the palette. Takes `name`, `description`, and a handler |
 | `register_prompt_hint({ ... })` | Extra context injected into the prompt based on a trigger |
+| `set_prompt({ ... })` | Override a singleton prompt slot (`identity` or `tone`). Takes `slot`, `content` (string or callback), and optional `prompt` |
 
 A minimal custom tool:
 
@@ -44,6 +45,29 @@ craft.api.register_tool({
     end,
 })
 ```
+
+## Prompt slots
+
+The system prompt is assembled from named slots. Two kinds exist:
+
+- **Singleton** slots (`identity`, `tone`) hold a single value. `set_prompt` replaces the built-in default. Last plugin to call it wins.
+- **Aggregate** slots (`tool_usage`, `efficient_tools`, `conventions`, `after_instructions`) append. Use `register_prompt_hint` for those.
+
+Override the agent's identity or tone from `init.lua`:
+
+```lua
+craft.api.set_prompt({
+    slot = "identity",
+    content = "Custom identity",
+})
+
+craft.api.set_prompt({
+    slot = "tone",
+    content = function() return "Short, direct answers." end,
+})
+```
+
+`content` can be a string or a function returning a string. Omit `prompt` to apply to every prompt that has the slot. Singleton slots only exist in the `system` prompt, so targeting `research` or `general` with them is an error. Use `craft prompt` to preview the result.
 
 ## Built-in Plugins
 
