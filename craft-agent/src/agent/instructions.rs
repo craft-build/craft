@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use craft_providers::model::Model;
+
 use crate::AgentMode;
 use crate::template::Vars;
 
@@ -53,11 +55,13 @@ pub fn build_system_prompt(
     mode: &AgentMode,
     instructions: &str,
     slots: &crate::prompt::ResolvedSlots,
+    model: &Model,
     compact: bool,
 ) -> String {
     let env = vars.apply(
         "\n\nEnvironment:\n- Working directory: {cwd}\n- Platform: {platform}\n- Date: {date}",
     );
+    let env = format!("{env}\n- Model: {}", model.spec());
     let instructions = format!("{env}{instructions}");
     let template = if compact {
         crate::prompt::SYSTEM_SMALL_PROMPT
@@ -187,7 +191,14 @@ mod tests {
     fn plan_section_presence(mode: &AgentMode, expect_plan: bool) {
         let vars = Vars::new().set("{cwd}", "/tmp").set("{platform}", "linux");
         let slots = crate::prompt::ResolvedSlots::default();
-        let prompt = build_system_prompt(&vars, mode, "", &slots, false);
+        let prompt = build_system_prompt(
+            &vars,
+            mode,
+            "",
+            &slots,
+            &Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap(),
+            false,
+        );
         assert_eq!(prompt.contains("Plan Mode"), expect_plan);
         if expect_plan {
             assert!(prompt.contains(PLAN_PATH));
@@ -214,6 +225,7 @@ mod tests {
             &AgentMode::Plan(PathBuf::from("plan.md")),
             &format!("\n{INSTR}"),
             &slots,
+            &Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap(),
             false,
         );
         let positions = [INSTR, EXTRA, "Plan Mode"].map(|n| prompt.find(n).unwrap());

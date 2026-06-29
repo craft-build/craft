@@ -163,6 +163,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         &mode,
         &instructions.text,
         &params.prompt_slots,
+        &params.model,
         compact,
     );
 
@@ -382,6 +383,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         &input.mode,
                         &instructions.text,
                         &params.prompt_slots,
+                        &model,
                         compact,
                     )
                 });

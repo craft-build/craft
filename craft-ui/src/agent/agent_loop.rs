@@ -226,6 +226,7 @@ impl AgentLoop {
             &input.mode,
             &self.instructions.text,
             &prompt_slots,
+            &model.model,
             compact,
         );
 
@@ -332,11 +333,13 @@ impl AgentLoop {
     }
 
     fn publish_btw_system(&self, slots: &craft_agent::prompt::ResolvedSlots) {
+        let slot = self.model_slot.load();
         let system = agent::build_system_prompt(
             &self.vars,
             &AgentMode::Build,
             &self.instructions.text,
             slots,
+            &slot.model,
             false,
         );
         self.btw_system.store(Arc::new(system));

@@ -14,6 +14,7 @@ use craft_config::providers::{
 };
 use craft_config::{load_env_files, load_permissions};
 use craft_lua::PluginHost;
+use craft_providers::model::Model;
 use craft_providers::provider::fetch_all_models;
 use craft_providers::{copilot_auth, dynamic, openai_auth};
 use craft_storage::StateDir;
@@ -647,6 +648,14 @@ pub fn prompt(
         .map(|h| h.collect_prompt_slots())
         .unwrap_or_default();
 
+    let model = StateDir::resolve()
+        .ok()
+        .and_then(|dir| craft_storage::model::read_model(&dir))
+        .and_then(|spec| Model::from_spec(&spec).ok())
+        .unwrap_or_else(|| {
+            Model::from_spec("anthropic/claude-sonnet-4-20250514").expect("default model spec")
+        });
+
     let output = match variant {
         PromptVariant::System => {
             let mode = if plan {
@@ -654,7 +663,7 @@ pub fn prompt(
             } else {
                 AgentMode::Build
             };
-            build_system_prompt(&vars, &mode, &instructions, &slots, false)
+            build_system_prompt(&vars, &mode, &instructions, &slots, &model, false)
         }
         PromptVariant::Research => assemble(PromptId::Research, &slots, &instructions),
         PromptVariant::General => assemble(PromptId::General, &slots, &instructions),
