@@ -18,13 +18,21 @@ pub(crate) fn create_uv_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
         })?,
     )?;
 
-    let p = perms;
+    let p = perms.clone();
     t.set(
         "os_homedir",
         lua.create_function(move |lua, ()| {
             p.guard(Env, lua, |_| {
                 Ok(craft_storage::paths::home().and_then(|p| p.to_str().map(String::from)))
             })
+        })?,
+    )?;
+
+    let p = perms;
+    t.set(
+        "os_getenv",
+        lua.create_function(move |lua, name: String| {
+            p.guard(Env, lua, |_| Ok(std::env::var(&name).ok()))
         })?,
     )?;
 
