@@ -158,6 +158,7 @@ impl ProviderKind {
                 | Self::Copilot
                 | Self::OpenRouter
                 | Self::TensorX
+                | Self::Mistral
         )
     }
 
