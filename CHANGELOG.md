@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-06-29
+
+### Added
+
+- **ui**: user-configurable keybindings via the `ui.keybindings` config field,
+  applied as an overlay on the compile-time defaults (`KeybindingResolver`,
+  `action_id` on every `KEYBINDS` entry). Canonical chord labels, effective
+  chords in the help modal, and disabling an action with an empty list.
+  (`b020bc00`)
+- **ui**: persistent append-only cost ledger (`cost.jsonl` in craft-storage,
+  concurrency-safe atomic appends), a `/stats` modal, and a `craft stats`
+  read-only CLI subcommand. (`b020bc00`)
+- **cli**: `craft completions <shell>` generating shell completions via
+  `clap_complete` (bash/zsh/fish/elvish/powershell). (`b020bc00`)
+- **agent**: `ast_edit` and `resolve` tools staging a dry ast-grep rewrite in
+  a session-scoped `PendingEditStore` with re-verification against on-disk
+  content and a safety backup before writing. (`75142a33`)
+- **agent**: `read` tool gains `rule://` and `agent://findings` URL schemes
+  (alongside `skill://`, `conflict://`), and `conflict://N` is now numbered
+  globally across the repo. (`75142a33`)
+- **agent**: model roles (default/smol/slow/plan/commit/advisor) with ordered
+  fallback chains loaded from `model_roles.toml`. `stream_with_retry`
+  advances to the next chain entry when key rotation is exhausted on
+  429/quota, resets `RetryState` on successful rotation, and round-robins
+  multiple API keys per provider from `providers.toml` (`api_keys`). Ctrl+P
+  keeps cycling globally. (`75142a33`)
+- **agent**: always-on lightweight advisor (off by default) reviewing the
+  transcript delta each turn and emitting at most one deduped
+  nit/concern/blocker note through an emission guard; resets on compaction.
+  (`75142a33`)
+- **agent**: TTSR stream rules (`ttsr.enabled`) matching the in-flight stream
+  text against regex rules from `.craft/rules/*.md` and injecting a firing
+  rule as a system reminder, with once/after-gap:N repeat policies. (`75142a33`)
+- **agent**: `browser_navigate`, `browser_click`, and `browser_text` tools
+  reusing the shared headless-Chromium launch path. `browser_navigate`
+  returns URL + title + body markdown; `browser_click` navigates, clicks the
+  first CSS-selector match, and returns text or a screenshot via an `as`
+  param; `browser_text` reads `document.body` or a scoped element's
+  `innerText` (capped at 64 KiB with a truncation marker). All reject
+  non-http(s) URLs and carry the same `url:<url>` permission scope as
+  `browser_screenshot`. (`a6d1fab2`)
+- **ui**: inline images via `ratatui-image` v11 (Kitty/Ghostty/iTerm2, with
+  unicode halfblock fallback under tmux/screen), OSC-8 clickable `file://`
+  hyperlinks on tool headers, finding file:line refs, and image captions,
+  and CSI 2026 synchronized output wrapping every frame draw to eliminate
+  partial-frame flicker. Images are modeled as a dedicated `Segment` variant
+  with independent height/scroll math. (`6ccd8df2`)
+
+### Fixed
+
+- **ui**: stale `audience_matrix_is_locked` test (expected 26 native tools,
+  now 31) refreshed with the 5 missing entries and tool-name constants.
+  (`6ccd8df2`)
+
 ## [0.7.2] - 2026-06-28
 
 ### Added
