@@ -44,6 +44,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "question",
             "list_tools",
             "retrieve",
+            "vcc_recall",
         ],
     ),
     (

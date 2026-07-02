@@ -774,6 +774,47 @@ impl<'h> Agent<'h> {
             DEFAULT_SMALL_MODEL_RATIO
         }
     }
+    /// Proactive compaction ratio: fraction of context window at which to
+    /// compact. Per-model `compact_percent`/`reserve_tokens` overrides the
+    /// small-model ratio when configured.
+    fn proactive_ratio(&self) -> f64 {
+        let provider_model_id = self.provider_model_id();
+        if let Some(t) = craft_config::resolve_threshold(
+            &self.config.compaction,
+            provider_model_id.as_deref(),
+            &self.model.id,
+        ) {
+            if let Some(pct) = t.compact_percent {
+                return (pct as f64).max(0.01) / 100.0;
+            }
+            if let Some(reserve) = t.reserve_tokens
+                && self.model.context_window > 0
+            {
+                return 1.0 - (reserve as f64 / self.model.context_window as f64);
+            }
+        }
+        self.small_model_ratio()
+    }
+
+    /// Effective overflow buffer: per-model `reserve_tokens` overrides
+    /// `compaction_buffer` when configured.
+    fn effective_compaction_buffer(&self) -> u32 {
+        let provider_model_id = self.provider_model_id();
+        if let Some(t) = craft_config::resolve_threshold(
+            &self.config.compaction,
+            provider_model_id.as_deref(),
+            &self.model.id,
+        ) && let Some(reserve) =
+            craft_config::resolve_reserve_tokens(t, self.model.context_window)
+        {
+            return reserve;
+        }
+        self.config.compaction_buffer
+    }
+
+    fn provider_model_id(&self) -> Option<String> {
+        Some(format!("{}/{}", self.model.provider, self.model.id))
+    }
 
     fn tool_context(&self) -> ToolContext {
         ToolContext {
@@ -805,6 +846,7 @@ impl<'h> Agent<'h> {
             hooks: self.hooks.clone(),
             snapshot_store: Arc::clone(&self.snapshot_store),
             pending_edits: Arc::clone(&self.pending_edits),
+            session_id: self.session_id.clone(),
         }
     }
 
@@ -823,12 +865,12 @@ impl<'h> Agent<'h> {
         }
 
         let overflow = force_full
-            || compaction::is_overflow(usage, &self.model, self.config.compaction_buffer);
+            || compaction::is_overflow(usage, &self.model, self.effective_compaction_buffer());
         let proactive = !overflow
             && compaction::is_proactive_threshold(
                 self.history,
                 &self.model,
-                self.small_model_ratio(),
+                self.proactive_ratio(),
             );
 
         if !overflow && !proactive {
@@ -872,7 +914,7 @@ impl<'h> Agent<'h> {
 
         if overflow
             && removed > 0
-            && !compaction::is_overflow(usage, &self.model, self.config.compaction_buffer)
+            && !compaction::is_overflow(usage, &self.model, self.effective_compaction_buffer())
         {
             info!(
                 chars_removed = removed,
@@ -942,20 +984,24 @@ impl<'h> Agent<'h> {
     }
 
     async fn do_compact(&mut self) -> Result<(), AgentError> {
-        let (compact_provider, compact_model) =
-            resolve_compaction_model(&self.provider, &self.model, self.timeouts).await;
-        self.total_usage += compaction::compact_history(
-            &*compact_provider,
-            &compact_model,
-            self.history,
-            &self.event_tx,
-            &self.cancel,
-            #[cfg(feature = "onnx")]
-            self.last_relevance_scores.as_deref(),
-            #[cfg(not(feature = "onnx"))]
-            None,
-        )
-        .await?;
+        let vcc_ok =
+            compaction::vcc_compact(self.history, &self.model, self.config.compaction_buffer)?;
+        if !vcc_ok {
+            let (compact_provider, compact_model) =
+                resolve_compaction_model(&self.provider, &self.model, self.timeouts).await;
+            self.total_usage += compaction::compact_history(
+                &*compact_provider,
+                &compact_model,
+                self.history,
+                &self.event_tx,
+                &self.cancel,
+                #[cfg(feature = "onnx")]
+                self.last_relevance_scores.as_deref(),
+                #[cfg(not(feature = "onnx"))]
+                None,
+            )
+            .await?;
+        }
         self.rollback_len = self.history.len();
         self.history
             .push(Message::synthetic(CONTINUE_AFTER_COMPACT.into()));
@@ -1462,5 +1508,93 @@ mod tests {
             e,
             AgentEvent::ToolDone(done) if done.is_error && done.id == expected_error_id
         )));
+    }
+
+    struct PanickingProvider;
+    impl Provider for PanickingProvider {
+        fn stream_message<'a>(
+            &'a self,
+            _: &'a Model,
+            _: &'a [Message],
+            _: &'a str,
+            _: &'a Value,
+            _: &'a flume::Sender<ProviderEvent>,
+            _: RequestOptions,
+            _: Option<&str>,
+        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+            Box::pin(async { panic!("LLM should not be called when VCC compaction succeeds") })
+        }
+        fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
+            Box::pin(async { unimplemented!() })
+        }
+    }
+
+    fn vcc_overflow_history() -> Vec<Message> {
+        let mut msgs = Vec::new();
+        for i in 0..6 {
+            msgs.push(Message::user(format!("do task {i}")));
+            msgs.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: format!("t{i}"),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": format!("echo step{i}")}),
+                }],
+                ..Default::default()
+            });
+            msgs.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: format!("t{i}"),
+                    content: format!("output {i}"),
+                    images: vec![],
+                    is_error: false,
+                }],
+                ..Default::default()
+            });
+        }
+        msgs.push(Message::user("final user message".into()));
+        msgs
+    }
+
+    #[tokio::test]
+    async fn do_compact_uses_vcc_and_skips_llm_when_under_limit() {
+        let mut history = History::new(vcc_overflow_history());
+        let (run_params, event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = Arc::new(PanickingProvider);
+        let mut agent = Agent::new(params, run_params);
+        agent.do_compact().await.unwrap();
+        drop(event_rx);
+        let msgs = agent.history.as_slice();
+        assert!(matches!(msgs[0].role, Role::Assistant));
+        assert!(msgs.iter().any(|m| m.content.iter().any(|b| matches!(
+            b,
+            ContentBlock::Text { text } if text.starts_with("This summary captures")
+        ))));
+        assert!(msgs.len() > 1, "tail must be preserved");
+    }
+
+    #[tokio::test]
+    async fn do_compact_falls_back_to_llm_when_vcc_insufficient() {
+        let mut history = History::new(vcc_overflow_history());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
+        params.model = {
+            let mut m = default_model();
+            m.context_window = 1;
+            m
+        };
+        let mut agent = Agent::new(params, run_params);
+        agent.do_compact().await.unwrap();
+        let msgs = agent.history.as_slice();
+        assert_eq!(
+            msgs.len(),
+            3,
+            "expected [user, assistant, continue-synthetic]"
+        );
+        assert!(matches!(msgs[0].role, Role::User));
+        assert!(matches!(msgs[1].role, Role::Assistant));
     }
 }

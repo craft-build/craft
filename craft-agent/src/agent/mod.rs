@@ -20,6 +20,8 @@ pub mod tool_dispatch;
 pub(crate) mod trust;
 mod ttsr;
 mod validation;
+pub(crate) mod vcc;
+pub(crate) mod vcc_recall;
 
 mod embed_types;
 pub use embed_types::EmbedRequest;

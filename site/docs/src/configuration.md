@@ -182,6 +182,23 @@ Time-traveling stream rules. When enabled, rules loaded from `.craft/rules/*.md`
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable time-traveling stream rules |
 
+### `agent.compaction`
+
+Per-model compaction thresholds. When set, override the global `agent.compaction_buffer` and `agent.compaction_threshold` for matching models. Lookup order: exact `provider/model_id` key, then bare `model_id`, then `global_threshold`. Either `reserve_tokens` (absolute) or `compact_percent` (percentage of the context window to compact at) may be set on a threshold; `reserve_tokens` wins when both are present.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model_thresholds` | table<string, ModelThreshold> | `{}` | Map of `provider/model_id` (or bare `model_id`) to per-model threshold |
+| `global_threshold` | ModelThreshold? | `nil` | Fallback threshold applied when no model-specific entry matches |
+
+Each `ModelThreshold` may set:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `reserve_tokens` | u32? | `nil` | Absolute tokens to reserve; compacts once remaining context drops below this |
+| `compact_percent` | u8? | `nil` | Compact at this percentage of the context window (1-99) |
+| `keep_recent_tokens` | u32? | `nil` | Advisory token budget for the preserved tail (reserved for future use) |
+
 ### `provider`
 
 | Field | Type | Default | Min | Description |

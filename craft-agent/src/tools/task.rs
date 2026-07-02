@@ -495,6 +495,7 @@ mod tests {
             (super::super::REVIEW_TOOL_NAME, MAIN),
             (super::super::READ_FINDINGS_TOOL_NAME, MAIN),
             (crate::agent::retrieve::Retrieve::NAME, MAIN | RES),
+            (crate::agent::vcc_recall::VccRecall::NAME, MAIN | RES),
             (super::super::WRITE_TOOL_NAME, MAIN | GEN | INT),
             (super::super::EDIT_TOOL_NAME, MAIN | GEN | INT),
             (super::super::MULTIEDIT_TOOL_NAME, MAIN | GEN | INT),

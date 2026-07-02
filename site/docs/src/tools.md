@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 43 built-in tools. This is the full reference.
+Craft ships with 44 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -252,6 +252,16 @@ Retrieve the original (uncompressed) content for a previously compressed tool ou
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `hash` | string | yes | Hash of the compressed content to retrieve |
+
+### `vcc_recall`
+
+Search the current session's full history (across compactions) losslessly. Supports regex queries, paging, and full-content expansion. Use to recall prior work, decisions, or context that was summarized away. Omit the query to browse recent entries.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `expand` | array | no | Entry indices to return full untruncated content for. Works alone or alongside a query. |
+| `page` | integer | no | Page number (1-based) for paginated search results. Default: 1. |
+| `query` | string | no | Search terms or regex pattern (e.g. 'auth|login', 'fail.*build'). Multi-word queries are OR-ranked by relevance. Omit to browse recent history. |
 
 ## Review & Findings
 

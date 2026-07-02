@@ -386,6 +386,8 @@ pub struct AgentFileConfig {
     pub advisor: AdvisorConfig,
     #[serde(default)]
     pub ttsr: TtsrConfig,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
     pub hooks_enabled: Option<bool>,
     pub judge_model: Option<String>,
 }
@@ -414,6 +416,7 @@ impl AgentFileConfig {
         if overlay.ttsr.enabled {
             self.ttsr = overlay.ttsr;
         }
+        self.compaction.merge(overlay.compaction);
     }
 }
 
@@ -926,6 +929,92 @@ impl SmallModelConfig {
     }
 }
 
+const MIN_COMPACT_PERCENT: u8 = 1;
+const MAX_COMPACT_PERCENT: u8 = 99;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct ModelThreshold {
+    #[serde(default)]
+    pub reserve_tokens: Option<u32>,
+    #[serde(default)]
+    pub compact_percent: Option<u8>,
+    #[serde(default)]
+    pub keep_recent_tokens: Option<u32>,
+}
+
+impl ModelThreshold {
+    fn merge_from(&mut self, overlay: ModelThreshold) {
+        if overlay.reserve_tokens.is_some() {
+            self.reserve_tokens = overlay.reserve_tokens;
+        }
+        if overlay.compact_percent.is_some() {
+            self.compact_percent = overlay.compact_percent;
+        }
+        if overlay.keep_recent_tokens.is_some() {
+            self.keep_recent_tokens = overlay.keep_recent_tokens;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CompactionConfig {
+    #[serde(default)]
+    pub model_thresholds: HashMap<String, ModelThreshold>,
+    #[serde(default)]
+    pub global_threshold: Option<ModelThreshold>,
+}
+
+impl CompactionConfig {
+    fn merge(&mut self, overlay: CompactionConfig) {
+        for (key, over) in &overlay.model_thresholds {
+            self.model_thresholds
+                .entry(key.clone())
+                .or_default()
+                .merge_from(*over);
+        }
+        if overlay.global_threshold.is_some() {
+            self.global_threshold = overlay.global_threshold;
+        }
+    }
+}
+
+/// Resolve the effective [`ModelThreshold`] for a given model.
+///
+/// Lookup order: exact `provider/modelId` key, then `modelId`, then
+/// `global_threshold`. Returns `None` when no override applies.
+pub fn resolve_threshold<'a>(
+    config: &'a CompactionConfig,
+    provider_model_id: Option<&str>,
+    model_id: &str,
+) -> Option<&'a ModelThreshold> {
+    if let Some(key) = provider_model_id
+        && let Some(t) = config.model_thresholds.get(key)
+    {
+        return Some(t);
+    }
+    if let Some(t) = config.model_thresholds.get(model_id) {
+        return Some(t);
+    }
+    config.global_threshold.as_ref()
+}
+
+/// Resolve the effective reserve-tokens for a threshold, handling both
+/// absolute (`reserve_tokens`) and percentage (`compact_percent`) modes.
+pub fn resolve_reserve_tokens(threshold: &ModelThreshold, context_window: u32) -> Option<u32> {
+    if let Some(reserve) = threshold.reserve_tokens {
+        return Some(reserve);
+    }
+    let pct = threshold.compact_percent?;
+    if !(MIN_COMPACT_PERCENT..=MAX_COMPACT_PERCENT).contains(&pct) {
+        return None;
+    }
+    if context_window == 0 {
+        return None;
+    }
+    let reserve = (context_window as f64 * (1.0 - pct as f64 / 100.0)).round() as u32;
+    Some(reserve)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DynamicToolsConfig {
     #[serde(default = "default_true")]
@@ -1048,6 +1137,9 @@ pub struct AgentConfig {
     #[config(skip, default = "TtsrConfig::default()")]
     pub ttsr: TtsrConfig,
 
+    #[config(skip, default = "CompactionConfig::default()")]
+    pub compaction: CompactionConfig,
+
     #[config(skip, default = "true")]
     pub hooks_enabled: bool,
 
@@ -1103,6 +1195,7 @@ impl AgentConfig {
             dynamic_tools: file.dynamic_tools,
             advisor: file.advisor,
             ttsr: file.ttsr,
+            compaction: file.compaction,
             hooks_enabled: file.hooks_enabled.unwrap_or(true),
             max_turns: None,
             judge_model: file.judge_model,
@@ -2397,5 +2490,103 @@ tasks = []
                 pair[1]
             );
         }
+    }
+
+    #[test_case(Some(32_768), 200_000, Some(32_768) ; "reserve_tokens_absolute")]
+    #[test_case(None, 200_000, None ; "no_threshold_returns_none")]
+    fn resolve_reserve_tokens_uses_absolute_or_none(
+        reserve: Option<u32>,
+        context_window: u32,
+        expected: Option<u32>,
+    ) {
+        let threshold = ModelThreshold {
+            reserve_tokens: reserve,
+            ..Default::default()
+        };
+        assert_eq!(resolve_reserve_tokens(&threshold, context_window), expected);
+    }
+
+    #[test]
+    fn resolve_reserve_tokens_compact_percent_rounds() {
+        let threshold = ModelThreshold {
+            compact_percent: Some(65),
+            ..Default::default()
+        };
+        assert_eq!(resolve_reserve_tokens(&threshold, 200_000), Some(70_000));
+    }
+
+    #[test_case(0 ; "percent_zero")]
+    #[test_case(100 ; "percent_hundred")]
+    fn resolve_reserve_tokens_rejects_out_of_range(pct: u8) {
+        let threshold = ModelThreshold {
+            compact_percent: Some(pct),
+            ..Default::default()
+        };
+        assert_eq!(resolve_reserve_tokens(&threshold, 200_000), None);
+    }
+
+    #[test]
+    fn resolve_reserve_tokens_rejects_zero_context_window() {
+        let threshold = ModelThreshold {
+            compact_percent: Some(65),
+            ..Default::default()
+        };
+        assert_eq!(resolve_reserve_tokens(&threshold, 0), None);
+    }
+
+    #[test]
+    fn resolve_threshold_prefers_provider_model_key() {
+        let mut config = CompactionConfig::default();
+        config.model_thresholds.insert(
+            "anthropic/claude".into(),
+            ModelThreshold {
+                reserve_tokens: Some(10_000),
+                ..Default::default()
+            },
+        );
+        config.model_thresholds.insert(
+            "claude".into(),
+            ModelThreshold {
+                reserve_tokens: Some(20_000),
+                ..Default::default()
+            },
+        );
+        let t = resolve_threshold(&config, Some("anthropic/claude"), "claude").unwrap();
+        assert_eq!(t.reserve_tokens, Some(10_000));
+    }
+
+    #[test]
+    fn resolve_threshold_falls_back_to_model_id_then_global() {
+        let config = CompactionConfig {
+            model_thresholds: HashMap::from([(
+                "claude".into(),
+                ModelThreshold {
+                    reserve_tokens: Some(20_000),
+                    ..Default::default()
+                },
+            )]),
+            global_threshold: Some(ModelThreshold {
+                reserve_tokens: Some(30_000),
+                ..Default::default()
+            }),
+        };
+        let t = resolve_threshold(&config, Some("anthropic/other"), "claude").unwrap();
+        assert_eq!(t.reserve_tokens, Some(20_000));
+
+        let t = resolve_threshold(&config, Some("anthropic/other"), "unknown").unwrap();
+        assert_eq!(t.reserve_tokens, Some(30_000));
+
+        assert_eq!(
+            resolve_threshold(&config, None, "unknown")
+                .unwrap()
+                .reserve_tokens,
+            Some(30_000)
+        );
+    }
+
+    #[test]
+    fn resolve_threshold_returns_none_when_unset() {
+        let config = CompactionConfig::default();
+        assert!(resolve_threshold(&config, Some("anthropic/x"), "x").is_none());
     }
 }

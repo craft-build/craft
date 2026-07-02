@@ -270,6 +270,7 @@ pub struct ToolContext {
     pub promoted: crate::tools::dynamic::PromotedTools,
     pub dynamic: crate::tools::dynamic::DynamicContext,
     pub hooks: Option<Arc<dyn crate::Hooks>>,
+    pub session_id: Option<String>,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -669,6 +670,7 @@ register_tools! {
     read_findings::ReadFindings,
     review::Review,
     crate::agent::retrieve::Retrieve,
+    crate::agent::vcc_recall::VccRecall,
     outline::Outline,
     safety::Safety,
     zoom::Zoom,
@@ -757,6 +759,7 @@ pub(crate) fn interpreter_ctx(
         hooks: None,
         snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
         pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
+        session_id: None,
     }
 }
 

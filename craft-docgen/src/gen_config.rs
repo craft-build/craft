@@ -247,6 +247,50 @@ fn write_nested_agent_sections(out: &mut String) {
     )
     .unwrap();
     writeln!(out).unwrap();
+
+    writeln!(out, "### `agent.compaction`\n").unwrap();
+    writeln!(
+        out,
+        "Per-model compaction thresholds. When set, override the global \
+         `agent.compaction_buffer` and `agent.compaction_threshold` for matching models. \
+         Lookup order: exact `provider/model_id` key, then bare `model_id`, then \
+         `global_threshold`. Either `reserve_tokens` (absolute) or `compact_percent` \
+         (percentage of the context window to compact at) may be set on a threshold; \
+         `reserve_tokens` wins when both are present.\n"
+    )
+    .unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `model_thresholds` | table<string, ModelThreshold> | `{{}}` | Map of `provider/model_id` (or bare `model_id`) to per-model threshold |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `global_threshold` | ModelThreshold? | `nil` | Fallback threshold applied when no model-specific entry matches |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "Each `ModelThreshold` may set:\n").unwrap();
+    writeln!(out, "| Field | Type | Default | Description |").unwrap();
+    writeln!(out, "|-------|------|---------|-------------|").unwrap();
+    writeln!(
+        out,
+        "| `reserve_tokens` | u32? | `nil` | Absolute tokens to reserve; compacts once remaining context drops below this |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `compact_percent` | u8? | `nil` | Compact at this percentage of the context window (1-99) |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `keep_recent_tokens` | u32? | `nil` | Advisory token budget for the preserved tail (reserved for future use) |"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
 }
 
 pub fn generate() -> String {
