@@ -2,7 +2,7 @@
 
 Craft talks to LLM providers over their HTTP APIs. Models are split into three tiers: **weak** (cheap and fast), **medium** (balanced), and **strong** (highest capability, highest cost). There is also a **compaction** tier for choosing a dedicated model to summarize context when the conversation grows long.
 
-Open the model picker with `/model` and press `1`, `2`, `3`, or `4` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions.
+Open the model picker with `/model` and press `!`, `@`, `#`, or `$` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions.
 
 ## Authentication
 

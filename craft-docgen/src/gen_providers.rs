@@ -3,7 +3,7 @@ use craft_providers::provider::ProviderKind;
 use std::fmt::Write;
 use strum::IntoEnumIterator;
 
-const TIER_PICKER_NOTE: &str = r#"Open the model picker with `/model` and press `1`, `2`, `3`, or `4` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions."#;
+const TIER_PICKER_NOTE: &str = r#"Open the model picker with `/model` and press `!`, `@`, `#`, or `$` on any row to assign it to strong, medium, weak, or compaction. Press the same key again to remove the assignment. Your overrides are saved to `~/.local/state/craft/model-tiers` and apply across sessions."#;
 
 const AUTH_SECTION: &str = r#"## Authentication
 
