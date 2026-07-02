@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-07-02
+
+### Added
+
+- **agent**: no-LLM VCC compaction tier. Ports pi-vcc's deterministic
+  structured-summary compaction as a third tier that runs before the LLM
+  compactor. On overflow, VCC builds a bracket-tagged summary of the older
+  history and keeps a task-boundary-aware tail; if that brings context under
+  the limit the LLM call is skipped entirely (cost + latency win), otherwise
+  it falls through to the existing `compact_history`, which remains the
+  safety net. The new `vcc_recall` tool offers lossless session-JSONL search
+  across compactions (regex/term query, expand, page). Also fixes UTF-8
+  panics found on review: `compress_bash`, the bash command display, and the
+  bash-output scan window sliced at raw byte indices and could panic on
+  multibyte input; the shared `util::clip`/`clip_sentence` had the same
+  latent bug. All now floor to a char boundary, covered by regression tests.
+  (`fb87d80`)
+
+### Changed
+
+- **ui**: model tier shortcuts are now `!@#$` instead of `1234`, since digits
+  are far more common in model names than those symbols and the old keys
+  blocked searching for model names containing numbers. The corresponding
+  keys for various other keyboard layouts are also considered.
+  (`f3a992e`)
+
+### Fixed
+
+- **agent**: edits outside the cwd now prompt instead of hard-blocking. The
+  old `check_physical_boundary` hard-blocked every write/edit/multiedit
+  outside cwd, even normal cross-project edits, labeling them all as symlink
+  escape. Renamed to `boundary_block_reason`, it now only hard-blocks truly
+  unverifiable paths (where the project root cannot be resolved); everything
+  else, including paths outside cwd and even symlink escapes, flows through
+  the normal permission prompt. (`9a824a3`)
+
 ## [0.7.4] - 2026-06-29
 
 ### Added
@@ -850,7 +886,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/craft-build/craft/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/craft-build/craft/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/craft-build/craft/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/craft-build/craft/compare/v0.7.1...v0.7.2
