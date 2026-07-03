@@ -172,45 +172,49 @@ impl OpenAiCompatProvider {
         }
     }
 
+    pub async fn fetch_and_parse_models(
+        &self,
+        auth: &ResolvedAuth,
+        parse_fn: impl Fn(&Value) -> Option<crate::model::ModelInfo>,
+    ) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
+        let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
+        let url = format!("{base}/models");
+        let body_text = self.get_text(auth, &url).await?;
+        let body: Value = serde_json::from_str(&body_text)?;
+        let mut models: Vec<crate::model::ModelInfo> = body["data"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(parse_fn).collect())
+            .unwrap_or_default();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(models)
+    }
+
+    fn default_model_parser(m: &Value) -> Option<crate::model::ModelInfo> {
+        let id = m["id"].as_str()?.to_string();
+        let mut info = crate::model::ModelInfo::new(id);
+        if let Some(n) = m.get("context_window").and_then(|v| v.as_u64()) {
+            info.context_window = Some(n as u32);
+        } else if let Some(n) = m.get("context_length").and_then(|v| v.as_u64()) {
+            info.context_window = Some(n as u32);
+        } else if let Some(n) = m.get("max_input_tokens").and_then(|v| v.as_u64()) {
+            info.context_window = Some(n as u32);
+        } else if let Some(n) = m.get("max_context_length").and_then(|v| v.as_u64()) {
+            info.context_window = Some(n as u32);
+        }
+        if let Some(n) = m.get("max_output_tokens").and_then(|v| v.as_u64()) {
+            info.max_output_tokens = Some(n as u32);
+        } else if let Some(n) = m.get("max_tokens").and_then(|v| v.as_u64()) {
+            info.max_output_tokens = Some(n as u32);
+        }
+        Some(info)
+    }
+
     pub async fn do_list_models_with_info(
         &self,
         auth: &ResolvedAuth,
     ) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
-        let response = self.build_request("GET", "/models", auth).send().await?;
-        if response.status().as_u16() != 200 {
-            return Err(AgentError::from_response(response).await);
-        }
-
-        let body: Value = serde_json::from_str(&response.text().await?)?;
-        let mut models: Vec<crate::model::ModelInfo> = body["data"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        let id = m["id"].as_str()?.to_string();
-                        let mut info = crate::model::ModelInfo::new(id);
-                        if let Some(n) = m.get("context_window").and_then(|v| v.as_u64()) {
-                            info.context_window = Some(n as u32);
-                        } else if let Some(n) = m.get("context_length").and_then(|v| v.as_u64()) {
-                            info.context_window = Some(n as u32);
-                        } else if let Some(n) = m.get("max_input_tokens").and_then(|v| v.as_u64()) {
-                            info.context_window = Some(n as u32);
-                        } else if let Some(n) = m.get("max_context_length").and_then(|v| v.as_u64())
-                        {
-                            info.context_window = Some(n as u32);
-                        }
-                        if let Some(n) = m.get("max_output_tokens").and_then(|v| v.as_u64()) {
-                            info.max_output_tokens = Some(n as u32);
-                        } else if let Some(n) = m.get("max_tokens").and_then(|v| v.as_u64()) {
-                            info.max_output_tokens = Some(n as u32);
-                        }
-                        Some(info)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        models.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(models)
+        self.fetch_and_parse_models(auth, Self::default_model_parser)
+            .await
     }
 
     pub async fn do_list_models(&self, auth: &ResolvedAuth) -> Result<Vec<String>, AgentError> {
