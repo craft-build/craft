@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
-use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
+use crate::{AgentError, EffortScale, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::super::lock_unpoison;
 use super::auth;
@@ -189,7 +189,8 @@ impl Provider for OpenAi {
             }
 
             let mut body = self.compat.build_body(model, messages, system, tools);
-            opts.thinking.apply_reasoning_effort(&mut body);
+            opts.thinking
+                .apply_reasoning_effort(&mut body, EffortScale::Standard);
             self.with_oauth_retry(|| async {
                 let auth = self.current_auth();
                 self.compat

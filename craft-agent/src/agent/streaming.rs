@@ -93,7 +93,7 @@ pub(crate) async fn stream_with_retry(
             async move { forward_provider_events(prx, &event_tx, ttsr, turn, fired).await }
         });
         let result = tokio::select! {
-            r = cur_provider.stream_message(cur_model, messages, system, tools, &ptx, opts, session_id) => r,
+            r = cur_provider.stream_message(cur_model, messages, system, tools, &ptx, opts.clamped(cur_model), session_id) => r,
             _ = cancel.cancelled() => Err(AgentError::Cancelled),
         };
         drop(ptx);

@@ -70,7 +70,12 @@ impl SessionState {
         let context_size = session.meta.context_size;
 
         Self {
-            thinking: session.meta.thinking.map(Into::into).unwrap_or_default(),
+            thinking: session
+                .meta
+                .thinking
+                .map(Into::into)
+                .filter(|_| model.supports_thinking())
+                .unwrap_or_default(),
             fast: session.meta.fast && model.supports_fast(),
             session,
             model,
@@ -107,11 +112,11 @@ impl SessionState {
     }
 
     pub fn update_model(&mut self, model: &Model) {
+        if !model.supports_thinking() {
+            self.thinking = ThinkingConfig::Off;
+        }
         if !model.supports_fast() {
             self.fast = false;
-        }
-        if !model.provider.supports_thinking() {
-            self.thinking = ThinkingConfig::Off;
         }
         self.session.model = model.spec();
         self.model = model.clone();
