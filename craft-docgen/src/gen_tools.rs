@@ -14,6 +14,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "read",
             "write",
             "edit",
+            "edit_lines",
             "multiedit",
             "apply_patch",
             "delete",

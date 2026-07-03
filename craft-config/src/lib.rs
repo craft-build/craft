@@ -87,6 +87,10 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "websearch",
 ];
 
+pub const OPT_IN_TOOLS: &[&str] = &["edit_lines"];
+
+pub const FILE_WRITE_TOOLS: &[&str] = &["write", "edit", "multiedit", "edit_lines"];
+
 #[derive(Debug, Clone, Copy)]
 pub enum ConfigValue {
     Bool(bool),
@@ -244,12 +248,17 @@ impl RawConfig {
     }
 
     pub fn into_config(self, no_rtk: bool) -> Result<Config, ConfigError> {
-        let disabled_tools: Vec<String> = self
+        let mut disabled_tools: Vec<String> = self
             .tools
             .iter()
             .filter(|(_, cfg)| cfg.enabled == Some(false))
             .map(|(name, _)| name.clone())
             .collect();
+        for &name in OPT_IN_TOOLS {
+            if self.tools.get(name).and_then(|t| t.enabled) != Some(true) {
+                disabled_tools.push(name.to_string());
+            }
+        }
         Ok(Config {
             always_yolo: self.always_yolo.unwrap_or(false),
             always_fast: self.always_fast.unwrap_or(false),
@@ -775,7 +784,8 @@ impl ToolOutputLines {
             "task" => self.task,
             "grep" | "glob" => self.grep,
             "read" => self.read,
-            "write" | "edit" | "multiedit" | "memory" => self.write,
+            "memory" => self.write,
+            name if FILE_WRITE_TOOLS.contains(&name) => self.write,
             "webfetch" | "websearch" => self.web,
             _ => self.other,
         }
@@ -2488,6 +2498,45 @@ tasks = []
                 "DEFAULT_BUILTINS not sorted: {:?} >= {:?}",
                 pair[0],
                 pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn opt_in_tools_require_explicit_enable() {
+        let default_config = RawConfig::default().into_config(false).unwrap();
+        for &name in OPT_IN_TOOLS {
+            assert!(
+                default_config
+                    .agent
+                    .disabled_tools
+                    .contains(&name.to_string()),
+                "{name} should be disabled by default"
+            );
+        }
+
+        let mut tools = HashMap::new();
+        for &name in OPT_IN_TOOLS {
+            tools.insert(
+                name.to_string(),
+                ToolFileConfig {
+                    enabled: Some(true),
+                },
+            );
+        }
+        let enabled_config = RawConfig {
+            tools,
+            ..Default::default()
+        }
+        .into_config(false)
+        .unwrap();
+        for &name in OPT_IN_TOOLS {
+            assert!(
+                !enabled_config
+                    .agent
+                    .disabled_tools
+                    .contains(&name.to_string()),
+                "{name} should be enabled when configured"
             );
         }
     }

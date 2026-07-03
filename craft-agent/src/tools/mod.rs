@@ -17,6 +17,7 @@ mod conflicts;
 mod delete;
 mod dynamic;
 mod edit;
+mod edit_lines;
 mod file_tracker;
 pub mod fs_backend;
 mod fuzzy_replace;
@@ -163,6 +164,7 @@ pub const BROWSER_CLICK_TOOL_NAME: &str = browser::BrowserClick::NAME;
 pub const BROWSER_TEXT_TOOL_NAME: &str = browser::BrowserText::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
+pub const EDIT_LINES_TOOL_NAME: &str = edit_lines::EditLines::NAME;
 pub const RESOLVE_TOOL_NAME: &str = resolve::Resolve::NAME;
 pub const AST_EDIT_TOOL_NAME: &str = ast_edit::AstEdit::NAME;
 pub const GLOB_TOOL_NAME: &str = "glob";
@@ -653,6 +655,7 @@ register_tools! {
     read::Read,
     write::Write,
     edit::Edit,
+    edit_lines::EditLines,
     multiedit::MultiEdit,
     apply_patch::ApplyPatch,
     task::Task,

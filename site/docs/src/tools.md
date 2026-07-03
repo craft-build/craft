@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 44 built-in tools. This is the full reference.
+Craft ships with 45 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -48,6 +48,17 @@ Replace an exact string match in a file.
 | `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |
 | `path` | string | yes |  |  |
 | `replace_all` | boolean | no | false | Replace all occurrences |
+
+### `edit_lines`
+
+Edit lines by number. Omit `end` to insert before `start` without removing lines. Set `end` to replace or delete (empty `new_string`) a range.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `end` | integer | no | Last line, inclusive. Omit to insert before start without removing lines. |
+| `new_string` | string | yes | Replacement text. Empty deletes the range. |
+| `path` | string | yes |  |
+| `start` | integer | yes | First line (1-indexed) |
 
 ### `multiedit`
 
