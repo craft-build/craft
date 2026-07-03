@@ -60,7 +60,10 @@ impl OpenAiCompatProvider {
         auth: &ResolvedAuth,
         url: &str,
     ) -> Result<String, AgentError> {
-        let mut request = self.client.get(url);
+        let mut request = self
+            .client
+            .get(url)
+            .header("user-agent", super::user_agent());
         for (key, value) in &auth.headers {
             request = request.header(key.as_str(), value.as_str());
         }
@@ -78,7 +81,11 @@ impl OpenAiCompatProvider {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<String, AgentError> {
-        let mut request = self.client.post(url).header("content-type", content_type);
+        let mut request = self
+            .client
+            .post(url)
+            .header("content-type", content_type)
+            .header("user-agent", super::user_agent());
         for (key, value) in &auth.headers {
             request = request.header(key.as_str(), value.as_str());
         }
