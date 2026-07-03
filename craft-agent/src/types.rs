@@ -605,6 +605,7 @@ pub enum AgentEvent {
         context: PermissionContext,
     },
     AuthRequired,
+    Nudge,
     SubagentHistory {
         tool_use_id: String,
         messages: Vec<Message>,

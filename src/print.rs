@@ -224,6 +224,7 @@ pub async fn run(
             | AgentEvent::ToolSnapshot { .. }
             | AgentEvent::ToolHeaderSnapshot { .. }
             | AgentEvent::LiveToolBuf { .. }
+            | AgentEvent::Nudge
             | AgentEvent::Info { .. }
             | AgentEvent::AdvisorNote { .. }
             | AgentEvent::ModelEscalation { .. } => {}

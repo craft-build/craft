@@ -6,7 +6,8 @@ use tracing::{error, info, warn};
 
 use craft_providers::provider::Provider;
 use craft_providers::{
-    ContentBlock, Message, Model, ModelTier, RequestOptions, StopReason, StreamResponse, TokenUsage,
+    ContentBlock, Message, Model, ModelTier, RequestOptions, Role, StopReason, StreamResponse,
+    TokenUsage,
 };
 
 use super::compaction::{self, CONTINUE_AFTER_COMPACT};
@@ -33,6 +34,7 @@ use crate::{
 use craft_config::ToolOutputLines;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
+const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
 const HOOK_BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
 const DEFAULT_SMALL_MODEL_RATIO: f64 = 0.60;
@@ -119,6 +121,7 @@ pub struct Agent<'h> {
     config: AgentConfig,
     tool_output_lines: ToolOutputLines,
     reauth_attempts: u32,
+    post_tool_empty_retried: bool,
     permissions: Arc<PermissionManager>,
     opts: RequestOptions,
     session_id: Option<String>,
@@ -197,6 +200,7 @@ impl<'h> Agent<'h> {
             rollback_len: 0,
             mcp: None,
             reauth_attempts: 0,
+            post_tool_empty_retried: false,
             opts: RequestOptions::default(),
             session_id: params.session_id,
             file_tracker: params.file_tracker,
@@ -579,6 +583,24 @@ impl<'h> Agent<'h> {
                 &self.event_tx,
             );
         } else {
+            let has_text = response.message.first_text_content().is_some();
+
+            if !has_text && !self.post_tool_empty_retried && self.history.has_recent_tool_results(5)
+            {
+                self.post_tool_empty_retried = true;
+                warn!("empty response after tool calls, nudging model to continue");
+                self.event_tx.send(AgentEvent::Nudge)?;
+                self.history.push(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "(empty)".into(),
+                    }],
+                    ..Default::default()
+                });
+                self.history.push(Message::synthetic(NUDGE_PROMPT.into()));
+                return Ok(TurnOutcome::Continue);
+            }
+
             self.history.push(response.message);
 
             if stop_reason == Some(StopReason::MaxTokens)
@@ -735,6 +757,7 @@ impl<'h> Agent<'h> {
         &mut self,
         response: StreamResponse,
     ) -> Result<ToolBatchOutcome, AgentError> {
+        self.post_tool_empty_retried = false;
         let ctx = self.tool_context();
         let mut recent = {
             let mut d = self.doom.lock().unwrap_or_else(|e| e.into_inner());
@@ -1190,6 +1213,18 @@ mod tests {
         }
     }
 
+    fn empty_response() -> StreamResponse {
+        StreamResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![],
+                ..Default::default()
+            },
+            usage: TokenUsage::default(),
+            stop_reason: Some(StopReason::EndTurn),
+        }
+    }
+
     fn make_agent_params() -> AgentParams {
         AgentParams {
             provider: Arc::new(MockProvider::new(vec![])),
@@ -1596,5 +1631,51 @@ mod tests {
         );
         assert!(matches!(msgs[0].role, Role::User));
         assert!(matches!(msgs[1].role, Role::Assistant));
+    }
+
+    async fn run_nudge(responses: Vec<StreamResponse>) -> (Vec<Envelope>, Option<u32>) {
+        let mut history = History::new(Vec::new());
+        let (run_params, event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = Arc::new(MockProvider::new(responses));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(default_input()).await;
+        let events = drain_events(&event_rx);
+        let done = events.iter().find_map(|e| match &e.event {
+            AgentEvent::Done { num_turns, .. } => Some(*num_turns),
+            _ => None,
+        });
+        (events, done)
+    }
+
+    #[tokio::test]
+    async fn nudge_on_empty_after_tools() {
+        let (events, done) = run_nudge(vec![
+            tool_call_response("glob", "t1"),
+            empty_response(),
+            text_response(StopReason::EndTurn),
+        ])
+        .await;
+        assert!(has_event(&events, |e| matches!(e, AgentEvent::Nudge)));
+        assert_eq!(done.expect("expected Done event"), 3);
+    }
+
+    #[tokio::test]
+    async fn no_nudge_when_text_after_tools() {
+        let (events, done) = run_nudge(vec![
+            tool_call_response("glob", "t1"),
+            text_response(StopReason::EndTurn),
+        ])
+        .await;
+        assert!(!has_event(&events, |e| matches!(e, AgentEvent::Nudge)));
+        assert_eq!(done.expect("expected Done event"), 2);
+    }
+
+    #[tokio::test]
+    async fn no_nudge_without_recent_tools() {
+        let (events, done) =
+            run_nudge(vec![empty_response(), text_response(StopReason::EndTurn)]).await;
+        assert!(!has_event(&events, |e| matches!(e, AgentEvent::Nudge)));
+        assert_eq!(done.expect("expected Done event"), 1);
     }
 }

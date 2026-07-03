@@ -166,7 +166,7 @@ impl Message {
         }
     }
 
-    fn first_text_content(&self) -> Option<&str> {
+    pub fn first_text_content(&self) -> Option<&str> {
         self.content.iter().find_map(|b| match b {
             ContentBlock::Text { text } if !text.is_empty() => Some(text.as_str()),
             _ => None,
