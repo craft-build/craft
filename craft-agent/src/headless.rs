@@ -280,6 +280,7 @@ pub struct InteractiveHandle {
     pub cancel_tx: flume::Sender<()>,
     pub model_tx: flume::Sender<Model>,
     pub session_id: String,
+    pub permissions: Arc<PermissionManager>,
     pub task: tokio::task::JoinHandle<()>,
 }
 
@@ -323,6 +324,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
 
     let task = tokio::spawn({
         let session_id = session_id.clone();
+        let permissions = Arc::clone(&permissions);
         async move {
             let mut model = params.model;
             let mut provider: Arc<dyn Provider> =
@@ -474,6 +476,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         cancel_tx,
         model_tx,
         session_id,
+        permissions,
         task,
     }
 }

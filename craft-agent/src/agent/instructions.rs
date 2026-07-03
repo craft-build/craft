@@ -70,7 +70,7 @@ pub fn build_system_prompt(
     };
     let mut out = crate::prompt::assemble_raw(template, slots, &instructions);
 
-    if let AgentMode::Plan(plan_path) = mode {
+    if let Some(plan_path) = mode.plan_path() {
         let plan_vars = Vars::new().set("{plan_path}", plan_path.display().to_string());
         out.push_str(&plan_vars.apply(crate::prompt::PLAN_PROMPT));
     }

@@ -35,7 +35,7 @@ pub use tools::ToolFilter;
 pub mod types;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use craft_providers::AgentError;
 use craft_providers::Message;
@@ -52,6 +52,15 @@ pub enum AgentMode {
     #[default]
     Build,
     Plan(PathBuf),
+}
+
+impl AgentMode {
+    pub fn plan_path(&self) -> Option<&Path> {
+        match self {
+            Self::Plan(p) => Some(p),
+            Self::Build => None,
+        }
+    }
 }
 
 pub enum ExtractedCommand {

@@ -182,7 +182,13 @@ impl PermissionManager {
         })
     }
 
-    fn check_inner(&self, tool: &str, scopes: &[&str], force_prompt: bool) -> PermissionCheck {
+    fn check_inner(
+        &self,
+        tool: &str,
+        scopes: &[&str],
+        force_prompt: bool,
+        plan_path: Option<&Path>,
+    ) -> PermissionCheck {
         let session = self.session_rules();
         let rules = session
             .iter()
@@ -200,6 +206,15 @@ impl PermissionManager {
 
         if self.yolo.load(Ordering::Relaxed) {
             return PermissionCheck::Allowed;
+        }
+
+        if FILE_WRITE_TOOLS.contains(&tool)
+            && let Some(pp) = plan_path
+        {
+            let plan_scope = normalize_scope_path(&pp.display().to_string());
+            if scopes.iter().any(|s| normalize_scope_path(s) == plan_scope) {
+                return PermissionCheck::Allowed;
+            }
         }
 
         let is_allowed = |scope: &&str| {
@@ -237,12 +252,18 @@ impl PermissionManager {
         }
     }
 
-    pub fn check(&self, tool: &str, scope: &str) -> PermissionCheck {
-        self.check_inner(tool, &[scope], false)
+    pub fn check(&self, tool: &str, scope: &str, plan_path: Option<&Path>) -> PermissionCheck {
+        self.check_inner(tool, &[scope], false, plan_path)
     }
 
-    pub fn check_multi(&self, tool: &str, scopes: &[&str], force_prompt: bool) -> PermissionCheck {
-        self.check_inner(tool, scopes, force_prompt)
+    pub fn check_multi(
+        &self,
+        tool: &str,
+        scopes: &[&str],
+        force_prompt: bool,
+        plan_path: Option<&Path>,
+    ) -> PermissionCheck {
+        self.check_inner(tool, scopes, force_prompt, plan_path)
     }
 
     pub fn add_session_rule(&self, rule: PermissionRule) {
@@ -340,6 +361,7 @@ impl PermissionManager {
         persist
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn enforce(
         &self,
         tool: &str,
@@ -348,6 +370,7 @@ impl PermissionManager {
         user_response_rx: Option<&tokio::sync::Mutex<flume::Receiver<String>>>,
         request_id: &str,
         cancel: &crate::CancelToken,
+        plan_path: Option<&Path>,
     ) -> Result<(), PermissionError> {
         let scope_refs: Vec<&str> = scopes.scopes.iter().map(|s| s.as_str()).collect();
         let deny = |guidance: Option<String>| {
@@ -358,16 +381,16 @@ impl PermissionManager {
             }
         };
 
-        let (pt, ps, force_prompt) = match self.check_inner(tool, &scope_refs, scopes.force_prompt)
-        {
-            PermissionCheck::Allowed => return Ok(()),
-            PermissionCheck::Denied => return Err(deny(None)),
-            PermissionCheck::NeedsPrompt {
-                tool,
-                scopes,
-                force_prompt,
-            } => (tool, scopes, force_prompt),
-        };
+        let (pt, ps, force_prompt) =
+            match self.check_inner(tool, &scope_refs, scopes.force_prompt, plan_path) {
+                PermissionCheck::Allowed => return Ok(()),
+                PermissionCheck::Denied => return Err(deny(None)),
+                PermissionCheck::NeedsPrompt {
+                    tool,
+                    scopes,
+                    force_prompt,
+                } => (tool, scopes, force_prompt),
+            };
 
         let Some(rx) = user_response_rx else {
             warn!(tool, scope = %scopes.scopes.join("; "), "no permission response channel");
@@ -376,7 +399,7 @@ impl PermissionManager {
 
         let guard = rx.lock().await;
         let refs: Vec<&str> = ps.iter().map(|s| s.as_str()).collect();
-        let (t2, s2) = match self.check_inner(&pt, &refs, force_prompt) {
+        let (t2, s2) = match self.check_inner(&pt, &refs, force_prompt, plan_path) {
             PermissionCheck::Allowed => return Ok(()),
             PermissionCheck::Denied => return Err(deny(None)),
             PermissionCheck::NeedsPrompt { tool, scopes, .. } => (tool, scopes),
@@ -567,7 +590,7 @@ mod tests {
             make_config(rules.into_iter().map(allow_rule).collect()),
             PathBuf::from("/tmp"),
         );
-        let check = mgr.check_multi("bash", &scopes, false);
+        let check = mgr.check_multi("bash", &scopes, false, None);
         assert_eq!(matches!(check, PermissionCheck::Allowed), expect_allowed);
     }
 
@@ -582,7 +605,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check_multi("bash", &["cd /tmp", "cargo test", "rm -rf /"], false),
+            mgr.check_multi("bash", &["cd /tmp", "cargo test", "rm -rf /"], false, None),
             PermissionCheck::Denied
         ));
     }
@@ -591,7 +614,7 @@ mod tests {
     fn complex_constructs_force_prompt_even_with_allow_star() {
         let mgr = PermissionManager::new(make_config(vec![allow_rule("*")]), PathBuf::from("/tmp"));
         assert!(matches!(
-            mgr.check_multi("bash", &["echo $(whoami)"], true),
+            mgr.check_multi("bash", &["echo $(whoami)"], true, None),
             PermissionCheck::NeedsPrompt { .. }
         ));
     }
@@ -600,7 +623,7 @@ mod tests {
     fn write_in_cwd() {
         let scope = canonical_cwd().join("file.txt");
         assert!(matches!(
-            default_mgr().check("write", &scope.to_string_lossy()),
+            default_mgr().check("write", &scope.to_string_lossy(), None),
             PermissionCheck::Allowed
         ));
     }
@@ -609,14 +632,17 @@ mod tests {
     #[test_case("task", "task:research" => true ; "task_allowed")]
     #[test_case("bash", "cargo test" => false ; "bash_prompts")]
     fn builtin_check(tool: &str, scope: &str) -> bool {
-        matches!(default_mgr().check(tool, scope), PermissionCheck::Allowed)
+        matches!(
+            default_mgr().check(tool, scope, None),
+            PermissionCheck::Allowed
+        )
     }
 
     #[test]
     fn path_traversal_prompts() {
         let path = normalize_scope_path("/tmp/../etc/passwd");
         assert!(matches!(
-            default_mgr().check("write", &path),
+            default_mgr().check("write", &path, None),
             PermissionCheck::NeedsPrompt { .. }
         ));
     }
@@ -737,7 +763,7 @@ mod tests {
         );
         mgr.add_session_rule(deny_rule("cargo *"));
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::Denied
         ));
     }
@@ -753,7 +779,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check("bash", "rm -rf /"),
+            mgr.check("bash", "rm -rf /", None),
             PermissionCheck::Denied
         ));
     }
@@ -769,7 +795,7 @@ mod tests {
             &PermissionAnswer::AllowSession,
         );
         assert!(matches!(
-            mgr.check("bash", "cargo build"),
+            mgr.check("bash", "cargo build", None),
             PermissionCheck::Allowed
         ));
     }
@@ -783,11 +809,11 @@ mod tests {
             &PermissionAnswer::DenyAlwaysLocal,
         );
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::Denied
         ));
         assert!(matches!(
-            mgr.check("bash", "cargo build"),
+            mgr.check("bash", "cargo build", None),
             PermissionCheck::NeedsPrompt { .. }
         ));
     }
@@ -812,10 +838,10 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check_multi("bash", &["cargo test", "git push"], false),
+            mgr.check_multi("bash", &["cargo test", "git push"], false, None),
             PermissionCheck::Allowed
         ));
-        match mgr.check_multi("bash", &["cargo test", "git push"], true) {
+        match mgr.check_multi("bash", &["cargo test", "git push"], true, None) {
             PermissionCheck::NeedsPrompt {
                 scopes,
                 force_prompt,
@@ -833,7 +859,7 @@ mod tests {
         let mgr =
             PermissionManager::new(make_config(vec![deny_rule("rm *")]), PathBuf::from("/tmp"));
         assert!(matches!(
-            mgr.check_multi("bash", &["rm -rf /"], true),
+            mgr.check_multi("bash", &["rm -rf /"], true, None),
             PermissionCheck::Denied
         ));
     }
@@ -844,7 +870,7 @@ mod tests {
             make_config(vec![allow_rule("cargo *")]),
             PathBuf::from("/tmp"),
         );
-        match mgr.check_multi("bash", &["cargo test", "git push", "ls"], false) {
+        match mgr.check_multi("bash", &["cargo test", "git push", "ls"], false, None) {
             PermissionCheck::NeedsPrompt { scopes, .. } => {
                 assert_eq!(scopes, vec!["git push", "ls"]);
             }
@@ -861,11 +887,11 @@ mod tests {
             &PermissionAnswer::AllowSession,
         );
         assert!(matches!(
-            mgr.check("bash", "cargo build"),
+            mgr.check("bash", "cargo build", None),
             PermissionCheck::Allowed
         ));
         assert!(matches!(
-            mgr.check("bash", "git push"),
+            mgr.check("bash", "git push", None),
             PermissionCheck::Allowed
         ));
     }
@@ -957,12 +983,12 @@ mod tests {
         );
         // Same tool, different arguments -> allowed without reprompting.
         assert!(matches!(
-            mgr.check("mcp:fetch", "{\"url\":\"https://b\"}"),
+            mgr.check("mcp:fetch", "{\"url\":\"https://b\"}", None),
             PermissionCheck::Allowed
         ));
         // A distinct MCP tool is not covered by the fetch rule.
         assert!(!matches!(
-            mgr.check("mcp:exec", "{\"cmd\":\"ls\"}"),
+            mgr.check("mcp:exec", "{\"cmd\":\"ls\"}", None),
             PermissionCheck::Allowed
         ));
     }
@@ -978,7 +1004,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check("bash", "anything"),
+            mgr.check("bash", "anything", None),
             PermissionCheck::Denied
         ));
     }
@@ -993,9 +1019,12 @@ mod tests {
             }]),
             PathBuf::from("/tmp"),
         );
-        assert!(matches!(mgr.check("bash", "ls"), PermissionCheck::Denied));
         assert!(matches!(
-            mgr.check("write", "/tmp/x"),
+            mgr.check("bash", "ls", None),
+            PermissionCheck::Denied
+        ));
+        assert!(matches!(
+            mgr.check("write", "/tmp/x", None),
             PermissionCheck::Denied
         ));
     }
@@ -1007,11 +1036,11 @@ mod tests {
         mgr.toggle_yolo();
         assert!(mgr.is_yolo());
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::Allowed
         ));
         assert!(matches!(
-            mgr.check("bash", "rm -rf /"),
+            mgr.check("bash", "rm -rf /", None),
             PermissionCheck::Denied
         ));
     }
@@ -1044,7 +1073,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::Denied
         ));
     }
@@ -1060,11 +1089,11 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::Allowed
         ));
         assert!(matches!(
-            mgr.check("bash", "rm -rf /"),
+            mgr.check("bash", "rm -rf /", None),
             PermissionCheck::Denied
         ));
     }
@@ -1079,7 +1108,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::Allowed
         ));
     }
@@ -1088,7 +1117,7 @@ mod tests {
     fn default_prompt_is_default_behavior() {
         let mgr = PermissionManager::new(PermissionsConfig::default(), PathBuf::from("/tmp"));
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::NeedsPrompt { .. }
         ));
     }
@@ -1105,12 +1134,28 @@ mod tests {
             PathBuf::from("/tmp"),
         );
         assert!(matches!(
-            mgr.check("bash", "cargo test"),
+            mgr.check("bash", "cargo test", None),
             PermissionCheck::Allowed
         ));
         assert!(matches!(
-            mgr.check("write", "/etc/passwd"),
+            mgr.check("write", "/etc/passwd", None),
             PermissionCheck::Denied
         ));
+    }
+
+    #[test_case("write", true ; "write_tool_allowed")]
+    #[test_case("edit", true ; "edit_tool_allowed")]
+    #[test_case("bash", false ; "non_write_tool_prompts")]
+    fn plan_path_auto_allows_file_write_tools_only(tool: &str, expect_allowed: bool) {
+        const PLAN_PATH: &str = "/home/user/.local/state/craft/plans/test.md";
+        let plan_path = Path::new(PLAN_PATH);
+        let mgr = default_mgr();
+        assert_eq!(
+            matches!(
+                mgr.check(tool, PLAN_PATH, Some(plan_path)),
+                PermissionCheck::Allowed
+            ),
+            expect_allowed,
+        );
     }
 }

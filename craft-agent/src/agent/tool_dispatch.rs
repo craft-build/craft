@@ -15,8 +15,7 @@ use crate::task_set::TaskSet;
 use crate::tools::ToolContext;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
 use crate::{
-    AgentError, AgentEvent, AgentMode, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent,
-    ToolUseEvent,
+    AgentError, AgentEvent, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent,
 };
 
 use super::dedup::ToolDedupCache;
@@ -156,9 +155,9 @@ pub async fn run(
         };
 
         if let Some(target) = invocation.mutable_path() {
-            let is_plan_target = matches!(&ctx.mode, AgentMode::Plan(pp) if target == pp.as_path());
+            let is_plan_target = ctx.mode.plan_path().is_some_and(|pp| target == pp);
             if !is_plan_target {
-                if matches!(&ctx.mode, AgentMode::Plan(_)) {
+                if ctx.mode.plan_path().is_some() {
                     warn!(
                         tool = %name,
                         target = %target.display(),
@@ -292,6 +291,7 @@ async fn enforce_permission(
                 ctx.user_response_rx.as_deref(),
                 id,
                 &ctx.cancel,
+                ctx.mode.plan_path(),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -315,7 +315,7 @@ async fn execute_mcp_tool(
         written_path: None,
     };
 
-    if matches!(ctx.mode, AgentMode::Plan(_)) {
+    if ctx.mode.plan_path().is_some() {
         return done(MCP_BLOCKED_IN_PLAN.into(), true);
     }
 
@@ -341,6 +341,7 @@ async fn execute_mcp_tool(
             ctx.user_response_rx.as_deref(),
             id,
             &ctx.cancel,
+            ctx.mode.plan_path(),
         )
         .await
     {
@@ -863,6 +864,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use crate::AgentMode;
 
     fn recent_calls(entries: &[(&str, Value)]) -> RecentCalls {
         let mut rc = RecentCalls::default();
