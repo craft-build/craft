@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mlua::{Lua, RegistryKey, Result as LuaResult, Table};
+use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 
 static NEXT_AUTOCMD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -22,29 +22,31 @@ pub(crate) struct AutocmdStore {
 impl AutocmdStore {
     pub fn register(
         &mut self,
+        id: u64,
         event: String,
         callback: RegistryKey,
         plugin: Arc<str>,
         once: bool,
-    ) -> u64 {
-        let id = NEXT_AUTOCMD_ID.fetch_add(1, Ordering::Relaxed);
+    ) {
         self.listeners.entry(event).or_default().push(AutocmdEntry {
             id,
             callback,
             plugin,
             once,
         });
-        id
     }
 
-    pub fn remove(&mut self, id: u64) -> Option<RegistryKey> {
+    pub fn remove(&mut self, id: u64) -> Vec<RegistryKey> {
+        let mut keys = Vec::new();
         for entries in self.listeners.values_mut() {
             if let Some(pos) = entries.iter().position(|e| e.id == id) {
-                return Some(entries.remove(pos).callback);
+                keys.push(entries.remove(pos).callback);
             }
         }
-        self.pending_deletions.insert(id);
-        None
+        if keys.is_empty() {
+            self.pending_deletions.insert(id);
+        }
+        keys
     }
 
     pub fn clear_plugin(&mut self, plugin: &str) -> Vec<RegistryKey> {
@@ -68,14 +70,22 @@ pub(crate) fn add_autocmd_methods(api_table: &Table, lua: &Lua, plugin: Arc<str>
     let p = Arc::clone(&plugin);
     api_table.set(
         "create_autocmd",
-        lua.create_function(move |lua, (event, opts): (String, Table)| {
+        lua.create_function(move |lua, (event, opts): (Value, Table)| {
+            let events: Vec<String> = match event {
+                Value::String(s) => vec![s.to_str()?.to_owned()],
+                Value::Table(t) => t.sequence_values::<String>().collect::<LuaResult<_>>()?,
+                _ => return Err(mlua::Error::runtime("event must be a string or string[]")),
+            };
             let callback: mlua::Function = opts.get("callback")?;
             let once: bool = opts.get("once").unwrap_or(false);
-            let key = lua.create_registry_value(callback)?;
-            let id = lua
+            let id = NEXT_AUTOCMD_ID.fetch_add(1, Ordering::Relaxed);
+            let mut store = lua
                 .app_data_mut::<AutocmdStore>()
-                .ok_or_else(|| mlua::Error::runtime("autocmd store not initialized"))?
-                .register(event, key, Arc::clone(&p), once);
+                .ok_or_else(|| mlua::Error::runtime("autocmd store not initialized"))?;
+            for event in events {
+                let key = lua.create_registry_value(callback.clone())?;
+                store.register(id, event, key, Arc::clone(&p), once);
+            }
             Ok(id)
         })?,
     )?;
@@ -83,10 +93,11 @@ pub(crate) fn add_autocmd_methods(api_table: &Table, lua: &Lua, plugin: Arc<str>
     api_table.set(
         "del_autocmd",
         lua.create_function(|lua, id: u64| {
-            let key = lua
+            let keys = lua
                 .app_data_mut::<AutocmdStore>()
-                .and_then(|mut store| store.remove(id));
-            if let Some(key) = key {
+                .map(|mut store| store.remove(id))
+                .unwrap_or_default();
+            for key in keys {
                 let _ = lua.remove_registry_value(key);
             }
             Ok(())
@@ -106,10 +117,11 @@ mod tests {
         let mut store = AutocmdStore::default();
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
         let key = lua.create_registry_value(f).unwrap();
-        let id = store.register("TurnEnd".into(), key, Arc::from("test"), false);
+        let id = NEXT_AUTOCMD_ID.fetch_add(1, Ordering::Relaxed);
+        store.register(id, "TurnEnd".into(), key, Arc::from("test"), false);
         assert!(store.listeners["TurnEnd"].len() == 1);
         let removed = store.remove(id);
-        assert!(removed.is_some());
+        assert_eq!(removed.len(), 1);
         assert!(store.listeners["TurnEnd"].is_empty());
     }
 
@@ -123,8 +135,10 @@ mod tests {
         let k1 = lua.create_registry_value(f1).unwrap();
         let k2 = lua.create_registry_value(f2).unwrap();
 
-        store.register("TurnEnd".into(), k1, Arc::from("plugA"), false);
-        store.register("TurnEnd".into(), k2, Arc::from("plugB"), false);
+        let id1 = NEXT_AUTOCMD_ID.fetch_add(1, Ordering::Relaxed);
+        let id2 = NEXT_AUTOCMD_ID.fetch_add(1, Ordering::Relaxed);
+        store.register(id1, "TurnEnd".into(), k1, Arc::from("plugA"), false);
+        store.register(id2, "TurnEnd".into(), k2, Arc::from("plugB"), false);
 
         let removed = store.clear_plugin("plugA");
         assert_eq!(removed.len(), 1);
@@ -133,9 +147,9 @@ mod tests {
     }
 
     #[test]
-    fn remove_nonexistent_returns_none() {
+    fn remove_nonexistent_returns_empty() {
         let mut store = AutocmdStore::default();
-        assert!(store.remove(999).is_none());
+        assert!(store.remove(999).is_empty());
     }
 
     #[test]
@@ -144,10 +158,11 @@ mod tests {
         let mut store = AutocmdStore::default();
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
         let key = lua.create_registry_value(f).unwrap();
-        let id = store.register("TurnEnd".into(), key, Arc::from("test"), false);
+        let id = NEXT_AUTOCMD_ID.fetch_add(1, Ordering::Relaxed);
+        store.register(id, "TurnEnd".into(), key, Arc::from("test"), false);
 
         let _entries = std::mem::take(store.listeners.get_mut("TurnEnd").unwrap());
-        assert!(store.remove(id).is_none());
+        assert!(store.remove(id).is_empty());
         assert!(store.pending_deletions.contains(&id));
 
         store.pending_deletions.clear();
@@ -160,7 +175,8 @@ mod tests {
         let mut store = AutocmdStore::default();
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
         let key = lua.create_registry_value(f).unwrap();
-        store.register("TurnEnd".into(), key, Arc::from("test"), true);
+        let id = NEXT_AUTOCMD_ID.fetch_add(1, Ordering::Relaxed);
+        store.register(id, "TurnEnd".into(), key, Arc::from("test"), true);
         assert!(store.listeners["TurnEnd"][0].once);
     }
 }

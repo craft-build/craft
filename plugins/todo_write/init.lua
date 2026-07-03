@@ -124,3 +124,13 @@ craft.api.create_autocmd("SessionStart", {
     craft.ui.set_status_hint(nil)
   end,
 })
+
+local function clear_todos()
+  state.items = {}
+  if state.win and state.win:is_open() then
+    state.win:hide()
+  end
+  craft.ui.set_status_hint(nil)
+end
+
+craft.api.create_autocmd({ "TurnEnd", "SessionReset" }, { callback = clear_todos })
