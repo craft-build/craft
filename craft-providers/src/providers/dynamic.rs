@@ -24,6 +24,7 @@ use super::local::{LLAMACPP, LocalEndpoint, OLLAMA};
 use super::lock_unpoison;
 use super::mistral::Mistral;
 use super::openai::OpenAi;
+use super::opencode::Opencode;
 use super::openrouter::OpenRouter;
 use super::synthetic::Synthetic;
 use super::tensorx::TensorX;
@@ -401,6 +402,10 @@ pub async fn create(
             TensorX::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
+        ProviderKind::Opencode => Box::new(
+            Opencode::with_auth(auth.clone(), timeouts)?
+                .with_system_prefix(meta.system_prefix.clone()),
+        ),
     };
 
     Ok(Box::new(DynamicProvider {
@@ -713,6 +718,7 @@ esac
     #[test_case("mistral", ProviderKind::Mistral ; "base_mistral")]
     #[test_case("synthetic", ProviderKind::Synthetic ; "base_synthetic")]
     #[test_case("deepseek", ProviderKind::DeepSeek ; "base_deepseek")]
+    #[test_case("opencode", ProviderKind::Opencode ; "base_opencode")]
     fn discover_accepts_all_bases(base: &str, expected: ProviderKind) {
         let tmp = TempDir::new().unwrap();
         let info = format!(r#"{{"display_name": "Test", "base": "{base}", "has_auth": false}}"#);

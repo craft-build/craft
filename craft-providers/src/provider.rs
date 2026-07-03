@@ -17,6 +17,7 @@ use crate::providers::google::Google;
 use crate::providers::local::{LLAMACPP, LocalEndpoint, OLLAMA};
 use crate::providers::mistral::Mistral;
 use crate::providers::openai::OpenAi;
+use crate::providers::opencode::Opencode;
 use crate::providers::openrouter::OpenRouter;
 use crate::providers::synthetic::Synthetic;
 use crate::providers::tensorx::TensorX;
@@ -40,6 +41,8 @@ pub enum ProviderKind {
     Synthetic,
     #[strum(serialize = "tensorx")]
     TensorX,
+    #[strum(serialize = "opencode")]
+    Opencode,
 }
 
 impl ProviderKind {
@@ -56,6 +59,7 @@ impl ProviderKind {
             Self::OpenRouter => "OpenRouter",
             Self::Synthetic => "Synthetic",
             Self::TensorX => "TensorX",
+            Self::Opencode => "Opencode",
         }
     }
 
@@ -72,6 +76,7 @@ impl ProviderKind {
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::Synthetic => "SYNTHETIC_API_KEY",
             Self::TensorX => "TENSORX_API_KEY",
+            Self::Opencode => "OPENCODE_API_KEY",
         }
     }
 
@@ -90,6 +95,7 @@ impl ProviderKind {
             Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
             Self::TensorX => "https://api.tensorx.ai/v1",
+            Self::Opencode => "https://opencode.ai/zen/v1",
         }
     }
 
@@ -105,6 +111,7 @@ impl ProviderKind {
                 | Self::OpenRouter
                 | Self::LlamaCpp
                 | Self::TensorX
+                | Self::Opencode
         )
     }
 
@@ -129,6 +136,9 @@ impl ProviderKind {
             Self::OpenRouter => {
                 Some("300+ models from all providers, prompt caching, provider routing")
             }
+            Self::Opencode => Some(
+                "Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API",
+            ),
             _ => None,
         }
     }
@@ -146,6 +156,7 @@ impl ProviderKind {
             Self::OpenRouter => ModelFamily::Generic,
             Self::Synthetic => ModelFamily::Synthetic,
             Self::TensorX => ModelFamily::Generic,
+            Self::Opencode => ModelFamily::Generic,
         }
     }
 
@@ -159,6 +170,7 @@ impl ProviderKind {
                 | Self::OpenRouter
                 | Self::TensorX
                 | Self::Mistral
+                | Self::Opencode
         )
     }
 
@@ -176,6 +188,7 @@ impl ProviderKind {
             Self::Synthetic => 32_000,
             // FIXME: See comment in tensorx.rs
             Self::TensorX => 0,
+            Self::Opencode => 128_000,
         }
     }
 
@@ -192,6 +205,7 @@ impl ProviderKind {
             Self::OpenRouter => 200_000,
             Self::Synthetic => 128_000,
             Self::TensorX => 200_000,
+            Self::Opencode => 256_000,
         }
     }
 
@@ -214,6 +228,7 @@ impl ProviderKind {
             Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
             Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
+            Self::Opencode => Ok(Box::new(Opencode::new(timeouts)?)),
         }
     }
 

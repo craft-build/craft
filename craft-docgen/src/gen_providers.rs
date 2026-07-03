@@ -321,6 +321,9 @@ fn no_catalog_note(kind: ProviderKind) -> &'static str {
         ProviderKind::OpenRouter => {
             "OpenRouter aggregates models from many providers behind a single API. Craft asks the OpenRouter API for the list of available models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."
         }
+        ProviderKind::Opencode => {
+            "Models are discovered dynamically from the [models.dev](https://models.dev/) catalog and the Opencode Zen API, so there's no built-in catalog. Use any model id the catalog exposes, prefixed with the sub-provider (e.g. `opencode/<sub-provider>/<model-id>`)."
+        }
         _ => {
             "Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."
         }

@@ -156,6 +156,7 @@ pub fn models_for_provider(provider: ProviderKind) -> &'static [ModelEntry] {
         ProviderKind::Synthetic => synthetic::models(),
         ProviderKind::DeepSeek => deepseek::models(),
         ProviderKind::TensorX => tensorx::models(),
+        ProviderKind::Opencode => &[],
     }
 }
 
@@ -393,6 +394,24 @@ mod tests {
     use crate::provider::ProviderKind;
     use strum::IntoEnumIterator;
     use test_case::test_case;
+
+    #[test]
+    fn opencode_from_spec_parses_four_levels() {
+        let spec = "opencode/nvidia/openai/gpt-oss-120b";
+        let model = Model::from_spec(spec).unwrap();
+        assert_eq!(model.provider, ProviderKind::Opencode);
+        assert_eq!(model.id, "nvidia/openai/gpt-oss-120b");
+        assert_eq!(model.spec(), spec);
+    }
+
+    #[test]
+    fn opencode_from_spec_parses_three_levels() {
+        let spec = "opencode/opencode/big-pickle";
+        let model = Model::from_spec(spec).unwrap();
+        assert_eq!(model.provider, ProviderKind::Opencode);
+        assert_eq!(model.id, "opencode/big-pickle");
+        assert_eq!(model.spec(), spec);
+    }
 
     const TIERS: [ModelTier; 4] = [
         ModelTier::Weak,
