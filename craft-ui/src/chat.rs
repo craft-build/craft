@@ -253,12 +253,16 @@ impl Chat {
         self.messages_panel.extract_selection_text(sel, msg_area)
     }
 
-    pub fn handle_click(
-        &mut self,
-        row: u16,
-        area: Rect,
-    ) -> super::components::messages::ClickResult {
-        self.messages_panel.handle_click(row, area)
+    pub fn handle_click(&mut self, row: u16, area: Rect) {
+        self.messages_panel.handle_click(row, area);
+    }
+
+    pub fn set_lua_event_handle(&mut self, handle: Option<craft_lua::EventHandle>) {
+        self.messages_panel.set_lua_event_handle(handle);
+    }
+
+    pub fn set_restore_event_tx(&mut self, tx: Option<craft_agent::EventSender>) {
+        self.messages_panel.set_restore_event_tx(tx);
     }
 
     pub fn tool_snapshot(
@@ -460,6 +464,7 @@ pub fn history_to_display(
                                 is_error: status == ToolStatus::Error,
                                 tool_output_lines: *tool_output_lines,
                                 theme_gen: None,
+                                expanded: false,
                             });
                             let theme_gen = 0;
                             display.push(DisplayMessage {

@@ -5,7 +5,7 @@ use craft_agent::types::InlineStyle;
 use craft_agent::{SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
 use mlua::{Function, Result as LuaResult, UserData, UserDataMethods, Value as LuaValue};
 
-use crate::runtime::{with_click_handlers, with_live_ctx};
+use crate::runtime::{self};
 
 /// `live_buf` tracks the first buffer a handler creates, which is the one
 /// the runtime streams to the UI during execution.
@@ -106,20 +106,17 @@ impl UserData for BufHandle {
 
         methods.add_method("len", |_lua, this, ()| Ok(this.buf.len()));
 
-        methods.add_method("on", |lua, this, (event, callback): (String, Function)| {
+        methods.add_method("on", |lua, _this, (event, callback): (String, Function)| {
             if event != "click" {
                 return Err(mlua::Error::runtime(format!("unsupported event: {event}")));
             }
-            let Some(tool_id) = with_live_ctx(lua, |live| live.tool_use_id.clone()) else {
+            let Some(handle) = lua.app_data_ref::<runtime::TaskHandle>() else {
                 return Ok(());
             };
             let key = lua.create_registry_value(callback)?;
-            let buf = Arc::clone(&this.buf);
-            with_click_handlers(lua, |handlers| {
-                if let Some((old_key, _)) = handlers.insert(tool_id, (key, buf)) {
-                    let _ = lua.remove_registry_value(old_key);
-                }
-            });
+            if let Some(old) = runtime::lock_cell(&handle).click.replace(key) {
+                let _ = lua.remove_registry_value(old);
+            }
             Ok(())
         });
     }
@@ -540,43 +537,47 @@ mod tests {
         lua.globals().set("buf", ud).unwrap();
     }
 
-    fn test_lua_with_handlers() -> mlua::Lua {
+    fn test_lua_with_scope() -> mlua::Lua {
         let lua = test_lua();
-        lua.set_app_data(HashMap::<String, (mlua::RegistryKey, Arc<SharedBuf>)>::new());
+        runtime::install_live_ctx(&lua, "tool_123");
         lua
     }
 
     #[test]
-    fn buf_on_click_without_live_ctx_is_noop() {
-        let lua = test_lua_with_handlers();
+    fn buf_on_click_without_task_scope_is_noop() {
+        let lua = test_lua();
         set_buf_global(&lua);
 
         lua.load(r#"buf:on("click", function() end)"#)
             .exec()
             .unwrap();
 
-        let handlers = lua
-            .app_data_ref::<HashMap<String, (mlua::RegistryKey, Arc<SharedBuf>)>>()
-            .unwrap();
-        assert!(handlers.is_empty(), "no-op should not register a handler");
+        assert!(
+            lua.app_data_ref::<runtime::TaskHandle>().is_none(),
+            "no-op should not register a handler"
+        );
     }
 
     #[test]
-    fn buf_on_click_registers_and_replaces_handler() {
-        let lua = test_lua_with_handlers();
-        crate::runtime::install_live_ctx(&lua, "tool_123");
+    fn buf_on_click_stores_in_task_cell_and_replaces() {
+        let lua = test_lua_with_scope();
         set_buf_global(&lua);
 
         lua.load(r#"buf:on("click", function() return 1 end)"#)
             .exec()
             .unwrap();
-        let registered = with_click_handlers(&lua, |h| h.contains_key("tool_123")).unwrap_or(false);
-        assert!(registered, "handler should be registered for tool_123");
+        let handle = lua.app_data_ref::<runtime::TaskHandle>().unwrap().clone();
+        assert!(
+            runtime::lock_cell(&handle).click.is_some(),
+            "handler should be stored in task cell"
+        );
 
         lua.load(r#"buf:on("click", function() return 2 end)"#)
             .exec()
             .unwrap();
-        let count = with_click_handlers(&lua, |h| h.len()).unwrap_or(0);
-        assert_eq!(count, 1, "second on() should replace, not accumulate");
+        assert!(
+            runtime::lock_cell(&handle).click.is_some(),
+            "second on() should replace, not remove"
+        );
     }
 }

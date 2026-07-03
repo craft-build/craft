@@ -12,7 +12,7 @@ use crate::api::keymap::KeymapReader;
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
-use crate::runtime::{self, ClickReply, LuaThread, Request, RestoreItem};
+use crate::runtime::{self, LuaThread, Request, RestoreItem};
 use crate::terminal_backend::{LocalTerminal, TerminalBackend};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -330,16 +330,6 @@ impl EventHandle {
 
     pub fn set_sandbox_config(&self, config: craft_config::SandboxConfig) {
         let _ = self.tx.send(Request::SetSandboxConfig { config });
-    }
-
-    pub fn fire_click(&self, tool_id: &str, row: u32) -> Option<ClickReply> {
-        let (tx, rx) = flume::bounded(1);
-        let _ = self.tx.try_send(Request::FireBufClick {
-            tool_id: tool_id.to_owned(),
-            row,
-            reply: tx,
-        });
-        rx.recv().ok().flatten()
     }
 
     pub fn run_command(&self, plugin: Arc<str>, command: Arc<str>, args: String) {

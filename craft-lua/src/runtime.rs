@@ -50,6 +50,7 @@ const MAX_INFLIGHT_TOOLS: usize = 64;
 const GC_STEP_INTERVAL: usize = 4;
 const INTERRUPT_CANCEL_CHECK_INTERVAL: u32 = 128;
 const ASYNC_RUN_DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+const TURN_END_EVENT: &str = "TurnEnd";
 
 fn strip_traceback(err: &mlua::Error) -> String {
     match err {
@@ -119,11 +120,6 @@ pub enum Request {
         plugin_dir: Option<PathBuf>,
         reply: flume::Sender<Result<Option<RawConfig>, PluginError>>,
     },
-    FireBufClick {
-        tool_id: String,
-        row: u32,
-        reply: flume::Sender<Option<ClickReply>>,
-    },
     RunCommand {
         plugin: Arc<str>,
         command: Arc<str>,
@@ -173,6 +169,7 @@ pub struct RestoreItem {
     pub is_error: bool,
     pub tool_output_lines: craft_config::ToolOutputLines,
     pub theme_gen: Option<u64>,
+    pub expanded: bool,
 }
 
 pub(crate) struct RestoreReply {
@@ -204,11 +201,6 @@ impl RestoreReply {
     }
 }
 
-pub struct ClickReply {
-    pub snapshot: BufferSnapshot,
-    pub live_buf: Arc<SharedBuf>,
-}
-
 #[derive(Clone)]
 pub struct LiveCtx {
     pub event_tx: craft_agent::EventSender,
@@ -224,6 +216,7 @@ pub(crate) struct TaskCell {
     pub(crate) jobs: JobStore,
     pub(crate) bufs: BufferStore,
     pub(crate) live: Option<LiveCtx>,
+    pub(crate) click: Option<RegistryKey>,
 }
 
 impl TaskCell {
@@ -240,13 +233,12 @@ impl TaskCell {
             jobs: JobStore::with_backend(backend),
             bufs: BufferStore::new(),
             live,
+            click: None,
         }
     }
 }
 
 pub(crate) type TaskHandle = Arc<Mutex<TaskCell>>;
-
-type ClickHandlerMap = HashMap<String, (RegistryKey, Arc<SharedBuf>)>;
 
 pub(crate) fn lock_cell(handle: &TaskHandle) -> std::sync::MutexGuard<'_, TaskCell> {
     handle.lock().unwrap_or_else(|e| e.into_inner())
@@ -353,6 +345,9 @@ impl Drop for TaskScope {
             cell.jobs.kill_all();
             cell.jobs.clear(&self.lua);
             cell.bufs.clear();
+            if let Some(k) = cell.click.take() {
+                let _ = self.lua.remove_registry_value(k);
+            }
         }
         match self.prev.take() {
             Some(p) => {
@@ -420,13 +415,7 @@ pub(crate) fn with_task_bufs<R>(lua: &Lua, f: impl FnOnce(&mut BufferStore) -> R
     f(&mut lock_cell(&active_task(lua)).bufs)
 }
 
-pub(crate) fn with_click_handlers<R>(
-    lua: &Lua,
-    f: impl FnOnce(&mut ClickHandlerMap) -> R,
-) -> Option<R> {
-    lua.app_data_mut::<ClickHandlerMap>().map(|mut m| f(&mut m))
-}
-
+#[cfg(test)]
 pub(crate) fn with_live_ctx<R>(lua: &Lua, f: impl FnOnce(&LiveCtx) -> R) -> Option<R> {
     let handle = lua.app_data_ref::<TaskHandle>()?;
     lock_cell(&handle).live.as_ref().map(f)
@@ -670,7 +659,6 @@ impl LuaRuntime {
             source: e,
         })?;
 
-        lua.set_app_data(ClickHandlerMap::new());
         lua.set_app_data(CommandHandlerMap::new());
         lua.set_app_data(SpawnQueue::default());
         lua.set_app_data(command_writer);
@@ -1226,6 +1214,21 @@ impl LuaRuntime {
                 |e| tracing::warn!(tool = &*item.tool, error = %e, "restore callback failed"),
             )
             .ok()?;
+
+        if item.expanded {
+            let click_key = lock_cell(scope.handle()).click.take();
+            if let Some(key) = click_key
+                && let Ok(func) = self.lua.registry_value::<Function>(&key)
+                && let Ok(data) = self.lua.create_table()
+            {
+                let _ = data.set("row", 0);
+                if let Err(e) = scope.scope_future(func.call_async::<()>(data)).await {
+                    tracing::warn!(tool = &*item.tool, error = %e, "click expand failed");
+                }
+                let _ = self.lua.remove_registry_value(key);
+            }
+        }
+
         drop(scope);
 
         let mut reply = extract_restore_reply(&ret)?;
@@ -1729,35 +1732,6 @@ pub fn spawn(
                             rt.clear_plugin(&plugin);
                             let _ = reply.send(());
                         }
-                        Request::FireBufClick { tool_id, row, reply } => {
-                            let entry =
-                                rt.lua.app_data_ref::<ClickHandlerMap>().and_then(|m| {
-                                    let (key, buf) = m.get(&tool_id)?;
-                                    let func = rt.lua.registry_value::<Function>(key).ok()?;
-                                    Some((func, Arc::clone(buf)))
-                                });
-                            if let Some((func, buf)) = entry {
-                                let lua = rt.lua.clone();
-                                let g = Rc::clone(&gate);
-                                tokio::task::spawn_local(async move {
-                                    let Ok(data) = lua.create_table() else {
-                                        let _ = reply.send(None);
-                                        return;
-                                    };
-                                    let _ = data.set("row", row);
-                                    if let Err(e) = run_detached(&lua, func.call_async::<()>(data)).await {
-                                        tracing::warn!(tool_id, error = %e, "click handler failed");
-                                    }
-                                    drain_spawn_queue(&lua, &g);
-                                    let _ = reply.send(Some(ClickReply {
-                                        snapshot: buf.take(),
-                                        live_buf: buf,
-                                    }));
-                                });
-                            } else {
-                                let _ = reply.send(None);
-                            }
-                        }
                         Request::RunCommand {
                             plugin,
                             command,
@@ -1868,6 +1842,7 @@ pub fn spawn(
                             };
                             std::mem::take(list)
                         };
+                        let is_turn_end = event == TURN_END_EVENT;
                         let ctx_table = rt.lua.create_table().ok();
                         if let Some(ref tbl) = ctx_table
                             && let Some(obj) = data.as_object()
@@ -1937,6 +1912,9 @@ pub fn spawn(
                                 store.listeners.entry(event).or_default().extend(keep);
                             }
                         drain_spawn_queue(&rt.lua, &gate);
+                        if is_turn_end {
+                            rt.lua.gc_collect().ok();
+                        }
                     }
                     Request::RunKeybindCallback { id } => {
                         let func = rt.lua.app_data_ref::<KeymapStore>().and_then(|store| {

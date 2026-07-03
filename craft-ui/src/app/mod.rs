@@ -49,7 +49,6 @@ use crate::components::tool_display::format_turn_usage;
 use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
 };
-use crate::event_loop::BufClickHandler;
 use crate::image;
 use crate::selection::{SelectionState, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -177,7 +176,6 @@ pub struct App {
     pub(crate) ui_config: UiConfig,
     pub(crate) keybindings: Arc<KeybindingResolver>,
     pub(crate) permissions: Arc<PermissionManager>,
-    pub(super) buf_click: Option<BufClickHandler>,
     pub(crate) lua_event_handle: Option<EventHandle>,
     pub(super) keymap_reader: KeymapReader,
     pub(super) hint_reader: HintReader,
@@ -277,7 +275,6 @@ impl App {
             ui_config,
             keybindings,
             permissions,
-            buf_click: None,
             lua_event_handle: None,
             keymap_reader,
             hint_reader,
@@ -298,6 +295,15 @@ impl App {
 
     pub(crate) fn main_chat(&mut self) -> &mut Chat {
         &mut self.chats[0]
+    }
+
+    pub(crate) fn propagate_lua_handles(&mut self) {
+        let handle = self.lua_event_handle.clone();
+        let tx = self.restore_event_tx.clone();
+        for chat in &mut self.chats {
+            chat.set_lua_event_handle(handle.clone());
+            chat.set_restore_event_tx(tx.clone());
+        }
     }
 
     pub(crate) fn dispatch_pending_restores(&mut self) {
@@ -1180,6 +1186,8 @@ impl App {
         }
         let mut chat = Chat::new(subagent.name.clone(), self.ui_config.clone());
         chat.model_id = subagent.model.clone();
+        chat.set_lua_event_handle(self.lua_event_handle.clone());
+        chat.set_restore_event_tx(self.restore_event_tx.clone());
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
         }

@@ -151,6 +151,8 @@ impl App {
             self.chat_index.insert(sa.tool_use_id.clone(), idx);
             let mut chat = Chat::new(sa.name, self.ui_config.clone());
             chat.model_id = sa.model;
+            chat.set_lua_event_handle(self.lua_event_handle.clone());
+            chat.set_restore_event_tx(self.restore_event_tx.clone());
             if let Some(messages) = self.state.session.subagent_messages.get(&sa.tool_use_id) {
                 let (display, items) = history_to_display(
                     messages,

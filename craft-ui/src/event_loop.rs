@@ -34,8 +34,6 @@ use crate::terminal;
 const ANIMATION_INTERVAL_MS: u64 = 16;
 const IDLE_POLL_INTERVAL_MS: u64 = 100;
 
-pub type BufClickHandler = Arc<dyn Fn(&str, u32) -> Option<craft_lua::ClickReply> + Send + Sync>;
-
 pub struct ShutdownResult {
     session_id: Option<String>,
     exit_code: i32,
@@ -83,7 +81,6 @@ pub struct EventLoopParams {
     pub hint_reader: HintReader,
     pub ui_action_rx: Option<flume::Receiver<UiAction>>,
     pub lua_event_handle: Option<EventHandle>,
-    pub buf_click: Option<BufClickHandler>,
     pub provider: Arc<dyn Provider>,
     pub mcp_handle: Option<McpHandle>,
     pub mcp_config_errors: McpConfigErrors,
@@ -222,7 +219,6 @@ impl<'t> EventLoop<'t> {
             hint_reader,
             ui_action_rx,
             lua_event_handle,
-            buf_click,
             provider,
             mcp_handle,
             mcp_config_errors,
@@ -280,7 +276,6 @@ impl<'t> EventLoop<'t> {
             custom_commands,
         );
         app.exit_on_done = exit_on_done;
-        app.buf_click = buf_click;
         app.lua_event_handle = lua_event_handle;
 
         if needs_login {
@@ -288,6 +283,7 @@ impl<'t> EventLoop<'t> {
         }
 
         handles.apply_to_app(&mut app);
+        app.propagate_lua_handles();
 
         if !handles.mcp_config_errors.is_empty() {
             app.flash(format!("MCP config error: {}", handles.mcp_config_errors));

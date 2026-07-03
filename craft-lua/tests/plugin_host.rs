@@ -1198,6 +1198,7 @@ async fn bash_timeout_round_trip() {
             is_error: true,
             tool_output_lines: ToolOutputLines::default(),
             theme_gen: None,
+            expanded: false,
         },
         event_tx,
     );

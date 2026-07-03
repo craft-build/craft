@@ -26,10 +26,10 @@ use crate::selection::Selection;
 use crate::splash::{ColorTransition, Splash};
 use crate::theme;
 use craft_config::{ToolOutputLines, UiConfig};
-use craft_lua::RestoreItem;
+use craft_lua::{EventHandle, RestoreItem};
 use serde_json::Value;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -49,13 +49,6 @@ struct LiveBufEntry {
     dirty_seen: bool,
 }
 
-#[derive(Debug)]
-pub enum ClickResult {
-    Nothing,
-    Toggled,
-    LuaToolClick { tool_id: String, row: u32 },
-}
-
 pub struct MessagesPanel {
     messages: Vec<DisplayMessage>,
     streaming_thinking: StreamingContent,
@@ -73,11 +66,14 @@ pub struct MessagesPanel {
     idle_splash: Splash,
     accent: ColorTransition,
     expanded_tools: HashMap<String, SectionFlags>,
+    lua_expanded: HashSet<String>,
     live_bufs: HashMap<String, LiveBufEntry>,
     batch_children: HashMap<String, BatchChildState>,
     tool_output_lines: ToolOutputLines,
     render_hints: RenderHintsRegistry,
     pending_restores: Vec<RestoreItem>,
+    lua_event_handle: Option<EventHandle>,
+    restore_event_tx: Option<craft_agent::EventSender>,
     image_picker: crate::image_render::ImagePicker,
 }
 
@@ -113,11 +109,14 @@ impl MessagesPanel {
             idle_splash: Splash::new(ui_config.splash_animation),
             accent: ColorTransition::new(theme::current().mode_build),
             expanded_tools: HashMap::new(),
+            lua_expanded: HashSet::new(),
             live_bufs: HashMap::new(),
             batch_children: HashMap::new(),
             tool_output_lines: ui_config.tool_output_lines,
             render_hints: RenderHintsRegistry::new(),
             pending_restores: Vec::new(),
+            lua_event_handle: None,
+            restore_event_tx: None,
             image_picker: crate::image_render::ImagePicker::new(),
         }
     }
@@ -130,9 +129,18 @@ impl MessagesPanel {
         self.messages = msgs;
         self.cache.clear();
         self.expanded_tools.clear();
+        self.lua_expanded.clear();
         self.batch_children.clear();
         self.live_bufs.clear();
         self.highlight_segment = None;
+    }
+
+    pub fn set_lua_event_handle(&mut self, handle: Option<EventHandle>) {
+        self.lua_event_handle = handle;
+    }
+
+    pub fn set_restore_event_tx(&mut self, tx: Option<craft_agent::EventSender>) {
+        self.restore_event_tx = tx;
     }
 
     pub fn thinking_delta(&mut self, text: &str) {
@@ -688,24 +696,35 @@ impl MessagesPanel {
         self.accent.set(color);
     }
 
-    pub fn handle_click(&mut self, row: u16, area: Rect) -> ClickResult {
+    pub fn handle_click(&mut self, row: u16, area: Rect) -> bool {
         if area.height == 0 {
-            return ClickResult::Nothing;
+            return false;
         }
         let doc_row = (row.saturating_sub(area.y)) as u32 + self.scroll_top as u32;
         let width = self.viewport_width;
-        let Some((_, seg, seg_start)) = self.cache.segment_at_row(doc_row, width) else {
-            return ClickResult::Nothing;
+        let Some((_, seg, _seg_start)) = self.cache.segment_at_row(doc_row, width) else {
+            return false;
         };
         let Some(tool_id) = seg.tool_id.as_deref() else {
-            return ClickResult::Nothing;
+            return false;
         };
 
         if self.has_snapshot(tool_id) {
-            return ClickResult::LuaToolClick {
-                tool_id: tool_id.to_owned(),
-                row: doc_row - seg_start,
-            };
+            let expanded = !self.lua_expanded.contains(tool_id);
+            if expanded {
+                self.lua_expanded.insert(tool_id.to_owned());
+            } else {
+                self.lua_expanded.remove(tool_id);
+            }
+            if let Some(mut item) = self.lua_restore_item(tool_id) {
+                item.expanded = expanded;
+                if let (Some(eh), Some(tx)) =
+                    (self.lua_event_handle.clone(), self.restore_event_tx.clone())
+                {
+                    eh.request_restore(item, tx);
+                }
+            }
+            return true;
         }
 
         let exp = self
@@ -714,7 +733,7 @@ impl MessagesPanel {
             .copied()
             .unwrap_or_default();
         if !seg.truncation.any() && !exp.any() {
-            return ClickResult::Nothing;
+            return false;
         }
         let tool_id = tool_id.to_owned();
         let truncation = seg.truncation;
@@ -726,12 +745,12 @@ impl MessagesPanel {
             entry.script = !entry.script;
         }
         self.rebuild_expanded_tool(&tool_id);
-        ClickResult::Toggled
+        true
     }
 
     #[cfg(test)]
     pub fn toggle_expansion_at(&mut self, row: u16, area: Rect) -> bool {
-        matches!(self.handle_click(row, area), ClickResult::Toggled)
+        self.handle_click(row, area)
     }
 
     fn rebuild_expanded_tool(&mut self, tool_id: &str) {
@@ -931,6 +950,59 @@ impl MessagesPanel {
                 .is_some_and(|m| m.render_snapshot.is_some())
     }
 
+    fn lua_restore_item(&self, tool_id: &str) -> Option<RestoreItem> {
+        let tol = self.tool_output_lines;
+        if let Some((batch_id, idx)) = parse_batch_inner_id(tool_id) {
+            let msg = self
+                .messages
+                .iter()
+                .rfind(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == batch_id))?;
+            let entries = match msg.tool_output.as_deref()? {
+                ToolOutput::Batch { entries, .. } => entries,
+                _ => return None,
+            };
+            let entry = entries.get(idx)?;
+            let output_text = entry
+                .output
+                .as_ref()
+                .map(|o| o.as_text())
+                .unwrap_or_default();
+            Some(RestoreItem {
+                tool: Arc::from(entry.tool.as_str()),
+                tool_use_id: tool_id.to_owned(),
+                output: output_text,
+                input: entry.raw_input.clone().unwrap_or(Value::Null),
+                is_error: entry.status == BatchToolStatus::Error,
+                tool_output_lines: tol,
+                theme_gen: Some(self.theme_generation),
+                expanded: false,
+            })
+        } else {
+            let msg = self
+                .messages
+                .iter()
+                .rfind(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == tool_id))?;
+            let DisplayRole::Tool(t) = &msg.role else {
+                return None;
+            };
+            let output_text = msg
+                .tool_output
+                .as_deref()
+                .map(|o| o.as_text())
+                .unwrap_or_default();
+            Some(RestoreItem {
+                tool: Arc::clone(&t.name),
+                tool_use_id: t.id.clone(),
+                output: output_text,
+                input: msg.tool_raw_input.clone().unwrap_or(Value::Null),
+                is_error: t.status == ToolStatus::Error,
+                tool_output_lines: tol,
+                theme_gen: Some(self.theme_generation),
+                expanded: false,
+            })
+        }
+    }
+
     fn store_snapshot(&mut self, tool_id: &str, snapshot: BufferSnapshot, theme_gen: Option<u64>) {
         let theme_gen_val = theme_gen.unwrap_or(self.theme_generation);
         if let Some((batch_id, _)) = parse_batch_inner_id(tool_id) {
@@ -961,7 +1033,6 @@ impl MessagesPanel {
     }
 
     fn collect_stale_snapshots(&mut self, current_gen: u64) {
-        let tol = self.tool_output_lines;
         for msg in &self.messages {
             let DisplayRole::Tool(t) = &msg.role else {
                 continue;
@@ -979,50 +1050,20 @@ impl MessagesPanel {
                     output: output_text,
                     input: msg.tool_raw_input.clone().unwrap_or(Value::Null),
                     is_error: t.status == ToolStatus::Error,
-                    tool_output_lines: tol,
+                    tool_output_lines: self.tool_output_lines,
                     theme_gen: Some(current_gen),
+                    expanded: self.lua_expanded.contains(&t.id),
                 });
             }
         }
         for (child_id, child) in &self.batch_children {
             if child.snapshot_is_stale(current_gen) {
-                let Some((batch_id, _)) = parse_batch_inner_id(child_id) else {
+                let Some(mut item) = self.lua_restore_item(child_id) else {
                     continue;
                 };
-                let Some(msg) = self
-                    .messages
-                    .iter()
-                    .rfind(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == batch_id))
-                else {
-                    continue;
-                };
-                let Some(tool_output) = &msg.tool_output else {
-                    continue;
-                };
-                let ToolOutput::Batch { entries, .. } = tool_output.as_ref() else {
-                    continue;
-                };
-                let idx = child_id
-                    .rsplit_once("__")
-                    .and_then(|(_, i)| i.parse::<usize>().ok());
-                let Some(idx) = idx else { continue };
-                let Some(entry) = entries.get(idx) else {
-                    continue;
-                };
-                let output_text = entry
-                    .output
-                    .as_ref()
-                    .map(|o| o.as_text())
-                    .unwrap_or_default();
-                self.pending_restores.push(RestoreItem {
-                    tool: Arc::from(entry.tool.as_str()),
-                    tool_use_id: child_id.clone(),
-                    output: output_text,
-                    input: entry.raw_input.clone().unwrap_or(Value::Null),
-                    is_error: entry.status == BatchToolStatus::Error,
-                    tool_output_lines: tol,
-                    theme_gen: Some(current_gen),
-                });
+                item.theme_gen = Some(current_gen);
+                item.expanded = self.lua_expanded.contains(child_id);
+                self.pending_restores.push(item);
             }
         }
     }
