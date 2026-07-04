@@ -11,7 +11,6 @@
 //! deliberately keeps `recent_calls` and `turn_embeddings` so loops that
 //! survive a "continue" are still detected.
 
-#[cfg(feature = "onnx")]
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -32,7 +31,6 @@ const DECAY_EFFECTIVE_COMPACT: u32 = 1;
 pub struct DoomTracker {
     score: u32,
     grace_called: bool,
-    #[cfg(feature = "onnx")]
     pub(super) turn_embeddings: VecDeque<Vec<f32>>,
     pub(super) recent_calls: RecentCalls,
 }
@@ -178,7 +176,6 @@ mod tests {
         assert_eq!(t.score(), u32::MAX);
     }
 
-    #[cfg(feature = "onnx")]
     #[test]
     fn reset_clears_score_and_grace_only() {
         let mut t = DoomTracker::new();

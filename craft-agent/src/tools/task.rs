@@ -42,6 +42,10 @@ pub struct Task {
     )]
     model_tier: Option<String>,
     #[param(
+        description = "Model role (optional, mutually exclusive with model_tier). When set, resolves the subagent's model from model_roles.toml by role name (e.g. \"scout\", \"advisor\"). Unset roles fall back to the current model. Cannot be combined with model_tier."
+    )]
+    model_role: Option<String>,
+    #[param(
         description = "Parent context to pass to the subagent:\n- \"none\" (default): fresh, no parent history.\n- \"summary\": last few parent messages for context.\n- \"full\": full parent conversation history."
     )]
     context_mode: Option<String>,
@@ -74,9 +78,26 @@ impl Task {
             other => return Err(format!("unknown subagent type: {other}")),
         };
 
-        let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref tier_str) =
-            self.model_tier
+        if self.model_tier.is_some() && self.model_role.is_some() {
+            return Err(
+                "model_tier and model_role are mutually exclusive; set only one".to_string(),
+            );
+        }
+
+        let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref role_str) =
+            self.model_role
         {
+            let role: craft_config::model_roles::ModelRole =
+                role_str.parse().map_err(|e: String| e)?;
+            let resolved = craft_providers::roles::resolve_role(
+                role,
+                Model::clone(&ctx.model),
+                Arc::clone(&ctx.provider),
+                ctx.timeouts,
+            )
+            .await;
+            (resolved.primary.model, resolved.primary.provider)
+        } else if let Some(ref tier_str) = self.model_tier {
             let requested: ModelTier = tier_str.parse().map_err(|e: ModelError| e.to_string())?;
             let effective = requested.min(ctx.model.tier);
             if effective == ctx.model.tier {
@@ -487,7 +508,7 @@ mod tests {
         const INT: ToolAudience = ToolAudience::INTERPRETER;
         let all = MAIN | RES | GEN | INT;
 
-        let expected: BTreeMap<&str, ToolAudience> = BTreeMap::from([
+        let mut expected: BTreeMap<&str, ToolAudience> = BTreeMap::from([
             (super::super::READ_TOOL_NAME, all),
             (super::super::STYLEGUIDE_LIST_TOOL_NAME, all),
             (super::super::STYLEGUIDE_SEARCH_TOOL_NAME, all),
@@ -499,6 +520,7 @@ mod tests {
             (crate::agent::vcc_recall::VccRecall::NAME, MAIN | RES),
             (super::super::WRITE_TOOL_NAME, MAIN | GEN | INT),
             (super::super::EDIT_TOOL_NAME, MAIN | GEN | INT),
+            (super::super::EDIT_LINES_TOOL_NAME, MAIN | GEN | INT),
             (super::super::MULTIEDIT_TOOL_NAME, MAIN | GEN | INT),
             (super::super::APPLY_PATCH_TOOL_NAME, MAIN | GEN | INT),
             (super::super::BATCH_TOOL_NAME, MAIN | RES | GEN),
@@ -521,6 +543,9 @@ mod tests {
             (super::super::RESOLVE_TOOL_NAME, MAIN),
             (super::super::SAFETY_TOOL_NAME, MAIN),
         ]);
+
+        // `flow_search` is always registered; the matrix must reflect the registry.
+        expected.insert(super::super::FLOW_SEARCH_TOOL_NAME, MAIN | RES | GEN);
 
         let snapshot = ToolRegistry::native().iter();
         let actual: BTreeMap<String, ToolAudience> = snapshot

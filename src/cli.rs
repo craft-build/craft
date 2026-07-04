@@ -31,6 +31,14 @@ pub enum CompletionShell {
     Powershell,
 }
 
+#[derive(Clone, ValueEnum, Default)]
+pub enum CliMode {
+    #[default]
+    Build,
+    Plan,
+    Flow,
+}
+
 #[derive(Parser)]
 #[command(name = "craft", version, about = "AI coding agent for the terminal")]
 pub struct Cli {
@@ -64,6 +72,10 @@ pub struct Cli {
     /// Output format for --print mode
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
+
+    /// Initial mode (build, plan, flow). Selects the agent mode on startup.
+    #[arg(long, value_enum, default_value_t = CliMode::Build)]
+    pub mode: CliMode,
 
     /// Input format (text or stream-json for SDK mode)
     #[arg(long, value_enum, default_value_t = InputFormat::Text)]
@@ -244,6 +256,8 @@ pub enum Command {
     },
     /// Run a headless agent query (a prompt or a recipe file) and print the result
     Run(RunCommand),
+    /// Run the Flow multi-stage pipeline on a request, or prune old workstreams
+    Flow(FlowCommand),
     /// Run deterministic review checks against the current diff
     Review(ReviewCommand),
     /// Terminal shell integration: transparent command logging and `@craft` alias
@@ -332,6 +346,39 @@ pub struct ReviewCommand {
     /// Model spec (provider/model-id) for checks that don't specify one
     #[arg(short = 'm', long)]
     pub model: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum FlowAction {
+    /// Run the Flow pipeline on a request
+    Run {
+        /// The request to run Flow on (reads stdin if omitted and piped)
+        request: Option<String>,
+        /// Print the outcome as JSON instead of entering the TUI
+        #[arg(long)]
+        print: bool,
+        /// Output format for --print
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output_format: OutputFormat,
+        /// Resume a specific session by its ID (re-enters at the approval gate)
+        #[arg(short = 's', long, alias = "resume")]
+        session: Option<String>,
+        /// Resume payload: "approved" to approve the goal doc, else a revised goal
+        #[arg(long, short = 'p', visible_alias = "payload")]
+        payload: Option<String>,
+    },
+    /// Prune Flow workstream directories older than the given age
+    Gc {
+        /// Age threshold, e.g. `30d`, `12h`, `45m` (humantime-style: d/h/m/s)
+        #[arg(long, default_value = "30d")]
+        older_than: String,
+    },
+}
+
+#[derive(Parser)]
+pub struct FlowCommand {
+    #[command(subcommand)]
+    pub action: Option<FlowAction>,
 }
 
 #[derive(Subcommand)]

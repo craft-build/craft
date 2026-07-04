@@ -19,6 +19,7 @@ mod dynamic;
 mod edit;
 mod edit_lines;
 mod file_tracker;
+pub mod flow_search;
 pub mod fs_backend;
 mod fuzzy_replace;
 pub mod grep;
@@ -38,9 +39,10 @@ mod review;
 pub mod safety;
 pub mod schema;
 mod styleguide;
+pub mod subagent;
 mod task;
 mod validation;
-mod worktree;
+pub mod worktree;
 mod write;
 mod zoom;
 
@@ -274,6 +276,9 @@ pub struct ToolContext {
     pub hooks: Option<Arc<dyn crate::Hooks>>,
     pub session_id: Option<String>,
     pub registry: Arc<ToolRegistry>,
+    /// Semantic-search backend for Flow mode. `Some` when running under a
+    /// Flow stage; `None` everywhere else, so the `flow_search` tool errors cleanly.
+    pub flow_search: flow_search::FlowSearchHandle,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -643,9 +648,11 @@ macro_rules! register_tools {
         };
 
         pub(crate) fn native_tools() -> Vec<std::sync::Arc<dyn $crate::tools::Tool>> {
-            vec![
+            let mut v: Vec<std::sync::Arc<dyn $crate::tools::Tool>> = vec![
                 $(std::sync::Arc::new($crate::tools::Native::<$inner>::new())),+
-            ]
+            ];
+            v.extend($crate::tools::feature_gated_native_tools());
+            v
         }
 
         pub const NATIVE_TOOL_NAMES: &[&str] = &[$(<$inner>::NAME),+];
@@ -687,6 +694,16 @@ register_tools! {
     inspect::Inspect,
     move_file::MoveFile,
 }
+
+/// Native tools that require the embedding model. `flow_search` is always
+/// registered.
+pub(crate) fn feature_gated_native_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+    vec![std::sync::Arc::new(Native::<flow_search::FlowSearch>::new())]
+}
+
+/// Stable names of feature-gated native tools, for the audience-matrix lock test
+/// and any caller that needs to know what `feature_gated_native_tools` contributes.
+pub const FLOW_SEARCH_TOOL_NAME: &str = "flow_search";
 
 pub fn all_builtin_tool_names() -> Vec<&'static str> {
     NATIVE_TOOL_NAMES
@@ -766,6 +783,67 @@ pub(crate) fn interpreter_ctx(
         pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
         session_id: None,
         registry,
+        flow_search: None,
+    }
+}
+
+/// Inputs for a Flow stage-runner ToolContext. Built by the `craft flow` CLI
+/// and (eventually) the TUI Flow loop; the real provider/model/config are
+/// forwarded so stage subagents launch against the live LLM, not NullProvider.
+pub struct FlowRunnerEnv {
+    pub provider: Arc<dyn Provider>,
+    pub model: Arc<Model>,
+    pub config: AgentConfig,
+    pub permissions: Arc<PermissionManager>,
+    pub timeouts: craft_providers::Timeouts,
+    pub compression: craft_config::CompressionConfig,
+    pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
+    pub event_tx: EventSender,
+    pub flow_search: flow_search::FlowSearchHandle,
+}
+
+/// Build a ToolContext for the Flow stage runner. Carries the real provider,
+/// model, config, permissions, and prompt slots so each stage subagent
+/// launches against the live LLM with the project's tool configuration.
+///
+/// `stage_id` is a stable per-invocation identifier (e.g.
+/// `flow:<workstream>:<stage>[:<chunk>]`) plumbed into `tool_use_id` so the
+/// host (TUI/ACP) can route permission prompts back to this specific
+/// subagent. Without it, `run_subagent` leaves `answer_tx` unset and any
+/// tool requiring a prompt (bash by default) blocks forever in
+/// `PermissionManager::enforce`.
+pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str) -> ToolContext {
+    ToolContext {
+        provider: Arc::clone(&env.provider),
+        model: Arc::clone(&env.model),
+        event_tx: env.event_tx.clone(),
+        mode: AgentMode::Flow(workstream_id.to_string()),
+        tool_use_id: Some(stage_id.to_string()),
+        user_response_rx: None,
+        loaded_instructions: LoadedInstructions::new(),
+        cancel: crate::cancel::CancelToken::none(),
+        mcp: None,
+        deadline: Deadline::None,
+        config: env.config.clone(),
+        tool_output_lines: ToolOutputLines::default(),
+        permissions: Arc::clone(&env.permissions),
+        timeouts: env.timeouts,
+        file_tracker: Arc::new(FileReadTracker::new()),
+        prompt_slots: Arc::clone(&env.prompt_slots),
+        opts: RequestOptions::default(),
+        subagent_cancels: Arc::new(CancelMap::new()),
+        compression: env.compression.clone(),
+        compression_store: crate::agent::compression_store::shared_store(),
+        findings_store: None,
+        fs: Arc::new(LocalFs),
+        parent_messages: Arc::from(Vec::new()),
+        promoted: crate::tools::dynamic::PromotedTools::new(),
+        dynamic: crate::tools::dynamic::DynamicContext::disabled(),
+        hooks: None,
+        snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
+        pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
+        session_id: None,
+        flow_search: env.flow_search.clone(),
     }
 }
 

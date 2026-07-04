@@ -76,9 +76,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             .context("initialize lua plugin host")?
     };
 
-    #[cfg(feature = "onnx")]
     let mut embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>> = None;
-    #[cfg(feature = "onnx")]
     if !cli.no_plugins {
         let (tx, rx) = flume::unbounded::<craft_agent::EmbedRequest>();
         embed_rx = Some(rx);
@@ -196,6 +194,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             if let Some(thinking) = config.always_thinking {
                 session.meta.thinking = Some(thinking);
             }
+            session.meta.mode = match cli.mode {
+                crate::cli::CliMode::Build => Some(craft_storage::sessions::StoredMode::Build),
+                crate::cli::CliMode::Plan => Some(craft_storage::sessions::StoredMode::Plan),
+                crate::cli::CliMode::Flow => Some(craft_storage::sessions::StoredMode::Flow),
+            };
         }
         let mut model = if session.messages.is_empty() {
             model
@@ -239,7 +242,6 @@ pub async fn run(cli: Cli) -> Result<()> {
             provider,
             mcp_handle,
             mcp_config_errors,
-            #[cfg(feature = "onnx")]
             embed_rx,
         };
         let result =

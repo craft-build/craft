@@ -21,10 +21,28 @@ confirming completion. Nothing else.";
 const MAX_JUDGE_MESSAGES: usize = 12;
 const MAX_TRANSCRIPT_CHARS: usize = 12_000;
 
+const CRITERIA_SYSTEM: &str = "\
+You are a judge evaluating whether an autonomous coding agent met each of a list of acceptance criteria. \
+You are given the criteria and the tail of the agent's conversation. \
+For EACH criterion, decide ONLY whether it is satisfied.\n\n\
+Respond with one line per criterion, in order, each starting with MET or UNMET:\n\
+- MET: the criterion is fully satisfied.\n\
+- UNMET: the criterion is not yet satisfied.\n\n\
+After the per-criterion verdicts, give a single concise summary line. Nothing else.";
+
+const MET: &str = "met";
+const UNMET: &str = "unmet";
+
 #[derive(Debug)]
 pub enum JudgeOutcome {
     Done,
     NotDone(String),
+    /// Structured verdict over a list of acceptance criteria.
+    #[allow(dead_code)]
+    Criteria {
+        met: Vec<String>,
+        unmet: Vec<String>,
+    },
 }
 
 pub async fn evaluate(
@@ -71,6 +89,118 @@ pub async fn evaluate(
     };
 
     Ok(parse_verdict(&verdict_text))
+}
+
+/// Evaluate the agent's transcript against a fixed list of acceptance criteria,
+/// returning a structured per-criterion verdict. Used by Flow's Verifier stage.
+/// `/goal` keeps its free-text `evaluate` path; this is the structured sibling.
+#[allow(dead_code)]
+pub async fn evaluate_criteria(
+    criteria: &[String],
+    history: &[Message],
+    active_provider: &Arc<dyn Provider>,
+    active_model: &Model,
+    judge_model_spec: Option<&str>,
+    timeouts: craft_providers::Timeouts,
+    session_id: Option<&str>,
+) -> Result<JudgeOutcome, CrateAgentError> {
+    let transcript = build_transcript(history);
+    let list = criteria
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}. {c}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let user_msg = format!(
+        "## Acceptance criteria\n{list}\n\n## Recent agent activity\n{transcript}\n\n\
+         For each criterion, respond MET or UNMET on its own line, in order."
+    );
+    let messages = vec![Message::user(user_msg)];
+
+    let verdict_text = match judge_model_spec {
+        Some(spec) => match resolve_judge(spec, timeouts).await {
+            Ok((model, provider)) => {
+                collect_text_with(
+                    provider.as_ref(),
+                    &model,
+                    &messages,
+                    CRITERIA_SYSTEM,
+                    session_id,
+                )
+                .await?
+            }
+            Err(e) => {
+                warn!(error = %e, spec, "judge model resolution failed, using active model");
+                collect_text_with(
+                    active_provider.as_ref(),
+                    active_model,
+                    &messages,
+                    CRITERIA_SYSTEM,
+                    session_id,
+                )
+                .await?
+            }
+        },
+        None => {
+            collect_text_with(
+                active_provider.as_ref(),
+                active_model,
+                &messages,
+                CRITERIA_SYSTEM,
+                session_id,
+            )
+            .await?
+        }
+    };
+
+    Ok(parse_criteria_verdict(criteria, &verdict_text))
+}
+
+async fn collect_text_with(
+    provider: &dyn Provider,
+    model: &Model,
+    messages: &[Message],
+    system: &str,
+    session_id: Option<&str>,
+) -> Result<String, CrateAgentError> {
+    let (ptx, _prx) = flume::unbounded();
+    let system = system.to_string();
+    let tools = Value::Array(vec![]);
+    let response = provider
+        .stream_message(
+            model,
+            messages,
+            &system,
+            &tools,
+            &ptx,
+            RequestOptions::default(),
+            session_id,
+        )
+        .await?;
+    Ok(response.message.user_text().unwrap_or_default().to_string())
+}
+
+/// Parse a per-criterion MET/UNMET verdict. Lines are matched in order to the
+/// criteria; a missing or ambiguous line defaults to UNMET (conservative).
+pub fn parse_criteria_verdict(criteria: &[String], text: &str) -> JudgeOutcome {
+    let mut met = Vec::new();
+    let mut unmet = Vec::new();
+    let mut verdict_lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(criteria.len());
+    for criterion in criteria {
+        let line = verdict_lines.next().unwrap_or("").to_ascii_lowercase();
+        let is_met = line.starts_with(MET) && !line.starts_with(UNMET);
+        if is_met {
+            met.push(criterion.clone());
+        } else {
+            unmet.push(criterion.clone());
+        }
+    }
+    info!(met = met.len(), unmet = unmet.len(), "criteria verdict");
+    JudgeOutcome::Criteria { met, unmet }
 }
 
 async fn resolve_judge(
@@ -189,6 +319,46 @@ mod tests {
             panic!("expected NotDone");
         };
         assert_eq!(reason, "Tests still fail");
+    }
+
+    #[test]
+    fn parse_criteria_verdict_classifies_each_line() {
+        let criteria = vec![
+            "tests pass".to_string(),
+            "docs updated".to_string(),
+            "no regressions".to_string(),
+        ];
+        let text = "MET\nUNMET\nMET\nall good";
+        let JudgeOutcome::Criteria { met, unmet } = parse_criteria_verdict(&criteria, text) else {
+            panic!("expected Criteria");
+        };
+        assert_eq!(
+            met,
+            vec!["tests pass".to_string(), "no regressions".to_string()]
+        );
+        assert_eq!(unmet, vec!["docs updated".to_string()]);
+    }
+
+    #[test]
+    fn parse_criteria_verdict_defaults_missing_to_unmet() {
+        let criteria = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let text = "MET\nUNMET";
+        let JudgeOutcome::Criteria { met, unmet } = parse_criteria_verdict(&criteria, text) else {
+            panic!("expected Criteria");
+        };
+        assert_eq!(met, vec!["a".to_string()]);
+        assert_eq!(unmet, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn parse_criteria_verdict_tolerates_prefix_punctuation() {
+        let criteria = vec!["x".to_string(), "y".to_string()];
+        let text = "MET: yes\n- UNMET: no";
+        let JudgeOutcome::Criteria { met, unmet } = parse_criteria_verdict(&criteria, text) else {
+            panic!("expected Criteria");
+        };
+        assert_eq!(met.len(), 1);
+        assert_eq!(unmet.len(), 1);
     }
 
     #[test]

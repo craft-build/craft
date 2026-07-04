@@ -6,6 +6,7 @@ use arc_swap::ArcSwap;
 use craft_agent::ToolOutput;
 use craft_agent::permissions::PermissionManager;
 use craft_config::Effect;
+use craft_flow::{ChunkStatus, Stage};
 use craft_providers::{Message, Model, ThinkingConfig, TokenUsage};
 use craft_storage::StateDir;
 use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
@@ -13,7 +14,20 @@ use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
 use crate::AppSession;
 use crate::agent::shared_queue::lock;
 
-use super::mode::{Mode, PlanState};
+use super::mode::{FlowChunkState, FlowState, Mode, PlanState};
+
+/// String form of a `ChunkStatus` for persistence, matching craft-flow's
+/// `rename_all = "snake_case"` serde variant names.
+fn chunk_status_str(status: ChunkStatus) -> String {
+    match status {
+        ChunkStatus::Queued => "queued",
+        ChunkStatus::Running => "running",
+        ChunkStatus::NeedsReview => "needs_review",
+        ChunkStatus::Blocked => "blocked",
+        ChunkStatus::Done => "done",
+    }
+    .to_string()
+}
 
 pub(crate) struct SessionState {
     pub session: AppSession,
@@ -22,6 +36,7 @@ pub(crate) struct SessionState {
     pub context_size: u32,
     pub mode: Mode,
     pub plan: PlanState,
+    pub flow: FlowState,
     pub warnings: Vec<String>,
     pub thinking: ThinkingConfig,
     pub fast: bool,
@@ -42,6 +57,7 @@ impl SessionState {
 
         let mode = match session.meta.mode {
             Some(StoredMode::Plan) => Mode::Plan,
+            Some(StoredMode::Flow) => Mode::Flow,
             _ => Mode::Build,
         };
 
@@ -66,6 +82,35 @@ impl SessionState {
             plan.allocate_path(storage);
         }
 
+        let flow = FlowState {
+            workstream_id: session.meta.flow_workstream_id.clone().unwrap_or_default(),
+            stage: session.meta.flow_stage.as_deref().and_then(Stage::parse),
+            chunks: session
+                .meta
+                .flow_chunks
+                .iter()
+                .map(|(id, c)| {
+                    (
+                        id.clone(),
+                        FlowChunkState {
+                            title: c.title.clone(),
+                            status: ChunkStatus::parse(&c.status).unwrap_or_default(),
+                            stage: None,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let flow = if mode == Mode::Flow && flow.workstream_id.is_empty() {
+            FlowState {
+                workstream_id: super::mode::new_workstream_id(),
+                ..flow
+            }
+        } else {
+            flow
+        };
+
         let token_usage = session.token_usage;
         let context_size = session.meta.context_size;
 
@@ -83,6 +128,7 @@ impl SessionState {
             context_size,
             mode,
             plan,
+            flow,
             warnings,
         }
     }
@@ -104,6 +150,24 @@ impl SessionState {
         self.session.meta.mode = Some(self.mode.into());
         self.session.meta.plan_path = self.plan.path().map(|p| p.to_string_lossy().into_owned());
         self.session.meta.plan_written = self.plan.is_ready();
+        self.session.meta.flow_workstream_id = (self.mode == Mode::Flow
+            && !self.flow.workstream_id.is_empty())
+        .then(|| self.flow.workstream_id.clone());
+        self.session.meta.flow_stage = self.flow.stage.map(|s| s.as_str().to_string());
+        self.session.meta.flow_chunks = self
+            .flow
+            .chunks
+            .iter()
+            .map(|(id, c)| {
+                (
+                    id.clone(),
+                    craft_storage::sessions::StoredFlowChunk {
+                        title: c.title.clone(),
+                        status: chunk_status_str(c.status),
+                    },
+                )
+            })
+            .collect();
         self.session.meta.session_rules = rules_to_stored(&permissions.session_rules_snapshot());
         self.session.meta.thinking = Some(self.thinking.into());
         self.session.meta.fast = self.fast;
@@ -128,6 +192,7 @@ impl From<Mode> for StoredMode {
         match mode {
             Mode::Build => StoredMode::Build,
             Mode::Plan => StoredMode::Plan,
+            Mode::Flow => StoredMode::Flow,
         }
     }
 }

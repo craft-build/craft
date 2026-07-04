@@ -15,14 +15,11 @@ rust-version = "1.89"
 name = "craft"
 path = "src/main.rs"
 
-[features]
-default = ["onnx"]
-onnx = ["craft-agent/onnx", "craft-lua/onnx", "craft-ui/onnx"]
-
 [dependencies]
 craft-ui = { workspace = true }
 craft-agent = { workspace = true }
 craft-acp = { workspace = true }
+craft-flow = { workspace = true }
 craft-config = { workspace = true }
 craft-providers = { workspace = true }
 craft-storage = { workspace = true }
@@ -55,6 +52,7 @@ members = [
   "craft-agent",
   "craft-config",
   "craft-docgen",
+  "craft-flow",
   "craft-highlight",
   "craft-interpreter",
   "craft-lua",
@@ -80,6 +78,7 @@ rust-version = "1.89"
 craft-acp = { path = "craft-acp" }
 craft-agent = { path = "craft-agent" }
 craft-config = { path = "craft-config" }
+craft-flow = { path = "craft-flow" }
 craft-interpreter = { path = "craft-interpreter" }
 craft-providers = { path = "craft-providers" }
 craft-storage = { path = "craft-storage" }
@@ -108,6 +107,7 @@ hmac = { version = "0.13", default-features = false }
 base64 = "0.22"
 getrandom = "0.4"
 fastrand = "2"
+filetime = "0.2"
 test-case = "3"
 ignore = "0.4"
 memchr = "2"
@@ -122,6 +122,10 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-def
 unicode-width = "0.2"
 unicode-normalization = "0.1"
 similar = { version = "3", features = ["inline", "unicode"] }
+mermaid-rs-renderer = { version = "0.3", default-features = false, features = ["png"] }
+usvg = "0.47"
+resvg = "0.47"
+tiny-skia = "0.12"
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

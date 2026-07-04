@@ -211,6 +211,9 @@ fn toggle_mode_state_machine() {
     assert!(first_path.to_str().unwrap().contains("plans"));
 
     tab(&mut app);
+    assert_eq!(app.state.mode, Mode::Flow);
+
+    tab(&mut app);
     assert_eq!(app.state.mode, Mode::Build);
     assert!(!app.state.plan.is_ready());
 
@@ -219,6 +222,9 @@ fn toggle_mode_state_machine() {
     assert_eq!(app.state.plan.path().unwrap(), first_path);
 
     app.state.plan.mark_ready();
+    // Plan → Flow (ready plan survives the round trip through Flow)
+    tab(&mut app);
+    assert_eq!(app.state.mode, Mode::Flow);
     tab(&mut app);
     assert_eq!(app.state.mode, Mode::Build);
     assert!(app.state.plan.is_ready());
@@ -2716,4 +2722,144 @@ fn subagent_cancel_then_navigate_back_main_unaffected() {
     assert_eq!(app.active_chat, 0);
     assert_eq!(app.status, Status::Streaming);
     assert!(!app.chats[0].is_finished());
+}
+
+fn flow_app() -> App {
+    let mut app = test_app();
+    app.state.mode = Mode::Flow;
+    app.state.flow.workstream_id = "abc123def456".into();
+    app
+}
+
+#[test]
+fn ctrl_t_toggles_flow_panel_in_flow_mode() {
+    let mut app = flow_app();
+    assert!(!app.flow_panel.is_visible());
+
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
+    assert!(app.flow_panel.is_visible());
+
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
+    assert!(!app.flow_panel.is_visible());
+}
+
+#[test]
+fn ctrl_t_falls_through_to_floats_in_build_mode() {
+    let mut app = test_app();
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
+    assert!(!app.flow_panel.is_visible());
+}
+
+#[test]
+fn reset_session_closes_flow_panel() {
+    let mut app = flow_app();
+    app.flow_panel.toggle();
+    assert!(app.flow_panel.is_visible());
+
+    app.reset_session();
+    assert!(!app.flow_panel.is_visible());
+}
+
+#[test]
+fn flow_panel_dismiss_key_hides_panel() {
+    let mut app = flow_app();
+    app.flow_panel.toggle();
+    assert!(app.flow_panel.is_visible());
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.flow_panel.is_visible());
+}
+
+#[test]
+fn sync_flow_snapshot_reflects_state() {
+    let mut app = flow_app();
+    app.state.flow.stage = Some(craft_flow::Stage::Execute);
+    app.state
+        .flow
+        .set_chunk_status("chunk-1", craft_flow::ChunkStatus::Running);
+    app.sync_flow_snapshot();
+
+    assert_eq!(
+        app.flow_panel.snapshot.stage,
+        Some(craft_flow::Stage::Execute)
+    );
+    assert_eq!(
+        app.flow_panel.snapshot.chunks.get("chunk-1"),
+        Some(&crate::components::flow_panel::FlowSnapshotChunk {
+            title: String::new(),
+            status: craft_flow::ChunkStatus::Running,
+            stage: None,
+            ..Default::default()
+        })
+    );
+}
+
+#[test]
+fn flow_state_persists_through_sync_session() {
+    use std::sync::{Arc, Mutex};
+    let mut app = flow_app();
+    app.state.flow.stage = Some(craft_flow::Stage::Review);
+    app.state
+        .flow
+        .set_chunk_status("c1", craft_flow::ChunkStatus::NeedsReview);
+
+    app.state.sync_session(
+        &None,
+        &Some(Arc::new(Mutex::new(HashMap::new()))),
+        &app.permissions.clone(),
+    );
+    assert_eq!(app.state.session.meta.flow_stage.as_deref(), Some("review"));
+    let chunk = app.state.session.meta.flow_chunks.get("c1").unwrap();
+    assert_eq!(chunk.status, "needs_review");
+}
+
+#[test]
+fn flow_chunk_title_forwarded_to_panel_snapshot() {
+    let mut app = flow_app();
+    app.state.flow.set_chunk(
+        "c1",
+        "Add auth",
+        craft_flow::ChunkStatus::Queued,
+        None,
+        0,
+        &[],
+    );
+    app.state
+        .flow
+        .set_chunk("c1", "", craft_flow::ChunkStatus::Done, None, 0, &[]);
+    app.sync_flow_snapshot();
+    let row = app
+        .flow_panel
+        .snapshot
+        .chunks
+        .get("c1")
+        .expect("chunk present");
+    assert_eq!(row.title, "Add auth");
+    assert_eq!(row.status, craft_flow::ChunkStatus::Done);
+}
+
+#[test]
+fn handle_flow_progress_chunk_carries_title() {
+    let mut app = flow_app();
+    app.handle_flow_progress(craft_flow::FlowProgress::Chunk {
+        id: "c1".into(),
+        title: "Add auth".into(),
+        status: craft_flow::ChunkStatus::Queued,
+        stage: None,
+        depends_on: Vec::new(),
+        order: 0,
+    });
+    app.handle_flow_progress(craft_flow::FlowProgress::Chunk {
+        id: "c1".into(),
+        title: String::new(),
+        status: craft_flow::ChunkStatus::Running,
+        stage: Some(craft_flow::Stage::Execute),
+        depends_on: Vec::new(),
+        order: 0,
+    });
+    app.sync_flow_snapshot();
+    let row = app.flow_panel.snapshot.chunks.get("c1").unwrap();
+    assert_eq!(row.title, "Add auth");
+    assert_eq!(row.status, craft_flow::ChunkStatus::Running);
+    assert_eq!(row.stage, Some(craft_flow::Stage::Execute));
 }

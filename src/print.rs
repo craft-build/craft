@@ -246,9 +246,8 @@ pub async fn run(
             | AgentEvent::Nudge
             | AgentEvent::Info { .. }
             | AgentEvent::AdvisorNote { .. }
-            | AgentEvent::ModelEscalation { .. } => {}
-            #[cfg(feature = "onnx")]
-            AgentEvent::StagnationDetected { .. } => {}
+            | AgentEvent::ModelEscalation { .. }
+            | AgentEvent::StagnationDetected { .. } => {}
             AgentEvent::Retry {
                 attempt,
                 message,

@@ -28,11 +28,6 @@ pub(crate) struct ImagePicker {
 
 impl ImagePicker {
     /// Query the terminal for its graphics protocol and font size.
-    /// Falls back to halfblocks on any failure (piped stdio, mux without
-    /// passthrough, unsupported terminal). Inside a detected multiplexer
-    /// we force halfblocks regardless of the query result, because
-    /// Kitty/iTerm2 escape sequences don't survive tmux/screen DCS
-    /// passthrough reliably.
     pub(crate) fn new() -> Self {
         if crate::terminal::is_muxed() {
             return Self {
@@ -41,6 +36,12 @@ impl ImagePicker {
         }
         let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
         Self { picker }
+    }
+
+    /// Terminal cell size in pixels (used to size rasterized diagrams to fill
+    /// a target cell box rather than rendering at natural size).
+    pub(crate) fn font_size(&self) -> ratatui_image::FontSize {
+        self.picker.font_size()
     }
 
     /// Build a renderable image state from a base64-encoded `ImageSource`,
@@ -71,6 +72,35 @@ impl ImagePicker {
 
         let area = Size {
             width: avail_width.max(1),
+            height: target_rows,
+        };
+        let protocol = self
+            .picker
+            .new_protocol(dyn_img, area, Resize::Fit(None))
+            .ok()?;
+        Some(ImageRenderState {
+            protocol: Arc::new(protocol),
+            rows: target_rows,
+        })
+    }
+
+    /// Render a PNG byte buffer (e.g. a rasterized diagram) into a renderable
+    /// image state scaled to fit `avail_width` columns and `avail_height` rows.
+    /// Returns `None` if the bytes can't be decoded.
+    pub(crate) fn render_png(
+        &self,
+        png: &[u8],
+        avail_width: u16,
+        avail_height: u16,
+    ) -> Option<ImageRenderState> {
+        let dyn_img = image::load_from_memory(png).ok()?;
+        // The caller (flow graph) pre-rasterizes to exactly
+        // avail_width x avail_height cells, so render at those cell dimensions
+        // without additional fit-scaling.
+        let target_cols = avail_width.max(1);
+        let target_rows = avail_height.max(1);
+        let area = Size {
+            width: target_cols,
             height: target_rows,
         };
         let protocol = self

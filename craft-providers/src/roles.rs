@@ -1,6 +1,7 @@
 //! Model role resolution and fallback chains.
 //!
-//! A role (`default`/`smol`/`slow`/`plan`/`commit`/`advisor`) maps to an ordered
+//! A role (`default`/`advisor`, plus the Flow pipeline roles `scout`/`tpm`/
+//! `plan`/`req`/`execute`/`review`/`qa`/`integrator`/`verifier`) maps to an ordered
 //! fallback chain of model specs read from `model_roles.toml` (see
 //! `craft_config::model_roles`). The primary entry is the first resolvable spec;
 //! the remainder form a fallback chain consumed by `stream_with_retry` when the
@@ -138,7 +139,7 @@ mod tests {
         let null = Arc::new(UnconfiguredProvider) as Arc<dyn Provider>;
         let model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
         let resolved = resolve_role(
-            ModelRole::Slow,
+            ModelRole::Advisor,
             model.clone(),
             Arc::clone(&null),
             Timeouts::default(),

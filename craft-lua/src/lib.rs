@@ -6,7 +6,6 @@ mod plugin_permissions;
 mod runtime;
 pub mod terminal_backend;
 
-#[cfg(feature = "onnx")]
 pub use api::embed::EmbedChannel;
 pub use api::hooks::LuaHooks;
 pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};

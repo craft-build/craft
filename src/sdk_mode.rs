@@ -999,9 +999,8 @@ impl EventPump {
             }
             AgentEvent::Info { .. }
             | AgentEvent::AdvisorNote { .. }
-            | AgentEvent::ModelEscalation { .. } => {}
-            #[cfg(feature = "onnx")]
-            AgentEvent::StagnationDetected { .. } => {}
+            | AgentEvent::ModelEscalation { .. }
+            | AgentEvent::StagnationDetected { .. } => {}
         }
         Ok(())
     }

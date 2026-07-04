@@ -10,6 +10,9 @@
 //!   `conflict://*` lists every hunk across the repo with its global index.
 //! - `agent://findings` / `agent://findings.<i>`: read structured review findings
 //!   collected from subagents (composes with `report_finding` and `review`).
+//! - `flow://<path>`: read a Flow workstream document by its path (the `path`
+//!   field returned by `flow_search`). `flow://*` lists every document in the
+//!   active workstream. Only resolves inside a Flow stage.
 //!
 //! Schemes that need external services (`pr://`, `issue://`, `diff://`) are
 //! intentionally out of the initial scope.
@@ -25,7 +28,7 @@ pub(super) fn handles(path: &str) -> bool {
         && path
             .split("://")
             .next()
-            .is_some_and(|scheme| matches!(scheme, "skill" | "rule" | "conflict" | "agent"))
+            .is_some_and(|scheme| matches!(scheme, "skill" | "rule" | "conflict" | "agent" | "flow"))
 }
 
 pub(super) async fn resolve(path: &str, ctx: &ToolContext) -> Result<ToolOutput, String> {
@@ -37,6 +40,7 @@ pub(super) async fn resolve(path: &str, ctx: &ToolContext) -> Result<ToolOutput,
         "rule" => resolve_rule(rest),
         "conflict" => resolve_conflict(rest),
         "agent" => resolve_agent(rest, ctx),
+        "flow" => resolve_flow(rest, ctx).await,
         other => Err(format!("unsupported scheme '{other}://'")),
     }
 }
@@ -95,6 +99,40 @@ fn resolve_rule(selector: &str) -> Result<ToolOutput, String> {
         found.name,
         found.content.trim()
     )))
+}
+
+async fn resolve_flow(selector: &str, ctx: &ToolContext) -> Result<ToolOutput, String> {
+    let selector = selector.trim();
+    let Some(backend) = ctx.flow_search.as_ref() else {
+        return Err(
+            "flow:// is only available inside a Flow stage (no active workstream)".to_string(),
+        );
+    };
+    let Some((project_id, workstream_id)) = backend.workstream() else {
+        return Err(
+            "flow:// is only available inside a Flow stage (no active workstream)".to_string(),
+        );
+    };
+    if selector.is_empty() {
+        return Err("flow:// requires a document path (or '*' to list all)".into());
+    }
+    if selector == "*" {
+        let docs = backend
+            .list_documents(&project_id, &workstream_id)
+            .await?;
+        if docs.is_empty() {
+            return Ok(ToolOutput::Plain("no flow documents in this workstream".into()));
+        }
+        let mut out = format!("{} flow document(s) in this workstream:\n", docs.len());
+        for p in &docs {
+            out.push_str(&format!("- flow://{p}\n"));
+        }
+        return Ok(ToolOutput::Plain(out));
+    }
+    let body = backend
+        .read_document(&project_id, &workstream_id, selector)
+        .await?;
+    Ok(ToolOutput::Plain(format!("# flow://{selector}\n\n{body}")))
 }
 
 fn resolve_agent(rest: &str, ctx: &ToolContext) -> Result<ToolOutput, String> {
@@ -236,8 +274,10 @@ mod tests {
     use super::*;
     use crate::AgentMode;
     use crate::agent::findings_store::FindingsStore;
-    use crate::tools::test_support::stub_ctx;
+    use crate::tools::flow_search::{FlowSearchBackend, ListFuture, ReadFuture, SearchFuture};
+    use crate::tools::test_support::{stub_ctx, stub_ctx_with};
     use crate::types::{Finding, Priority};
+    use std::sync::Arc;
 
     #[test]
     fn handles_recognizes_schemes() {
@@ -248,6 +288,8 @@ mod tests {
             "conflict://1",
             "conflict://*",
             "agent://findings",
+            "flow://goal.md",
+            "flow://*",
         ] {
             assert!(handles(path), "{path} should be recognized");
         }
@@ -359,5 +401,95 @@ mod tests {
         let ctx = stub_ctx(&AgentMode::Build);
         let err = resolve("agent://history", &ctx).await.unwrap_err();
         assert!(err.contains("unsupported agent:// selector"), "{err}");
+    }
+
+    const FLOW_WS: &str = "ws-flow";
+
+    /// Backend stub for `flow://` tests: returns canned docs keyed by path.
+    struct FlowStub {
+        docs: Vec<(&'static str, &'static str)>,
+    }
+
+    impl FlowSearchBackend for FlowStub {
+        fn workstream(&self) -> Option<(String, String)> {
+            Some(("proj".to_string(), FLOW_WS.to_string()))
+        }
+        fn search<'a>(
+            &'a self,
+            _project_id: &'a str,
+            _workstream_id: &'a str,
+            _query: &'a str,
+            _k: usize,
+        ) -> SearchFuture<'a> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn read_document<'a>(
+            &'a self,
+            _project_id: &'a str,
+            _workstream_id: &'a str,
+            rel_path: &'a str,
+        ) -> ReadFuture<'a> {
+            let body = self
+                .docs
+                .iter()
+                .find(|(p, _)| *p == rel_path)
+                .map(|(_, c)| (*c).to_string())
+                .unwrap_or_else(|| format!("(missing {rel_path})"));
+            Box::pin(async move { Ok(body) })
+        }
+        fn list_documents<'a>(
+            &'a self,
+            _project_id: &'a str,
+            _workstream_id: &'a str,
+        ) -> ListFuture<'a> {
+            let paths: Vec<String> = self.docs.iter().map(|(p, _)| (*p).to_string()).collect();
+            Box::pin(async move { Ok(paths) })
+        }
+    }
+
+    fn flow_ctx(backend: Option<FlowStub>) -> ToolContext {
+        let mut ctx = stub_ctx_with(&AgentMode::Flow(FLOW_WS.to_string()), None, Some("flow:test"));
+        ctx.flow_search = backend.map(|b| Arc::new(b) as Arc<dyn FlowSearchBackend>);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn resolve_flow_without_backend_errors_with_guidance() {
+        let ctx = flow_ctx(None);
+        let err = resolve("flow://goal.md", &ctx).await.unwrap_err();
+        assert!(
+            err.contains("only available inside a Flow stage"),
+            "expected guidance, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_flow_list_shows_all_documents() {
+        let ctx = flow_ctx(Some(FlowStub {
+            docs: vec![("goal.md", "goal body"), ("plan.md", "plan body")],
+        }));
+        let out = resolve("flow://*", &ctx).await.unwrap();
+        let text = out.as_text().to_string();
+        assert!(text.contains("2 flow document"), "{text}");
+        assert!(text.contains("flow://goal.md"), "{text}");
+        assert!(text.contains("flow://plan.md"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn resolve_flow_doc_returns_body_with_header() {
+        let ctx = flow_ctx(Some(FlowStub {
+            docs: vec![("goal.md", "acceptance: ...")],
+        }));
+        let out = resolve("flow://goal.md", &ctx).await.unwrap();
+        let text = out.as_text().to_string();
+        assert!(text.contains("# flow://goal.md"), "{text}");
+        assert!(text.contains("acceptance: ..."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn resolve_flow_empty_selector_errors() {
+        let ctx = flow_ctx(Some(FlowStub { docs: vec![] }));
+        let err = resolve("flow://", &ctx).await.unwrap_err();
+        assert!(err.contains("requires a document path"), "{err}");
     }
 }

@@ -1,5 +1,3 @@
-#![cfg(feature = "onnx")]
-
 use craft_providers::{ContentBlock, Message};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use std::sync::{Arc, Mutex};

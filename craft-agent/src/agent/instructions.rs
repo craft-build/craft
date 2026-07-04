@@ -75,6 +75,10 @@ pub fn build_system_prompt(
         out.push_str(&plan_vars.apply(crate::prompt::PLAN_PROMPT));
     }
 
+    if let Some(flow) = crate::prompt::flow_section(mode) {
+        out.push_str(&flow);
+    }
+
     out
 }
 
@@ -206,6 +210,7 @@ mod tests {
     use super::*;
 
     const PLAN_PATH: &str = ".craft/plans/123.md";
+    const WORKSTREAM_ID: &str = "ws-abc";
 
     #[test_case(&AgentMode::Build, false ; "build_excludes_plan")]
     #[test_case(&AgentMode::Plan(PathBuf::from(PLAN_PATH)), true ; "plan_includes_plan")]
@@ -224,6 +229,36 @@ mod tests {
         if expect_plan {
             assert!(prompt.contains(PLAN_PATH));
         }
+    }
+
+    #[test]
+    fn flow_mode_injects_flow_section_and_workstream_id() {
+        let vars = Vars::new().set("{cwd}", "/tmp").set("{platform}", "linux");
+        let slots = crate::prompt::ResolvedSlots::default();
+        let prompt = build_system_prompt(
+            &vars,
+            &AgentMode::Flow(WORKSTREAM_ID.to_string()),
+            "",
+            &slots,
+            &Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap(),
+            false,
+        );
+        assert!(
+            prompt.contains("Flow Mode"),
+            "missing Flow section:\n{prompt}"
+        );
+        assert!(
+            prompt.contains(WORKSTREAM_ID),
+            "workstream id not substituted:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("{workstream_id}"),
+            "unfilled marker left in prompt"
+        );
+        assert!(
+            !prompt.contains("Plan Mode"),
+            "Flow leaked the Plan section"
+        );
     }
 
     #[test]

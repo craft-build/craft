@@ -7,6 +7,7 @@ Internal URL schemes (resolved through this one interface, no extra tools):
 - `conflict://*`: list every conflict hunk across the repo with its global index.
 - `agent://findings`: list structured review findings recorded by subagents.
 - `agent://findings.<i>`: read the ith finding in full (title, file, body).
+- `flow://<path>`: read a Flow workstream document (the `path` returned by `flow_search`). `flow://*` lists every document in the active workstream.
 Use these to cut down the number of tools you reach for.
 
 - Supports absolute, relative, and ~/ paths.

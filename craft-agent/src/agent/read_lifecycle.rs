@@ -292,10 +292,9 @@ pub(super) fn apply_lifecycle(
 }
 
 /// Run read lifecycle management on a History, returning total chars removed.
-/// When the `onnx` feature is enabled and a scorer is provided, semantically
-/// stale reads may be downgraded back to Fresh if the edit content is still
-/// similar enough to the original read content.
-#[cfg(feature = "onnx")]
+/// When a scorer is provided, semantically stale reads may be downgraded back
+/// to Fresh if the edit content is still similar enough to the original read
+/// content.
 pub(super) async fn run_lifecycle(
     history: &mut History,
     scorer: Option<&super::semantic::RelevanceScorer>,
@@ -326,17 +325,6 @@ pub(super) async fn run_lifecycle(
         }
     }
 
-    let msgs = history.as_mut_slice();
-    apply_lifecycle(msgs, &classifications, compression_store)
-}
-
-#[cfg(not(feature = "onnx"))]
-pub(super) async fn run_lifecycle(
-    history: &mut History,
-    compression_store: Option<&SharedCompressionStore>,
-) -> usize {
-    let messages = history.as_slice();
-    let classifications = classify_reads(messages);
     let msgs = history.as_mut_slice();
     apply_lifecycle(msgs, &classifications, compression_store)
 }
@@ -605,10 +593,7 @@ mod tests {
         ];
         msgs.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
         let mut history = History::new(msgs);
-        #[cfg(feature = "onnx")]
         let removed = run_lifecycle(&mut history, None, None).await;
-        #[cfg(not(feature = "onnx"))]
-        let removed = run_lifecycle(&mut history, None).await;
         assert!(removed > 0);
         match &history.as_slice()[2].content[0] {
             ContentBlock::ToolResult { content, .. } => {

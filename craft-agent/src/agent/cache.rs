@@ -68,7 +68,6 @@ impl PrefixCacheTracker {
         new_cost < original_cost
     }
 
-    #[cfg(any(test, feature = "onnx"))]
     pub(super) fn frozen_count(&self) -> usize {
         self.frozen_count
     }

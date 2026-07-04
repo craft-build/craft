@@ -28,3 +28,4 @@
 - [Doctor](./doctor.md)
 - [Headless Mode](./headless.md)
 - [ACP](./acp.md)
+- [Flow Mode](./flow.md)

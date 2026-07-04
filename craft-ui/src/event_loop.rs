@@ -85,7 +85,6 @@ pub struct EventLoopParams {
     pub provider: Arc<dyn Provider>,
     pub mcp_handle: Option<McpHandle>,
     pub mcp_config_errors: McpConfigErrors,
-    #[cfg(feature = "onnx")]
     pub embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
 }
 
@@ -223,7 +222,6 @@ impl<'t> EventLoop<'t> {
             provider,
             mcp_handle,
             mcp_config_errors,
-            #[cfg(feature = "onnx")]
             embed_rx,
         } = params;
 
@@ -242,6 +240,11 @@ impl<'t> EventLoop<'t> {
             provider,
         }));
         let bg = spawn_model_fetch(&model_slot, timeouts);
+        let flow_store = std::sync::Arc::new(
+            craft_storage::flow::FlowStore::new(&storage).unwrap_or_else(|_| {
+                craft_storage::flow::FlowStore::from_root(storage.path().join("projects"))
+            }),
+        );
         let handles = AgentHandles::spawn(
             &model_slot,
             initial_history,
@@ -254,7 +257,7 @@ impl<'t> EventLoop<'t> {
             mcp_handle,
             mcp_config_errors.clone(),
             compression.clone(),
-            #[cfg(feature = "onnx")]
+            flow_store,
             embed_rx,
         );
 
@@ -278,6 +281,7 @@ impl<'t> EventLoop<'t> {
         );
         app.exit_on_done = exit_on_done;
         app.lua_event_handle = lua_event_handle;
+        app.flow_parallel_chunks = config.flow.parallel_chunks;
 
         if needs_login {
             app.login_picker.open(app.storage.clone());
@@ -374,6 +378,11 @@ impl<'t> EventLoop<'t> {
 
         while let Ok(warning) = self.warn_rx.try_recv() {
             self.app.flash(warning);
+        }
+
+        while let Ok(p) = self.handles.flow_progress_rx.try_recv() {
+            let actions = self.app.update(Msg::FlowProgress(p));
+            self.dispatch(actions);
         }
 
         let slot_model = self.model_slot.load();

@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 
 pub(crate) const FORMAT_TOOL_NAME: &str = "format";
 
-const RUSTFMT_ARGS: &[&str] = &[];
+const RUSTFMT_ARGS: &[&str] = &["--edition", "2024"];
 const PRETTIER_ARGS: &[&str] = &["--write"];
 const BLACK_ARGS: &[&str] = &[];
 const GOFMT_ARGS: &[&str] = &["-w"];

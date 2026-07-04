@@ -174,6 +174,15 @@ An always-on lightweight reviewer that reads the transcript delta each turn and 
 | `model` | string | `none` | `provider/model_id` spec for the advisor. When unset, the `advisor` role from `model_roles.toml` is used, falling back to the active model |
 | `dedup_size` | usize | `16` | Maximum advisor notes kept in the dedup FIFO |
 
+### `agent.flow`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the Flow multi-stage pipeline |
+| `max_review_iterations` | u32 | `3` | How many times Review can send a chunk back to Execute |
+| `max_qa_iterations` | u32 | `2` | How many times QA can send a chunk back to Execute |
+| `parallel_chunks` | u32 | `1` | Chunks to run at once |
+
 ### `agent.ttsr`
 
 Time-traveling stream rules. When enabled, rules loaded from `.craft/rules/*.md` (lines prefixed with `rule:`) are matched against the in-flight stream text each turn, and a firing rule injects a system reminder. Off by default.
@@ -227,7 +236,6 @@ Each `ModelThreshold` may set:
 | `max_diff_lines` | usize | `100` | 10 | Max lines in compressed diff output |
 | `max_json_items` | usize | `15` | 5 | Max items in compressed JSON array output |
 | `protect_recent_tool_outputs` | usize | `2` | 1 | Never compress the last N tool outputs |
-| `semantic_enabled` | bool | `false` | - | Enable semantic relevance scoring (requires onnx feature) |
 
 ### `sandbox`
 

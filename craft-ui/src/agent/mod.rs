@@ -50,6 +50,7 @@ pub(crate) struct AgentHandles {
     pub(crate) queue: QueueSender,
     pub(crate) timeouts: craft_providers::Timeouts,
     pub(crate) btw_system: Arc<ArcSwap<String>>,
+    pub(crate) flow_progress_rx: flume::Receiver<craft_flow::FlowProgress>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -69,7 +70,8 @@ impl AgentHandles {
         mcp_handle: Option<McpHandle>,
         mcp_config_errors: McpConfigErrors,
         compression: craft_config::CompressionConfig,
-        #[cfg(feature = "onnx")] embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
+        flow_store: std::sync::Arc<craft_storage::flow::FlowStore>,
+        embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
     ) -> Self {
         spawn_agent_internal(
             model_slot,
@@ -83,7 +85,7 @@ impl AgentHandles {
             timeouts,
             lua_handle,
             compression,
-            #[cfg(feature = "onnx")]
+            flow_store,
             embed_rx,
         )
     }
@@ -141,6 +143,11 @@ impl AgentHandles {
                 warn!(error = %e, "failed to reload auth, continuing with existing credentials");
             }
         });
+        let flow_store = std::sync::Arc::new(
+            craft_storage::flow::FlowStore::new(&app.storage).unwrap_or_else(|_| {
+                craft_storage::flow::FlowStore::from_root(app.storage.path().join("projects"))
+            }),
+        );
         let new = spawn_agent_internal(
             model_slot,
             history,
@@ -153,7 +160,7 @@ impl AgentHandles {
             self.timeouts,
             lua_handle,
             compression,
-            #[cfg(feature = "onnx")]
+            flow_store,
             None,
         );
         let old = mem::replace(self, new);
@@ -196,7 +203,8 @@ fn spawn_agent_internal(
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
     compression: craft_config::CompressionConfig,
-    #[cfg(feature = "onnx")] embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
+    flow_store: std::sync::Arc<craft_storage::flow::FlowStore>,
+    embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
 ) -> AgentHandles {
     let (agent_tx, agent_rx) = flume::unbounded::<Envelope>();
     let agent_tx_clone = agent_tx.clone();
@@ -220,6 +228,8 @@ fn spawn_agent_internal(
         Arc::clone(&subagent_cancels),
     );
 
+    let (flow_progress_tx, flow_progress_rx) = flume::unbounded::<craft_flow::FlowProgress>();
+
     let agent_loop = AgentLoop::new(
         Arc::clone(model_slot),
         config,
@@ -239,11 +249,12 @@ fn spawn_agent_internal(
         Arc::clone(&btw_system),
         compression,
         subagent_cancels,
+        flow_store,
+        flow_progress_tx,
     );
 
     let task = tokio::spawn(agent_loop.run());
 
-    #[cfg(feature = "onnx")]
     if let Some(rx) = embed_rx {
         let service = craft_agent::EmbeddingService::new();
         tokio::spawn(async move {
@@ -267,5 +278,6 @@ fn spawn_agent_internal(
         timeouts,
         btw_system,
         task,
+        flow_progress_rx,
     }
 }

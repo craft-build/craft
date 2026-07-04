@@ -11,7 +11,6 @@ pub use mcp::protocol::PromptRole;
 pub use mcp::{McpCommand, McpHandle, McpPromptArg, McpPromptInfo, McpSnapshot, McpSnapshotReader};
 pub(crate) mod task_set;
 pub use agent::EmbedRequest;
-#[cfg(feature = "onnx")]
 pub use agent::EmbeddingService;
 pub use agent::{
     Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
@@ -52,13 +51,22 @@ pub enum AgentMode {
     #[default]
     Build,
     Plan(PathBuf),
+    /// Flow mode carries the active workstream id.
+    Flow(String),
 }
 
 impl AgentMode {
     pub fn plan_path(&self) -> Option<&Path> {
         match self {
             Self::Plan(p) => Some(p),
-            Self::Build => None,
+            Self::Build | Self::Flow(_) => None,
+        }
+    }
+
+    pub fn flow_workstream(&self) -> Option<&str> {
+        match self {
+            Self::Flow(id) => Some(id),
+            Self::Build | Self::Plan(_) => None,
         }
     }
 }

@@ -66,10 +66,6 @@ tree-sitter-perl = { workspace = true }
 tree-sitter-svelte-next = { workspace = true }
 tree-sitter-zsh = { workspace = true }
 
-[features]
-default = []
-onnx = ["craft-agent/onnx"]
-
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

@@ -208,6 +208,11 @@ pub fn map_stop_reason(
         Some(craft_providers::StopReason::Cancelled) => {
             agent_client_protocol_schema::StopReason::Cancelled
         }
+        // The approval gate is a Craft-only pause; ACP has no equivalent, so
+        // surface it as EndTurn (the ACP session simply ends from its view).
+        Some(craft_providers::StopReason::AwaitingGoalApproval) => {
+            agent_client_protocol_schema::StopReason::EndTurn
+        }
     }
 }
 

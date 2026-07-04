@@ -626,7 +626,6 @@ pub enum AgentEvent {
         id: String,
         body: Arc<SharedBuf>,
     },
-    #[cfg(feature = "onnx")]
     StagnationDetected {
         similarity: f32,
     },

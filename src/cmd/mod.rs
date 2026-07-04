@@ -60,6 +60,22 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Run(args)) => {
             subcmd::run::run(args).await?;
         }
+        Some(Command::Flow(args)) => {
+            match args.action {
+                Some(action) => subcmd::flow::run(action).await?,
+                None => {
+                    // `craft flow` with no subcommand defaults to `run` against stdin.
+                    let action = crate::cli::FlowAction::Run {
+                        request: None,
+                        print: false,
+                        output_format: crate::print::OutputFormat::Text,
+                        session: None,
+                        payload: None,
+                    };
+                    subcmd::flow::run(action).await?;
+                }
+            }
+        }
         Some(Command::Review(args)) => {
             subcmd::review::run(args).await?;
         }

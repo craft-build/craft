@@ -110,11 +110,16 @@ impl App {
         self.status = super::Status::Idle;
         self.queue.clear();
         self.close_all_overlays();
+        if self.flow_awaiting_approval {
+            self.flow_awaiting_approval = false;
+            self.send_answer(craft_flow::FLOW_CANCEL_ANSWER.to_owned());
+        }
         self.pending_input = PendingInput::None;
         self.status_bar.clear_flash();
         self.task_picker_original = None;
         self.last_esc = None;
         self.plan_form.reset();
+        self.flow_panel.reset();
         self.restoring = Arc::new(std::sync::atomic::AtomicBool::new(false));
     }
 

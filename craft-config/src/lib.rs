@@ -73,7 +73,6 @@ pub const DEFAULT_COMPRESSION_JSON_FIRST_KEEP: usize = 5;
 pub const DEFAULT_COMPRESSION_JSON_LAST_KEEP: usize = 3;
 pub const DEFAULT_COMPRESSION_PROTECT_RECENT: usize = 2;
 pub const DEFAULT_COMPRESSION_CODE_RATE: f32 = 0.3;
-pub const DEFAULT_SEMANTIC_ENABLED: bool = false;
 
 pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
@@ -393,6 +392,7 @@ pub struct AgentFileConfig {
     pub dynamic_tools: DynamicToolsConfig,
     #[serde(default)]
     pub advisor: AdvisorConfig,
+    pub flow: Option<FlowConfig>,
     #[serde(default)]
     pub ttsr: TtsrConfig,
     #[serde(default)]
@@ -421,6 +421,9 @@ impl AgentFileConfig {
         );
         if overlay.advisor.enabled || overlay.advisor.model.is_some() {
             self.advisor = overlay.advisor;
+        }
+        if let Some(flow) = overlay.flow {
+            self.flow = Some(flow);
         }
         if overlay.ttsr.enabled {
             self.ttsr = overlay.ttsr;
@@ -484,7 +487,6 @@ pub struct CompressionFileConfig {
     pub json_first_keep: Option<usize>,
     pub json_last_keep: Option<usize>,
     pub protect_recent_tool_outputs: Option<usize>,
-    pub semantic_enabled: Option<bool>,
 }
 
 impl CompressionFileConfig {
@@ -501,8 +503,7 @@ impl CompressionFileConfig {
             max_json_items,
             json_first_keep,
             json_last_keep,
-            protect_recent_tool_outputs,
-            semantic_enabled
+            protect_recent_tool_outputs
         );
     }
 }
@@ -1056,6 +1057,45 @@ fn default_advisor_dedup_size() -> usize {
     16
 }
 
+/// Flow mode configuration. Off by default; when enabled, the agent can run
+/// the multi-stage Flow pipeline (scout, tpm, plan, execute, qa, integrator,
+/// verifier) with persisted per-workstream documents.
+#[derive(Debug, Clone, Deserialize, Serialize, ConfigSection)]
+#[config(section = "agent.flow")]
+#[serde(default, deny_unknown_fields)]
+pub struct FlowConfig {
+    #[serde(default)]
+    #[config(default = false, desc = "Enable the Flow multi-stage pipeline")]
+    pub enabled: bool,
+    #[serde(default = "default_flow_max_review_iterations")]
+    #[config(
+        default = 3,
+        desc = "How many times Review can send a chunk back to Execute"
+    )]
+    pub max_review_iterations: u32,
+    #[serde(default = "default_flow_max_qa_iterations")]
+    #[config(
+        default = 2,
+        desc = "How many times QA can send a chunk back to Execute"
+    )]
+    pub max_qa_iterations: u32,
+    #[serde(default = "default_flow_parallel_chunks")]
+    #[config(default = 1, desc = "Chunks to run at once")]
+    pub parallel_chunks: u32,
+}
+
+fn default_flow_max_review_iterations() -> u32 {
+    3
+}
+
+fn default_flow_max_qa_iterations() -> u32 {
+    2
+}
+
+fn default_flow_parallel_chunks() -> u32 {
+    1
+}
+
 /// Time-traveling stream rules. Off by default; when enabled, rules loaded from
 /// `.craft/rules/*.md` (lines prefixed with `rule:`) are matched against the
 /// in-flight stream text each turn, and a firing rule injects a system reminder.
@@ -1144,6 +1184,9 @@ pub struct AgentConfig {
     #[config(skip, default = "AdvisorConfig::default()")]
     pub advisor: AdvisorConfig,
 
+    #[config(skip, default = "FlowConfig::default()")]
+    pub flow: FlowConfig,
+
     #[config(skip, default = "TtsrConfig::default()")]
     pub ttsr: TtsrConfig,
 
@@ -1204,6 +1247,7 @@ impl AgentConfig {
             small_model: file.small_model,
             dynamic_tools: file.dynamic_tools,
             advisor: file.advisor,
+            flow: file.flow.unwrap_or_default(),
             ttsr: file.ttsr,
             compaction: file.compaction,
             hooks_enabled: file.hooks_enabled.unwrap_or(true),
@@ -1342,9 +1386,6 @@ pub struct CompressionConfig {
 
     #[config(default = DEFAULT_COMPRESSION_PROTECT_RECENT, min = 1, desc = "Never compress the last N tool outputs")]
     pub protect_recent_tool_outputs: usize,
-
-    #[config(default = DEFAULT_SEMANTIC_ENABLED, desc = "Enable semantic relevance scoring (requires onnx feature)")]
-    pub semantic_enabled: bool,
 }
 
 impl CompressionConfig {
@@ -1376,7 +1417,6 @@ impl CompressionConfig {
             protect_recent_tool_outputs: f
                 .protect_recent_tool_outputs
                 .unwrap_or(DEFAULT_COMPRESSION_PROTECT_RECENT),
-            semantic_enabled: f.semantic_enabled.unwrap_or(DEFAULT_SEMANTIC_ENABLED),
         }
     }
 }

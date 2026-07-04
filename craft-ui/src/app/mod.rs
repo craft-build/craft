@@ -28,6 +28,9 @@ use crate::clipboard::ClipboardState;
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
+use crate::components::flow_goal_prompt::{FlowGoalAnswer, FlowGoalPrompt};
+use crate::components::flow_graph::FlowGraph;
+use crate::components::flow_panel::{FlowPanel, FlowPanelAction, FlowSnapshot, FlowSnapshotChunk};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
 use crate::components::keybindings::{ActionId, KeybindingResolver, key, normalize_key};
@@ -51,6 +54,7 @@ use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
 };
 use crate::image;
+use crate::image_render::ImagePicker;
 use crate::selection::{SelectionState, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use craft_agent::permissions::PermissionManager;
@@ -127,6 +131,7 @@ pub enum Msg {
     Mouse(MouseEvent),
     Scroll { column: u16, row: u16, delta: i32 },
     Agent(Box<Envelope>),
+    FlowProgress(craft_flow::FlowProgress),
 }
 
 pub struct App {
@@ -152,6 +157,19 @@ pub struct App {
     pub(super) file_picker: FilePickerModal,
     pub(super) permission_prompt: PermissionPrompt,
     pub(super) plan_form: PlanForm,
+    pub(super) flow_panel: FlowPanel,
+    pub(super) flow_graph: FlowGraph,
+    pub(super) image_picker: ImagePicker,
+    pub(super) flow_goal_prompt: FlowGoalPrompt,
+    /// Index of the selected chunk in the flow panel, if any. Drives the right
+    /// pane of the flow-graph split to show that chunk's subagent history.
+    pub(super) flow_selected_chunk: Option<String>,
+    /// True while the flow pipeline is paused at the goal-approval gate. The
+    /// next submit is routed to the agent's answer channel (as the approval
+    /// payload) instead of starting a new agent turn.
+    pub(super) flow_awaiting_approval: bool,
+    /// Max concurrent chunks from config; drives the graph's parallel layout.
+    pub(super) flow_parallel_chunks: u32,
     pub(super) status_bar: StatusBar,
     pub status: Status,
     pub(crate) state: session_state::SessionState,
@@ -196,6 +214,18 @@ macro_rules! define_overlays {
             vec![$(&mut self.$field,)+]
         }
     };
+}
+
+/// True for per-chunk pipeline stages (Req/Execute/Review/Qa) that carry a
+/// chunk id in their `flow_stage_id`, as opposed to top-level stages.
+fn is_chunk_stage(stage: craft_flow::Stage) -> bool {
+    matches!(
+        stage,
+        craft_flow::Stage::Req
+            | craft_flow::Stage::Execute
+            | craft_flow::Stage::Review
+            | craft_flow::Stage::Qa
+    )
 }
 
 impl App {
@@ -254,6 +284,13 @@ impl App {
             file_picker: FilePickerModal::new(),
             permission_prompt: PermissionPrompt::new(),
             plan_form: PlanForm::new(),
+            flow_panel: FlowPanel::new(),
+            flow_graph: FlowGraph::new(),
+            image_picker: ImagePicker::new(),
+            flow_goal_prompt: FlowGoalPrompt::new(),
+            flow_selected_chunk: None,
+            flow_awaiting_approval: false,
+            flow_parallel_chunks: 1,
             status_bar: StatusBar::new(ui_config.flash_duration()),
             status: Status::Idle,
             state,
@@ -297,6 +334,7 @@ impl App {
         app.login_picker.set_keybindings(app.keybindings.clone());
         app.mcp_picker.set_keybindings(app.keybindings.clone());
         app.plan_form.set_keybindings(app.keybindings.clone());
+        app.flow_panel.set_keybindings(app.keybindings.clone());
         app
     }
 
@@ -336,6 +374,173 @@ impl App {
 
     fn plan_form_active(&self) -> bool {
         self.state.mode == Mode::Plan && self.plan_form.is_visible()
+    }
+
+    fn flow_panel_active(&self) -> bool {
+        self.state.mode == Mode::Flow && self.flow_panel.is_visible()
+    }
+
+    /// True when the flow-graph split should replace the messages area: Flow
+    /// mode + panel open + not waiting at the goal-approval overlay.
+    fn flow_graph_active(&self) -> bool {
+        self.flow_panel_active() && !self.flow_awaiting_approval
+    }
+
+    /// Resolve the chat index for the subagent currently driving the flow, so
+    /// the right pane of the flow-graph split can render its live transcript.
+    ///
+    /// Top-level stages (Scout/TPM/Plan/Integrator/Verifier) map to
+    /// `flow:{ws}:{stage}`; chunk stages (Req/Execute/Review/Qa) map to
+    /// `flow:{ws}:{sub_stage}:{chunk}` using the selected chunk's current
+    /// sub-stage (falling back to the first running chunk). Returns `None`
+    /// when no matching subagent chat exists yet.
+    fn resolve_flow_subagent_chat(&self) -> Option<usize> {
+        let workstream = &self.state.flow.workstream_id;
+        let candidate_ids: Vec<String> = match self.state.flow.stage {
+            Some(stage) if is_chunk_stage(stage) => {
+                let chunk_id = self.flow_selected_chunk.clone().or_else(|| {
+                    self.state
+                        .flow
+                        .chunks
+                        .iter()
+                        .find(|(_, c)| c.status == craft_flow::ChunkStatus::Running)
+                        .map(|(id, _)| id.clone())
+                })?;
+                let sub_stage = self
+                    .state
+                    .flow
+                    .chunks
+                    .get(&chunk_id)
+                    .and_then(|c| c.stage)
+                    .unwrap_or(craft_flow::Stage::Req);
+                vec![format!(
+                    "flow:{workstream}:{}:{chunk_id}",
+                    sub_stage.as_str()
+                )]
+            }
+            Some(stage) => vec![format!("flow:{workstream}:{}", stage.as_str())],
+            None => vec![],
+        };
+        for id in candidate_ids {
+            if let Some(&idx) = self.chat_index.get(id.as_str()) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    /// Whether `key` matches a global shortcut (Tasks, chat cycling, queue
+    /// pop, etc) that should fire even while the flow panel is visible.
+    fn is_global_shortcut(&self, key: KeyEvent) -> bool {
+        use crate::components::keybindings::ActionId;
+        self.keybindings.matches(ActionId::Tasks, key)
+            || self.keybindings.matches(ActionId::NextChat, key)
+            || self.keybindings.matches(ActionId::PrevChat, key)
+            || self.keybindings.matches(ActionId::PopQueue, key)
+            || self.keybindings.matches(ActionId::Quit, key)
+            || self.keybindings.matches(ActionId::Search, key)
+            || self.keybindings.matches(ActionId::FilePicker, key)
+            || self.keybindings.matches(ActionId::Help, key)
+            || self.keybindings.matches(ActionId::OpenEditor, key)
+    }
+
+    /// Push the current `FlowState` into the panel's render snapshot. Called
+    /// each frame before rendering so the panel always reflects live state
+    /// without holding a borrow into `SessionState`.
+    fn sync_flow_snapshot(&mut self) {
+        let snapshot = FlowSnapshot {
+            workstream_id: self.state.flow.workstream_id.clone(),
+            stage: self.state.flow.stage,
+            parallel_chunks: self.flow_parallel_chunks,
+            chunks: self
+                .state
+                .flow
+                .chunks
+                .iter()
+                .map(|(id, c)| {
+                    (
+                        id.clone(),
+                        FlowSnapshotChunk {
+                            title: c.title.clone(),
+                            status: c.status,
+                            stage: c.stage,
+                            order: c.order,
+                            depends_on: c.depends_on.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        self.flow_panel.set_snapshot(snapshot);
+    }
+
+    /// Update a single chunk's status in the active workstream, surfaced from
+    /// craft-flow stage events. No-op outside Flow mode.
+    #[allow(dead_code)]
+    pub(crate) fn update_flow_chunk(&mut self, chunk_id: &str, status: craft_flow::ChunkStatus) {
+        if self.state.mode != Mode::Flow {
+            return;
+        }
+        self.state.flow.set_chunk_status(chunk_id, status);
+    }
+
+    /// Bulk-replace the workstream's stage + chunks from a craft-flow snapshot.
+    #[allow(dead_code)]
+    pub(crate) fn sync_flow_state(
+        &mut self,
+        stage: Option<craft_flow::Stage>,
+        chunks: impl IntoIterator<Item = (String, String, craft_flow::ChunkStatus)>,
+    ) {
+        if self.state.mode != Mode::Flow {
+            return;
+        }
+        self.state.flow.sync_from(stage, chunks);
+    }
+
+    /// Apply a `FlowProgress` event from the pipeline to the live `FlowState`
+    /// (so the FlowPanel reflects stage/chunk transitions) or open the
+    /// goal-approval overlay at the gate. No-op outside Flow mode.
+    fn handle_flow_progress(&mut self, p: craft_flow::FlowProgress) -> Vec<Action> {
+        if self.state.mode != Mode::Flow {
+            return vec![];
+        }
+        match p {
+            craft_flow::FlowProgress::Stage(stage) => {
+                if stage == craft_flow::Stage::Scout {
+                    self.state.flow.clear_chunks();
+                }
+                self.state.flow.stage = Some(stage);
+            }
+            craft_flow::FlowProgress::Chunk {
+                id,
+                title,
+                status,
+                stage,
+                depends_on,
+                order,
+            } => {
+                self.state
+                    .flow
+                    .set_chunk(&id, &title, status, stage, order, &depends_on);
+            }
+            craft_flow::FlowProgress::GoalReady { goal_doc } => {
+                self.flow_awaiting_approval = true;
+                self.flow_goal_prompt.open(goal_doc);
+            }
+            craft_flow::FlowProgress::Done { .. } => {
+                self.state.flow.finalize_non_terminal();
+                self.flash("Flow run complete.".into());
+            }
+            craft_flow::FlowProgress::Failed { stage, reason } => {
+                self.state.flow.finalize_non_terminal();
+                self.status = Status::error(format!("flow {stage:?} failed: {reason}"));
+            }
+            craft_flow::FlowProgress::Cancelled => {
+                self.state.flow.finalize_non_terminal();
+                self.status = Status::error("flow run cancelled".into());
+            }
+        }
+        vec![]
     }
 
     pub(crate) fn update_model(&mut self, model: &Model) {
@@ -407,6 +612,7 @@ impl App {
                 vec![]
             }
             Msg::Agent(envelope) => self.handle_agent_event(*envelope),
+            Msg::FlowProgress(p) => self.handle_flow_progress(p),
         }
     }
 
@@ -540,6 +746,20 @@ impl App {
     /// Returns `Some` when an overlay is open (consuming the key),
     /// `None` when no overlay is active and input should continue.
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
+        if self.flow_goal_prompt.is_open() {
+            if let Some(answer) = self.flow_goal_prompt.handle_key(key) {
+                let encoded = match answer {
+                    FlowGoalAnswer::Approve => craft_flow::FLOW_APPROVE_ANSWER.to_owned(),
+                    FlowGoalAnswer::Cancel => craft_flow::FLOW_CANCEL_ANSWER.to_owned(),
+                    FlowGoalAnswer::Revise(text) => text,
+                };
+                self.flow_goal_prompt.close();
+                self.flow_awaiting_approval = false;
+                self.send_answer(encoded);
+            }
+            return Some(vec![]);
+        }
+
         if self.permission_prompt.is_open() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
                 let subagent_id = self.permission_prompt.subagent_id().map(str::to_owned);
@@ -555,6 +775,37 @@ impl App {
             let action = self.plan_form.handle_key(key);
             if action != PlanFormAction::Passthrough {
                 return Some(self.handle_plan_form_action(action));
+            }
+        }
+
+        // flow_panel is non-modal: it hides on Esc/Ctrl+Q/Ctrl+T but passes
+        // global shortcuts (Tasks, NextChat, PrevChat, PopQueue, etc) through
+        // so they still work while the panel is visible. Skip entirely while
+        // an overlay (task picker, search, file picker, etc) has focus so the
+        // overlay's keys (Up/Down/Enter) aren't swallowed.
+        let overlay_open = self.task_picker.is_open()
+            || self.session_picker.is_open()
+            || self.search_modal.is_open()
+            || self.file_picker.is_open()
+            || self.help_modal.is_open()
+            || self.stats_modal.is_open()
+            || self.btw_modal.is_open();
+        if self.flow_panel_active() && !overlay_open {
+            let action = self.flow_panel.handle_key(key);
+            match action {
+                FlowPanelAction::Hide => {
+                    self.flow_panel.hide();
+                    return Some(vec![]);
+                }
+                FlowPanelAction::Passthrough => {}
+                FlowPanelAction::Consumed => {
+                    self.flow_selected_chunk = self.flow_panel.selected_chunk().map(str::to_owned);
+                    if self.is_global_shortcut(key) {
+                        // fall through to normal dispatch
+                    } else {
+                        return Some(vec![]);
+                    }
+                }
             }
         }
 
@@ -818,6 +1069,7 @@ impl App {
             } else if self.keybindings.matches(ActionId::PlanToggle, key) {
                 match self.state.mode {
                     Mode::Plan => self.plan_form.toggle(),
+                    Mode::Flow => self.flow_panel.toggle(),
                     _ => self.float_mgr.toggle_panel_visibility(),
                 }
             } else if self.keybindings.matches(ActionId::Search, key) {
@@ -918,6 +1170,21 @@ impl App {
             }
             PendingInput::None => {}
         }
+        if self.flow_awaiting_approval {
+            if !sub.text.trim().is_empty() {
+                let text = sub.text.trim().to_owned();
+                self.main_chat().show_user_message(text.clone());
+                self.flow_awaiting_approval = false;
+                self.flow_goal_prompt.close();
+                let answer = match text.as_str() {
+                    "cancel" => craft_flow::FLOW_CANCEL_ANSWER.to_owned(),
+                    "approved" => craft_flow::FLOW_APPROVE_ANSWER.to_owned(),
+                    other => other.to_owned(),
+                };
+                self.send_answer(answer);
+            }
+            return vec![];
+        }
         if sub.is_empty() {
             return vec![];
         }
@@ -954,8 +1221,13 @@ impl App {
         let cancelled_run = self.run_id;
         self.run_id += 1;
         self.retry_info = None;
+        let awaiting_flow = self.flow_awaiting_approval;
         self.close_all_overlays();
         self.pending_input = PendingInput::None;
+        if awaiting_flow {
+            self.flow_awaiting_approval = false;
+            self.send_answer(craft_flow::FLOW_CANCEL_ANSWER.to_owned());
+        }
         self.finish_subagents(DisplayRole::Error, CANCELLED_TEXT);
         self.subagent_answers.clear();
         self.shell.cancel_all();
@@ -1533,6 +1805,7 @@ impl App {
         login_picker,
         mcp_picker,
         permission_prompt,
+        flow_goal_prompt,
     );
 
     pub fn any_overlay_open(&self) -> bool {
@@ -1576,6 +1849,9 @@ impl App {
 
     fn route_text_paste(&mut self, text: &str) {
         if self.plan_form_active() {
+            return;
+        }
+        if self.flow_goal_prompt.handle_paste(text) {
             return;
         }
         if self.permission_prompt.handle_paste(text) {

@@ -14,19 +14,19 @@ use tracing::{debug, warn};
 const WORKTREE_BRANCH_PREFIX: &str = "craft-subagent/";
 
 /// A linked git worktree. `Drop` removes the worktree and its branch.
-pub(crate) struct Worktree {
+pub struct Worktree {
     path: PathBuf,
     branch: String,
 }
 
 impl Worktree {
-    pub(crate) fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 
     /// Create a linked worktree from the repo rooted at `cwd`. Returns `None`
     /// (and logs) when git is missing or the dir is not a git repo.
-    pub(crate) fn create(cwd: &std::path::Path, label: &str) -> Option<Self> {
+    pub fn create(cwd: &std::path::Path, label: &str) -> Option<Self> {
         if !cwd.is_dir() {
             return None;
         }

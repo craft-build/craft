@@ -39,11 +39,8 @@ const HOOK_BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
 const DEFAULT_SMALL_MODEL_RATIO: f64 = 0.60;
 const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
-#[cfg(feature = "onnx")]
 const MANDATORY_RECENT_MESSAGES: usize = 6;
-#[cfg(feature = "onnx")]
 const STAGNATION_WINDOW_SIZE: usize = 5;
-#[cfg(feature = "onnx")]
 const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
 
 pub async fn resolve_compaction_model(
@@ -145,9 +142,7 @@ pub struct Agent<'h> {
     dynamic: crate::tools::DynamicContext,
     tool_build: Option<crate::tools::ToolBuild>,
     hooks: Option<Arc<dyn crate::Hooks>>,
-    #[cfg(feature = "onnx")]
     scorer: Option<super::semantic::RelevanceScorer>,
-    #[cfg(feature = "onnx")]
     last_relevance_scores: Option<Vec<(usize, f32)>>,
     fs: Arc<dyn crate::tools::FsBackend>,
     goal: Option<String>,
@@ -157,6 +152,7 @@ pub struct Agent<'h> {
     fallback_chain: Vec<craft_providers::roles::ChainHop>,
     advisor_state: Option<super::advisor::AdvisorState>,
     ttsr: Option<Arc<super::ttsr::TtsrManager>>,
+    flow_search: crate::tools::flow_search::FlowSearchHandle,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -229,13 +225,7 @@ impl<'h> Agent<'h> {
             dynamic,
             tool_build: run.tool_build,
             hooks: run.hooks,
-            #[cfg(feature = "onnx")]
-            scorer: if params.compression.semantic_enabled {
-                Some(super::semantic::RelevanceScorer::new())
-            } else {
-                None
-            },
-            #[cfg(feature = "onnx")]
+            scorer: Some(super::semantic::RelevanceScorer::new()),
             last_relevance_scores: None,
             fs: params.fs,
             goal: None,
@@ -245,6 +235,7 @@ impl<'h> Agent<'h> {
             fallback_chain: Vec::new(),
             advisor_state,
             ttsr,
+            flow_search: None,
         }
     }
 
@@ -290,13 +281,19 @@ impl<'h> Agent<'h> {
         self
     }
 
-    #[cfg(feature = "onnx")]
+    pub fn with_flow_search(
+        mut self,
+        flow_search: crate::tools::flow_search::FlowSearchHandle,
+    ) -> Self {
+        self.flow_search = flow_search;
+        self
+    }
+
     async fn build_intent(&self) -> Option<Vec<f32>> {
         let scorer = self.scorer.as_ref()?;
         scorer.build_intent(self.history.as_slice()).await.ok()
     }
 
-    #[cfg(feature = "onnx")]
     async fn build_semantic_view(&self, intent: &[f32]) -> Option<Vec<Message>> {
         let scorer = self.scorer.as_ref()?;
         let scores = scorer
@@ -443,10 +440,8 @@ impl<'h> Agent<'h> {
             );
         }
 
-        #[cfg(feature = "onnx")]
         let intent = self.build_intent().await;
 
-        #[cfg(feature = "onnx")]
         if let Some(intent_vec) = &intent
             && let Some(scorer) = &self.scorer
         {
@@ -462,18 +457,14 @@ impl<'h> Agent<'h> {
             }
         }
 
-        #[cfg(feature = "onnx")]
         let semantic_view: Option<Vec<Message>> = match &intent {
             Some(intent_vec) => self.build_semantic_view(intent_vec).await,
             None => None,
         };
 
-        #[cfg(feature = "onnx")]
         let messages: &[Message] = semantic_view
             .as_deref()
             .unwrap_or_else(|| self.history.as_slice());
-        #[cfg(not(feature = "onnx"))]
-        let messages: &[Message] = self.history.as_slice();
 
         let response = match stream_with_retry(
             &*self.provider,
@@ -532,7 +523,6 @@ impl<'h> Agent<'h> {
         self.context_size = usage.total_input();
         self.cache_tracker.update(&usage, self.history.len());
 
-        #[cfg(feature = "onnx")]
         if let Some(scorer) = &self.scorer {
             let turn_summary = super::semantic::intent_summary(self.history.as_slice());
             if !turn_summary.is_empty()
@@ -699,6 +689,13 @@ impl<'h> Agent<'h> {
                 );
                 self.history.push(Message::synthetic(note));
                 Ok(TurnOutcome::Continue)
+            }
+            Ok(super::judge::JudgeOutcome::Criteria { .. }) => {
+                debug_assert!(
+                    false,
+                    "Criteria verdict from /goal judge; structured path is Flow-only"
+                );
+                Ok(TurnOutcome::Done(stop_reason))
             }
             Err(e) => {
                 warn!(error = %e, "judge evaluation failed, allowing stop (fail-open)");
@@ -874,6 +871,7 @@ impl<'h> Agent<'h> {
             snapshot_store: Arc::clone(&self.snapshot_store),
             pending_edits: Arc::clone(&self.pending_edits),
             session_id: self.session_id.clone(),
+            flow_search: self.flow_search.clone(),
         }
     }
 
@@ -906,7 +904,6 @@ impl<'h> Agent<'h> {
 
         self.dedup_cache.clear();
 
-        #[cfg(feature = "onnx")]
         if let Some(scorer) = &self.scorer
             && let Ok(intent) = scorer.build_intent(self.history.as_slice()).await
             && let Ok(scores) = scorer
@@ -922,14 +919,10 @@ impl<'h> Agent<'h> {
             compaction_buffer: self.config.compaction_buffer,
             cache_tracker: Some(&self.cache_tracker),
             compression_store: Some(&self.compression_store),
-            #[cfg(feature = "onnx")]
             relevance_scores: self
                 .scorer
                 .as_ref()
                 .and(self.last_relevance_scores.as_deref()),
-            #[cfg(not(feature = "onnx"))]
-            relevance_scores: None,
-            #[cfg(feature = "onnx")]
             scorer: self.scorer.as_ref(),
         };
         let removed = compaction::progressive_compact(
@@ -1022,10 +1015,7 @@ impl<'h> Agent<'h> {
                 self.history,
                 &self.event_tx,
                 &self.cancel,
-                #[cfg(feature = "onnx")]
                 self.last_relevance_scores.as_deref(),
-                #[cfg(not(feature = "onnx"))]
-                None,
             )
             .await?;
         }

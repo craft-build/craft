@@ -2,8 +2,8 @@ use std::fmt::Write;
 
 use craft_config::{
     AgentConfig, CompressionConfig, ConfigField, DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_MAX_LOG_FILES,
-    DEFAULT_MAX_OUTPUT_LINES, DEFAULT_MOUSE_SCROLL_LINES, MIN_TOOL_OUTPUT_LINES, ProviderConfig,
-    StorageConfig, TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
+    DEFAULT_MAX_OUTPUT_LINES, DEFAULT_MOUSE_SCROLL_LINES, FlowConfig, MIN_TOOL_OUTPUT_LINES,
+    ProviderConfig, StorageConfig, TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
 };
 
 fn write_table_with_min(out: &mut String, fields: &[ConfigField]) {
@@ -230,6 +230,8 @@ fn write_nested_agent_sections(out: &mut String) {
     )
     .unwrap();
     writeln!(out).unwrap();
+
+    write_section(out, "[agent.flow]", FlowConfig::FIELDS);
 
     writeln!(out, "### `agent.ttsr`\n").unwrap();
     writeln!(

@@ -186,7 +186,6 @@ impl Chat {
                     format!("[advisor:{severity}] {message}"),
                 ));
             }
-            #[cfg(feature = "onnx")]
             AgentEvent::StagnationDetected { .. } => {}
             AgentEvent::ModelEscalation { .. } => {}
         }

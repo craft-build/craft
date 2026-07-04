@@ -59,13 +59,9 @@ pub(crate) fn create_craft_global(
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
     )?;
 
-    #[cfg(feature = "onnx")]
     if let Some(tx) = embed_tx {
         craft.set("embed", crate::api::embed::create_embed_table(lua, tx)?)?;
     }
-
-    #[cfg(not(feature = "onnx"))]
-    let _ = embed_tx;
 
     Ok(craft)
 }

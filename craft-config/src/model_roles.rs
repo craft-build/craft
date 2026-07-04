@@ -1,12 +1,12 @@
 //! Model role routing, per-role fallback chains, and credential stacking.
 //!
-//! Roles route work by intent (`default`, `smol`, `slow`, `plan`, `commit`,
-//! `advisor`) instead of a single global model. Each role maps to an ordered
+//! Roles route work by intent (`default`, `advisor`, plus the Flow pipeline
+//! roles `scout`/`tpm`/`plan`/`req`/`execute`/`review`/`qa`/`integrator`/
+//! `verifier`) instead of a single global model. Each role maps to an ordered
 //! fallback chain of model specs: on a retryable error (429/quota/timeout) the
 //! next entry in the chain takes the rest of the turn. The interactive model
-//! picker (`Ctrl+P`) keeps cycling all models globally; roles resolve a starting
-//! model for subagents (`smol`), the advisor (`advisor`), and CLI flags
-//! (`--smol`/`--slow`/`--plan`).
+//! picker (`Ctrl+P`) keeps cycling all models globally; roles resolve a
+//! starting model for the advisor and the Flow pipeline stages.
 //!
 //! Config lives in `model_roles.toml` next to `providers.toml`. Missing config
 //! falls back to a single-model (current behavior).
@@ -27,31 +27,46 @@ const MODEL_ROLES_FILE: &str = "model_roles.toml";
 #[serde(rename_all = "lowercase")]
 pub enum ModelRole {
     Default,
-    Smol,
-    Slow,
-    Plan,
-    Commit,
     Advisor,
+    FlowScout,
+    FlowTpm,
+    FlowPlan,
+    FlowReq,
+    FlowExecute,
+    FlowReview,
+    FlowQa,
+    FlowIntegrator,
+    FlowVerifier,
 }
 
 impl ModelRole {
     pub const ALL: &[ModelRole] = &[
         ModelRole::Default,
-        ModelRole::Smol,
-        ModelRole::Slow,
-        ModelRole::Plan,
-        ModelRole::Commit,
         ModelRole::Advisor,
+        ModelRole::FlowScout,
+        ModelRole::FlowTpm,
+        ModelRole::FlowPlan,
+        ModelRole::FlowReq,
+        ModelRole::FlowExecute,
+        ModelRole::FlowReview,
+        ModelRole::FlowQa,
+        ModelRole::FlowIntegrator,
+        ModelRole::FlowVerifier,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             ModelRole::Default => "default",
-            ModelRole::Smol => "smol",
-            ModelRole::Slow => "slow",
-            ModelRole::Plan => "plan",
-            ModelRole::Commit => "commit",
             ModelRole::Advisor => "advisor",
+            ModelRole::FlowScout => "scout",
+            ModelRole::FlowTpm => "tpm",
+            ModelRole::FlowPlan => "plan",
+            ModelRole::FlowReq => "req",
+            ModelRole::FlowExecute => "execute",
+            ModelRole::FlowReview => "review",
+            ModelRole::FlowQa => "qa",
+            ModelRole::FlowIntegrator => "integrator",
+            ModelRole::FlowVerifier => "verifier",
         }
     }
 }
@@ -61,13 +76,18 @@ impl std::str::FromStr for ModelRole {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "default" => Ok(ModelRole::Default),
-            "smol" => Ok(ModelRole::Smol),
-            "slow" => Ok(ModelRole::Slow),
-            "plan" => Ok(ModelRole::Plan),
-            "commit" => Ok(ModelRole::Commit),
             "advisor" => Ok(ModelRole::Advisor),
+            "scout" => Ok(ModelRole::FlowScout),
+            "tpm" => Ok(ModelRole::FlowTpm),
+            "plan" => Ok(ModelRole::FlowPlan),
+            "req" => Ok(ModelRole::FlowReq),
+            "execute" => Ok(ModelRole::FlowExecute),
+            "review" => Ok(ModelRole::FlowReview),
+            "qa" => Ok(ModelRole::FlowQa),
+            "integrator" => Ok(ModelRole::FlowIntegrator),
+            "verifier" => Ok(ModelRole::FlowVerifier),
             other => Err(format!(
-                "unknown model role '{other}'; expected one of default, smol, slow, plan, commit, advisor"
+                "unknown model role '{other}'; expected one of default, advisor, scout, tpm, plan, req, execute, review, qa, integrator, verifier"
             )),
         }
     }
@@ -149,9 +169,9 @@ mod tests {
     use test_case::test_case;
 
     #[test_case("default", ModelRole::Default ; "default")]
-    #[test_case("SMOL", ModelRole::Smol ; "smol_case_insensitive")]
-    #[test_case("plan", ModelRole::Plan ; "plan")]
-    #[test_case("advisor", ModelRole::Advisor ; "advisor")]
+    #[test_case("ADVISOR", ModelRole::Advisor ; "advisor_case_insensitive")]
+    #[test_case("scout", ModelRole::FlowScout ; "scout")]
+    #[test_case("plan", ModelRole::FlowPlan ; "plan")]
     fn role_parses(s: &str, expected: ModelRole) {
         assert_eq!(ModelRole::from_str(s).unwrap(), expected);
     }
@@ -163,6 +183,8 @@ mod tests {
 
     #[test_case(ModelRole::Default, "default")]
     #[test_case(ModelRole::Advisor, "advisor")]
+    #[test_case(ModelRole::FlowScout, "scout")]
+    #[test_case(ModelRole::FlowVerifier, "verifier")]
     fn role_roundtrips_str(role: ModelRole, s: &str) {
         assert_eq!(role.as_str(), s);
     }
@@ -173,7 +195,7 @@ mod tests {
 [default]
 chain = [{ model = "anthropic/claude-sonnet-4-20250514" }, { model = "openai/gpt-4o" }]
 
-[smol]
+[advisor]
 chain = [{ model = "anthropic/claude-haiku" }]
 "#;
         let cfg: ModelRolesConfig = toml::from_str(toml).unwrap();
@@ -182,10 +204,10 @@ chain = [{ model = "anthropic/claude-haiku" }]
             vec!["anthropic/claude-sonnet-4-20250514", "openai/gpt-4o"]
         );
         assert_eq!(
-            cfg.chain_for(ModelRole::Smol),
+            cfg.chain_for(ModelRole::Advisor),
             vec!["anthropic/claude-haiku"]
         );
-        assert!(cfg.chain_for(ModelRole::Plan).is_empty());
+        assert!(cfg.chain_for(ModelRole::FlowPlan).is_empty());
         assert!(!cfg.is_empty());
     }
 

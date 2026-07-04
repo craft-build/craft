@@ -64,7 +64,10 @@ const SECTIONS: &[(&str, &[&str])] = &[
         "Styleguide",
         &["styleguide_list", "styleguide_search", "styleguide_get"],
     ),
-    ("Agent & Knowledge", &["task", "memory", "skill"]),
+    (
+        "Agent & Knowledge",
+        &["task", "memory", "skill", "flow_search"],
+    ),
     (
         "Web",
         &[

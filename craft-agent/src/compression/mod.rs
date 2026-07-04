@@ -32,7 +32,6 @@ pub struct CompressionConfig {
     pub json_first_keep: usize,
     pub json_last_keep: usize,
     pub protect_recent_tool_outputs: usize,
-    pub semantic_enabled: bool,
 }
 
 impl Default for CompressionConfig {
@@ -48,7 +47,6 @@ impl Default for CompressionConfig {
             json_first_keep: 5,
             json_last_keep: 3,
             protect_recent_tool_outputs: 2,
-            semantic_enabled: false,
         }
     }
 }
@@ -66,7 +64,6 @@ impl From<&craft_config::CompressionConfig> for CompressionConfig {
             json_first_keep: c.json_first_keep,
             json_last_keep: c.json_last_keep,
             protect_recent_tool_outputs: c.protect_recent_tool_outputs,
-            semantic_enabled: c.semantic_enabled,
         }
     }
 }
@@ -110,11 +107,9 @@ pub fn detect_content_type(text: &str) -> ContentType {
     ContentType::PlainText
 }
 
-#[cfg(feature = "onnx")]
 static MAGIKA_MODEL: std::sync::OnceLock<Result<std::sync::Mutex<magika::Session>, String>> =
     std::sync::OnceLock::new();
 
-#[cfg(feature = "onnx")]
 pub fn download_magika_model() -> Result<(), String> {
     MAGIKA_MODEL
         .get_or_init(|| {
@@ -127,7 +122,6 @@ pub fn download_magika_model() -> Result<(), String> {
         .map_err(|e| e.clone())
 }
 
-#[cfg(feature = "onnx")]
 pub fn detect_content_type_onnx(text: &str) -> ContentType {
     if text.is_empty() {
         return ContentType::PlainText;
@@ -207,7 +201,6 @@ pub fn compress(text: &str, content_type: ContentType, config: &CompressionConfi
     }
 }
 
-#[cfg(feature = "onnx")]
 pub fn compress_with_onnx(text: &str, config: &CompressionConfig) -> String {
     let content_type = detect_content_type_onnx(text);
     compress(text, content_type, config)

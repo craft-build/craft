@@ -26,11 +26,8 @@ pub(crate) mod vcc_recall;
 mod embed_types;
 pub use embed_types::EmbedRequest;
 
-#[cfg(feature = "onnx")]
 mod semantic;
-#[cfg(feature = "onnx")]
 pub use semantic::EmbeddingService;
-#[cfg(feature = "onnx")]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     semantic::cosine_similarity(a, b)
 }

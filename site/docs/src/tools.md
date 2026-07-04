@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 45 built-in tools. This is the full reference.
+Craft ships with 46 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -389,6 +389,7 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 | `context_mode` | string | no | Parent context to pass to the subagent:<br>- "none" (default): fresh, no parent history.<br>- "summary": last few parent messages for context.<br>- "full": full parent conversation history. |
 | `description` | string | yes | Short (3-5 words) description of the task |
 | `isolation` | string | no | Isolation mode for a general subagent:<br>- "none" (default): run in the current working tree.<br>- "worktree": run inside a fresh linked git worktree so file mutations do not touch the parent tree (sibling subagents cannot clobber each other). Requires a git repo; falls back to none otherwise. |
+| `model_role` | string | no | Model role (optional, mutually exclusive with model_tier). When set, resolves the subagent's model from model_roles.toml by role name (e.g. "scout", "advisor"). Unset roles fall back to the current model. Cannot be combined with model_tier. |
 | `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
 | `output_schema` | string | no | Optional JSON Schema (object) describing the structured object the subagent must return as its final message. When set, the subagent is told to emit a final JSON object matching the schema; that object is validated and returned to you as structured data instead of prose. On validation failure the subagent is re-prompted (bounded), then a clean error is surfaced. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
@@ -411,6 +412,15 @@ Load a skill that provides instructions and workflows for specific tasks.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | yes | Name of the skill to load |
+
+### `flow_search`
+
+Search the current Flow workstream's persisted documents (goal, plan, requirements, QA, integration, verification) by semantic relevance to a natural-language query. Returns the top-k matching document paths with similarity scores.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `k` | integer | no | 5, max 20 | Maximum results to return |
+| `query` | string | yes |  | Natural-language query describing what you need |
 
 ## Web
 

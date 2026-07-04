@@ -203,7 +203,7 @@ pub enum ProviderEvent {
     ToolUseStart { id: String, name: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Display, IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -211,6 +211,11 @@ pub enum StopReason {
     ToolUse,
     MaxTokens,
     Cancelled,
+    /// Flow pipeline paused at the goal-approval gate, awaiting user input.
+    /// Craft-side only: no upstream provider ever returns this. Surfaced in
+    /// headless JSON output so callers can detect the gate and resume via
+    /// `-p "approved"` (or a goal revision).
+    AwaitingGoalApproval,
 }
 
 impl StopReason {
@@ -484,6 +489,14 @@ mod tests {
     #[test_case("unknown", StopReason::EndTurn    ; "unknown_defaults_to_end_turn")]
     fn stop_reason_from_openai(input: &str, expected: StopReason) {
         assert_eq!(StopReason::from_openai(input), expected);
+    }
+
+    #[test]
+    fn awaiting_goal_approval_serde_round_trips() {
+        let json = serde_json::to_string(&StopReason::AwaitingGoalApproval).unwrap();
+        assert_eq!(json, "\"awaiting_goal_approval\"");
+        let parsed: StopReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, StopReason::AwaitingGoalApproval);
     }
 
     #[test]

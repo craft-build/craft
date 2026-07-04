@@ -9,6 +9,7 @@ use crate::theme;
 use craft_lua::Split;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Widget};
 
@@ -30,7 +31,9 @@ impl App {
     pub fn view(&mut self, frame: &mut Frame) {
         self.status_bar.clear_expired_hint();
 
-        let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
+        self.sync_flow_snapshot();
+        let form_visible =
+            self.permission_prompt.is_open() || self.plan_form_active() || self.flow_panel_active();
         let layout = self.compute_layout(frame, form_visible);
         let render_chat = self.resolve_render_chat();
 
@@ -72,7 +75,12 @@ impl App {
         } else if below_active {
             0
         } else if form_visible {
-            self.plan_form.height().min(max_bottom)
+            let plan_h = if self.plan_form_active() {
+                self.plan_form.height()
+            } else {
+                self.flow_panel.height()
+            };
+            plan_h.min(max_bottom)
         } else if self.is_main_chat() {
             let panel_h: u16 = self
                 .float_mgr
@@ -158,7 +166,57 @@ impl App {
     fn render_messages(&mut self, frame: &mut Frame, layout: &ViewLayout, render_chat: usize) {
         let accent = self.effective_mode_color();
         self.chats[render_chat].set_accent(accent);
+        if self.flow_graph_active() {
+            let graph_cols = (layout.msg_area.width / 3).clamp(36, 55);
+            let chat_cols = layout.msg_area.width.saturating_sub(graph_cols);
+            let [graph_area, chat_area] = Layout::horizontal([
+                Constraint::Length(graph_cols),
+                Constraint::Length(chat_cols),
+            ])
+            .areas(layout.msg_area);
+            self.render_flow_graph(frame, graph_area);
+            self.render_flow_side_panel(frame, chat_area, render_chat);
+            return;
+        }
         self.chats[render_chat].view(frame, layout.msg_area, self.selection_state.is_some());
+    }
+
+    fn render_flow_graph(&mut self, frame: &mut Frame, area: Rect) {
+        let snapshot = self.flow_panel.snapshot.clone();
+        let border_style = self.separator_style();
+        let title_style = Style::new().fg(self.effective_mode_color()).bold();
+        let bg = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(" Workflow ")
+            .title_style(title_style);
+        let inner = bg.inner(area);
+        // Size to the inner area (inside the border) so the rasterized diagram
+        // fills the visible panel rather than being clipped by the border.
+        let image =
+            self.flow_graph
+                .render(&snapshot, &self.image_picker, inner.width, inner.height);
+        frame.render_widget(bg, area);
+        if let Some(state) = image {
+            state.render(inner, frame);
+        } else {
+            let t = theme::current();
+            let para = ratatui::widgets::Paragraph::new("graph unavailable").style(t.tool_dim);
+            frame.render_widget(para, inner);
+        }
+    }
+
+    /// Right pane of the flow-graph split. Renders the live `Chat` for the
+    /// subagent currently driving the flow (the active top-level stage, or
+    /// the selected chunk's current sub-stage), so the user sees the actual
+    /// streaming tool I/O — the same view `Ctrl+X` exposes — rather than a
+    /// truncated summary. Falls back to the main chat when no subagent chat
+    /// exists yet.
+    fn render_flow_side_panel(&mut self, frame: &mut Frame, area: Rect, render_chat: usize) {
+        let sub_chat = self.resolve_flow_subagent_chat();
+        let idx = sub_chat.unwrap_or(render_chat);
+        let show_selection = self.selection_state.is_some() && idx == render_chat;
+        self.chats[idx].view(frame, area, show_selection);
     }
 
     fn render_bottom_panel(&mut self, frame: &mut Frame, layout: &ViewLayout) {
@@ -195,6 +253,8 @@ impl App {
             frame.render_widget(sep, sep_area);
         } else if self.plan_form_active() {
             self.plan_form.view(frame, layout.bottom_area);
+        } else if self.flow_panel_active() {
+            self.flow_panel.view(frame, layout.bottom_area);
         } else if layout.bottom_area.height > 0 {
             let queue_entries = self.queue.panel_entries();
             queue_panel::view(frame, layout.queue_area, &queue_entries, self.queue.focus());
@@ -205,6 +265,11 @@ impl App {
             let panel_hint = (self.state.mode == Mode::Plan)
                 .then(|| self.plan_form.hint_line())
                 .flatten()
+                .or_else(|| {
+                    (self.state.mode == Mode::Flow)
+                        .then(|| self.flow_panel.hint_line())
+                        .flatten()
+                })
                 .or_else(|| self.lua_hint_line());
             self.input_box.view(
                 frame,
@@ -272,6 +337,10 @@ impl App {
 
     fn render_top_modals(&mut self, frame: &mut Frame, mut overlay_rect: Rect) -> Rect {
         let full = frame.area();
+        let r = self.flow_goal_prompt.view(frame, full);
+        if r.width > 0 {
+            overlay_rect = r;
+        }
         let r = self.btw_modal.view(frame, full);
         if r.width > 0 {
             overlay_rect = r;

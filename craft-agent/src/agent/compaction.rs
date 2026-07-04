@@ -27,9 +27,7 @@ const AGGRESSIVE_MAX_JSON_ITEMS: usize = 8;
 const MIN_TOOL_RESULT_CHARS: usize = 300;
 const LOW_RELEVANCE_THRESHOLD: f32 = 0.3;
 const HIGH_RELEVANCE_THRESHOLD: f32 = 0.7;
-#[cfg(feature = "onnx")]
 const TARGETED_TOPICS_COUNT: usize = 10;
-#[cfg(feature = "onnx")]
 const TARGETED_MIN_SCORE: f32 = 0.5;
 const VERY_OLD_MULTIPLIER: usize = 3;
 const SUMMARY_PREVIEW_CHARS: usize = 80;
@@ -38,7 +36,6 @@ const ERROR_SNIPPET_CHARS: usize = 200;
 const COMPACT_USER_PROMPT: &str = "What did we do so far?";
 
 fn build_compaction_user_message(relevance_scores: Option<&[(usize, f32)]>) -> Message {
-    #[cfg(feature = "onnx")]
     if let Some(scores) = relevance_scores {
         let top_topics: Vec<String> = scores
             .iter()
@@ -54,8 +51,6 @@ fn build_compaction_user_message(relevance_scores: Option<&[(usize, f32)]>) -> M
             return Message::user(prompt);
         }
     }
-    #[allow(unused_variables)]
-    let _ = relevance_scores;
     Message::user(COMPACT_USER_PROMPT.to_string())
 }
 
@@ -71,7 +66,6 @@ fn aggressive_config() -> AgentCompressionConfig {
         json_first_keep: 2,
         json_last_keep: 2,
         protect_recent_tool_outputs: 0,
-        semantic_enabled: false,
     }
 }
 
@@ -85,10 +79,7 @@ pub(super) async fn compact_history(
 ) -> Result<TokenUsage, AgentError> {
     let compact_start = std::time::Instant::now();
 
-    #[cfg(feature = "onnx")]
     let lifecycle_removed = super::read_lifecycle::run_lifecycle(history, None, None).await;
-    #[cfg(not(feature = "onnx"))]
-    let lifecycle_removed = super::read_lifecycle::run_lifecycle(history, None).await;
     if lifecycle_removed > 0 {
         info!(
             chars_removed = lifecycle_removed,
@@ -198,7 +189,6 @@ pub(super) struct CompactContext<'a> {
     pub cache_tracker: Option<&'a super::cache::PrefixCacheTracker>,
     pub compression_store: Option<&'a super::compression_store::SharedCompressionStore>,
     pub relevance_scores: Option<&'a [(usize, f32)]>,
-    #[cfg(feature = "onnx")]
     pub scorer: Option<&'a super::semantic::RelevanceScorer>,
 }
 
@@ -228,11 +218,8 @@ pub(super) async fn progressive_compact(
         .sum();
 
     // Pass 1: read lifecycle
-    #[cfg(feature = "onnx")]
     let mut removed =
         super::read_lifecycle::run_lifecycle(history, ctx.scorer, ctx.compression_store).await;
-    #[cfg(not(feature = "onnx"))]
-    let mut removed = super::read_lifecycle::run_lifecycle(history, ctx.compression_store).await;
 
     let tool_result_indices: Vec<usize> = history
         .as_slice()
@@ -254,7 +241,6 @@ pub(super) async fn progressive_compact(
 
     // Semantic overlap detection — find old tool results that semantically
     // duplicate a newer result and mark them for aggressive compression.
-    #[cfg(feature = "onnx")]
     let overlap_indices: HashSet<usize> = {
         let mut set = HashSet::new();
         if let Some(scorer) = ctx.scorer {
@@ -293,8 +279,6 @@ pub(super) async fn progressive_compact(
         }
         set
     };
-    #[cfg(not(feature = "onnx"))]
-    let overlap_indices: HashSet<usize> = HashSet::new();
 
     let aggressive = aggressive_config();
 
@@ -897,7 +881,6 @@ mod tests {
             cache_tracker: None,
             compression_store: None,
             relevance_scores: None,
-            #[cfg(feature = "onnx")]
             scorer: None,
         };
         let _removed = progressive_compact(&mut history, 0, &ctx).await;
@@ -951,7 +934,6 @@ mod tests {
             cache_tracker: None,
             compression_store: None,
             relevance_scores: None,
-            #[cfg(feature = "onnx")]
             scorer: None,
         };
         let _removed = progressive_compact(&mut history, 1, &ctx).await;
@@ -1013,7 +995,6 @@ mod tests {
             cache_tracker: None,
             compression_store: None,
             relevance_scores: None,
-            #[cfg(feature = "onnx")]
             scorer: None,
         };
         let _removed = progressive_compact(&mut history, 0, &ctx).await;

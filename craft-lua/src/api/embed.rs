@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 pub type EmbedChannel = Arc<flume::Sender<EmbedRequest>>;
 
-#[cfg(feature = "onnx")]
 pub(crate) fn create_embed_table(
     lua: &mlua::Lua,
     embed_tx: EmbedChannel,
