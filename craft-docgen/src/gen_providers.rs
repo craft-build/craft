@@ -221,7 +221,7 @@ fn build_sections() -> Vec<ProviderSection> {
                     name: kind.display_name(),
                     kind,
                     auth_line: format!(
-                        "{} or `~/.config/github-copilot/{{hosts.json,apps.json}}`",
+                        "{} (or run `craft auth login copilot` to import a token from gh)",
                         format_auth(kind)
                     ),
                     urls: vec![kind.base_url()],

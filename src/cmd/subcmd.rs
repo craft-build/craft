@@ -57,7 +57,7 @@ pub async fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()
     let slug = provider.map(slugify);
     match slug.as_deref() {
         Some("openai") => openai_auth::login(storage).await?,
-        Some("copilot") => copilot_auth::login()?,
+        Some("copilot") => copilot_auth::login(storage)?,
         Some(s) => login_provider(s, storage)?,
         None => login_interactive(storage)?,
     }
@@ -364,7 +364,7 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
     let slug = slugify(provider);
     match slug.as_str() {
         "openai" => openai_auth::logout(storage)?,
-        "copilot" => copilot_auth::logout()?,
+        "copilot" => copilot_auth::logout(storage)?,
         _ => {
             let mut config = ProvidersConfig::load();
             let deleted =
