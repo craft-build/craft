@@ -1229,6 +1229,54 @@ async fn bash_timeout_round_trip() {
     );
 }
 
+#[tokio::test]
+async fn memory_write_restore_rebuilds_body_from_input_content() {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+        .unwrap();
+
+    let summary = "wrote n.md (1 lines)";
+    let input = serde_json::json!({"command": "write", "path": "n.md", "content": "gamma"});
+
+    let handle = host.event_handle().expect("event handle available");
+    let (tx, rx) = flume::unbounded();
+    handle.request_restore(
+        craft_lua::RestoreItem {
+            tool: Arc::from("memory"),
+            tool_use_id: "restore_id".to_owned(),
+            output: summary.to_owned(),
+            input,
+            is_error: false,
+            tool_output_lines: ToolOutputLines::default(),
+            theme_gen: None,
+            expanded: true,
+        },
+        craft_agent::EventSender::new(tx, 0),
+    );
+    let _ = handle.collect_prompt_slots_async().await;
+
+    let mut text = String::new();
+    for env in rx.drain() {
+        if let craft_agent::AgentEvent::ToolSnapshot { snapshot, .. } = env.event {
+            for line in snapshot.lines.iter() {
+                for span in &line.spans {
+                    text.push_str(&span.text);
+                }
+            }
+        }
+    }
+
+    assert!(
+        text.contains("gamma"),
+        "restored memory body should show saved content, got: {text}"
+    );
+    assert!(
+        !text.contains(summary),
+        "restored memory body should not show the summary, got: {text}"
+    );
+}
+
 async fn exec_tool_with_perms(
     reg: &ToolRegistry,
     name: &str,
