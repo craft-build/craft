@@ -229,7 +229,7 @@ Executes multiple independent tool calls concurrently to reduce round-trips.
 
 ### `code_execution`
 
-Execute Python code in a sandboxed interpreter. Tools are available as callable functions.
+Execute Python code in a sandboxed interpreter with tools as callable functions.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
