@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-07-05
+
+### Added
+
+- **tools**: `edit_lines` tool for line-number-based replacements. `read`
+  and `grep` print lines as `<nr>: <content>`, so `edit_lines` takes
+  `path`, `start`, `end` (optional, defaults to insert-before-start), and
+  `new_string`; empty `new_string` deletes the range and out-of-range
+  starts/ends are rejected before any write. Built as a native Rust tool
+  (inclusive-range splicing with boundary validation belongs with
+  `edit`/`multiedit`/`write`), and gated behind `OPT_IN_TOOLS` so it
+  stays off unless explicitly enabled. (`81d2b7c`, credit: Tony
+  Solomonik)
+- **agent**: nudge on empty response after tool calls. Weaker models
+  sometimes end the turn with no text and no tool uses right after
+  running tools, silently abandoning a multi-step task; a synthetic user
+  message asking the model to process the tool results and continue is
+  now injected, guarded by a per-round flag and a recent-tool-results
+  check. (`b5ffa9d`, credit: Gabriel FORTE)
+- **providers**: Opencode provider with catalog-based model discovery.
+  Models are addressed as `opencode/<sub-provider>/<model-id>` and
+  discovered from the remote models.dev catalog plus the Opencode Zen
+  API, cached under the cache dir with a 24h TTL; requests route to
+  OpenAI-compatible chat/completions or Anthropic Messages endpoints
+  based on the catalog npm tag. (`09df769`, credit: Zsombor Gegesy)
+- **providers**: per-model `supports_thinking` instead of per-provider.
+  `Model` now carries a `supports_thinking_override` (also settable in
+  `ModelDef` config and dynamic provider scripts), which Mistral flips
+  off for `ministral-*`. The per-dialect effort match arms collapsed
+  into `apply_reasoning_effort(body, EffortScale)`, and
+  `RequestOptions::clamped(model)` runs before every request so thinking
+  and fast flags never reach a model that cannot honor them.
+  (`2711ea1`, credit: Tony Solomonik)
+- **ui**: `rose_pine_moon` and `rose_pine_dawn` themes, the two missing
+  Rosé Pine variants from the canonical rosepinetheme.com palette (Moon
+  is darker, Dawn is the light variant). (`d969474`, credit: Sam Mohr)
+- **ui**: `SessionReset` autocmd fired on `/new` so plugins can clear
+  per-session state (e.g. todos) when a new session starts. (`8a0c5e9`)
+
+### Changed
+
+- **providers/copilot**: explicit login required, ambient `gh` fallback
+  dropped. `load_token()` now only checks env vars and saved craft
+  credentials; the ambient scan of gh/Copilot config files moves into a
+  private `discover_token()` used solely by `login()`, which imports the
+  discovered token into craft's credential store. `logout()` now deletes
+  the saved credential instead of erroring. (`ef38cbb`, credit: Sam Mohr)
+- **providers**: `fetch_and_parse_models` helper hoists the GET `/models`
+  + JSON parse + sort boilerplate out of the per-provider
+  `list_models_with_info` implementations; Mistral and OpenRouter pass
+  their own parsers. (`fdb7303`, credit: Sebastian Dröge)
+
+### Fixed
+
+- **lua**: click handlers scoped to `TaskCell` to stop VM memory
+  exhaustion. Every `buf:on("click", cb)` pinned the closure in a global
+  `ClickHandlerMap` keyed by tool id forever; the closure captured the
+  `ToolView` holding the entire tool output in Lua, so long sessions
+  accumulated pinned state until the 512MB `LUA_MEMORY_LIMIT` hit and
+  every tool failed with `memory error`. Handlers now live in
+  `TaskCell.click` and die with the tool invocation; `gc_collect()` also
+  runs on `TurnEnd`. (`a9579ff`, credit: Tony Solomonik)
+- **permissions**: plan file writes auto-allowed. Two gatekeeping systems
+  (`tool_dispatch` plan-mode restriction and `PermissionManager`
+  permission rules) both needed to know the plan file is special but
+  only `tool_dispatch` did, so writing the plan file (which lives outside
+  `{cwd}`) always triggered a prompt. `AgentMode::plan_path()` now
+  threads the plan path through `check`/`check_multi`/`enforce`.
+  (`8957d69`, credit: Tony Solomonik)
+- **ui**: `/model` picker selection preserved across async refresh.
+  `ModelPicker` tracked the current model by index, but `replace_items`
+  reset selection to 0, so asynchronously arriving models always jumped
+  back to the first item; a `current_spec` field now looks up the
+  correct index after items change. (`54b70e4`, credit: Tony Solomonik)
+- **ui**: Rosé Pine themes standardized to the canonical palette.
+  Regenerated all three variants (base, moon, dawn) from one template so
+  structure is identical, with palette values matching the official
+  rose-pine/neovim `palette.lua` including highlight-high colors.
+  (`df67678`, credit: smores56, tontinton)
+- **storage**: state and logs dirs corrected on Windows. `xdg_sibling()`
+  walked up from `data_dir` to find sibling folders, which worked on
+  Linux (`~/.local/share` -> `~/.local/state`) but on Windows produced
+  bogus paths like `~/AppData/state/craft/`; replaced with
+  `etcetera::BaseStrategy::state_dir()` with a `data_dir` fallback.
+  (`aa681c8`, credit: Tony Solomonik)
+- **providers**: `user-agent` header added to the `get_text`/`post_text`
+  helpers, which were missing the header that `build_request()` already
+  sets, so all outgoing requests now identify the agent consistently.
+  (`0748337`, credit: Sebastian Dröge)
+- **providers/dynamic**: test scripts fsynced before spawn. Tests wrote
+  discovery executables and spawned them immediately, racing the kernel
+  page cache flush and surfacing `ETXTBSY` under parallel test load; the
+  test helpers now fsync the script file first. (`193eafa`, credit: Chris
+  Lee)
+
 ## [0.7.5] - 2026-07-02
 
 ### Added
