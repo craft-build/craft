@@ -7,7 +7,7 @@ Craft ships with 45 built-in tools. This is the full reference.
 ### `bash` *(lua plugin)*
 
 Execute a bash command.
-Commands run in
+Commands run in <cwd> by default.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -17,7 +17,33 @@ Commands run in
 | `timeout` | integer | no | 120 | Timeout in seconds |
 | `workdir` | string | no | cwd | Working directory |
 
-### `read`
+### `bash_kill` *(lua plugin)*
+
+Terminate a background bash task.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | The task_id returned by bash |
+
+### `bash_watch` *(lua plugin)*
+
+Wait for a pattern (substring or Lua pattern) in a background bash task's output, or for the task to exit. Polls until match found, task exits, or timeout.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pattern` | string | no |  | Substring or Lua pattern to wait for in task output |
+| `task_id` | string | yes |  | The task_id returned by bash |
+| `timeout` | integer | no | 60 | Max seconds to wait |
+
+### `bash_status` *(lua plugin)*
+
+Check status and current output of a background bash task.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | yes | The task_id returned by bash |
+
+### `read` *(native)*
 
 Read a file or directory. Returns contents with line numbers (1-indexed).
 
@@ -27,7 +53,7 @@ Read a file or directory. Returns contents with line numbers (1-indexed).
 | `offset` | integer | no | Line number to start from (1-indexed) |
 | `path` | string | yes |  |
 
-### `write`
+### `write` *(native)*
 
 Write content to a file, replacing existing content.
 
@@ -36,7 +62,7 @@ Write content to a file, replacing existing content.
 | `content` | string | yes | The complete file content to write |
 | `path` | string | yes |  |
 
-### `edit`
+### `edit` *(native)*
 
 Replace an exact string match in a file.
 
@@ -49,7 +75,7 @@ Replace an exact string match in a file.
 | `path` | string | yes |  |  |
 | `replace_all` | boolean | no | false | Replace all occurrences |
 
-### `edit_lines`
+### `edit_lines` *(native, opt-in)*
 
 Edit lines by number. Omit `end` to insert before `start` without removing lines. Set `end` to replace or delete (empty `new_string`) a range.
 
@@ -60,7 +86,7 @@ Edit lines by number. Omit `end` to insert before `start` without removing lines
 | `path` | string | yes |  |
 | `start` | integer | yes | First line (1-indexed) |
 
-### `multiedit`
+### `multiedit` *(native)*
 
 Make multiple find-and-replace edits to a single file atomically.
 Prefer this over edit when making multiple changes to the same file.
@@ -70,7 +96,7 @@ Prefer this over edit when making multiple changes to the same file.
 | `edits` | array | yes | Array of edit operations to apply sequentially |
 | `path` | string | yes |  |
 
-### `apply_patch`
+### `apply_patch` *(native)*
 
 Apply a Codex-style patch to one or more files.
 
@@ -78,7 +104,7 @@ Apply a Codex-style patch to one or more files.
 |-----------|------|----------|-------------|
 | `patch_text` | string | yes | Codex-style patch text with *** Begin Patch / *** End Patch markers |
 
-### `delete`
+### `delete` *(native)*
 
 Delete files or directories. Text file contents are auto-backed up (use `safety undo` to recover).
 
@@ -87,7 +113,7 @@ Delete files or directories. Text file contents are auto-backed up (use `safety 
 | `files` | array | yes | Files or directories to delete |
 | `recursive` | boolean | no | Delete directories recursively (required for non-empty dirs) |
 
-### `move`
+### `move` *(native)*
 
 Move/rename a file or directory and update import references across the project.
 
@@ -118,7 +144,7 @@ Search file contents using regex.
 | `path` | string | no | cwd | Directory to search in |
 | `pattern` | string | yes |  | Regex pattern |
 
-### `outline`
+### `outline` *(native)*
 
 Return a structural outline of a file or directory.
 
@@ -129,7 +155,7 @@ Return a structural outline of a file or directory.
 
 ## Navigation & Analysis
 
-### `zoom`
+### `zoom` *(native)*
 
 Zoom into a specific symbol or line range in a file.
 
@@ -141,7 +167,7 @@ Zoom into a specific symbol or line range in a file.
 | `start_line` | integer | no |  | Start line (1-indexed) for line-range mode |
 | `symbol` | string | no |  | Symbol name to zoom into (function, struct, class, heading, etc.) |
 
-### `ast_grep`
+### `ast_grep` *(native)*
 
 Search and replace code using AST patterns. More precise than regex for code.
 
@@ -154,7 +180,7 @@ Search and replace code using AST patterns. More precise than regex for code.
 | `pattern` | string | yes |  | AST pattern with $VAR and $$$BODY metavariables |
 | `rewrite` | string | no |  | Replacement pattern (omitting = search-only mode). Uses $VAR refs from pattern. |
 
-### `ast_edit`
+### `ast_edit` *(native)*
 
 Propose a structural AST rewrite, then commit or discard it with `resolve`. Safer than a global `edit` when many call sites need the same change.
 
@@ -166,7 +192,7 @@ Propose a structural AST rewrite, then commit or discard it with `resolve`. Safe
 | `pattern` | string | yes |  | AST pattern with $VAR and $$$BODY metavariables |
 | `rewrite` | string | yes |  | Replacement pattern, using $VAR refs from the pattern |
 
-### `resolve`
+### `resolve` *(native)*
 
 Commit or discard a pending `ast_edit` proposal by its `edit_id`.
 
@@ -175,7 +201,7 @@ Commit or discard a pending `ast_edit` proposal by its `edit_id`.
 | `action` | string | yes | "apply" to commit the staged edit, or "discard" to drop it |
 | `edit_id` | string | yes | edit_id returned by a prior ast_edit call |
 
-### `callgraph`
+### `callgraph` *(native)*
 
 Intra-file call graph analysis. Traces function/method call relationships within a single file.
 
@@ -186,7 +212,7 @@ Intra-file call graph analysis. Traces function/method call relationships within
 | `path` | string | yes |  | File path |
 | `symbol` | string | yes |  | Symbol name (function/method/struct) |
 
-### `inspect`
+### `inspect` *(native)*
 
 Quick project health check. Scans for TODOs, FIXMEs, HACKs, and git status.
 
@@ -195,7 +221,7 @@ Quick project health check. Scans for TODOs, FIXMEs, HACKs, and git status.
 | `scope` | string | no | cwd | File or directory to scope |
 | `sections` | string | no | all | Sections: todos, git_status, or all |
 
-### `conflicts`
+### `conflicts` *(native)*
 
 Find and resolve git merge conflicts in the project.
 
@@ -207,7 +233,7 @@ Find and resolve git merge conflicts in the project.
 
 ## Safety
 
-### `safety`
+### `safety` *(native)*
 
 Create and restore file-system checkpoints, undo file edits, and view backup history.
 
@@ -219,7 +245,7 @@ Create and restore file-system checkpoints, undo file edits, and view backup his
 
 ## Execution & Control
 
-### `batch`
+### `batch` *(native)*
 
 Executes multiple independent tool calls concurrently to reduce round-trips.
 
@@ -227,7 +253,7 @@ Executes multiple independent tool calls concurrently to reduce round-trips.
 |-----------|------|----------|-------------|
 | `tool_calls` | array | yes | Array of tool calls to execute in parallel |
 
-### `code_execution`
+### `code_execution` *(native)*
 
 Execute Python code in a sandboxed interpreter with tools as callable functions.
 
@@ -248,7 +274,7 @@ Use this tool when you need to ask the user questions during execution. This all
 |-----------|------|----------|-------------|
 | `questions` | array | yes | List of questions to ask the user |
 
-### `list_tools`
+### `list_tools` *(native)*
 
 List the tools available in this session, or enable and inspect a specific tool.
 
@@ -256,7 +282,7 @@ List the tools available in this session, or enable and inspect a specific tool.
 |-----------|------|----------|-------------|
 | `detail` | string | no | Optional tool name to inspect. Returns the full input schema and enables the tool for the rest of the session. Omit to list every tool with a short description. |
 
-### `retrieve`
+### `retrieve` *(native)*
 
 Retrieve the original (uncompressed) content for a previously compressed tool output. Use the hash value from a compression marker in the conversation. Compression markers appear as [N lines compressed from M. Retrieve original: hash=HASH] or in stale/superseded read markers that include a hash.
 
@@ -264,7 +290,7 @@ Retrieve the original (uncompressed) content for a previously compressed tool ou
 |-----------|------|----------|-------------|
 | `hash` | string | yes | Hash of the compressed content to retrieve |
 
-### `vcc_recall`
+### `vcc_recall` *(native)*
 
 Search the current session's full history (across compactions) losslessly. Supports regex queries, paging, and full-content expansion. Use to recall prior work, decisions, or context that was summarized away. Omit the query to browse recent entries.
 
@@ -274,9 +300,17 @@ Search the current session's full history (across compactions) losslessly. Suppo
 | `page` | integer | no | Page number (1-based) for paginated search results. Default: 1. |
 | `query` | string | no | Search terms or regex pattern (e.g. 'auth|login', 'fail.*build'). Multi-word queries are OR-ranked by relevance. Omit to browse recent history. |
 
+### `todo_write` *(lua plugin)*
+
+Track and update progress on multi-step tasks. Use this tool to plan and track tasks (must be 3+ steps). Update after EACH completed step, not only all at once. Each task needs an id (e.g. T1, T1.1), content, and status. Parent-child relationships are supported via the parent field.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `todos` | array | yes | List of tasks to track |
+
 ## Review & Findings
 
-### `review`
+### `review` *(native)*
 
 Spawn a code review subagent that reads files, checks against styleguide rules, and reports structured findings with priorities (P0-P3) and a verdict.
 
@@ -285,7 +319,7 @@ Spawn a code review subagent that reads files, checks against styleguide rules, 
 | `focus_files` | array | no | Files to focus on (optional) |
 | `task` | string | yes | What to review (e.g., 'Review the auth module for security issues') |
 
-### `report_finding`
+### `report_finding` *(native)*
 
 Report a code review finding with priority, location, and optional rule references.
 
@@ -301,7 +335,7 @@ Report a code review finding with priority, location, and optional rule referenc
 | `suggestion` | string | no | Suggested fix or code snippet |
 | `title` | string | yes | Imperative title, prefixed with priority (e.g. '[P1] Add error handling') |
 
-### `read_findings`
+### `read_findings` *(native)*
 
 Retrieve detailed code review findings recorded by review subagents during this session. Use this when you need the original priority, file path, line numbers, body, suggested fix, and rule IDs after a review tool has finished.
 
@@ -313,7 +347,7 @@ Retrieve detailed code review findings recorded by review subagents during this 
 
 ## Styleguide
 
-### `styleguide_list`
+### `styleguide_list` *(native)*
 
 List available styleguide categories for a language. Use this to discover what styleguides are available before fetching specific rules.
 
@@ -321,7 +355,7 @@ List available styleguide categories for a language. Use this to discover what s
 |-----------|------|----------|-------------|
 | `language` | string | yes | Language to list styleguides for (e.g., 'rust', 'general') |
 
-### `styleguide_search`
+### `styleguide_search` *(native)*
 
 Search for styleguide rules by keywords, rule IDs, or tags. Returns matching rules sorted by relevance.
 
@@ -333,7 +367,7 @@ Search for styleguide rules by keywords, rule IDs, or tags. Returns matching rul
 | `query` | string | yes |  | Search query — rule ID, keyword, or phrase |
 | `tags` | array | no |  | Filter by tags. |
 
-### `styleguide_get`
+### `styleguide_get` *(native)*
 
 Fetch specific styleguide rules or entire categories. Can fetch by category, rule IDs, or auto-detect from file path.
 
@@ -346,7 +380,7 @@ Fetch specific styleguide rules or entire categories. Can fetch by category, rul
 
 ## Agent & Knowledge
 
-### `task`
+### `task` *(native)*
 
 Launch an autonomous subagent to perform tasks independently. Best combined with batch.
 
@@ -380,7 +414,7 @@ Load a skill that provides instructions and workflows for specific tasks.
 
 ## Web
 
-### `browser_screenshot`
+### `browser_screenshot` *(native)*
 
 Renders a web page in headless Chromium and returns a full-page PNG screenshot so you can visually inspect the current state of a frontend. Use this for visual feedback when working on UI/CSS/layout, verifying a dev server, or checking what a page actually looks like.
 
@@ -392,7 +426,7 @@ Renders a web page in headless Chromium and returns a full-page PNG screenshot s
 | `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
 | `width` | integer | no | 1280 | Viewport width in pixels |
 
-### `browser_navigate`
+### `browser_navigate` *(native)*
 
 Navigates a headless Chromium browser to a URL and returns the page's URL, title, and visible text as markdown. Use this to confirm a route loaded, capture the document title, or read page text without taking a screenshot.
 
@@ -403,7 +437,7 @@ Navigates a headless Chromium browser to a URL and returns the page's URL, title
 | `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
 | `width` | integer | no | 1280 | Viewport width in pixels |
 
-### `browser_click`
+### `browser_click` *(native)*
 
 Navigates a headless Chromium browser to a URL, clicks the first element matching a CSS selector, then returns either the resulting page text or a screenshot. Use this to drive interactions: open a menu, follow a login link, trigger a tab switch.
 
@@ -417,7 +451,7 @@ Navigates a headless Chromium browser to a URL, clicks the first element matchin
 | `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after clicking |
 | `width` | integer | no | 1280 | Viewport width in pixels |
 
-### `browser_text`
+### `browser_text` *(native)*
 
 Reads the visible text of a web page in headless Chromium and returns it as markdown. Use this to extract page content into the conversation for reading, searching, or summarizing without an image. Optionally scope extraction to a single element via a CSS selector.
 

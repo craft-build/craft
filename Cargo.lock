@@ -1215,10 +1215,13 @@ version = "0.7.6"
 dependencies = [
  "craft-agent",
  "craft-config",
+ "craft-lua",
  "craft-providers",
  "craft-ui",
+ "regex",
  "serde_json",
  "strum 0.28.0",
+ "test-case",
  "tokio",
 ]
 
