@@ -103,6 +103,52 @@ local function rtk_find_unsupported(cmd)
   return false
 end
 
+local DANGEROUS_FIND_ROOTS = {
+  "/",
+  "/.",
+  "/*",
+  "/~",
+  "/root",
+  "/home",
+  "/Users",
+  "/var",
+  "/usr",
+  "/etc",
+  "/sys",
+  "/proc",
+  "/dev",
+  "/opt",
+  "/mnt",
+  "/media",
+  "/srv",
+  "/bin",
+  "/sbin",
+  "/lib",
+  "/System",
+  "/Library",
+  "/private",
+}
+
+local function denied_command_reason(command)
+  local cmd = command:match("^%s*(.-)%s*$")
+  if cmd == "" then
+    return nil
+  end
+  if cmd:match("^find%s+") then
+    local root = cmd:match("^find%s+(%S+)")
+    if root then
+      for _, danger in ipairs(DANGEROUS_FIND_ROOTS) do
+        if root == danger then
+          return "refused: `find` from a filesystem root ("
+            .. root
+            .. ") is blocked to avoid hanging on a full-disk scan. Scope `find` to a project subdirectory, or use `glob`/`grep` instead."
+        end
+      end
+    end
+  end
+  return nil
+end
+
 local function rtk_rewrite(command, ctx)
   local config = ctx:config()
   if config and config.no_rtk then
@@ -368,6 +414,10 @@ craft.api.register_tool({
     end
 
     local command, workdir = parse_cd_hint(input)
+    local deny = denied_command_reason(command)
+    if deny then
+      return { llm_output = deny, is_error = true }
+    end
     local config = ctx:config()
     local timeout_secs = input.timeout or (config and config.bash_timeout_secs) or 120
     local max_lines = (config and config.max_output_lines) or 2000

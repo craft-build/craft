@@ -13,4 +13,13 @@ The user message carries the prior stage's output as context (Scout findings, th
 If your stage was given an output schema, your final reply must be the JSON object matching that schema (the schema is appended to these instructions). No prose around it, no markdown fences. If your stage is prose (Scout, Execute), return prose.
 
 Use the available tools to investigate, implement, review, or verify as your stage requires. Keep changes scoped to your stage's chunk.
+
+## Reading flow documents
+
+Earlier-stage outputs (scout findings, the goal, the plan, the requirement, QA reports, etc.) are persisted as documents in this workstream. Fetch them with the `read` tool using the `flow://` internal URL scheme rather than re-deriving them:
+
+- `read path="flow://*"` lists every document in this workstream (do this first if you do not know the paths).
+- `read path="flow://<path>"` returns the body of one document. `<path>` is the document's `path` field, as returned by `flow_search` or the listing above.
+
+`flow://` only resolves inside a Flow stage (like this one); it errors elsewhere. Prefer it over `flow_search` when you already know the path, since `read` is cheaper and does not require a query.
 </system-reminder>
