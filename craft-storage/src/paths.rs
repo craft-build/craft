@@ -228,11 +228,13 @@ pub fn legacy_home_dir() -> Option<PathBuf> {
         .filter(|d| d.is_dir())
 }
 
-pub fn user_config_dirs(home: Option<&Path>, subdir: &str) -> Vec<PathBuf> {
-    let legacy = home
-        .map(|h| h.join(FALLBACK_DIR).join(subdir))
-        .or_else(|| legacy_home_dir().map(|d| d.join(subdir)));
-    let xdg = config_dir().ok().map(|d| d.join(subdir));
+pub fn user_config_dirs(
+    home: Option<&Path>,
+    xdg_config: Option<&Path>,
+    subdir: &str,
+) -> Vec<PathBuf> {
+    let legacy = home.map(|h| h.join(FALLBACK_DIR).join(subdir));
+    let xdg = xdg_config.map(|d| d.join(subdir));
     [legacy, xdg].into_iter().flatten().collect()
 }
 
@@ -241,11 +243,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn user_config_dirs_with_explicit_home() {
-        let home = PathBuf::from("/tmp/testhome");
-        let dirs = user_config_dirs(Some(&home), "plugins");
-        assert_eq!(dirs.len(), 2);
-        assert_eq!(dirs[0], PathBuf::from("/tmp/testhome/.craft/plugins"));
+    fn user_config_dirs_returns_legacy_and_xdg() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = home.path().join(".config").join(APP_NAME);
+
+        let dirs = user_config_dirs(Some(home.path()), Some(&xdg), "AGENTS.md");
+        assert_eq!(
+            dirs,
+            vec![
+                home.path().join(FALLBACK_DIR).join("AGENTS.md"),
+                xdg.join("AGENTS.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn user_config_dirs_omits_legacy_when_home_none() {
+        let xdg = tempfile::tempdir().unwrap();
+
+        let dirs = user_config_dirs(None, Some(xdg.path()), "AGENTS.md");
+        assert_eq!(dirs, vec![xdg.path().join("AGENTS.md")]);
+    }
+
+    #[test]
+    fn user_config_dirs_omits_xdg_when_xdg_none() {
+        let home = tempfile::tempdir().unwrap();
+
+        let dirs = user_config_dirs(Some(home.path()), None, "AGENTS.md");
+        assert_eq!(dirs, vec![home.path().join(FALLBACK_DIR).join("AGENTS.md")]);
+    }
+
+    #[test]
+    fn user_config_dirs_neither_depends_on_process_env() {
+        let home_a = tempfile::tempdir().unwrap();
+        let xdg_a = home_a.path().join(".config").join(APP_NAME);
+
+        let hostile = tempfile::tempdir().unwrap();
+
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: tests run single-threaded within a process nextest invokes once.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", hostile.path()) };
+
+        let dirs = user_config_dirs(Some(home_a.path()), Some(&xdg_a), "AGENTS.md");
+
+        // SAFETY: same single-threaded assumption as above.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+
+        assert!(
+            !dirs.iter().any(|p| p.starts_with(hostile.path())),
+            "combiner read XDG_CONFIG_HOME: {dirs:?}"
+        );
     }
 
     #[test]

@@ -38,18 +38,24 @@ const PROJECT_PREFIXES: &[&str] = &[".craft", ".agents", ".claude", ".opencode"]
 pub struct Discovery {
     cwd: PathBuf,
     home: Option<PathBuf>,
+    xdg_config: Option<PathBuf>,
 }
 
 impl Discovery {
-    pub fn new(cwd: PathBuf, home: Option<PathBuf>) -> Self {
-        Self { cwd, home }
+    pub fn new(cwd: PathBuf, home: Option<PathBuf>, xdg_config: Option<PathBuf>) -> Self {
+        Self {
+            cwd,
+            home,
+            xdg_config,
+        }
     }
 
     /// Discovery rooted at the current working directory and the user's home.
     pub fn from_env() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let home = paths::home();
-        Self::new(cwd, home)
+        let xdg_config = paths::config_dir().ok();
+        Self::new(cwd, home, xdg_config)
     }
 
     /// The working directory discovery is rooted at.
@@ -103,7 +109,7 @@ impl Discovery {
     }
 
     fn global_dirs(&self, kind: &str) -> Vec<PathBuf> {
-        paths::user_config_dirs(self.home.as_deref(), kind)
+        paths::user_config_dirs(self.home.as_deref(), self.xdg_config.as_deref(), kind)
     }
 
     fn collect_files(
@@ -198,7 +204,7 @@ mod tests {
         write(&project.join(".craft/recipes/audit.yaml"), "project: 1");
         write(&root.join(".craft/recipes/audit.yaml"), "ancestor: 1");
 
-        let discovery = Discovery::new(nested.clone(), None);
+        let discovery = Discovery::new(nested.clone(), None, None);
         let found = discovery.discover_files("recipes", &["yaml", "yml", "json"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "audit");
@@ -221,7 +227,7 @@ mod tests {
         );
         write(&global.join("release.yaml"), "global version");
 
-        let discovery = Discovery::new(project.clone(), Some(root.join("home")));
+        let discovery = Discovery::new(project.clone(), Some(root.join("home")), None);
         let found = discovery.discover_files("recipes", &["yaml", "yml", "json"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].content, "project version");
@@ -239,7 +245,7 @@ mod tests {
 
         write(&global.join("only.yaml"), "global");
 
-        let discovery = Discovery::new(project, Some(root.join("home")));
+        let discovery = Discovery::new(project, Some(root.join("home")), None);
         let found = discovery.discover_files("recipes", &["yaml", "yml", "json"]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "only");
@@ -255,7 +261,7 @@ mod tests {
         write(&root.join(".craft/recipes/c.json"), "json");
         write(&root.join(".craft/recipes/d.txt"), "ignored");
 
-        let discovery = Discovery::new(root.to_path_buf(), None);
+        let discovery = Discovery::new(root.to_path_buf(), None, None);
         let found = discovery.discover_files("recipes", &["yaml", "yml", "json"]);
         let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"a"));
@@ -277,7 +283,7 @@ mod tests {
             "not a skill",
         );
 
-        let discovery = Discovery::new(root.to_path_buf(), None);
+        let discovery = Discovery::new(root.to_path_buf(), None, None);
         let found = discovery.discover_dirs("skills", "SKILL.md");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "audit");
@@ -297,7 +303,7 @@ mod tests {
         write(&project.join(".craft/skills/audit/SKILL.md"), "project");
         write(&global.join("audit/SKILL.md"), "global");
 
-        let discovery = Discovery::new(nested, Some(root.join("home")));
+        let discovery = Discovery::new(nested, Some(root.join("home")), None);
         let found = discovery.discover_dirs("skills", "SKILL.md");
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].content, "project");
@@ -312,21 +318,21 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(root.join("repo/.git"), "gitdir: /tmp").unwrap();
 
-        let discovery = Discovery::new(nested, None);
+        let discovery = Discovery::new(nested, None, None);
         assert_eq!(discovery.project_root(), project);
     }
 
     #[test]
     fn project_root_defaults_to_cwd_without_git() {
         let tmp = TempDir::new().unwrap();
-        let discovery = Discovery::new(tmp.path().to_path_buf(), None);
+        let discovery = Discovery::new(tmp.path().to_path_buf(), None, None);
         assert_eq!(discovery.project_root(), tmp.path());
     }
 
     #[test]
     fn empty_when_nothing_found() {
         let tmp = TempDir::new().unwrap();
-        let discovery = Discovery::new(tmp.path().to_path_buf(), None);
+        let discovery = Discovery::new(tmp.path().to_path_buf(), None, None);
         assert!(
             discovery
                 .discover_files("recipes", &["yaml", "yml", "json"])
