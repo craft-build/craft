@@ -285,6 +285,8 @@ impl App {
         app.task_picker.set_keybindings(app.keybindings.clone());
         app.theme_picker.set_keybindings(app.keybindings.clone());
         app.model_picker.set_keybindings(app.keybindings.clone());
+        app.model_picker
+            .set_recents(craft_storage::model::read_recents(&app.storage));
         app.session_picker.set_keybindings(app.keybindings.clone());
         app.rewind_picker.set_keybindings(app.keybindings.clone());
         app.login_picker.set_keybindings(app.keybindings.clone());
@@ -338,6 +340,11 @@ impl App {
 
     pub(crate) fn flash(&mut self, msg: String) {
         self.status_bar.flash(msg);
+    }
+
+    pub(crate) fn record_recent_model(&mut self, spec: &str) {
+        let recents = craft_storage::model::push_recent(&self.storage, spec);
+        self.model_picker.set_recents(recents);
     }
 
     pub fn tick_error_expiry(&mut self) {

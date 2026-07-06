@@ -623,6 +623,7 @@ impl<'t> EventLoop<'t> {
                     Ok(new_provider) => {
                         if let Ok(new_model) = Model::from_spec(&model_spec) {
                             self.app.update_model(&new_model);
+                            self.app.record_recent_model(&model_spec);
                             self.model_slot.store(Arc::new(ModelSlot {
                                 model: new_model,
                                 provider: new_provider,
