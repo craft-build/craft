@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-06
+
+### Added
+
+- **flow**: Flow mode, a third agent mode (alongside Build and Plan) that
+  runs a feature through named stages (Scout, TPM, Plan, Req, Execute,
+  Review, QA, Integrator, Verifier), each under a dedicated `flow_*`
+  model role, pausing for goal approval before execution and producing a
+  verification report at the end. Backed by a new `craft-flow` crate
+  (state machine, document schemas, prompt templates), a `flow` storage
+  namespace with per-workstream persisted documents and a semantic
+  embedding index powering a `flow_search` tool, `FlowConfig` plus nine
+  `flow_*` ModelRole variants, `AgentMode`/`Mode`/`StoredMode` Flow
+  variants with a 3-way toggle, `StopReason::AwaitingGoalApproval`, and a
+  `craft flow` CLI with `gc --older-than` and JSON output for gate/
+  verdict stop reasons. (`f1801923`)
+- **flow**: resume/retry. Mutable workstream state (stage, approval flag,
+  chunk statuses, iteration counts) is persisted to `workstream.json` via
+  `FlowStore`, so a crashed or failed run re-enters at the right stage
+  instead of restarting. `FlowParams::resume` rehydrates and skips
+  Scout/TPM/Plan when their docs are on disk, `run_chunk` emits its own
+  Done transition, and `craft flow -s <id> --retry` resumes a failed
+  workstream. (`3bc1ef73`)
+- **ui**: `/usage` command with a token breakdown per model and quota
+  display, backed by a new `ProviderUsage` type and `fetch_usage` trait
+  method. (`26319dd8`, `cd5c0aa1`)
+- **providers**: Anthropic OAuth usage quota. `fetch_usage` calls the
+  beta usage endpoint (bearer auth against `api.anthropic.com` only, since
+  API keys have no subscription quota), rendering `Current session`,
+  `Current week (all models)`, scoped per-model rows, and `Usage credits`
+  via `UsageLimit::detail`; the flat `five_hour`/`seven_day*` windows
+  remain a parse fallback. (`0481157d`)
+- **ui**: `Ctrl+R` reloads the quota in the `/usage` modal via
+  `Action::RefreshUsage`, with a styled hint on the popup border.
+  (`497b02cc`)
+- **ui**: Ayu light and mirage themes. (`ce8f6d3e`)
+- **ui**: recent models section in the `/model` picker. (`6e021ad1`)
+- **ui**: `PageUp`/`PageDown` scrolling in pickers. (`b0724a7f`, credit:
+  Luca Barbato)
+- **print**: image files attached as vision content. (`204104b6`)
+- **storage**: per-model token usage accounting in sessions.
+  (`9322027b`)
+
+### Fixed
+
+- **flow**: Flow stage subagents now get prompt-level instruction that the
+  `flow://` internal URL scheme exists (so they fetch prior-stage docs via
+  the read tool), and `find` invoked against a filesystem root
+  (`find /`, `find /home`, `find /Users`, ...) is hard-denied in the bash
+  plugin, since these full-disk scans hang when the agent falls back to
+  them after a `flow://` error. (`48a44105`)
+- **providers**: `spec_for_tier` checks the static model table between
+  user overrides and positional fallback, fixing tier resolution for
+  providers like DeepSeek where the discovered-models order does not match
+  annotated tiers (running Opus now correctly picks Sonnet for `medium`
+  and Haiku for `weak` without user config). (`3b072d1a`)
+- **agent**: the task tool keeps the dynamic provider slug when resolving
+  subagent tiers, skipping the base registry lookup when the model carries
+  a dynamic slug while tier overrides still apply. (`aea0413e`)
+- **plugins**: the memory tool expands to file content instead of the
+  summary. (`34280cea`)
+- **question**: CJK/multibyte input allowed in the custom answer field.
+  (`a175d122`)
+- **storage**: tests isolated from the host env — `ToolRegistry` injected
+  via `ToolContext` and a pure combiner removes host-env dependence.
+  (`c5ba1dcb`, `8347e40e`, credit: Sam Mohr)
+
 ## [0.7.6] - 2026-07-05
 
 ### Added

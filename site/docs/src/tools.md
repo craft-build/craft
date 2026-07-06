@@ -413,7 +413,7 @@ Load a skill that provides instructions and workflows for specific tasks.
 |-----------|------|----------|-------------|
 | `name` | string | yes | Name of the skill to load |
 
-### `flow_search`
+### `flow_search` *(native)*
 
 Search the current Flow workstream's persisted documents (goal, plan, requirements, QA, integration, verification) by semantic relevance to a natural-language query. Returns the top-k matching document paths with similarity scores.
 
