@@ -10,6 +10,7 @@ Type `/` in the input box to open the command palette.
 | `/compact` | Summarize and compact conversation history |
 | `/new` | Start a new session |
 | `/help` | Show keybindings |
+| `/usage` | Show token usage breakdown |
 | `/stats` | Show cost and usage stats |
 | `/queue` | Remove items from queue |
 | `/sessions` | Browse and switch sessions |

@@ -280,6 +280,20 @@ impl App {
         if r.width > 0 {
             overlay_rect = r;
         }
+        if self.usage_modal.is_open() {
+            let quota = self.usage_slot.load();
+            let ctx = crate::components::usage_modal::UsageModalContext {
+                total: &self.state.token_usage,
+                by_model: &self.state.session.meta.usage_by_model,
+                model: &self.state.model,
+                fast: self.state.fast,
+                quota: quota.as_deref(),
+            };
+            let r = self.usage_modal.view(frame, full, &ctx);
+            if r.width > 0 {
+                overlay_rect = r;
+            }
+        }
         let r = self.stats_modal.view(frame, full);
         if r.width > 0 {
             overlay_rect = r;

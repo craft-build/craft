@@ -12,7 +12,7 @@ use crate::animation::{spinner_frame, spinner_str};
 use crate::components::Overlay;
 use crate::components::hint_line;
 use crate::components::is_ctrl;
-use crate::components::keybindings::{ActionId, KeybindingResolver};
+use crate::components::keybindings::{ActionId, KeybindingResolver, key};
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::text_buffer::TextBuffer;
@@ -454,6 +454,14 @@ impl<T: PickerItem> ListPicker<T> {
         if self.keybindings.matches(ActionId::DeleteWord, key) {
             s.search.remove_word_before_cursor();
             s.update_search_and_clamp();
+            return PickerAction::Consumed;
+        }
+        if key::SCROLL_HALF_UP.matches(key) {
+            s.page_up();
+            return PickerAction::Consumed;
+        }
+        if key::SCROLL_HALF_DOWN.matches(key) {
+            s.page_down();
             return PickerAction::Consumed;
         }
         if is_ctrl(&key) {
@@ -1027,6 +1035,20 @@ mod tests {
             p.handle_key(key(KeyCode::PageDown));
         }
         assert_eq!(ready_state(&p).selected, 49);
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_page_like_page_keys() {
+        let items: Vec<Entry> = (0..50).map(|i| Entry::new(&format!("Item {i}"))).collect();
+        let mut p = ListPicker::new();
+        p.open(items, " Test ");
+        ready_state_mut(&mut p).viewport_height = 10;
+
+        p.handle_key(kb::SCROLL_HALF_DOWN.to_key_event());
+        assert_eq!(ready_state(&p).selected, 10);
+
+        p.handle_key(kb::SCROLL_HALF_UP.to_key_event());
+        assert_eq!(ready_state(&p).selected, 0);
     }
 
     #[test]

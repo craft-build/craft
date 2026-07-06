@@ -27,6 +27,7 @@ pub mod status_bar;
 pub(crate) mod streaming_content;
 pub(crate) mod theme_picker;
 pub(crate) mod tool_display;
+pub(crate) mod usage_modal;
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -210,6 +211,7 @@ pub enum Action {
     Btw(String),
     Suspend,
     RefreshModels,
+    RefreshUsage,
     Quit,
     ProviderReady {
         model_spec: String,

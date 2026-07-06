@@ -26,6 +26,7 @@ use crate::agent::{
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg};
 use crate::components::input::Submission;
+use crate::components::usage_modal::UsageFetchState;
 use crate::components::{Action, ExitRequest, LoadedSession, Status};
 
 use crate::storage_writer::StorageWriter;
@@ -613,6 +614,7 @@ impl<'t> EventLoop<'t> {
             }
             Action::Suspend => terminal::suspend(self.terminal),
             Action::RefreshModels => self.refresh_models(),
+            Action::RefreshUsage => self.refresh_usage(),
             Action::Quit => {}
             Action::ProviderReady {
                 model_spec,
@@ -624,6 +626,7 @@ impl<'t> EventLoop<'t> {
                         if let Ok(new_model) = Model::from_spec(&model_spec) {
                             self.app.update_model(&new_model);
                             self.app.record_recent_model(&model_spec);
+                            self.app.usage_slot.store(None);
                             self.model_slot.store(Arc::new(ModelSlot {
                                 model: new_model,
                                 provider: new_provider,
@@ -670,6 +673,20 @@ impl<'t> EventLoop<'t> {
         available.store(None);
         tokio::spawn(async move {
             fetch_all_models(|batch| merge_batch(&available, batch, &warn_tx), None).await;
+        });
+    }
+
+    fn refresh_usage(&self) {
+        let provider = Arc::clone(&self.model_slot.load().provider);
+        let slot = Arc::clone(&self.app.usage_slot);
+        slot.store(Some(Arc::new(UsageFetchState::Loading)));
+        tokio::spawn(async move {
+            let state = match provider.fetch_usage().await {
+                Ok(Some(usage)) => UsageFetchState::Ready(usage),
+                Ok(None) => UsageFetchState::Unsupported,
+                Err(e) => UsageFetchState::Error(e.user_message()),
+            };
+            slot.store(Some(Arc::new(state)));
         });
     }
 
