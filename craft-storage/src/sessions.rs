@@ -41,6 +41,37 @@ pub enum SessionError {
     CursorAhead { saved: usize, actual: usize },
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTokenUsage {
+    #[serde(default)]
+    pub input: u32,
+    #[serde(default)]
+    pub output: u32,
+    #[serde(default)]
+    pub cache_creation: u32,
+    #[serde(default)]
+    pub cache_read: u32,
+}
+
+impl StoredTokenUsage {
+    pub fn total_input(&self) -> u32 {
+        self.input + self.cache_read + self.cache_creation
+    }
+
+    pub fn total(&self) -> u32 {
+        self.input + self.output + self.cache_creation + self.cache_read
+    }
+}
+
+impl std::ops::AddAssign for StoredTokenUsage {
+    fn add_assign(&mut self, rhs: Self) {
+        self.input += rhs.input;
+        self.output += rhs.output;
+        self.cache_creation += rhs.cache_creation;
+        self.cache_read += rhs.cache_read;
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionMeta {
     #[serde(default)]
@@ -67,6 +98,8 @@ pub struct SessionMeta {
     pub fast: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub usage_by_model: HashMap<String, StoredTokenUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
