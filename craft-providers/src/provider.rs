@@ -21,7 +21,7 @@ use crate::providers::opencode::Opencode;
 use crate::providers::openrouter::OpenRouter;
 use crate::providers::synthetic::Synthetic;
 use crate::providers::tensorx::TensorX;
-use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
+use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
 #[strum(serialize_all = "kebab-case")]
@@ -263,6 +263,12 @@ pub trait Provider: Send + Sync {
             let ids = self.list_models().await?;
             Ok(ids.into_iter().map(crate::model::ModelInfo::new).collect())
         })
+    }
+
+    /// Fetch provider-side usage quota (remaining percentage / reset times).
+    /// `Ok(None)` means the provider does not expose a programmatic usage endpoint.
+    fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
+        Box::pin(async { Ok(None) })
     }
 
     fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
