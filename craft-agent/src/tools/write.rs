@@ -66,7 +66,7 @@ impl super::ToolInvocation for Write {
     fn start_header(&self) -> super::HeaderFuture {
         super::HeaderFuture::Ready(super::HeaderResult::plain(Write::start_header(self)))
     }
-    fn start_output(&self) -> Option<ToolOutput> {
+    fn start_output(&self, _ctx: &super::ToolContext) -> Option<ToolOutput> {
         let path = super::resolve_path(&self.path).ok()?;
         Some(self.write_output(&path, craft_config::DEFAULT_MAX_OUTPUT_LINES))
     }

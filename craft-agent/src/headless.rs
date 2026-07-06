@@ -18,7 +18,7 @@ use crate::cancel::{CancelMap, CancelToken};
 use crate::permissions::PermissionManager;
 use crate::prompt::ResolvedSlots;
 use crate::template;
-use crate::tools::{FileReadTracker, FsBackend};
+use crate::tools::{FileReadTracker, FsBackend, ToolRegistry};
 use crate::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
     Envelope, EventSender, ImageSource, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
@@ -209,6 +209,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::new(params.prompt_slots),
                     subagent_cancels: Arc::new(CancelMap::new()),
+                    registry: Arc::clone(ToolRegistry::native_arc()),
                     compression: params.compression,
                     findings_store: Some(crate::FindingsStore::new_shared()),
                     fs: Arc::new(crate::tools::LocalFs),
@@ -420,6 +421,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         file_tracker: Arc::clone(&file_tracker),
                         prompt_slots: Arc::clone(&params.prompt_slots),
                         subagent_cancels: Arc::new(CancelMap::new()),
+                        registry: Arc::clone(ToolRegistry::native_arc()),
                         compression: params.compression.clone(),
                         findings_store: Some(crate::FindingsStore::new_shared()),
                         fs: Arc::clone(&params.fs),

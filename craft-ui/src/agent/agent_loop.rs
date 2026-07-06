@@ -248,6 +248,7 @@ impl AgentLoop {
                 file_tracker: Arc::clone(&self.file_tracker),
                 prompt_slots: std::sync::Arc::new(prompt_slots),
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
+                registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
                 compression: self.compression.clone(),
                 findings_store: Some(Arc::clone(&self.findings_store)),
                 fs: Arc::new(craft_agent::tools::LocalFs),

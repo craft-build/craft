@@ -39,6 +39,7 @@ struct InterpreterEnv {
     permissions: Arc<PermissionManager>,
     file_tracker: Arc<FileReadTracker>,
     user_response_rx: Option<Arc<Mutex<flume::Receiver<String>>>>,
+    registry: Arc<ToolRegistry>,
 }
 
 #[derive(Tool, Debug, Clone, Deserialize)]
@@ -81,6 +82,7 @@ impl CodeExecution {
             permissions: ctx.permissions.clone(),
             file_tracker: ctx.file_tracker.clone(),
             user_response_rx: ctx.user_response_rx.clone(),
+            registry: Arc::clone(&ctx.registry),
         };
 
         // We race cancel against the blocking thread. If cancel wins, the Python thread
@@ -178,7 +180,7 @@ impl super::ToolInvocation for CodeExecution {
 fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
     let mut tools: HashMap<String, ToolFn> = HashMap::new();
 
-    for entry in ToolRegistry::native().iter().iter() {
+    for entry in env.registry.iter().iter() {
         let tool_name = entry.name();
         if !entry.tool.audience().contains(ToolAudience::INTERPRETER) {
             continue;
@@ -195,6 +197,7 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
         let config = env.config.clone();
         let file_tracker = Arc::clone(&env.file_tracker);
         let user_response_rx = env.user_response_rx.clone();
+        let registry = Arc::clone(&env.registry);
 
         tools.insert(
             name.clone(),
@@ -211,12 +214,13 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
                         Arc::clone(&permissions),
                         Arc::clone(&file_tracker),
                         user_response_rx.clone(),
+                        Arc::clone(&registry),
                     );
                     inner_ctx.deadline = deadline;
                     inner_ctx.config = config.clone();
                     let done = tokio::runtime::Handle::current().block_on(
                         crate::agent::tool_dispatch::run(
-                            ToolRegistry::native(),
+                            &registry,
                             inner_ctx.mcp.as_ref(),
                             String::new(),
                             fn_name,
@@ -247,6 +251,7 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
     let permissions = Arc::clone(&env.permissions);
     let file_tracker = Arc::clone(&env.file_tracker);
     let user_response_rx = env.user_response_rx.clone();
+    let registry = Arc::clone(&env.registry);
 
     Box::new(move |pending_calls: Vec<PendingCall>| {
         let config = config.clone();
@@ -263,6 +268,7 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
                 let config = config.clone();
                 let file_tracker = Arc::clone(&file_tracker);
                 let user_response_rx = user_response_rx.clone();
+                let registry = Arc::clone(&registry);
 
                 set.spawn(async move {
                     if let Err(e) = deadline.check() {
@@ -281,11 +287,12 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
                         Arc::clone(&permissions),
                         file_tracker,
                         user_response_rx,
+                        Arc::clone(&registry),
                     );
                     inner_ctx.deadline = deadline;
                     inner_ctx.config = config;
                     let done = crate::agent::tool_dispatch::run(
-                        ToolRegistry::native(),
+                        &inner_ctx.registry,
                         inner_ctx.mcp.as_ref(),
                         String::new(),
                         &pc.name,

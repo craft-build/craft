@@ -180,7 +180,7 @@ pub async fn run(
             annotation: invocation.start_annotation(),
             input: invocation.start_input(),
             raw_input: None,
-            output: invocation.start_output(),
+            output: invocation.start_output(ctx),
         };
         if matches!(emit, Emit::Notify) {
             let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
@@ -511,7 +511,7 @@ pub(super) async fn process_tool_calls(
         let is_read_only = dedup_key.is_some();
         set.spawn(async move {
             let done = run(
-                ToolRegistry::native(),
+                &tool_ctx.registry,
                 mcp_owned.as_ref(),
                 id,
                 &name,
@@ -892,7 +892,7 @@ mod tests {
     async fn unknown_tool_returns_error_event() {
         let ctx = crate::tools::test_support::stub_ctx(&AgentMode::Build);
         let done = run(
-            ToolRegistry::native(),
+            &ctx.registry,
             None,
             "t1".into(),
             "nonexistent__tool",

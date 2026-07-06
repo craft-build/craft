@@ -273,6 +273,7 @@ pub struct ToolContext {
     pub dynamic: crate::tools::dynamic::DynamicContext,
     pub hooks: Option<Arc<dyn crate::Hooks>>,
     pub session_id: Option<String>,
+    pub registry: Arc<ToolRegistry>,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -729,6 +730,7 @@ pub(crate) fn interpreter_ctx(
     permissions: Arc<PermissionManager>,
     file_tracker: Arc<FileReadTracker>,
     user_response_rx: Option<Arc<tokio::sync::Mutex<flume::Receiver<String>>>>,
+    registry: Arc<ToolRegistry>,
 ) -> ToolContext {
     static PROVIDER: LazyLock<Arc<dyn Provider>> = LazyLock::new(|| Arc::new(NullProvider));
     static MODEL: LazyLock<Arc<Model>> =
@@ -763,6 +765,7 @@ pub(crate) fn interpreter_ctx(
         snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
         pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
         session_id: None,
+        registry,
     }
 }
 
@@ -785,6 +788,7 @@ pub fn cli_tool_ctx() -> ToolContext {
         )),
         Arc::new(FileReadTracker::new()),
         None,
+        Arc::clone(ToolRegistry::native_arc()),
     )
 }
 
@@ -824,6 +828,7 @@ pub mod test_support {
             Arc::clone(&TEST_PERMISSIONS),
             Arc::new(FileReadTracker::new()),
             None,
+            Arc::new(ToolRegistry::with_natives()),
         );
         ctx.tool_use_id = tool_use_id.map(String::from);
         ctx
@@ -847,6 +852,7 @@ pub mod test_support {
             permissions,
             Arc::new(FileReadTracker::new()),
             None,
+            Arc::new(ToolRegistry::with_natives()),
         );
         ctx.tool_use_id = None;
         ctx

@@ -114,17 +114,18 @@ impl<'de> Deserialize<'de> for BatchEntry {
 impl BatchEntry {
     fn to_batch_entry(
         &self,
+        registry: &ToolRegistry,
         status: BatchToolStatus,
         output: Option<ToolOutput>,
         summary: Option<String>,
     ) -> BatchToolEntry {
-        let reg = ToolRegistry::native();
-        let call = reg
+        let call = registry
             .get(&self.tool)
             .and_then(|e| e.tool.parse(&self.parameters).ok());
         BatchToolEntry {
             tool: self.tool.clone(),
-            summary: summary.unwrap_or_else(|| reg.resolve_header(&self.tool, &self.parameters)),
+            summary: summary
+                .unwrap_or_else(|| registry.resolve_header(&self.tool, &self.parameters)),
             status,
             input: call.and_then(|c| c.start_input()),
             raw_input: None,
@@ -193,9 +194,7 @@ impl Batch {
                     );
                 }
 
-                let summary = ToolRegistry::native()
-                    .resolve_header_async(&name, &params)
-                    .await;
+                let summary = ctx.registry.resolve_header_async(&name, &params).await;
 
                 ctx.event_tx
                     .try_send(AgentEvent::BatchProgress(Box::new(BatchProgressEvent {
@@ -212,7 +211,7 @@ impl Batch {
                     ..ctx.clone()
                 };
                 let done = tool_dispatch::run(
-                    ToolRegistry::native(),
+                    &ctx.registry,
                     inner_ctx.mcp.as_ref(),
                     id,
                     &name,
@@ -284,7 +283,7 @@ impl Batch {
                 } else {
                     BatchToolStatus::Error
                 };
-                entry.to_batch_entry(status, br.output.clone(), br.summary.clone())
+                entry.to_batch_entry(&ctx.registry, status, br.output.clone(), br.summary.clone())
             })
             .collect();
 
@@ -306,7 +305,7 @@ impl Batch {
                 "## {}\n[ERROR] maximum of {MAX_BATCH_SIZE} tools per batch\n\n",
                 entry.tool
             );
-            entries.push(entry.to_batch_entry(BatchToolStatus::Error, None, None));
+            entries.push(entry.to_batch_entry(&ctx.registry, BatchToolStatus::Error, None, None));
         }
 
         let succeeded = total - failed;
@@ -355,11 +354,11 @@ impl super::ToolInvocation for Batch {
     fn start_header(&self) -> super::HeaderFuture {
         super::HeaderFuture::Ready(super::HeaderResult::plain(Batch::start_header(self)))
     }
-    fn start_output(&self) -> Option<ToolOutput> {
+    fn start_output(&self, ctx: &super::ToolContext) -> Option<ToolOutput> {
         let entries = self
             .tool_calls
             .iter()
-            .map(|entry| entry.to_batch_entry(BatchToolStatus::Pending, None, None))
+            .map(|entry| entry.to_batch_entry(&ctx.registry, BatchToolStatus::Pending, None, None))
             .collect();
         Some(ToolOutput::Batch {
             entries,

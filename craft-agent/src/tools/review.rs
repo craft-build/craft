@@ -141,6 +141,7 @@ impl Review {
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
+                registry: Arc::clone(crate::tools::ToolRegistry::native_arc()),
                 compression: ctx.compression.clone(),
                 findings_store: None,
                 fs: Arc::new(crate::tools::LocalFs),
