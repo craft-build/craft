@@ -140,6 +140,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         permissions_config: config.permissions,
         timeouts,
         prompt: prompt.clone(),
+        images: Vec::new(),
         prompt_slots,
         excluded_tools: excluded,
         mcp_handle,

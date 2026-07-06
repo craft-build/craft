@@ -22,7 +22,7 @@ use craft_agent::{
 };
 use craft_config::CompressionConfig;
 use craft_providers::model::Model;
-use craft_providers::{Message, StopReason, Timeouts, TokenUsage};
+use craft_providers::{ImageSource, Message, StopReason, Timeouts, TokenUsage};
 use craft_storage::StateDir;
 use craft_storage::sessions::Session;
 use flume::{Receiver, Sender};
@@ -566,6 +566,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
                 };
                 let content = user.message.content;
                 let prompt = content_text(&content).unwrap_or_else(|| content.to_string());
+                let images = content_images(&content);
                 let mode = {
                     let mut shared = shared.lock().unwrap();
                     shared.turn_start = Instant::now();
@@ -574,6 +575,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
                 let input = AgentInput {
                     message: prompt,
                     mode: mode.agent_mode(&cwd),
+                    images,
                     fast,
                     ..Default::default()
                 };
@@ -676,6 +678,20 @@ fn content_text(content: &Value) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+// Claude Code stream-json block shape:
+// {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
+// `source` deserializes straight into ImageSource; malformed blocks are skipped.
+fn content_images(content: &Value) -> Vec<ImageSource> {
+    let Value::Array(blocks) = content else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|b| serde_json::from_value::<ImageSource>(b.get("source")?.clone()).ok())
+        .collect()
 }
 
 fn handle_control_request(
@@ -1214,6 +1230,24 @@ mod tests {
         ]);
         assert_eq!(content_text(&blocks), Some("a\nb".into()));
         assert_eq!(content_text(&serde_json::json!(42)), None);
+    }
+
+    #[test]
+    fn content_images_extracts_base64_blocks() {
+        let blocks = serde_json::json!([
+            {"type": "text", "text": "look at this"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}},
+        ]);
+        let images = content_images(&blocks);
+        assert_eq!(images.len(), 2);
+        assert_eq!(&*images[0].data, "AAAA");
+        assert_eq!(&*images[1].data, "BBBB");
+
+        // Non-array content and malformed image blocks yield no images.
+        assert!(content_images(&serde_json::json!("hi")).is_empty());
+        let bad = serde_json::json!([{"type": "image", "source": {"data": "x"}}]);
+        assert!(content_images(&bad).is_empty());
     }
 
     #[test]

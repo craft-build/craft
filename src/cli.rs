@@ -41,6 +41,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub print: bool,
 
+    /// Attach an image to the prompt in --print mode as vision content (repeatable)
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<std::path::PathBuf>,
+
     /// Model spec (provider/model-id). Defaults to last used model, or claude-opus-4-6
     #[arg(short, long)]
     pub model: Option<String>,

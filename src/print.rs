@@ -8,14 +8,15 @@
 //! Check their docs before changing anything here.
 
 use std::io::{self, Read};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use color_eyre::Result;
-use color_eyre::eyre::Context;
+use color_eyre::eyre::{Context, eyre};
 use craft_agent::headless::{HeadlessHandle, HeadlessParams};
 use craft_agent::tools::QUESTION_TOOL_NAME;
-use craft_agent::{AgentConfig, AgentEvent, Envelope, PermissionsConfig};
+use craft_agent::{AgentConfig, AgentEvent, Envelope, ImageSource, PermissionsConfig};
 use craft_lua::EventHandle;
 use craft_providers::model::Model;
 use craft_providers::{StopReason, TokenUsage};
@@ -23,6 +24,20 @@ use serde::Serialize;
 use serde_json::Value;
 
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Fails fast: silently dropping an image the caller explicitly attached
+// would be worse than erroring.
+fn load_images(paths: &[PathBuf]) -> Result<Vec<ImageSource>> {
+    paths
+        .iter()
+        .map(|path| {
+            let media_type = craft_ui::image::media_type_for(path)
+                .ok_or_else(|| eyre!("unsupported image type: {}", path.display()))?;
+            craft_ui::image::load_file_image(path, media_type)
+                .map_err(|e| eyre!("failed to load image: {e}"))
+        })
+        .collect()
+}
 
 #[derive(Clone, ValueEnum)]
 pub enum OutputFormat {
@@ -121,6 +136,7 @@ impl VerboseOutput {
 pub async fn run(
     model: &Model,
     prompt_arg: Option<String>,
+    image_paths: Vec<PathBuf>,
     format: OutputFormat,
     verbose: bool,
     config: AgentConfig,
@@ -138,6 +154,8 @@ pub async fn run(
             buf
         }
     };
+
+    let images = load_images(&image_paths)?;
 
     let prompt_slots = lua_handle
         .as_ref()
@@ -157,6 +175,7 @@ pub async fn run(
         permissions_config,
         timeouts,
         prompt,
+        images,
         prompt_slots,
         excluded_tools: vec![QUESTION_TOOL_NAME],
         mcp_handle,

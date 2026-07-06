@@ -13,7 +13,7 @@ pub use components::keybindings;
 mod highlight;
 pub use highlight::highlight_ansi;
 mod hyperlink;
-mod image;
+pub mod image;
 mod image_render;
 mod markdown;
 mod render_worker;

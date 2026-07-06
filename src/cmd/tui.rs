@@ -169,6 +169,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             crate::print::run(
                 &model,
                 cli.initial_prompt,
+                cli.images,
                 cli.output_format,
                 cli.verbose,
                 config.agent,
