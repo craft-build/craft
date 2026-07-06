@@ -107,7 +107,11 @@ impl Task {
                     let map = model_registry::model_registry()
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
-                    map.spec_for_tier(ctx.model.provider, effective)
+                    ctx.model
+                        .dynamic_slug
+                        .is_none()
+                        .then(|| map.spec_for_tier(ctx.model.provider, effective))
+                        .flatten()
                         .or_else(|| map.spec_for_tier_any(effective))
                         .and_then(|spec| Model::from_spec(&spec).ok())
                         .or_else(|| {
