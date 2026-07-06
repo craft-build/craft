@@ -627,6 +627,13 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         action_id: None,
+        label: KeyLabel::Alt("PageUp", "PageDown"),
+        description: "Scroll page up / down",
+        context: KeybindContext::Picker,
+        platform: Platform::All,
+    },
+    Keybind {
+        action_id: None,
         label: KeyLabel::Single("Enter"),
         description: "Select",
         context: KeybindContext::Picker,

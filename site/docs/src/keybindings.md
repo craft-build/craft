@@ -62,6 +62,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate |
+| `PageUp` / `PageDown` | Scroll page up / down |
 | `Enter` | Select |
 | `Esc` | Close |
 | `Type` | Filter |
