@@ -69,11 +69,7 @@ pub trait FlowSearchBackend: Send + Sync {
 
     /// List all persisted document paths in the workstream. Backs
     /// `flow://*` (the "what's available" listing).
-    fn list_documents<'a>(
-        &'a self,
-        project_id: &'a str,
-        workstream_id: &'a str,
-    ) -> ListFuture<'a>;
+    fn list_documents<'a>(&'a self, project_id: &'a str, workstream_id: &'a str) -> ListFuture<'a>;
 }
 
 /// Shared, cloneable handle to an optional backend. `None` means Flow semantic
@@ -203,9 +199,7 @@ mod tests {
             _workstream_id: &'a str,
             rel_path: &'a str,
         ) -> ReadFuture<'a> {
-            Box::pin(async move {
-                Ok(format!("# body of {rel_path}\n\n(flow document content)"))
-            })
+            Box::pin(async move { Ok(format!("# body of {rel_path}\n\n(flow document content)")) })
         }
         fn list_documents<'a>(
             &'a self,

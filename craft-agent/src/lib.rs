@@ -100,4 +100,7 @@ pub struct AgentInput {
     pub fast: bool,
     pub prompt: Option<Box<McpPromptRef>>,
     pub goal: Option<String>,
+    /// Flow mode only: resume a previously-failed run for this workstream
+    /// instead of starting fresh. Ignored outside Flow mode.
+    pub flow_resume: bool,
 }

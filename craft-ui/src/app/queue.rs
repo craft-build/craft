@@ -140,7 +140,11 @@ impl App {
 
     /// Immediate path: kick off the agent and draw the bubble in the same
     /// frame, so the user sees their message land where it will stay.
-    pub(super) fn start_from_queue(&mut self, msg: &QueuedMessage) -> Vec<super::Action> {
+    pub(super) fn start_from_queue(
+        &mut self,
+        msg: &QueuedMessage,
+        flow_resume: bool,
+    ) -> Vec<super::Action> {
         self.status = super::Status::Streaming;
         if self.state.mode == super::Mode::Flow {
             self.flow_panel.show_if_not_dismissed();
@@ -151,7 +155,7 @@ impl App {
         self.main_chat()
             .show_user_message(format_with_images(&msg.text, msg.images.len()));
         vec![super::Action::SendMessage(Box::new(
-            self.build_agent_input(msg),
+            self.build_agent_input_with(msg, flow_resume),
         ))]
     }
 }

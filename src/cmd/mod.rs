@@ -71,6 +71,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
                         output_format: crate::print::OutputFormat::Text,
                         session: None,
                         payload: None,
+                        retry: false,
                     };
                     subcmd::flow::run(action).await?;
                 }

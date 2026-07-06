@@ -74,14 +74,16 @@ tree-sitter-objc = { workspace = true }
 tree-sitter-perl = { workspace = true }
 tree-sitter-svelte-next = { workspace = true }
 tree-sitter-zsh = { workspace = true }
-fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries"], optional = true }
-magika = { version = "1", optional = true }
+fastembed = { workspace = true }
+magika = { workspace = true }
 ast-grep-core = { workspace = true }
 ast-grep-language = { workspace = true, features = ["tree-sitter-rust", "tree-sitter-typescript", "tree-sitter-python", "tree-sitter-go"] }
+minijinja = { workspace = true }
+chromiumoxide = { workspace = true }
+futures = { workspace = true }
 
 [features]
 default = []
-onnx = ["dep:fastembed", "dep:magika"]
 
 [dev-dependencies]
 test-case = { workspace = true }

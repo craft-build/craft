@@ -2863,3 +2863,72 @@ fn handle_flow_progress_chunk_carries_title() {
     assert_eq!(row.status, craft_flow::ChunkStatus::Running);
     assert_eq!(row.stage, Some(craft_flow::Stage::Execute));
 }
+
+#[test]
+fn flow_failed_then_submit_dispatches_resume_run() {
+    let mut app = flow_app();
+    // A chunk stuck Running, then the pipeline reports failure.
+    app.state.flow.set_chunk(
+        "c1",
+        "Add auth",
+        craft_flow::ChunkStatus::Running,
+        Some(craft_flow::Stage::Execute),
+        0,
+        &[],
+    );
+    app.handle_flow_progress(craft_flow::FlowProgress::Failed {
+        stage: craft_flow::Stage::Review,
+        reason: "blocking findings".into(),
+    });
+    assert!(app.flow_failed, "flow_failed should be set after a failure");
+    // Still-running chunk gets finalized to Blocked on failure.
+    assert_eq!(
+        app.state.flow.chunks.get("c1").unwrap().status,
+        craft_flow::ChunkStatus::Blocked
+    );
+
+    // Submitting in Flow mode while flow_failed dispatches a resume run.
+    let actions = app.handle_submit(Submission {
+        text: String::new(),
+        images: vec![],
+    });
+    assert!(
+        !app.flow_failed,
+        "flow_failed should clear after a retry submit"
+    );
+    let input = actions
+        .iter()
+        .find_map(|a| match a {
+            Action::SendMessage(i) => Some(i),
+            _ => None,
+        })
+        .expect("retry should send a message");
+    assert!(
+        input.flow_resume,
+        "retry input must carry flow_resume = true"
+    );
+}
+
+#[test]
+fn flow_done_does_not_finalize_running_chunks_to_blocked() {
+    let mut app = flow_app();
+    // A chunk still marked Running when Done arrives (a missed transition).
+    // Done must NOT force it to Blocked; that would mask the bug.
+    app.state.flow.set_chunk(
+        "c1",
+        "Add auth",
+        craft_flow::ChunkStatus::Running,
+        Some(craft_flow::Stage::Execute),
+        0,
+        &[],
+    );
+    app.handle_flow_progress(craft_flow::FlowProgress::Done {
+        verdict: "{\"goal_met\":true}".into(),
+    });
+    assert_eq!(
+        app.state.flow.chunks.get("c1").unwrap().status,
+        craft_flow::ChunkStatus::Running,
+        "Done must not clobber a still-Running chunk to Blocked"
+    );
+    assert!(!app.flow_failed);
+}

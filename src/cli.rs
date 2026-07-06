@@ -366,6 +366,10 @@ pub enum FlowAction {
         /// Resume payload: "approved" to approve the goal doc, else a revised goal
         #[arg(long, short = 'p', visible_alias = "payload")]
         payload: Option<String>,
+        /// Retry a previously-failed run for the session, re-entering at the
+        /// failed stage using persisted workstream state (implies -s <id>)
+        #[arg(long)]
+        retry: bool,
     },
     /// Prune Flow workstream directories older than the given age
     Gc {

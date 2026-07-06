@@ -25,10 +25,9 @@ use super::relative_path;
 
 pub(super) fn handles(path: &str) -> bool {
     path.contains("://")
-        && path
-            .split("://")
-            .next()
-            .is_some_and(|scheme| matches!(scheme, "skill" | "rule" | "conflict" | "agent" | "flow"))
+        && path.split("://").next().is_some_and(|scheme| {
+            matches!(scheme, "skill" | "rule" | "conflict" | "agent" | "flow")
+        })
 }
 
 pub(super) async fn resolve(path: &str, ctx: &ToolContext) -> Result<ToolOutput, String> {
@@ -117,11 +116,11 @@ async fn resolve_flow(selector: &str, ctx: &ToolContext) -> Result<ToolOutput, S
         return Err("flow:// requires a document path (or '*' to list all)".into());
     }
     if selector == "*" {
-        let docs = backend
-            .list_documents(&project_id, &workstream_id)
-            .await?;
+        let docs = backend.list_documents(&project_id, &workstream_id).await?;
         if docs.is_empty() {
-            return Ok(ToolOutput::Plain("no flow documents in this workstream".into()));
+            return Ok(ToolOutput::Plain(
+                "no flow documents in this workstream".into(),
+            ));
         }
         let mut out = format!("{} flow document(s) in this workstream:\n", docs.len());
         for p in &docs {
@@ -448,7 +447,11 @@ mod tests {
     }
 
     fn flow_ctx(backend: Option<FlowStub>) -> ToolContext {
-        let mut ctx = stub_ctx_with(&AgentMode::Flow(FLOW_WS.to_string()), None, Some("flow:test"));
+        let mut ctx = stub_ctx_with(
+            &AgentMode::Flow(FLOW_WS.to_string()),
+            None,
+            Some("flow:test"),
+        );
         ctx.flow_search = backend.map(|b| Arc::new(b) as Arc<dyn FlowSearchBackend>);
         ctx
     }

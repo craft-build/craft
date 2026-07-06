@@ -844,6 +844,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
         session_id: None,
         flow_search: env.flow_search.clone(),
+        registry: Arc::clone(ToolRegistry::native_arc()),
     }
 }
 

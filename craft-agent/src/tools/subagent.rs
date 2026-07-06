@@ -241,6 +241,7 @@ pub async fn run_subagent(
                 findings_store: None,
                 fs: Arc::new(crate::tools::LocalFs),
                 doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
+                registry: Arc::clone(crate::tools::ToolRegistry::native_arc()),
             },
             AgentRunParams {
                 history: &mut history,
@@ -253,9 +254,9 @@ pub async fn run_subagent(
             },
         )
         .with_user_response_rx(Arc::clone(&answer_rx))
-            .with_cancel(child_cancel.clone())
-            .with_mcp(ctx.mcp.clone())
-            .with_flow_search(ctx.flow_search.clone());
+        .with_cancel(child_cancel.clone())
+        .with_mcp(ctx.mcp.clone())
+        .with_flow_search(ctx.flow_search.clone());
 
         run_isolated(agent, input, worktree.as_ref())
             .await

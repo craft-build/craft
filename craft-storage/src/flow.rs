@@ -17,6 +17,7 @@ use crate::{StateDir, StorageError, atomic_write};
 const FLOW_DIR_NAME: &str = "flow";
 const PROJECTS_DIR_NAME: &str = "projects";
 const MAX_DOC_BYTES: usize = 256 * 1024;
+const WORKSTREAM_STATE_FILE: &str = "workstream.json";
 /// Per-workstream documents must exceed this count before the semantic index
 /// activates. Below it, linear scan over `list()` is cheaper than maintaining
 /// an embedding index and re-running inference on every write.
@@ -233,6 +234,51 @@ impl FlowStore {
             fs::remove_file(&path)?;
         }
         Ok(())
+    }
+
+    fn workstream_state_path(&self, project_id: &str, workstream_id: &str) -> PathBuf {
+        self.root
+            .join(project_id)
+            .join(FLOW_DIR_NAME)
+            .join(workstream_id)
+            .join(WORKSTREAM_STATE_FILE)
+    }
+
+    /// Load a workstream's persisted mutable state (stage, approval flag, chunk
+    /// statuses, iteration counts). Returns `None` when no state has been
+    /// persisted yet (first run). The bytes are opaque to this crate; craft-flow
+    /// owns the `Workstream` schema and deserializes them.
+    pub fn read_workstream_state(
+        &self,
+        project_id: &str,
+        workstream_id: &str,
+    ) -> Result<Option<Vec<u8>>, FlowError> {
+        let path = self.workstream_state_path(project_id, workstream_id);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(FlowError::Io(e)),
+        }
+    }
+
+    /// Persist a workstream's mutable state atomically. Called after every
+    /// stage/chunk transition so a crash or resume re-enters at the right place.
+    pub fn write_workstream_state(
+        &self,
+        project_id: &str,
+        workstream_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), FlowError> {
+        if bytes.len() > MAX_DOC_BYTES {
+            return Err(FlowError::DocTooLarge {
+                actual: bytes.len(),
+            });
+        }
+        let path = self.workstream_state_path(project_id, workstream_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(atomic_write(&path, bytes)?)
     }
 }
 
@@ -532,5 +578,27 @@ mod tests {
         assert_eq!(idx.len(), 1);
         assert!(idx.get("stale.md").is_none());
         assert_eq!(missing, vec!["plan.md".to_string()]);
+    }
+
+    #[test]
+    fn workstream_state_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = store(tmp.path());
+        assert!(s.read_workstream_state("proj", "ws").unwrap().is_none());
+        s.write_workstream_state("proj", "ws", b"{\"stage\":\"plan\"}")
+            .unwrap();
+        let loaded = s.read_workstream_state("proj", "ws").unwrap();
+        assert_eq!(loaded.as_deref(), Some(b"{\"stage\":\"plan\"}" as &[u8]));
+    }
+
+    #[test]
+    fn workstream_state_too_large_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = store(tmp.path());
+        let big = vec![0u8; MAX_DOC_BYTES + 1];
+        match s.write_workstream_state("proj", "ws", &big) {
+            Err(FlowError::DocTooLarge { .. }) => {}
+            other => panic!("expected DocTooLarge, got {other:?}"),
+        }
     }
 }

@@ -168,6 +168,11 @@ pub struct App {
     /// next submit is routed to the agent's answer channel (as the approval
     /// payload) instead of starting a new agent turn.
     pub(super) flow_awaiting_approval: bool,
+    /// True when the last flow run ended in `FlowOutcome::Failed` and the
+    /// workstream has persisted state worth resuming. Drives the in-app retry
+    /// affordance: submitting in Flow mode while this is set re-enters the
+    /// pipeline with `flow_resume = true` instead of starting fresh.
+    pub(super) flow_failed: bool,
     /// Max concurrent chunks from config; drives the graph's parallel layout.
     pub(super) flow_parallel_chunks: u32,
     pub(super) status_bar: StatusBar,
@@ -290,6 +295,7 @@ impl App {
             flow_goal_prompt: FlowGoalPrompt::new(),
             flow_selected_chunk: None,
             flow_awaiting_approval: false,
+            flow_failed: false,
             flow_parallel_chunks: 1,
             status_bar: StatusBar::new(ui_config.flash_duration()),
             status: Status::Idle,
@@ -510,6 +516,7 @@ impl App {
                     self.state.flow.clear_chunks();
                 }
                 self.state.flow.stage = Some(stage);
+                self.flow_failed = false;
             }
             craft_flow::FlowProgress::Chunk {
                 id,
@@ -528,15 +535,24 @@ impl App {
                 self.flow_goal_prompt.open(goal_doc);
             }
             craft_flow::FlowProgress::Done { .. } => {
-                self.state.flow.finalize_non_terminal();
+                // On success every chunk should already be Done (each chunk
+                // emits its own Done after QA passes). Do NOT finalize here:
+                // forcing still-running chunks to Blocked on a successful run
+                // would mask a real missed-transition bug. Finalize only runs
+                // on Failed/Cancelled below.
+                self.flow_failed = false;
                 self.flash("Flow run complete.".into());
             }
             craft_flow::FlowProgress::Failed { stage, reason } => {
                 self.state.flow.finalize_non_terminal();
-                self.status = Status::error(format!("flow {stage:?} failed: {reason}"));
+                self.flow_failed = true;
+                self.status = Status::error(format!(
+                    "flow {stage:?} failed: {reason} (press Enter to retry)"
+                ));
             }
             craft_flow::FlowProgress::Cancelled => {
                 self.state.flow.finalize_non_terminal();
+                self.flow_failed = false;
                 self.status = Status::error("flow run cancelled".into());
             }
         }
@@ -1185,6 +1201,25 @@ impl App {
             }
             return vec![];
         }
+        // Flow retry: when the last flow run failed and persisted state exists,
+        // submitting in Flow mode (Enter, optionally with a note) re-enters the
+        // pipeline at the failed stage instead of starting a fresh workstream.
+        // A non-empty submission that isn't a bare retry intent falls through
+        // to the normal path below (treated as a new request).
+        if self.state.mode == Mode::Flow && self.flow_failed {
+            let note = sub.text.trim();
+            self.flow_failed = false;
+            self.run_id += 1;
+            let msg = QueuedMessage {
+                text: if note.is_empty() {
+                    "resume flow from last failure".to_string()
+                } else {
+                    note.to_string()
+                },
+                images: sub.images.clone(),
+            };
+            return self.start_from_queue(&msg, true);
+        }
         if sub.is_empty() {
             return vec![];
         }
@@ -1213,7 +1248,7 @@ impl App {
             vec![]
         } else {
             self.run_id += 1;
-            self.start_from_queue(&msg)
+            self.start_from_queue(&msg, false)
         }
     }
 
@@ -1756,7 +1791,7 @@ impl App {
             vec![]
         } else {
             self.run_id += 1;
-            self.start_from_queue(&msg)
+            self.start_from_queue(&msg, false)
         }
     }
 
@@ -1946,7 +1981,7 @@ impl App {
             text,
             images: vec![],
         };
-        actions.extend(self.start_from_queue(&msg));
+        actions.extend(self.start_from_queue(&msg, false));
         actions
     }
 }

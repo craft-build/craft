@@ -73,7 +73,7 @@ pub type StageFuture<'a> = Pin<Box<dyn Future<Output = Result<String, FlowRunErr
 
 /// One named stage of the pipeline. Order is significant; the orchestrator
 /// advances through them in sequence (per chunk for the middle stages).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
     Scout,
@@ -304,6 +304,11 @@ pub struct FlowParams {
     /// reindexes the workstream's documents before the Verifier stage so
     /// `flow_search` has fresh vectors.
     pub embedder: Option<Arc<dyn search::Embedder>>,
+    /// Resume a previously-failed run. When true, the pipeline rehydrates the
+    /// persisted `Workstream` state (stage, chunk statuses, iteration counts)
+    /// and skips stages whose documents are already on disk, re-entering at the
+    /// last persisted stage. Off for fresh runs.
+    pub resume: bool,
 }
 
 impl FlowParams {
@@ -325,6 +330,7 @@ impl FlowParams {
             runner: None,
             progress: None,
             embedder: None,
+            resume: false,
         }
     }
 }
@@ -458,6 +464,7 @@ impl StageRunner for DefaultRunner {
 /// pass-through; with `> 1` it merges worktrees via the `conflicts` gate.
 pub async fn run(params: FlowParams) -> FlowOutcome {
     let embedder = params.embedder.clone();
+    let resume = params.resume;
     let FlowParams {
         project_id,
         request,
@@ -476,16 +483,31 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
             workstream_id: workstream_id.clone(),
         })
     });
-    let mut ws = Workstream::new(project_id.clone(), workstream_id.clone());
     let ctx = Ctx::new(&project_id, &workstream_id, Arc::clone(&store), progress);
 
-    // Resume optimization: when an approval payload is supplied and a goal doc
-    // is already persisted, re-enter at the gate (skip Scout/TPM re-runs). This
-    // is what makes `craft flow -s <id> -p approved` cheap on the second call.
+    // Rehydrate persisted workstream state on resume; otherwise start fresh.
+    // On resume we skip any top-level stage whose document is already on disk
+    // and re-enter at the last persisted stage, so a failed run can be retried
+    // without re-running Scout/TPM/Plan.
+    let mut ws = if resume {
+        load_workstream(&store, &project_id, &workstream_id)
+            .unwrap_or_else(|| Workstream::new(project_id.clone(), workstream_id.clone()))
+    } else {
+        Workstream::new(project_id.clone(), workstream_id.clone())
+    };
+    // Capture the rehydrated stage before the Scout/TPM section below overwrites
+    // ws.stage; the resume-skip decision for the chunk pipeline needs the
+    // persisted stage, not the transient Scout/TPM marker.
+    let loaded_stage = ws.stage;
+
+    // Goal-approval resume optimization: when an approval payload is supplied
+    // and a goal doc is already persisted, re-enter at the gate (skip
+    // Scout/TPM re-runs). This is what makes `craft flow -s <id> -p approved`
+    // cheap on the second call, and also covers the resume path.
     let persisted_goal = store
         .read(&project_id, &workstream_id, "tpm.md")
         .ok()
-        .filter(|_| approval.is_some());
+        .filter(|_| approval.is_some() || resume);
 
     // Scout
     ws.stage = Some(Stage::Scout);
@@ -525,7 +547,9 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
             persist(&ctx, Stage::Tpm, None, &rev);
             rev
         }
+        None if ws.approved => goal_doc,
         None => {
+            save_workstream(&ctx, &ws);
             ctx.emit(FlowProgress::GoalReady {
                 goal_doc: goal_doc.clone(),
             });
@@ -534,18 +558,36 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
     };
     ws.approved = true;
 
-    // Plan
-    ws.stage = Some(Stage::Plan);
-    ctx.emit(FlowProgress::Stage(Stage::Plan));
-    let plan_doc = match launch(&runner, &ctx, Stage::Plan, &approved_goal, None, false).await {
-        Ok(s) => s,
-        Err(e) => return fail(&ctx, Stage::Plan, e.into_reason()),
+    // Plan: skip on resume when the persisted stage is already past Plan and a
+    // plan doc exists, so we re-enter directly at the chunk pipeline.
+    let resumed_plan = resume
+        && loaded_stage.is_some_and(|s| s >= Stage::Execute)
+        && store.read(&project_id, &workstream_id, "plan.md").is_ok();
+    let plan_doc = if resumed_plan {
+        store
+            .read(&project_id, &workstream_id, "plan.md")
+            .unwrap_or_default()
+    } else {
+        ws.stage = Some(Stage::Plan);
+        ctx.emit(FlowProgress::Stage(Stage::Plan));
+        let doc = match launch(&runner, &ctx, Stage::Plan, &approved_goal, None, false).await {
+            Ok(s) => s,
+            Err(e) => return fail(&ctx, Stage::Plan, e.into_reason()),
+        };
+        persist(&ctx, Stage::Plan, None, &doc);
+        doc
     };
-    persist(&ctx, Stage::Plan, None, &plan_doc);
 
     let chunks = parse_chunks(&plan_doc);
     for (i, c) in chunks.iter().enumerate() {
-        ws.set_chunk_status(&c.id, ChunkStatus::Queued);
+        ws.chunks.entry(c.id.clone()).or_insert_with(|| Chunk {
+            id: c.id.clone(),
+            title: c.title.clone(),
+            status: ChunkStatus::Queued,
+            depends_on: c.depends_on.clone(),
+            review_iterations: 0,
+            qa_iterations: 0,
+        });
         if let Some(entry) = ws.chunks.get_mut(&c.id) {
             entry.title = c.title.clone();
             entry.depends_on = c.depends_on.clone();
@@ -559,6 +601,7 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
             order: i,
         });
     }
+    save_workstream(&ctx, &ws);
     if chunks.is_empty() {
         return FlowOutcome::Failed {
             stage: Stage::Plan,
@@ -572,6 +615,7 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
     let concurrency = config.parallel_chunks.max(1) as usize;
 
     ws.stage = Some(Stage::Execute);
+    save_workstream(&ctx, &ws);
     ctx.emit(FlowProgress::Stage(Stage::Execute));
 
     let results = run_chunk_dag(
@@ -609,6 +653,7 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
             Err(e) => {
                 let stage = e.stage();
                 ws.set_chunk_status(&chunk_id, ChunkStatus::Blocked);
+                save_workstream(&ctx, &ws);
                 ctx.emit(FlowProgress::Chunk {
                     id: chunk_id.clone(),
                     title,
@@ -624,6 +669,7 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
             }
         }
     }
+    save_workstream(&ctx, &ws);
 
     // Integrator -> Verifier
     // Refresh the semantic index so the Verifier (and any stage agent calling
@@ -638,12 +684,14 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
         }
     }
     ws.stage = Some(Stage::Integrator);
+    save_workstream(&ctx, &ws);
     ctx.emit(FlowProgress::Stage(Stage::Integrator));
     let integration = match launch(&runner, &ctx, Stage::Integrator, &plan_doc, None, false).await {
         Ok(s) => s,
         Err(e) => return fail(&ctx, Stage::Integrator, e.into_reason()),
     };
     if isolate && !merge_ok(&integration) {
+        save_workstream(&ctx, &ws);
         return FlowOutcome::Failed {
             stage: Stage::Integrator,
             reason: "unresolved merge conflicts across parallel chunks".to_string(),
@@ -652,6 +700,7 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
     persist(&ctx, Stage::Integrator, None, &integration);
 
     ws.stage = Some(Stage::Verifier);
+    save_workstream(&ctx, &ws);
     ctx.emit(FlowProgress::Stage(Stage::Verifier));
     let verification =
         match launch(&runner, &ctx, Stage::Verifier, &approved_goal, None, false).await {
@@ -660,6 +709,7 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
         };
     persist(&ctx, Stage::Verifier, None, &verification);
 
+    save_workstream(&ctx, &ws);
     ctx.emit(FlowProgress::Done {
         verdict: verification.clone(),
     });
@@ -737,6 +787,44 @@ fn fail(ctx: &Ctx, stage: Stage, reason: String) -> FlowOutcome {
         reason: reason.clone(),
     });
     FlowOutcome::Failed { stage, reason }
+}
+
+/// Serialize and persist the mutable workstream state so a crash or retry can
+/// re-enter at the right stage. Best-effort: a write failure logs and continues
+/// rather than failing the run (the on-disk stage docs are the source of truth
+/// for resume; this state just picks the re-entry point and chunk statuses).
+fn save_workstream(ctx: &Ctx, ws: &Workstream) {
+    match serde_json::to_vec(ws) {
+        Ok(bytes) => {
+            if let Err(e) =
+                ctx.store
+                    .write_workstream_state(&ctx.project_id, &ctx.workstream_id, &bytes)
+            {
+                warn!(error = %e, "flow: failed to persist workstream state");
+            }
+        }
+        Err(e) => warn!(error = %e, "flow: failed to serialize workstream state"),
+    }
+}
+
+/// Rehydrate the persisted mutable workstream state. Returns `None` when no
+/// state has been written yet (first run) or when the persisted bytes are
+/// unreadable (corruption / version skew) so the caller falls back to fresh.
+fn load_workstream(store: &FlowStore, project_id: &str, workstream_id: &str) -> Option<Workstream> {
+    let bytes = store
+        .read_workstream_state(project_id, workstream_id)
+        .ok()
+        .flatten()?;
+    match serde_json::from_slice::<Workstream>(&bytes) {
+        Ok(ws) => {
+            info!(stage = ?ws.stage, "flow: rehydrated workstream state");
+            Some(ws)
+        }
+        Err(e) => {
+            warn!(error = %e, "flow: workstream state unreadable, starting fresh");
+            None
+        }
+    }
 }
 
 /// Build the prompt for a stage by substituting the relevant template.
@@ -1021,6 +1109,19 @@ async fn run_chunk(
             reason: format!("chunk {chunk_id} still fails QA after {qa_budget} qa iteration(s)"),
         });
     }
+
+    // Announce the chunk's own completion so the signal is local to the
+    // per-chunk pipeline rather than implicit in the caller. The caller still
+    // applies the Done status (a backstop); this emit carries the chunk id and
+    // the QA stage so a driver can attribute the transition precisely.
+    ctx.emit(FlowProgress::Chunk {
+        id: chunk_id.to_string(),
+        title: String::new(),
+        status: ChunkStatus::Done,
+        stage: Some(Stage::Qa),
+        depends_on: Vec::new(),
+        order: 0,
+    });
 
     Ok(())
 }
@@ -1937,5 +2038,153 @@ mod tests {
     #[test_case("[p2] nit", false ; "lexical_p2_does_not_block")]
     fn review_failed_matches_structured_then_lexical(review: &str, blocks: bool) {
         assert_eq!(review_failed(review), blocks);
+    }
+
+    #[tokio::test]
+    async fn resume_persists_state_and_skips_completed_stages_on_retry() {
+        // First run: approve at the gate, then fail the chunk at Review. The
+        // workstream state must be persisted so a retry can re-enter.
+        let (_tmp, store) = tmp_store();
+        let fail_outputs = vec![
+            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator (not reached)
+            r#"{"status":"pass"}"#.to_string(),                           // QA (not reached)
+            r#"{"chunk_id":"c1","status":"fail","findings":["[P0] broken"]}"#.to_string(), // Review (blocks)
+            "executed v1".to_string(),                     // Execute
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(), // Req
+            plan_doc_one_chunk().to_string(),              // Plan
+            "goal doc".to_string(),                        // TPM
+            "scout findings".to_string(),                  // Scout
+        ];
+        let first = FlowParams {
+            approval: Some(ApprovalPayload::Approved),
+            config: FlowConfig {
+                max_review_iterations: 1,
+                ..FlowConfig::default()
+            },
+            runner: Some(Arc::new(ScriptedRunner::recording(fail_outputs))),
+            ..params(store.clone(), Vec::new())
+        };
+        let outcome = run(first).await;
+        let FlowOutcome::Failed { stage, .. } = outcome else {
+            panic!("expected Failed, got {outcome:?}");
+        };
+        assert_eq!(stage, Stage::Review);
+        // Workstream state persisted: a retry can read it back.
+        assert!(
+            store
+                .read_workstream_state("proj", "ws1")
+                .unwrap()
+                .is_some()
+        );
+
+        // Retry: resume=true, persisted state exists. Scout/TPM/Plan must be
+        // skipped (their docs are on disk). The runner only needs to supply the
+        // chunk pipeline outputs again; Review now passes so the run succeeds.
+        let retry_outputs = vec![
+            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator
+            r#"{"status":"pass"}"#.to_string(),                  // QA
+            r#"{"chunk_id":"c1","status":"pass"}"#.to_string(),  // Review (passes)
+            "executed v2".to_string(),                           // Execute
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),       // Req
+        ];
+        let runner = Arc::new(ScriptedRunner::recording(retry_outputs));
+        let resume = FlowParams {
+            resume: true,
+            runner: Some(runner.clone()),
+            ..params(store, Vec::new())
+        };
+        let outcome = run(resume).await;
+        assert!(matches!(outcome, FlowOutcome::Done { .. }));
+
+        let launched: Vec<Stage> = runner.calls().iter().map(|(s, _, _)| *s).collect();
+        assert!(
+            !launched.contains(&Stage::Scout),
+            "resume should skip Scout, got {launched:?}"
+        );
+        assert!(
+            !launched.contains(&Stage::Tpm),
+            "resume should skip TPM, got {launched:?}"
+        );
+        assert!(
+            !launched.contains(&Stage::Plan),
+            "resume should skip Plan when past Execute, got {launched:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_emits_done_after_qa_passes() {
+        // A successful chunk run must emit a Done progress event for its own
+        // chunk id (localized transition, not just the caller's backstop).
+        let (_tmp, store) = tmp_store();
+        let (tx, rx) = flume::unbounded::<FlowProgress>();
+        let outputs = vec![
+            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"pass"}"#.to_string(), // QA pass
+            "clean review".to_string(),
+            "executed".to_string(),
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
+            plan_doc_one_chunk().to_string(),
+            "goal doc".to_string(),
+            "scout findings".to_string(),
+        ];
+        let p = FlowParams {
+            approval: Some(ApprovalPayload::Approved),
+            runner: Some(Arc::new(ScriptedRunner::new(outputs))),
+            progress: Some(tx),
+            ..params(store, Vec::new())
+        };
+        let outcome = run(p).await;
+        assert!(matches!(outcome, FlowOutcome::Done { .. }));
+
+        let events: Vec<FlowProgress> = rx.try_iter().collect();
+        let chunk_done_for_c1 = events.iter().any(|e| match e {
+            FlowProgress::Chunk {
+                id,
+                status: ChunkStatus::Done,
+                ..
+            } => id == "c1",
+            _ => false,
+        });
+        assert!(
+            chunk_done_for_c1,
+            "expected a Done Chunk event for c1 after QA passed"
+        );
+    }
+
+    #[test]
+    fn save_and_load_workstream_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(FlowStore::from_root(tmp.path().to_path_buf()));
+        let mut ws = Workstream::new("proj", "ws1");
+        ws.stage = Some(Stage::Execute);
+        ws.approved = true;
+        ws.set_chunk_status("c1", ChunkStatus::Running);
+        let ctx = Ctx::new("proj", "ws1", Arc::clone(&store), None);
+        save_workstream(&ctx, &ws);
+
+        let loaded = load_workstream(&store, "proj", "ws1").expect("should rehydrate");
+        assert_eq!(loaded.stage, Some(Stage::Execute));
+        assert!(loaded.approved);
+        assert_eq!(loaded.chunk_status("c1"), Some(ChunkStatus::Running));
+    }
+
+    #[test]
+    fn load_workstream_returns_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FlowStore::from_root(tmp.path().to_path_buf());
+        assert!(load_workstream(&store, "proj", "ws1").is_none());
+    }
+
+    #[test]
+    fn load_workstream_returns_none_on_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FlowStore::from_root(tmp.path().to_path_buf());
+        store
+            .write_workstream_state("proj", "ws1", b"not valid json")
+            .unwrap();
+        assert!(load_workstream(&store, "proj", "ws1").is_none());
     }
 }

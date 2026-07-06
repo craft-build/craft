@@ -41,7 +41,8 @@ pub async fn run(action: FlowAction) -> Result<()> {
             output_format,
             session,
             payload,
-        } => run_pipeline(request, print, output_format, session, payload).await,
+            retry,
+        } => run_pipeline(request, print, output_format, session, payload, retry).await,
         FlowAction::Gc { older_than } => gc(older_than),
     }
 }
@@ -53,6 +54,7 @@ async fn run_pipeline(
     output_format: OutputFormat,
     session: Option<String>,
     payload: Option<String>,
+    retry: bool,
 ) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     craft_providers::model_registry::load_from_storage(&storage);
@@ -81,6 +83,10 @@ async fn run_pipeline(
     let project_id = craft_flow::project_id(&cwd);
     let store = Arc::new(FlowStore::new(&storage).context("init flow store")?);
     // Resume re-uses the persisted workstream id; a fresh run mints one.
+    // --retry requires a session id (we need to know which workstream to resume).
+    if retry && session.is_none() {
+        bail!("--retry requires -s <session-id> to identify the workstream to resume");
+    }
     let workstream_id = match &session {
         Some(id) => id.clone(),
         None => new_workstream_id(),
@@ -111,6 +117,7 @@ async fn run_pipeline(
         Arc::clone(&store),
     );
     params.approval = approval;
+    params.resume = retry;
     // Live stage runner: launches each stage as a real subagent via Agent::run
     // (model-role resolution, worktree isolation, output-schema validation),
     // closing the gap where the pipeline previously only ran under the

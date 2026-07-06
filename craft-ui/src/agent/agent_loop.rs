@@ -324,6 +324,7 @@ impl AgentLoop {
         event_tx: EventSender,
         run_id: u64,
     ) -> Result<(), AgentError> {
+        let resume = input.flow_resume;
         let slot = self.model_slot.load();
         let workstream_id = input
             .mode
@@ -386,6 +387,7 @@ impl AgentLoop {
             )));
             params.progress = Some(self.flow_progress_tx.clone());
             params.embedder = Some(Arc::clone(&embedder));
+            params.resume = resume;
 
             let outcome = tokio::select! {
                 biased;

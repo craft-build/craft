@@ -272,6 +272,16 @@ impl App {
     }
 
     pub(crate) fn build_agent_input(&self, msg: &QueuedMessage) -> AgentInput {
+        self.build_agent_input_with(msg, false)
+    }
+
+    /// Build an agent input, optionally marking it as a flow-mode resume of a
+    /// previously-failed run. `flow_resume` is only meaningful in Flow mode.
+    pub(crate) fn build_agent_input_with(
+        &self,
+        msg: &QueuedMessage,
+        flow_resume: bool,
+    ) -> AgentInput {
         AgentInput {
             message: msg.text.clone(),
             mode: self.agent_mode(),
@@ -279,6 +289,7 @@ impl App {
             thinking: self.state.thinking,
             fast: self.state.fast,
             goal: self.state.session.meta.goal.clone(),
+            flow_resume,
             ..Default::default()
         }
     }
