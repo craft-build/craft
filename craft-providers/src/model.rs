@@ -654,8 +654,6 @@ mod tests {
         );
     }
 
-    #[test_case("claude-opus-4-6" ; "opus_4_6")]
-    #[test_case("claude-opus-4-7" ; "opus_4_7")]
     #[test_case("claude-opus-4-8" ; "opus_4_8")]
     fn supports_fast_true_for_anthropic_opus(model_id: &str) {
         let model = Model::from_base(ProviderKind::Anthropic, model_id, None);

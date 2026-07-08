@@ -26,6 +26,58 @@ const MIN_EVENTSTREAM_FRAME: usize = 16;
 const CONTAINER_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 
+// Maps the short Anthropic model prefixes from `shared::MODELS` to the base
+// Bedrock model IDs. Bedrock does not recognise the short ids, so requests
+// built from the built-in model list would otherwise fail with a
+// ValidationException. The final id is composed as `<region-prefix><base>`
+// at request time by [`resolve_bedrock_model_id`].
+const BEDROCK_MODEL_IDS: &[(&str, &str)] = &[
+    ("claude-sonnet-5", "anthropic.claude-sonnet-5"),
+    ("claude-fable-5", "anthropic.claude-fable-5"),
+    ("claude-opus-4-8", "anthropic.claude-opus-4-8"),
+    (
+        "claude-haiku-4-5",
+        "anthropic.claude-haiku-4-5-20251001-v1:0",
+    ),
+];
+
+// AWS region -> cross-region inference profile prefix. Bedrock exposes Claude
+// through regional inference profiles; the prefix must match the SigV4 region
+// or the request fails with a ValidationException about an unknown profile.
+fn bedrock_region_prefix(region: &str) -> &'static str {
+    if region.starts_with("us-") {
+        "us."
+    } else if region.starts_with("eu-") {
+        "eu."
+    } else if region.starts_with("ap-") {
+        "apac."
+    } else {
+        "global."
+    }
+}
+
+// Resolves a short Anthropic model id (e.g. `claude-opus-4-8`) into a fully
+// qualified Bedrock inference profile id for the given region. Ids that are
+// already Bedrock-shaped (contain `anthropic.claude-`, or carry a known
+// inference-profile prefix) are passed through unchanged so that manual
+// `ANTHROPIC_MODEL` overrides and cross-region profiles keep working.
+fn resolve_bedrock_model_id(model_id: &str, region: &str) -> String {
+    let already_bedrock = model_id.contains("anthropic.claude-")
+        || matches!(bedrock_region_prefix(region), prefix if model_id.starts_with(prefix));
+    if already_bedrock {
+        return model_id.to_string();
+    }
+
+    let Some((_, base)) = BEDROCK_MODEL_IDS
+        .iter()
+        .find(|(short, _)| model_id == *short || model_id.starts_with(short))
+    else {
+        return model_id.to_string();
+    };
+
+    format!("{}{}", bedrock_region_prefix(region), base)
+}
+
 fn io_error(
     kind: std::io::ErrorKind,
     e: impl Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -536,7 +588,8 @@ impl Provider for Bedrock {
             let requested_id = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| model.id.clone());
             let long_context = requested_id.ends_with(shared::LONG_CONTEXT_SUFFIX)
                 || shared::has_native_1m(&requested_id);
-            let model_id = shared::strip_long_context(&requested_id).to_string();
+            let short_id = shared::strip_long_context(&requested_id);
+            let model_id = resolve_bedrock_model_id(short_id, &auth.region);
 
             let mut body = shared::build_request_body_with_system(
                 model,
@@ -783,6 +836,66 @@ mod tests {
                 "Signature=ff69b69725fa6fa2de10b57605b9fca403f357980e082d138d1772abe10fbea2"
             ),
             "unexpected signature: {auth}"
+        );
+    }
+
+    #[test_case("us-east-1",  "us."    ; "us_region")]
+    #[test_case("us-west-2",  "us."    ; "us_west")]
+    #[test_case("eu-west-1",  "eu."    ; "eu_region")]
+    #[test_case("eu-central-1", "eu."  ; "eu_central")]
+    #[test_case("ap-south-1", "apac."  ; "apac_region")]
+    #[test_case("ap-northeast-1", "apac." ; "apac_northeast")]
+    #[test_case("ca-central-1", "global." ; "other_region")]
+    #[test_case("sa-east-1",  "global." ; "south_america")]
+    fn bedrock_region_prefix_mapping(region: &str, expected: &str) {
+        assert_eq!(bedrock_region_prefix(region), expected);
+    }
+
+    #[test]
+    fn every_builtin_model_resolves_to_bedrock_profile() {
+        const REGIONS: &[&str] = &["us-east-1", "eu-west-1", "ap-south-1", "ca-central-1"];
+        const VALID_PREFIXES: &[&str] = &["us.", "eu.", "apac.", "global."];
+
+        for entry in shared::models() {
+            for &prefix in entry.prefixes {
+                for &region in REGIONS {
+                    let resolved = resolve_bedrock_model_id(prefix, region);
+                    let matched = VALID_PREFIXES.iter().any(|p| resolved.starts_with(p))
+                        && resolved
+                            .find("anthropic.claude-")
+                            .is_some_and(|i| i > 0 && i < resolved.len());
+                    assert!(
+                        matched,
+                        "{prefix} in {region} resolved to {resolved}, \
+                         which is not a Bedrock inference profile id"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test_case("claude-opus-4-8", "us-east-1",
+        "us.anthropic.claude-opus-4-8" ; "short_us")]
+    #[test_case("claude-sonnet-5", "eu-west-1",
+        "eu.anthropic.claude-sonnet-5" ; "short_eu")]
+    #[test_case("claude-haiku-4-5", "ap-south-1",
+        "apac.anthropic.claude-haiku-4-5-20251001-v1:0" ; "short_apac")]
+    fn bedrock_model_id_resolves_short_ids(model_id: &str, region: &str, expected: &str) {
+        assert_eq!(resolve_bedrock_model_id(model_id, region), expected);
+    }
+
+    #[test_case("us.anthropic.claude-opus-4-8-20260101-v1:0", "us-east-1" ; "prefixed_profile")]
+    #[test_case("anthropic.claude-3-5-sonnet-20241022-v2:0", "us-east-1" ; "base_bedrock_id")]
+    #[test_case("eu.anthropic.claude-sonnet-4-6-20250918-v1:0", "eu-west-1" ; "eu_profile")]
+    fn bedrock_model_id_passes_through_already_bedrock_ids(model_id: &str, region: &str) {
+        assert_eq!(resolve_bedrock_model_id(model_id, region), model_id);
+    }
+
+    #[test]
+    fn bedrock_model_id_passes_through_unknown_id() {
+        assert_eq!(
+            resolve_bedrock_model_id("custom-fine-tune", "us-east-1"),
+            "custom-fine-tune"
         );
     }
 

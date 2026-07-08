@@ -53,7 +53,9 @@ You will need `AWS_REGION` and one of the following for auth:
 | Bearer token | `AWS_BEARER_TOKEN_BEDROCK` |
 | Gateway proxy | `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1` + `ANTHROPIC_BEDROCK_BASE_URL` (skips signing, useful behind a proxy that handles auth) |
 
-You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROPIC_BEDROCK_BASE_URL`. These env var names match Claude Code, so if you were already using Bedrock there, the same setup works here."#;
+You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROPIC_BEDROCK_BASE_URL`. These env var names match Claude Code, so if you were already using Bedrock there, the same setup works here.
+
+Craft maps the short model ids from the built-in list (like `claude-opus-4-8`) to Bedrock inference profile ids automatically, based on your `AWS_REGION`. A `us-*` region becomes a `us.` profile, `eu-*` becomes `eu.`, `ap-*` becomes `apac.`, and anything else becomes `global.`. You usually do not need to set `ANTHROPIC_MODEL` for the built-in models. Set it only when you want a specific Bedrock id (for example a base id without a region prefix, or a cross-region profile in a different region than your credentials)."#;
 
 const MODEL_IDENTIFIERS: &str = r#"## Model Identifiers
 
