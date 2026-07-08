@@ -3,9 +3,18 @@
 //! Data plane uses `aws_sdk_bedrockruntime` `ConverseStream`; control plane
 //! uses `aws_sdk_bedrock` `ListInferenceProfiles` for model discovery. Auth is
 //! the full AWS SDK credential chain (env, profiles, SSO, IMDS, web identity,
-//! container creds) via `aws_config::load_defaults`.
+//! container creds). The base `SdkConfig` is loaded once and cached; Bedrock
+//! providers are cached per `(region, timeouts)` so auxiliary roles/subagents
+//! reuse the same HTTP connections and credential cache instead of paying the
+//! IMDS/SSO probe cost on every creation.
+
+use std::collections::HashMap;
+use std::sync::{Mutex as StdMutex, OnceLock};
+use std::time::Duration;
 
 use aws_config::BehaviorVersion;
+use aws_config::default_provider::credentials::DefaultCredentialsChain;
+use aws_config::provider_config::ProviderConfig;
 use aws_sdk_bedrock::Client as BedrockClient;
 use aws_sdk_bedrockruntime::Client as RuntimeClient;
 use aws_smithy_runtime_api::client::result::SdkError;
@@ -26,6 +35,7 @@ mod stream;
 
 pub(crate) use converse::{inference_config, system_block, to_aws_messages, to_aws_tools};
 
+#[derive(Clone)]
 pub struct Bedrock {
     rt: RuntimeClient,
     ctrl: BedrockClient,
@@ -48,6 +58,81 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
+/// Tight timeouts for the EC2 IMDS credential probe. On non-EC2 machines the
+/// default IMDS client retries several times with 1-second timeouts, adding
+/// multiple seconds to every provider creation. These values keep the probe fast
+/// while still working on EC2, where IMDS responds in milliseconds.
+const IMDS_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+const IMDS_READ_TIMEOUT: Duration = Duration::from_millis(500);
+const IMDS_OPERATION_TIMEOUT: Duration = Duration::from_millis(800);
+const IMDS_MAX_ATTEMPTS: u32 = 1;
+
+/// Cached base `SdkConfig`. The expensive part of provider creation is walking
+/// the AWS credential chain (env, files, SSO, IMDS, ...). Loading it once and
+/// cloning it for each provider eliminates repeated probes.
+static SDK_CONFIG: OnceLock<StdMutex<Option<aws_config::SdkConfig>>> = OnceLock::new();
+
+/// Cached `Bedrock` instances keyed by region and timeout configuration.
+/// AWS SDK clients internally pool HTTP connections, so reusing instances for
+/// auxiliary roles/subagents avoids redundant TLS handshakes.
+static BEDROCK_CACHE: OnceLock<StdMutex<HashMap<ProviderKey, Bedrock>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProviderKey {
+    region: String,
+    connect_secs: u64,
+    stream_secs: u64,
+    low_speed_secs: u64,
+}
+
+impl ProviderKey {
+    fn new(region: &str, timeouts: &Timeouts) -> Self {
+        Self {
+            region: region.to_string(),
+            connect_secs: timeouts.connect.as_secs(),
+            stream_secs: timeouts.stream.as_secs(),
+            low_speed_secs: timeouts.low_speed.as_secs(),
+        }
+    }
+}
+
+/// Loads the base `SdkConfig` once, then returns clones. Failures are not
+/// cached so transient credential issues can recover on the next attempt.
+async fn load_sdk_config() -> Result<aws_config::SdkConfig, AgentError> {
+    let cell = SDK_CONFIG.get_or_init(|| StdMutex::new(None));
+    {
+        let guard = cell.lock().unwrap();
+        if let Some(config) = guard.as_ref() {
+            return Ok(config.clone());
+        }
+    }
+
+    let provider_config = ProviderConfig::without_region();
+    let imds_client = aws_config::imds::Client::builder()
+        .configure(&provider_config)
+        .connect_timeout(IMDS_CONNECT_TIMEOUT)
+        .read_timeout(IMDS_READ_TIMEOUT)
+        .operation_timeout(IMDS_OPERATION_TIMEOUT)
+        .max_attempts(IMDS_MAX_ATTEMPTS)
+        .build();
+    let credentials_provider = DefaultCredentialsChain::builder()
+        .configure(provider_config)
+        .imds_client(imds_client)
+        .build()
+        .await;
+    let config = aws_config::from_env()
+        .behavior_version(BehaviorVersion::latest())
+        .credentials_provider(credentials_provider)
+        .load()
+        .await;
+
+    let mut guard = cell.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(config.clone());
+    }
+    Ok(config)
+}
+
 /// Constructs a [`Bedrock`] provider or returns a config error when the feature
 /// is disabled. Exposed as a free fn so `ProviderKind::Bedrock::create` (which
 /// must compile without the feature) can call it via the cfg-gated module.
@@ -57,32 +142,43 @@ pub(crate) async fn create(timeouts: Timeouts) -> Result<Bedrock, AgentError> {
 
 impl Bedrock {
     pub(crate) async fn new(timeouts: Timeouts) -> Result<Self, AgentError> {
-        let sdk_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-        Self::from_config(sdk_config, timeouts)
-    }
-
-    fn from_config(
-        sdk_config: aws_config::SdkConfig,
-        timeouts: Timeouts,
-    ) -> Result<Self, AgentError> {
-        let region = sdk_config
+        let base_config = load_sdk_config().await?;
+        let region = base_config
             .region()
             .map(|r| r.as_ref().to_string())
             .unwrap_or_else(|| {
                 std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string())
             });
+
+        let key = ProviderKey::new(&region, &timeouts);
+        let cache = BEDROCK_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
+        if let Some(bedrock) = cache.lock().unwrap().get(&key) {
+            debug!(region = %region, "reusing cached Bedrock provider");
+            return Ok(bedrock.clone());
+        }
+
+        let bedrock = Self::build(base_config, timeouts, region.clone())?;
+        cache.lock().unwrap().insert(key, bedrock.clone());
+        debug!(region = %region, "bedrock provider initialized");
+        Ok(bedrock)
+    }
+
+    fn build(
+        base_config: aws_config::SdkConfig,
+        timeouts: Timeouts,
+        region: String,
+    ) -> Result<Self, AgentError> {
         let timeout_config = TimeoutConfig::builder()
             .connect_timeout(timeouts.connect)
             .read_timeout(timeouts.low_speed)
             .operation_timeout(timeouts.stream)
             .build();
-        let sdk_config = sdk_config
+        let sdk_config = base_config
             .to_builder()
             .timeout_config(timeout_config)
             .build();
         let rt = RuntimeClient::new(&sdk_config);
         let ctrl = BedrockClient::new(&sdk_config);
-        debug!(region = %region, "bedrock provider initialized");
         Ok(Self { rt, ctrl, region })
     }
 
