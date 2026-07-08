@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "craft"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "craft-acp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agent-client-protocol-schema",
  "color-eyre",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "craft-agent"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "craft-config"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "craft-config-macro",
  "craft-storage",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "craft-config-macro"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "craft-docgen"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "craft-agent",
  "craft-config",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "craft-flow"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "craft-agent",
  "craft-config",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "craft-highlight"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "serde_json",
  "syntect",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "craft-interpreter"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "monty",
  "serde_json",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "craft-lua"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arc-swap",
  "craft-agent",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "craft-markdown"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "craft-highlight",
  "fastrand",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "craft-providers"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrock",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "craft-sandbox"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "tempfile",
  "test-case",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "craft-storage"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "etcetera",
  "filetime",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "craft-tool-macro"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1821,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "craft-ui"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arboard",
  "arc-swap",
@@ -3625,9 +3625,9 @@ dependencies = [
 
 [[package]]
 name = "inotify-sys"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ea94e891b3606826e9c998be69ddca42247dad8ad50b1649a5cb7e1c9ae06fd"
+checksum = "c033f80b2c113cdf91ab7a33faa9cbc014726dcad99880c8609af2a370edf37d"
 dependencies = [
  "libc",
 ]
@@ -4202,9 +4202,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.8.2"
+version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memmap2"
@@ -6364,9 +6364,9 @@ dependencies = [
 
 [[package]]
 name = "rustversion"
-version = "1.0.22"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustybuzz"

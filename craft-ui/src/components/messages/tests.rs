@@ -1265,3 +1265,50 @@ fn tool_done_clean_live_buf_does_not_snapshot() {
         "clean (never-written) live buf should not produce a snapshot"
     );
 }
+
+fn dump(panel: &mut MessagesPanel, w: u16, h: u16, label: &str) {
+    use ratatui::backend::TestBackend;
+    let backend = TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| panel.view(f, f.area(), false)).unwrap();
+    let buf = terminal.backend().buffer();
+    println!("=== {label} (scroll_top={}, heights={:?}) ===", panel.scroll_top, panel.segment_heights());
+    for y in 0..h.min(14) {
+        let row: String = (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+            .collect();
+        println!("row {y:2}: {row:?}");
+    }
+}
+
+fn cell_at(panel: &mut MessagesPanel, w: u16, h: u16, x: u16, y: u16) -> String {
+    use ratatui::backend::TestBackend;
+    let backend = TestBackend::new(w, h);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| panel.view(f, f.area(), false)).unwrap();
+    terminal.backend().buffer().cell((x,y)).map(|c| c.symbol().to_string()).unwrap_or_default()
+}
+
+#[test]
+fn repro_thinking_overlay_tool() {
+    let mut panel = MessagesPanel::new(UiConfig::default());
+    panel.push(DisplayMessage::new(DisplayRole::Thinking, "let me think about this carefully and run a tool".into()));
+    panel.tool_start(start("t1", "bash"));
+    dump(&mut panel, 30, 40, "thinking+tool");
+}
+
+#[test]
+fn repro_trailing_newline_overlay() {
+    let mut panel = MessagesPanel::new(UiConfig::default());
+    panel.push(DisplayMessage::new(DisplayRole::Assistant, "some text\n".into()));
+    panel.tool_start(start("t1", "bash"));
+    dump(&mut panel, 30, 40, "trailing-newline");
+}
+
+#[test]
+fn repro_multi_para_overlay() {
+    let mut panel = MessagesPanel::new(UiConfig::default());
+    panel.push(DisplayMessage::new(DisplayRole::Assistant, "first paragraph here\n\nsecond paragraph here\n\nthird".into()));
+    panel.tool_start(start("t1", "bash"));
+    dump(&mut panel, 30, 40, "multi-para");
+}

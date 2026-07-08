@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-08
+
+### Added
+
+- **providers**: Bedrock provider via the official AWS SDK for Rust
+  (`aws-sdk-bedrockruntime` ConverseStream for the data plane,
+  `aws-sdk-bedrock` ListInferenceProfiles for discovery), gated behind the
+  `bedrock` cargo feature. Auth uses the full SDK credential chain (env,
+  profiles, SSO, IMDS, web identity, container creds) via
+  `aws_config::load_defaults`; agent `Timeouts` thread into an SDK
+  `TimeoutConfig`. Short Anthropic model ids from the built-in list are
+  resolved to fully qualified inference profile ids at request time using a
+  region-derived prefix (us./eu./apac./global.) matching the SigV4 region,
+  since Bedrock rejects the short ids with a ValidationException; already-
+  Bedrock-shaped and unknown ids pass through unchanged. (`47c2ec3e`,
+  `00d2da2a`)
+
+### Fixed
+
+- **ui**: stray spaces dropped when copying CJK/emoji selection. Wide
+  characters leave continuation cells in the ratatui buffer holding a
+  placeholder space, so copying a CJK selection inserted a space between
+  every glyph; each glyph's display width is now tracked and its
+  continuation cells skipped. (`5c00520e`)
+- **agent**: doom stagnation gated on no tool-success progress. Stagnation
+  detection fired on legitimate long research sessions because consecutive
+  read/grep-heavy turns cluster semantically, accruing +3 per turn with no
+  actual loop present. `note_stagnation` now only adds to the score after
+  3 consecutive similar turns without an intervening successful tool call;
+  `note_tool_success` and `reset_for_new_user_input` clear the counter, so
+  productive research breaks the stagnation chain while real loops stay
+  caught. (`d854fac2`)
+- **tool-macro**: raw identifiers unrawed in JSON schema keys. `r#` prefixes
+  (e.g. `r#as` in `browser_click`) leaked into tool input_schema property
+  keys via `Ident::to_string()`, and the `#` violated Anthropic's
+  `^[a-zA-Z0-9_.-]{1,64}$` pattern (HTTP 400 on Bedrock's Anthropic-
+  compatible API). `IdentExt::unraw()` runs before stringifying so emitted
+  keys match the source-level name. (`5eefff14`)
+
 ## [0.8.0] - 2026-07-06
 
 ### Added
