@@ -26,11 +26,13 @@ const SCORE_TOOL_ERROR: u32 = 1;
 const SCORE_VALIDATOR_REJECT: u32 = 1;
 const DECAY_TOOL_SUCCESS: u32 = 1;
 const DECAY_EFFECTIVE_COMPACT: u32 = 1;
+const STAGNATION_MIN_UNPRODUCTIVE_TURNS: u32 = 3;
 
 #[derive(Default)]
 pub struct DoomTracker {
     score: u32,
     grace_called: bool,
+    turns_since_success: u32,
     pub(super) turn_embeddings: VecDeque<Vec<f32>>,
     pub(super) recent_calls: RecentCalls,
 }
@@ -65,7 +67,10 @@ impl DoomTracker {
     }
 
     pub fn note_stagnation(&mut self) {
-        self.add(SCORE_STAGNATION);
+        self.turns_since_success = self.turns_since_success.saturating_add(1);
+        if self.turns_since_success >= STAGNATION_MIN_UNPRODUCTIVE_TURNS {
+            self.add(SCORE_STAGNATION);
+        }
     }
 
     pub fn note_ineffective_compaction(&mut self) {
@@ -81,6 +86,7 @@ impl DoomTracker {
     }
 
     pub fn note_tool_success(&mut self) {
+        self.turns_since_success = 0;
         self.sub(DECAY_TOOL_SUCCESS);
     }
 
@@ -94,6 +100,7 @@ impl DoomTracker {
     pub fn reset_for_new_user_input(&mut self) {
         self.score = 0;
         self.grace_called = false;
+        self.turns_since_success = 0;
     }
 
     fn add(&mut self, n: u32) {
@@ -188,5 +195,50 @@ mod tests {
         assert_eq!(t.score(), 0);
         assert!(!t.grace_called());
         assert_eq!(t.turn_embeddings.len(), 1, "embeddings preserved");
+    }
+
+    #[test]
+    fn stagnation_ignored_while_tools_succeed() {
+        let mut t = DoomTracker::new();
+        for _ in 0..10 {
+            t.note_stagnation();
+            t.note_tool_success();
+        }
+        assert_eq!(
+            t.score(),
+            0,
+            "productive research must not accrue doom score"
+        );
+    }
+
+    #[test_case(2, 0  ; "below_min_no_score")]
+    #[test_case(3, 3  ; "at_min_first_score")]
+    #[test_case(5, 9  ; "sustained_no_progress")]
+    fn stagnation_scores_only_without_progress(stagnant_turns: u32, expected_score: u32) {
+        let mut t = DoomTracker::new();
+        for _ in 0..stagnant_turns {
+            t.note_stagnation();
+        }
+        assert_eq!(t.score(), expected_score);
+    }
+
+    #[test]
+    fn stagnation_resumes_after_success_window_closes() {
+        let mut t = DoomTracker::new();
+        for _ in 0..3 {
+            t.note_stagnation();
+        }
+        assert_eq!(t.score(), 3);
+        t.note_tool_success();
+        for _ in 0..2 {
+            t.note_stagnation();
+        }
+        assert_eq!(
+            t.score(),
+            2,
+            "two stagnant turns alone do not re-arm the score"
+        );
+        t.note_stagnation();
+        assert_eq!(t.score(), 5, "third consecutive stagnant turn scores again");
     }
 }
