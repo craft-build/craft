@@ -408,6 +408,13 @@ pub async fn create(
             Opencode::with_auth(auth.clone(), timeouts)?
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
+        ProviderKind::Bedrock => {
+            return Err(AgentError::Config {
+                message: "Bedrock is not reachable via the dynamic provider path; use the \
+                          `bedrock/...` model spec directly"
+                    .into(),
+            });
+        }
     };
 
     Ok(Box::new(DynamicProvider {

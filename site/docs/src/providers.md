@@ -48,29 +48,35 @@ You can set multiple API keys in one env var (`ANTHROPIC_API_KEY=sk-1,sk-2,sk-3`
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
 | Weak | **claude-haiku-4-5** (default) | $1.00 / $5.00 | 200K ctx / 64K out |
-| Medium | claude-sonnet-4-5, **claude-sonnet-4-6** (default), claude-sonnet-4 | $3.00 / $15.00 | 200K ctx / 64K out |
-| Strong | claude-opus-4-5, claude-opus-4-6, claude-opus-4-7, **claude-opus-4-8** (default), claude-fable-5, claude-opus-4-0, claude-opus-4-1 | $5.00 / $25.00 | 200K ctx / 64K out |
+| Medium | **claude-sonnet-5** (default) | $3.00 / $15.00 | 200K ctx / 64K out |
+| Strong | **claude-opus-4-8** (default), claude-fable-5 | $5.00 / $25.00 | 200K ctx / 128K out |
 
-Defaults: claude-haiku-4-5 (weak), claude-sonnet-4-6 (medium), claude-opus-4-8 (strong)
+Defaults: claude-haiku-4-5 (weak), claude-sonnet-5 (medium), claude-opus-4-8 (strong)
 
 Add `-1m` to any Claude model, like `claude-sonnet-4-6-1m`, to use the 1M token context window.
 
 #### Amazon Bedrock
 
-If you already use Claude through AWS Bedrock, you can point Craft at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Craft will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
+Craft ships a first-class `bedrock` provider that talks to Bedrock through the official AWS SDK (`ConverseStream`). Use it with a `bedrock/...` model spec:
 
-You will need `AWS_REGION` and one of the following for auth:
+```
+bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0
+bedrock/anthropic.claude-opus-4-1-20250805-v1:0
+```
+
+The model id is a Bedrock inference profile id, passed through verbatim. Model discovery runs `ListInferenceProfiles`, so `/models` lists every active profile your AWS principal can see.
+
+Auth uses the full AWS SDK credential chain, so any of these works:
 
 | Method | Env vars |
 |--------|----------|
 | IAM credentials | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (and optionally `AWS_SESSION_TOKEN`) |
 | Credentials file | `AWS_PROFILE` (defaults to `default`), reads `~/.aws/credentials` |
-| Bearer token | `AWS_BEARER_TOKEN_BEDROCK` |
-| Gateway proxy | `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1` + `ANTHROPIC_BEDROCK_BASE_URL` (skips signing, useful behind a proxy that handles auth) |
+| SSO / IMDS / web identity / container creds | resolved automatically by `aws-config` |
 
-You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROPIC_BEDROCK_BASE_URL`. These env var names match Claude Code, so if you were already using Bedrock there, the same setup works here.
+Set `AWS_REGION` to your preferred region (for example `us-east-1`).
 
-Craft maps the short model ids from the built-in list (like `claude-opus-4-8`) to Bedrock inference profile ids automatically, based on your `AWS_REGION`. A `us-*` region becomes a `us.` profile, `eu-*` becomes `eu.`, `ap-*` becomes `apac.`, and anything else becomes `global.`. You usually do not need to set `ANTHROPIC_MODEL` for the built-in models. Set it only when you want a specific Bedrock id (for example a base id without a region prefix, or a cross-region profile in a different region than your credentials).
+> **Deprecated:** the older `CLAUDE_CODE_USE_BEDROCK=1` env var still works (it swaps the `anthropic` provider onto Bedrock via hand-rolled SigV4), but new users should prefer the `bedrock/...` provider above. The legacy path does not support SSO, IMDS, or web identity and will not receive new features.
 
 ### OpenAI
 
@@ -193,6 +199,14 @@ Craft asks the server for the list of installed models, so there's no built-in c
 
 Models are discovered dynamically from the [models.dev](https://models.dev/) catalog and the Opencode Zen API, so there's no built-in catalog. Use any model id the catalog exposes, prefixed with the sub-provider (e.g. `opencode/<sub-provider>/<model-id>`).
 
+### Bedrock
+
+- **Env var**: `AWS_REGION`
+- **API**: `https://bedrock-runtime.<region>.amazonaws.com (AWS SDK)`
+- **Features**: AWS SDK auth (SSO/IMDS/profiles/env), ConverseStream, inference-profile discovery
+
+Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.
+
 ## Model Identifiers
 
 Models are referenced as `provider/model_id`:
@@ -276,7 +290,7 @@ To add a provider proxy via an executable script, drop it into `~/.config/craft/
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `deepseek`, `openrouter`, `synthetic`, `tensorx`, `opencode`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `deepseek`, `openrouter`, `synthetic`, `tensorx`, `opencode`, `bedrock`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 

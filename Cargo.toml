@@ -21,7 +21,7 @@ craft-agent = { workspace = true }
 craft-acp = { workspace = true }
 craft-flow = { workspace = true }
 craft-config = { workspace = true }
-craft-providers = { workspace = true }
+craft-providers = { workspace = true, features = ["bedrock"] }
 craft-storage = { workspace = true }
 craft-lua = { workspace = true }
 clap = { workspace = true }
@@ -203,6 +203,11 @@ inventory = "0.3"
 wait-timeout = "0.2"
 aho-corasick = "1"
 time = ">=0.3, <0.3.48"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrock = "1"
+aws-sdk-bedrockruntime = "1"
+aws-smithy-types = "1"
+aws-smithy-runtime-api = "1"
 
 [profile.bench]
 debug = true

@@ -43,6 +43,7 @@ pub enum ProviderKind {
     TensorX,
     #[strum(serialize = "opencode")]
     Opencode,
+    Bedrock,
 }
 
 impl ProviderKind {
@@ -60,6 +61,7 @@ impl ProviderKind {
             Self::Synthetic => "Synthetic",
             Self::TensorX => "TensorX",
             Self::Opencode => "Opencode",
+            Self::Bedrock => "Bedrock",
         }
     }
 
@@ -77,6 +79,9 @@ impl ProviderKind {
             Self::Synthetic => "SYNTHETIC_API_KEY",
             Self::TensorX => "TENSORX_API_KEY",
             Self::Opencode => "OPENCODE_API_KEY",
+            // Bedrock auth is the AWS SDK credential chain, not a static key.
+            // Surfaced only so `craft auth status` has a column to show.
+            Self::Bedrock => "AWS_REGION",
         }
     }
 
@@ -96,6 +101,7 @@ impl ProviderKind {
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
             Self::TensorX => "https://api.tensorx.ai/v1",
             Self::Opencode => "https://opencode.ai/zen/v1",
+            Self::Bedrock => "https://bedrock-runtime.<region>.amazonaws.com (AWS SDK)",
         }
     }
 
@@ -112,6 +118,7 @@ impl ProviderKind {
                 | Self::LlamaCpp
                 | Self::TensorX
                 | Self::Opencode
+                | Self::Bedrock
         )
     }
 
@@ -139,6 +146,9 @@ impl ProviderKind {
             Self::Opencode => Some(
                 "Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API",
             ),
+            Self::Bedrock => Some(
+                "AWS SDK auth (SSO/IMDS/profiles/env), ConverseStream, inference-profile discovery",
+            ),
             _ => None,
         }
     }
@@ -157,6 +167,7 @@ impl ProviderKind {
             Self::Synthetic => ModelFamily::Synthetic,
             Self::TensorX => ModelFamily::Generic,
             Self::Opencode => ModelFamily::Generic,
+            Self::Bedrock => ModelFamily::Claude,
         }
     }
 
@@ -171,6 +182,7 @@ impl ProviderKind {
                 | Self::TensorX
                 | Self::Mistral
                 | Self::Opencode
+                | Self::Bedrock
         )
     }
 
@@ -189,6 +201,7 @@ impl ProviderKind {
             // FIXME: See comment in tensorx.rs
             Self::TensorX => 0,
             Self::Opencode => 128_000,
+            Self::Bedrock => 128_000,
         }
     }
 
@@ -206,6 +219,7 @@ impl ProviderKind {
             Self::Synthetic => 128_000,
             Self::TensorX => 200_000,
             Self::Opencode => 256_000,
+            Self::Bedrock => 200_000,
         }
     }
 
@@ -229,6 +243,20 @@ impl ProviderKind {
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
             Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
             Self::Opencode => Ok(Box::new(Opencode::new(timeouts)?)),
+            Self::Bedrock => {
+                #[cfg(feature = "bedrock")]
+                {
+                    crate::providers::bedrock::create(timeouts)
+                        .await
+                        .map(|b| Box::new(b) as Box<dyn Provider>)
+                }
+                #[cfg(not(feature = "bedrock"))]
+                Err(AgentError::Config {
+                    message: "the `bedrock` cargo feature is not enabled; rebuild craft with \
+                              the feature on"
+                        .into(),
+                })
+            }
         }
     }
 

@@ -42,20 +42,26 @@ const LONG_CONTEXT_NOTE: &str = r#"Add `-1m` to any Claude model, like `claude-s
 
 const BEDROCK_NOTE: &str = r#"#### Amazon Bedrock
 
-If you already use Claude through AWS Bedrock, you can point Craft at it instead of the direct Anthropic API. Set `CLAUDE_CODE_USE_BEDROCK=1` and Craft will route all Anthropic requests through Bedrock. The same models, the same features, just a different door.
+Craft ships a first-class `bedrock` provider that talks to Bedrock through the official AWS SDK (`ConverseStream`). Use it with a `bedrock/...` model spec:
 
-You will need `AWS_REGION` and one of the following for auth:
+```
+bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0
+bedrock/anthropic.claude-opus-4-1-20250805-v1:0
+```
+
+The model id is a Bedrock inference profile id, passed through verbatim. Model discovery runs `ListInferenceProfiles`, so `/models` lists every active profile your AWS principal can see.
+
+Auth uses the full AWS SDK credential chain, so any of these works:
 
 | Method | Env vars |
 |--------|----------|
 | IAM credentials | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (and optionally `AWS_SESSION_TOKEN`) |
 | Credentials file | `AWS_PROFILE` (defaults to `default`), reads `~/.aws/credentials` |
-| Bearer token | `AWS_BEARER_TOKEN_BEDROCK` |
-| Gateway proxy | `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1` + `ANTHROPIC_BEDROCK_BASE_URL` (skips signing, useful behind a proxy that handles auth) |
+| SSO / IMDS / web identity / container creds | resolved automatically by `aws-config` |
 
-You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROPIC_BEDROCK_BASE_URL`. These env var names match Claude Code, so if you were already using Bedrock there, the same setup works here.
+Set `AWS_REGION` to your preferred region (for example `us-east-1`).
 
-Craft maps the short model ids from the built-in list (like `claude-opus-4-8`) to Bedrock inference profile ids automatically, based on your `AWS_REGION`. A `us-*` region becomes a `us.` profile, `eu-*` becomes `eu.`, `ap-*` becomes `apac.`, and anything else becomes `global.`. You usually do not need to set `ANTHROPIC_MODEL` for the built-in models. Set it only when you want a specific Bedrock id (for example a base id without a region prefix, or a cross-region profile in a different region than your credentials)."#;
+> **Deprecated:** the older `CLAUDE_CODE_USE_BEDROCK=1` env var still works (it swaps the `anthropic` provider onto Bedrock via hand-rolled SigV4), but new users should prefer the `bedrock/...` provider above. The legacy path does not support SSO, IMDS, or web identity and will not receive new features."#;
 
 const MODEL_IDENTIFIERS: &str = r#"## Model Identifiers
 
