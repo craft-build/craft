@@ -959,6 +959,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use regex::Regex;
     use serde_json::json;
     use tempfile::TempDir;
     use test_case::test_case;
@@ -971,6 +972,8 @@ mod tests {
 
     const LINE_LIMIT: usize = 500;
     const PARSE_INTERNAL_BUG: &str = "internal validator bug";
+    static KEY_PATTERN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_.\-]{1,64}$").unwrap());
 
     #[test_case(30,  "30s timeout"   ; "seconds_only")]
     #[test_case(120, "2m timeout"    ; "minutes_only")]
@@ -1170,6 +1173,37 @@ mod tests {
         for def in all.as_array().unwrap() {
             let name = def["name"].as_str().unwrap();
             check_object_schemas(&def["input_schema"], name);
+        }
+    }
+
+    #[test]
+    fn tool_definitions_property_keys_match_anthropic_pattern() {
+        fn check_keys(schema: &Value, path: &str) {
+            if let Some(props) = schema.get("properties").and_then(|v| v.as_object()) {
+                for (key, val) in props {
+                    assert!(
+                        KEY_PATTERN.is_match(key),
+                        "{path}: property key `{key}` violates Anthropic pattern",
+                    );
+                    check_keys(val, &format!("{path}.properties.{key}"));
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                check_keys(items, &format!("{path}.items"));
+            }
+        }
+
+        let vars = Vars::new().set("{cwd}", "/tmp");
+        let all = ToolRegistry::native().definitions(
+            &vars,
+            &DescriptionContext {
+                filter: &ToolFilter::All,
+            },
+            true,
+        );
+        for def in all.as_array().unwrap() {
+            let name = def["name"].as_str().unwrap();
+            check_keys(&def["input_schema"], name);
         }
     }
 

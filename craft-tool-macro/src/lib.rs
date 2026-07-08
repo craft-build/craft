@@ -9,7 +9,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
     Attribute, Data, DeriveInput, Expr, Fields, GenericArgument, Lit, Meta, PathArguments, Type,
-    parse_macro_input,
+    ext::IdentExt, parse_macro_input,
 };
 
 fn param_description(attrs: &[Attribute]) -> Option<String> {
@@ -182,7 +182,7 @@ fn object_property_tokens(fields: &syn::FieldsNamed) -> Vec<TokenStream2> {
         .iter()
         .map(|field| {
             let field_name = field.ident.as_ref().unwrap();
-            let field_str = field_name.to_string();
+            let field_str = field_name.unraw().to_string();
             let desc = param_description(&field.attrs).unwrap_or_default();
             let schema = schema_ref(&field.ty, &desc, true);
             let required = !(is_option(&field.ty) || has_serde_default(&field.attrs));

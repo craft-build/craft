@@ -453,9 +453,9 @@ Navigates a headless Chromium browser to a URL, clicks the first element matchin
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `as` | string | no | "text" | What to return after clicking: "text" or "screenshot" |
 | `full_page` | boolean | no | true | Capture a full-page screenshot when as="screenshot" |
 | `height` | integer | no | 720 | Viewport height in pixels |
-| `r#as` | string | no | "text" | What to return after clicking: "text" or "screenshot" |
 | `selector` | string | yes |  | CSS selector of the element to click (first match) |
 | `url` | string | yes |  | Absolute http(s) URL to navigate to before clicking |
 | `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after clicking |
