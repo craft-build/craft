@@ -1289,19 +1289,6 @@ fn dump(panel: &mut MessagesPanel, w: u16, h: u16, label: &str) {
     }
 }
 
-fn cell_at(panel: &mut MessagesPanel, w: u16, h: u16, x: u16, y: u16) -> String {
-    use ratatui::backend::TestBackend;
-    let backend = TestBackend::new(w, h);
-    let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|f| panel.view(f, f.area(), false)).unwrap();
-    terminal
-        .backend()
-        .buffer()
-        .cell((x, y))
-        .map(|c| c.symbol().to_string())
-        .unwrap_or_default()
-}
-
 #[test]
 fn repro_thinking_overlay_tool() {
     let mut panel = MessagesPanel::new(UiConfig::default());
