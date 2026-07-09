@@ -160,10 +160,7 @@ pub fn is_tool_enabled(config: &AgentConfig, name: &str) -> bool {
 
 pub const BASH_TOOL_NAME: &str = "bash";
 pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
-pub const BROWSER_SCREENSHOT_TOOL_NAME: &str = browser::BrowserScreenshot::NAME;
-pub const BROWSER_NAVIGATE_TOOL_NAME: &str = browser::BrowserNavigate::NAME;
-pub const BROWSER_CLICK_TOOL_NAME: &str = browser::BrowserClick::NAME;
-pub const BROWSER_TEXT_TOOL_NAME: &str = browser::BrowserText::NAME;
+pub const BROWSER_TOOL_NAME: &str = browser::Browser::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
 pub const EDIT_LINES_TOOL_NAME: &str = edit_lines::EditLines::NAME;
@@ -668,10 +665,7 @@ register_tools! {
     apply_patch::ApplyPatch,
     task::Task,
     batch::Batch,
-    browser::BrowserScreenshot,
-    browser::BrowserNavigate,
-    browser::BrowserClick,
-    browser::BrowserText,
+    browser::Browser,
     code_execution::CodeExecution,
     list_tools::ListTools,
     styleguide::StyleguideList,

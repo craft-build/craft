@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 46 built-in tools. This is the full reference.
+Craft ships with 43 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -424,53 +424,35 @@ Search the current Flow workstream's persisted documents (goal, plan, requiremen
 
 ## Web
 
-### `browser_screenshot` *(native)*
+### `browser` *(native)*
 
-Renders a web page in headless Chromium and returns a full-page PNG screenshot so you can visually inspect the current state of a frontend. Use this for visual feedback when working on UI/CSS/layout, verifying a dev server, or checking what a page actually looks like.
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `full_page` | boolean | no | true | Capture the full scrollable page |
-| `height` | integer | no | 720 | Viewport height in pixels |
-| `url` | string | yes |  | Absolute http(s) URL of the page to render |
-| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
-| `width` | integer | no | 1280 | Viewport width in pixels |
-
-### `browser_navigate` *(native)*
-
-Navigates a headless Chromium browser to a URL and returns the page's URL, title, and visible text as markdown. Use this to confirm a route loaded, capture the document title, or read page text without taking a screenshot.
+Drives a headless browser (Chromium via Playwright) so you can inspect frontends, fill forms, click elements, extract content, and run JavaScript. The browser session persists across calls: pages stay open, tabs are reused, and cookie/localStorage state carries over until you close a tab or the agent run ends.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `action` | string | yes |  | Browser action to perform |
+| `amount` | integer | no |  | Scroll amount in pixels (for 'scroll' action, default: 500) |
+| `clear` | boolean | no |  | Clear the field before typing (for 'type' action, default: true) |
+| `direction` | string | no |  | Scroll direction 'up' or 'down' (for 'scroll' action, default: 'down') |
+| `fields` | array | no |  | Form fields to fill (for 'fill_form' action). Array of {selector, value, type?, checked?} objects. |
+| `filter` | string | no | 'all' | Filter for 'interactables': 'all', 'links', 'inputs', 'buttons' |
+| `format` | string | no | 'text' | Content format for 'get_content': 'text', 'html', 'markdown', or 'title' |
+| `full_page` | boolean | no | true, for 'screenshot' action | Full-page screenshot |
 | `height` | integer | no | 720 | Viewport height in pixels |
-| `url` | string | yes |  | Absolute http(s) URL to navigate to |
-| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
-| `width` | integer | no | 1280 | Viewport width in pixels |
-
-### `browser_click` *(native)*
-
-Navigates a headless Chromium browser to a URL, clicks the first element matching a CSS selector, then returns either the resulting page text or a screenshot. Use this to drive interactions: open a menu, follow a login link, trigger a tab switch.
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `as` | string | no | "text" | What to return after clicking: "text" or "screenshot" |
-| `full_page` | boolean | no | true | Capture a full-page screenshot when as="screenshot" |
-| `height` | integer | no | 720 | Viewport height in pixels |
-| `selector` | string | yes |  | CSS selector of the element to click (first match) |
-| `url` | string | yes |  | Absolute http(s) URL to navigate to before clicking |
-| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after clicking |
-| `width` | integer | no | 1280 | Viewport width in pixels |
-
-### `browser_text` *(native)*
-
-Reads the visible text of a web page in headless Chromium and returns it as markdown. Use this to extract page content into the conversation for reading, searching, or summarizing without an image. Optionally scope extraction to a single element via a CSS selector.
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `height` | integer | no | 720 | Viewport height in pixels |
-| `selector` | string | no |  | Optional CSS selector to scope the extracted text (defaults to document.body) |
-| `url` | string | yes |  | Absolute http(s) URL of the page to read |
-| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait for SPA hydration |
+| `key` | string | no |  | Key chord to press, e.g. 'Enter', 'Tab', 'Escape', 'ctrl+shift+t' (for 'press' action) |
+| `region` | array | no |  | Screenshot region [x, y, width, height] in CSS pixels (for 'screenshot' action) |
+| `script` | string | no |  | JavaScript to execute in the page context (for 'eval' action) |
+| `selector` | string | no |  | CSS selector of the element to interact with. Used by click, type, select, scroll, screenshot, wait. |
+| `submit` | boolean | no |  | Press Enter after typing (for 'type' action, default: false) |
+| `submit_selector` | string | no |  | Submit button CSS selector (for 'fill_form' when submit=true) |
+| `tab` | integer | no | active tab | Tab index to operate on |
+| `text` | string | no |  | Text to type into the element (for 'type' action) |
+| `timeout_ms` | integer | no | 10000 | Timeout in milliseconds for 'wait' action |
+| `to_top` | boolean | no |  | Scroll to top (true) or bottom (false) of page (for 'scroll' action) |
+| `url` | string | no |  | Absolute http(s) URL to navigate to. Required for 'open', optional for most others (navigates first if provided). |
+| `value` | string | no |  | Value to select in a dropdown (for 'select' action) |
+| `visible` | boolean | no |  | Wait for element to be visible, not just present (for 'wait' action, default: true) |
+| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after navigation |
 | `width` | integer | no | 1280 | Viewport width in pixels |
 
 ### `webfetch` *(lua plugin)*

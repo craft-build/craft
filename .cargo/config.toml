@@ -1,0 +1,9 @@
+# playwright-rs (pre-1.0) downloads its Node driver from the Playwright Azure CDN in
+# build.rs and emits the path via cargo:rustc-env. Environments that cannot reach that
+# CDN fail to compile with `environment variable PLAYWRIGHT_DRIVER_VERSION not defined`.
+# Setting DOCS_RS makes build.rs take its no-network branch (placeholder env vars); the
+# real driver is resolved at runtime via npm-global fallback (see browser.rs).
+[env]
+PLAYWRIGHT_DRIVER_VERSION="1.60.0"
+PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD="1"
+

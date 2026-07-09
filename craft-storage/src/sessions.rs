@@ -27,7 +27,7 @@ pub const SESSIONS_DIR: &str = "sessions";
 const CWD_INDEX_FILE: &str = "cwd_latest.json";
 const DEFAULT_TITLE: &str = "New session";
 const MAX_TITLE_LEN: usize = 60;
-const TAIL_BUF: u64 = 4096;
+const TAIL_BUF: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -248,6 +248,7 @@ pub fn generate_title<M: TitleSource>(messages: &[M]) -> String {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "t")]
+#[allow(clippy::large_enum_variant)]
 enum LogRecord<M, U, T> {
     #[serde(rename = "header")]
     Header {

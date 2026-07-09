@@ -25,6 +25,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  PLAYWRIGHT_DRIVER_VERSION: "1.60.0"
+  PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
 
 jobs:
   fmt:
@@ -51,6 +53,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright driver
+        run: npm install -g playwright@1.60.0
       - uses: extractions/setup-just@v2
       - run: just lint
 
@@ -60,6 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright driver
+        run: npm install -g playwright@1.60.0
       - uses: extractions/setup-just@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -92,6 +104,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright driver
+        run: npm install -g playwright@1.60.0
       - uses: extractions/setup-just@v2
       - run: just build
 
@@ -101,6 +118,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright driver
+        run: npm install -g playwright@1.60.0
       - uses: extractions/setup-just@v2
       - run: just lint
 
@@ -110,5 +132,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright driver
+        run: npm install -g playwright@1.60.0
       - uses: extractions/setup-just@v2
       - run: just build

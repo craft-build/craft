@@ -98,6 +98,12 @@ Runtime difference - Craft also significantly retools the async runtime and netw
 ## Installation
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/craft-build/craft/main/install.sh | sh
+```
+
+Or build from source:
+
+```sh
 cargo install --git https://github.com/craft-build/craft.git craft
 ```
 

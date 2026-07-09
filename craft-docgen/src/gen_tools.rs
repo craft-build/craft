@@ -68,17 +68,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
         "Agent & Knowledge",
         &["task", "memory", "skill", "flow_search"],
     ),
-    (
-        "Web",
-        &[
-            "browser_screenshot",
-            "browser_navigate",
-            "browser_click",
-            "browser_text",
-            "webfetch",
-            "websearch",
-        ],
-    ),
+    ("Web", &["browser", "webfetch", "websearch"]),
 ];
 
 struct ToolInfo {
@@ -161,7 +151,7 @@ fn write_param_table(out: &mut String, params: &[Param]) {
     };
     writeln!(out, "{header}").unwrap();
     for p in params {
-        let desc = p.description.replace('\n', "<br>");
+        let desc = p.description.replace('\n', "<br>").replace('|', "\\|");
         let required = if p.required { "yes" } else { "no" };
         if has_defaults {
             writeln!(

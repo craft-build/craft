@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **tools**: The four browser tools (`browser_screenshot`, `browser_navigate`,
+  `browser_click`, `browser_text`) are replaced by a single unified `browser` tool
+  with an `action` parameter. The underlying driver migrated from `chromiumoxide`
+  to `playwright-rs` (Playwright protocol), enabling session persistence across
+  calls, multi-tab support, form filling, keyboard input, JavaScript evaluation,
+  element discovery, scrolling, waiting, and screenshot regions. 18 actions total.
+  Migration: `browser_screenshot {url}` -> `browser {action:"screenshot", url}`;
+  `browser_navigate {url}` -> `browser {action:"open", url}`; `browser_click {url,
+  selector}` -> `browser {action:"click", url, selector}`; `browser_text {url}` ->
+  `browser {action:"get_content", url}`. Pages now persist across calls; use
+  `browser close_tab` for cleanup. The browser requires the Playwright driver
+  (`npm install -g playwright@1.60.0` or set `PLAYWRIGHT_DRIVER_PATH`).
+
 ## [0.8.1] - 2026-07-08
 
 ### Added
