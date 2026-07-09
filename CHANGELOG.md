@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-07-08
+
 ### Changed (breaking)
 
 - **tools**: The four browser tools (`browser_screenshot`, `browser_navigate`,
@@ -21,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `browser {action:"get_content", url}`. Pages now persist across calls; use
   `browser close_tab` for cleanup. The browser requires the Playwright driver
   (`npm install -g playwright@1.60.0` or set `PLAYWRIGHT_DRIVER_PATH`).
+  (`140ad807`)
+
+### Fixed
+
+- **bedrock**: clients are cached so repeated calls reuse the same provider
+  instance instead of rebuilding it. (`e84f1431`)
+- **ui**: removed an unused `cell_at` test helper that triggered a dead_code
+  clippy error. (`400be1c8`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the
+  lockfile (`bytes` 1.12.1, `der` 0.8.1, `exr` 1.74.1, `inotify` 0.11.4,
+  `jiff` 0.2.32, `rustc-demangle` 0.1.28, `zerocopy` 0.8.54).
 
 ## [0.8.1] - 2026-07-08
 
@@ -1102,7 +1115,11 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/craft-build/craft/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/craft-build/craft/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/craft-build/craft/compare/v0.7.6...v0.8.0
+[0.7.6]: https://github.com/craft-build/craft/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/craft-build/craft/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/craft-build/craft/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/craft-build/craft/compare/v0.7.2...v0.7.3

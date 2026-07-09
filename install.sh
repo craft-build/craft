@@ -1,11 +1,12 @@
 #!/usr/bin/env sh
-# Craft installer. Fetches the latest release binary for the current platform
+# Craft installer. Builds the latest release from source via `cargo install`
 # from https://github.com/craft-build/craft and installs it to ~/.cargo/bin.
 set -eu
 
 REPO="craft-build/craft"
 INSTALL_DIR="${CRAFT_INSTALL_DIR:-$HOME/.cargo/bin}"
 BINARY_NAME="craft"
+PLAYWRIGHT_VERSION="1.60.0"
 
 err() {
     printf '\033[31merror:\033[0m %s\n' "$1" >&2
@@ -16,44 +17,32 @@ info() {
     printf '\033[36m==>\033[0m %s\n' "$1"
 }
 
-# Detect target triple.
-uname_s="$(uname -s)"
-uname_m="$(uname -m)"
+warn() {
+    printf '\033[33mwarning:\033[0m %s\n' "$1" >&2
+}
 
-case "$uname_s" in
-    Linux) os="unknown-linux-musl" ;;
-    Darwin) os="apple-darwin" ;;
-    *) err "unsupported OS: $uname_s" ;;
-esac
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
 
-case "$uname_m" in
-    x86_64|amd64) arch="x86_64" ;;
-    aarch64|arm64) arch="aarch64" ;;
-    *) err "unsupported architecture: $uname_m" ;;
-esac
-
-target="${arch}-${os}"
-artifact="craft-${target}.tar.gz"
+if ! command_exists cargo; then
+    err "cargo not found. Install Rust from https://rustup.rs and re-run this script."
+fi
 
 info "looking up the latest release"
 api_url="https://api.github.com/repos/${REPO}/releases/latest"
-download_url="$(curl -fsSL "$api_url" \
-    | grep -o "https://[^\"']*${artifact}" \
-    | head -n1)"
+tag="$(curl -fsSL -H 'Accept: application/json' -H 'User-Agent: craft' "$api_url" \
+    | grep -o '"tag_name":[[:space:]]*"[^"]*"' \
+    | head -n1 \
+    | sed -E 's/.*"([^"]+)"$/\1/')"
 
-[ -n "$download_url" ] || err "no release asset found for ${target}"
+[ -n "$tag" ] || err "could not determine the latest release tag"
 
-info "downloading ${artifact}"
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL -o "${tmpdir}/${artifact}" "$download_url"
+export PLAYWRIGHT_DRIVER_VERSION="$PLAYWRIGHT_VERSION"
+export PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD="1"
 
-tar -C "$tmpdir" -xzf "${tmpdir}/${artifact}"
-
-info "installing ${BINARY_NAME} to ${INSTALL_DIR}"
-mkdir -p "$INSTALL_DIR"
-mv -f "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
-chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
+info "building ${BINARY_NAME} ${tag} from source (this compiles all dependencies and can take several minutes)"
+cargo install --locked --force --git "https://github.com/${REPO}.git" --tag "$tag" "$BINARY_NAME"
 
 case ":$PATH:" in
     *":${INSTALL_DIR}:"*) ;;
@@ -66,5 +55,15 @@ case ":$PATH:" in
         printf '\n'
         ;;
 esac
+
+if command_exists npm; then
+    printf '\n'
+    printf '%s\n' "Browser tooling (optional) needs the Playwright driver:"
+    printf '  %s\n' "npm install -g playwright@${PLAYWRIGHT_VERSION}"
+else
+    printf '\n'
+    warn "Browser tooling needs the Playwright driver, but npm was not found."
+    warn "Install Node.js, then run: npm install -g playwright@${PLAYWRIGHT_VERSION}"
+fi
 
 info "done. Run 'craft --version' to verify."

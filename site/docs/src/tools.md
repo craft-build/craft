@@ -298,7 +298,7 @@ Search the current session's full history (across compactions) losslessly. Suppo
 |-----------|------|----------|-------------|
 | `expand` | array | no | Entry indices to return full untruncated content for. Works alone or alongside a query. |
 | `page` | integer | no | Page number (1-based) for paginated search results. Default: 1. |
-| `query` | string | no | Search terms or regex pattern (e.g. 'auth|login', 'fail.*build'). Multi-word queries are OR-ranked by relevance. Omit to browse recent history. |
+| `query` | string | no | Search terms or regex pattern (e.g. 'auth\|login', 'fail.*build'). Multi-word queries are OR-ranked by relevance. Omit to browse recent history. |
 
 ### `todo_write` *(lua plugin)*
 
