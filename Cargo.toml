@@ -208,6 +208,7 @@ aws-sdk-bedrock = "1"
 aws-sdk-bedrockruntime = "1"
 aws-smithy-types = "1"
 aws-smithy-runtime-api = "1"
+xa11y = "0.10"
 
 [profile.bench]
 debug = true

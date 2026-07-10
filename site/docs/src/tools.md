@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 44 built-in tools. This is the full reference.
+Craft ships with 45 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -430,7 +430,7 @@ Search the current Flow workstream's persisted documents (goal, plan, requiremen
 | `k` | integer | no | 5, max 20 | Maximum results to return |
 | `query` | string | yes |  | Natural-language query describing what you need |
 
-## Web
+## Web & Desktop
 
 ### `browser` *(native)*
 
@@ -462,6 +462,33 @@ Drives a headless browser (Chromium via Playwright) so you can inspect frontends
 | `visible` | boolean | no |  | Wait for element to be visible, not just present (for 'wait' action, default: true) |
 | `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after navigation |
 | `width` | integer | no | 1280 | Viewport width in pixels |
+
+### `desktop` *(native)*
+
+Drives native desktop applications through the platform accessibility tree (AXUIElement on macOS, AT-SPI2 on Linux, UI Automation on Windows). It is the desktop counterpart to the `browser` tool: where `browser` drives Chromium via Playwright, `desktop` drives real apps, including Tauri/webview apps whose content the OS exposes as an ARIA-mapped tree.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `action` | string | yes |  | Desktop action to perform |
+| `amount` | integer | no | 3 | Scroll amount in ticks. |
+| `app` | string | no |  | App name (for 'connect'). One of 'app' or 'pid' is required for connect. |
+| `clear` | boolean | no |  | Clear the field before typing (for 'type', default true). |
+| `direction` | string | no | 'down' | Scroll direction 'up' or 'down'. |
+| `event_filter` | string | no |  | Optional EventKind name filter for 'next_event' (e.g. 'focus_changed'). |
+| `fields` | array | no |  | Fields to fill (for 'fill'). Array of {selector, value, type?, checked?} objects. |
+| `format` | string | no |  | Format for 'read': 'tree' (default), 'json', or 'text'. |
+| `key` | string | no |  | Key chord for 'press' ('Enter', 'cmd+a', ...). |
+| `limit` | integer | no |  | Limit number of results for 'find'. |
+| `max_depth` | integer | no | 4 | Max tree depth for 'tree'/'dump'/'read'. |
+| `pid` | integer | no |  | Process id alternative to 'app' for 'connect'. |
+| `region` | array | no |  | Region [x, y, width, height] in logical screen pixels (for 'screenshot'). |
+| `selector` | string | no |  | xa11y CSS-like selector (e.g. button[name='OK']). Used by find/click/type/fill/scroll/wait/select/read/screenshot(element). |
+| `state` | string | no | visible | Desired state for 'wait': visible/attached/enabled/hidden/disabled. |
+| `submit` | boolean | no | false | Press Enter after typing/filling. |
+| `text` | string | no |  | Text to type ('type') or value to set ('select'/'fill'). |
+| `timeout_ms` | integer | no | 10000, max 60000 | Timeout in ms for connect/wait/next_event. |
+| `to_top` | boolean | no |  | Scroll to top (true) or bottom (false) of content. |
+| `value` | string | no |  | Value for 'select'. |
 
 ### `webfetch` *(lua plugin)*
 

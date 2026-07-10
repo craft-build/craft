@@ -69,7 +69,10 @@ const SECTIONS: &[(&str, &[&str])] = &[
         "Agent & Knowledge",
         &["task", "memory", "skill", "flow_search"],
     ),
-    ("Web", &["browser", "webfetch", "websearch"]),
+    (
+        "Web & Desktop",
+        &["browser", "desktop", "webfetch", "websearch"],
+    ),
 ];
 
 struct ToolInfo {

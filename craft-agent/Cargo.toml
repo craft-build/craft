@@ -82,6 +82,7 @@ ast-grep-language = { workspace = true, features = ["tree-sitter-rust", "tree-si
 minijinja = { workspace = true }
 playwright-rs = { workspace = true }
 futures = { workspace = true }
+xa11y = { workspace = true }
 
 [features]
 default = []

@@ -15,6 +15,7 @@ mod callgraph;
 mod code_execution;
 mod conflicts;
 mod delete;
+mod desktop;
 mod dynamic;
 mod edit;
 mod edit_lines;
@@ -172,6 +173,7 @@ pub fn is_tool_enabled(config: &AgentConfig, name: &str) -> bool {
 pub const BASH_TOOL_NAME: &str = "bash";
 pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
 pub const BROWSER_TOOL_NAME: &str = browser::Browser::NAME;
+pub const DESKTOP_TOOL_NAME: &str = desktop::Desktop::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
 pub const EDIT_LINES_TOOL_NAME: &str = edit_lines::EditLines::NAME;
@@ -678,6 +680,7 @@ register_tools! {
     task::Task,
     batch::Batch,
     browser::Browser,
+    desktop::Desktop,
     code_execution::CodeExecution,
     list_tools::ListTools,
     styleguide::StyleguideList,
