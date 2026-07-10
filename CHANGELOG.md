@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-07-10
+
+### Added
+
+- **tools**: new `desktop` tool driving native desktop applications through the
+  platform accessibility tree (AXUIElement on macOS, AT-SPI2 on Linux,
+  UI Automation on Windows) via the `xa11y` crate. A dedicated worker thread
+  owns the blocking session so it persists across calls. 19 actions: `status`,
+  `apps`, `connect`, `active`, `disconnect`, `tree`, `dump`, `read`, `find`,
+  `screenshot`, `click`, `type`, `fill`, `press`, `scroll`, `wait`, `select`,
+  `subscribe`, `next_event`. Action failures propagate as errors to the trust
+  tracker, guardrails, and the model. (`41b94841`)
+- **tools**: tools can now return images the model actually sees, not just text.
+  Lua tools return `image = { media_type, data }` alongside `llm_output`, mapped
+  to `ToolOutput::Image`. Ships the bundled `view_image` Lua plugin built on two
+  new Lua APIs: `craft.base64` (mirrors `vim.base64`) and `craft.image`
+  (probe/decode/resize/encode). Models without vision never learn `view_image`
+  exists (`Model::vision()` gate, `capability_exclusions`), and image blocks are
+  dropped to a text note for text-only models at request time. Ported from maki
+  commit 7b2c657 by Dvir Hatabi. (`e96e0d2d`)
+- **openai**: register `gpt-5.6-luna` (weak), `gpt-5.6-terra` (medium), and
+  `gpt-5.6-sol` (strong) as the new OpenAI defaults, each with a 372K context
+  window and 128K max output. Routed through the Coding Plan via
+  `coding_plan_context_window` (372K for `gpt-5.6-*`, 272K otherwise). The
+  older `gpt-5.4-nano`, `gpt-4.1`, and `gpt-5.5` entries drop to `default: false`.
+  (`58c719b9`)
+
+### Fixed
+
+- **ui**: guard image paste (file and clipboard) and the paste-completion
+  handler with a vision-capability check, so models without image input support
+  are rejected with a status bar message instead of silently attaching.
+  (`3d2bbc7a`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the
+  lockfile (`ignore` 0.4.28, `lru` 0.18.1, `regex` 1.13.0,
+  `regex-automata` 0.4.15, `zlib-rs` 0.6.6).
+
 ## [0.8.2] - 2026-07-08
 
 ### Changed (breaking)
@@ -1115,7 +1152,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/craft-build/craft/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/craft-build/craft/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/craft-build/craft/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/craft-build/craft/compare/v0.7.6...v0.8.0
