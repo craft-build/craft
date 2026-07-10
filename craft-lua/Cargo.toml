@@ -9,6 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 arc-swap = { workspace = true }
+base64 = { workspace = true }
+image = { workspace = true }
 crossterm = { workspace = true }
 craft-agent = { workspace = true }
 craft-config = { workspace = true }
@@ -70,6 +72,8 @@ tree-sitter-zsh = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
+image = { workspace = true }
 craft-agent = { workspace = true }
 tempfile = { workspace = true }
 test-case = { workspace = true }

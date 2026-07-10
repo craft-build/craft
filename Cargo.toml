@@ -128,7 +128,7 @@ resvg = "0.47"
 tiny-skia = "0.12"
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 flume = { version = "0.12", default-features = false, features = ["async"] }
 humantime = "2"
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }

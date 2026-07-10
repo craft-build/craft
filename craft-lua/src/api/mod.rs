@@ -1,9 +1,11 @@
 mod r#async;
 pub(crate) mod autocmd;
+pub(crate) mod base64;
 pub(crate) mod env;
 pub(crate) mod r#fn;
 pub(crate) mod fs;
 pub(crate) mod hooks;
+pub(crate) mod image;
 pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
@@ -44,6 +46,8 @@ pub(crate) fn create_craft_global(
     craft.set("log", log::create_log_table(lua, Arc::clone(&plugin))?)?;
     craft.set("treesitter", treesitter::create_treesitter_table(lua)?)?;
     craft.set("uv", uv::create_uv_table(lua, permissions)?)?;
+    craft.set("base64", base64::create_base64_table(lua)?)?;
+    craft.set("image", image::create_image_table(lua)?)?;
     craft.set("json", json::create_json_table(lua)?)?;
     craft.set("yaml", yaml::create_yaml_table(lua)?)?;
     craft.set("net", net::create_net_table(lua, permissions)?)?;

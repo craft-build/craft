@@ -149,6 +149,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         .unwrap_or_else(|| kind.fallback_context_window());
     let supports_tool_examples_override = declared.and_then(|m| m.supports_tool_examples);
     let supports_thinking_override = declared.and_then(|m| m.supports_thinking);
+    let supports_vision_override = declared.and_then(|m| m.supports_vision);
     let pricing = declared
         .filter(|m| m.has_pricing())
         .map(|m| ModelPricing {
@@ -173,6 +174,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         family: kind.family(),
         supports_tool_examples_override,
         supports_thinking_override,
+        supports_vision_override,
         pricing,
         max_output_tokens,
         context_window,

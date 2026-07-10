@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 43 built-in tools. This is the full reference.
+Craft ships with 44 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -152,6 +152,14 @@ Return a structural outline of a file or directory.
 |-----------|------|----------|-------------|
 | `files` | boolean | no | When path is a directory, return a flat file table instead of nested symbols |
 | `path` | string | yes |  |
+
+### `view_image` *(lua plugin)*
+
+View an image file (png, jpeg, gif, webp) so you can actually see it; it is returned as vision input alongside the tool result. Use instead of `read` for images.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Path to the image file |
 
 ## Navigation & Analysis
 

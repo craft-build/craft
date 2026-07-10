@@ -1491,6 +1491,7 @@ fn timeout_reply(handle: &TaskHandle, plugin: &str, tool: &str) -> ToolCallReply
         format: LuaOutputFormat::default(),
         annotation: None,
         written_path: None,
+        image: None,
     }
 }
 

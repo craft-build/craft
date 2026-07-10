@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use craft_providers::adapt_images_for_model;
 use craft_providers::provider::Provider;
 use craft_providers::retry::{MAX_TIMEOUT_RETRIES, RetryState};
 use craft_providers::roles::ChainHop;
@@ -78,6 +79,8 @@ pub(crate) async fn stream_with_retry(
 ) -> Result<(StreamResponse, Option<String>), AgentError> {
     let mut active_provider: &dyn Provider = provider;
     let mut active_model: &Model = model;
+    let messages = adapt_images_for_model(model, messages);
+    let messages = &*messages;
     let mut next_fallback = 0usize;
     let mut retry = RetryState::new();
     let mut pending_injection: Option<String> = None;

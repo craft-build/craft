@@ -123,7 +123,7 @@ impl ToolFilter {
         }
     }
 
-    pub fn from_config(config: &AgentConfig, extra_exclude: &[&str]) -> Self {
+    pub fn from_config(config: &AgentConfig, model: &Model, extra_exclude: &[&str]) -> Self {
         let base = if config.allowed_tools.is_empty() {
             if config.small_model.should_activate(0) && config.small_model.reduced_tools {
                 Self::Only(
@@ -149,8 +149,19 @@ impl ToolFilter {
             )
         };
         let mut exclude: Vec<&str> = extra_exclude.to_vec();
+        exclude.extend(capability_exclusions(model));
         exclude.extend(config.disabled_tools.iter().map(|s| s.as_str()));
         base.excluding(&exclude)
+    }
+}
+
+/// One gate for every definitions builder (main loop, headless, Lua): a model
+/// without vision never learns `view_image` exists.
+pub fn capability_exclusions(model: &Model) -> &'static [&'static str] {
+    if model.vision() {
+        &[]
+    } else {
+        &[VIEW_IMAGE_TOOL_NAME]
     }
 }
 
@@ -177,6 +188,7 @@ pub const STYLEGUIDE_LIST_TOOL_NAME: &str = styleguide::StyleguideList::NAME;
 pub const STYLEGUIDE_SEARCH_TOOL_NAME: &str = styleguide::StyleguideSearch::NAME;
 pub const STYLEGUIDE_GET_TOOL_NAME: &str = styleguide::StyleguideGet::NAME;
 pub const TASK_TOOL_NAME: &str = task::Task::NAME;
+pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
 pub const WRITE_TOOL_NAME: &str = write::Write::NAME;
 pub const CODE_EXECUTION_TOOL_NAME: &str = code_execution::CodeExecution::NAME;
 pub const READ_FINDINGS_TOOL_NAME: &str = read_findings::ReadFindings::NAME;
@@ -974,6 +986,19 @@ mod tests {
     #[test_case(90,  "1m30s timeout" ; "mixed")]
     fn timeout_annotation_cases(secs: u64, expected: &str) {
         assert_eq!(timeout_annotation(secs), expected);
+    }
+
+    #[test_case(true  ; "vision_model_keeps_view_image")]
+    #[test_case(false ; "text_only_model_loses_view_image")]
+    fn from_config_gates_view_image_on_vision(vision: bool) {
+        let mut model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        model.supports_vision_override = Some(vision);
+        let filter = ToolFilter::from_config(&AgentConfig::default(), &model, &[]);
+        assert_eq!(filter.matches(VIEW_IMAGE_TOOL_NAME), vision);
+        assert!(
+            filter.matches(READ_TOOL_NAME),
+            "unrelated tools stay enabled"
+        );
     }
 
     #[test_case(Deadline::None,                          120, 120 ; "none_passes_through")]

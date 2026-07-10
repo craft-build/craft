@@ -1604,6 +1604,7 @@ name = "craft-lua"
 version = "0.8.2"
 dependencies = [
  "arc-swap",
+ "base64 0.22.1",
  "craft-agent",
  "craft-config",
  "craft-highlight",
@@ -1615,6 +1616,7 @@ dependencies = [
  "flume",
  "htmd",
  "humantime",
+ "image",
  "include_dir",
  "libc",
  "mlua",

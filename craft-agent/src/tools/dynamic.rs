@@ -93,7 +93,7 @@ pub fn build_active_tools(
     dynamic: &DynamicContext,
     promoted: &PromotedTools,
 ) -> Value {
-    let filter = ToolFilter::from_config(config, &build.excluded);
+    let filter = ToolFilter::from_config(config, model, &build.excluded);
     let ctx = DescriptionContext { filter: &filter };
     let mut tools =
         ToolRegistry::native().definitions(&build.vars, &ctx, model.supports_tool_examples());

@@ -3,6 +3,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use craft_agent::prompt::{PromptId, Slot, SlotKind, ValidNames};
 use craft_agent::tools::Tool;
 use craft_agent::tools::schema::{ParamSchema, to_json_schema, try_from_json, validate};
@@ -10,7 +12,7 @@ use craft_agent::tools::{
     BoxFuture, Deadline, DescriptionContext, ExecFuture, HeaderFuture, HeaderResult, ParseError,
     PermissionScopes, ToolAudience, ToolContext, ToolExecResult, ToolInvocation,
 };
-use craft_agent::{AgentEvent, BufferSnapshot, SharedBuf, ToolOutput};
+use craft_agent::{AgentEvent, BufferSnapshot, ImageMediaType, ImageSource, SharedBuf, ToolOutput};
 use flume::Sender;
 use mlua::{
     Function, Lua, LuaSerdeExt, RegistryKey, Result as LuaResult, Table, Value as LuaValue,
@@ -292,10 +294,17 @@ impl ToolInvocation for LuaToolInvocation {
                         .emit(id, None, &ctx.event_tx);
                     }
                     let format = reply.format;
+                    let image = reply.image;
                     ToolExecResult {
-                        output: reply.result.map(|s| match format {
-                            LuaOutputFormat::Markdown => ToolOutput::Markdown(s),
-                            LuaOutputFormat::Plain => ToolOutput::Plain(s),
+                        output: reply.result.map(|s| {
+                            if let Some(source) = image {
+                                ToolOutput::Image { caption: s, source }
+                            } else {
+                                match format {
+                                    LuaOutputFormat::Markdown => ToolOutput::Markdown(s),
+                                    LuaOutputFormat::Plain => ToolOutput::Plain(s),
+                                }
+                            }
                         }),
                         annotation: reply.annotation,
                         written_path: reply.written_path,
@@ -728,11 +737,14 @@ pub(crate) struct ToolCallReply {
     pub format: LuaOutputFormat,
     pub annotation: Option<String>,
     pub written_path: Option<String>,
+    /// Set via `image = { media_type = "image/png", data = <base64> }` in the
+    /// handler return; becomes `ToolOutput::Image` with `result` as caption.
+    pub image: Option<ImageSource>,
 }
 
 impl ToolCallReply {
     pub fn from_lua_value(val: &LuaValue) -> Self {
-        let result = coerce_tool_result(val);
+        let mut result = coerce_tool_result(val);
         let LuaValue::Table(t) = val else {
             return Self {
                 result,
@@ -742,6 +754,7 @@ impl ToolCallReply {
                 format: LuaOutputFormat::default(),
                 annotation: None,
                 written_path: None,
+                image: None,
             };
         };
         let (snapshot, live_buf) = Self::extract_body_handle(t);
@@ -752,6 +765,15 @@ impl ToolCallReply {
         let format = extract_format(t);
         let annotation = t.get::<String>("annotation").ok();
         let written_path = t.get::<String>("written_path").ok();
+        // A malformed image fails the call; dropping it silently would leave
+        // a caption claiming pixels the model never receives.
+        let image = match extract_image(t) {
+            Ok(image) => image,
+            Err(e) => {
+                result = Err(e);
+                None
+            }
+        };
         Self {
             result,
             snapshot,
@@ -760,6 +782,7 @@ impl ToolCallReply {
             format,
             annotation,
             written_path,
+            image,
         }
     }
 
@@ -789,8 +812,44 @@ impl ToolCallReply {
             format: LuaOutputFormat::default(),
             annotation: None,
             written_path: None,
+            image: None,
         }
     }
+}
+
+fn extract_image(t: &mlua::Table) -> Result<Option<ImageSource>, String> {
+    let entry = match t.get::<LuaValue>("image") {
+        Ok(LuaValue::Table(entry)) => entry,
+        Ok(LuaValue::Nil) | Err(_) => return Ok(None),
+        Ok(other) => {
+            return Err(format!(
+                "tool 'image' field must be a table {{ media_type, data }}, got {}",
+                other.type_name()
+            ));
+        }
+    };
+    let media_type = entry
+        .get::<String>("media_type")
+        .map_err(|_| "tool image is missing 'media_type'".to_owned())?;
+    let media_type = ImageMediaType::from_mime(&media_type).ok_or_else(|| {
+        let supported: Vec<&str> = ImageMediaType::ALL.iter().map(|m| m.as_mime()).collect();
+        format!(
+            "unsupported tool image media_type '{media_type}' ({})",
+            supported.join(", ")
+        )
+    })?;
+    let data = entry
+        .get::<String>("data")
+        .map_err(|_| "tool image is missing base64 'data'".to_owned())?;
+    // Bad base64 would land in history and fail every later request;
+    // validate once at the boundary.
+    if data.is_empty() {
+        return Err("tool image 'data' is empty".to_owned());
+    }
+    BASE64
+        .decode(data.as_bytes())
+        .map_err(|e| format!("tool image 'data' is not valid base64: {e}"))?;
+    Ok(Some(ImageSource::new(media_type, Arc::from(data))))
 }
 
 fn extract_format(t: &mlua::Table) -> LuaOutputFormat {
@@ -842,6 +901,33 @@ mod tests {
     #[test_case::test_case("1foo", false ; "leading_digit")]
     fn tool_name_validation(name: &str, expected: bool) {
         assert_eq!(is_valid_tool_name(name), expected);
+    }
+
+    #[test_case::test_case(
+        r#"{ llm_output = "c", image = { data = "aGVsbG8=" } }"#,
+        "missing 'media_type'" ; "missing_media_type")]
+    #[test_case::test_case(
+        r#"{ llm_output = "c", image = { media_type = "image/png" } }"#,
+        "missing base64 'data'" ; "missing_data")]
+    #[test_case::test_case(
+        r#"{ llm_output = "c", image = { media_type = "image/png", data = "" } }"#,
+        "'data' is empty" ; "empty_data")]
+    #[test_case::test_case(
+        r#"{ llm_output = "c", image = "nope" }"#,
+        "must be a table" ; "image_not_a_table")]
+    #[test_case::test_case(
+        r#"{ llm_output = "c", image = { media_type = "image/bmp", data = "aGVsbG8=" } }"#,
+        "unsupported tool image media_type" ; "unsupported_media_type")]
+    #[test_case::test_case(
+        r#"{ llm_output = "c", image = { media_type = "image/png", data = "!!!not base64!!!" } }"#,
+        "not valid base64" ; "data_not_base64")]
+    fn malformed_image_reply_fails_the_call(src: &str, expected: &str) {
+        let lua = Lua::new();
+        let val: LuaValue = lua.load(format!("return {src}")).eval().unwrap();
+        let reply = ToolCallReply::from_lua_value(&val);
+        assert!(reply.image.is_none());
+        let err = reply.result.expect_err("malformed image must error");
+        assert!(err.contains(expected), "got: {err}");
     }
 
     fn invocation(input: Value) -> LuaToolInvocation {

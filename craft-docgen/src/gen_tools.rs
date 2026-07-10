@@ -29,6 +29,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "glob",
             "grep",
             "outline",
+            "view_image",
         ],
     ),
     (

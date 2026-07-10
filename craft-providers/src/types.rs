@@ -13,6 +13,7 @@ use strum::{Display, IntoStaticStr};
 use tracing::warn;
 
 use crate::TokenUsage;
+use crate::model::Model;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ImageMediaType {
@@ -27,6 +28,8 @@ pub enum ImageMediaType {
 }
 
 impl ImageMediaType {
+    pub const ALL: [Self; 4] = [Self::Png, Self::Jpeg, Self::Gif, Self::Webp];
+
     pub fn as_mime(self) -> &'static str {
         match self {
             Self::Png => "image/png",
@@ -34,6 +37,10 @@ impl ImageMediaType {
             Self::Gif => "image/gif",
             Self::Webp => "image/webp",
         }
+    }
+
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.as_mime() == mime)
     }
 }
 
@@ -62,6 +69,46 @@ impl ImageSource {
     pub fn to_data_url(&self) -> String {
         format!("data:{};base64,{}", self.media_type.as_mime(), self.data)
     }
+}
+
+pub const IMAGE_OMITTED_NOTE: &str =
+    "[image omitted: the current model does not support image input]";
+
+/// For models without vision, image blocks become a text note instead of a
+/// wire block the API would reject. History keeps the pixels, so switching
+/// back to a vision-capable model restores them.
+pub fn adapt_images_for_model<'a>(model: &Model, messages: &'a [Message]) -> Cow<'a, [Message]> {
+    let has_image = |m: &Message| {
+        m.content.iter().any(|b| match b {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::ToolResult { images, .. } => !images.is_empty(),
+            _ => false,
+        })
+    };
+    if model.vision() || !messages.iter().any(has_image) {
+        return Cow::Borrowed(messages);
+    }
+    let adapted = messages
+        .iter()
+        .map(|m| {
+            let mut m = m.clone();
+            for block in &mut m.content {
+                match block {
+                    ContentBlock::Image { .. } => {
+                        *block = ContentBlock::Text {
+                            text: IMAGE_OMITTED_NOTE.into(),
+                        };
+                    }
+                    ContentBlock::ToolResult { images, .. } if !images.is_empty() => {
+                        images.clear();
+                    }
+                    _ => {}
+                }
+            }
+            m
+        })
+        .collect();
+    Cow::Owned(adapted)
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -540,6 +587,66 @@ mod tests {
         assert_eq!(&*deserialized.data, "abc123");
     }
 
+    #[test_case("image/png",  Some(ImageMediaType::Png)  ; "png")]
+    #[test_case("image/webp", Some(ImageMediaType::Webp) ; "webp")]
+    #[test_case("image/bmp",  None                       ; "unsupported")]
+    fn media_type_from_mime(mime: &str, expected: Option<ImageMediaType>) {
+        assert_eq!(ImageMediaType::from_mime(mime), expected);
+    }
+
+    #[test]
+    fn adapt_images_borrows_when_model_has_vision_or_no_images() {
+        let model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        let with_image = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                source: ImageSource::new(ImageMediaType::Png, Arc::from("abc123")),
+            }],
+            ..Default::default()
+        }];
+        assert!(matches!(
+            adapt_images_for_model(&model, &with_image),
+            Cow::Borrowed(_)
+        ));
+
+        let mut text_only_model = model;
+        text_only_model.supports_vision_override = Some(false);
+        let no_images = vec![Message::user("hi".into())];
+        assert!(matches!(
+            adapt_images_for_model(&text_only_model, &no_images),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn adapt_images_replaces_blocks_for_text_only_model() {
+        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        model.supports_vision_override = Some(false);
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "[image: pic.png 1KB]".into(),
+                    images: vec![ImageSource::new(ImageMediaType::Png, Arc::from("abc123"))],
+                    is_error: false,
+                },
+                ContentBlock::Image {
+                    source: ImageSource::new(ImageMediaType::Png, Arc::from("abc123")),
+                },
+            ],
+            ..Default::default()
+        }];
+        let adapted = adapt_images_for_model(&model, &messages);
+        assert!(matches!(
+            &adapted[0].content[0],
+            ContentBlock::ToolResult { images, .. } if images.is_empty()
+        ));
+        assert!(
+            matches!(&adapted[0].content[1], ContentBlock::Text { text } if text == IMAGE_OMITTED_NOTE)
+        );
+    }
+
     #[test_case(ThinkingConfig::Off, "claude-opus-4-5", json!({}) ; "off")]
     #[test_case(ThinkingConfig::Adaptive, "claude-opus-4-5", json!({"thinking": {"type": "adaptive"}}) ; "adaptive")]
     #[test_case(ThinkingConfig::Budget(10000), "claude-opus-4-5", json!({"thinking": {"type": "enabled", "budget_tokens": 10000}}) ; "budget_legacy_old_opus")]
@@ -609,6 +716,7 @@ mod tests {
             family: provider.family(),
             supports_tool_examples_override: None,
             supports_thinking_override: None,
+            supports_vision_override: None,
             pricing: crate::model::ModelPricing::default(),
             max_output_tokens: 8192,
             context_window: 200_000,

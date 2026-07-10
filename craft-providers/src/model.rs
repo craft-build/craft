@@ -167,6 +167,12 @@ impl ModelFamily {
         matches!(self, Self::Claude | Self::Gpt | Self::Gemini | Self::Glm)
     }
 
+    /// Fallback for models missing from the static tables; a per-model
+    /// override lives in `Model::supports_vision_override`.
+    pub fn supports_vision(self) -> bool {
+        matches!(self, Self::Claude | Self::Gpt | Self::Gemini)
+    }
+
     /// Estimate token count for text using character-based heuristic.
     /// Anthropic models tokenize slightly denser than GPT, so we apply a multiplier.
     pub fn estimate_tokens(self, text: &str) -> u32 {
@@ -208,6 +214,7 @@ pub struct Model {
     pub family: ModelFamily,
     pub supports_tool_examples_override: Option<bool>,
     pub supports_thinking_override: Option<bool>,
+    pub supports_vision_override: Option<bool>,
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
@@ -254,6 +261,7 @@ impl Model {
             family,
             supports_tool_examples_override: None,
             supports_thinking_override: None,
+            supports_vision_override: None,
             pricing,
             max_output_tokens,
             context_window,
@@ -268,6 +276,12 @@ impl Model {
     pub fn supports_tool_examples(&self) -> bool {
         self.supports_tool_examples_override
             .unwrap_or_else(|| self.family.supports_tool_examples())
+    }
+
+    /// Gates vision-only tools (`view_image`) and image blocks at request time.
+    pub fn vision(&self) -> bool {
+        self.supports_vision_override
+            .unwrap_or_else(|| self.family.supports_vision())
     }
 
     pub fn supports_fast(&self) -> bool {

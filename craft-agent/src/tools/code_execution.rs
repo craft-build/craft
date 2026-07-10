@@ -30,6 +30,9 @@ use crate::tools::{ToolAudience, ToolRegistry};
 const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const PREAMBLE: &str = "import re\nimport asyncio\nimport sys\nimport os\nimport json\n";
 
+pub const IMAGE_NOT_VISIBLE_NOTE: &str =
+    "image pixels are not visible from here; call the view_image tool directly";
+
 struct InterpreterEnv {
     event_tx: EventSender,
     mode: AgentMode,
@@ -304,6 +307,10 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
 
                     let result = if done.is_error {
                         Err(done.output.as_text())
+                    } else if let ToolOutput::Image { caption, .. } = &done.output {
+                        Ok(Value::String(format!(
+                            "{caption} ({IMAGE_NOT_VISIBLE_NOTE})"
+                        )))
                     } else {
                         Ok(Value::String(done.output.as_text()))
                     };
