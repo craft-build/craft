@@ -150,6 +150,10 @@ pub struct ProviderDef {
     pub default_model: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub discover_models: bool,
+    /// Opencode-only: when `Some(false)`, free catalog models are hidden
+    /// entirely. Defaults to `false` when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_free_models: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<ProviderModelDef>>,
 }
@@ -166,6 +170,7 @@ impl std::fmt::Debug for ProviderDef {
             .field("api_keys", &self.api_keys.len())
             .field("default_model", &self.default_model)
             .field("discover_models", &self.discover_models)
+            .field("enable_free_models", &self.enable_free_models)
             .field("models", &self.models)
             .finish()
     }
@@ -351,6 +356,7 @@ mod tests {
                 base_url: Some("https://api.example.com/v1".into()),
                 api_key_env: Some("MY_API_KEY".into()),
                 discover_models: true,
+                enable_free_models: Some(false),
                 ..Default::default()
             },
         );
@@ -364,6 +370,18 @@ mod tests {
             parsed.get("my-provider").unwrap().base_url,
             Some("https://api.example.com/v1".into())
         );
+        assert_eq!(
+            parsed.get("my-provider").unwrap().enable_free_models,
+            Some(false)
+        );
+    }
+
+    const EMPTY_PROVIDER_DEF_TOML: &str = "";
+
+    #[test]
+    fn provider_def_enable_free_models_defaults_none() {
+        let def: ProviderDef = toml::from_str(EMPTY_PROVIDER_DEF_TOML).unwrap();
+        assert_eq!(def.enable_free_models, None);
     }
 
     const UNKNOWN_TIER_TOML: &str = r#"id = "x"

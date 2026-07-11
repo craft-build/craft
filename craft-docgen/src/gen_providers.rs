@@ -63,6 +63,15 @@ Set `AWS_REGION` to your preferred region (for example `us-east-1`).
 
 > **Deprecated:** the older `CLAUDE_CODE_USE_BEDROCK=1` env var still works (it swaps the `anthropic` provider onto Bedrock via hand-rolled SigV4), but new users should prefer the `bedrock/...` provider above. The legacy path does not support SSO, IMDS, or web identity and will not receive new features."#;
 
+const OPENCODE_FREE_MODELS_NOTE: &str = r#"By default Craft hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/craft/providers.toml`:
+
+```toml
+[opencode]
+enable_free_models = true
+```
+
+The default is `false`."#;
+
 const MODEL_IDENTIFIERS: &str = r#"## Model Identifiers
 
 Models are referenced as `provider/model_id`:
@@ -366,6 +375,10 @@ fn write_section(out: &mut String, section: &ProviderSection) {
     if section.name == "Anthropic" {
         let _ = writeln!(out, "\n{LONG_CONTEXT_NOTE}");
         let _ = writeln!(out, "\n{BEDROCK_NOTE}");
+    }
+
+    if section.kind == ProviderKind::Opencode {
+        let _ = writeln!(out, "\n{OPENCODE_FREE_MODELS_NOTE}");
     }
 }
 

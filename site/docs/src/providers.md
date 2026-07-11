@@ -199,6 +199,15 @@ Craft asks the server for the list of installed models, so there's no built-in c
 
 Models are discovered dynamically from the [models.dev](https://models.dev/) catalog and the Opencode Zen API, so there's no built-in catalog. Use any model id the catalog exposes, prefixed with the sub-provider (e.g. `opencode/<sub-provider>/<model-id>`).
 
+By default Craft hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/craft/providers.toml`:
+
+```toml
+[opencode]
+enable_free_models = true
+```
+
+The default is `false`.
+
 ### Bedrock
 
 - **Env var**: `AWS_REGION`

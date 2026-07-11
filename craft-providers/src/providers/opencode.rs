@@ -239,10 +239,14 @@ impl Opencode {
         if !needs_fetch {
             return Ok(());
         }
+        let enable_free_models = craft_config::providers::ProvidersConfig::load()
+            .get("opencode")
+            .and_then(|d| d.enable_free_models)
+            .unwrap_or(false);
         match fetch_remote_catalog(&self.client).await {
             Ok(index) => {
                 save_cached_catalog(&index);
-                let data = catalog_to_data(index);
+                let data = catalog_to_data(index, enable_free_models);
                 if !data.entries.is_empty() {
                     *CATALOG.get().unwrap().lock().unwrap() = data;
                 }
@@ -486,7 +490,7 @@ fn determine_catalog_format(npm: &str) -> EndpointType {
 
 const ALLOWED_NPM: &[&str] = &["@ai-sdk/openai-compatible", "@ai-sdk/anthropic"];
 
-fn catalog_to_data(index: CatalogIndex) -> CatalogData {
+fn catalog_to_data(index: CatalogIndex, enable_free_models: bool) -> CatalogData {
     let mut entries: HashMap<ModelWithProvider, CatalogMeta> = HashMap::new();
     let mut auths = HashMap::new();
 
@@ -517,6 +521,10 @@ fn catalog_to_data(index: CatalogIndex) -> CatalogData {
                 .and_then(|c| c.output)
                 .unwrap_or(0.0);
             let is_free = input_price == 0.0 && output_price == 0.0;
+
+            if is_free && !enable_free_models {
+                continue;
+            }
 
             if !(has_key || provider_id == "opencode" && is_free) {
                 continue;
@@ -577,9 +585,13 @@ fn catalog_to_data(index: CatalogIndex) -> CatalogData {
 }
 
 fn init_catalog_from_cache() -> CatalogData {
+    let enable_free_models = craft_config::providers::ProvidersConfig::load()
+        .get("opencode")
+        .and_then(|d| d.enable_free_models)
+        .unwrap_or(false);
     if let Some(index) = load_cached_catalog() {
         debug!("using cached catalog");
-        return catalog_to_data(index);
+        return catalog_to_data(index, enable_free_models);
     }
     CatalogData {
         entries: HashMap::new(),
@@ -800,7 +812,7 @@ mod tests {
             },
         );
 
-        let result = catalog_to_data(providers);
+        let result = catalog_to_data(providers, true);
         assert!(
             result.entries.is_empty(),
             "should be empty: {:?}",
@@ -850,7 +862,7 @@ mod tests {
             },
         );
 
-        let result = catalog_to_data(providers);
+        let result = catalog_to_data(providers, true);
         assert!(
             result
                 .entries
@@ -907,7 +919,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_OPENCODE_ALL_81274", "real-key") };
-        let result = catalog_to_data(providers);
+        let result = catalog_to_data(providers, true);
         unsafe { std::env::remove_var("CRAFT_TEST_OPENCODE_ALL_81274") };
 
         assert!(
@@ -921,6 +933,85 @@ mod tests {
                 .contains_key(&("opencode".into(), "paid-model".into()))
         );
         assert!(result.auths.contains_key("opencode"));
+    }
+
+    fn opencode_catalog_with_free_and_paid(env_var: &str) -> CatalogIndex {
+        let mut models = HashMap::new();
+        models.insert(
+            "paid-model".into(),
+            CatalogModel {
+                limit: None,
+                cost: Some(CatalogCost {
+                    input: Some(5.0),
+                    output: Some(25.0),
+                    cache_read: None,
+                    cache_write: None,
+                }),
+                provider: None,
+            },
+        );
+        models.insert(
+            "free-model".into(),
+            CatalogModel {
+                limit: None,
+                cost: Some(CatalogCost {
+                    input: Some(0.0),
+                    output: Some(0.0),
+                    cache_read: None,
+                    cache_write: None,
+                }),
+                provider: None,
+            },
+        );
+        let mut providers = HashMap::new();
+        providers.insert(
+            "opencode".into(),
+            CatalogProvider {
+                name: "Opencode".into(),
+                env: vec![env_var.into()],
+                npm: "@ai-sdk/openai-compatible".into(),
+                api: Some("https://opencode.ai/zen/v1".into()),
+                models,
+            },
+        );
+        providers
+    }
+
+    const DISABLE_FREE_TEST_KEY: &str = "CRAFT_TEST_OPENCODE_DISABLE_FREE_94421";
+
+    #[test]
+    fn catalog_to_data_opencode_hides_free_models_when_disabled() {
+        unsafe { std::env::set_var(DISABLE_FREE_TEST_KEY, "real-key") };
+        let index = opencode_catalog_with_free_and_paid(DISABLE_FREE_TEST_KEY);
+        let result = catalog_to_data(index, false);
+        unsafe { std::env::remove_var(DISABLE_FREE_TEST_KEY) };
+
+        assert!(
+            !result
+                .entries
+                .contains_key(&("opencode".into(), "free-model".into())),
+            "free model should be hidden when enable_free_models=false: {:?}",
+            result.entries.keys()
+        );
+        assert!(
+            result
+                .entries
+                .contains_key(&("opencode".into(), "paid-model".into()))
+        );
+        assert!(result.auths.contains_key("opencode"));
+    }
+
+    #[test]
+    fn catalog_to_data_opencode_no_models_without_key_when_disabled() {
+        let index = opencode_catalog_with_free_and_paid(DISABLE_FREE_TEST_KEY);
+        let result = catalog_to_data(index, false);
+
+        assert!(
+            result.entries.is_empty(),
+            "no models should be listed without a key when enable_free_models=false: {:?}",
+            result.entries.keys()
+        );
+        assert!(!result.auths.contains_key("opencode"));
     }
 
     #[test]
@@ -966,7 +1057,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_VENDOR_KEY_81274", "test-key") };
-        let result = catalog_to_data(providers);
+        let result = catalog_to_data(providers, true);
         unsafe { std::env::remove_var("CRAFT_TEST_VENDOR_KEY_81274") };
 
         assert!(
@@ -995,7 +1086,7 @@ mod tests {
             },
         );
 
-        let result = catalog_to_data(providers);
+        let result = catalog_to_data(providers, true);
         assert!(result.entries.is_empty());
         assert!(result.auths.is_empty());
     }
@@ -1046,7 +1137,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_OTHER_KEY_COLLISION", "key") };
-        let result = catalog_to_data(providers);
+        let result = catalog_to_data(providers, true);
         unsafe { std::env::remove_var("CRAFT_TEST_OTHER_KEY_COLLISION") };
 
         assert!(
@@ -1093,7 +1184,7 @@ mod tests {
             },
         );
 
-        let data = catalog_to_data(providers);
+        let data = catalog_to_data(providers, true);
         let (meta, _) = data.lookup("opencode/opus").unwrap();
         assert_eq!(meta.provider_id, "opencode");
     }
@@ -1127,7 +1218,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_NVIDIA_KEY_LOOKUP", "key") };
-        let data = catalog_to_data(providers);
+        let data = catalog_to_data(providers, true);
         unsafe { std::env::remove_var("CRAFT_TEST_NVIDIA_KEY_LOOKUP") };
 
         let (meta, _) = data.lookup("nvidia/openai/gpt-oss-120b").unwrap();
@@ -1163,7 +1254,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_NVIDIA_DIRECT", "key") };
-        let data = catalog_to_data(providers);
+        let data = catalog_to_data(providers, true);
         unsafe { std::env::remove_var("CRAFT_TEST_NVIDIA_DIRECT") };
 
         let key = format!("{}/{}", "nvidia", "openai/gpt-oss-120b");
@@ -1200,7 +1291,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_FIREWORKS_DEEP", "key") };
-        let data = catalog_to_data(providers);
+        let data = catalog_to_data(providers, true);
         unsafe { std::env::remove_var("CRAFT_TEST_FIREWORKS_DEEP") };
 
         let key = format!("{}/{}", "fireworks", "deepseek-ai/DeepSeek-R1");
