@@ -27,6 +27,7 @@ use crate::api::create_craft_global;
 use crate::api::r#fn::{JobMeta, JobStore};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
+use crate::api::slot::SlotStore;
 use crate::api::tool::{LuaOutputFormat, LuaTool, PendingTool, PendingTools, ToolCallReply};
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
@@ -682,6 +683,7 @@ impl LuaRuntime {
         lua.set_app_data(HintStore::new());
         lua.set_app_data(crate::api::hooks::HookHandlerMap::new());
         lua.set_app_data(AutocmdStore::default());
+        lua.set_app_data(SlotStore::default());
         lua.set_app_data(KeymapStore::new());
         lua.set_app_data(keymap_writer);
         lua.set_app_data(hint_writer);
@@ -706,6 +708,12 @@ impl LuaRuntime {
     }
 
     fn drop_plugin_keys(&mut self, name: &str) {
+        if let Some(mut store) = self.lua.app_data_mut::<AutocmdStore>() {
+            store.clear_plugin(name);
+        }
+        if let Some(mut store) = self.lua.app_data_mut::<SlotStore>() {
+            store.clear_plugin(name);
+        }
         if let Some(keys) = self.plugins.borrow_mut().remove(name) {
             for (_, tk) in keys {
                 if let Err(e) = self.lua.remove_registry_value(tk.handler) {
@@ -1118,13 +1126,6 @@ impl LuaRuntime {
     fn clear_plugin(&mut self, plugin: &str) {
         self.registry.clear_plugin(plugin);
         self.drop_plugin_keys(plugin);
-        if let Some(mut store) = self.lua.app_data_mut::<AutocmdStore>() {
-            let keys = store.clear_plugin(plugin);
-            drop(store);
-            for key in keys {
-                let _ = self.lua.remove_registry_value(key);
-            }
-        }
         if let Some(mut store) = self.lua.app_data_mut::<KeymapStore>() {
             let keys = store.clear_plugin(plugin);
             let entries = store.snapshot_entries();
@@ -1875,86 +1876,9 @@ pub fn spawn(
                         let _ = reply.send(result);
                     }
                     Request::FireAutocmd { event, data } => {
-                        let entries = {
-                            let mut store = match rt.lua.app_data_mut::<AutocmdStore>() {
-                                Some(s) => s,
-                                None => continue,
-                            };
-                            store.pending_deletions.clear();
-                            let Some(list) = store.listeners.get_mut(&event) else {
-                                continue;
-                            };
-                            std::mem::take(list)
-                        };
                         let is_turn_end = event == TURN_END_EVENT;
-                        let ctx_table = rt.lua.create_table().ok();
-                        if let Some(ref tbl) = ctx_table
-                            && let Some(obj) = data.as_object()
-                        {
-                            for (k, v) in obj {
-                                let _ = tbl.set(
-                                    k.as_str(),
-                                    json_to_lua(&rt.lua, v).unwrap_or(LuaValue::Nil),
-                                );
-                            }
-                        }
-                        let mut keep = Vec::with_capacity(entries.len());
-                        for entry in entries {
-                            if entry.once {
-                                let _ = rt.lua.remove_registry_value(entry.callback);
-                                continue;
-                            }
-                            let already_deleted = rt
-                                .lua
-                                .app_data_ref::<AutocmdStore>()
-                                .is_some_and(|s| s.pending_deletions.contains(&entry.id));
-                            if !already_deleted
-                                && let Ok(func) =
-                                    rt.lua.registry_value::<Function>(&entry.callback)
-                            {
-                                let arg = ctx_table
-                                    .as_ref()
-                                    .map(|t| LuaValue::Table(t.clone()))
-                                    .unwrap_or(LuaValue::Nil);
-                                if let Err(e) = rt.call_sync_detached::<()>(&func, arg) {
-                                    tracing::warn!(
-                                        event = %event,
-                                        plugin = %entry.plugin,
-                                        error = %e,
-                                        "autocmd callback failed"
-                                    );
-                                }
-                            }
-                            let deleted = rt
-                                .lua
-                                .app_data_ref::<AutocmdStore>()
-                                .is_some_and(|s| s.pending_deletions.contains(&entry.id));
-                            if deleted {
-                                let _ = rt.lua.remove_registry_value(entry.callback);
-                            } else {
-                                keep.push(entry);
-                            }
-                        }
-                        let pending = rt
-                            .lua
-                            .app_data_mut::<AutocmdStore>()
-                            .map(|mut s| std::mem::take(&mut s.pending_deletions))
-                            .unwrap_or_default();
-                        if !pending.is_empty() {
-                            let mut retained = Vec::with_capacity(keep.len());
-                            for e in keep.drain(..) {
-                                if pending.contains(&e.id) {
-                                    let _ = rt.lua.remove_registry_value(e.callback);
-                                } else {
-                                    retained.push(e);
-                                }
-                            }
-                            keep = retained;
-                        }
-                        if let Some(mut store) = rt.lua.app_data_mut::<AutocmdStore>()
-                            && !keep.is_empty() {
-                                store.listeners.entry(event).or_default().extend(keep);
-                            }
+                        let data = json_to_lua(&rt.lua, &data).unwrap_or(LuaValue::Nil);
+                        crate::api::autocmd::dispatch(&rt.lua, &event, None, data);
                         drain_spawn_queue(&rt.lua, &gate);
                         if is_turn_end {
                             rt.lua.gc_collect().ok();
