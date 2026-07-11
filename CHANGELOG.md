@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-07-11
+
+### Added
+
+- **wiki**: in-project local wiki knowledge base (`890e7355`)
+- **agent**: detect sed/perl in-place edits and snapshot affected files (`06e6915f`)
+- **bash**: capture image data URIs in stdout as image content blocks (`eb94a964`)
+- **ui**: context-window override commands and persistence (`31c05552`)
+- **ui**: tabbed provider layout to model picker (`b6f63f11`)
+- **ui**: `show_thinking` option to control model reasoning display (`e78a0043`)
+- **providers**: `/v1/responses` endpoint support for local providers (`24c1708f`)
+- **providers**: opencode `enable_free_models` option, default false (`2ef435d4`)
+
+### Fixed
+
+- **lua**: run restore async tasks inline so highlighting survives expand (`c7b756c9`)
+
+### Changed
+
+- **lua**: collapse `permission_scope` into `permission_scopes` (`688b045b`)
+- **lua**: let plugins talk through events and slots (`14841ffb`)
+- **lua**: unify error pairs and keyed `ctx:config` (`b9b54a0e`)
+- **config**: derive `Deserialize` for `ToolOutputLines` (`52d1eef2`)
+- **agent**: extract `ToolDoneEvent` flattening into `interpreter_bridge` (`328bfcaa`)
+- **providers**: centralize auth request header setup (`f09cd0eb`)
+- **docs**: add time-traveling stream rules (ttsr) page (`8997671d`)
+
 ## [0.8.3] - 2026-07-10
 
 ### Added
