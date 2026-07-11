@@ -103,6 +103,8 @@ pub struct ListPicker<T> {
     footer: Option<FooterSpec>,
     error_text: Option<String>,
     keybindings: Arc<KeybindingResolver>,
+    header_height: u16,
+    last_header_area: Option<Rect>,
 }
 
 enum FooterSpec {
@@ -286,7 +288,18 @@ impl<T: PickerItem> ListPicker<T> {
             footer: None,
             error_text: None,
             keybindings: Arc::new(KeybindingResolver::new()),
+            header_height: 0,
+            last_header_area: None,
         }
+    }
+
+    pub fn with_header(mut self, height: u16) -> Self {
+        self.header_height = height;
+        self
+    }
+
+    pub fn header_area(&self) -> Option<Rect> {
+        self.last_header_area
     }
 
     pub fn with_keybindings(mut self, resolver: Arc<KeybindingResolver>) -> Self {
@@ -351,6 +364,14 @@ impl<T: PickerItem> ListPicker<T> {
             self.generation += 1;
             s.selected = index.min(s.filtered.len().saturating_sub(1));
             s.ensure_visible();
+        }
+    }
+
+    pub fn clear_search(&mut self) {
+        if let Some(s) = self.state.as_mut().and_then(PickerState::ready_mut) {
+            self.generation += 1;
+            s.search.clear();
+            s.update_search_and_clamp();
         }
     }
 
@@ -591,6 +612,7 @@ impl<T: PickerItem> ListPicker<T> {
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         let footer = self.footer.as_ref();
         let footer_rows = if footer.is_some() { 1u16 } else { 0 };
+        let header_h = self.header_height;
         match self.state.as_mut() {
             None => Rect::default(),
             Some(PickerState::Loading) => {
@@ -599,19 +621,31 @@ impl<T: PickerItem> ListPicker<T> {
                     width_percent: MIN_WIDTH_PERCENT,
                     max_height_percent: MAX_HEIGHT_PERCENT,
                 };
-                let (popup, inner) = modal.render(frame, area, 1 + SEARCH_ROW + footer_rows);
-                let constraints: Vec<Constraint> = if footer.is_some() {
-                    vec![
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                    ]
-                } else {
-                    vec![Constraint::Min(1), Constraint::Length(1)]
-                };
+                let (popup, inner) =
+                    modal.render(frame, area, 1 + SEARCH_ROW + footer_rows + header_h);
+                let mut constraints: Vec<Constraint> = Vec::with_capacity(4);
+                if header_h > 0 {
+                    constraints.push(Constraint::Length(header_h));
+                }
+                constraints.push(Constraint::Min(1));
+                constraints.push(Constraint::Length(SEARCH_ROW));
+                if footer.is_some() {
+                    constraints.push(Constraint::Length(1));
+                }
                 let areas = Layout::vertical(constraints).split(inner);
-                let list_area = areas[0];
-                let search_area = areas[1];
+                let mut idx = 0;
+                let list_area;
+                if header_h > 0 {
+                    let header_area = areas[idx];
+                    idx += 1;
+                    list_area = areas[idx];
+                    self.last_header_area = Some(header_area);
+                } else {
+                    self.last_header_area = None;
+                    list_area = areas[idx];
+                }
+                idx += 1;
+                let search_area = areas[idx];
                 let ch = spinner_frame(animation_elapsed_ms());
                 let line = Line::from(Span::styled(
                     format!("  {ch} {LOADING_LABEL}"),
@@ -620,7 +654,7 @@ impl<T: PickerItem> ListPicker<T> {
                 frame.render_widget(Paragraph::new(vec![line]), list_area);
                 render_search(frame, search_area, &TextBuffer::new(String::new()));
                 if let Some(spec) = footer {
-                    render_footer(frame, areas[2], spec);
+                    render_footer(frame, areas[idx + 1], spec);
                 }
                 popup
             }
@@ -632,6 +666,8 @@ impl<T: PickerItem> ListPicker<T> {
                 self.max_visible,
                 footer,
                 self.error_text.as_deref(),
+                header_h,
+                &mut self.last_header_area,
             ),
         }
     }
@@ -647,6 +683,7 @@ impl<T: PickerItem> Overlay for ListPicker<T> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_ready<T: PickerItem>(
     frame: &mut Frame,
     area: Rect,
@@ -655,6 +692,8 @@ fn render_ready<T: PickerItem>(
     max_visible: Option<u16>,
     footer: Option<&FooterSpec>,
     error_text: Option<&str>,
+    header_height: u16,
+    header_area_slot: &mut Option<Rect>,
 ) -> Rect {
     let footer_rows = if footer.is_some() { 1u16 } else { 0 };
     let content_rows = if s.filtered.is_empty() {
@@ -675,26 +714,36 @@ fn render_ready<T: PickerItem>(
     let (popup, inner) = modal.render(
         frame,
         area,
-        content_rows + SEARCH_ROW + footer_rows + error_rows,
+        content_rows + SEARCH_ROW + footer_rows + error_rows + header_height,
     );
     let viewport_h = inner
         .height
-        .saturating_sub(error_rows + SEARCH_ROW + footer_rows);
+        .saturating_sub(error_rows + SEARCH_ROW + footer_rows + header_height);
     s.viewport_height = viewport_h as usize;
     s.ensure_visible();
 
-    let mut constraints: Vec<Constraint> = Vec::with_capacity(3 + error_text.is_some() as usize);
-    if error_text.is_some() {
-        constraints.push(Constraint::Length(1)); // error line
+    let mut constraints: Vec<Constraint> = Vec::with_capacity(4 + error_text.is_some() as usize);
+    if header_height > 0 {
+        constraints.push(Constraint::Length(header_height));
     }
-    constraints.push(Constraint::Min(1)); // list
-    constraints.push(Constraint::Length(1)); // search
+    if error_text.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(1));
+    constraints.push(Constraint::Length(1));
     if footer.is_some() {
-        constraints.push(Constraint::Length(1)); // footer
+        constraints.push(Constraint::Length(1));
     }
 
     let areas = Layout::vertical(constraints).split(inner);
     let mut area_idx = 0;
+
+    if header_height > 0 {
+        *header_area_slot = Some(areas[area_idx]);
+        area_idx += 1;
+    } else {
+        *header_area_slot = None;
+    }
 
     if let Some(err) = error_text {
         let line = Line::from(Span::styled(
