@@ -221,6 +221,7 @@ pub enum Action {
         provider: Result<Arc<dyn Provider>, String>,
         pending_load_session: Option<Box<LoadedSession>>,
     },
+    ApplyContextWindowOverride,
 }
 
 const ERROR_DISPLAY: Duration = Duration::from_secs(5);

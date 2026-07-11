@@ -106,6 +106,8 @@ pub struct SessionMeta {
     pub flow_stage: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flow_chunks: BTreeMap<String, StoredFlowChunk>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub context_window_overrides: HashMap<String, u32>,
 }
 
 /// Persisted per-chunk state for Flow mode; mirrors `craft_flow::Chunk`'s
@@ -115,7 +117,7 @@ pub struct SessionMeta {
 pub struct StoredFlowChunk {
     #[serde(default)]
     pub title: String,
-    #[serde(default, rename = "status")]
+    #[serde(default)]
     pub status: String,
 }
 
@@ -1426,6 +1428,44 @@ mod tests {
 
         let loaded = TestSession::load_from(&session.id, dir).unwrap();
         assert!(loaded.meta.fast);
+    }
+
+    #[test]
+    fn session_meta_context_window_overrides_backward_compat() {
+        let json = r#"{"mode":"build"}"#;
+        let meta: super::SessionMeta = serde_json::from_str(json).unwrap();
+        assert!(meta.context_window_overrides.is_empty());
+    }
+
+    #[test]
+    fn session_context_window_overrides_persist_through_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/project");
+        session
+            .meta
+            .context_window_overrides
+            .insert("anthropic/claude-opus-4-8".into(), 120_000);
+        session.save_to(dir).unwrap();
+
+        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        assert_eq!(
+            loaded
+                .meta
+                .context_window_overrides
+                .get("anthropic/claude-opus-4-8"),
+            Some(&120_000)
+        );
+    }
+
+    #[test]
+    fn session_meta_context_window_overrides_serde_round_trip() {
+        let mut meta = super::SessionMeta::default();
+        meta.context_window_overrides
+            .insert("anthropic/claude-opus-4-8".into(), 200_000);
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: super::SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.context_window_overrides, meta.context_window_overrides);
     }
 
     #[test]

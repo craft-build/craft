@@ -849,6 +849,16 @@ impl Default for TrustDecayConfig {
     }
 }
 
+const DEFAULT_MAX_VALIDATION_ITERATIONS: u8 = 3;
+const DEFAULT_VALIDATION_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_FORMAT_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.50;
+const DEFAULT_CONTEXT_WINDOW_THRESHOLD: u32 = 32_000;
+const DEFAULT_ADVISOR_DEDUP_SIZE: usize = 16;
+const DEFAULT_FLOW_MAX_REVIEW_ITERATIONS: u32 = 3;
+const DEFAULT_FLOW_MAX_QA_ITERATIONS: u32 = 2;
+const DEFAULT_FLOW_PARALLEL_CHUNKS: u32 = 1;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ValidationConfig {
     #[serde(default)]
@@ -861,18 +871,18 @@ pub struct ValidationConfig {
 }
 
 fn default_max_validation_iterations() -> u8 {
-    3
+    DEFAULT_MAX_VALIDATION_ITERATIONS
 }
 
 fn default_validation_timeout_secs() -> u64 {
-    30
+    DEFAULT_VALIDATION_TIMEOUT_SECS
 }
 
 impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_iterations: 3,
+            max_iterations: DEFAULT_MAX_VALIDATION_ITERATIONS,
             command: None,
             timeout_secs: default_validation_timeout_secs(),
         }
@@ -889,7 +899,7 @@ pub struct FormatConfig {
 }
 
 fn default_format_timeout_secs() -> u64 {
-    15
+    DEFAULT_FORMAT_TIMEOUT_SECS
 }
 
 impl Default for FormatConfig {
@@ -921,10 +931,10 @@ pub struct SmallModelConfig {
 }
 
 fn default_compaction_threshold() -> f64 {
-    0.50
+    DEFAULT_COMPACTION_THRESHOLD
 }
 fn default_context_window_threshold() -> u32 {
-    32_000
+    DEFAULT_CONTEXT_WINDOW_THRESHOLD
 }
 
 impl Default for SmallModelConfig {
@@ -934,9 +944,9 @@ impl Default for SmallModelConfig {
             reduced_tools: false,
             compact_prompt: false,
             aggressive_truncation: false,
-            compaction_threshold: 0.50,
+            compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
             forgiving_parsing: true,
-            auto_detect_context_window: 32_000,
+            auto_detect_context_window: DEFAULT_CONTEXT_WINDOW_THRESHOLD,
         }
     }
 }
@@ -1036,6 +1046,13 @@ pub fn resolve_reserve_tokens(threshold: &ModelThreshold, context_window: u32) -
     Some(reserve)
 }
 
+/// Clamp a context window so compaction thresholds never go negative or
+/// absurdly small. Returns `max(declared, reserve_tokens + compaction_buffer)`,
+/// guarding against overflow.
+pub fn effective_context_window(declared: u32, reserve_tokens: u32, compaction_buffer: u32) -> u32 {
+    declared.max(reserve_tokens.saturating_add(compaction_buffer))
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DynamicToolsConfig {
     #[serde(default = "default_true")]
@@ -1064,7 +1081,7 @@ pub struct AdvisorConfig {
 }
 
 fn default_advisor_dedup_size() -> usize {
-    16
+    DEFAULT_ADVISOR_DEDUP_SIZE
 }
 
 /// Flow mode configuration. Off by default; when enabled, the agent can run
@@ -1095,15 +1112,15 @@ pub struct FlowConfig {
 }
 
 fn default_flow_max_review_iterations() -> u32 {
-    3
+    DEFAULT_FLOW_MAX_REVIEW_ITERATIONS
 }
 
 fn default_flow_max_qa_iterations() -> u32 {
-    2
+    DEFAULT_FLOW_MAX_QA_ITERATIONS
 }
 
 fn default_flow_parallel_chunks() -> u32 {
-    1
+    DEFAULT_FLOW_PARALLEL_CHUNKS
 }
 
 /// Time-traveling stream rules. Off by default; when enabled, rules loaded from
@@ -2650,6 +2667,29 @@ tasks = []
             ..Default::default()
         };
         assert_eq!(resolve_reserve_tokens(&threshold, 0), None);
+    }
+
+    #[test_case(200_000, 32_768, 4_096, 200_000 ; "declared_above_floor")]
+    #[test_case(30_000, 32_768, 4_096, 36_864 ; "declared_below_floor_clamped")]
+    #[test_case(200_000, 0, 0, 200_000 ; "zero_floor_keeps_declared")]
+    fn effective_context_window_enforces_floor(
+        declared: u32,
+        reserve_tokens: u32,
+        compaction_buffer: u32,
+        expected: u32,
+    ) {
+        assert_eq!(
+            effective_context_window(declared, reserve_tokens, compaction_buffer),
+            expected
+        );
+    }
+
+    #[test]
+    fn effective_context_window_saturates_on_overflow() {
+        assert_eq!(
+            effective_context_window(10_000, u32::MAX, 10),
+            u32::MAX.saturating_add(10)
+        );
     }
 
     #[test]

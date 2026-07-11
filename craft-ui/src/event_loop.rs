@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,6 +107,7 @@ pub(crate) struct EventLoop<'t> {
     action_tx: flume::Sender<Action>,
     warn_tx: flume::Sender<String>,
     available_models: Arc<ArcSwapOption<Vec<String>>>,
+    context_window_overrides: Arc<ArcSwap<HashMap<String, u32>>>,
     _model_fetch_task: tokio::task::JoinHandle<()>,
 }
 
@@ -136,7 +138,12 @@ fn merge_batch(
     available.store(Some(Arc::new(merged)));
 }
 
-fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -> BackgroundModels {
+fn spawn_model_fetch(
+    model_slot: &Arc<ArcSwap<ModelSlot>>,
+    timeouts: Timeouts,
+    overrides: Arc<ArcSwap<HashMap<String, u32>>>,
+    config: AgentConfig,
+) -> BackgroundModels {
     let available: Arc<ArcSwapOption<Vec<String>>> = Arc::new(ArcSwapOption::empty());
     let bg = Arc::clone(&available);
     let (warn_tx, warn_rx) = flume::unbounded::<String>();
@@ -147,6 +154,7 @@ fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -
         let done = Box::new(move || {
             let spec = model_slot.load().model.spec();
             let model_slot = Arc::clone(&model_slot);
+            let overrides = Arc::clone(&overrides);
             tokio::spawn(async move {
                 let mut resolved = match Model::from_spec(&spec) {
                     Ok(m) => m,
@@ -165,6 +173,20 @@ fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -
                         return;
                     }
                 };
+                let provider_model_id = format!("{}/{}", resolved.provider, resolved.id);
+                let reserve = craft_config::resolve_threshold(
+                    &config.compaction,
+                    Some(&provider_model_id),
+                    &resolved.id,
+                )
+                .and_then(|t| craft_config::resolve_reserve_tokens(t, resolved.context_window))
+                .unwrap_or(config.compaction_buffer);
+                crate::app::session_state::apply_context_window_override(
+                    &mut resolved,
+                    &overrides.load(),
+                    reserve,
+                    config.compaction_buffer,
+                );
                 model_slot.store(Arc::new(ModelSlot {
                     model: resolved,
                     provider,
@@ -234,12 +256,20 @@ impl<'t> EventLoop<'t> {
 
         let resumed = !session.messages.is_empty();
         let initial_history = session.messages.clone();
+        let context_window_overrides = Arc::new(ArcSwap::from_pointee(
+            session.meta.context_window_overrides.clone(),
+        ));
 
         let model_slot = Arc::new(ArcSwap::from_pointee(ModelSlot {
             model: model.clone(),
             provider,
         }));
-        let bg = spawn_model_fetch(&model_slot, timeouts);
+        let bg = spawn_model_fetch(
+            &model_slot,
+            timeouts,
+            Arc::clone(&context_window_overrides),
+            config.clone(),
+        );
         let flow_store = std::sync::Arc::new(
             craft_storage::flow::FlowStore::new(&storage).unwrap_or_else(|_| {
                 craft_storage::flow::FlowStore::from_root(storage.path().join("projects"))
@@ -316,6 +346,7 @@ impl<'t> EventLoop<'t> {
             action_tx,
             warn_tx: bg.warn_tx,
             available_models,
+            context_window_overrides,
             _model_fetch_task: bg.task,
         })
     }
@@ -632,7 +663,14 @@ impl<'t> EventLoop<'t> {
             } => {
                 match provider {
                     Ok(new_provider) => {
-                        if let Ok(new_model) = Model::from_spec(&model_spec) {
+                        if let Ok(mut new_model) = Model::from_spec(&model_spec) {
+                            let reserve = self.reserve_tokens_for(&new_model);
+                            crate::app::session_state::apply_context_window_override(
+                                &mut new_model,
+                                &self.app.state.context_window_overrides,
+                                reserve,
+                                self.config.compaction_buffer,
+                            );
                             self.app.update_model(&new_model);
                             self.app.record_recent_model(&model_spec);
                             self.app.usage_slot.store(None);
@@ -648,7 +686,50 @@ impl<'t> EventLoop<'t> {
                     self.respawn_with_tool_outputs(*loaded);
                 }
             }
+            Action::ApplyContextWindowOverride => self.apply_active_context_window_override(),
         }
+    }
+
+    /// Resolve the effective reserve tokens for a model, mirroring
+    /// `Agent::effective_compaction_buffer`: per-model `reserve_tokens`
+    /// overrides `compaction_buffer` when configured.
+    fn reserve_tokens_for(&self, model: &Model) -> u32 {
+        let provider_model_id = format!("{}/{}", model.provider, model.id);
+        if let Some(t) = craft_config::resolve_threshold(
+            &self.config.compaction,
+            Some(&provider_model_id),
+            &model.id,
+        ) && let Some(reserve) = craft_config::resolve_reserve_tokens(t, model.context_window)
+        {
+            return reserve;
+        }
+        self.config.compaction_buffer
+    }
+
+    /// Apply the active model's stored context-window override to both the
+    /// `model_slot` and `app.state.model`, keeping them consistent. Also
+    /// syncs the shared override map consumed by the background model fetch.
+    fn apply_active_context_window_override(&mut self) {
+        self.context_window_overrides
+            .store(Arc::new(self.app.state.context_window_overrides.clone()));
+        let slot = self.model_slot.load();
+        let reserve = self.reserve_tokens_for(&slot.model);
+        let buffer = self.config.compaction_buffer;
+        let mut model = slot.model.clone();
+        let changed = crate::app::session_state::apply_context_window_override(
+            &mut model,
+            &self.app.state.context_window_overrides,
+            reserve,
+            buffer,
+        );
+        if !changed {
+            return;
+        }
+        let provider = Arc::clone(&slot.provider);
+        self.model_slot
+            .store(Arc::new(ModelSlot { model, provider }));
+        let slot = self.model_slot.load();
+        self.app.update_model(&slot.model);
     }
 
     fn change_model(&mut self, spec: String) {

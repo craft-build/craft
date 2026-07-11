@@ -40,6 +40,7 @@ pub(crate) struct SessionState {
     pub warnings: Vec<String>,
     pub thinking: ThinkingConfig,
     pub fast: bool,
+    pub context_window_overrides: HashMap<String, u32>,
 }
 
 const PLAN_FILE_MISSING_WARNING: &str = "Plan file was deleted \u{2014} started a new plan";
@@ -113,6 +114,7 @@ impl SessionState {
 
         let token_usage = session.token_usage;
         let context_size = session.meta.context_size;
+        let context_window_overrides = session.meta.context_window_overrides.clone();
 
         Self {
             thinking: session
@@ -130,6 +132,7 @@ impl SessionState {
             plan,
             flow,
             warnings,
+            context_window_overrides,
         }
     }
 
@@ -171,6 +174,7 @@ impl SessionState {
         self.session.meta.session_rules = rules_to_stored(&permissions.session_rules_snapshot());
         self.session.meta.thinking = Some(self.thinking.into());
         self.session.meta.fast = self.fast;
+        self.session.meta.context_window_overrides = self.context_window_overrides.clone();
         self.session.updated_at = craft_storage::now_epoch();
         self.session.update_title_if_default();
     }
@@ -185,6 +189,28 @@ impl SessionState {
         self.session.model = model.spec();
         self.model = model.clone();
     }
+}
+
+/// Apply a stored context-window override to `model` for its spec, clamped by
+/// the floor guard. Returns true when the model's `context_window` changed.
+/// `reserve_tokens` and `compaction_buffer` come from the resolved agent
+/// config so the UI does not duplicate that lookup.
+pub(crate) fn apply_context_window_override(
+    model: &mut Model,
+    overrides: &HashMap<String, u32>,
+    reserve_tokens: u32,
+    compaction_buffer: u32,
+) -> bool {
+    let Some(&requested) = overrides.get(&model.spec()) else {
+        return false;
+    };
+    let effective =
+        craft_config::effective_context_window(requested, reserve_tokens, compaction_buffer);
+    if model.context_window == effective {
+        return false;
+    }
+    model.context_window = effective;
+    true
 }
 
 impl From<Mode> for StoredMode {
@@ -284,5 +310,80 @@ mod tests {
         let state = SessionState::from_session(session, &test_model(), &storage);
         assert_eq!(state.mode, Mode::Build);
         assert!(state.plan.path().is_none());
+    }
+
+    #[test]
+    fn from_session_loads_context_window_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = AppSession::new("test-model", "/tmp");
+        session
+            .meta
+            .context_window_overrides
+            .insert("test-model".into(), 150_000);
+        let state = SessionState::from_session(session, &test_model(), &storage);
+        assert_eq!(
+            state.context_window_overrides.get("test-model"),
+            Some(&150_000)
+        );
+    }
+
+    #[test]
+    fn sync_session_writes_back_context_window_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let session = AppSession::new("test-model", "/tmp");
+        let mut state = SessionState::from_session(session, &test_model(), &storage);
+        state
+            .context_window_overrides
+            .insert("test-model".into(), 180_000);
+        state.sync_session(
+            &None,
+            &None,
+            &Arc::new(PermissionManager::new(
+                craft_config::PermissionsConfig::default(),
+                std::path::PathBuf::from("/tmp"),
+            )),
+        );
+        assert_eq!(
+            state
+                .session
+                .meta
+                .context_window_overrides
+                .get("test-model"),
+            Some(&180_000)
+        );
+    }
+
+    #[test]
+    fn apply_context_window_override_sets_window_for_matching_spec() {
+        let mut model = test_model();
+        let mut overrides = HashMap::new();
+        overrides.insert("anthropic/test-model".into(), 120_000);
+        assert!(apply_context_window_override(
+            &mut model, &overrides, 4_096, 32_768
+        ));
+        assert_eq!(model.context_window, 120_000);
+    }
+
+    #[test]
+    fn apply_context_window_override_clamps_below_floor() {
+        let mut model = test_model();
+        let mut overrides = HashMap::new();
+        overrides.insert("anthropic/test-model".into(), 10_000);
+        assert!(apply_context_window_override(
+            &mut model, &overrides, 32_768, 4_096
+        ));
+        assert_eq!(model.context_window, 36_864);
+    }
+
+    #[test]
+    fn apply_context_window_override_noop_without_entry() {
+        let mut model = test_model();
+        let overrides = HashMap::new();
+        assert!(!apply_context_window_override(
+            &mut model, &overrides, 4_096, 32_768
+        ));
+        assert_eq!(model.context_window, crate::components::TEST_CONTEXT_WINDOW);
     }
 }

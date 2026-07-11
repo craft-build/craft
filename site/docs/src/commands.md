@@ -28,6 +28,8 @@ Type `/` in the input box to open the command palette.
 | `/dream` | Consolidate and curate project memory |
 | `/distill` | Discover reusable workflows and propose skills |
 | `/checkpoint` | Write a session checkpoint for smooth resume |
+| `/set-context-window` | Override a model's context window (tokens) |
+| `/clear-context-window` | Clear a context-window override |
 | `/memory` | View, edit, and delete memory files |
 
 ## Custom commands

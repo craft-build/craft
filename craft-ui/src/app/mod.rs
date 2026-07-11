@@ -88,6 +88,7 @@ const FLASH_REWIND: &str = "Press esc again to rewind...";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
+const SET_CONTEXT_WINDOW_USAGE: &str = "Usage: /set-context-window [model] <tokens> (tokens > 0)";
 const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `craft auth login` in another terminal, then press Enter to retry.";
 const FLASH_NO_PLAN: &str = "No plan file";
@@ -1603,6 +1604,8 @@ impl App {
                 vec![]
             }
             "/cd" => self.cmd_cd(&cmd.args),
+            "/set-context-window" => self.cmd_set_context_window(&cmd.args),
+            "/clear-context-window" => self.cmd_clear_context_window(&cmd.args),
             "/yolo" => {
                 let enabled = self.permissions.toggle_yolo();
                 let sandbox_cfg = if enabled {
@@ -1824,6 +1827,80 @@ impl App {
             }
             Err(e) => self.flash(format!("cd: {e}")),
         }
+        vec![]
+    }
+
+    fn cmd_set_context_window(&mut self, args: &str) -> Vec<Action> {
+        let trimmed = args.trim();
+        if trimmed.is_empty() || trimmed == "status" {
+            return self.flash_context_window_overrides();
+        }
+        let (spec, tokens_str) = match trimmed.split_once(char::is_whitespace) {
+            Some((a, b)) => (a.trim().to_string(), b.trim()),
+            None => (self.state.model.spec(), trimmed),
+        };
+        let Ok(tokens) = tokens_str.parse::<u32>() else {
+            self.flash(SET_CONTEXT_WINDOW_USAGE.into());
+            return vec![];
+        };
+        if tokens == 0 {
+            self.flash(SET_CONTEXT_WINDOW_USAGE.into());
+            return vec![];
+        }
+        self.state
+            .context_window_overrides
+            .insert(spec.clone(), tokens);
+        self.flash(format!("context window for {spec} set to {tokens}"));
+        if spec == self.state.model.spec() {
+            vec![Action::ApplyContextWindowOverride]
+        } else {
+            vec![]
+        }
+    }
+
+    fn cmd_clear_context_window(&mut self, args: &str) -> Vec<Action> {
+        let trimmed = args.trim();
+        if trimmed == "all" {
+            if self.state.context_window_overrides.is_empty() {
+                self.flash("no context-window overrides set".into());
+                return vec![];
+            }
+            self.state.context_window_overrides.clear();
+            self.flash("cleared all context-window overrides".into());
+            return vec![Action::ApplyContextWindowOverride];
+        }
+        let spec = if trimmed.is_empty() {
+            self.state.model.spec()
+        } else {
+            trimmed.to_string()
+        };
+        if self.state.context_window_overrides.remove(&spec).is_some() {
+            self.flash(format!(
+                "context window for {spec} restored to catalog value"
+            ));
+            if spec == self.state.model.spec() {
+                vec![Action::ApplyContextWindowOverride]
+            } else {
+                vec![]
+            }
+        } else {
+            self.flash(format!("no override set for {spec}"));
+            vec![]
+        }
+    }
+
+    fn flash_context_window_overrides(&mut self) -> Vec<Action> {
+        if self.state.context_window_overrides.is_empty() {
+            self.flash("no context-window overrides set".into());
+            return vec![];
+        }
+        let mut entries: Vec<_> = self.state.context_window_overrides.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let lines: Vec<String> = entries
+            .iter()
+            .map(|(spec, tokens)| format!("{spec} -> {tokens}"))
+            .collect();
+        self.flash(format!("active overrides:\n{}", lines.join("\n")));
         vec![]
     }
 

@@ -132,6 +132,16 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Write a session checkpoint for smooth resume",
         max_args: 0,
     },
+    BuiltinCommand {
+        name: "/set-context-window",
+        description: "Override a model's context window (tokens)",
+        max_args: 2,
+    },
+    BuiltinCommand {
+        name: "/clear-context-window",
+        description: "Clear a context-window override",
+        max_args: 1,
+    },
 ];
 
 pub struct ParsedCommand {
@@ -180,6 +190,10 @@ pub struct CommandPalette {
     current_arg_count: usize,
 }
 
+fn push_matcher(item: &CommandItem, cols: &mut [Utf32String]) {
+    cols[0] = Utf32String::from(item.name.as_str());
+}
+
 impl CommandPalette {
     pub fn new(
         custom_commands: Arc<[CustomCommand]>,
@@ -219,30 +233,28 @@ impl CommandPalette {
         let nucleo = Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1);
         let injector = nucleo.injector();
 
+        let push = |item: CommandItem| {
+            injector.push(item, push_matcher);
+        };
+
         for cmd in BUILTIN_COMMANDS.iter() {
-            let item = CommandItem {
+            push(CommandItem {
                 name: cmd.name.to_string(),
                 max_args: cmd.max_args,
                 command_type: CommandType::Builtin(cmd),
-            };
-            injector.push(item, |item, cols| {
-                cols[0] = Utf32String::from(item.name.as_str());
             });
         }
 
         for (i, cmd) in custom_commands.iter().enumerate() {
-            let item = CommandItem {
+            push(CommandItem {
                 name: cmd.display_name(),
                 max_args: if cmd.has_args() { usize::MAX } else { 0 },
                 command_type: CommandType::Custom(i),
-            };
-            injector.push(item, |item, cols| {
-                cols[0] = Utf32String::from(item.name.as_str());
             });
         }
 
         for (i, prompt) in mcp_prompts.iter().enumerate() {
-            let item = CommandItem {
+            push(CommandItem {
                 name: format!("/{}", prompt.display_name),
                 max_args: if prompt.arguments.is_empty() {
                     0
@@ -250,20 +262,14 @@ impl CommandPalette {
                     usize::MAX
                 },
                 command_type: CommandType::McpPrompt(i),
-            };
-            injector.push(item, |item, cols| {
-                cols[0] = Utf32String::from(item.name.as_str());
             });
         }
 
         for (i, cmd) in lua_commands.iter().enumerate() {
-            let item = CommandItem {
+            push(CommandItem {
                 name: cmd.name.to_string(),
                 max_args: 0,
                 command_type: CommandType::Lua(i),
-            };
-            injector.push(item, |item, cols| {
-                cols[0] = Utf32String::from(item.name.as_str());
             });
         }
 
@@ -350,7 +356,6 @@ impl CommandPalette {
             false,
         );
 
-        // Tick to get matches
         self.tick();
     }
 
