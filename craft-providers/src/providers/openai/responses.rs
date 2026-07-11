@@ -169,13 +169,12 @@ pub(crate) async fn do_stream(
     })?;
     let json_body = serde_json::to_vec(body)?;
 
-    let mut builder = client
-        .post(format!("{base}{RESPONSES_PATH}"))
-        .header("content-type", MIME_JSON)
-        .header("user-agent", super::super::user_agent());
-    for (key, value) in &auth.headers {
-        builder = builder.header(key.as_str(), value.as_str());
-    }
+    let builder = auth.configure_request(
+        client
+            .post(format!("{base}{RESPONSES_PATH}"))
+            .header("content-type", MIME_JSON)
+            .header("user-agent", super::super::user_agent()),
+    );
 
     debug!(
         model = %model.id,

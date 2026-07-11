@@ -73,6 +73,12 @@ impl ResolvedAuth {
             headers: vec![("authorization".into(), format!("Bearer {api_key}"))],
         }
     }
+
+    pub fn configure_request(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        self.headers
+            .iter()
+            .fold(builder, |b, (key, value)| b.header(key, value))
+    }
 }
 
 pub(crate) fn with_prefix<'a>(

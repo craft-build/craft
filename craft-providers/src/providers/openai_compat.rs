@@ -60,13 +60,11 @@ impl OpenAiCompatProvider {
         auth: &ResolvedAuth,
         url: &str,
     ) -> Result<String, AgentError> {
-        let mut request = self
-            .client
-            .get(url)
-            .header("user-agent", super::user_agent());
-        for (key, value) in &auth.headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
+        let request = auth.configure_request(
+            self.client
+                .get(url)
+                .header("user-agent", super::user_agent()),
+        );
         let response = request.send().await?;
         if response.status().as_u16() != 200 {
             return Err(AgentError::from_response(response).await);
@@ -81,14 +79,12 @@ impl OpenAiCompatProvider {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<String, AgentError> {
-        let mut request = self
-            .client
-            .post(url)
-            .header("content-type", content_type)
-            .header("user-agent", super::user_agent());
-        for (key, value) in &auth.headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
+        let request = auth.configure_request(
+            self.client
+                .post(url)
+                .header("content-type", content_type)
+                .header("user-agent", super::user_agent()),
+        );
         let response = request.body(body).send().await?;
         if response.status().as_u16() != 200 {
             return Err(AgentError::from_response(response).await);
@@ -130,14 +126,11 @@ impl OpenAiCompatProvider {
         auth: &ResolvedAuth,
     ) -> reqwest::RequestBuilder {
         let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
-        let mut builder = self
-            .client
-            .request(method.parse().unwrap(), format!("{base}{path}"))
-            .header("user-agent", super::user_agent());
-        for (key, value) in &auth.headers {
-            builder = builder.header(key.as_str(), value.as_str());
-        }
-        builder
+        auth.configure_request(
+            self.client
+                .request(method.parse().unwrap(), format!("{base}{path}"))
+                .header("user-agent", super::user_agent()),
+        )
     }
 
     pub async fn do_stream(

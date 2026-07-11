@@ -274,15 +274,12 @@ impl Anthropic {
     fn build_request(&self, method: &str, url: Option<&str>) -> reqwest::RequestBuilder {
         let auth = lock_unpoison(&self.auth);
         let url = url.unwrap_or_else(|| auth.base_url.as_deref().unwrap_or(MESSAGES_URL));
-        let mut builder = self
-            .client
-            .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url)
-            .header("anthropic-version", API_VERSION)
-            .header("user-agent", super::user_agent());
-        for (key, value) in &auth.headers {
-            builder = builder.header(key.as_str(), value.as_str());
-        }
-        builder
+        auth.configure_request(
+            self.client
+                .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url)
+                .header("anthropic-version", API_VERSION)
+                .header("user-agent", super::user_agent()),
+        )
     }
 
     async fn do_stream_request(

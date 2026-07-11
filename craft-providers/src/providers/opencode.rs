@@ -310,15 +310,13 @@ impl Opencode {
         body["stream"] = json!(true);
         let json_body = serde_json::to_vec(&body)?;
         let base = auth.base_url.as_deref().unwrap_or("");
-        let mut request = self
-            .client
-            .post(format!("{base}{MESSAGES_PATH}"))
-            .header("user-agent", super::user_agent())
-            .header("content-type", super::MIME_JSON)
-            .header("anthropic-version", "2023-06-01");
-        for (key, value) in &auth.headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
+        let request = auth.configure_request(
+            self.client
+                .post(format!("{base}{MESSAGES_PATH}"))
+                .header("user-agent", super::user_agent())
+                .header("content-type", super::MIME_JSON)
+                .header("anthropic-version", "2023-06-01"),
+        );
 
         debug!(model = %model.id, "sending Anthropic-format request via catalog");
 
