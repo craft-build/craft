@@ -157,13 +157,8 @@ pub async fn run(
         if let Some(target) = invocation.mutable_path() {
             let is_plan_target = ctx.mode.plan_path().is_some_and(|pp| target == pp);
             if !is_plan_target {
-                if ctx.mode.plan_path().is_some() {
-                    warn!(
-                        tool = %name,
-                        target = %target.display(),
-                        "blocked write in plan mode"
-                    );
-                    return done_error(crate::tools::PLAN_WRITE_RESTRICTED.into());
+                if let Some(reason) = plan_mode_block_reason(ctx, name, target) {
+                    return done_error(reason);
                 }
                 if let Some(reason) = ctx.permissions.boundary_block_reason(target) {
                     return done_error(reason);
@@ -299,6 +294,37 @@ async fn enforce_permission(
     Ok(())
 }
 
+/// Records a pre-write backup for `path`: lazily starts an auto snapshot,
+/// notes the path, and pushes its current contents onto the undo stack.
+async fn snapshot_backup(
+    snapshot: &super::snapshot::SnapshotManager,
+    store: &crate::tools::safety::SnapshotStore,
+    path: &Path,
+) {
+    if !snapshot.is_active() {
+        snapshot.begin("auto");
+    }
+    snapshot.note(path).await;
+    if let Ok(content) = std::fs::read_to_string(path) {
+        store.push_backup(path.to_path_buf(), content);
+    }
+}
+
+/// Returns an error message if `target` cannot be written in plan mode, else `None`.
+/// In plan mode only the plan file itself may be written.
+fn plan_mode_block_reason(ctx: &ToolContext, name: &str, target: &Path) -> Option<String> {
+    if ctx.mode.plan_path().is_some() {
+        warn!(
+            tool = %name,
+            target = %target.display(),
+            "blocked write in plan mode"
+        );
+        Some(crate::tools::PLAN_WRITE_RESTRICTED.into())
+    } else {
+        None
+    }
+}
+
 async fn execute_mcp_tool(
     ctx: &ToolContext,
     id: &str,
@@ -316,6 +342,7 @@ async fn execute_mcp_tool(
     };
 
     if ctx.mode.plan_path().is_some() {
+        warn!(tool = %tool_name, "mcp tool blocked in plan mode");
         return done(MCP_BLOCKED_IN_PLAN.into(), true);
     }
 
@@ -472,14 +499,27 @@ pub(super) async fn process_tool_calls(
         }
 
         if is_write_tool(&name) {
-            if !snapshot.is_active() {
-                snapshot.begin("auto");
-            }
             for p in &write_paths {
-                snapshot.note(Path::new(p)).await;
-                if let Ok(content) = std::fs::read_to_string(p) {
-                    ctx.snapshot_store.push_backup(PathBuf::from(p), content);
-                }
+                snapshot_backup(snapshot, &ctx.snapshot_store, Path::new(p)).await;
+            }
+        }
+
+        if name == crate::tools::BASH_TOOL_NAME
+            && let Some(cmd) = input.get("command").and_then(|v| v.as_str())
+        {
+            let workdir = input
+                .get("workdir")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            for rel in super::inplace_edit::detect_inplace_edit_paths(cmd) {
+                let abs = if rel.is_absolute() {
+                    rel
+                } else {
+                    workdir.join(&rel)
+                };
+                snapshot_backup(snapshot, &ctx.snapshot_store, &abs).await;
             }
         }
 
@@ -1241,5 +1281,93 @@ mod tests {
             written_path: None,
         }];
         assert!(collect_format_events(&formatter, &results).await.is_none());
+    }
+
+    fn sed_available() -> bool {
+        std::process::Command::new("sed")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Mirrors the dispatcher's bash in-place-edit backup logic (scan + read +
+    /// push_backup), then verifies `safety undo`/`history` consume the backup.
+    #[tokio::test]
+    async fn bash_sed_inplace_edit_pushes_undoable_backup() {
+        if !sed_available() {
+            eprintln!("skipping: sed unavailable");
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("data.txt");
+        let original = "alpha beta\n";
+        fs::write(&target, original).unwrap();
+        let target_str = target.to_str().unwrap().to_string();
+
+        let ctx = crate::tools::test_support::stub_ctx(&AgentMode::Build);
+
+        let command = format!("sed -i 's/beta/gamma/' {target_str}");
+        for rel in super::super::inplace_edit::detect_inplace_edit_paths(&command) {
+            let abs = if rel.is_absolute() {
+                rel
+            } else {
+                std::env::current_dir().unwrap_or_default().join(&rel)
+            };
+            if let Ok(content) = std::fs::read_to_string(&abs) {
+                ctx.snapshot_store.push_backup(abs, content);
+            }
+        }
+
+        std::process::Command::new("sed")
+            .arg("-i")
+            .arg("s/beta/gamma/")
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "alpha gamma\n");
+
+        let undone = run(
+            ToolRegistry::native(),
+            None,
+            "u1".into(),
+            crate::tools::SAFETY_TOOL_NAME,
+            &serde_json::json!({"action": "undo", "path": target_str}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(!undone.is_error, "undo failed: {}", undone.output.as_text());
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+
+        let hist = run(
+            ToolRegistry::native(),
+            None,
+            "h1".into(),
+            crate::tools::SAFETY_TOOL_NAME,
+            &serde_json::json!({"action": "history", "path": target_str}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(!hist.is_error);
+        assert!(
+            hist.output.as_text().contains("0 entries"),
+            "undo should have drained the backup stack, got: {}",
+            hist.output.as_text()
+        );
+    }
+
+    /// A non-in-place sed command must produce no backup (fail-open).
+    #[tokio::test]
+    async fn bash_sed_without_inplace_produces_no_backup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("data.txt");
+        fs::write(&target, "alpha beta\n").unwrap();
+        let target_str = target.to_str().unwrap().to_string();
+
+        let command = format!("sed 's/beta/gamma/' {target_str}");
+        let detected = super::super::inplace_edit::detect_inplace_edit_paths(&command);
+        assert!(detected.is_empty(), "non-in-place sed must not be tracked");
     }
 }

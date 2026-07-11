@@ -9,6 +9,7 @@ pub mod findings_store;
 mod format;
 mod guardrails;
 mod history;
+mod inplace_edit;
 mod instructions;
 mod judge;
 mod read_lifecycle;
