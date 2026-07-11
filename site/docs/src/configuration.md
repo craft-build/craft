@@ -186,7 +186,7 @@ An always-on lightweight reviewer that reads the transcript delta each turn and 
 
 ### `agent.ttsr`
 
-Time-traveling stream rules. When enabled, rules loaded from `.craft/rules/*.md` (lines prefixed with `rule:`) are matched against the in-flight stream text each turn, and a firing rule injects a system reminder. Off by default.
+Time-traveling stream rules. When enabled, rules loaded from `.craft/rules/*.md` (lines prefixed with `rule:`) are matched against the in-flight stream text each turn, and a firing rule injects a system reminder. Off by default. See [Stream Rules](./ttsr.md) for the rule format and discovery paths.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
