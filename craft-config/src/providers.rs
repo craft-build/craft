@@ -43,9 +43,10 @@ pub fn slugify(name: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Protocol {
     Openai,
+    OpenaiResponses,
     Anthropic,
     Google,
 }
@@ -56,6 +57,7 @@ impl FromStr for Protocol {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "openai" => Ok(Self::Openai),
+            "openai-responses" => Ok(Self::OpenaiResponses),
             "anthropic" => Ok(Self::Anthropic),
             "google" => Ok(Self::Google),
             _ => Err(format!("unknown protocol: {s}")),

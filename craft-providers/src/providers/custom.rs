@@ -9,6 +9,7 @@ use craft_config::providers::{
     resolve_base_url, resolve_protocol,
 };
 
+use super::openai::responses;
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{ResolvedAuth, lock_unpoison};
 use crate::model::{FastPricing, Model, ModelPricing, ModelTier};
@@ -94,7 +95,7 @@ fn create_from_def(
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
     let kind = match def.protocol {
-        Some(Protocol::Openai) => ProviderKind::OpenAi,
+        Some(Protocol::Openai) | Some(Protocol::OpenaiResponses) => ProviderKind::OpenAi,
         Some(Protocol::Anthropic) => ProviderKind::Anthropic,
         Some(Protocol::Google) => ProviderKind::Google,
         None => {
@@ -113,6 +114,7 @@ fn create_from_def(
         ProviderKind::OpenAi => Ok(Box::new(CustomOpenAiProvider {
             compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts)?,
             auth,
+            protocol: def.protocol.unwrap_or(Protocol::Openai),
         })),
         ProviderKind::Google => Ok(Box::new(super::google::Google::with_auth(auth, timeouts)?)),
         _ => Err(AgentError::Config {
@@ -127,7 +129,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
     let config = ProvidersConfig::load();
     let def = config.get(slug)?;
     let kind = match def.protocol? {
-        Protocol::Openai => ProviderKind::OpenAi,
+        Protocol::Openai | Protocol::OpenaiResponses => ProviderKind::OpenAi,
         Protocol::Anthropic => ProviderKind::Anthropic,
         Protocol::Google => ProviderKind::Google,
     };
@@ -227,6 +229,7 @@ pub async fn discover_models(timeouts: Timeouts) -> Vec<String> {
 struct CustomOpenAiProvider {
     compat: OpenAiCompatProvider,
     auth: Arc<Mutex<ResolvedAuth>>,
+    protocol: Protocol,
 }
 
 impl Provider for CustomOpenAiProvider {
@@ -240,12 +243,26 @@ impl Provider for CustomOpenAiProvider {
         opts: RequestOptions,
         _session_id: Option<&'a str>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        let auth = lock_unpoison(&self.auth).clone();
-        let mut body = self.compat.build_body(model, messages, system, tools);
-        if matches!(opts.thinking, ThinkingConfig::Off) {
-            body["thinking"] = serde_json::json!({"type": "disabled"});
-        }
         Box::pin(async move {
+            let auth = lock_unpoison(&self.auth).clone();
+
+            if self.protocol == Protocol::OpenaiResponses {
+                let body = responses::build_body(model, messages, system, tools);
+                return responses::do_stream(
+                    self.compat.client(),
+                    model,
+                    &body,
+                    event_tx,
+                    &auth,
+                    self.compat.stream_timeout(),
+                )
+                .await;
+            }
+
+            let mut body = self.compat.build_body(model, messages, system, tools);
+            if matches!(opts.thinking, ThinkingConfig::Off) {
+                body["thinking"] = serde_json::json!({"type": "disabled"});
+            }
             self.compat
                 .do_stream(model, &[], &body, event_tx, &auth)
                 .await
