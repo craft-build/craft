@@ -10,18 +10,6 @@ local function line_nr_fmt(count)
   return "%" .. w .. "d "
 end
 
-local function build_highlighted_lines(highlighted, fmt, start_idx)
-  local result = {}
-  for idx, hl_line in ipairs(highlighted) do
-    local spans = { format_line_nr(fmt, start_idx + idx - 1) }
-    for _, seg in ipairs(hl_line) do
-      spans[#spans + 1] = seg
-    end
-    result[#result + 1] = spans
-  end
-  return result
-end
-
 function ToolView.new(buf, opts)
   local self = setmetatable({}, ToolView)
   self.buf = buf
@@ -53,7 +41,6 @@ function ToolView:clear()
   self.all_lines = {}
   self.all_skipped = 0
   self.ring_map = {}
-  self._hl = nil
   self:flush()
 end
 
@@ -101,41 +88,33 @@ function ToolView:set_highlight(content, ext)
   if content:sub(-1) == "\n" then
     content = content:sub(1, -2)
   end
+  if content == "" then
+    return false
+  end
   local lines = {}
   for line in (content .. "\n"):gmatch("([^\n]*)\n") do
     lines[#lines + 1] = line
   end
-  if #lines == 0 then
-    return false
-  end
-
-  self._hl = {
-    content = content,
-    ext = ext,
-    line_count = #lines,
-    expanded_done = false,
-  }
 
   local fmt = line_nr_fmt(#lines)
   for idx, line in ipairs(lines) do
     self:append({ format_line_nr(fmt, idx), { line } })
   end
 
-  local visible_count = math.min(#lines, self.max)
-  local visible_start = self.keep == "head" and 1 or (#lines - visible_count + 1)
-  local visible_content = table.concat(lines, "\n", visible_start, visible_start + visible_count - 1)
-
   craft.async.run(function()
-    local highlighted = craft.ui.highlight(visible_content, ext)
+    local highlighted = craft.ui.highlight(content, ext)
     if not highlighted then
       return
     end
-    local hl_lines = build_highlighted_lines(highlighted, fmt, visible_start)
-    self.ring = {}
-    self.ring_start = 1
-    self.ring_count = #hl_lines
-    for i, l in ipairs(hl_lines) do
-      self.ring[i] = l
+    for idx, hl_line in ipairs(highlighted) do
+      if not self.all_lines[idx] then
+        break
+      end
+      local spans = { format_line_nr(fmt, idx) }
+      for _, seg in ipairs(hl_line) do
+        spans[#spans + 1] = seg
+      end
+      self:update_line(idx, spans)
     end
     self:flush()
   end)
@@ -145,26 +124,7 @@ end
 
 function ToolView:toggle()
   self.expanded = not self.expanded
-  if self.expanded and self._hl and not self._hl.expanded_done then
-    self:_highlight_full()
-  else
-    self:flush()
-  end
-end
-
-function ToolView:_highlight_full()
   self:flush()
-  local hl = self._hl
-  craft.async.run(function()
-    local highlighted = craft.ui.highlight(hl.content, hl.ext)
-    if not highlighted then
-      return
-    end
-    hl.expanded_done = true
-    local fmt = line_nr_fmt(hl.line_count)
-    self.all_lines = build_highlighted_lines(highlighted, fmt, 1)
-    self:flush()
-  end)
 end
 
 function ToolView:flush()

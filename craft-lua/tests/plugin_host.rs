@@ -1277,6 +1277,73 @@ async fn memory_write_restore_rebuilds_body_from_input_content() {
     );
 }
 
+async fn restore_snapshot_text(src: &str, tool: &str, expanded: bool) -> String {
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    host.load_source("restore_plugin", src).unwrap();
+    let handle = host.event_handle().expect("event handle available");
+    let (tx, rx) = flume::unbounded();
+
+    handle.request_restore(
+        craft_lua::RestoreItem {
+            tool: Arc::from(tool),
+            tool_use_id: "restore_id".to_owned(),
+            output: "ok".to_owned(),
+            input: serde_json::json!({}),
+            is_error: false,
+            tool_output_lines: ToolOutputLines::default(),
+            theme_gen: None,
+            expanded,
+        },
+        craft_agent::EventSender::new(tx, 0),
+    );
+    let _ = handle.collect_prompt_slots_async().await;
+
+    let mut text = String::new();
+    for env in rx.drain() {
+        if let craft_agent::AgentEvent::ToolSnapshot { snapshot, .. } = env.event {
+            for line in snapshot.lines.iter() {
+                for span in &line.spans {
+                    text.push_str(&span.text);
+                }
+            }
+        }
+    }
+    text
+}
+
+#[test_case::test_case(false, "restore async line" ; "restore_async_task_runs_inline")]
+#[test_case::test_case(true, "click async line" ; "click_replay_async_task_runs_inline")]
+#[tokio::test]
+async fn restore_snapshot_contains_async_run_content(expanded: bool, expected: &str) {
+    let src = format!(
+        r#"craft.api.register_tool({{
+            name = "async_restore",
+            description = "t",
+            schema = {MINIMAL_SCHEMA},
+            handler = function() return "ok" end,
+            restore = function(input, output, is_error, rctx)
+                local buf = craft.ui.buf()
+                buf:line("sync line")
+                craft.async.run(function()
+                    buf:line("restore async line")
+                end)
+                buf:on("click", function()
+                    craft.async.run(function()
+                        buf:line("click async line")
+                    end)
+                end)
+                return buf
+            end
+        }})"#,
+    );
+    let text = restore_snapshot_text(&src, "async_restore", expanded).await;
+    assert!(text.contains("sync line"), "sync content missing: {text}");
+    assert!(
+        text.contains(expected),
+        "async content missing {expected:?}: {text}"
+    );
+}
+
 async fn exec_tool_with_perms(
     reg: &ToolRegistry,
     name: &str,
