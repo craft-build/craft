@@ -1,4 +1,5 @@
 local truncate = require("craft.truncate")
+local extract_image_output = require("craft.image_uri")
 local ToolView = require("craft.tool_view")
 
 local RTK_REWRITE_TIMEOUT_MS = 2000
@@ -441,11 +442,29 @@ craft.api.register_tool({
     end
 
     local function finish(exit_code)
-      local output = table.concat(output_parts)
-      output = compress_output(output)
+      local raw = table.concat(output_parts)
+      local is_error = exit_code ~= 0
+
+      if not is_error then
+        local image_result = extract_image_output(raw)
+        if image_result then
+          local llm_output = image_result.caption .. "\nExit code: 0"
+          view:clear()
+          view:append({ { "[image returned to model]", "dim" } })
+          view:finish()
+          ctx:finish({
+            llm_output = llm_output,
+            is_error = false,
+            body = buf,
+            image = { media_type = image_result.media_type, data = image_result.data },
+          })
+          return
+        end
+      end
+
+      local output = compress_output(raw)
       output = truncate(output, max_lines, max_bytes)
 
-      local is_error = exit_code ~= 0
       local llm_output
       if exit_code == 0 then
         llm_output = output == "" and "Exit code: 0" or output
