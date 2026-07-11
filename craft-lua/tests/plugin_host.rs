@@ -54,6 +54,14 @@ const INVALID_PERMISSION_SCOPE_ERR: &str = "not in schema properties or not type
 const BAD_NAME_SRC: &str = r#"name = "bad name!", description = "test""#;
 const EMPTY_DESC_SRC: &str = r#"name = "valid_name", description = """#;
 const EMPTY_AUD_SRC: &str = r#"name = "no_aud", description = "test", audiences = {}"#;
+const SCOPE_MISSING_FIELD_SRC: &str =
+    r#"name = "bad_scope", description = "test", permission_scopes = "nonexistent""#;
+const SCOPE_NON_STRING_FIELD_SRC: &str =
+    r#"name = "bad_scope", description = "test", permission_scopes = "count""#;
+const OLD_SCOPE_KEY_SRC: &str =
+    r#"name = "old_key", description = "test", permission_scope = "url""#;
+const WRONG_TYPE_SCOPES_SRC: &str =
+    r#"name = "num_scope", description = "test", permission_scopes = 42"#;
 const NON_STRING_FIELD_SCHEMA: &str = r#"{
     type = "object",
     properties = { count = { type = "integer" } },
@@ -129,16 +137,20 @@ fn unload_round_trip() {
     assert!(!reg.has("echo_"));
 }
 
-#[test_case::test_case(BAD_NAME_SRC, "invalid name" ; "invalid_tool_name")]
-#[test_case::test_case(EMPTY_DESC_SRC, "description must be non-empty" ; "empty_description")]
-#[test_case::test_case(EMPTY_AUD_SRC, "audiences" ; "empty_audiences")]
-fn registration_validation_rejects(fields: &str, expected_err: &str) {
+#[test_case::test_case(BAD_NAME_SRC, MINIMAL_SCHEMA, "invalid name" ; "invalid_tool_name")]
+#[test_case::test_case(EMPTY_DESC_SRC, MINIMAL_SCHEMA, "description must be non-empty" ; "empty_description")]
+#[test_case::test_case(EMPTY_AUD_SRC, MINIMAL_SCHEMA, "audiences" ; "empty_audiences")]
+#[test_case::test_case(SCOPE_MISSING_FIELD_SRC, STRING_FIELD_SCHEMA, INVALID_PERMISSION_SCOPE_ERR ; "permission_scopes_missing_field")]
+#[test_case::test_case(SCOPE_NON_STRING_FIELD_SRC, NON_STRING_FIELD_SCHEMA, INVALID_PERMISSION_SCOPE_ERR ; "permission_scopes_non_string_field")]
+#[test_case::test_case(OLD_SCOPE_KEY_SRC, MINIMAL_SCHEMA, "'permission_scope' was removed" ; "old_permission_scope_key")]
+#[test_case::test_case(WRONG_TYPE_SCOPES_SRC, MINIMAL_SCHEMA, "'permission_scopes' must be a string field name or a function" ; "permission_scopes_wrong_type")]
+fn registration_validation_rejects(fields: &str, schema: &str, expected_err: &str) {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let src = format!(
         r#"craft.api.register_tool({{
             {fields},
-            schema = {MINIMAL_SCHEMA},
+            schema = {schema},
             handler = function(input, ctx) return "" end
         }})"#,
     );
@@ -151,7 +163,7 @@ fn registration_validation_rejects(fields: &str, expected_err: &str) {
 
 #[test_case::test_case(STRING_FIELD_SCHEMA, "nonexistent" ; "missing_field")]
 #[test_case::test_case(NON_STRING_FIELD_SCHEMA, "count" ; "non_string_field")]
-fn permission_scope_invalid_rejected(schema: &str, scope_field: &str) {
+fn permission_scopes_invalid_rejected(schema: &str, scope_field: &str) {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
@@ -160,13 +172,13 @@ fn permission_scope_invalid_rejected(schema: &str, scope_field: &str) {
             name = "bad_scope",
             description = "test",
             schema = {schema},
-            permission_scope = "{scope_field}",
+            permission_scopes = "{scope_field}",
             handler = function() return "" end
         }})"#,
     );
     let err = host
         .load_source("bad_scope_plugin", &src)
-        .expect_err("expected error for invalid permission_scope");
+        .expect_err("expected error for invalid permission_scopes");
 
     assert!(matches!(err, PluginError::Lua { .. }));
     assert!(
@@ -176,7 +188,7 @@ fn permission_scope_invalid_rejected(schema: &str, scope_field: &str) {
 }
 
 #[test]
-fn permission_scope_valid_string_field_accepted() {
+fn permission_scopes_valid_string_field_accepted() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
 
@@ -185,7 +197,7 @@ fn permission_scope_valid_string_field_accepted() {
             name = "ok_scope",
             description = "test",
             schema = {STRING_FIELD_SCHEMA},
-            permission_scope = "url",
+            permission_scopes = "url",
             handler = function() return "" end
         }})"#,
     );
