@@ -6,7 +6,7 @@ use craft_agent::agent::LoadedInstructions;
 use craft_agent::cancel::CancelToken;
 use craft_agent::tools::FileReadTracker;
 use craft_config::{AgentConfig, ToolOutputLines};
-use mlua::{LuaSerdeExt, UserData, UserDataMethods, Value as LuaValue};
+use mlua::{LuaSerdeExt, MultiValue, UserData, UserDataMethods, Value as LuaValue};
 
 use crate::api::tool::ToolCallReply;
 use crate::runtime::active_task;
@@ -38,7 +38,25 @@ impl UserData for LuaCtx {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("cancelled", |_, this, ()| Ok(this.cancel.is_cancelled()));
 
-        methods.add_method("config", |lua, this, ()| lua.to_value(&this.config));
+        methods.add_method("config", |lua, this, args: MultiValue| {
+            let config_val = lua.to_value(&this.config)?;
+            if args.is_empty() {
+                return Ok(config_val);
+            }
+            let key: String = lua.from_value(args[0].clone())?;
+            let default = args.get(1).cloned().unwrap_or(LuaValue::Nil);
+            match config_val {
+                LuaValue::Table(ref tbl) => {
+                    let val = tbl.raw_get::<LuaValue>(key.as_str())?;
+                    if matches!(val, LuaValue::Nil) {
+                        Ok(default)
+                    } else {
+                        Ok(val)
+                    }
+                }
+                _ => Ok(default),
+            }
+        });
 
         methods.add_method("tool_output_lines", |lua, this, ()| {
             lua.to_value(&this.tool_output_lines)

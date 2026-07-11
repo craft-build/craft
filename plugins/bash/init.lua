@@ -151,8 +151,7 @@ local function denied_command_reason(command)
 end
 
 local function rtk_rewrite(command, ctx)
-  local config = ctx:config()
-  if config and config.no_rtk then
+  if ctx:config("no_rtk") then
     return nil
   end
 
@@ -419,10 +418,9 @@ craft.api.register_tool({
     if deny then
       return { llm_output = deny, is_error = true }
     end
-    local config = ctx:config()
-    local timeout_secs = input.timeout or (config and config.bash_timeout_secs) or 120
-    local max_lines = (config and config.max_output_lines) or 2000
-    local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
+    local timeout_secs = input.timeout or ctx:config("bash_timeout_secs", 120)
+    local max_lines = ctx:config("max_output_lines", 2000)
+    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
 
     if not input.background then
       ctx:set_deadline(timeout_secs)
@@ -578,9 +576,8 @@ craft.api.register_tool({
       return { llm_output = 'error: unknown task_id "' .. id .. '"', is_error = true }
     end
 
-    local config = ctx:config()
-    local max_lines = (config and config.max_output_lines) or 2000
-    local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
+    local max_lines = ctx:config("max_output_lines", 2000)
+    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
 
     local output = table.concat(job.output_parts)
     output = compress_output(output)
@@ -631,9 +628,8 @@ craft.api.register_tool({
       return { llm_output = 'error: unknown task_id "' .. id .. '"', is_error = true }
     end
 
-    local config = ctx:config()
-    local max_lines = (config and config.max_output_lines) or 2000
-    local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
+    local max_lines = ctx:config("max_output_lines", 2000)
+    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
     local timeout_secs = input.timeout or 60
     local pattern = input.pattern
 

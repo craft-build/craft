@@ -111,10 +111,9 @@ craft.api.register_tool({
       return "error: unknown format: " .. tostring(fmt)
     end
 
-    local config = ctx:config()
-    local max_response = (config and config.max_response_bytes) or (5 * 1024 * 1024)
-    local max_lines = (config and config.max_output_lines) or 2000
-    local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
+    local max_response = ctx:config("max_response_bytes", (5 * 1024 * 1024))
+    local max_lines = ctx:config("max_output_lines", 2000)
+    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
 
     local resp, err = craft.net.request(url, {
       timeout = input.timeout or 30,

@@ -239,14 +239,13 @@ craft.api.register_tool({
     end
     pattern = pattern:gsub('"$', "")
 
-    local config = ctx:config()
-    local search_limit = (config and config.search_result_limit) or 100
-    local max_lines = (config and config.max_output_lines) or 2000
-    local max_bytes = (config and config.max_output_bytes) or (50 * 1024)
+    local search_limit = ctx:config("search_result_limit", 100)
+    local max_lines = ctx:config("max_output_lines", 2000)
+    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
 
     local limit = math.min(input.limit or search_limit, MAX_PER_CALL_LIMIT)
 
-    local max_line_bytes = config and config.max_line_bytes
+    local max_line_bytes = ctx:config("max_line_bytes")
 
     local entries, err = craft.fs.grep(pattern, {
       path = input.path,
