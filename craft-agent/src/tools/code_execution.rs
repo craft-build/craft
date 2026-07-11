@@ -232,11 +232,7 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
                             Emit::Silent,
                         ),
                     );
-                    if done.is_error {
-                        Err(done.output.as_text())
-                    } else {
-                        Ok(Value::String(done.output.as_text()))
-                    }
+                    super::interpreter_bridge::flatten(&done).map(Value::String)
                 },
             ),
         );
@@ -305,15 +301,7 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
                     )
                     .await;
 
-                    let result = if done.is_error {
-                        Err(done.output.as_text())
-                    } else if let ToolOutput::Image { caption, .. } = &done.output {
-                        Ok(Value::String(format!(
-                            "{caption} ({IMAGE_NOT_VISIBLE_NOTE})"
-                        )))
-                    } else {
-                        Ok(Value::String(done.output.as_text()))
-                    };
+                    let result = super::interpreter_bridge::flatten(&done).map(Value::String);
                     (pc.call_id, result)
                 });
             }
