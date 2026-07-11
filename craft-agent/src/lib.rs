@@ -32,6 +32,7 @@ pub mod template;
 pub mod tools;
 pub use tools::ToolFilter;
 pub mod types;
+pub mod wiki;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

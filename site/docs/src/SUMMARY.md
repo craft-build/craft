@@ -29,4 +29,5 @@
 - [Headless Mode](./headless.md)
 - [ACP](./acp.md)
 - [Flow Mode](./flow.md)
+- [Wiki](./wiki.md)
 - [Stream Rules](./ttsr.md)

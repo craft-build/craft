@@ -29,6 +29,7 @@ pub mod doctor;
 pub mod review;
 pub mod run;
 pub mod term;
+pub mod wiki;
 
 fn credential_path(slug: &str) -> String {
     match StateDir::resolve() {

@@ -222,6 +222,9 @@ pub enum Action {
         pending_load_session: Option<Box<LoadedSession>>,
     },
     ApplyContextWindowOverride,
+    WikiIngest {
+        source_path: PathBuf,
+    },
 }
 
 const ERROR_DISPLAY: Duration = Duration::from_secs(5);

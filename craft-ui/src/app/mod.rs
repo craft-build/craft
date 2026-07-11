@@ -1675,6 +1675,7 @@ impl App {
             "/checkpoint" => {
                 self.run_meta_prompt("/checkpoint", craft_agent::prompt::CHECKPOINT_PROMPT)
             }
+            "/wiki" => self.execute_wiki_command(&cmd.args),
             name if name.starts_with("/project:") || name.starts_with("/user:") => {
                 self.execute_custom_command(name, &cmd.args)
             }
@@ -1687,6 +1688,92 @@ impl App {
             }
             _ => vec![],
         }
+    }
+
+    fn execute_wiki_command(&mut self, args: &str) -> Vec<Action> {
+        let mut parts = args.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        match sub {
+            "ingest" => {
+                let Some(path_str) = parts.next() else {
+                    self.flash("Usage: /wiki ingest <file>".into());
+                    return vec![];
+                };
+                let path = PathBuf::from(path_str);
+                let absolute = if path.is_absolute() {
+                    path
+                } else {
+                    PathBuf::from(&self.state.session.cwd).join(&path)
+                };
+                if !absolute.exists() {
+                    self.flash(format!("No such file: {}", absolute.display()));
+                    return vec![];
+                }
+                self.flash(format!("Ingesting {}...", absolute.display()));
+                vec![Action::WikiIngest {
+                    source_path: absolute,
+                }]
+            }
+            "list" => match self.wiki_list_text() {
+                Ok(text) => {
+                    self.flash(text);
+                    vec![]
+                }
+                Err(e) => {
+                    self.flash(format!("wiki list failed: {e}"));
+                    vec![]
+                }
+            },
+            "show" => {
+                let Some(slug) = parts.next() else {
+                    self.flash("Usage: /wiki show <slug>".into());
+                    return vec![];
+                };
+                match self.wiki_show_text(slug) {
+                    Ok(text) => {
+                        self.flash(text);
+                        vec![]
+                    }
+                    Err(e) => {
+                        self.flash(format!("wiki show failed: {e}"));
+                        vec![]
+                    }
+                }
+            }
+            "" => {
+                self.flash("Usage: /wiki <ingest <file> | list | show <slug>>".into());
+                vec![]
+            }
+            other => {
+                self.flash(format!("Unknown /wiki subcommand: {other}"));
+                vec![]
+            }
+        }
+    }
+
+    fn wiki_list_text(&self) -> Result<String, String> {
+        let cwd = PathBuf::from(&self.state.session.cwd);
+        let store = craft_storage::wiki::WikiStore::open(&cwd).map_err(|e| e.to_string())?;
+        let listings = store.list().map_err(|e| e.to_string())?;
+        if listings.is_empty() {
+            return Ok("Wiki is empty. Use /wiki ingest <file>.".into());
+        }
+        let mut out = String::new();
+        for entry in listings {
+            let kind = if entry.kind == craft_storage::wiki::ListingKind::Source {
+                "source"
+            } else {
+                "page"
+            };
+            out.push_str(&format!("[{kind}] {} - {}\n", entry.slug, entry.title));
+        }
+        Ok(out)
+    }
+
+    fn wiki_show_text(&self, slug: &str) -> Result<String, String> {
+        let cwd = PathBuf::from(&self.state.session.cwd);
+        let store = craft_storage::wiki::WikiStore::open(&cwd).map_err(|e| e.to_string())?;
+        store.read_page(slug).map_err(|e| e.to_string())
     }
 
     fn run_lua_command(&self, name: &str, args: String) {

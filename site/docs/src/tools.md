@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 45 built-in tools. This is the full reference.
+Craft ships with 47 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -429,6 +429,23 @@ Search the current Flow workstream's persisted documents (goal, plan, requiremen
 |-----------|------|----------|---------|-------------|
 | `k` | integer | no | 5, max 20 | Maximum results to return |
 | `query` | string | yes |  | Natural-language query describing what you need |
+
+### `wiki_read` *(native)*
+
+Read a page or ingested-source note from the project's local wiki (`.wiki/`). The `page` argument is the entry's slug (lowercase, digits, and dashes). Returns the markdown body. Wiki content is durable plain markdown committed to the repo.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `page` | string | yes | Slug of the wiki page or source note to read |
+
+### `wiki_append` *(native)*
+
+Append markdown `body` to a wiki page in the project's local wiki (`.wiki/`), creating it if it does not exist, then regenerate the wiki index. `page` is the entry's slug (lowercase, digits, and dashes). Use this to capture durable, shareable project knowledge (decisions, notes, glossary entries).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `body` | string | yes | Markdown body to append |
+| `page` | string | yes | Slug of the wiki page to append to |
 
 ## Web & Desktop
 

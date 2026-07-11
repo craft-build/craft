@@ -67,7 +67,14 @@ const SECTIONS: &[(&str, &[&str])] = &[
     ),
     (
         "Agent & Knowledge",
-        &["task", "memory", "skill", "flow_search"],
+        &[
+            "task",
+            "memory",
+            "skill",
+            "flow_search",
+            "wiki_read",
+            "wiki_append",
+        ],
     ),
     (
         "Web & Desktop",

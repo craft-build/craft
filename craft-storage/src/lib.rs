@@ -13,6 +13,7 @@ pub mod sessions;
 pub mod stats;
 pub mod theme;
 pub mod version;
+pub mod wiki;
 
 use std::fs;
 use std::io::Write;

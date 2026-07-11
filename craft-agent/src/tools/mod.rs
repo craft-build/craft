@@ -44,6 +44,7 @@ mod styleguide;
 pub mod subagent;
 mod task;
 mod validation;
+mod wiki;
 pub mod worktree;
 mod write;
 mod zoom;
@@ -204,6 +205,8 @@ pub const INSPECT_TOOL_NAME: &str = inspect::Inspect::NAME;
 pub const MOVE_TOOL_NAME: &str = move_file::MoveFile::NAME;
 pub const OUTLINE_TOOL_NAME: &str = outline::Outline::NAME;
 pub const SAFETY_TOOL_NAME: &str = safety::Safety::NAME;
+pub const WIKI_READ_TOOL_NAME: &str = wiki::WikiRead::NAME;
+pub const WIKI_APPEND_TOOL_NAME: &str = wiki::WikiAppend::NAME;
 pub const ZOOM_TOOL_NAME: &str = zoom::Zoom::NAME;
 
 pub(crate) const PLAN_WRITE_RESTRICTED: &str = "write restricted to plan file in plan mode";
@@ -703,6 +706,8 @@ register_tools! {
     delete::Delete,
     inspect::Inspect,
     move_file::MoveFile,
+    wiki::WikiRead,
+    wiki::WikiAppend,
 }
 
 /// Native tools that require the embedding model. `flow_search` is always

@@ -41,6 +41,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 libc = { workspace = true }
 open = { workspace = true }
+jiff = { workspace = true }
 
 
 [dev-dependencies]

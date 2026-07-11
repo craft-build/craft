@@ -258,6 +258,8 @@ pub enum Command {
     Run(RunCommand),
     /// Run the Flow multi-stage pipeline on a request, or prune old workstreams
     Flow(FlowCommand),
+    /// Manage the in-project local wiki knowledge base (`.wiki/`)
+    Wiki(WikiCommand),
     /// Run deterministic review checks against the current diff
     Review(ReviewCommand),
     /// Terminal shell integration: transparent command logging and `@craft` alias
@@ -383,6 +385,28 @@ pub enum FlowAction {
 pub struct FlowCommand {
     #[command(subcommand)]
     pub action: Option<FlowAction>,
+}
+
+#[derive(Subcommand)]
+pub enum WikiAction {
+    /// Ingest a local file into the wiki as a structured source note with an LLM summary
+    Ingest {
+        /// Path to the local file to ingest
+        source: std::path::PathBuf,
+        /// Model spec (provider/model-id) for the summarization call
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+    },
+    /// List all wiki pages and ingested sources with their titles
+    List,
+    /// Print a wiki page or source note by its slug
+    Show { id: String },
+}
+
+#[derive(Parser)]
+pub struct WikiCommand {
+    #[command(subcommand)]
+    pub action: WikiAction,
 }
 
 #[derive(Subcommand)]

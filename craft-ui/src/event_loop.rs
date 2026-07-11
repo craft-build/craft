@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,6 +117,76 @@ struct BackgroundModels {
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
     task: tokio::task::JoinHandle<()>,
+}
+
+const WIKI_MAX_SUMMARY_BYTES: usize = 24 * 1024;
+
+async fn run_wiki_ingest(
+    cwd: &std::path::Path,
+    source_path: &std::path::Path,
+    provider: &dyn Provider,
+    model: &Model,
+) -> String {
+    let content = match std::fs::read_to_string(source_path) {
+        Ok(c) => c,
+        Err(e) => return format!("wiki ingest failed: read {source_path:?}: {e}"),
+    };
+    let title = craft_storage::wiki::first_h1_title(&content).unwrap_or_else(|| {
+        source_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("untitled")
+            .to_string()
+    });
+    let slug = craft_storage::wiki::slugify(&title);
+    let excerpt = craft_storage::wiki::extract_excerpt(&content);
+
+    let truncated = if content.len() > WIKI_MAX_SUMMARY_BYTES {
+        let cut = content[..WIKI_MAX_SUMMARY_BYTES]
+            .char_indices()
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(WIKI_MAX_SUMMARY_BYTES);
+        content[..cut].to_string()
+    } else {
+        content
+    };
+    let summary = match craft_agent::wiki::summarize(provider, model, &truncated, None).await {
+        Ok(s) => s,
+        Err(e) => return format!("wiki ingest failed: summarize: {e}"),
+    };
+
+    let store = match craft_storage::wiki::WikiStore::open(cwd) {
+        Ok(s) => s,
+        Err(e) => return format!("wiki ingest failed: open store: {e}"),
+    };
+    let ingested_at = jiff::Zoned::now()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let note = craft_storage::wiki::SourceNote {
+        slug: slug.clone(),
+        title: title.clone(),
+        source_path: source_path.display().to_string(),
+        ingested_at,
+        summary,
+        excerpt,
+        linked_pages: Vec::new(),
+    };
+    if let Err(e) = store.write_source_note(&note) {
+        return format!("wiki ingest failed: write note: {e}");
+    }
+    if let Err(e) = store.append_log(&format!(
+        "{} ingested `{}` -> {}",
+        note.ingested_at,
+        source_path.display(),
+        slug,
+    )) {
+        return format!("wiki ingest failed: append log: {e}");
+    }
+    if let Err(e) = store.rebuild_index() {
+        return format!("wiki ingest failed: rebuild index: {e}");
+    }
+    format!("wiki: ingested `{}` as `{slug}`", source_path.display())
 }
 
 fn merge_batch(
@@ -652,6 +723,9 @@ impl<'t> EventLoop<'t> {
                 self.app
                     .start_btw(question, Arc::clone(&slot.provider), slot.model.clone());
             }
+            Action::WikiIngest { source_path } => {
+                self.wiki_ingest(source_path);
+            }
             Action::Suspend => terminal::suspend(self.terminal),
             Action::RefreshModels => self.refresh_models(),
             Action::RefreshUsage => self.refresh_usage(),
@@ -777,6 +851,18 @@ impl<'t> EventLoop<'t> {
                 Err(e) => UsageFetchState::Error(e.user_message()),
             };
             slot.store(Some(Arc::new(state)));
+        });
+    }
+
+    fn wiki_ingest(&self, source_path: PathBuf) {
+        let slot = self.model_slot.load();
+        let provider = Arc::clone(&slot.provider);
+        let model = slot.model.clone();
+        let cwd = PathBuf::from(self.app.state.session.cwd.clone());
+        let warn_tx = self.warn_tx.clone();
+        tokio::spawn(async move {
+            let result = run_wiki_ingest(&cwd, &source_path, provider.as_ref(), &model).await;
+            let _ = warn_tx.send(result);
         });
     }
 

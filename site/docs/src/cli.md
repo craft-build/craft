@@ -137,6 +137,16 @@ craft term run "why did that fail?"
 craft term info                  # show recent logged commands
 ```
 
+### `wiki`
+
+Manage the in-project local [wiki](./wiki.md) knowledge base (`.wiki/`).
+
+```bash
+craft wiki ingest ./docs/design.md   # ingest a file with an LLM summary
+craft wiki list                      # list pages and sources
+craft wiki show <slug>               # print a page or source note
+```
+
 ### `doctor`
 
 Diagnose and self-heal provider configuration. See [Doctor](./doctor.md).

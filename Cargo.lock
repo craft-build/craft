@@ -1525,6 +1525,7 @@ dependencies = [
  "craft-storage",
  "craft-ui",
  "flume",
+ "jiff",
  "libc",
  "open",
  "regex",
@@ -1858,6 +1859,7 @@ dependencies = [
 name = "craft-storage"
 version = "0.8.3"
 dependencies = [
+ "craft-markdown",
  "etcetera",
  "filetime",
  "getrandom 0.4.3",
