@@ -116,6 +116,10 @@ impl StreamingContent {
         self.typewriter.is_empty()
     }
 
+    pub fn line_count(&self) -> usize {
+        self.typewriter.buffer_line_count()
+    }
+
     pub fn is_animating(&self) -> bool {
         self.typewriter.is_animating()
     }

@@ -485,6 +485,7 @@ pub fn history_to_display(
                                 render_header,
                                 tool_raw_input: Some(input.clone()),
                                 snapshot_theme_gen: theme_gen,
+                                thinking_collapsed: false,
                             });
                         }
                         _ => {}

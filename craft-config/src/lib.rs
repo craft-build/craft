@@ -292,6 +292,7 @@ pub struct UiFileConfig {
     pub flash_duration_ms: Option<u64>,
     pub typewriter_ms_per_char: Option<u64>,
     pub mouse_scroll_lines: Option<u32>,
+    pub show_thinking: Option<bool>,
     pub tool_output_lines: Option<ToolOutputLinesFile>,
     pub keybindings: Option<HashMap<String, KeybindingOverride>>,
 }
@@ -322,7 +323,8 @@ impl UiFileConfig {
             scrollbar,
             flash_duration_ms,
             typewriter_ms_per_char,
-            mouse_scroll_lines
+            mouse_scroll_lines,
+            show_thinking
         );
         match (self.tool_output_lines.as_mut(), overlay.tool_output_lines) {
             (Some(base), Some(over)) => base.merge(over),
@@ -646,6 +648,12 @@ pub struct UiConfig {
     #[config(default = DEFAULT_MOUSE_SCROLL_LINES, min = MIN_MOUSE_SCROLL_LINES, desc = "Lines per mouse wheel scroll")]
     pub mouse_scroll_lines: u32,
 
+    #[config(
+        default = true,
+        desc = "When true (default), show full model reasoning live and persisted. When false, hide reasoning behind an indicator (thinking> ...) with a click-to-expand hint, both while thinking and after it completes"
+    )]
+    pub show_thinking: bool,
+
     #[config(skip, default = "ToolOutputLines::default()")]
     pub tool_output_lines: ToolOutputLines,
 
@@ -692,6 +700,7 @@ impl UiConfig {
                 .typewriter_ms_per_char
                 .unwrap_or(DEFAULT_TYPEWRITER_MS_PER_CHAR),
             mouse_scroll_lines: f.mouse_scroll_lines.unwrap_or(DEFAULT_MOUSE_SCROLL_LINES),
+            show_thinking: f.show_thinking.unwrap_or(true),
             tool_output_lines: ToolOutputLines::from_file(f.tool_output_lines),
             keybindings: KeybindingsConfig::from_file(f.keybindings),
         }
@@ -1979,6 +1988,25 @@ tasks = []
             err,
             ConfigError::BelowMinimum { section: s, field: f, .. } if s == section && f == field
         ));
+    }
+
+    #[test]
+    fn show_thinking_deserializes_true() {
+        let raw: RawConfig = toml::from_str("[ui]\nshow_thinking = true\n").unwrap();
+        assert!(raw.ui.show_thinking.unwrap());
+    }
+
+    #[test]
+    fn show_thinking_deserializes_false() {
+        let raw: RawConfig = toml::from_str("[ui]\nshow_thinking = false\n").unwrap();
+        assert!(!raw.ui.show_thinking.unwrap());
+    }
+
+    #[test]
+    fn show_thinking_missing_defaults_true() {
+        let raw: RawConfig = toml::from_str("").unwrap();
+        let config = raw.into_config(false).unwrap();
+        assert!(config.ui.show_thinking);
     }
 
     #[test]

@@ -302,6 +302,7 @@ pub struct DisplayMessage {
     pub render_header: Option<BufferSnapshot>,
     pub tool_raw_input: Option<Value>,
     pub snapshot_theme_gen: u64,
+    pub thinking_collapsed: bool,
 }
 
 impl DisplayMessage {
@@ -321,6 +322,7 @@ impl DisplayMessage {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 
@@ -340,6 +342,7 @@ impl DisplayMessage {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 }

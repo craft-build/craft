@@ -1092,6 +1092,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 
@@ -1389,6 +1390,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 
@@ -1504,6 +1506,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 
@@ -1543,6 +1546,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 
@@ -1707,6 +1711,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 
@@ -1814,6 +1819,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         }
     }
 
@@ -1961,6 +1967,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         };
         let tl = build_tool_lines(
             &msg,
@@ -1999,6 +2006,7 @@ mod tests {
             render_header: None,
             tool_raw_input: None,
             snapshot_theme_gen: 0,
+            thinking_collapsed: false,
         };
         let tl = build_tool_lines(
             &msg,
