@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-07-12
+
+### Added
+
+- **wiki**: adopt OKF frontmatter and add project-init orchestrator (`1c21e82a`)
+- **flow**: recovery classification taxonomy mapping tool/subagent/reconciliation failures to typed kinds for structured logging (`886fd43e`)
+- **flow**: drift reconciliation on resume, detecting and repairing mismatches between persisted workstream state and on-disk stage/chunk docs (`886fd43e`)
+- **flow**: `FlowOutcome::NeedsReview` soft-warning path for verifier `needs_review` status, surfaced in the CLI, TUI agent loop, and flow panel (`886fd43e`)
+
+### Fixed
+
+- **flow**: stage doc missing repair now clears `ws.stage` so `detect_drift` stops re-finding it (`886fd43e`)
+- **flow**: removed dead `DriftKind::CorruptWorkstreamState` variant and unreachable `UnresolvedDrift` match arms (`886fd43e`)
+- **agent**: include the concrete validation error in the subagent schema-exhaustion message (`886fd43e`)
+
 ## [0.8.4] - 2026-07-11
 
 ### Added
