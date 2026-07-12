@@ -141,7 +141,7 @@ async fn run_wiki_ingest(
     let slug = craft_storage::wiki::slugify(&title);
     let excerpt = craft_storage::wiki::extract_excerpt(&content);
 
-    let truncated = if content.len() > WIKI_MAX_SUMMARY_BYTES {
+    let truncated: String = if content.len() > WIKI_MAX_SUMMARY_BYTES {
         let cut = content[..WIKI_MAX_SUMMARY_BYTES]
             .char_indices()
             .last()
@@ -149,7 +149,7 @@ async fn run_wiki_ingest(
             .unwrap_or(WIKI_MAX_SUMMARY_BYTES);
         content[..cut].to_string()
     } else {
-        content
+        content.clone()
     };
     let summary = match craft_agent::wiki::summarize(provider, model, &truncated, None).await {
         Ok(s) => s,
@@ -170,17 +170,14 @@ async fn run_wiki_ingest(
         ingested_at,
         summary,
         excerpt,
+        body: content,
         linked_pages: Vec::new(),
     };
     if let Err(e) = store.write_source_note(&note) {
         return format!("wiki ingest failed: write note: {e}");
     }
-    if let Err(e) = store.append_log(&format!(
-        "{} ingested `{}` -> {}",
-        note.ingested_at,
-        source_path.display(),
-        slug,
-    )) {
+    let log_message = format!("Ingested `{}` as `{slug}`.", source_path.display());
+    if let Err(e) = store.append_log(&note.ingested_at, "Creation", &log_message) {
         return format!("wiki ingest failed: append log: {e}");
     }
     if let Err(e) = store.rebuild_index() {

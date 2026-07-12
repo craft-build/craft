@@ -10,6 +10,7 @@ use std::sync::Arc;
 use color_eyre::Result;
 use color_eyre::eyre::{Context, bail};
 
+use craft_agent::prompt::WIKI_INIT_PROMPT;
 use craft_agent::wiki::summarize;
 use craft_config::load_env_files;
 use craft_lua::PluginHost;
@@ -20,6 +21,8 @@ use craft_storage::wiki::{
 };
 
 use crate::cli::WikiAction;
+use crate::cmd::headless::{self, HeadlessOptions};
+use crate::print::OutputFormat;
 use crate::setup;
 
 /// Maximum bytes of source text sent to the summarization model. Bounds cost.
@@ -30,7 +33,27 @@ pub async fn run(cmd: WikiAction) -> Result<()> {
         WikiAction::Ingest { source, model } => ingest(source, model).await,
         WikiAction::List => list(),
         WikiAction::Show { id } => show(&id),
+        WikiAction::Init { model } => init(model).await,
     }
+}
+
+async fn init(model_spec: Option<String>) -> Result<()> {
+    let outcome = headless::run_headless(HeadlessOptions {
+        model: model_spec,
+        prompt: WIKI_INIT_PROMPT.to_string(),
+        yolo: false,
+        no_plugins: false,
+        no_rtk: false,
+        extra_excluded_tools: vec![],
+        context: vec![],
+        persist_session: false,
+        max_turns: None,
+        allowed_tools: vec![],
+        stream: true,
+    })
+    .await?;
+    headless::print_outcome(&outcome, OutputFormat::Text);
+    Ok(())
 }
 
 async fn ingest(source: PathBuf, model_spec: Option<String>) -> Result<()> {
@@ -106,18 +129,16 @@ async fn ingest(source: PathBuf, model_spec: Option<String>) -> Result<()> {
         ingested_at,
         summary,
         excerpt,
+        body: content,
         linked_pages: Vec::new(),
     };
     store
         .write_source_note(&note)
         .context("write source note")?;
-    let log_line = format!(
-        "{} ingested `{}` -> {}",
-        note.ingested_at,
-        abs_source.display(),
-        slug,
-    );
-    store.append_log(&log_line).context("append wiki log")?;
+    let log_message = format!("Ingested `{}` as `{}`.", abs_source.display(), slug);
+    store
+        .append_log(&note.ingested_at, "Creation", &log_message)
+        .context("append wiki log")?;
     store.rebuild_index().context("rebuild wiki index")?;
 
     let note_path = store

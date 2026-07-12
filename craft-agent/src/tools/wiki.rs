@@ -4,7 +4,7 @@
 
 use std::env;
 
-use craft_storage::wiki::WikiStore;
+use craft_storage::wiki::{PageMeta, WikiStore};
 use craft_tool_macro::Tool;
 use serde::Deserialize;
 
@@ -21,6 +21,10 @@ const WIKI_APPEND_DESCRIPTION: &str = "\
 Append markdown `body` to a wiki page in the project's local wiki (`.wiki/`), \
 creating it if it does not exist, then regenerate the wiki index. \
 `page` is the entry's slug (lowercase, digits, and dashes). \
+The optional `kind`, `description`, and `tags` fields populate the page's OKF \
+frontmatter: `kind` sets the `type` for a new page (default `Note`), and \
+`description`/`tags` fill in a missing field on an existing page without \
+overwriting what is already there. \
 Use this to capture durable, shareable project knowledge (decisions, notes, glossary entries).";
 
 #[derive(Tool, Debug, Clone, Deserialize)]
@@ -63,13 +67,23 @@ pub struct WikiAppend {
     page: String,
     #[param(description = "Markdown body to append")]
     body: String,
+    #[param(
+        description = "OKF `type` for a new page, e.g. Note, Reference, Decision. Ignored if the page already exists."
+    )]
+    kind: Option<String>,
+    #[param(
+        description = "One-line description for the page's OKF frontmatter and the index listing. Fills in a missing field only."
+    )]
+    description: Option<String>,
+    #[param(description = "Tags for the page's OKF frontmatter. Fills in a missing field only.")]
+    tags: Option<Vec<String>>,
 }
 
 impl WikiAppend {
     pub const NAME: &str = "wiki_append";
     pub const DESCRIPTION: &str = WIKI_APPEND_DESCRIPTION;
     pub const EXAMPLES: Option<&str> = Some(
-        "[{\"page\": \"decisions\", \"body\": \"## Use Postgres\\n\\nDecided 2026-01-01 to standardize on Postgres.\"}]",
+        "[{\"page\": \"decisions\", \"body\": \"## Use Postgres\\n\\nDecided 2026-01-01 to standardize on Postgres.\", \"kind\": \"Decision\", \"description\": \"Database choice\", \"tags\": [\"database\", \"adr\"]}]",
     );
 
     pub fn start_header(&self) -> String {
@@ -79,8 +93,16 @@ impl WikiAppend {
     pub async fn execute(&self, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         let cwd = env::current_dir().map_err(|e| format!("cwd error: {e}"))?;
         let store = WikiStore::open(&cwd).map_err(|e| e.to_string())?;
+        let timestamp = jiff::Zoned::now()
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let meta = PageMeta {
+            kind: self.kind.clone(),
+            description: self.description.clone(),
+            tags: self.tags.clone().unwrap_or_default(),
+        };
         store
-            .append_page(&self.page, &self.body)
+            .append_page_meta(&self.page, &self.body, Some(&timestamp), meta)
             .map_err(|e| e.to_string())?;
         store.rebuild_index().map_err(|e| e.to_string())?;
         Ok(ToolOutput::Plain(format!(
@@ -127,6 +149,66 @@ mod tests {
 
         let index = std::fs::read_to_string(dir.path().join(".wiki/index.md")).unwrap();
         assert!(index.contains("[Decisions](pages/decisions.md)"));
+
+        env::set_current_dir(prev).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_append_with_meta_sets_okf_frontmatter() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prev = env::current_dir().unwrap();
+        env::set_current_dir(dir.path()).unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+
+        let append = WikiAppend::parse_input(&serde_json::json!({
+            "page": "tech-stack",
+            "body": "# Tech Stack\n\nRust.",
+            "kind": "Reference",
+            "description": "stack overview",
+            "tags": ["rust", "toolchain"],
+        }))
+        .unwrap();
+        append.execute(&ctx).await.unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join(".wiki/pages/tech-stack.md")).unwrap();
+        assert!(raw.contains("type: Reference"));
+        assert!(raw.contains("description: stack overview"));
+        assert!(raw.contains("rust"));
+
+        let index = std::fs::read_to_string(dir.path().join(".wiki/index.md")).unwrap();
+        assert!(index.contains("[Tech Stack](pages/tech-stack.md) - stack overview"));
+
+        env::set_current_dir(prev).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wiki_append_meta_does_not_overwrite_existing_type() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prev = env::current_dir().unwrap();
+        env::set_current_dir(dir.path()).unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+
+        let append = WikiAppend::parse_input(&serde_json::json!({
+            "page": "decisions",
+            "body": "# Decisions\n\nUse Rust.",
+            "kind": "Decision",
+        }))
+        .unwrap();
+        append.execute(&ctx).await.unwrap();
+
+        let append2 = WikiAppend::parse_input(&serde_json::json!({
+            "page": "decisions",
+            "body": "## Also use tokio.",
+            "kind": "Reference",
+        }))
+        .unwrap();
+        append2.execute(&ctx).await.unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join(".wiki/pages/decisions.md")).unwrap();
+        assert!(raw.contains("type: Decision"));
+        assert!(!raw.contains("type: Reference"));
+        assert!(raw.contains("Use Rust."));
+        assert!(raw.contains("Also use tokio."));
 
         env::set_current_dir(prev).unwrap();
     }

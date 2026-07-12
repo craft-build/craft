@@ -1740,8 +1740,9 @@ impl App {
                     }
                 }
             }
+            "init" => self.run_meta_prompt("/wiki init", craft_agent::prompt::WIKI_INIT_PROMPT),
             "" => {
-                self.flash("Usage: /wiki <ingest <file> | list | show <slug>>".into());
+                self.flash("Usage: /wiki <init | ingest <file> | list | show <slug>>".into());
                 vec![]
             }
             other => {

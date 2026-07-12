@@ -401,6 +401,12 @@ pub enum WikiAction {
     List,
     /// Print a wiki page or source note by its slug
     Show { id: String },
+    /// Research the current project and generate a structured starter wiki (.wiki/)
+    Init {
+        /// Model spec (provider/model-id) for the orchestrator agent
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Parser)]

@@ -48,6 +48,7 @@ pub const COMPACTION_TARGETED_USER: &str = include_str!("prompts/compaction_targ
 pub const DREAM_PROMPT: &str = include_str!("prompts/dream.md");
 pub const DISTILL_PROMPT: &str = include_str!("prompts/distill.md");
 pub const CHECKPOINT_PROMPT: &str = include_str!("prompts/checkpoint.md");
+pub const WIKI_INIT_PROMPT: &str = include_str!("prompts/wiki_init.md");
 
 pub const DEFAULT_IDENTITY: &str = r#"You are Craft, an interactive CLI coding agent. Use the tools available to assist the user with software engineering tasks. Complete tasks successfully while minimizing token usage and tool calls to avoid context bloat.
 

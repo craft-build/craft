@@ -144,7 +144,7 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "/wiki",
-        description: "Ingest a file, list entries, or show a page from the project wiki (.wiki)",
+        description: "Init the project wiki, ingest a file, list entries, or show a page",
         max_args: usize::MAX,
     },
 ];

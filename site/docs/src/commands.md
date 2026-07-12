@@ -30,7 +30,7 @@ Type `/` in the input box to open the command palette.
 | `/checkpoint` | Write a session checkpoint for smooth resume |
 | `/set-context-window` | Override a model's context window (tokens) |
 | `/clear-context-window` | Clear a context-window override |
-| `/wiki` | Ingest a file, list entries, or show a page from the project wiki (.wiki) |
+| `/wiki` | Init the project wiki, ingest a file, list entries, or show a page |
 | `/memory` | View, edit, and delete memory files |
 
 ## Custom commands
