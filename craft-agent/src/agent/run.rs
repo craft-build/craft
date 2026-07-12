@@ -497,7 +497,15 @@ impl<'h> Agent<'h> {
                 return Ok(TurnOutcome::Overflow);
             }
             Err(e) => {
-                error!(error = %e, model = %self.model.id, self.num_turns, "stream_message failed");
+                let (kind, action) = super::recovery::classify(&e);
+                error!(
+                    error = %e,
+                    model = %self.model.id,
+                    self.num_turns,
+                    recovery_kind = ?kind,
+                    recovery_action = ?action,
+                    "stream_message failed",
+                );
                 return Err(e);
             }
         };

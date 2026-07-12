@@ -14,8 +14,9 @@ pub use agent::EmbedRequest;
 pub use agent::EmbeddingService;
 pub use agent::{
     Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
-    LoadedInstructions, SharedDoomTracker, SharedFindingsStore, SharedMessages, StoredFinding,
-    find_subdirectory_instructions, is_instruction_file,
+    LoadedInstructions, RecoveryAction, RecoveryFailureKind, SharedDoomTracker,
+    SharedFindingsStore, SharedMessages, StoredFinding, action_for, classify,
+    classify_subagent_error, find_subdirectory_instructions, is_instruction_file,
 };
 pub use cancel::{CancelMap, CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};

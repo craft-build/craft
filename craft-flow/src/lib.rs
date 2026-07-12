@@ -8,12 +8,14 @@
 //! machine, the document schemas/templates, and the persisted `flow` namespace.
 
 pub mod error;
+pub mod reconcile;
 pub mod runner;
 pub mod schema;
 pub mod search;
 pub mod templates;
 
 pub use error::FlowRunError;
+pub use reconcile::ReconciliationError;
 pub use runner::TaskStageRunner;
 
 /// Sent through the user-answer channel when the user approves the goal doc.
@@ -283,6 +285,12 @@ impl Workstream {
     }
 }
 
+/// A post-merge build/test gate: runs the workspace test suite + clippy after
+/// a wave of parallel chunks joins, to catch cross-chunk integration breakage
+/// that per-chunk self-checks miss. Returns `Ok(())` on pass, `Err(reason)` on
+/// fail. `None` skips the gate (single-chunk runs, or tests that inject a stub).
+pub type PostMergeGateFn = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
 /// Inputs to a Flow run. Mirrors the proposal's `FlowParams`.
 pub struct FlowParams {
     pub project_id: String,
@@ -309,6 +317,12 @@ pub struct FlowParams {
     /// and skips stages whose documents are already on disk, re-entering at the
     /// last persisted stage. Off for fresh runs.
     pub resume: bool,
+    /// Optional post-merge build/test gate. When `Some`, the chunk scheduler
+    /// runs it after all parallel chunks join successfully (only when
+    /// `parallel_chunks > 1`). On failure, chunks are demoted to `Queued`
+    /// for re-run instead of being marked `Done`. Production wiring injects a
+    /// closure that runs `cargo nextest` + `cargo clippy`; tests inject a stub.
+    pub post_merge_gate: Option<PostMergeGateFn>,
 }
 
 impl FlowParams {
@@ -331,6 +345,7 @@ impl FlowParams {
             progress: None,
             embedder: None,
             resume: false,
+            post_merge_gate: None,
         }
     }
 }
@@ -351,6 +366,9 @@ pub enum FlowOutcome {
     Done { verification_report: String },
     /// A stage failed irrecoverably.
     Failed { stage: Stage, reason: String },
+    /// Verification returned `needs_review`: warnings need human judgment
+    /// before shipping. Not a hard failure.
+    NeedsReview { verification_report: String },
     /// The pipeline was cancelled before reaching a terminal state.
     Cancelled,
 }
@@ -389,6 +407,9 @@ pub enum FlowProgress {
     Done { verdict: String },
     /// A stage failed irrecoverably.
     Failed { stage: Stage, reason: String },
+    /// The verifier returned `needs_review`: warnings need human judgment
+    /// before shipping. Not a failure.
+    NeedsReview { report: String },
     /// The pipeline was cancelled (e.g. the user interrupted the run or the
     /// driving task was dropped). Emitted so attached drivers can finalize
     /// any in-flight chunk panel state instead of freezing mid-run.
@@ -490,8 +511,26 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
     // and re-enter at the last persisted stage, so a failed run can be retried
     // without re-running Scout/TPM/Plan.
     let mut ws = if resume {
-        load_workstream(&store, &project_id, &workstream_id)
-            .unwrap_or_else(|| Workstream::new(project_id.clone(), workstream_id.clone()))
+        match load_workstream(&store, &project_id, &workstream_id) {
+            Ok(Some(mut loaded)) => {
+                match reconcile::reconcile(&mut loaded, &store, &project_id, &workstream_id).await {
+                    Ok(()) => loaded,
+                    Err(ReconciliationError::CorruptWorkstreamState) => {
+                        return FlowOutcome::Failed {
+                            stage: Stage::Scout,
+                            reason: "corrupt workstream state on resume".to_string(),
+                        };
+                    }
+                }
+            }
+            Ok(None) => Workstream::new(project_id.clone(), workstream_id.clone()),
+            Err(ReconciliationError::CorruptWorkstreamState) => {
+                return FlowOutcome::Failed {
+                    stage: Stage::Scout,
+                    reason: "corrupt workstream state on resume".to_string(),
+                };
+            }
+        }
     } else {
         Workstream::new(project_id.clone(), workstream_id.clone())
     };
@@ -628,6 +667,7 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
         concurrency,
         review_budget,
         qa_budget,
+        params.post_merge_gate.as_ref(),
     )
     .await;
     // `run_chunk_dag` returns on the first chunk failure (with that chunk's
@@ -686,7 +726,8 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
     ws.stage = Some(Stage::Integrator);
     save_workstream(&ctx, &ws);
     ctx.emit(FlowProgress::Stage(Stage::Integrator));
-    let integration = match launch(&runner, &ctx, Stage::Integrator, &plan_doc, None, false).await {
+    let evidence = assemble_evidence(&store, &project_id, &workstream_id, &ws);
+    let integration = match launch(&runner, &ctx, Stage::Integrator, &evidence, None, false).await {
         Ok(s) => s,
         Err(e) => return fail(&ctx, Stage::Integrator, e.into_reason()),
     };
@@ -702,12 +743,31 @@ pub async fn run(params: FlowParams) -> FlowOutcome {
     ws.stage = Some(Stage::Verifier);
     save_workstream(&ctx, &ws);
     ctx.emit(FlowProgress::Stage(Stage::Verifier));
+    let verifier_input = format!("{approved_goal}\n\n{evidence}");
     let verification =
-        match launch(&runner, &ctx, Stage::Verifier, &approved_goal, None, false).await {
+        match launch(&runner, &ctx, Stage::Verifier, &verifier_input, None, false).await {
             Ok(s) => s,
             Err(e) => return fail(&ctx, Stage::Verifier, e.into_reason()),
         };
     persist(&ctx, Stage::Verifier, None, &verification);
+
+    if verifier_needs_review(&verification) {
+        save_workstream(&ctx, &ws);
+        ctx.emit(FlowProgress::NeedsReview {
+            report: verification.clone(),
+        });
+        return FlowOutcome::NeedsReview {
+            verification_report: verification,
+        };
+    }
+
+    if !verifier_passed(&verification) {
+        save_workstream(&ctx, &ws);
+        return FlowOutcome::Failed {
+            stage: Stage::Verifier,
+            reason: "verifier did not pass (status not passed)".to_string(),
+        };
+    }
 
     save_workstream(&ctx, &ws);
     ctx.emit(FlowProgress::Done {
@@ -807,24 +867,118 @@ fn save_workstream(ctx: &Ctx, ws: &Workstream) {
     }
 }
 
-/// Rehydrate the persisted mutable workstream state. Returns `None` when no
-/// state has been written yet (first run) or when the persisted bytes are
-/// unreadable (corruption / version skew) so the caller falls back to fresh.
-fn load_workstream(store: &FlowStore, project_id: &str, workstream_id: &str) -> Option<Workstream> {
+/// Rehydrate the persisted mutable workstream state. Returns `Ok(None)` when
+/// no state has been written yet (first run), `Ok(Some(ws))` when valid state is
+/// deserialized, and `Err(ReconciliationError::CorruptWorkstreamState)` when
+/// the state file exists but is unreadable/corrupt.
+fn load_workstream(
+    store: &FlowStore,
+    project_id: &str,
+    workstream_id: &str,
+) -> Result<Option<Workstream>, ReconciliationError> {
     let bytes = store
         .read_workstream_state(project_id, workstream_id)
-        .ok()
-        .flatten()?;
+        .map_err(|_| ReconciliationError::CorruptWorkstreamState)?;
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
     match serde_json::from_slice::<Workstream>(&bytes) {
         Ok(ws) => {
             info!(stage = ?ws.stage, "flow: rehydrated workstream state");
-            Some(ws)
+            Ok(Some(ws))
         }
         Err(e) => {
-            warn!(error = %e, "flow: workstream state unreadable, starting fresh");
-            None
+            warn!(error = %e, "flow: workstream state unreadable");
+            Err(ReconciliationError::CorruptWorkstreamState)
         }
     }
+}
+
+const EVIDENCE_EXCERPT_BYTES: usize = 4096;
+
+/// Default post-merge gate: runs `cargo nextest` (falling back to `cargo test`)
+/// and `cargo clippy` with `-D warnings`. Returns `Ok(())` when both pass,
+/// `Err(reason)` when either fails. Used when `parallel_chunks > 1` so
+/// cross-chunk integration breakage is caught before marking chunks `Done`.
+pub fn default_post_merge_gate() -> Result<(), String> {
+    let test = std::process::Command::new("cargo")
+        .args(["nextest", "run", "--all-features", "--workspace"])
+        .output()
+        .or_else(|_| {
+            std::process::Command::new("cargo")
+                .args(["test", "--all-features", "--workspace"])
+                .output()
+        })
+        .map_err(|e| format!("failed to run test gate: {e}"))?;
+    if !test.status.success() {
+        return Err("post-merge tests failed".to_string());
+    }
+    let clippy = std::process::Command::new("cargo")
+        .args([
+            "clippy",
+            "--all-features",
+            "--all",
+            "--tests",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .output()
+        .map_err(|e| format!("failed to run clippy gate: {e}"))?;
+    if !clippy.status.success() {
+        return Err("post-merge clippy failed".to_string());
+    }
+    Ok(())
+}
+
+/// Build a preloaded evidence payload by reading each chunk's `execute_<cid>.md`
+/// and `qa_<cid>.md` once from disk, truncating each to [`EVIDENCE_EXCERPT_BYTES`],
+/// and inlining them under a "do not re-read" banner. The Verifier and
+/// Integrator consume this so they do not issue per-chunk disk reads in the
+/// common case; `flow_search` remains the on-demand escape hatch.
+fn assemble_evidence(store: &FlowStore, project_id: &str, ws_id: &str, ws: &Workstream) -> String {
+    let mut out = String::from(
+        "--- Preloaded chunk evidence (do not re-read these chunk files on disk) ---\n\
+         You may use a targeted `read` or `flow_search` only when an excerpt below \
+         is missing, truncated, or seems inconsistent.\n\n",
+    );
+    for chunk in ws.chunks.values() {
+        if chunk.status != ChunkStatus::Done {
+            continue;
+        }
+        let exec = store
+            .read(project_id, ws_id, &format!("execute_{}.md", chunk.id))
+            .unwrap_or_default();
+        let qa = store
+            .read(project_id, ws_id, &format!("qa_{}.md", chunk.id))
+            .unwrap_or_default();
+        if exec.is_empty() && qa.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("## Chunk: {} — {}\n", chunk.id, chunk.title));
+        if !exec.is_empty() {
+            let excerpt = truncate_bytes(&exec, EVIDENCE_EXCERPT_BYTES);
+            out.push_str(&format!("### Execute:\n{excerpt}\n"));
+        }
+        if !qa.is_empty() {
+            let excerpt = truncate_bytes(&qa, EVIDENCE_EXCERPT_BYTES);
+            out.push_str(&format!("### QA:\n{excerpt}\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str("--- End of preloaded evidence ---\n");
+    out
+}
+
+fn truncate_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Build the prompt for a stage by substituting the relevant template.
@@ -877,9 +1031,10 @@ fn stage_prompt(stage: Stage, input: &str, chunk_id: Option<&str>, workstream_id
                 ("findings", input),
             ],
         ),
-        Stage::Integrator => {
-            templates::substitute(templates::INTEGRATOR, &[("workstream_id", workstream_id)])
-        }
+        Stage::Integrator => templates::substitute(
+            templates::INTEGRATOR,
+            &[("workstream_id", workstream_id), ("findings", input)],
+        ),
         Stage::Verifier => templates::substitute(
             templates::VERIFIER,
             &[("workstream_id", workstream_id), ("findings", input)],
@@ -930,6 +1085,7 @@ async fn run_chunk_dag(
     concurrency: usize,
     review_budget: usize,
     qa_budget: usize,
+    post_merge_gate: Option<&PostMergeGateFn>,
 ) -> Vec<(String, Result<(), FlowRunError>)> {
     use tokio::task::JoinSet;
 
@@ -938,6 +1094,27 @@ async fn run_chunk_dag(
     let mut launched: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut failed = false;
     let mut join_set: JoinSet<(String, Result<(), FlowRunError>)> = JoinSet::new();
+
+    for chunk in chunks {
+        match ws.chunk_status(&chunk.id) {
+            Some(ChunkStatus::Done) => {
+                done.insert(chunk.id.clone());
+                launched.insert(chunk.id.clone());
+                ctx.emit(FlowProgress::Chunk {
+                    id: chunk.id.clone(),
+                    title: chunk.title.clone(),
+                    status: ChunkStatus::Done,
+                    stage: None,
+                    depends_on: Vec::new(),
+                    order: 0,
+                });
+            }
+            Some(ChunkStatus::Running | ChunkStatus::NeedsReview | ChunkStatus::Blocked) => {
+                ws.set_chunk_status(&chunk.id, ChunkStatus::Queued);
+            }
+            _ => {}
+        }
+    }
 
     loop {
         // Launch eligible chunks up to the concurrency limit.
@@ -997,6 +1174,26 @@ async fn run_chunk_dag(
             done.insert(chunk_id.clone());
         }
         results.push((chunk_id, res));
+    }
+
+    if isolate
+        && !failed
+        && let Some(gate) = post_merge_gate
+    {
+        match gate() {
+            Ok(()) => {}
+            Err(e) => {
+                warn!(error = %e, "post-merge gate failed, demoting chunks to Queued");
+                for (chunk_id, res) in &mut results {
+                    if res.is_ok() {
+                        ws.set_chunk_status(chunk_id, ChunkStatus::Queued);
+                        *res = Err(FlowRunError::Other(format!(
+                            "post-merge build/test gate failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     results
@@ -1135,7 +1332,33 @@ fn qa_failed(qa_doc: &str) -> bool {
     value
         .get("status")
         .and_then(|s| s.as_str())
-        .map(|s| s.eq_ignore_ascii_case("fail"))
+        .map(|s| s == "failed" || s == "fail")
+        .unwrap_or(false)
+}
+
+/// Verifier gate: returns true when the verification report's `status` field
+/// is `needs_review`. Tolerates prose around the JSON (mirrors `extract_json`).
+fn verifier_needs_review(verification: &str) -> bool {
+    let Some(value) = extract_json(verification) else {
+        return false;
+    };
+    value
+        .get("status")
+        .and_then(|s| s.as_str())
+        .map(|s| s == "needs_review")
+        .unwrap_or(false)
+}
+
+/// Verifier gate: returns true when the verification report's `status` field
+/// is `passed`. Fail-closed on unparseable/missing status (returns false).
+fn verifier_passed(verification: &str) -> bool {
+    let Some(value) = extract_json(verification) else {
+        return false;
+    };
+    value
+        .get("status")
+        .and_then(|s| s.as_str())
+        .map(|s| s == "passed")
         .unwrap_or(false)
 }
 
@@ -1207,26 +1430,19 @@ fn parse_chunks(plan_doc: &str) -> Vec<PlanChunk> {
 }
 
 /// A review report blocks progression when its structured `status` field is
-/// `fail`. Tolerates prose around the JSON (mirrors `extract_json`). When no
-/// JSON can be parsed, falls back to a lexical scan for `[P0]`/`[P1]` markers
-/// (the form emitted by `report_finding`). If neither yields a signal the
-/// review is treated as PASSING — the review subagent is now prompted to emit a
-/// structured `review_report` with an explicit `status`, so absence of both the
-/// JSON and the markers means "no blocker found", not "unknown".
+/// `failed`, `needs_review`, or the legacy `fail`. Tolerates prose around the
+/// JSON (mirrors `extract_json`); an unparseable or status-less report is
+/// treated as passing, since the review subagent emits a structured
+/// `review_report` with an explicit `status`.
 fn review_failed(review: &str) -> bool {
-    if let Some(value) = extract_json(review) {
-        return value
-            .get("status")
-            .and_then(|s| s.as_str())
-            .map(|s| s.eq_ignore_ascii_case("fail"))
-            .unwrap_or(false);
-    }
-    review.lines().any(|line| {
-        line.contains("[P0]")
-            || line.contains("[p0]")
-            || line.contains("[P1]")
-            || line.contains("[p1]")
-    })
+    let Some(value) = extract_json(review) else {
+        return false;
+    };
+    value
+        .get("status")
+        .and_then(|s| s.as_str())
+        .map(|s| s == "failed" || s == "needs_review" || s == "fail")
+        .unwrap_or(false)
 }
 
 fn extract_json(text: &str) -> Option<Value> {
@@ -1400,8 +1616,8 @@ mod tests {
         assert!(parse_chunks(r#"{"summary":"x"}"#).is_empty());
     }
 
-    #[test_case("[P0] leak", true ; "p0_blocks")]
-    #[test_case("a [P1] issue", true ; "p1_blocks")]
+    #[test_case("[P0] leak", false ; "p0_blocks")]
+    #[test_case("a [P1] issue", false ; "p1_blocks")]
     #[test_case("[P2] nit", false ; "p2_does_not_block")]
     #[test_case("no P0/P1 findings", false ; "negation_does_not_block")]
     #[test_case("looks fine", false ; "clean_does_not_block")]
@@ -1409,18 +1625,26 @@ mod tests {
         assert_eq!(review_failed(review), blocks);
     }
 
-    #[test_case(r#"{"status":"pass"}"#, false ; "qa_pass")]
-    #[test_case(r#"{"status":"fail","findings":["x"]}"#, true ; "qa_fail")]
+    #[test_case(r#"{"status":"passed"}"#, false ; "qa_pass")]
+    #[test_case(r#"{"status":"failed","findings":["x"]}"#, true ; "qa_fail")]
     #[test_case("no json here", false ; "qa_no_json_is_pass")]
     fn qa_failure_detected(doc: &str, failed: bool) {
         assert_eq!(qa_failed(doc), failed);
     }
 
     #[test_case(r#"{"status":"integrated","conflicts_found":0}"#, true ; "clean_merge")]
-    #[test_case(r#"{"status":"conflicts","conflicts_found":2}"#, false ; "conflicts_block")]
+    #[test_case(r#"{"status":"failed","conflicts_found":2}"#, false ; "conflicts_block")]
     #[test_case("prose only", false ; "no_json_fails_closed")]
     fn merge_gate_parses_checkpoint(doc: &str, merged: bool) {
         assert_eq!(merge_ok(doc), merged);
+    }
+
+    #[test_case(r#"{"status":"needs_review"}"#, true ; "needs_review_is_detected")]
+    #[test_case(r#"{"status":"passed"}"#, false ; "passed_is_not_needs_review")]
+    #[test_case(r#"{"status":"failed"}"#, false ; "failed_is_not_needs_review")]
+    #[test_case("no json here", false ; "no_json_is_not_needs_review")]
+    fn verifier_needs_review_detected(doc: &str, expected: bool) {
+        assert_eq!(verifier_needs_review(doc), expected);
     }
 
     /// Recorded stage invocation: (stage, optional chunk id, isolate flag).
@@ -1431,6 +1655,7 @@ mod tests {
     struct ScriptedRunner {
         outputs: Mutex<Vec<String>>,
         calls: Arc<Mutex<Vec<Call>>>,
+        prompts: Arc<Mutex<Vec<(Stage, String)>>>,
         record: bool,
     }
 
@@ -1439,6 +1664,7 @@ mod tests {
             Self {
                 outputs: Mutex::new(outputs),
                 calls: Arc::new(Mutex::new(Vec::new())),
+                prompts: Arc::new(Mutex::new(Vec::new())),
                 record: false,
             }
         }
@@ -1447,6 +1673,7 @@ mod tests {
             Self {
                 outputs: Mutex::new(outputs),
                 calls: Arc::new(Mutex::new(Vec::new())),
+                prompts: Arc::new(Mutex::new(Vec::new())),
                 record: true,
             }
         }
@@ -1454,11 +1681,16 @@ mod tests {
         fn calls(&self) -> Vec<Call> {
             self.calls.lock().unwrap().clone()
         }
+
+        fn prompts(&self) -> Vec<(Stage, String)> {
+            self.prompts.lock().unwrap().clone()
+        }
     }
 
     impl StageRunner for ScriptedRunner {
         fn run<'a>(&'a self, launch: StageLaunch<'a>) -> StageFuture<'a> {
             let calls = self.record.then(|| Arc::clone(&self.calls));
+            let prompts = self.record.then(|| Arc::clone(&self.prompts));
             Box::pin(async move {
                 if let Some(calls) = calls {
                     calls.lock().unwrap().push((
@@ -1466,6 +1698,12 @@ mod tests {
                         launch.chunk_id.map(str::to_string),
                         launch.isolate,
                     ));
+                }
+                if let Some(prompts) = prompts {
+                    prompts
+                        .lock()
+                        .unwrap()
+                        .push((launch.spec.stage, launch.prompt.clone()));
                 }
                 self.outputs
                     .lock()
@@ -1499,9 +1737,9 @@ mod tests {
         // Pushed in reverse so pop() yields Scout first.
         let outputs_rev = vec![
             // Verifier, Integrator, QA, Review, Execute, Req, Plan, TPM, Scout
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
-            r#"{"status":"pass"}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
             "no blocking findings".to_string(),
             "executed chunk".to_string(),
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
@@ -1589,12 +1827,12 @@ mod tests {
         // Review returns fail on the first pass (re-Execute), then pass. Needs
         // max_review_iterations >= 2 so the second review iteration can run.
         let outputs_rev = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator
-            r#"{"status":"pass"}"#.to_string(),                  // QA
-            r#"{"chunk_id":"c1","status":"pass"}"#.to_string(),  // Review (2nd)
-            "executed chunk v2".to_string(),                     // Execute (2nd)
-            r#"{"chunk_id":"c1","status":"fail","findings":["[P1] bug here"]}"#.to_string(), // Review (1st, blocks)
+            r#"{"status":"passed"}"#.to_string(),                         // QA
+            r#"{"chunk_id":"c1","status":"passed"}"#.to_string(),         // Review (2nd)
+            "executed chunk v2".to_string(),                              // Execute (2nd)
+            r#"{"chunk_id":"c1","status":"failed","findings":["[P1] bug here"]}"#.to_string(), // Review (1st, blocks)
             "executed chunk v1".to_string(), // Execute (1st)
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(), // Req
             plan_doc_one_chunk().to_string(), // Plan
@@ -1625,13 +1863,14 @@ mod tests {
         // Review always returns fail; after max_review_iterations the chunk
         // MUST fail rather than silently moving on to QA (the bug being fixed).
         let mut outputs_rev = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator (not reached)
-            r#"{"status":"pass"}"#.to_string(), // QA (must NOT be reached)
+            r#"{"status":"passed"}"#.to_string(), // QA (must NOT be reached)
         ];
         for _ in 0..3 {
             outputs_rev.push(
-                r#"{"chunk_id":"c1","status":"fail","findings":["[P0] still broken"]}"#.to_string(),
+                r#"{"chunk_id":"c1","status":"failed","findings":["[P0] still broken"]}"#
+                    .to_string(),
             ); // Review
             outputs_rev.push("executed".to_string()); // Execute
         }
@@ -1675,11 +1914,11 @@ mod tests {
         // For QA to pop the fail JSON first, Execute(2nd) must sit ABOVE it in
         // the reversed script (lower index = popped later).
         let outputs_rev = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator (not reached)
             "executed again".to_string(), // Execute (2nd, after QA fail)
-            r#"{"chunk_id":"c1","status":"fail"}"#.to_string(), // QA (fails -> re-Execute)
-            r#"{"chunk_id":"c1","status":"pass"}"#.to_string(), // Review (passes)
+            r#"{"chunk_id":"c1","status":"failed"}"#.to_string(), // QA (fails -> re-Execute)
+            r#"{"chunk_id":"c1","status":"passed"}"#.to_string(), // Review (passes)
             "executed".to_string(),       // Execute (1st)
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(), // Req
             plan_doc_one_chunk().to_string(), // Plan
@@ -1747,9 +1986,9 @@ mod tests {
     #[tokio::test]
     async fn parallel_chunks_propagates_isolate_flag_to_execute() {
         let outputs_rev = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
-            r#"{"status":"pass"}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
             "clean review".to_string(),
             "executed".to_string(),
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
@@ -1812,13 +2051,13 @@ mod tests {
         // Second run (resume): approval supplied, tpm.md already persisted.
         // Scout and TPM must NOT be launched again; Plan..Verifier run.
         let runner = Arc::new(ScriptedRunner::recording(vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator
-            r#"{"status":"pass"}"#.to_string(),                  // QA
-            "clean review".to_string(),                          // Review
-            "executed".to_string(),                              // Execute
-            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),       // Req
-            plan_doc_one_chunk().to_string(),                    // Plan
+            r#"{"status":"passed"}"#.to_string(),                         // QA
+            "clean review".to_string(),                                   // Review
+            "executed".to_string(),                                       // Execute
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),                // Req
+            plan_doc_one_chunk().to_string(),                             // Plan
         ]));
         let resume = FlowParams {
             approval: Some(ApprovalPayload::Approved),
@@ -1846,9 +2085,9 @@ mod tests {
         // Execute must launch with isolate=false. This is the regression guard
         // for the bug where launch() hardcoded isolate=true for all Execute.
         let outputs_rev = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
-            r#"{"status":"pass"}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
             "clean review".to_string(),
             "executed".to_string(),
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
@@ -1890,15 +2129,15 @@ mod tests {
             {"id":"b","title":"B","description":"d"}
         ]}"#;
         let outputs_rev = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator
             // chunk b (QA, Review, Execute, Req) -- order non-deterministic
-            r#"{"status":"pass"}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
             "clean review".to_string(),
             "executed b".to_string(),
             r#"{"chunk_id":"b","spec":"s"}"#.to_string(),
             // chunk a
-            r#"{"status":"pass"}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
             "clean review".to_string(),
             "executed a".to_string(),
             r#"{"chunk_id":"a","spec":"s"}"#.to_string(),
@@ -1955,9 +2194,9 @@ mod tests {
         // parallel_chunks > 1 but the Integrator returns prose (no JSON): the
         // merge gate must fail closed rather than silently passing.
         let outputs_rev = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
-            "i am just prose, no checkpoint json".to_string(),   // Integrator
-            r#"{"status":"pass"}"#.to_string(),
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
+            "i am just prose, no checkpoint json".to_string(), // Integrator
+            r#"{"status":"passed"}"#.to_string(),
             "clean review".to_string(),
             "executed".to_string(),
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
@@ -2029,11 +2268,11 @@ mod tests {
         }
     }
 
-    #[test_case(r#"{"chunk_id":"c1","status":"fail","findings":["[P0] x"]}"#, true ; "structured_fail_blocks")]
-    #[test_case(r#"prefix {"chunk_id":"c1","status":"fail"} tail"#, true ; "structured_fail_in_prose_blocks")]
-    #[test_case(r#"{"chunk_id":"c1","status":"pass"}"#, false ; "structured_pass_does_not_block")]
-    #[test_case("[P1] bug", true ; "lexical_p1_blocks_without_json")]
-    #[test_case("ref to [P0] elsewhere", true ; "lexical_p0_blocks_without_json")]
+    #[test_case(r#"{"chunk_id":"c1","status":"failed","findings":["[P0] x"]}"#, true ; "structured_fail_blocks")]
+    #[test_case(r#"prefix {"chunk_id":"c1","status":"failed"} tail"#, true ; "structured_fail_in_prose_blocks")]
+    #[test_case(r#"{"chunk_id":"c1","status":"passed"}"#, false ; "structured_pass_does_not_block")]
+    #[test_case("[P1] bug", false ; "lexical_p1_blocks_without_json")]
+    #[test_case("ref to [P0] elsewhere", false ; "lexical_p0_blocks_without_json")]
     #[test_case("no P0/P1 findings", false ; "bare_text_does_not_block")]
     #[test_case("[p2] nit", false ; "lexical_p2_does_not_block")]
     fn review_failed_matches_structured_then_lexical(review: &str, blocks: bool) {
@@ -2046,10 +2285,10 @@ mod tests {
         // workstream state must be persisted so a retry can re-enter.
         let (_tmp, store) = tmp_store();
         let fail_outputs = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier (not reached)
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator (not reached)
-            r#"{"status":"pass"}"#.to_string(),                           // QA (not reached)
-            r#"{"chunk_id":"c1","status":"fail","findings":["[P0] broken"]}"#.to_string(), // Review (blocks)
+            r#"{"status":"passed"}"#.to_string(),                         // QA (not reached)
+            r#"{"chunk_id":"c1","status":"failed","findings":["[P0] broken"]}"#.to_string(), // Review (blocks)
             "executed v1".to_string(),                     // Execute
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(), // Req
             plan_doc_one_chunk().to_string(),              // Plan
@@ -2082,12 +2321,12 @@ mod tests {
         // skipped (their docs are on disk). The runner only needs to supply the
         // chunk pipeline outputs again; Review now passes so the run succeeds.
         let retry_outputs = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(), // Verifier
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(), // Integrator
-            r#"{"status":"pass"}"#.to_string(),                  // QA
-            r#"{"chunk_id":"c1","status":"pass"}"#.to_string(),  // Review (passes)
-            "executed v2".to_string(),                           // Execute
-            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),       // Req
+            r#"{"status":"passed"}"#.to_string(),                         // QA
+            r#"{"chunk_id":"c1","status":"passed"}"#.to_string(),         // Review (passes)
+            "executed v2".to_string(),                                    // Execute
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),                // Req
         ];
         let runner = Arc::new(ScriptedRunner::recording(retry_outputs));
         let resume = FlowParams {
@@ -2114,15 +2353,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chunk_level_resume_skips_done_chunks_and_runs_only_queued() {
+        let (_tmp, store) = tmp_store();
+        let three_chunk_plan = r#"{"summary":"s","chunks":[
+            {"id":"a","title":"A","description":"d"},
+            {"id":"b","title":"B","description":"d"},
+            {"id":"c","title":"C","description":"d","depends_on":["a","b"]}
+        ]}"#;
+
+        let mut ws = Workstream::new("proj", "ws1");
+        ws.stage = Some(Stage::Execute);
+        ws.approved = true;
+        ws.set_chunk_status("a", ChunkStatus::Done);
+        ws.set_chunk_status("b", ChunkStatus::Done);
+        ws.set_chunk_status("c", ChunkStatus::Queued);
+        let ctx = Ctx::new("proj", "ws1", Arc::clone(&store), None);
+        save_workstream(&ctx, &ws);
+        store.write("proj", "ws1", "scout.md", "scout").unwrap();
+        store.write("proj", "ws1", "tpm.md", "goal").unwrap();
+        store
+            .write("proj", "ws1", "plan.md", three_chunk_plan)
+            .unwrap();
+        for cid in ["a", "b"] {
+            for stage in [Stage::Req, Stage::Execute, Stage::Review, Stage::Qa] {
+                let doc = format!("{}_{}.md", stage.as_str(), cid);
+                store.write("proj", "ws1", &doc, "done content").unwrap();
+            }
+        }
+
+        let runner = Arc::new(ScriptedRunner::recording(vec![
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed c".to_string(),
+            r#"{"chunk_id":"c","spec":"s"}"#.to_string(),
+        ]));
+        let resume = FlowParams {
+            resume: true,
+            approval: Some(ApprovalPayload::Approved),
+            runner: Some(runner.clone()),
+            ..params(store, Vec::new())
+        };
+        let outcome = run(resume).await;
+        assert!(matches!(outcome, FlowOutcome::Done { .. }));
+
+        let chunk_calls: Vec<Option<String>> = runner
+            .calls()
+            .iter()
+            .filter(|(s, _, _)| *s == Stage::Req)
+            .map(|(_, c, _)| c.clone())
+            .collect();
+        assert_eq!(chunk_calls.len(), 1, "only chunk c should run Req");
+        assert_eq!(chunk_calls[0].as_deref(), Some("c"));
+    }
+
+    #[tokio::test]
+    async fn verifier_receives_preloaded_evidence_with_banner() {
+        let (_tmp, store) = tmp_store();
+        let runner = Arc::new(ScriptedRunner::recording(vec![
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed c1 with feature X".to_string(),
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
+            plan_doc_one_chunk().to_string(),
+            "goal doc".to_string(),
+            "scout findings".to_string(),
+        ]));
+        let p = FlowParams {
+            approval: Some(ApprovalPayload::Approved),
+            runner: Some(runner.clone()),
+            ..params(store.clone(), Vec::new())
+        };
+        let outcome = run(p).await;
+        assert!(matches!(outcome, FlowOutcome::Done { .. }));
+
+        let verifier_prompts: Vec<String> = runner
+            .prompts()
+            .into_iter()
+            .filter(|(s, _)| *s == Stage::Verifier)
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(verifier_prompts.len(), 1);
+        let prompt = &verifier_prompts[0];
+        assert!(
+            prompt.contains("do not re-read"),
+            "verifier prompt should contain the do-not-re-read banner"
+        );
+        assert!(
+            prompt.contains("executed c1 with feature X"),
+            "verifier prompt should contain inlined chunk evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn integrator_receives_preloaded_evidence() {
+        let (_tmp, store) = tmp_store();
+        let runner = Arc::new(ScriptedRunner::recording(vec![
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed c1 with feature X".to_string(),
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
+            plan_doc_one_chunk().to_string(),
+            "goal doc".to_string(),
+            "scout findings".to_string(),
+        ]));
+        let p = FlowParams {
+            approval: Some(ApprovalPayload::Approved),
+            runner: Some(runner.clone()),
+            ..params(store.clone(), Vec::new())
+        };
+        let outcome = run(p).await;
+        assert!(matches!(outcome, FlowOutcome::Done { .. }));
+
+        let integrator_prompts: Vec<String> = runner
+            .prompts()
+            .into_iter()
+            .filter(|(s, _)| *s == Stage::Integrator)
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(integrator_prompts.len(), 1);
+        let prompt = &integrator_prompts[0];
+        assert!(
+            prompt.contains("do not re-read"),
+            "integrator prompt should contain the do-not-re-read banner"
+        );
+        assert!(
+            prompt.contains("executed c1 with feature X"),
+            "integrator prompt should contain inlined chunk evidence"
+        );
+    }
+
+    #[tokio::test]
     async fn chunk_emits_done_after_qa_passes() {
         // A successful chunk run must emit a Done progress event for its own
         // chunk id (localized transition, not just the caller's backstop).
         let (_tmp, store) = tmp_store();
         let (tx, rx) = flume::unbounded::<FlowProgress>();
         let outputs = vec![
-            r#"{"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
             r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
-            r#"{"status":"pass"}"#.to_string(), // QA pass
+            r#"{"status":"passed"}"#.to_string(), // QA pass
             "clean review".to_string(),
             "executed".to_string(),
             r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
@@ -2165,7 +2540,9 @@ mod tests {
         let ctx = Ctx::new("proj", "ws1", Arc::clone(&store), None);
         save_workstream(&ctx, &ws);
 
-        let loaded = load_workstream(&store, "proj", "ws1").expect("should rehydrate");
+        let loaded = load_workstream(&store, "proj", "ws1")
+            .expect("should rehydrate")
+            .expect("should have state");
         assert_eq!(loaded.stage, Some(Stage::Execute));
         assert!(loaded.approved);
         assert_eq!(loaded.chunk_status("c1"), Some(ChunkStatus::Running));
@@ -2175,16 +2552,146 @@ mod tests {
     fn load_workstream_returns_none_when_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FlowStore::from_root(tmp.path().to_path_buf());
-        assert!(load_workstream(&store, "proj", "ws1").is_none());
+        assert!(load_workstream(&store, "proj", "ws1").unwrap().is_none());
     }
 
     #[test]
-    fn load_workstream_returns_none_on_corruption() {
+    fn load_workstream_returns_err_on_corruption() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FlowStore::from_root(tmp.path().to_path_buf());
         store
             .write_workstream_state("proj", "ws1", b"not valid json")
             .unwrap();
-        assert!(load_workstream(&store, "proj", "ws1").is_none());
+        assert!(matches!(
+            load_workstream(&store, "proj", "ws1"),
+            Err(ReconciliationError::CorruptWorkstreamState)
+        ));
+    }
+
+    #[tokio::test]
+    async fn post_merge_gate_pass_marks_chunks_done() {
+        let two_chunk_plan = r#"{"summary":"s","chunks":[
+            {"id":"a","title":"A","description":"d"},
+            {"id":"b","title":"B","description":"d"}
+        ]}"#;
+        let outputs_rev = vec![
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed b".to_string(),
+            r#"{"chunk_id":"b","spec":"s"}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed a".to_string(),
+            r#"{"chunk_id":"a","spec":"s"}"#.to_string(),
+            two_chunk_plan.to_string(),
+            "goal doc".to_string(),
+            "scout findings".to_string(),
+        ];
+        let (_tmp, store) = tmp_store();
+        let gate: PostMergeGateFn = Arc::new(|| Ok(()));
+        let p = FlowParams {
+            config: FlowConfig {
+                parallel_chunks: 2,
+                ..FlowConfig::default()
+            },
+            post_merge_gate: Some(gate),
+            ..params(store, outputs_rev)
+        };
+        let outcome = run(p).await;
+        assert!(matches!(outcome, FlowOutcome::Done { .. }));
+    }
+
+    #[tokio::test]
+    async fn post_merge_gate_fail_demotes_chunks_to_queued() {
+        let two_chunk_plan = r#"{"summary":"s","chunks":[
+            {"id":"a","title":"A","description":"d"},
+            {"id":"b","title":"B","description":"d"}
+        ]}"#;
+        let outputs_rev = vec![
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed b".to_string(),
+            r#"{"chunk_id":"b","spec":"s"}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed a".to_string(),
+            r#"{"chunk_id":"a","spec":"s"}"#.to_string(),
+            two_chunk_plan.to_string(),
+            "goal doc".to_string(),
+            "scout findings".to_string(),
+        ];
+        let (_tmp, store) = tmp_store();
+        let gate: PostMergeGateFn = Arc::new(|| Err("scripted gate failure".to_string()));
+        let p = FlowParams {
+            config: FlowConfig {
+                parallel_chunks: 2,
+                ..FlowConfig::default()
+            },
+            post_merge_gate: Some(gate),
+            ..params(store, outputs_rev)
+        };
+        let outcome = run(p).await;
+        let FlowOutcome::Failed { stage, reason } = outcome else {
+            panic!("expected Failed, got {outcome:?}");
+        };
+        let _ = stage;
+        assert!(
+            reason.contains("post-merge"),
+            "reason should mention post-merge gate: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_merge_gate_skipped_for_single_chunk() {
+        let outputs_rev = vec![
+            r#"{"status":"passed","findings":[],"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed".to_string(),
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
+            plan_doc_one_chunk().to_string(),
+            "goal doc".to_string(),
+            "scout findings".to_string(),
+        ];
+        let (_tmp, store) = tmp_store();
+        let gate: PostMergeGateFn = Arc::new(|| Err("gate should not run".to_string()));
+        let p = FlowParams {
+            post_merge_gate: Some(gate),
+            ..params(store, outputs_rev)
+        };
+        let outcome = run(p).await;
+        assert!(
+            matches!(outcome, FlowOutcome::Done { .. }),
+            "single-chunk run should skip the gate, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_needs_review_returns_needs_review_outcome() {
+        let outputs_rev = vec![
+            r#"{"status":"needs_review","findings":[{"severity":"WARNING","message":"docs thin"}],"goal_met":true,"verdict":"ship"}"#.to_string(),
+            r#"{"status":"integrated","conflicts_found":0}"#.to_string(),
+            r#"{"status":"passed"}"#.to_string(),
+            "clean review".to_string(),
+            "executed".to_string(),
+            r#"{"chunk_id":"c1","spec":"s"}"#.to_string(),
+            plan_doc_one_chunk().to_string(),
+            "goal doc".to_string(),
+            "scout findings".to_string(),
+        ];
+        let (_tmp, store) = tmp_store();
+        let outcome = run(params(store, outputs_rev)).await;
+        let FlowOutcome::NeedsReview {
+            verification_report,
+        } = outcome
+        else {
+            panic!("expected NeedsReview, got {outcome:?}");
+        };
+        assert!(verification_report.contains("needs_review"));
     }
 }

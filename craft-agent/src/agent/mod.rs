@@ -13,6 +13,7 @@ mod inplace_edit;
 mod instructions;
 mod judge;
 mod read_lifecycle;
+pub(crate) mod recovery;
 pub(crate) mod retrieve;
 mod run;
 mod snapshot;
@@ -40,5 +41,8 @@ pub use history::{History, SharedMessages};
 pub use instructions::{
     Instructions, LoadedInstructions, build_system_prompt, find_subdirectory_instructions,
     is_instruction_file, load_instruction_text, load_instructions,
+};
+pub use recovery::{
+    RecoveryAction, RecoveryFailureKind, action_for, classify, classify_subagent_error,
 };
 pub use run::{Agent, AgentParams, AgentRunParams, resolve_compaction_model};

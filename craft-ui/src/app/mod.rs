@@ -544,6 +544,10 @@ impl App {
                 self.flow_failed = false;
                 self.flash("Flow run complete.".into());
             }
+            craft_flow::FlowProgress::NeedsReview { .. } => {
+                self.flow_failed = false;
+                self.flash("Flow verification needs review.".into());
+            }
             craft_flow::FlowProgress::Failed { stage, reason } => {
                 self.state.flow.finalize_non_terminal();
                 self.flow_failed = true;

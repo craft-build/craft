@@ -31,6 +31,7 @@ use crate::setup;
 const STOP_DONE: &str = "done";
 const STOP_ERROR: &str = "error";
 const STOP_CANCELLED: &str = "cancelled";
+const STOP_NEEDS_REVIEW: &str = "needs_review";
 const APPROVED_TOKEN: &str = "approved";
 
 pub async fn run(action: FlowAction) -> Result<()> {
@@ -221,6 +222,7 @@ fn outcome_stop_reason(outcome: &FlowOutcome) -> StopReasonOrStr {
         }
         FlowOutcome::Done { .. } => StopReasonOrStr::Str(STOP_DONE),
         FlowOutcome::Failed { .. } => StopReasonOrStr::Str(STOP_ERROR),
+        FlowOutcome::NeedsReview { .. } => StopReasonOrStr::Str(STOP_NEEDS_REVIEW),
         FlowOutcome::Cancelled => StopReasonOrStr::Str(STOP_CANCELLED),
     }
 }
@@ -240,6 +242,11 @@ fn outcome_text(outcome: &FlowOutcome) -> String {
         } => verification_report.clone(),
         FlowOutcome::Failed { stage, reason } => {
             format!("Flow failed at stage '{}': {reason}", stage.as_str())
+        }
+        FlowOutcome::NeedsReview {
+            verification_report,
+        } => {
+            format!("Flow verification needs review:\n{verification_report}")
         }
         FlowOutcome::Cancelled => "Flow run cancelled.".to_string(),
     }
@@ -358,5 +365,16 @@ mod tests {
         assert_eq!(json["stop_reason"], serde_json::json!("cancelled"));
         assert_eq!(json["is_error"], serde_json::json!(true));
         assert_eq!(json["result"], serde_json::json!("Flow run cancelled."));
+    }
+
+    #[test]
+    fn needs_review_outcome_json_emits_needs_review_stop_reason() {
+        let outcome = FlowOutcome::NeedsReview {
+            verification_report: r#"{"status":"needs_review"}"#.to_string(),
+        };
+        let json = outcome_json(&outcome, "m");
+        assert_eq!(json["stop_reason"], serde_json::json!("needs_review"));
+        assert_eq!(json["is_error"], serde_json::json!(false));
+        assert!(json["result"].as_str().unwrap().contains("needs review"));
     }
 }

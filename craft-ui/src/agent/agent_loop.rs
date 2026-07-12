@@ -444,6 +444,19 @@ impl AgentLoop {
                     });
                     break Ok(());
                 }
+                FlowOutcome::NeedsReview {
+                    verification_report,
+                } => {
+                    let _ = event_tx.send(AgentEvent::TextDelta {
+                        text: format!("## Flow verification needs review\n\n{verification_report}"),
+                    });
+                    let _ = event_tx.send(AgentEvent::Done {
+                        usage: TokenUsage::default(),
+                        num_turns: 0,
+                        stop_reason: Some(StopReason::EndTurn),
+                    });
+                    break Ok(());
+                }
                 FlowOutcome::Failed { stage, reason } => {
                     let _ = event_tx.send(AgentEvent::Error {
                         message: format!("flow {stage:?} failed: {reason}"),
