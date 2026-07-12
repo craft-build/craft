@@ -565,6 +565,8 @@ impl Provider for DynamicProvider {
                 id: m.id.clone(),
                 context_window: Some(m.context_window),
                 max_output_tokens: Some(m.max_output_tokens),
+                supports_thinking: None,
+                provider_info: None,
             })
             .collect();
         Box::pin(async move { Ok(infos) })

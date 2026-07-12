@@ -175,6 +175,8 @@ impl CatalogData {
                 id: format!("{provider}/{model_id}"),
                 context_window: Some(meta.context),
                 max_output_tokens: Some(meta.output),
+                supports_thinking: None,
+                provider_info: None,
             })
             .collect();
         models.sort_by(|a, b| a.id.cmp(&b.id));

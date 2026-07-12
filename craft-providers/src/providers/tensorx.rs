@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::model::{Model, ModelEntry, ModelInfo};
 use crate::provider::{BoxFuture, Provider};
-use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
+use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig};
 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyPool, ResolvedAuth, lock_unpoison};
@@ -32,6 +32,12 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
 
 pub(crate) fn models() -> &'static [ModelEntry] {
     &[]
+}
+
+#[derive(Debug)]
+struct TensorXModelInfo {
+    has_thinking: bool,
+    has_reasoning_effort: bool,
 }
 
 pub struct TensorX {
@@ -87,12 +93,37 @@ impl Provider for TensorX {
             let system = super::with_prefix(&self.system_prefix, system, &mut buf);
             let mut body = self.compat.build_body(model, messages, system, tools);
 
-            // See https://docs.tensorx.ai/api-reference/chat-completions#reasoning
-            if opts.thinking.is_enabled() && model.id.starts_with("deepseek/deepseek-v4") {
+            let (has_thinking, has_reasoning_effort) = {
+                let guard = crate::model_registry::model_registry().read().unwrap();
+                let info = guard
+                    .discovered(model.provider, &model.id)
+                    .and_then(|d| d.provider_info.clone())
+                    .map(|arc| {
+                        Arc::downcast::<TensorXModelInfo>(arc).expect("wrong provider info type")
+                    });
+                if let Some(info) = info {
+                    (info.has_thinking, info.has_reasoning_effort)
+                } else {
+                    (false, false)
+                }
+            };
+
+            if has_thinking {
+                body["thinking"] = json!(!matches!(opts.thinking, ThinkingConfig::Off));
+            }
+            if has_reasoning_effort {
+                let effort = match opts.thinking {
+                    ThinkingConfig::Adaptive => "high",
+                    ThinkingConfig::Budget(n) => ThinkingConfig::budget_to_effort(n),
+                    ThinkingConfig::Off => "none",
+                };
+                body["reasoning_effort"] = json!(effort);
+            } else if !has_thinking
+                && !matches!(opts.thinking, ThinkingConfig::Off)
+                && model.id.starts_with("deepseek/deepseek-v4")
+            {
                 body["chat_template_kwargs"] = json!({"thinking": true});
             }
-            // For other models it seems to be hardcoded, e.g. minimax m3 requests
-            // fail when setting reasoning_effort=none
 
             self.compat
                 .do_stream(model, &[], &body, event_tx, &auth)
@@ -141,10 +172,28 @@ impl Provider for TensorX {
                             // output tokens. It checks input+max_output<=context_window
                             let max_output_tokens = None;
 
+                            let supports_thinking =
+                                info.get("supports_reasoning").and_then(Value::as_bool);
+
+                            let supported_params = info
+                                .get("supported_openai_params")
+                                .and_then(Value::as_array)
+                                .map(|params| TensorXModelInfo {
+                                    has_thinking: params
+                                        .iter()
+                                        .any(|v| v.as_str() == Some("thinking")),
+                                    has_reasoning_effort: params
+                                        .iter()
+                                        .any(|v| v.as_str() == Some("reasoning_effort")),
+                                });
+
                             Some(ModelInfo {
                                 id: id.to_string(),
                                 context_window,
                                 max_output_tokens,
+                                supports_thinking,
+                                provider_info: supported_params
+                                    .map(|p| Arc::new(p) as Arc<dyn std::any::Any + Send + Sync>),
                             })
                         })
                         .collect()
