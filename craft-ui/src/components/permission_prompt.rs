@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use craft_agent::permissions::{DEFAULT_DENY_GUIDANCE, PermissionAnswer, generalized_scopes};
+use craft_config::ToolKey;
 
 use crate::components::Overlay;
 use crate::components::form::render_form;
@@ -94,7 +95,7 @@ pub enum PermissionPrompt {
     Closed,
     Open {
         _id: String,
-        tool: String,
+        tool: ToolKey,
         scopes: Vec<String>,
         context: Box<craft_agent::types::PermissionContext>,
         subagent_id: Option<String>,
@@ -126,7 +127,7 @@ impl PermissionPrompt {
     pub fn open(
         &mut self,
         id: String,
-        tool: String,
+        tool: ToolKey,
         scopes: Vec<String>,
         context: craft_agent::types::PermissionContext,
         subagent_id: Option<String>,
@@ -270,7 +271,7 @@ impl PermissionPrompt {
         if subagent_id.is_some() {
             tool_spans.push(Span::styled("[subtask] ", t.item_desc));
         }
-        tool_spans.push(Span::styled(tool.clone(), value_style));
+        tool_spans.push(Span::styled(tool.to_string(), value_style));
 
         let mut lines = vec![Line::raw(""), Line::from(tool_spans)];
         for (i, s) in scopes.iter().enumerate() {
@@ -402,6 +403,7 @@ impl PermissionPrompt {
 #[cfg(test)]
 mod tests {
     use craft_agent::permissions::PermissionAnswer;
+    use craft_config::ToolKey;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{PermissionPrompt, PromptState};
@@ -410,7 +412,7 @@ mod tests {
         let mut prompt = PermissionPrompt::new();
         prompt.open(
             "id".into(),
-            "bash".into(),
+            ToolKey::native("bash"),
             vec!["execute".into()],
             craft_agent::types::PermissionContext::default(),
             None,
@@ -493,5 +495,18 @@ mod tests {
         } else {
             panic!("expected Open");
         }
+    }
+
+    #[test]
+    fn wildcard_tool_key_opens() {
+        let mut prompt = PermissionPrompt::new();
+        prompt.open(
+            "id".into(),
+            ToolKey::Wildcard,
+            vec![],
+            craft_agent::types::PermissionContext::default(),
+            None,
+        );
+        assert!(matches!(prompt, PermissionPrompt::Open { .. }));
     }
 }

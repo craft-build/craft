@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use craft_config::CompressionConfig;
+use craft_config::{CompressionConfig, ToolKey};
 use craft_providers::{
     AgentError, ContentBlock, ImageSource, Message, Role, StopReason, TokenUsage,
 };
@@ -599,7 +599,7 @@ pub enum AgentEvent {
     },
     PermissionRequest {
         id: String,
-        tool: String,
+        tool: ToolKey,
         scopes: Vec<String>,
         #[serde(default)]
         context: PermissionContext,

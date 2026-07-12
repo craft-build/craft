@@ -677,7 +677,7 @@ mod tests {
     fn definitions_reflects_mid_session_registration() {
         let reg = ToolRegistry::new();
         reg.register(
-            mock("late_server__probe"),
+            mock("late_server.probe"),
             ToolSource::Mcp {
                 server: "late_server".into(),
             },
@@ -691,7 +691,7 @@ mod tests {
         let arr = defs.as_array().expect("definitions returns array");
         assert!(
             arr.iter()
-                .any(|d| d["name"].as_str() == Some("late_server__probe")),
+                .any(|d| d["name"].as_str() == Some("late_server.probe")),
             "mid-session tool missing from definitions"
         );
     }
@@ -700,14 +700,14 @@ mod tests {
     fn clear_mcp_server_removes_only_that_server() {
         let reg = ToolRegistry::new();
         reg.register(
-            mock("serverA__one"),
+            mock("serverA.one"),
             ToolSource::Mcp {
                 server: "serverA".into(),
             },
         )
         .unwrap();
         reg.register(
-            mock("serverB__one"),
+            mock("serverB.one"),
             ToolSource::Mcp {
                 server: "serverB".into(),
             },
@@ -718,8 +718,8 @@ mod tests {
 
         reg.clear_mcp_server("serverA");
 
-        assert!(!reg.has("serverA__one"));
-        assert!(reg.has("serverB__one"));
+        assert!(!reg.has("serverA.one"));
+        assert!(reg.has("serverB.one"));
         assert!(reg.has("native_tool"));
     }
 
@@ -727,14 +727,14 @@ mod tests {
     fn clear_plugin_removes_only_that_plugin() {
         let reg = ToolRegistry::new();
         reg.register(
-            mock("pluginA__foo"),
+            mock("pluginA.foo"),
             ToolSource::Lua {
                 plugin: "pluginA".into(),
             },
         )
         .unwrap();
         reg.register(
-            mock("pluginB__bar"),
+            mock("pluginB.bar"),
             ToolSource::Lua {
                 plugin: "pluginB".into(),
             },
@@ -745,8 +745,8 @@ mod tests {
 
         reg.clear_plugin("pluginA");
 
-        assert!(!reg.has("pluginA__foo"));
-        assert!(reg.has("pluginB__bar"));
+        assert!(!reg.has("pluginA.foo"));
+        assert!(reg.has("pluginB.bar"));
         assert!(reg.has("native_tool2"));
     }
 

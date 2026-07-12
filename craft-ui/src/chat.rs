@@ -20,7 +20,7 @@ use craft_agent::{
     AgentEvent, BatchToolStatus, BufferSnapshot, SharedBuf, ToolDoneEvent, ToolOutput,
     ToolStartEvent,
 };
-use craft_config::{ToolOutputLines, UiConfig};
+use craft_config::{ToolKey, ToolOutputLines, UiConfig};
 use craft_providers::{ContentBlock, Message, Role, TokenUsage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -42,7 +42,7 @@ pub enum ChatEventResult {
     Error(String),
     PermissionRequest {
         id: String,
-        tool: String,
+        tool: ToolKey,
         scopes: Vec<String>,
         context: craft_agent::types::PermissionContext,
     },
