@@ -440,12 +440,15 @@ Read a page or ingested-source note from the project's local wiki (`.wiki/`). Th
 
 ### `wiki_append` *(native)*
 
-Append markdown `body` to a wiki page in the project's local wiki (`.wiki/`), creating it if it does not exist, then regenerate the wiki index. `page` is the entry's slug (lowercase, digits, and dashes). Use this to capture durable, shareable project knowledge (decisions, notes, glossary entries).
+Append markdown `body` to a wiki page in the project's local wiki (`.wiki/`), creating it if it does not exist, then regenerate the wiki index. `page` is the entry's slug (lowercase, digits, and dashes). The optional `kind`, `description`, and `tags` fields populate the page's OKF frontmatter: `kind` sets the `type` for a new page (default `Note`), and `description`/`tags` fill in a missing field on an existing page without overwriting what is already there. Use this to capture durable, shareable project knowledge (decisions, notes, glossary entries).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `body` | string | yes | Markdown body to append |
+| `description` | string | no | One-line description for the page's OKF frontmatter and the index listing. Fills in a missing field only. |
+| `kind` | string | no | OKF `type` for a new page, e.g. Note, Reference, Decision. Ignored if the page already exists. |
 | `page` | string | yes | Slug of the wiki page to append to |
+| `tags` | array | no | Tags for the page's OKF frontmatter. Fills in a missing field only. |
 
 ## Web & Desktop
 
