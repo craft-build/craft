@@ -10,7 +10,7 @@ use crate::cancel::CancelToken;
 use crate::compression::{self, CompressionConfig as AgentCompressionConfig};
 use crate::{AgentError, AgentEvent, EventSender, TurnCompleteEvent};
 
-pub(super) const CONTINUE_AFTER_COMPACT: &str = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed. If you learned important project context during this session, consider saving it to memory before it's lost.";
+pub(super) const CONTINUE_AFTER_COMPACT: &str = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed. If the summary contains a todo list, restore it with todo_write and keep it updated. If you learned important project context during this session, consider saving it to memory before it's lost.";
 const IMAGE_PLACEHOLDER: &str = "[image]";
 const TOOL_RESULT_PLACEHOLDER: &str = "[tool result]";
 const KEEP_LAST_TOOL_RESULTS: usize = 3;
