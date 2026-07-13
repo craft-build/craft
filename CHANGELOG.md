@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-07-13
+
+### Added
+
+- **agent**: self-calibrating token estimation multiplier that raises the estimate after context overflows, so proactive compaction fires earlier and breaks the overflow/emergency-compact loop (`d8eee519`)
+- **permissions**: MCP permission scoping via a `ToolKey` enum replacing flat string identifiers, with `[mcp.server]` TOML nesting, a migrator from old `mcp:server__tool` keys, and wire/internal name conversion at the provider boundary (`4c6c7b84`)
+- **providers**: parse per-model thinking support from provider listing endpoints, including the OpenRouter reasoning object, TensorX `supported_openai_params`, and Mistral `capabilities.reasoning` (`e9de682c`)
+
+### Fixed
+
+- **session**: rewind no longer leaves ghost subagent tabs; new `Session::prune_orphans` retains only state reachable from remaining messages, also healing sessions already corrupted by the old bug (`fbe3ec3f`)
+- **agent**: todo list now survives compaction via a `## Todo list` section in the summary template (`a9128320`)
+- **permissions**: empty tool keys no longer crash the native assert; in-memory migration and deduped TOML helpers (`a49923dc`)
+- **agent**: context size estimate is updated after rewind (`0cbe04ba`)
+
 ## [0.8.5] - 2026-07-12
 
 ### Added
