@@ -7,6 +7,8 @@ use craft_tool_macro::{Args, Tool};
 
 use super::relative_path;
 
+const SNIPPET_MAX_CHARS: usize = 32;
+
 #[derive(Args, Debug, Clone, Deserialize)]
 struct EditEntry {
     #[param(description = "Exact string to find")]
@@ -45,6 +47,23 @@ impl MultiEdit {
         format!("{n} edit{s}")
     }
 
+    fn first_line_snippet(s: &str) -> String {
+        let line = s.split('\n').next().unwrap_or("");
+        let chars: Vec<char> = line.chars().take(SNIPPET_MAX_CHARS).collect();
+        if line.chars().count() > SNIPPET_MAX_CHARS {
+            format!("{}…", chars.iter().collect::<String>())
+        } else {
+            chars.iter().collect()
+        }
+    }
+
+    fn edit_failure(i: usize, edit: &EditEntry, err: &str) -> String {
+        format!(
+            "edits[{i}] (old_string {:?}): {err}",
+            Self::first_line_snippet(&edit.old_string)
+        )
+    }
+
     fn apply_edits(&self, before: &str) -> Result<String, String> {
         if self.edits.is_empty() {
             return Err("provide at least one edit".into());
@@ -64,13 +83,14 @@ impl MultiEdit {
                 ) {
                     super::hashline::AnchorOutcome::Applied { content, .. } => content,
                     super::hashline::AnchorOutcome::Stale { current } => {
-                        return Err(format!(
-                            "edit {i}: {}",
-                            super::hashline::stale_message(&current)
+                        return Err(Self::edit_failure(
+                            i,
+                            edit,
+                            &super::hashline::stale_message(&current),
                         ));
                     }
                     super::hashline::AnchorOutcome::NotFound => {
-                        return Err(format!("edit {i}: {}", super::fuzzy_replace::NO_MATCH));
+                        return Err(Self::edit_failure(i, edit, super::fuzzy_replace::NO_MATCH));
                     }
                 }
             } else {
@@ -81,7 +101,7 @@ impl MultiEdit {
                     edit.replace_all.unwrap_or(false),
                     None,
                 )
-                .map_err(|e| format!("edit {i}: {e}"))?
+                .map_err(|e| Self::edit_failure(i, edit, &e))?
                 .content
             };
         }
@@ -228,9 +248,37 @@ mod tests {
         }))
         .unwrap();
         let err = tool.execute(&ctx).await.unwrap_err();
-        assert!(err.contains("edit 1"));
+        assert!(
+            err.contains("edits[1] (old_string \"MISSING\")"),
+            "got: {err}"
+        );
         assert!(err.contains(fuzzy_replace::NO_MATCH));
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn failure_snippet_truncates_long_first_line() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let original = "let a = 1;\n";
+        let path = temp_file(&dir, "f.rs", original);
+        pre_read(&ctx, &path);
+        let long_missing: String = "X".repeat(64);
+        let tool = MultiEdit::parse_input(&json!({
+            "path": path,
+            "edits": [
+                { "old_string": long_missing, "new_string": "x" }
+            ]
+        }))
+        .unwrap();
+        let err = tool.execute(&ctx).await.unwrap_err();
+        let snippet_start = "edits[0] (old_string \"";
+        let idx = err.find(snippet_start).expect("snippet prefix present") + snippet_start.len();
+        let snippet = &err[idx..];
+        let closing = snippet.find("\")").expect("closing bracket");
+        let snippet = &snippet[..closing];
+        assert!(snippet.ends_with('…'), "got: {snippet}");
+        assert_eq!(snippet.chars().count(), 33);
     }
 
     #[tokio::test]
