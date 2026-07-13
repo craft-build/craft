@@ -153,6 +153,7 @@ pub struct Agent<'h> {
     advisor_state: Option<super::advisor::AdvisorState>,
     ttsr: Option<Arc<super::ttsr::TtsrManager>>,
     flow_search: crate::tools::flow_search::FlowSearchHandle,
+    token_estimation_multiplier: f64,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -236,6 +237,7 @@ impl<'h> Agent<'h> {
             advisor_state,
             ttsr,
             flow_search: None,
+            token_estimation_multiplier: 1.0,
         }
     }
 
@@ -899,11 +901,29 @@ impl<'h> Agent<'h> {
 
         let overflow = force_full
             || compaction::is_overflow(usage, &self.model, self.effective_compaction_buffer());
+
+        if overflow {
+            let estimated = self.history.estimate_tokens(&self.model) as f64;
+            if estimated > 0.0 && self.context_size > 0 {
+                let ratio = self.context_size as f64 / estimated;
+                if ratio > self.token_estimation_multiplier {
+                    self.token_estimation_multiplier =
+                        (ratio * 1.1).min(compaction::MAX_TOKEN_ESTIMATION_MULTIPLIER);
+                    info!(
+                        ratio,
+                        new_multiplier = self.token_estimation_multiplier,
+                        "calibrated token estimation multiplier after overflow"
+                    );
+                }
+            }
+        }
+
         let proactive = !overflow
             && compaction::is_proactive_threshold(
                 self.history,
                 &self.model,
                 self.proactive_ratio(),
+                self.token_estimation_multiplier,
             );
 
         if !overflow && !proactive {
@@ -1012,8 +1032,12 @@ impl<'h> Agent<'h> {
     }
 
     async fn do_compact(&mut self) -> Result<(), AgentError> {
-        let vcc_ok =
-            compaction::vcc_compact(self.history, &self.model, self.config.compaction_buffer)?;
+        let vcc_ok = compaction::vcc_compact(
+            self.history,
+            &self.model,
+            self.config.compaction_buffer,
+            self.token_estimation_multiplier,
+        )?;
         if !vcc_ok {
             let (compact_provider, compact_model) =
                 resolve_compaction_model(&self.provider, &self.model, self.timeouts).await;
@@ -1683,5 +1707,24 @@ mod tests {
             run_nudge(vec![empty_response(), text_response(StopReason::EndTurn)]).await;
         assert!(!has_event(&events, |e| matches!(e, AgentEvent::Nudge)));
         assert_eq!(done.expect("expected Done event"), 1);
+    }
+
+    #[tokio::test]
+    async fn try_auto_compact_calibrates_multiplier_on_overflow() {
+        let mut history = History::new(vec![Message::user("go".into())]);
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
+        let mut agent = Agent::new(params, run_params);
+        agent.model = Arc::new(small_context_model(200_000, 8_192));
+        agent.context_size = 10_000;
+
+        let usage = TokenUsage::default();
+        let _ = agent.try_auto_compact(&usage, true).await.unwrap();
+
+        assert_eq!(
+            agent.token_estimation_multiplier, 5.0,
+            "multiplier should be capped at MAX_TOKEN_ESTIMATION_MULTIPLIER"
+        );
     }
 }

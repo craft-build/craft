@@ -34,6 +34,7 @@ const SUMMARY_PREVIEW_CHARS: usize = 80;
 const SUFFICIENT_REDUCTION_RATIO: f32 = 0.15;
 const ERROR_SNIPPET_CHARS: usize = 200;
 const COMPACT_USER_PROMPT: &str = "What did we do so far?";
+pub(super) const MAX_TOKEN_ESTIMATION_MULTIPLIER: f64 = 5.0;
 
 fn build_compaction_user_message(relevance_scores: Option<&[(usize, f32)]>) -> Message {
     if let Some(scores) = relevance_scores {
@@ -411,8 +412,13 @@ pub(super) async fn progressive_compact(
 
 /// Check if estimated history tokens have reached the proactive compression threshold.
 /// This fires before overflow to compress incrementally rather than all-at-once.
-pub(super) fn is_proactive_threshold(history: &History, model: &Model, ratio: f64) -> bool {
-    let estimated = history.estimate_tokens(model);
+pub(super) fn is_proactive_threshold(
+    history: &History,
+    model: &Model,
+    ratio: f64,
+    multiplier: f64,
+) -> bool {
+    let estimated = (history.estimate_tokens(model) as f64 * multiplier) as u32;
     let threshold = (model.context_window as f64 * ratio) as u32;
     estimated >= threshold
 }
@@ -581,9 +587,11 @@ pub(super) fn context_under_limit(
     history: &History,
     model: &Model,
     compaction_buffer: u32,
+    multiplier: f64,
 ) -> bool {
     let usable = model.context_window.saturating_sub(compaction_buffer);
-    history.estimate_tokens(model) < usable
+    let estimated = (history.estimate_tokens(model) as f64 * multiplier) as u32;
+    estimated < usable
 }
 
 /// No-LLM VCC compaction: build a structured summary of the head, keep the tail.
@@ -593,6 +601,7 @@ pub(super) fn vcc_compact(
     history: &mut History,
     model: &Model,
     compaction_buffer: u32,
+    multiplier: f64,
 ) -> Result<bool, AgentError> {
     let messages = history.as_slice();
     let (prev, live_start) = match messages.first() {
@@ -621,7 +630,7 @@ pub(super) fn vcc_compact(
     });
     new_history.extend(tail);
     history.replace(new_history);
-    let under = context_under_limit(history, model, compaction_buffer);
+    let under = context_under_limit(history, model, compaction_buffer, multiplier);
     info!(tail_msgs, under_limit = under, "vcc compaction applied");
     Ok(under)
 }
@@ -1114,7 +1123,7 @@ mod tests {
             },
         ]);
         assert!(
-            is_proactive_threshold(&history, &model, 0.50),
+            is_proactive_threshold(&history, &model, 0.50, 1.0),
             "should exceed 50% threshold"
         );
     }
@@ -1124,7 +1133,7 @@ mod tests {
         let model = small_context_model(200_000);
         let history = History::new(vec![Message::user("hello".into())]);
         assert!(
-            !is_proactive_threshold(&history, &model, 0.75),
+            !is_proactive_threshold(&history, &model, 0.75, 1.0),
             "should not exceed 75% threshold"
         );
     }
@@ -1466,7 +1475,7 @@ mod tests {
         let mut history = History::new(vcc_history());
         let model = default_model();
         let buffer = AgentConfig::default().compaction_buffer;
-        let under = vcc_compact(&mut history, &model, buffer).unwrap();
+        let under = vcc_compact(&mut history, &model, buffer, 1.0).unwrap();
         assert!(under, "vcc should bring context under the limit");
         let msgs = history.as_slice();
         assert!(matches!(msgs[0].role, Role::Assistant));
@@ -1479,7 +1488,61 @@ mod tests {
     async fn vcc_compact_falls_back_when_still_over_limit() {
         let mut history = History::new(vcc_history());
         let model = small_context_model(50);
-        let under = vcc_compact(&mut history, &model, 10).unwrap();
+        let under = vcc_compact(&mut history, &model, 10, 1.0).unwrap();
         assert!(!under, "tiny context window should remain over the limit");
+    }
+
+    #[test]
+    fn proactive_threshold_multiplier_fires_earlier() {
+        let model = small_context_model(1000);
+        let history = History::new(vec![Message::user("x".repeat(1000))]);
+        assert!(
+            !is_proactive_threshold(&history, &model, 0.50, 1.0),
+            "should not exceed 50% threshold with multiplier=1.0"
+        );
+        assert!(
+            is_proactive_threshold(&history, &model, 0.50, 2.0),
+            "should exceed 50% threshold with multiplier=2.0"
+        );
+    }
+
+    #[test]
+    fn context_under_limit_multiplier_makes_stricter() {
+        let model = small_context_model(1000);
+        let history = History::new(vec![Message::user("x".repeat(2000))]);
+        assert!(
+            context_under_limit(&history, &model, 0, 1.0),
+            "should be under limit with multiplier=1.0"
+        );
+        assert!(
+            !context_under_limit(&history, &model, 0, 2.0),
+            "should not be under limit with multiplier=2.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn vcc_compact_multiplier_makes_fall_back_earlier() {
+        let compaction_buffer = 0;
+
+        let mut probe = History::new(vcc_history());
+        let probe_model = small_context_model(1_000_000);
+        assert!(vcc_compact(&mut probe, &probe_model, compaction_buffer, 1.0).unwrap());
+        let estimated = probe.estimate_tokens(&probe_model);
+        assert!(estimated > 0);
+
+        let context_window = estimated + estimated / 2;
+
+        let mut history = History::new(vcc_history());
+        let model = small_context_model(context_window);
+        assert!(
+            vcc_compact(&mut history, &model, compaction_buffer, 1.0).unwrap(),
+            "multiplier=1.0 should be under the limit"
+        );
+
+        let mut history = History::new(vcc_history());
+        assert!(
+            !vcc_compact(&mut history, &model, compaction_buffer, 2.0).unwrap(),
+            "multiplier=2.0 should be over the limit"
+        );
     }
 }
