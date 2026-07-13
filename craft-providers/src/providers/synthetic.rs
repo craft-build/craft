@@ -46,6 +46,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 131072,
             context_window: 512_000,
+            supports_vision: false,
         },
         ModelEntry {
             prefixes: &["syn:small:vision", "hf:Qwen/Qwen3.6-27B"],
@@ -61,6 +62,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 131072,
             context_window: 256_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["syn:large:vision", "hf:moonshotai/Kimi-K2.6"],
@@ -76,6 +78,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 131072,
             context_window: 256_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["syn:large:text", "hf:zai-org/GLM-5.2"],
@@ -91,6 +94,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 131_072,
             context_window: 512_000,
+            supports_vision: false,
         },
         ModelEntry {
             prefixes: &["syn:small:text", "hf:zai-org/GLM-4.7-Flash"],
@@ -106,6 +110,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 131072,
             context_window: 200_000,
+            supports_vision: false,
         },
     ]
 }

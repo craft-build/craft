@@ -438,6 +438,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 64000,
             context_window: 200_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["claude-sonnet-5"],
@@ -453,6 +454,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 64000,
             context_window: 200_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["claude-opus-4-8"],
@@ -471,6 +473,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128000,
             context_window: 200_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["claude-fable-5"],
@@ -486,6 +489,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128000,
             context_window: 200_000,
+            supports_vision: true,
         },
     ];
     MODELS

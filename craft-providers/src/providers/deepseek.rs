@@ -50,6 +50,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 384_000,
             context_window: 1_000_000,
+            supports_vision: false,
         },
         ModelEntry {
             prefixes: &["deepseek-v4-pro"],
@@ -65,6 +66,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 384_000,
             context_window: 1_000_000,
+            supports_vision: false,
         },
     ]
 }

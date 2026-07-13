@@ -647,6 +647,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adapt_images_keeps_pixels_for_synthetic_vision_model() {
+        let model = crate::model::Model::from_spec("synthetic/syn:large:vision").unwrap();
+        assert!(model.vision());
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                source: ImageSource::new(ImageMediaType::Png, Arc::from("abc123")),
+            }],
+            ..Default::default()
+        }];
+        assert!(matches!(
+            adapt_images_for_model(&model, &messages),
+            Cow::Borrowed(_)
+        ));
+    }
+
     #[test_case(ThinkingConfig::Off, "claude-opus-4-5", json!({}) ; "off")]
     #[test_case(ThinkingConfig::Adaptive, "claude-opus-4-5", json!({"thinking": {"type": "adaptive"}}) ; "adaptive")]
     #[test_case(ThinkingConfig::Budget(10000), "claude-opus-4-5", json!({"thinking": {"type": "enabled", "budget_tokens": 10000}}) ; "budget_legacy_old_opus")]

@@ -25,6 +25,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: GPT_5_6_MAX_OUTPUT_TOKENS,
             context_window: GPT_5_6_CONTEXT_WINDOW,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.6-terra"],
@@ -40,6 +41,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: GPT_5_6_MAX_OUTPUT_TOKENS,
             context_window: GPT_5_6_CONTEXT_WINDOW,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.6-sol"],
@@ -55,6 +57,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: GPT_5_6_MAX_OUTPUT_TOKENS,
             context_window: GPT_5_6_CONTEXT_WINDOW,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.4-nano"],
@@ -70,6 +73,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 400_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.4-mini"],
@@ -85,6 +89,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 400_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-4.1-nano"],
@@ -100,6 +105,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 32_768,
             context_window: 1_047_576,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-4.1-mini"],
@@ -115,6 +121,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 32_768,
             context_window: 1_047_576,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-4.1"],
@@ -130,6 +137,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 32_768,
             context_window: 1_047_576,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["o4-mini"],
@@ -145,6 +153,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 100_000,
             context_window: 200_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.5"],
@@ -160,6 +169,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 1_050_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.4"],
@@ -175,6 +185,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 1_050_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["o3"],
@@ -190,6 +201,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 100_000,
             context_window: 200_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.3-codex"],
@@ -205,6 +217,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 400_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.2-codex"],
@@ -220,6 +233,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 400_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.1-codex-mini"],
@@ -235,6 +249,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 400_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.1-codex-max"],
@@ -250,6 +265,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 400_000,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gpt-5.1-codex"],
@@ -265,6 +281,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 128_000,
             context_window: 400_000,
+            supports_vision: true,
         },
     ]
 }

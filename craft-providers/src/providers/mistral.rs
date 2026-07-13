@@ -77,6 +77,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 262_144,
             context_window: 262_144,
+            supports_vision: false,
         },
         ModelEntry {
             prefixes: &["mistral-small-latest", "mistral-small-2603"],
@@ -92,6 +93,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 262_144,
             context_window: 262_144,
+            supports_vision: false,
         },
         ModelEntry {
             prefixes: &["ministral-14b-latest", "ministral-14b-2512"],
@@ -107,6 +109,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 262_144,
             context_window: 262_144,
+            supports_vision: false,
         },
     ]
 }

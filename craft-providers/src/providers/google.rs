@@ -51,6 +51,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 65_536,
             context_window: 1_048_576,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gemini-2.5-flash"],
@@ -66,6 +67,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 65_536,
             context_window: 1_048_576,
+            supports_vision: true,
         },
         ModelEntry {
             prefixes: &["gemini-2.0-flash-lite"],
@@ -81,6 +83,7 @@ pub(crate) fn models() -> &'static [ModelEntry] {
             },
             max_output_tokens: 65_536,
             context_window: 1_048_576,
+            supports_vision: true,
         },
     ]
 }

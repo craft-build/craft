@@ -131,6 +131,7 @@ pub struct ModelEntry {
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
+    pub supports_vision: bool,
 }
 
 fn lookup_entry<'a>(
@@ -268,7 +269,7 @@ impl Model {
             family,
             supports_tool_examples_override: None,
             supports_thinking_override: None,
-            supports_vision_override: None,
+            supports_vision_override: static_entry.map(|e| e.supports_vision),
             pricing,
             max_output_tokens,
             context_window,
@@ -662,6 +663,20 @@ mod tests {
         assert_eq!(model.provider, expected_provider);
         assert_eq!(model.id, expected_id);
         assert_eq!(model.family, expected_provider.family());
+    }
+
+    #[test_case("synthetic/syn:large:vision", true ; "synthetic_large_vision")]
+    #[test_case("synthetic/syn:small:vision", true ; "synthetic_small_vision")]
+    #[test_case("synthetic/hf:moonshotai/Kimi-K2.6", true ; "synthetic_hf_vision_alias")]
+    #[test_case("synthetic/syn:large:text", false ; "synthetic_large_text")]
+    #[test_case("synthetic/hf:zai-org/GLM-5.2", false ; "synthetic_hf_text_alias")]
+    #[test_case("anthropic/claude-sonnet-4-20250514", true ; "claude_vision")]
+    #[test_case("openai/gpt-4.1", true ; "gpt_vision")]
+    #[test_case("google/gemini-2.5-pro", true ; "gemini_vision")]
+    #[test_case("mistral/mistral-medium-latest", false ; "generic_no_vision")]
+    fn vision_flag_from_model_entry(spec: &str, expected: bool) {
+        let model = Model::from_spec(spec).unwrap();
+        assert_eq!(model.vision(), expected);
     }
 
     #[test]
