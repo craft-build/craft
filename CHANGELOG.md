@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-07-14
+
+### Added
+
+- **repomap**: new `craft-repomap` crate implementing aider-style repo map via PageRank over a tree-sitter symbol graph; injected as a synthetic message each turn so the model knows the project's shape without spending a tool call (`5e8a00cf`)
+- **repomap**: tag extraction for 25 languages (Rust, TypeScript, Python, Go, Java, C/C++, Ruby, Lua, Bash, Kotlin, Swift, C#, Elixir, Scala, PHP, HTML, Gleam, Dart, Starlark, Nix, Zig, CSS, Fish, Perl) with definition/reference captures and personalized PageRank ranking boosted by mentioned identifiers and in-context files
+- **repomap**: `/map`, `/map-refresh`, and `/map-toggle` slash commands; `repomap { enabled, max_tokens }` config under the `[agent]` section; mtime-keyed tag cache that persists across turns so unchanged files are not re-parsed
+- **watch**: editor-agnostic watch mode (`craft-ui/src/watch.rs`) that detects AI comment markers (`// AI!`, `# AI?`, `-- AI`) in files as you edit, then injects them as prompts; three actions: code change (`!`), ask (`?`), add context (bare); `/watch` slash command toggles the watcher; `watch { enabled }` config (default off)
+- **providers**: per-model `supports_vision` flag in the static catalog, threaded into `Model` as the default vision override so `model.vision()` resolves without runtime probing (`d5b8550c`)
+
+### Fixed
+
+- **multiedit**: error messages now quote the failing `old_string` (truncated) instead of a 0-indexed `edit {i}` position, so the model can match by content instead of miscounting array entries (`55ecca85`)
+
 ## [0.8.6] - 2026-07-13
 
 ### Added
