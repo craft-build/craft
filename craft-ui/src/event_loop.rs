@@ -33,6 +33,7 @@ use crate::components::{Action, ExitRequest, LoadedSession, Status};
 
 use crate::storage_writer::StorageWriter;
 use crate::terminal;
+use crate::watch;
 
 const ANIMATION_INTERVAL_MS: u64 = 16;
 const IDLE_POLL_INTERVAL_MS: u64 = 100;
@@ -88,6 +89,7 @@ pub struct EventLoopParams {
     pub mcp_handle: Option<McpHandle>,
     pub mcp_config_errors: McpConfigErrors,
     pub embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
+    pub watch_enabled: bool,
 }
 
 pub(crate) struct EventLoop<'t> {
@@ -110,6 +112,7 @@ pub(crate) struct EventLoop<'t> {
     available_models: Arc<ArcSwapOption<Vec<String>>>,
     context_window_overrides: Arc<ArcSwap<HashMap<String, u32>>>,
     _model_fetch_task: tokio::task::JoinHandle<()>,
+    watch_handle: Option<watch::WatcherHandle>,
 }
 
 struct BackgroundModels {
@@ -313,6 +316,7 @@ impl<'t> EventLoop<'t> {
             mcp_handle,
             mcp_config_errors,
             embed_rx,
+            watch_enabled,
         } = params;
 
         std::thread::spawn(crate::highlight::warmup);
@@ -376,6 +380,8 @@ impl<'t> EventLoop<'t> {
             input_history_size,
             Arc::clone(&permissions),
             custom_commands,
+            config.repomap.enabled,
+            watch_enabled,
         );
         app.exit_on_done = exit_on_done;
         app.lua_event_handle = lua_event_handle;
@@ -396,7 +402,7 @@ impl<'t> EventLoop<'t> {
             restore_session(&mut app, &handles);
         }
 
-        Ok(Self {
+        let mut event_loop = Self {
             terminal,
             app,
             handles,
@@ -416,7 +422,14 @@ impl<'t> EventLoop<'t> {
             available_models,
             context_window_overrides,
             _model_fetch_task: bg.task,
-        })
+            watch_handle: None,
+        };
+
+        if watch_enabled {
+            event_loop.spawn_watch_watcher();
+        }
+
+        Ok(event_loop)
     }
 
     pub(crate) fn run(mut self, initial_prompt: Option<String>) -> RunResult {
@@ -723,6 +736,22 @@ impl<'t> EventLoop<'t> {
             Action::WikiIngest { source_path } => {
                 self.wiki_ingest(source_path);
             }
+            Action::ToggleWatch { enabled } => {
+                if enabled {
+                    self.spawn_watch_watcher();
+                } else {
+                    self.stop_watch_watcher();
+                }
+            }
+            Action::WatchPrompt { text, files } => {
+                let label = format!(
+                    "watch ({} file{})",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                );
+                let actions = self.app.submit_watch_prompt(label, text);
+                self.dispatch(actions);
+            }
             Action::Suspend => terminal::suspend(self.terminal),
             Action::RefreshModels => self.refresh_models(),
             Action::RefreshUsage => self.refresh_usage(),
@@ -861,6 +890,23 @@ impl<'t> EventLoop<'t> {
             let result = run_wiki_ingest(&cwd, &source_path, provider.as_ref(), &model).await;
             let _ = warn_tx.send(result);
         });
+    }
+
+    fn spawn_watch_watcher(&mut self) {
+        if self.watch_handle.is_some() {
+            return;
+        }
+        let cwd = PathBuf::from(self.app.state.session.cwd.clone());
+        let action_tx = self.action_tx.clone();
+        if let Some(handle) = watch::spawn_watcher(cwd, action_tx) {
+            self.watch_handle = Some(handle);
+        }
+    }
+
+    fn stop_watch_watcher(&mut self) {
+        if let Some(handle) = self.watch_handle.take() {
+            handle.stop();
+        }
     }
 
     fn refresh_provider(&mut self, slug: String) {

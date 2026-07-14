@@ -154,6 +154,7 @@ pub struct Agent<'h> {
     ttsr: Option<Arc<super::ttsr::TtsrManager>>,
     flow_search: crate::tools::flow_search::FlowSearchHandle,
     token_estimation_multiplier: f64,
+    repo_map: Option<craft_repomap::RepoMap>,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -238,6 +239,7 @@ impl<'h> Agent<'h> {
             ttsr,
             flow_search: None,
             token_estimation_multiplier: 1.0,
+            repo_map: None,
         }
     }
 
@@ -288,6 +290,11 @@ impl<'h> Agent<'h> {
         flow_search: crate::tools::flow_search::FlowSearchHandle,
     ) -> Self {
         self.flow_search = flow_search;
+        self
+    }
+
+    pub fn with_repo_map(mut self, repo_map: Option<craft_repomap::RepoMap>) -> Self {
+        self.repo_map = repo_map;
         self
     }
 
@@ -464,9 +471,45 @@ impl<'h> Agent<'h> {
             None => None,
         };
 
-        let messages: &[Message] = semantic_view
+        let base_messages: &[Message] = semantic_view
             .as_deref()
             .unwrap_or_else(|| self.history.as_slice());
+
+        let last_user_text = base_messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .and_then(|m| m.first_text_content())
+            .unwrap_or("");
+
+        let repo_map_msg = if let Some(rm) = &self.repo_map {
+            let context_files: Vec<String> = self
+                .file_tracker
+                .read_paths()
+                .into_iter()
+                .filter_map(|p| p.to_str().map(String::from))
+                .collect();
+            let map_text = rm.get_repo_map(&[], &context_files, last_user_text);
+            if map_text.is_empty() {
+                None
+            } else {
+                Some(Message::synthetic(format!(
+                    "Repo map (ranked symbols, may be stale):\n\n{map_text}"
+                )))
+            }
+        } else {
+            None
+        };
+
+        let owned_messages: Vec<Message>;
+        let messages: &[Message] = if let Some(rm_msg) = repo_map_msg {
+            owned_messages = std::iter::once(rm_msg)
+                .chain(base_messages.iter().cloned())
+                .collect();
+            &owned_messages
+        } else {
+            base_messages
+        };
 
         let response = match stream_with_retry(
             &*self.provider,

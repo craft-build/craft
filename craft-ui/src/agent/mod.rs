@@ -51,6 +51,7 @@ pub(crate) struct AgentHandles {
     pub(crate) timeouts: craft_providers::Timeouts,
     pub(crate) btw_system: Arc<ArcSwap<String>>,
     pub(crate) flow_progress_rx: flume::Receiver<craft_flow::FlowProgress>,
+    pub(crate) repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -104,6 +105,7 @@ impl AgentHandles {
         app.shared_tool_outputs = Some(Arc::clone(&self.tool_outputs));
         app.queue.set_shared(self.queue.clone());
         app.btw_system = Some(Arc::clone(&self.btw_system));
+        app.repomap_enabled = Arc::clone(&self.repomap_enabled);
 
         let restore_tx =
             craft_agent::EventSender::new(self.agent_tx.clone(), crate::app::RESTORE_RUN_ID);
@@ -221,6 +223,7 @@ fn spawn_agent_internal(
     let subagent_cancels: Arc<CancelMap<String>> = Arc::new(CancelMap::new());
 
     let btw_system: Arc<ArcSwap<String>> = Arc::new(ArcSwap::from_pointee(String::new()));
+    let repomap_enabled = Arc::new(std::sync::atomic::AtomicBool::new(config.repomap.enabled));
 
     spawn_command_router(
         cmd_rx,
@@ -251,6 +254,7 @@ fn spawn_agent_internal(
         subagent_cancels,
         flow_store,
         flow_progress_tx,
+        Arc::clone(&repomap_enabled),
     );
 
     let task = tokio::spawn(agent_loop.run());
@@ -277,7 +281,8 @@ fn spawn_agent_internal(
         queue: queue_tx,
         timeouts,
         btw_system,
-        task,
         flow_progress_rx,
+        repomap_enabled,
+        task,
     }
 }

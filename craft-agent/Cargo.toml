@@ -7,6 +7,7 @@ edition.workspace = true
 craft-providers = { workspace = true }
 craft-config = { workspace = true }
 craft-interpreter = { workspace = true }
+craft-repomap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -64,6 +64,10 @@ impl FileReadTracker {
         }
         Ok(())
     }
+
+    pub fn read_paths(&self) -> Vec<PathBuf> {
+        self.0.lock().unwrap().keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]

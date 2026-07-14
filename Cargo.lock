@@ -1576,6 +1576,7 @@ dependencies = [
  "craft-config",
  "craft-interpreter",
  "craft-providers",
+ "craft-repomap",
  "craft-storage",
  "craft-tool-macro",
  "event-listener",
@@ -1846,6 +1847,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-repomap"
+version = "0.8.6"
+dependencies = [
+ "ignore",
+ "regex",
+ "tempfile",
+ "test-case",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-dart",
+ "tree-sitter-elixir",
+ "tree-sitter-fish",
+ "tree-sitter-gleam",
+ "tree-sitter-go",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-kotlin-ng",
+ "tree-sitter-lua",
+ "tree-sitter-nix",
+ "tree-sitter-perl",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-starlark",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "tree-sitter-zig",
+]
+
+[[package]]
 name = "craft-sandbox"
 version = "0.8.6"
 dependencies = [
@@ -1898,6 +1936,7 @@ dependencies = [
  "craft-lua",
  "craft-markdown",
  "craft-providers",
+ "craft-repomap",
  "craft-storage",
  "criterion",
  "crossterm",
@@ -1914,6 +1953,7 @@ dependencies = [
  "open",
  "ratatui",
  "ratatui-image",
+ "regex",
  "resvg",
  "serde",
  "serde_json",

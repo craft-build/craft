@@ -209,6 +209,8 @@ pub struct App {
     subagent_answers: HashMap<String, flume::Sender<String>>,
     pub(crate) restore_event_tx: Option<craft_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
+    pub(super) repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) watch_enabled: bool,
 }
 
 macro_rules! define_overlays {
@@ -251,6 +253,8 @@ impl App {
         input_history_size: usize,
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[craft_agent::command::CustomCommand]>,
+        repomap_enabled: bool,
+        watch_enabled: bool,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
@@ -330,6 +334,8 @@ impl App {
             subagent_answers: HashMap::new(),
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
+            repomap_enabled: Arc::new(std::sync::atomic::AtomicBool::new(repomap_enabled)),
+            watch_enabled,
         };
         app.task_picker.set_keybindings(app.keybindings.clone());
         app.theme_picker.set_keybindings(app.keybindings.clone());
@@ -1680,6 +1686,38 @@ impl App {
                 self.run_meta_prompt("/checkpoint", craft_agent::prompt::CHECKPOINT_PROMPT)
             }
             "/wiki" => self.execute_wiki_command(&cmd.args),
+            "/map" => self.execute_map_command(),
+            "/map-refresh" => {
+                if let Some(rm) = craft_repomap::RepoMap::try_from_cwd() {
+                    rm.force_refresh();
+                    self.flash("Repo map cache cleared.".into());
+                } else {
+                    self.flash("Not in a git repo.".into());
+                }
+                vec![]
+            }
+            "/map-toggle" => {
+                let prev = self
+                    .repomap_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                self.repomap_enabled
+                    .store(!prev, std::sync::atomic::Ordering::Relaxed);
+                let state = if !prev { "enabled" } else { "disabled" };
+                self.flash(format!("Repo map {state}."));
+                vec![]
+            }
+            "/watch" => {
+                self.watch_enabled = !self.watch_enabled;
+                let state = if self.watch_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                self.flash(format!("Watch mode {state}."));
+                vec![Action::ToggleWatch {
+                    enabled: self.watch_enabled,
+                }]
+            }
             name if name.starts_with("/project:") || name.starts_with("/user:") => {
                 self.execute_custom_command(name, &cmd.args)
             }
@@ -1692,6 +1730,24 @@ impl App {
             }
             _ => vec![],
         }
+    }
+
+    fn execute_map_command(&mut self) -> Vec<Action> {
+        let map = craft_repomap::RepoMap::try_from_cwd()
+            .map(|rm| rm.get_repo_map(&[], &[], ""))
+            .unwrap_or_default();
+        if map.is_empty() {
+            self.flash("Repo map is empty or not in a git repo.".into());
+        } else {
+            let chat = self.main_chat();
+            chat.flush();
+            chat.push(DisplayMessage::new(
+                DisplayRole::Assistant,
+                format!("Repo map (ranked symbols, may be stale):\n\n{map}"),
+            ));
+            chat.enable_auto_scroll();
+        }
+        vec![]
     }
 
     fn execute_wiki_command(&mut self, args: &str) -> Vec<Action> {
@@ -1847,6 +1903,21 @@ impl App {
         self.run_id += 1;
         self.status = Status::Streaming;
         self.main_chat().show_user_message(label.to_string());
+        vec![Action::SendMessage(Box::new(input))]
+    }
+
+    pub(crate) fn submit_watch_prompt(&mut self, label: String, text: String) -> Vec<Action> {
+        if self.status == Status::Streaming {
+            self.flash("Agent is busy, watch prompt discarded".into());
+            return vec![];
+        }
+        let input = self.build_agent_input(&QueuedMessage {
+            text,
+            images: Vec::new(),
+        });
+        self.run_id += 1;
+        self.status = Status::Streaming;
+        self.main_chat().show_user_message(label);
         vec![Action::SendMessage(Box::new(input))]
     }
 

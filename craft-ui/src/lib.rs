@@ -27,6 +27,7 @@ pub mod update;
 mod agent;
 mod event_loop;
 mod terminal;
+mod watch;
 
 use color_eyre::Result;
 use craft_agent::ToolOutput;

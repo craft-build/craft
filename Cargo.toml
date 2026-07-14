@@ -59,6 +59,7 @@ members = [
   "craft-lua",
   "craft-markdown",
   "craft-providers",
+  "craft-repomap",
   "craft-sandbox",
   "craft-storage",
   "craft-tool-macro",
@@ -89,6 +90,7 @@ craft-tool-macro = { path = "craft-tool-macro" }
 craft-config-macro = { path = "craft-config-macro" }
 craft-highlight = { path = "craft-highlight" }
 craft-markdown = { path = "craft-markdown" }
+craft-repomap = { path = "craft-repomap" }
 craft-sandbox = { path = "craft-sandbox" }
 playwright-rs = { version = "0.14", default-features = false, features = ["macros", "rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive", "rc"] }

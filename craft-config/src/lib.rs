@@ -233,6 +233,10 @@ pub struct RawConfig {
     pub compression: CompressionFileConfig,
     #[serde(default)]
     pub sandbox: SandboxFileConfig,
+    #[serde(default)]
+    pub repomap: RepoMapFileConfig,
+    #[serde(default)]
+    pub watch: WatchFileConfig,
     pub tools: HashMap<String, ToolFileConfig>,
 }
 
@@ -245,6 +249,8 @@ impl RawConfig {
         self.storage.merge(overlay.storage);
         self.compression.merge(overlay.compression);
         self.sandbox.merge(overlay.sandbox);
+        self.repomap.merge(overlay.repomap);
+        self.watch.merge(overlay.watch);
         self.tools.extend(overlay.tools);
     }
 
@@ -260,6 +266,9 @@ impl RawConfig {
                 disabled_tools.push(name.to_string());
             }
         }
+        let mut agent = AgentConfig::from_file(self.agent, no_rtk, disabled_tools);
+        let repomap = RepoMapConfig::from_file(self.repomap);
+        agent.repomap = repomap.clone();
         Ok(Config {
             always_yolo: self.always_yolo.unwrap_or(false),
             always_fast: self.always_fast.unwrap_or(false),
@@ -268,13 +277,15 @@ impl RawConfig {
                 .map(AlwaysThinking::resolve)
                 .transpose()?,
             ui: UiConfig::from_file(self.ui),
-            agent: AgentConfig::from_file(self.agent, no_rtk, disabled_tools),
+            agent,
             provider: ProviderConfig::from_file(self.provider),
             storage: StorageConfig::from_file(self.storage),
             compression: CompressionConfig::from_file(self.compression),
             sandbox: SandboxConfig::from_file(self.sandbox),
             permissions: PermissionsConfig::default(),
             plugins: PluginsConfig::from_tools(self.tools),
+            repomap,
+            watch: WatchConfig::from_file(self.watch),
         })
     }
 }
@@ -803,6 +814,8 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     pub permissions: PermissionsConfig,
     pub plugins: PluginsConfig,
+    pub repomap: RepoMapConfig,
+    pub watch: WatchConfig,
 }
 
 #[derive(Debug, Clone, ConfigSection)]
@@ -1404,6 +1417,9 @@ pub struct AgentConfig {
 
     #[config(skip, default = "None")]
     pub judge_model: Option<String>,
+
+    #[config(skip, default = "RepoMapConfig::default()")]
+    pub repomap: RepoMapConfig,
 }
 
 impl AgentConfig {
@@ -1456,6 +1472,7 @@ impl AgentConfig {
             hooks_enabled: file.hooks_enabled.unwrap_or(true),
             max_turns: None,
             judge_model: file.judge_model,
+            repomap: RepoMapConfig::default(),
         }
     }
 
@@ -1688,6 +1705,75 @@ impl PluginsConfig {
         all.extend(extra.into_iter().cloned());
 
         Self { tools: all }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RepoMapConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_repomap_max_tokens")]
+    pub max_tokens: u32,
+}
+
+const DEFAULT_REPOMAP_MAX_TOKENS: u32 = 1024;
+
+fn default_repomap_max_tokens() -> u32 {
+    DEFAULT_REPOMAP_MAX_TOKENS
+}
+
+impl Default for RepoMapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_tokens: DEFAULT_REPOMAP_MAX_TOKENS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RepoMapFileConfig {
+    pub enabled: Option<bool>,
+    pub max_tokens: Option<u32>,
+}
+
+impl RepoMapFileConfig {
+    pub fn merge(&mut self, overlay: RepoMapFileConfig) {
+        merge_option!(self, overlay, enabled, max_tokens);
+    }
+}
+
+impl RepoMapConfig {
+    pub fn from_file(f: RepoMapFileConfig) -> Self {
+        Self {
+            enabled: f.enabled.unwrap_or(true),
+            max_tokens: f.max_tokens.unwrap_or(DEFAULT_REPOMAP_MAX_TOKENS),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WatchConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WatchFileConfig {
+    pub enabled: Option<bool>,
+}
+
+impl WatchFileConfig {
+    pub fn merge(&mut self, overlay: WatchFileConfig) {
+        merge_option!(self, overlay, enabled);
+    }
+}
+
+impl WatchConfig {
+    pub fn from_file(f: WatchFileConfig) -> Self {
+        Self {
+            enabled: f.enabled.unwrap_or(false),
+        }
     }
 }
 
@@ -2531,6 +2617,8 @@ tasks = []
             sandbox: SandboxConfig::default(),
             permissions: PermissionsConfig::default(),
             plugins: PluginsConfig::default(),
+            repomap: RepoMapConfig::default(),
+            watch: WatchConfig::default(),
         };
         match (section, field) {
             ("provider", "connect_timeout_secs") => {

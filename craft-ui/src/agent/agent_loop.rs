@@ -52,6 +52,7 @@ pub(super) struct AgentLoop {
     subagent_cancels: Arc<CancelMap<String>>,
     flow_store: Arc<FlowStore>,
     flow_progress_tx: flume::Sender<FlowProgress>,
+    repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentLoop {
@@ -77,6 +78,7 @@ impl AgentLoop {
         subagent_cancels: Arc<CancelMap<String>>,
         flow_store: Arc<FlowStore>,
         flow_progress_tx: flume::Sender<FlowProgress>,
+        repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             model_slot,
@@ -106,6 +108,7 @@ impl AgentLoop {
             subagent_cancels,
             flow_store,
             flow_progress_tx,
+            repomap_enabled,
         }
     }
 
@@ -287,7 +290,14 @@ impl AgentLoop {
         .with_user_response_rx(Arc::clone(&self.answer_rx))
         .with_interrupt_source(Arc::clone(&self.queue) as Arc<dyn craft_agent::InterruptSource>)
         .with_cancel(cancel)
-        .with_mcp(self.mcp_handle.clone());
+        .with_mcp(self.mcp_handle.clone())
+        .with_repo_map(
+            self.repomap_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(craft_repomap::RepoMap::try_from_cwd)
+                .flatten()
+                .map(|rm| rm.with_max_tokens(self.config.repomap.max_tokens)),
+        );
 
         let agent = {
             let role = craft_providers::roles::resolve_role(

@@ -52,6 +52,8 @@ fn test_app() -> App {
         100,
         permissions,
         Arc::from([]),
+        true,
+        false,
     );
     let (shared_queue, _rx) = shared_queue::queue();
     app.queue.set_shared(shared_queue);
@@ -505,6 +507,8 @@ fn load_session_clears_plan() {
             PathBuf::from("/tmp"),
         )),
         Arc::from([]),
+        true,
+        false,
     );
     app.state
         .session

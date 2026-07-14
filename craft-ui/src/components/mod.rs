@@ -225,6 +225,13 @@ pub enum Action {
     WikiIngest {
         source_path: PathBuf,
     },
+    ToggleWatch {
+        enabled: bool,
+    },
+    WatchPrompt {
+        text: String,
+        files: Vec<PathBuf>,
+    },
 }
 
 const ERROR_DISPLAY: Duration = Duration::from_secs(5);

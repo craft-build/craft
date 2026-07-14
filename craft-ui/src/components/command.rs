@@ -147,6 +147,26 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Init the project wiki, ingest a file, list entries, or show a page",
         max_args: usize::MAX,
     },
+    BuiltinCommand {
+        name: "/map",
+        description: "Show the current repo map (ranked symbol context)",
+        max_args: 0,
+    },
+    BuiltinCommand {
+        name: "/map-refresh",
+        description: "Force rebuild the repo map cache",
+        max_args: 0,
+    },
+    BuiltinCommand {
+        name: "/map-toggle",
+        description: "Toggle repo map injection on/off",
+        max_args: 0,
+    },
+    BuiltinCommand {
+        name: "/watch",
+        description: "Toggle watch mode (AI comments in editor drive the agent)",
+        max_args: 0,
+    },
 ];
 
 pub struct ParsedCommand {

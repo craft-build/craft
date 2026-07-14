@@ -243,6 +243,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             mcp_handle,
             mcp_config_errors,
             embed_rx,
+            watch_enabled: config.watch.enabled,
         };
         let result =
             tokio::task::spawn_blocking(move || craft_ui::run(handle, params, initial_prompt))
