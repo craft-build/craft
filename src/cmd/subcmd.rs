@@ -26,6 +26,7 @@ use craft_storage::model::persist_model;
 
 pub mod acp;
 pub mod doctor;
+pub mod recipe;
 pub mod review;
 pub mod run;
 pub mod term;

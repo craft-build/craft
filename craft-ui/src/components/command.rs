@@ -118,6 +118,11 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: usize::MAX,
     },
     BuiltinCommand {
+        name: "/recipe",
+        description: "Browse and run a recipe",
+        max_args: 0,
+    },
+    BuiltinCommand {
         name: "/dream",
         description: "Consolidate and curate project memory",
         max_args: 0,

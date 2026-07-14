@@ -135,6 +135,7 @@ const MAX_OUTPUT_BYTES: usize = 30_000;
 pub enum LangId {
     Rust,
     TypeScript,
+    Tsx,
     Python,
     Go,
     Java,
@@ -176,8 +177,9 @@ impl LangId {
     fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "rs" => Some(Self::Rust),
-            "ts" | "tsx" => Some(Self::TypeScript),
-            "js" | "jsx" | "mjs" | "cjs" => Some(Self::TypeScript),
+            "ts" => Some(Self::TypeScript),
+            "tsx" | "jsx" => Some(Self::Tsx),
+            "js" | "mjs" | "cjs" => Some(Self::TypeScript),
             "py" | "pyi" => Some(Self::Python),
             "go" => Some(Self::Go),
             "java" => Some(Self::Java),
@@ -216,6 +218,7 @@ impl LangId {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
             Self::Java => tree_sitter_java::LANGUAGE.into(),
@@ -253,6 +256,7 @@ impl LangId {
         match self {
             Self::Rust => "rust",
             Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
             Self::Python => "python",
             Self::Go => "go",
             Self::Java => "java",
@@ -1066,6 +1070,7 @@ fn lang_parts(lang: LangId) -> (&'static LazyLock<Option<Query>>, &'static str) 
     match lang {
         LangId::Rust => (&RUST_QUERY, RUST_SRC),
         LangId::TypeScript => (&TS_QUERY, TS_SRC),
+        LangId::Tsx => (&TSX_QUERY, TS_SRC),
         LangId::Python => (&PY_QUERY, PY_SRC),
         LangId::Go => (&GO_QUERY, GO_SRC),
         LangId::Java => (&JAVA_QUERY, JAVA_SRC),
@@ -1188,6 +1193,9 @@ static TS_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
         TS_SRC,
     )
 });
+
+static TSX_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("tsx", &tree_sitter_typescript::LANGUAGE_TSX.into(), TS_SRC));
 
 const PY_SRC: &str = r#"
 (function_definition name: (identifier) @fn.name) @fn.def

@@ -198,8 +198,7 @@ impl ProviderKind {
             Self::DeepSeek => 384_000,
             Self::OpenRouter => 128_000,
             Self::Synthetic => 32_000,
-            // FIXME: See comment in tensorx.rs
-            Self::TensorX => 0,
+            Self::TensorX => 32_000,
             Self::Opencode => 128_000,
             Self::Bedrock => 128_000,
         }

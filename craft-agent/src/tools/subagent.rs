@@ -308,6 +308,7 @@ pub async fn run_subagent(
             let msg = format!("subagent did not produce schema-valid JSON: {last_error}");
             let (kind, action) = crate::agent::recovery::classify_subagent_error(&msg);
             warn!(description = %req.description, ?kind, ?action, "subagent schema validation exhausted");
+            // action is Stop (schema failures are deterministic) — no retry.
             Err(msg)
         }
     }

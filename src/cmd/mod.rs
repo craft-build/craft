@@ -80,6 +80,9 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Review(args)) => {
             subcmd::review::run(args).await?;
         }
+        Some(Command::Recipe(args)) => {
+            subcmd::recipe::run(args).await?;
+        }
         Some(Command::Wiki(args)) => {
             subcmd::wiki::run(args.action).await?;
         }

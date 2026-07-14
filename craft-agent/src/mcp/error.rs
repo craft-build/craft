@@ -40,9 +40,6 @@ pub enum McpError {
         reason: String,
     },
 
-    #[error("server {server} requires OAuth authentication")]
-    OAuthRequired { server: String },
-
     #[error("OAuth failed for server {server}: {reason}")]
     OAuthFailed { server: String, reason: String },
 }

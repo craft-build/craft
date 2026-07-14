@@ -346,6 +346,58 @@ fn plan_mode_block_reason(ctx: &ToolContext, name: &str, target: &Path) -> Optio
     }
 }
 
+async fn retry_transient_mcp<F>(
+    tool_name: &str,
+    mut call: impl FnMut() -> F,
+    cancel: &crate::CancelToken,
+    event_tx: &crate::EventSender,
+    retry: super::recovery::RecoveryAction,
+) -> Result<String, String>
+where
+    F: std::future::Future<Output = Result<String, String>> + Send,
+{
+    match call().await {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            let msg = e;
+            let (kind, _) = super::recovery::classify_subagent_error(&msg);
+            if !matches!(
+                kind,
+                super::recovery::RecoveryFailureKind::ToolUnavailable
+                    | super::recovery::RecoveryFailureKind::Provider
+            ) {
+                return Err(msg);
+            }
+            let super::recovery::RecoveryAction::Retry { max, delay } = retry else {
+                return Err(msg);
+            };
+            let mut last_err = msg;
+            for attempt in 1..=max {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                let _ = event_tx.send(AgentEvent::Retry {
+                    attempt,
+                    message: format!("mcp tool {tool_name}: {last_err}"),
+                    delay_ms: delay.as_millis() as u64,
+                });
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = cancel.cancelled() => break,
+                }
+                if cancel.is_cancelled() {
+                    break;
+                }
+                match call().await {
+                    Ok(text) => return Ok(text),
+                    Err(e) => last_err = e,
+                }
+            }
+            Err(last_err)
+        }
+    }
+}
+
 async fn execute_mcp_tool(
     ctx: &ToolContext,
     id: &str,
@@ -405,9 +457,21 @@ async fn execute_mcp_tool(
         return done(format!("MCP manager not available for {tool_name}"), true);
     };
 
-    match mcp.call_tool(tool_name, input).await {
+    match retry_transient_mcp(
+        tool_name,
+        || async move {
+            mcp.call_tool(tool_name, input)
+                .await
+                .map_err(|e| e.to_string())
+        },
+        &ctx.cancel,
+        &ctx.event_tx,
+        super::recovery::RETRY_TOOL_UNAVAILABLE,
+    )
+    .await
+    {
         Ok(text) => done(text, false),
-        Err(e) => done(e.to_string(), true),
+        Err(msg) => done(msg, true),
     }
 }
 
@@ -1395,5 +1459,94 @@ mod tests {
         let command = format!("sed 's/beta/gamma/' {target_str}");
         let detected = super::super::inplace_edit::detect_inplace_edit_paths(&command);
         assert!(detected.is_empty(), "non-in-place sed must not be tracked");
+    }
+
+    #[tokio::test]
+    async fn retry_transient_mcp_retries_then_succeeds() {
+        let (_trigger, cancel) = crate::CancelToken::new();
+        let (tx, _rx) = flume::unbounded::<crate::Envelope>();
+        let event_tx = crate::EventSender::new(tx, 0);
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_clone = std::sync::Arc::clone(&attempts);
+        let result = retry_transient_mcp(
+            "test_tool",
+            || {
+                let attempts = std::sync::Arc::clone(&attempts_clone);
+                async move {
+                    let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n < 2 {
+                        Err("tool unavailable".into())
+                    } else {
+                        Ok("ok".into())
+                    }
+                }
+            },
+            &cancel,
+            &event_tx,
+            crate::RecoveryAction::Retry {
+                max: 3,
+                delay: Duration::from_millis(1),
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap(), "ok");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_transient_mcp_exhausts_retries() {
+        let (_trigger, cancel) = crate::CancelToken::new();
+        let (tx, _rx) = flume::unbounded::<crate::Envelope>();
+        let event_tx = crate::EventSender::new(tx, 0);
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_clone = std::sync::Arc::clone(&attempts);
+        let result = retry_transient_mcp(
+            "test_tool",
+            || {
+                let attempts = std::sync::Arc::clone(&attempts_clone);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("tool unavailable".into())
+                }
+            },
+            &cancel,
+            &event_tx,
+            crate::RecoveryAction::Retry {
+                max: 3,
+                delay: Duration::from_millis(1),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "tool unavailable");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn retry_transient_mcp_no_retry_for_deterministic_error() {
+        let (_trigger, cancel) = crate::CancelToken::new();
+        let (tx, _rx) = flume::unbounded::<crate::Envelope>();
+        let event_tx = crate::EventSender::new(tx, 0);
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_clone = std::sync::Arc::clone(&attempts);
+        let result = retry_transient_mcp(
+            "test_tool",
+            || {
+                let attempts = std::sync::Arc::clone(&attempts_clone);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("schema validation failed".into())
+                }
+            },
+            &cancel,
+            &event_tx,
+            crate::RecoveryAction::Retry {
+                max: 3,
+                delay: Duration::from_millis(1),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

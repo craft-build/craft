@@ -19,6 +19,7 @@ pub(crate) mod model_picker;
 pub(crate) mod permission_prompt;
 pub(crate) mod plan_form;
 pub mod queue_panel;
+pub(crate) mod recipe_picker;
 pub(crate) mod render_hints;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;

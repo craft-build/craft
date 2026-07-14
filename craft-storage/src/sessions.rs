@@ -98,6 +98,8 @@ pub struct SessionMeta {
     pub fast: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goal_criteria: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub usage_by_model: HashMap<String, StoredTokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

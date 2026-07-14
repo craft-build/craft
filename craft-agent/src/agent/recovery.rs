@@ -2,10 +2,9 @@
 //!
 //! Provides a single [`classify`] seam that maps an error to a typed
 //! [`RecoveryFailureKind`] and a deterministic [`RecoveryAction`] so call
-//! sites log structured recovery metadata (kind + action) instead of
-//! opaque error strings. The action is not yet wired to drive retry /
-//! escalate / stop behavior at the call sites — it is an observability-only
-//! seam until the turn loop and subagent launcher branch on it.
+//! sites log structured recovery metadata (kind + action) and branch on it:
+//! the tool-dispatch layer applies a bounded retry for transient MCP failures,
+//! and the turn loop emits an escalation nudge before stopping.
 //!
 //! Provider streaming retries are already handled by `stream_with_retry`;
 //! this module covers the layer above it (tool dispatch, subagent launch,
@@ -60,7 +59,7 @@ pub enum RecoveryAction {
     Stop,
 }
 
-const RETRY_TOOL_UNAVAILABLE: RecoveryAction = RecoveryAction::Retry {
+pub(crate) const RETRY_TOOL_UNAVAILABLE: RecoveryAction = RecoveryAction::Retry {
     max: 3,
     delay: Duration::from_secs(1),
 };
@@ -240,5 +239,12 @@ mod tests {
         let (kind, action) = classify_subagent_error("something unexpected happened");
         assert_eq!(kind, RecoveryFailureKind::RuntimeUnknown);
         assert_eq!(action, RecoveryAction::Escalate);
+    }
+
+    #[test]
+    fn classify_subagent_error_tool_unavailable_is_retry() {
+        let (kind, action) = classify_subagent_error("tool unavailable");
+        assert_eq!(kind, RecoveryFailureKind::ToolUnavailable);
+        assert!(matches!(action, RecoveryAction::Retry { .. }));
     }
 }

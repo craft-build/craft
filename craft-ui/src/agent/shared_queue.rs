@@ -34,6 +34,7 @@ impl From<Submission> for QueuedMessage {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum QueueItem {
     Message {
         text: String,

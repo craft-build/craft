@@ -25,12 +25,17 @@ Type `/` in the input box to open the command palette.
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/exit` | Exit the application |
 | `/goal` | Set a goal the agent must meet before stopping (blank to clear) |
+| `/recipe` | Browse and run a recipe |
 | `/dream` | Consolidate and curate project memory |
 | `/distill` | Discover reusable workflows and propose skills |
 | `/checkpoint` | Write a session checkpoint for smooth resume |
 | `/set-context-window` | Override a model's context window (tokens) |
 | `/clear-context-window` | Clear a context-window override |
 | `/wiki` | Init the project wiki, ingest a file, list entries, or show a page |
+| `/map` | Show the current repo map (ranked symbol context) |
+| `/map-refresh` | Force rebuild the repo map cache |
+| `/map-toggle` | Toggle repo map injection on/off |
+| `/watch` | Toggle watch mode (AI comments in editor drive the agent) |
 | `/memory` | View, edit, and delete memory files |
 
 ## Custom commands

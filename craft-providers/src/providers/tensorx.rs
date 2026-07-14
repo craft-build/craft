@@ -18,6 +18,8 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "TensorX",
 };
 
+const OUTPUT_TOKEN_MARGIN: u32 = 4096;
+
 inventory::submit!(craft_config::providers::BuiltInProvider {
     slug: "tensorx",
     display_name: "TensorX",
@@ -168,9 +170,10 @@ impl Provider for TensorX {
                                 .or_else(|| info["max_input_tokens"].as_u64())
                                 .and_then(|v| u32::try_from(v).ok());
 
-                            // FIXME: API rejects requests if we request the maximum number of
-                            // output tokens. It checks input+max_output<=context_window
-                            let max_output_tokens = None;
+                            // The API enforces input+max_output<=context_window, so cap
+                            // below the window to leave room for the prompt.
+                            let max_output_tokens =
+                                context_window.map(|cw| cw.saturating_sub(OUTPUT_TOKEN_MARGIN));
 
                             let supports_thinking =
                                 info.get("supports_reasoning").and_then(Value::as_bool);

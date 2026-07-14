@@ -41,6 +41,7 @@ use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
 use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::plan_form::{PlanForm, PlanFormAction};
+use crate::components::recipe_picker::{RecipePicker, RecipePickerAction};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
@@ -148,6 +149,7 @@ pub struct App {
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
     pub(super) session_picker: SessionPicker,
+    pub(super) recipe_picker: RecipePicker,
     pub(super) rewind_picker: RewindPicker,
     pub(super) help_modal: HelpModal,
     pub(super) usage_modal: UsageModal,
@@ -284,6 +286,7 @@ impl App {
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
             session_picker: SessionPicker::new(),
+            recipe_picker: RecipePicker::new(),
             rewind_picker: RewindPicker::new(),
             help_modal: HelpModal::new(),
             usage_modal: UsageModal::new(),
@@ -793,6 +796,20 @@ impl App {
                 let encoded = answer.encode();
                 self.permission_prompt.close();
                 self.send_to_agent(subagent_id.as_deref(), encoded);
+            }
+            return Some(vec![]);
+        }
+
+        if self.recipe_picker.is_open() {
+            match self.recipe_picker.handle_key(key) {
+                RecipePickerAction::Consumed => {}
+                RecipePickerAction::Select(path) => {
+                    self.recipe_picker.close();
+                    return Some(self.run_recipe(&path));
+                }
+                RecipePickerAction::Close => {
+                    self.recipe_picker.close();
+                }
             }
             return Some(vec![]);
         }
@@ -1673,11 +1690,18 @@ impl App {
                 let goal = cmd.args.trim().to_string();
                 if goal.is_empty() {
                     self.state.session.meta.goal = None;
+                    self.state.session.meta.goal_criteria.clear();
                     self.flash("Goal cleared".into());
                 } else {
+                    let criteria = parse_goal_criteria(&goal);
                     self.state.session.meta.goal = Some(goal.clone());
+                    self.state.session.meta.goal_criteria = criteria;
                     self.flash(format!("Goal set: {goal}"));
                 }
+                vec![]
+            }
+            "/recipe" => {
+                self.recipe_picker.open();
                 vec![]
             }
             "/dream" => self.run_meta_prompt("/dream", craft_agent::prompt::DREAM_PROMPT),
@@ -1906,6 +1930,51 @@ impl App {
         vec![Action::SendMessage(Box::new(input))]
     }
 
+    fn run_recipe(&mut self, path: &std::path::Path) -> Vec<Action> {
+        if self.status == Status::Streaming {
+            self.flash("Agent is busy, try again later".into());
+            return vec![];
+        }
+        let recipe = match craft_agent::recipe::load(path) {
+            Ok(r) => r,
+            Err(e) => {
+                self.flash(format!("recipe load error: {e}"));
+                return vec![];
+            }
+        };
+        let overrides = HashMap::new();
+        if !recipe.missing_required(&overrides).is_empty() {
+            self.flash(
+                "recipe has required parameters without defaults; use CLI: craft recipe run <name> --param key=value"
+                    .into(),
+            );
+            return vec![];
+        }
+        let params = match recipe.resolve_parameters(&overrides) {
+            Ok(p) => p,
+            Err(e) => {
+                self.flash(format!("recipe param error: {e}"));
+                return vec![];
+            }
+        };
+        let prompt = match recipe.render(&params, path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.flash(format!("recipe render error: {e}"));
+                return vec![];
+            }
+        };
+        let label = recipe.name.clone().unwrap_or_else(|| "recipe".into());
+        let input = self.build_agent_input(&QueuedMessage {
+            text: prompt,
+            images: Vec::new(),
+        });
+        self.run_id += 1;
+        self.status = Status::Streaming;
+        self.main_chat().show_user_message(label);
+        vec![Action::SendMessage(Box::new(input))]
+    }
+
     pub(crate) fn submit_watch_prompt(&mut self, label: String, text: String) -> Vec<Action> {
         if self.status == Status::Streaming {
             self.flash("Agent is busy, watch prompt discarded".into());
@@ -2077,6 +2146,7 @@ impl App {
         file_picker,
         task_picker,
         session_picker,
+        recipe_picker,
         rewind_picker,
         theme_picker,
         model_picker,
@@ -2161,6 +2231,7 @@ impl App {
         try_picker!(self.model_picker);
         try_picker!(self.login_picker);
         try_picker!(self.mcp_picker);
+        try_picker!(self.recipe_picker);
         if !self.is_main_chat() {
             return;
         }
@@ -2243,4 +2314,25 @@ fn format_with_images(text: &str, image_count: usize) -> String {
         1 => format!("{text} [1 image]"),
         n => format!("{text} [{n} images]"),
     }
+}
+
+fn parse_goal_criteria(goal: &str) -> Vec<String> {
+    let marker = "## acceptance criteria";
+    let lines: Vec<&str> = goal.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().to_ascii_lowercase() == marker {
+            return lines[i + 1..]
+                .iter()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .map(|l| {
+                    l.strip_prefix("- ")
+                        .or_else(|| l.strip_prefix("* "))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| l.to_string())
+                })
+                .collect();
+        }
+    }
+    Vec::new()
 }

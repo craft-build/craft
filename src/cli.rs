@@ -262,6 +262,8 @@ pub enum Command {
     Wiki(WikiCommand),
     /// Run deterministic review checks against the current diff
     Review(ReviewCommand),
+    /// Discover and run recipes by name
+    Recipe(RecipeCommand),
     /// Terminal shell integration: transparent command logging and `@craft` alias
     Term {
         #[command(subcommand)]
@@ -326,6 +328,50 @@ pub struct RunCommand {
     /// Pre-approve tools (comma-separated), accepts PascalCase or snake_case
     #[arg(long, value_delimiter = ',')]
     pub allowed_tools: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum RecipeAction {
+    /// List discovered recipes
+    List,
+    /// Run a recipe by name (file stem or recipe `name` field)
+    Run {
+        /// Recipe name
+        name: String,
+        /// Model spec (provider/model-id)
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+        /// Output format for the result
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output_format: OutputFormat,
+        /// Don't persist a session log for this run
+        #[arg(long)]
+        no_session: bool,
+        /// Suppress non-essential diagnostic output
+        #[arg(long)]
+        quiet: bool,
+        /// Skip all permission prompts (allow everything)
+        #[arg(long)]
+        yolo: bool,
+        /// Disable the Lua plugin system
+        #[arg(long)]
+        no_plugins: bool,
+        /// Recipe parameter overrides (key=value), repeatable
+        #[arg(long, value_name = "KEY=VALUE")]
+        param: Vec<String>,
+        /// Maximum number of agent turns
+        #[arg(long)]
+        max_turns: Option<u32>,
+        /// Pre-approve tools (comma-separated), accepts PascalCase or snake_case
+        #[arg(long, value_delimiter = ',')]
+        allowed_tools: Vec<String>,
+    },
+}
+
+#[derive(Parser)]
+pub struct RecipeCommand {
+    #[command(subcommand)]
+    pub action: RecipeAction,
 }
 
 #[derive(Parser)]

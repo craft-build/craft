@@ -38,6 +38,24 @@ Override a parameter:
 craft run .craft/recipes/audit.yaml --param focus=staleness --param depth=2
 ```
 
+## Discovering recipes
+
+Craft discovers recipes from `.craft/recipes/`, `.agents/recipes/`, `.claude/recipes/`, and `.opencode/recipes/` directories, walking up from the current directory to the project root.
+
+List discovered recipes:
+
+```bash
+craft recipe list
+```
+
+Run a recipe by name (file stem or recipe `name` field):
+
+```bash
+craft recipe run audit --param focus=staleness
+```
+
+In the TUI, type `/recipe` to browse and run a recipe interactively.
+
 ## Parameters
 
 Each parameter has a `name`, a `type`, and optional `default`, `required`, `description`, and `options`.

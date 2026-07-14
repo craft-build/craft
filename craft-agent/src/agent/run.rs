@@ -146,6 +146,7 @@ pub struct Agent<'h> {
     last_relevance_scores: Option<Vec<(usize, f32)>>,
     fs: Arc<dyn crate::tools::FsBackend>,
     goal: Option<String>,
+    goal_criteria: Vec<String>,
     judge_continuations: u8,
     snapshot_store: Arc<crate::tools::safety::SnapshotStore>,
     pending_edits: Arc<crate::tools::ast_edit::PendingEditStore>,
@@ -231,6 +232,7 @@ impl<'h> Agent<'h> {
             last_relevance_scores: None,
             fs: params.fs,
             goal: None,
+            goal_criteria: Vec::new(),
             judge_continuations: 0,
             snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
             pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
@@ -344,6 +346,7 @@ impl<'h> Agent<'h> {
         self.history.push(msg);
         self.mode = input.mode;
         self.goal = input.goal;
+        self.goal_criteria = input.goal_criteria.clone();
         self.opts = RequestOptions {
             thinking: input.thinking,
             fast: input.fast,
@@ -551,6 +554,11 @@ impl<'h> Agent<'h> {
                     recovery_action = ?action,
                     "stream_message failed",
                 );
+                if matches!(action, super::recovery::RecoveryAction::Escalate) {
+                    let _ = self.event_tx.send(AgentEvent::Info {
+                        message: format!("{kind:?}: {e}"),
+                    });
+                }
                 return Err(e);
             }
         };
@@ -673,7 +681,8 @@ impl<'h> Agent<'h> {
         if has_tools {
             Ok(TurnOutcome::Continue)
         } else if let Some(ref goal) = self.goal.clone() {
-            self.run_goal_judge(goal, stop_reason).await
+            let criteria = self.goal_criteria.clone();
+            self.run_goal_judge(goal, &criteria, stop_reason).await
         } else {
             Ok(TurnOutcome::Done(stop_reason))
         }
@@ -708,6 +717,7 @@ impl<'h> Agent<'h> {
     async fn run_goal_judge(
         &mut self,
         goal: &str,
+        goal_criteria: &[String],
         stop_reason: Option<StopReason>,
     ) -> Result<TurnOutcome, AgentError> {
         if self.judge_continuations >= MAX_JUDGE_CONTINUATIONS {
@@ -716,6 +726,11 @@ impl<'h> Agent<'h> {
                 "judge continuation cap reached, allowing stop"
             );
             return Ok(TurnOutcome::Done(stop_reason));
+        }
+        if !goal_criteria.is_empty() {
+            return self
+                .run_criteria_judge(goal, goal_criteria, stop_reason)
+                .await;
         }
         let outcome = super::judge::evaluate(
             goal,
@@ -744,14 +759,57 @@ impl<'h> Agent<'h> {
                 Ok(TurnOutcome::Continue)
             }
             Ok(super::judge::JudgeOutcome::Criteria { .. }) => {
-                debug_assert!(
-                    false,
-                    "Criteria verdict from /goal judge; structured path is Flow-only"
-                );
+                // Only returned by evaluate_criteria, not evaluate.
                 Ok(TurnOutcome::Done(stop_reason))
             }
             Err(e) => {
                 warn!(error = %e, "judge evaluation failed, allowing stop (fail-open)");
+                Ok(TurnOutcome::Done(stop_reason))
+            }
+        }
+    }
+
+    async fn run_criteria_judge(
+        &mut self,
+        goal: &str,
+        criteria: &[String],
+        stop_reason: Option<StopReason>,
+    ) -> Result<TurnOutcome, AgentError> {
+        let outcome = super::judge::evaluate_criteria(
+            criteria,
+            self.history.as_slice(),
+            &self.provider,
+            &self.model,
+            self.config.judge_model.as_deref(),
+            self.timeouts,
+            self.session_id.as_deref(),
+        )
+        .await;
+        match outcome {
+            Ok(super::judge::JudgeOutcome::Criteria { met, unmet }) => {
+                if unmet.is_empty() {
+                    self.event_tx.send(AgentEvent::Info {
+                        message: format!("Goal met — all {} criteria verified", met.len()),
+                    })?;
+                    Ok(TurnOutcome::Done(stop_reason))
+                } else {
+                    self.judge_continuations += 1;
+                    let list = unmet
+                        .iter()
+                        .map(|c| format!("- {c}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let note = format!(
+                        "Unmet criteria:\n{list}\n\nContinue working toward the goal: {goal}. \
+                         Do not stop until all criteria are met."
+                    );
+                    self.history.push(Message::synthetic(note));
+                    Ok(TurnOutcome::Continue)
+                }
+            }
+            Ok(_) => Ok(TurnOutcome::Done(stop_reason)),
+            Err(e) => {
+                warn!(error = %e, "criteria judge evaluation failed, allowing stop (fail-open)");
                 Ok(TurnOutcome::Done(stop_reason))
             }
         }

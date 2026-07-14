@@ -105,4 +105,20 @@ mod tests {
         assert!(result.syntax_valid);
         assert!(!result.introduced_errors);
     }
+
+    #[test]
+    fn tsx_with_jsx_passes() {
+        const AFTER: &str = "const App = () => <div className=\"x\">hi</div>;";
+        let result = validate_edit(Path::new("Component.tsx"), "", AFTER);
+        assert!(result.syntax_valid, "tsx should parse jsx");
+        assert!(!result.introduced_errors);
+    }
+
+    #[test]
+    fn jsx_with_html_passes() {
+        const AFTER: &str = "const el = <button onClick={fn}>OK</button>;";
+        let result = validate_edit(Path::new("Component.jsx"), "", AFTER);
+        assert!(result.syntax_valid, "jsx should parse html-like syntax");
+        assert!(!result.introduced_errors);
+    }
 }

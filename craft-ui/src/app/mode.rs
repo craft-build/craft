@@ -289,6 +289,7 @@ impl App {
             thinking: self.state.thinking,
             fast: self.state.fast,
             goal: self.state.session.meta.goal.clone(),
+            goal_criteria: self.state.session.meta.goal_criteria.clone(),
             flow_resume,
             ..Default::default()
         }

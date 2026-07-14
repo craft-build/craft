@@ -38,7 +38,6 @@ pub enum JudgeOutcome {
     Done,
     NotDone(String),
     /// Structured verdict over a list of acceptance criteria.
-    #[allow(dead_code)]
     Criteria {
         met: Vec<String>,
         unmet: Vec<String>,
@@ -92,9 +91,8 @@ pub async fn evaluate(
 }
 
 /// Evaluate the agent's transcript against a fixed list of acceptance criteria,
-/// returning a structured per-criterion verdict. Used by Flow's Verifier stage.
-/// `/goal` keeps its free-text `evaluate` path; this is the structured sibling.
-#[allow(dead_code)]
+/// returning a structured per-criterion verdict. `/goal` uses this when the
+/// goal text includes an acceptance-criteria list; Flow's Verifier also uses it.
 pub async fn evaluate_criteria(
     criteria: &[String],
     history: &[Message],
