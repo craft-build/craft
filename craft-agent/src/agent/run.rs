@@ -847,6 +847,7 @@ impl<'h> Agent<'h> {
                 usage: response.usage,
                 model: self.model.id.clone(),
                 context_size: Some(response.usage.context_tokens()),
+                context_window: self.model.context_window,
             })))
     }
 

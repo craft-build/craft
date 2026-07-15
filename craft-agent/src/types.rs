@@ -542,6 +542,24 @@ pub struct PermissionContext {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionSpec {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -603,6 +621,10 @@ pub enum AgentEvent {
         scopes: Vec<String>,
         #[serde(default)]
         context: PermissionContext,
+    },
+    QuestionRequest {
+        id: String,
+        questions: Vec<QuestionSpec>,
     },
     AuthRequired,
     Nudge,
@@ -775,6 +797,7 @@ pub struct TurnCompleteEvent {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_size: Option<u32>,
+    pub context_window: u32,
 }
 
 #[derive(Debug, Serialize)]

@@ -6,6 +6,7 @@ use agent_client_protocol_schema::{
 use craft_agent::tools::ToolRegistry;
 use craft_agent::types::{BatchProgressEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
 use craft_providers::{ContentBlock as MsgBlock, ImageMediaType, Message, Role as MsgRole};
+use std::collections::HashMap;
 
 const MIN_FENCE_LEN: usize = 3;
 pub const SUBAGENT_BREADCRUMB_ARROW: &str = "▸ ";
@@ -217,17 +218,30 @@ pub fn map_stop_reason(
 }
 
 pub fn replay_history(messages: &[Message]) -> Vec<SessionUpdate> {
+    let tool_inputs: HashMap<String, &serde_json::Value> = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            MsgBlock::ToolUse { id, input, .. } => Some((id.clone(), input)),
+            _ => None,
+        })
+        .collect();
+
     let mut updates = Vec::new();
     for msg in messages {
         match msg.role {
-            MsgRole::User => replay_user(msg, &mut updates),
+            MsgRole::User => replay_user(msg, &mut updates, &tool_inputs),
             MsgRole::Assistant => replay_assistant(msg, &mut updates),
         }
     }
     updates
 }
 
-fn replay_user(msg: &Message, updates: &mut Vec<SessionUpdate>) {
+fn replay_user(
+    msg: &Message,
+    updates: &mut Vec<SessionUpdate>,
+    tool_inputs: &HashMap<String, &serde_json::Value>,
+) {
     if let Some(text) = msg.user_text() {
         updates.push(SessionUpdate::UserMessageChunk(ContentChunk::new(
             ContentBlock::Text(TextContent::new(text.to_string())),
@@ -240,7 +254,12 @@ fn replay_user(msg: &Message, updates: &mut Vec<SessionUpdate>) {
                 content,
                 is_error,
                 ..
-            } => updates.push(replay_tool_result(tool_use_id, content, *is_error)),
+            } => updates.push(replay_tool_result(
+                tool_use_id,
+                content,
+                *is_error,
+                tool_inputs.get(tool_use_id).copied(),
+            )),
             MsgBlock::Image { source } => {
                 updates.push(SessionUpdate::UserMessageChunk(ContentChunk::new(
                     ContentBlock::Image(ImageContent::new(
@@ -276,22 +295,71 @@ fn replay_tool_call(id: &str, name: &str, input: &serde_json::Value) -> SessionU
     )
 }
 
-fn replay_tool_result(id: &str, content: &str, is_error: bool) -> SessionUpdate {
+fn replay_tool_result(
+    id: &str,
+    content: &str,
+    is_error: bool,
+    input: Option<&serde_json::Value>,
+) -> SessionUpdate {
     let status = if is_error {
         ToolCallStatus::Failed
     } else {
         ToolCallStatus::Completed
     };
     let mut fields = ToolCallUpdateFields::new().status(status);
-    if !content.is_empty() {
+
+    if let Some(diff) = input.and_then(reconstruct_diff) {
+        fields = fields.content(vec![ToolCallContent::Diff(diff)]);
+    } else if !content.is_empty() {
         fields = fields.content(vec![ToolCallContent::Content(Content::new(
             ContentBlock::Text(TextContent::new(fenced(content))),
         ))]);
     }
+
     SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
         ToolCallId::from(id.to_string()),
         fields,
     ))
+}
+
+fn reconstruct_diff(input: &serde_json::Value) -> Option<Diff> {
+    let path = input.get("path").and_then(|v| v.as_str())?;
+    let edits: Vec<(String, String)> =
+        if let Some(edits_arr) = input.get("edits").and_then(|v| v.as_array()) {
+            edits_arr
+                .iter()
+                .filter_map(|e| {
+                    Some((
+                        e.get("old_string")?.as_str()?.to_string(),
+                        e.get("new_string")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        } else {
+            let old = input
+                .get("old_string")
+                .and_then(|v| v.as_str())?
+                .to_string();
+            let new = input
+                .get("new_string")
+                .and_then(|v| v.as_str())?
+                .to_string();
+            vec![(old, new)]
+        };
+    if edits.is_empty() {
+        return None;
+    }
+    let old_text = edits
+        .iter()
+        .map(|(o, _)| o.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let new_text = edits
+        .iter()
+        .map(|(_, n)| n.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(Diff::new(path.to_string(), new_text).old_text(old_text))
 }
 
 fn mime_type(media: &ImageMediaType) -> &'static str {
@@ -462,6 +530,98 @@ mod tests {
         let json = updates_json(&[msg]);
         assert_eq!(json[0]["sessionUpdate"], "tool_call_update");
         assert_eq!(json[0]["status"], "failed");
+    }
+
+    #[test]
+    fn replay_edit_produces_diff_content() {
+        let messages = vec![
+            assistant(vec![MsgBlock::ToolUse {
+                id: "tu-edit".into(),
+                name: "edit".into(),
+                input: serde_json::json!({
+                    "path": "src/main.rs",
+                    "old_string": "fn old() {}",
+                    "new_string": "fn new() {}"
+                }),
+            }]),
+            Message {
+                role: MsgRole::User,
+                content: vec![MsgBlock::ToolResult {
+                    tool_use_id: "tu-edit".into(),
+                    content: "edited src/main.rs".into(),
+                    images: vec![],
+                    is_error: false,
+                }],
+                display_text: None,
+            },
+        ];
+        let json = updates_json(&messages);
+        let result_update = &json[1];
+        assert_eq!(result_update["sessionUpdate"], "tool_call_update");
+        assert_eq!(result_update["content"][0]["type"], "diff");
+        assert_eq!(result_update["content"][0]["path"], "src/main.rs");
+        assert_eq!(result_update["content"][0]["oldText"], "fn old() {}");
+        assert_eq!(result_update["content"][0]["newText"], "fn new() {}");
+    }
+
+    #[test]
+    fn replay_multiedit_merges_edits_into_diff() {
+        let messages = vec![
+            assistant(vec![MsgBlock::ToolUse {
+                id: "tu-multi".into(),
+                name: "multiedit".into(),
+                input: serde_json::json!({
+                    "path": "lib.rs",
+                    "edits": [
+                        {"old_string": "a", "new_string": "b"},
+                        {"old_string": "c", "new_string": "d"}
+                    ]
+                }),
+            }]),
+            Message {
+                role: MsgRole::User,
+                content: vec![MsgBlock::ToolResult {
+                    tool_use_id: "tu-multi".into(),
+                    content: "edited lib.rs".into(),
+                    images: vec![],
+                    is_error: false,
+                }],
+                display_text: None,
+            },
+        ];
+        let json = updates_json(&messages);
+        let result_update = &json[1];
+        assert_eq!(result_update["content"][0]["type"], "diff");
+        assert_eq!(result_update["content"][0]["oldText"], "a\n\nc");
+        assert_eq!(result_update["content"][0]["newText"], "b\n\nd");
+    }
+
+    #[test]
+    fn replay_non_edit_tool_still_uses_text() {
+        let messages = vec![
+            assistant(vec![MsgBlock::ToolUse {
+                id: "tu-bash".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo hi"}),
+            }]),
+            Message {
+                role: MsgRole::User,
+                content: vec![MsgBlock::ToolResult {
+                    tool_use_id: "tu-bash".into(),
+                    content: "hi".into(),
+                    images: vec![],
+                    is_error: false,
+                }],
+                display_text: None,
+            },
+        ];
+        let json = updates_json(&messages);
+        let result_update = &json[1];
+        assert_eq!(result_update["content"][0]["type"], "content");
+        assert_eq!(
+            result_update["content"][0]["content"]["text"],
+            "```\nhi\n```"
+        );
     }
 
     #[test]

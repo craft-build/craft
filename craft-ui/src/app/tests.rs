@@ -619,6 +619,7 @@ fn turn_complete_tracks_usage_and_context_per_chat() {
             usage: main_usage,
             model: "test".into(),
             context_size: None,
+            context_window: 0,
         },
     ))));
 
@@ -633,6 +634,7 @@ fn turn_complete_tracks_usage_and_context_per_chat() {
             usage: sub_usage,
             model: "test".into(),
             context_size: None,
+            context_window: 0,
         })),
         "task1",
         None,
@@ -661,6 +663,7 @@ fn turn_complete_accumulates_usage_by_model() {
             },
             model: "main-model".into(),
             context_size: None,
+            context_window: 0,
         },
     ))));
     app.update(subagent_msg(
@@ -673,6 +676,7 @@ fn turn_complete_accumulates_usage_by_model() {
             },
             model: "sub-model".into(),
             context_size: None,
+            context_window: 0,
         })),
         "task1",
         None,
@@ -2106,6 +2110,7 @@ fn stale_non_terminal_event_does_not_save_session() {
             usage: TokenUsage::default(),
             model: "mock".into(),
             context_size: None,
+            context_window: 0,
         })),
         old_run_id,
     ));

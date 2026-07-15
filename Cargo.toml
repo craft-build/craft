@@ -65,6 +65,7 @@ members = [
   "craft-tool-macro",
   "craft-config-macro",
   "craft-ui",
+  "craft-desktop",
 ]
 resolver = "3"
 

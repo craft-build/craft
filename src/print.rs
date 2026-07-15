@@ -239,6 +239,7 @@ pub async fn run(
             | AgentEvent::AutoCompacting
             | AgentEvent::AuthRequired
             | AgentEvent::PermissionRequest { .. }
+            | AgentEvent::QuestionRequest { .. }
             | AgentEvent::SubagentHistory { .. }
             | AgentEvent::ToolSnapshot { .. }
             | AgentEvent::ToolHeaderSnapshot { .. }

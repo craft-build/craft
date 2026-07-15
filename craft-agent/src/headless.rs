@@ -277,6 +277,12 @@ pub struct InteractiveParams {
 
 pub struct InteractiveHandle {
     pub event_rx: Receiver<Envelope>,
+    /// Sender half of `event_rx`'s channel. Exposed so callers that drive
+    /// out-of-band work against this session (for example craft-acp's Flow
+    /// pipeline, which craft-agent cannot depend on without a dependency
+    /// cycle) can inject `Envelope`s that flow through the same translation
+    /// path as regular agent turns instead of building a parallel one.
+    pub raw_event_tx: flume::Sender<Envelope>,
     pub tool_names: Vec<String>,
     pub input_tx: flume::Sender<AgentInput>,
     pub answer_tx: flume::Sender<String>,
@@ -304,6 +310,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     let tool_names = extract_tool_names(&tools);
 
     let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
+    let raw_event_tx = raw_tx.clone();
     let (input_tx, input_rx) = flume::unbounded::<AgentInput>();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
     let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
@@ -474,6 +481,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
 
     InteractiveHandle {
         event_rx,
+        raw_event_tx,
         tool_names,
         input_tx,
         answer_tx,

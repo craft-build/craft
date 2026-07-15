@@ -32,6 +32,7 @@ mod list_tools;
 mod move_file;
 mod multiedit;
 mod outline;
+pub mod question;
 mod read;
 mod read_findings;
 pub mod registry;

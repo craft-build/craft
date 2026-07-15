@@ -188,6 +188,7 @@ impl Chat {
             }
             AgentEvent::StagnationDetected { .. } => {}
             AgentEvent::ModelEscalation { .. } => {}
+            AgentEvent::QuestionRequest { .. } => {}
         }
         ChatEventResult::Continue
     }

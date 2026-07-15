@@ -1000,6 +1000,7 @@ impl EventPump {
             AgentEvent::Info { .. }
             | AgentEvent::AdvisorNote { .. }
             | AgentEvent::ModelEscalation { .. }
+            | AgentEvent::QuestionRequest { .. }
             | AgentEvent::StagnationDetected { .. } => {}
         }
         Ok(())

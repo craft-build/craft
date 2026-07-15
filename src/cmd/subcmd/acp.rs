@@ -8,6 +8,7 @@ use craft_agent::tools::ToolRegistry;
 use craft_config::{load_env_files, load_permissions};
 use craft_lua::PluginHost;
 use craft_storage::StateDir;
+use craft_storage::flow::FlowStore;
 
 use crate::setup;
 
@@ -64,6 +65,8 @@ pub async fn run(yolo: bool) -> Result<()> {
         .map(|h| h.collect_prompt_slots())
         .unwrap_or_default();
 
+    let flow_store = Arc::new(FlowStore::new(&storage).context("init flow store")?);
+
     craft_acp::run(craft_acp::AcpParams {
         model,
         config: config.agent,
@@ -74,6 +77,7 @@ pub async fn run(yolo: bool) -> Result<()> {
         prompt_slots: Arc::new(prompt_slots),
         yolo,
         plugin_host,
+        flow_store,
     })
     .await
 }

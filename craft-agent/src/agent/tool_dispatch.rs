@@ -133,6 +133,12 @@ pub async fn run(
     };
     let input: &Value = hook_input.as_ref().unwrap_or(input);
 
+    if name == crate::tools::QUESTION_TOOL_NAME
+        && let Some(rx) = ctx.user_response_rx.as_deref()
+    {
+        return run_headless_question(id, &tool_id, input, ctx, rx, started).await;
+    }
+
     if let Some(entry) = entry {
         let invocation = match entry.tool.parse(input) {
             Ok(inv) => inv,
@@ -252,6 +258,87 @@ pub async fn run(
         let msg = format!("{UNKNOWN_TOOL_PREFIX}: {mcp_lookup}");
         warn!(tool = %mcp_lookup, "unknown tool");
         done_error(msg)
+    }
+}
+
+async fn run_headless_question(
+    id: String,
+    tool_id: &Arc<str>,
+    input: &Value,
+    ctx: &ToolContext,
+    answer_rx: &tokio::sync::Mutex<flume::Receiver<String>>,
+    started: Instant,
+) -> ToolDoneEvent {
+    let done_error = |msg: String| ToolDoneEvent {
+        id: id.clone(),
+        tool: Arc::clone(tool_id),
+        output: ToolOutput::Plain(msg),
+        is_error: true,
+        annotation: None,
+        written_path: None,
+    };
+
+    let questions = match crate::tools::question::parse_questions(input) {
+        Ok(qs) => qs,
+        Err(e) => return done_error(e),
+    };
+
+    let count = questions.len();
+    let summary = format!("{count} question{}", if count == 1 { "" } else { "s" });
+
+    let start = ToolStartEvent {
+        id: id.clone(),
+        tool: Arc::clone(tool_id),
+        summary,
+        render_header: None,
+        annotation: None,
+        input: None,
+        raw_input: None,
+        output: None,
+    };
+    let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let _ = ctx.event_tx.send(AgentEvent::QuestionRequest {
+        id: request_id.clone(),
+        questions: questions.clone(),
+    });
+
+    let response = {
+        let guard = answer_rx.lock().await;
+        ctx.cancel.race(guard.recv_async()).await
+    };
+
+    let raw = match response {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) => {
+            warn!("question answer channel closed");
+            return done_error("question answer channel closed".to_string());
+        }
+        Err(_) => return done_error("cancelled".to_string()),
+    };
+
+    let answer = crate::tools::question::decode_answer(&raw).unwrap_or_else(|| {
+        crate::tools::question::QuestionAnswer {
+            dismissed: true,
+            answers: vec![],
+        }
+    });
+
+    let markdown = crate::tools::question::format_answer_markdown(&questions, &answer);
+    debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        dismissed = answer.dismissed,
+        "headless question answered"
+    );
+
+    ToolDoneEvent {
+        id,
+        tool: Arc::clone(tool_id),
+        output: ToolOutput::Markdown(markdown),
+        is_error: false,
+        annotation: None,
+        written_path: None,
     }
 }
 

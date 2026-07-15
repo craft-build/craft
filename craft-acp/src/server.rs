@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -17,7 +17,7 @@ use agent_client_protocol_schema::{
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
     SetSessionModeRequest, SetSessionModeResponse, TerminalId, TerminalOutputRequest,
     TerminalOutputResponse, TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
-    WriteTextFileRequest, WriteTextFileResponse,
+    UsageUpdate, WriteTextFileRequest, WriteTextFileResponse,
 };
 use color_eyre::eyre::Context;
 use craft_agent::headless::{self, InteractiveHandle, InteractiveParams};
@@ -47,7 +47,7 @@ const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type PendingPrompt = Arc<Mutex<Option<RequestId>>>;
 type ModelSpecs = Arc<Mutex<Vec<String>>>;
-type PendingRequests = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
+pub(crate) type PendingRequests = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 
 struct ClientCaps {
     fs_read: AtomicBool,
@@ -142,7 +142,7 @@ async fn recv_delegated(rx: oneshot::Receiver<Value>) -> Result<Value, String> {
     Ok(raw.get("result").cloned().unwrap_or(Value::Null))
 }
 
-async fn send_delegated(
+pub(crate) async fn send_delegated(
     out_tx: &Sender<Value>,
     pending: &PendingRequests,
     next_id: &AtomicI64,
@@ -352,6 +352,7 @@ struct SessionState {
     current_model: String,
     pending_prompt: PendingPrompt,
     title_sent: bool,
+    cwd: PathBuf,
 }
 
 struct SessionInfo {
@@ -366,6 +367,7 @@ struct Server {
     model_specs: ModelSpecs,
     shared_session: SharedSession,
     pending_requests: PendingRequests,
+    question_request_ids: Arc<Mutex<HashSet<i64>>>,
     client_caps: Arc<ClientCaps>,
     next_request_id: Arc<AtomicI64>,
     session: Option<SessionState>,
@@ -435,6 +437,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         model_specs,
         shared_session,
         pending_requests,
+        question_request_ids: Arc::new(Mutex::new(HashSet::new())),
         client_caps,
         next_request_id,
         session: None,
@@ -524,6 +527,7 @@ async fn handle_request(
             };
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
+            let cwd = req.cwd.clone();
             let handle = spawn_session(params, req.cwd, None, Vec::new(), &mcp_servers, fs).await;
             let spec = params.model.spec();
             let resp = {
@@ -533,7 +537,7 @@ async fn handle_request(
                     methods::model_config_option(&spec, &specs),
                 ])
             };
-            install_session(srv, handle, spec);
+            install_session(srv, handle, spec, cwd);
             Ok(AgentResponse::NewSessionResponse(resp))
         }
         "session/load" => {
@@ -558,6 +562,7 @@ async fn handle_request(
             }
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
+            let cwd = req.cwd.clone();
             let handle =
                 spawn_session(params, req.cwd, Some(session_id), history, &mcp_servers, fs).await;
             let spec = params.model.spec();
@@ -568,7 +573,7 @@ async fn handle_request(
                     methods::model_config_option(&spec, &specs),
                 ])
             };
-            install_session(srv, handle, spec);
+            install_session(srv, handle, spec, cwd);
             Ok(AgentResponse::LoadSessionResponse(resp))
         }
         "session/resume" => {
@@ -589,6 +594,7 @@ async fn handle_request(
             };
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
+            let cwd = req.cwd.clone();
             let handle =
                 spawn_session(params, req.cwd, Some(session_id), history, &mcp_servers, fs).await;
             let spec = params.model.spec();
@@ -599,12 +605,12 @@ async fn handle_request(
                     methods::model_config_option(&spec, &specs),
                 ])
             };
-            install_session(srv, handle, spec);
+            install_session(srv, handle, spec, cwd);
             Ok(AgentResponse::ResumeSessionResponse(resp))
         }
         "session/list" => handle_list_sessions(raw),
         "session/close" => handle_close_session(srv, raw),
-        "session/prompt" => match handle_prompt(srv, raw, &id) {
+        "session/prompt" => match handle_prompt(srv, raw, &id, params) {
             Ok(()) => return,
             Err(e) => Err(e),
         },
@@ -702,7 +708,12 @@ fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {
     merged
 }
 
-fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: String) {
+fn install_session(
+    srv: &mut Server,
+    handle: InteractiveHandle,
+    current_model: String,
+    cwd: PathBuf,
+) {
     if let Some(prev) = srv.session.take() {
         teardown_session(&srv.out_tx, prev);
     }
@@ -714,6 +725,7 @@ fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: S
         srv.out_tx.clone(),
         Arc::clone(&pending),
         Arc::clone(&srv.next_request_id),
+        Arc::clone(&srv.question_request_ids),
     );
     *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionInfo {
         session_id: session_id.clone(),
@@ -725,6 +737,7 @@ fn install_session(srv: &mut Server, handle: InteractiveHandle, current_model: S
         current_model,
         pending_prompt: pending,
         title_sent: false,
+        cwd,
     });
 }
 
@@ -764,7 +777,12 @@ fn load_history_from(
     Ok(session.messages)
 }
 
-fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), AcpError> {
+fn handle_prompt(
+    srv: &mut Server,
+    raw: &Value,
+    id: &RequestId,
+    params: &AcpParams,
+) -> Result<(), AcpError> {
     let req: PromptRequest = parse_params(raw)?;
     let session = srv.session.as_mut().ok_or_else(no_session)?;
     if session
@@ -791,6 +809,13 @@ fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), Ac
             session.title_sent = true;
         }
     }
+
+    if let AgentMode::Flow(workstream_id) = &session.current_mode {
+        let workstream_id = workstream_id.clone();
+        spawn_flow_prompt(srv, params, workstream_id, message, id.clone());
+        return Ok(());
+    }
+
     let input = AgentInput {
         message,
         mode: session.current_mode.clone(),
@@ -808,6 +833,66 @@ fn handle_prompt(srv: &mut Server, raw: &Value, id: &RequestId) -> Result<(), Ac
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
     Ok(())
+}
+
+/// Flow mode bypasses `InteractiveHandle::input_tx` (see `crate::flow`'s module
+/// doc): it drives `craft_flow::run` directly against this session's live
+/// provider/permissions, streaming progress as `SessionUpdate::Plan` and
+/// `ToolCall`/`ToolCallUpdate`s, and resolves this `session/prompt` request
+/// itself once the workstream reaches a terminal outcome. Note `session/cancel`
+/// does not yet interrupt an in-flight Flow run.
+fn spawn_flow_prompt(
+    srv: &mut Server,
+    params: &AcpParams,
+    workstream_id: String,
+    request: String,
+    id: RequestId,
+) {
+    let session = srv.session.as_ref().expect("caller holds session.as_mut()");
+    let model = Model::from_spec(&session.current_model).unwrap_or_else(|_| params.model.clone());
+    let drive_params = crate::flow::FlowDriveParams {
+        session_id: session.handle.session_id.clone(),
+        workstream_id,
+        project_id: craft_flow::project_id(&session.cwd),
+        request,
+        model,
+        config: params.config.clone(),
+        permissions: Arc::clone(&session.handle.permissions),
+        timeouts: params.timeouts,
+        compression: craft_config::CompressionConfig::default(),
+        prompt_slots: Arc::clone(&params.prompt_slots),
+        flow_store: Arc::clone(&params.flow_store),
+        raw_event_tx: session.handle.raw_event_tx.clone(),
+    };
+    *session
+        .pending_prompt
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+
+    let pending_prompt = Arc::clone(&session.pending_prompt);
+    let out_tx = srv.out_tx.clone();
+    let pending_requests = Arc::clone(&srv.pending_requests);
+    let next_request_id = Arc::clone(&srv.next_request_id);
+    tokio::spawn(async move {
+        let stop_reason = crate::flow::drive(
+            drive_params,
+            out_tx.clone(),
+            pending_requests,
+            next_request_id,
+        )
+        .await;
+        if let Some(pending_id) = pending_prompt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let resp = PromptResponse::new(stop_reason);
+            send(
+                &out_tx,
+                Response::new(pending_id, Ok(AgentResponse::PromptResponse(resp))),
+            );
+        }
+    });
 }
 
 fn apply_mode(srv: &mut Server, mode_str: &str) -> Result<(), AcpError> {
@@ -981,6 +1066,31 @@ fn handle_incoming_response(srv: &Server, raw: &Value) {
     }
 
     let Some(session) = &srv.session else { return };
+
+    let is_question = id_in_response(raw).is_some_and(|id| {
+        srv.question_request_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id)
+    });
+
+    if is_question {
+        let answer_json = raw
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "dismissed": true, "answers": [] }));
+        let qa: craft_agent::tools::question::QuestionAnswer = serde_json::from_value(answer_json)
+            .unwrap_or_else(|_| craft_agent::tools::question::QuestionAnswer {
+                dismissed: true,
+                answers: vec![],
+            });
+        let _ = session
+            .handle
+            .answer_tx
+            .send(craft_agent::tools::question::encode_answer(&qa));
+        return;
+    }
+
     if let Some(result) = raw.get("result")
         && let Ok(resp) = serde_json::from_value::<RequestPermissionResponse>(result.clone())
     {
@@ -992,6 +1102,10 @@ fn handle_incoming_response(srv: &Server, raw: &Value) {
             .answer_tx
             .send(craft_agent::permissions::PermissionAnswer::Deny.encode());
     }
+}
+
+fn id_in_response(raw: &Value) -> Option<i64> {
+    raw.get("id").and_then(Value::as_i64)
 }
 
 fn extract_prompt_content(blocks: &[ContentBlock]) -> (String, Vec<ImageSource>) {
@@ -1042,6 +1156,7 @@ fn start_event_pump(
     out_tx: Sender<Value>,
     pending: PendingPrompt,
     next_request_id: Arc<AtomicI64>,
+    question_request_ids: Arc<Mutex<HashSet<i64>>>,
 ) {
     tokio::spawn(async move {
         let sid = SessionId::from(session_id);
@@ -1133,6 +1248,27 @@ fn start_event_pump(
                     );
                     continue;
                 }
+                AgentEvent::QuestionRequest { id, questions } => {
+                    let req_id = next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
+                    question_request_ids
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(req_id);
+                    let params = serde_json::json!({
+                        "sessionId": sid,
+                        "requestId": id,
+                        "questions": questions,
+                    });
+                    send(
+                        &out_tx,
+                        Request {
+                            id: RequestId::Number(req_id),
+                            method: Arc::from("session/question"),
+                            params: Some(params),
+                        },
+                    );
+                    continue;
+                }
                 AgentEvent::Done { stop_reason, .. } => {
                     if let Some(id) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
                         let resp = PromptResponse::new(translate::map_stop_reason(stop_reason));
@@ -1150,6 +1286,18 @@ fn start_event_pump(
                     }
                     continue;
                 }
+                AgentEvent::TurnComplete(tc) => {
+                    let used = tc.context_size.unwrap_or_else(|| tc.usage.context_tokens());
+                    session_update(
+                        &out_tx,
+                        &sid,
+                        SessionUpdate::UsageUpdate(UsageUpdate::new(
+                            used.into(),
+                            tc.context_window.into(),
+                        )),
+                    );
+                    continue;
+                }
                 _ => continue,
             };
             session_update(&out_tx, &sid, update);
@@ -1157,7 +1305,7 @@ fn start_event_pump(
     });
 }
 
-fn send(out_tx: &Sender<Value>, msg: impl Serialize) {
+pub(crate) fn send(out_tx: &Sender<Value>, msg: impl Serialize) {
     match serde_json::to_value(JsonRpcMessage::wrap(msg)) {
         Ok(json) => {
             if out_tx.send(json).is_err() {
@@ -1168,7 +1316,7 @@ fn send(out_tx: &Sender<Value>, msg: impl Serialize) {
     }
 }
 
-fn session_update(out_tx: &Sender<Value>, sid: &SessionId, update: SessionUpdate) {
+pub(crate) fn session_update(out_tx: &Sender<Value>, sid: &SessionId, update: SessionUpdate) {
     let notification =
         AgentNotification::SessionNotification(SessionNotification::new(sid.clone(), update));
     send(

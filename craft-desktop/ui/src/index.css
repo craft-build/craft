@@ -1,0 +1,36 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+* {
+  box-sizing: border-box;
+}
+::selection {
+  background: rgba(226, 128, 47, 0.35);
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+.cd-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.cd-scroll::-webkit-scrollbar-thumb {
+  background: rgba(140, 120, 100, 0.35);
+  border-radius: 4px;
+}
+.cd-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+#root {
+  width: 100vw;
+  height: 100vh;
+}

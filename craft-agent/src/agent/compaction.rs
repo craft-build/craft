@@ -152,6 +152,7 @@ pub(super) async fn compact_history(
         usage: response.usage,
         model: model.id.clone(),
         context_size: Some(response.usage.context_tokens()),
+        context_window: model.context_window,
     })))?;
 
     let new_history = vec![Message::user(COMPACT_USER_PROMPT.into()), response.message];

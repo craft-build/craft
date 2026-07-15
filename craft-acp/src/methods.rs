@@ -10,6 +10,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const MODE_BUILD: &str = "build";
 pub const MODE_PLAN: &str = "plan";
+pub const MODE_FLOW: &str = "flow";
 
 pub const MODEL_CONFIG_ID: &str = "model";
 pub const MODE_CONFIG_ID: &str = "mode";
@@ -36,6 +37,7 @@ pub fn mode_config_option(current: &str) -> SessionConfigOption {
     let options = vec![
         SessionConfigSelectOption::new(MODE_BUILD.to_string(), "Build"),
         SessionConfigSelectOption::new(MODE_PLAN.to_string(), "Plan"),
+        SessionConfigSelectOption::new(MODE_FLOW.to_string(), "Flow"),
     ];
     SessionConfigOption::select(MODE_CONFIG_ID, "Mode", current.to_string(), options)
         .category(SessionConfigOptionCategory::Mode)
@@ -57,6 +59,7 @@ fn session_modes(current: &str) -> SessionModeState {
         vec![
             SessionMode::new(MODE_BUILD.to_string(), "Build"),
             SessionMode::new(MODE_PLAN.to_string(), "Plan"),
+            SessionMode::new(MODE_FLOW.to_string(), "Flow"),
         ],
     )
 }
@@ -111,6 +114,15 @@ pub fn mode_id_to_agent_mode(mode_id: &str) -> Option<craft_agent::AgentMode> {
             let plan_path = craft_storage::plans::new_plan_path(&storage).ok()?;
             Some(craft_agent::AgentMode::Plan(plan_path))
         }
+        MODE_FLOW => Some(craft_agent::AgentMode::Flow(new_workstream_id())),
         _ => None,
     }
+}
+
+/// Fresh opaque workstream id (16 hex chars from 8 random bytes), matching the
+/// convention `craft-ui`'s Flow mode uses (see `craft-ui/src/app/mode.rs`).
+fn new_workstream_id() -> String {
+    let mut bytes = [0u8; 8];
+    let _ = getrandom::fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
