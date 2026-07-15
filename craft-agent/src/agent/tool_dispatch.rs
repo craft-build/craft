@@ -191,7 +191,7 @@ pub async fn run(
             render_header: header_result.snapshot(),
             annotation: invocation.start_annotation(),
             input: invocation.start_input(),
-            raw_input: None,
+            raw_input: Some(input.clone()),
             output: invocation.start_output(ctx),
         };
         if matches!(emit, Emit::Notify) {
@@ -245,7 +245,7 @@ pub async fn run(
             render_header: None,
             annotation: None,
             input: None,
-            raw_input: None,
+            raw_input: Some(input.clone()),
             output: None,
         };
         if matches!(emit, Emit::Notify) {

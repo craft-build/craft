@@ -186,6 +186,8 @@ export function Shell() {
           {modeLabel(active.mode).toUpperCase()}
         </div>
 
+        <YoloToggle active={active} t={t} />
+
         <ModelPicker active={active} t={t} currentModelLabel={currentModelLabel} />
 
         <ContextUsage used={active.contextUsed} size={active.contextSize} t={t} />
@@ -406,6 +408,55 @@ function ModelPicker({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function YoloToggle({ active, t }: { active: TabState; t: Tokens }) {
+  const dispatch = useAppDispatch();
+  const yoloOption = active.configOptions.find((c) => c.id === "yolo");
+  const isYolo = yoloOption?.currentValue === "true";
+
+  const toggle = async () => {
+    if (!active.sessionId) return;
+    const next = isYolo ? "false" : "true";
+    try {
+      const resp = (await setConfigOption(active.tabId, active.sessionId, "yolo", next)) as {
+        configOptions?: TabState["configOptions"];
+      };
+      if (resp?.configOptions) {
+        dispatch({
+          type: "SESSION_UPDATE",
+          tabId: active.tabId,
+          update: { sessionUpdate: "config_option_update", configOptions: resp.configOptions },
+        });
+      }
+    } catch (e) {
+      console.error("failed to toggle yolo", e);
+    }
+  };
+
+  return (
+    <div
+      onClick={toggle}
+      title={isYolo ? "Yolo on: permissions auto-approved" : "Enable yolo (auto-approve permissions)"}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "6px 10px",
+        borderRadius: 7,
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: 0.3,
+        cursor: "pointer",
+        background: isYolo ? `color-mix(in oklch, ${t.warning} 16%, transparent)` : "transparent",
+        color: isYolo ? t.warning : t.textFaint,
+        border: `1px solid ${isYolo ? `color-mix(in oklch, ${t.warning} 40%, transparent)` : t.border}`,
+      }}
+    >
+      <span style={{ fontSize: 12 }}>{isYolo ? "\u26A1" : "\u26A1"}</span>
+      YOLO
     </div>
   );
 }

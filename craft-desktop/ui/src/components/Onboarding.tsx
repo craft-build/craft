@@ -14,6 +14,7 @@ export function Onboarding() {
   const t = state.tokens;
   const [cwd, setCwd] = useState("");
   const [mode, setMode] = useState<string>("build");
+  const [yolo, setYolo] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,7 +35,7 @@ export function Onboarding() {
     setError(null);
     const tabId = crypto.randomUUID();
     try {
-      const resp = await startSession(tabId, cwd, false);
+      const resp = await startSession(tabId, cwd, yolo);
       if (mode !== "build") {
         await setSessionMode(tabId, resp.sessionId, mode).catch(() => {});
       }
@@ -156,6 +157,56 @@ export function Onboarding() {
                 {MODE_LABELS[m]}
               </div>
             ))}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>PERMISSIONS</div>
+          <div
+            onClick={() => setYolo((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "12px 14px",
+              borderRadius: 8,
+              background: t.bgInset,
+              border: `1px solid ${yolo ? t.warning : t.border}`,
+              cursor: "pointer",
+            }}
+          >
+            <span style={{ fontSize: 12, color: yolo ? t.warning : t.textDim }}>&#9881;</span>
+            <span style={{ flex: 1, fontSize: 12.5, color: t.text }}>
+              Yolo mode
+              <span style={{ display: "block", fontSize: 11, color: t.textFaint }}>
+                Auto-approve all tool permissions
+              </span>
+            </span>
+            <span
+              style={{
+                width: 32,
+                height: 18,
+                borderRadius: 9,
+                background: yolo ? t.warning : t.bg,
+                border: `1px solid ${yolo ? t.warning : t.border}`,
+                position: "relative",
+                flex: "none",
+                transition: "background 0.15s",
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: 2,
+                  left: yolo ? 16 : 2,
+                  width: 12,
+                  height: 12,
+                  borderRadius: "50%",
+                  background: yolo ? t.bg : t.textFaint,
+                  transition: "left 0.15s",
+                }}
+              />
+            </span>
           </div>
         </div>
 

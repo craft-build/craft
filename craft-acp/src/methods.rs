@@ -14,6 +14,7 @@ pub const MODE_FLOW: &str = "flow";
 
 pub const MODEL_CONFIG_ID: &str = "model";
 pub const MODE_CONFIG_ID: &str = "mode";
+pub const YOLO_CONFIG_ID: &str = "yolo";
 
 pub fn initialize_response() -> InitializeResponse {
     InitializeResponse::new(ProtocolVersion::V1)
@@ -41,6 +42,19 @@ pub fn mode_config_option(current: &str) -> SessionConfigOption {
     ];
     SessionConfigOption::select(MODE_CONFIG_ID, "Mode", current.to_string(), options)
         .category(SessionConfigOptionCategory::Mode)
+}
+
+pub fn yolo_config_option(current: bool) -> SessionConfigOption {
+    SessionConfigOption::select(
+        YOLO_CONFIG_ID,
+        "Yolo",
+        current.to_string(),
+        vec![
+            SessionConfigSelectOption::new("false", "Off"),
+            SessionConfigSelectOption::new("true", "On"),
+        ],
+    )
+    .description("Auto-approve all tool permissions")
 }
 
 fn model_config_option_default() -> SessionConfigOption {
