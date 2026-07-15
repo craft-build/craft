@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-15
+
+### Added
+
+- **desktop**: YOLO mode (auto-approve permissions) configurable at session start and toggleable at runtime (`08bc2bf5`)
+- **desktop**: live todo list rendered in a dedicated panel (`25e8e710`)
+
 ## [0.9.0] - 2026-07-15
 
 ### Added
@@ -1240,6 +1247,12 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
 [Unreleased]: https://github.com/craft-build/craft/compare/v0.8.3...HEAD
+[0.9.1]: https://github.com/craft-build/craft/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/craft-build/craft/compare/v0.8.7...v0.9.0
+[0.8.7]: https://github.com/craft-build/craft/compare/v0.8.6...v0.8.7
+[0.8.6]: https://github.com/craft-build/craft/compare/v0.8.5...v0.8.6
+[0.8.5]: https://github.com/craft-build/craft/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/craft-build/craft/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/craft-build/craft/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/craft-build/craft/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/craft-build/craft/compare/v0.8.0...v0.8.1
