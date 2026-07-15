@@ -48,6 +48,7 @@ export function Onboarding() {
         configOptions: resp.configOptions ?? [],
         items: [],
         plan: [],
+        todos: [],
         composerText: "",
         pending: false,
         connectionError: null,

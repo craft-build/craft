@@ -27,6 +27,7 @@ const SESSION_UPDATE_EVENT: &str = "acp://session-update";
 const PERMISSION_REQUEST_EVENT: &str = "acp://permission-request";
 const QUESTION_REQUEST_EVENT: &str = "acp://question";
 const CLOSED_EVENT: &str = "acp://closed";
+const TODO_UPDATE_EVENT: &str = "acp://todo-update";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -304,6 +305,13 @@ fn handle_incoming(app: &AppHandle, tab_id: &str, value: Value, pending: &Pendin
             let _ = app.emit(
                 PERMISSION_REQUEST_EVENT,
                 json!({ "tabId": tab_id, "requestId": request_id, "params": params }),
+            );
+        }
+        ("session/todo_update", None) => {
+            let todos = params.get("todos").cloned().unwrap_or(Value::Array(vec![]));
+            let _ = app.emit(
+                TODO_UPDATE_EVENT,
+                json!({ "tabId": tab_id, "todos": todos }),
             );
         }
         ("session/question", Some(request_id)) => {

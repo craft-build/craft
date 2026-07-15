@@ -6,6 +6,7 @@ import type {
   QuestionSpec,
   SessionUpdate,
   TabState,
+  TodoItem,
   ToolCallEvent,
   ToolCallUpdateEvent,
 } from "../types";
@@ -36,6 +37,7 @@ export type Action =
       title?: string;
     }
   | { type: "SESSION_UPDATE"; tabId: string; update: SessionUpdate }
+  | { type: "TODO_UPDATE"; tabId: string; todos: TodoItem[] }
   | {
       type: "PERMISSION_REQUEST";
       tabId: string;
@@ -198,6 +200,8 @@ function reducer(state: AppState, action: Action): AppState {
       };
     case "SESSION_UPDATE":
       return updateTab(state, action.tabId, (t) => applySessionUpdate(t, action.update));
+    case "TODO_UPDATE":
+      return updateTab(state, action.tabId, (t) => ({ ...t, todos: action.todos }));
     case "SESSION_META":
       return updateTab(state, action.tabId, (t) => ({
         ...t,

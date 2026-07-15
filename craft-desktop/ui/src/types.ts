@@ -16,6 +16,15 @@ export type ToolKind =
   | "other";
 export type PlanEntryStatus = "pending" | "in_progress" | "completed";
 export type PlanEntryPriority = "high" | "medium" | "low";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
+
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: TodoStatus;
+  parent?: string;
+  owner?: string;
+}
 
 export interface TextContentBlock {
   type: "text";
@@ -214,6 +223,7 @@ export interface TabState {
   configOptions: SessionConfigOption[];
   items: ChatItem[];
   plan: PlanEntry[];
+  todos: TodoItem[];
   composerText: string;
   pending: boolean;
   connectionError: string | null;

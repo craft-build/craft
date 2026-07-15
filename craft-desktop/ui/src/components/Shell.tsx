@@ -5,6 +5,7 @@ import { closeTab, listSessions, listThemes, loadSession, setConfigOption, setMo
 import type { TabState } from "../types";
 import { ChatPane } from "./ChatPane";
 import { PlanGraph } from "./PlanGraph";
+import { TodoPanel } from "./TodoPanel";
 
 const MODE_ORDER = ["build", "plan", "flow"];
 
@@ -228,6 +229,8 @@ export function Shell() {
 
           {state.centerTab === "chat" ? <ChatPane tab={active} t={t} /> : <PlanGraph tab={active} t={t} />}
         </div>
+
+        {active.todos.length > 0 && <TodoPanel tab={active} t={t} />}
       </div>
     </div>
   );
@@ -443,6 +446,7 @@ function LeftRail({ active, t }: { active: TabState; t: Tokens }) {
         configOptions: [],
         items: [],
         plan: [],
+        todos: [],
         composerText: "",
         pending: false,
         connectionError: null,

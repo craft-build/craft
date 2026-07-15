@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { NewSessionResponse, QuestionSpec } from "../types";
+import type { NewSessionResponse, QuestionSpec, TodoItem } from "../types";
 import type { Tokens, ThemeName } from "../theme";
 
 export function getTheme(): Promise<Tokens> {
@@ -113,4 +113,13 @@ export function onPromptDone(cb: (p: PromptDoneEventPayload) => void): Promise<U
 }
 export function onClosed(cb: (p: ClosedEventPayload) => void): Promise<UnlistenFn> {
   return listen<ClosedEventPayload>("acp://closed", (e) => cb(e.payload));
+}
+
+export interface TodoUpdateEventPayload {
+  tabId: string;
+  todos: TodoItem[];
+}
+
+export function onTodoUpdate(cb: (p: TodoUpdateEventPayload) => void): Promise<UnlistenFn> {
+  return listen<TodoUpdateEventPayload>("acp://todo-update", (e) => cb(e.payload));
 }

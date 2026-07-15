@@ -44,6 +44,8 @@ use crate::{AcpParams, mcp as acp_mcp, methods, permissions, translate};
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 const DELEGATION_TIMEOUT: Duration = Duration::from_secs(60);
 const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const TODO_WRITE_TOOL: &str = "todo_write";
+const TODO_UPDATE_METHOD: &str = "session/todo_update";
 
 type PendingPrompt = Arc<Mutex<Option<RequestId>>>;
 type ModelSpecs = Arc<Mutex<Vec<String>>>;
@@ -1213,6 +1215,10 @@ fn start_event_pump(
                 continue;
             }
 
+            if let Some(todos) = todo_update_from_event(&event) {
+                emit_todo_update(&out_tx, &sid, todos);
+            }
+
             let update = match event {
                 AgentEvent::TextDelta { text } => translate::text_delta(&text),
                 AgentEvent::ThinkingDelta { text } => translate::thinking_delta(&text),
@@ -1328,6 +1334,29 @@ pub(crate) fn session_update(out_tx: &Sender<Value>, sid: &SessionId, update: Se
     );
 }
 
+/// If this event is a `todo_write` tool start, extract the structured `todos`
+/// array so the ACP server can forward it as a `session/todo_update`
+/// notification (ACP has no dedicated todo `SessionUpdate` variant).
+fn todo_update_from_event(event: &AgentEvent) -> Option<&serde_json::Value> {
+    match event {
+        AgentEvent::ToolStart(ts) if ts.tool.as_ref() == TODO_WRITE_TOOL => {
+            ts.raw_input.as_ref().and_then(|v| v.get("todos"))
+        }
+        _ => None,
+    }
+}
+
+fn emit_todo_update(out_tx: &Sender<Value>, sid: &SessionId, todos: &serde_json::Value) {
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": TODO_UPDATE_METHOD,
+        "params": { "sessionId": sid, "todos": todos }
+    });
+    if out_tx.send(msg).is_err() {
+        warn!("ACP: failed to send todo_update, channel closed");
+    }
+}
+
 fn no_session() -> AcpError {
     AcpError::invalid_request().data(json_str("no active session"))
 }
@@ -1344,6 +1373,7 @@ fn json_str(e: &(impl std::fmt::Display + ?Sized)) -> Value {
 #[cfg(test)]
 mod tests {
     use craft_agent::ToolOutput;
+    use craft_agent::types::ToolStartEvent;
     use craft_providers::{ContentBlock as MsgBlock, Role, TokenUsage};
     use craft_storage::StateDir;
     use craft_storage::sessions::Session;
@@ -1383,5 +1413,66 @@ mod tests {
         let dir = StateDir::from_path(tmp.path().to_path_buf());
         let err = load_history_from(&dir, "missing-id").unwrap_err();
         assert_eq!(err.code, AcpError::resource_not_found(None).code);
+    }
+
+    fn tool_start(name: &str, raw_input: serde_json::Value) -> AgentEvent {
+        AgentEvent::ToolStart(Box::new(ToolStartEvent {
+            id: "tu-1".into(),
+            tool: Arc::from(name),
+            summary: "summary".into(),
+            render_header: None,
+            annotation: None,
+            input: None,
+            raw_input: Some(raw_input),
+            output: None,
+        }))
+    }
+
+    #[test]
+    fn todo_update_extracts_todos_from_todo_write_tool_start() {
+        let event = tool_start(
+            "todo_write",
+            serde_json::json!({
+                "todos": [
+                    { "id": "T1", "content": "task one", "status": "pending" }
+                ]
+            }),
+        );
+        let todos = todo_update_from_event(&event).unwrap();
+        assert_eq!(todos[0]["id"], "T1");
+        assert_eq!(todos[0]["status"], "pending");
+    }
+
+    #[test]
+    fn todo_update_ignores_non_todo_write_tools() {
+        let event = tool_start("bash", serde_json::json!({ "command": "ls" }));
+        assert!(todo_update_from_event(&event).is_none());
+    }
+
+    #[test]
+    fn todo_update_ignores_todo_write_without_raw_input() {
+        let event = AgentEvent::ToolStart(Box::new(ToolStartEvent {
+            id: "tu-1".into(),
+            tool: Arc::from("todo_write"),
+            summary: "summary".into(),
+            render_header: None,
+            annotation: None,
+            input: None,
+            raw_input: None,
+            output: None,
+        }));
+        assert!(todo_update_from_event(&event).is_none());
+    }
+
+    #[test]
+    fn emit_todo_update_sends_expected_payload() {
+        let (tx, rx) = flume::unbounded::<Value>();
+        let sid = SessionId::from("sess-1".to_string());
+        let todos = serde_json::json!([{ "id": "T1", "content": "x", "status": "completed" }]);
+        emit_todo_update(&tx, &sid, &todos);
+        let msg = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+        assert_eq!(msg["method"], TODO_UPDATE_METHOD);
+        assert_eq!(msg["params"]["sessionId"], "sess-1");
+        assert_eq!(msg["params"]["todos"][0]["id"], "T1");
     }
 }

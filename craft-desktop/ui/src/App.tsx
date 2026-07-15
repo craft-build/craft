@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useAppDispatch, useAppState } from "./state/store";
-import { onClosed, onPermissionRequest, onPromptDone, onQuestion, onSessionUpdate } from "./lib/acp";
+import { onClosed, onPermissionRequest, onPromptDone, onQuestion, onSessionUpdate, onTodoUpdate } from "./lib/acp";
 import type { PermissionOption, QuestionSpec, SessionUpdate } from "./types";
 import { Onboarding } from "./components/Onboarding";
 import { Shell } from "./components/Shell";
@@ -33,6 +33,9 @@ export default function App() {
       }),
       onClosed(({ tabId }) => {
         dispatch({ type: "CONNECTION_CLOSED", tabId });
+      }),
+      onTodoUpdate(({ tabId, todos }) => {
+        dispatch({ type: "TODO_UPDATE", tabId, todos });
       }),
     ];
     return () => {
