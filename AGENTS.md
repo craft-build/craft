@@ -34,15 +34,16 @@ Craft is an AI coding agent (like Claude Code and opencode), that is built botto
 - cargo clippy --all-features --all --tests -- -D warnings
 - cargo nextest run --all-features --workspace
 
-Read `justfile` for more.
+Other targets (see `justfile`): `just lint-fix`, `just fmt` (rustfmt + stylua on `plugins/`), `just pylint` (ruff + ty on `scripts/`), `just gen-docs`, and `just ci` (full CI: fmt-check, lint, pylint, test, gen-docs-check).
 
 ## Architecture
 
 Rust workspace, key crates in root dir:
 
-- craft-ui: Uses ratatui for an interactive UI (elm like architecture)
+- craft-ui: Interactive TUI built on ratatui (elm-like architecture)
 - craft-agent: Async agent loop on tokio. Holds tool descriptions, the agent state machine, compression, snapshots, and skill loading
-- craft-interpreter: code_execution tool implementation using pydantic/monty (a minimal python sandbox)
+- craft-interpreter: `code_execution` tool implementation built on monty (pydantic/monty, a minimal python interpreter) with async host-call bridging
+- craft-sandbox: OS-level command sandboxing under the logical permission manager (macOS `sandbox-exec`, Linux `bwrap`, Windows no-op in v1). Confines approved commands to the workspace with network gated
 - craft-providers: Integration with LLM providers via APIs (e.g. Anthropic, Z.AI)
 - craft-storage: Persistent state across runs (e.g. sessions, auth)
 - craft-config: User config
@@ -50,13 +51,16 @@ Rust workspace, key crates in root dir:
 - craft-lua: Lua plugin system (API mirrored from neovim for plugin compatibility), built-in plugins in ./plugins dir
 - craft-tool-macro: Derive macro for tool schemas used by craft-agent
 - craft-acp: Agent Client Protocol server (exposes craft as an ACP-compatible agent to external clients like editors)
-- craft-docgen: Bin that generates the user docs in site/docs/src from the workspace metadata
+- craft-desktop: Desktop GUI built on Tauri and the Agent Client Protocol
+- craft-flow: Flow mode, a multi-stage pipeline (Scout, TPM, Plan, Req, Execute, Review, QA, Integrator, Verifier) that persists per-workstream documents and pauses for goal approval before execution. Stage agents reuse the standard subagent path
+- craft-repomap: Repository map generator (tree-sitter tag extraction, ranking graph, token-budgeted rendering with caching)
+- craft-docgen: Bin that generates the user docs in site/docs/src from the workspace metadata (commands, config, keybindings, providers, tools)
 - craft-highlight: Thin wrapper around syntect/two-face for syntax highlighting
 - craft-markdown: Theme-free markdown parser and width-aware renderer, shared by craft-ui and craft-lua
 
-Built-in lua plugins in ./plugins: index (compact tree-sitter skeleton of a source file), bash, glob, question, skill, memory, webfetch, websearch.
+Built-in lua plugins in ./plugins: index (compact tree-sitter skeleton of a source file), bash, glob, grep, question, skill, memory, webfetch, websearch, todo_write, view_image.
 
-The bin entry point lives in src/main.rs (clap dispatch into src/cmd/ subcommands, plus print, sdk_mode, setup, update). HTTP is done with reqwest. Async channels use flume.
+The bin entry point lives in src/main.rs (clap dispatch into src/cmd/ subcommands). Top-level src modules: cli, print, sdk_mode, setup, update. Subcommands under src/cmd/ (desktop, headless, migrate, tui) and src/cmd/subcmd/ (acp, doctor, flow, recipe, review, run, term, wiki). HTTP is done with reqwest. Async channels use flume.
 
 ## Docs
 
