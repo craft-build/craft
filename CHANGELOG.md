@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-15
+
+### Added
+
+- **desktop**: new `craft-desktop` crate, a Tauri + React desktop IDE that drives craft for real over the Agent Client Protocol (one `craft acp` subprocess per session tab, JSON-RPC over stdio); chat streaming, tool calls, and permission prompts are genuine ACP traffic (`53e54e5c`)
+- **flow**: Flow mode now works over ACP; `craft-acp` drives `craft_flow::run` directly, surfaces the goal-approval gate as a real permission request, and streams stage/chunk progress as `SessionUpdate::Plan` (`53e54e5c`)
+- **agent**: bounded retry (3x, 1s delay) for transient MCP tool failures (`ToolUnavailable`/`Provider` kinds) in tool dispatch, emitting `AgentEvent::Retry` per attempt (`d0e56aa9`)
+- **recipes**: `craft recipe list` and `craft recipe run <name>` CLI subcommands, plus a `/recipe` TUI slash command with a recipe picker overlay (`d0e56aa9`)
+- **agent**: `/goal` now parses acceptance criteria (`## Acceptance criteria`) and evaluates them via `JudgeOutcome::Criteria`, replacing the prior unimplemented arm (`d0e56aa9`)
+
+### Fixed
+
+- **providers**: TensorX now computes `max_output_tokens` as `context_window - 4096` margin instead of returning `None`, with a 32000 fallback (`d0e56aa9`)
+- **agent**: `RecoveryAction::Escalate` at the stream-failure site now emits an `Info` event before returning `Err` instead of being a no-op (`d0e56aa9`)
+- **agent**: subagent schema-failure `Stop` is now explicit and non-retriable (`d0e56aa9`)
+
 ## [0.8.7] - 2026-07-14
 
 ### Added
