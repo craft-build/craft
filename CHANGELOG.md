@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-16
+
+### Added
+
+- **agent**: `insert_lines` split out of `edit_lines` as its own tool for clarity (`6d7f0d838`)
+- **agent**: built-in skills are now embedded directly in the binary instead of loaded from disk at runtime (`c66073b40`)
+- **agent**: `subagent-briefing` prompt slot and refined flow stage prompts so subagents start with better context (`cb5e0957c`)
+- **desktop**: redesigned shell and chat layout with an inline context bar (`6c8042bab`)
+- **ui**: redesigned chat layout with a model row, bar indicators, and layered theme colors (`5c0da3dad`)
+- **mcp**: headless OAuth via pasted redirect URL, for environments without a browser (`9e4ba1843`)
+- **providers**: parse `supports_vision` per model for llama.cpp, OpenRouter, Mistral, and TensorX (`4c1bfd5b6`)
+
+### Changed
+
+- **docs**: warn that `edit_lines` / `insert_lines` must not be used with the batch tool (`ab7aef0cf`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`bitflags` 2.13.1, `clap` 4.6.2, `globset` 0.4.19, `grep-matcher` 0.1.9, `grep-searcher` 0.1.17, `ignore` 0.4.29, `regex` 1.13.1, `regex-automata` 0.4.16, `uuid` 1.24.0)
+
+### Fixed
+
+- **agent**: guardrail-disable no longer applies to edit tools (`cc8c4cca8`)
+- **agent**: compaction buffer is now scaled with the context window (`b13c90fa4`)
+- **agent**: the disconnect from the `question` tool to the TUI is fixed (`f4123ebd6`)
+- **ui**: streaming buffers are flushed after compaction to prevent message merging (`1a5edb7de`)
+- **grep**: path tiebreak added for deterministic ordering on mtime ties (`af65a746b`)
+- **desktop**: updated application icon (`ec56e627b`)
+
+### Performance
+
+- **grep**: walker parallelized and mtime sort cached (`4e776073f`)
+
 ## [0.9.1] - 2026-07-15
 
 ### Added
@@ -1246,7 +1276,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/craft-build/craft/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/craft-build/craft/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/craft-build/craft/compare/v0.8.7...v0.9.0
 [0.8.7]: https://github.com/craft-build/craft/compare/v0.8.6...v0.8.7
