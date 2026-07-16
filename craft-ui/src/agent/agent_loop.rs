@@ -586,6 +586,7 @@ fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
                 &server_url,
                 www_auth.as_deref(),
                 &storage,
+                craft_agent::mcp::oauth::Interaction::Background,
             )
             .await
             {

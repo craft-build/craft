@@ -577,7 +577,7 @@ pub async fn mcp_auth(server: &str, storage: &StateDir) -> Result<()> {
         mcp_config::Transport::Http { url, .. } => url,
         _ => color_eyre::eyre::bail!("server '{server}' is not an HTTP transport"),
     };
-    mcp_oauth::authenticate(server, &url, None, storage).await?;
+    mcp_oauth::authenticate(server, &url, None, storage, mcp_oauth::Interaction::Cli).await?;
     eprintln!("Successfully authenticated with MCP server '{server}'");
     Ok(())
 }

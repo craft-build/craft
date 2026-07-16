@@ -1,12 +1,9 @@
-use std::time::Duration;
-
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 const PREFERRED_PORT: u16 = 19876;
 const MAX_HEADER_SIZE: usize = 8192;
 const CALLBACK_PATH: &str = "/mcp/oauth/callback";
-const TIMEOUT: Duration = Duration::from_secs(300);
 const SUCCESS_HTML: &str =
     "<html><body><h1>Authentication successful</h1><p>You can close this tab.</p></body></html>";
 const ERROR_HTML: &str =
@@ -38,13 +35,6 @@ impl CallbackServer {
     }
 
     pub async fn wait_for_callback(self, expected_state: &str) -> Result<CallbackResult, String> {
-        tokio::select! {
-            result = self.accept_loop(expected_state) => result,
-            _ = tokio::time::sleep(TIMEOUT) => Err("OAuth callback timed out after 5 minutes".into()),
-        }
-    }
-
-    async fn accept_loop(self, expected_state: &str) -> Result<CallbackResult, String> {
         loop {
             let (mut stream, _) = self
                 .listener
@@ -116,7 +106,7 @@ impl CallbackServer {
     }
 }
 
-fn parse_query(query: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_query(query: &str) -> Vec<(String, String)> {
     query
         .split('&')
         .filter(|p| !p.is_empty())
