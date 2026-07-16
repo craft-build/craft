@@ -51,7 +51,7 @@ All fields are optional. Typos in field names cause an error right away.
 |-------|------|---------|-------------|
 | `always_yolo` | bool | `false` | Start every session with YOLO mode (skip permission prompts, deny rules still apply) |
 | `always_fast` | bool | `false` | Start every session with Anthropic fast mode (Opus only; ignored otherwise) |
-| `always_thinking` | bool | string | `false` | Start every session with extended thinking (true/"adaptive", "off", or a token budget) |
+| `always_thinking` | bool \| string | `false` | Start every session with extended thinking (true/"adaptive", "off", or a token budget) |
 
 ### `ui`
 
@@ -126,7 +126,7 @@ Remappable actions:
 | `bash_timeout_secs` | u64 | `120` | 5 | Bash command timeout (seconds) |
 | `code_execution_timeout_secs` | u64 | `30` | 5 | Code execution timeout (seconds) |
 | `max_continuation_turns` | u32 | `3` | 1 | Max automatic continuation turns |
-| `compaction_buffer` | u32 | `40000` | 1000 | Token buffer reserved during compaction |
+| `compaction_buffer` | u32 \| string | `20%` | - | Context reserved for compaction: token count or percent of the context window (e.g. "20%") |
 | `search_result_limit` | usize | `100` | 10 | Max results from grep/glob searches |
 | `interpreter_max_memory_mb` | usize | `50` | 10 | Memory limit for code interpreter (MB) |
 

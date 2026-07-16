@@ -311,10 +311,10 @@ impl<'h> Agent<'h> {
             .score_messages(self.history.as_slice(), intent)
             .await
             .ok()?;
-        let token_budget = self
-            .model
-            .context_window
-            .saturating_sub(self.config.compaction_buffer);
+        let token_budget = self.model.context_window.saturating_sub(
+            self.config
+                .resolve_compaction_buffer(self.model.context_window),
+        );
         let selected = super::semantic::select_messages(
             &scores,
             self.history.len(),
@@ -944,7 +944,8 @@ impl<'h> Agent<'h> {
         {
             return reserve;
         }
-        self.config.compaction_buffer
+        self.config
+            .resolve_compaction_buffer(self.model.context_window)
     }
 
     fn provider_model_id(&self) -> Option<String> {
@@ -1046,7 +1047,9 @@ impl<'h> Agent<'h> {
         let ctx = compaction::CompactContext {
             usage,
             model: &self.model,
-            compaction_buffer: self.config.compaction_buffer,
+            compaction_buffer: self
+                .config
+                .resolve_compaction_buffer(self.model.context_window),
             cache_tracker: Some(&self.cache_tracker),
             compression_store: Some(&self.compression_store),
             relevance_scores: self
@@ -1137,7 +1140,8 @@ impl<'h> Agent<'h> {
         let vcc_ok = compaction::vcc_compact(
             self.history,
             &self.model,
-            self.config.compaction_buffer,
+            self.config
+                .resolve_compaction_buffer(self.model.context_window),
             self.token_estimation_multiplier,
         )?;
         if !vcc_ok {

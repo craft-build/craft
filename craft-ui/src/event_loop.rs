@@ -251,12 +251,13 @@ fn spawn_model_fetch(
                     &resolved.id,
                 )
                 .and_then(|t| craft_config::resolve_reserve_tokens(t, resolved.context_window))
-                .unwrap_or(config.compaction_buffer);
+                .unwrap_or_else(|| config.resolve_compaction_buffer(resolved.context_window));
+                let buffer = config.resolve_compaction_buffer(resolved.context_window);
                 crate::app::session_state::apply_context_window_override(
                     &mut resolved,
                     &overrides.load(),
                     reserve,
-                    config.compaction_buffer,
+                    buffer,
                 );
                 model_slot.store(Arc::new(ModelSlot {
                     model: resolved,
@@ -765,11 +766,14 @@ impl<'t> EventLoop<'t> {
                     Ok(new_provider) => {
                         if let Ok(mut new_model) = Model::from_spec(&model_spec) {
                             let reserve = self.reserve_tokens_for(&new_model);
+                            let buffer = self
+                                .config
+                                .resolve_compaction_buffer(new_model.context_window);
                             crate::app::session_state::apply_context_window_override(
                                 &mut new_model,
                                 &self.app.state.context_window_overrides,
                                 reserve,
-                                self.config.compaction_buffer,
+                                buffer,
                             );
                             self.app.update_model(&new_model);
                             self.app.record_recent_model(&model_spec);
@@ -803,7 +807,7 @@ impl<'t> EventLoop<'t> {
         {
             return reserve;
         }
-        self.config.compaction_buffer
+        self.config.resolve_compaction_buffer(model.context_window)
     }
 
     /// Apply the active model's stored context-window override to both the
@@ -814,7 +818,9 @@ impl<'t> EventLoop<'t> {
             .store(Arc::new(self.app.state.context_window_overrides.clone()));
         let slot = self.model_slot.load();
         let reserve = self.reserve_tokens_for(&slot.model);
-        let buffer = self.config.compaction_buffer;
+        let buffer = self
+            .config
+            .resolve_compaction_buffer(slot.model.context_window);
         let mut model = slot.model.clone();
         let changed = crate::app::session_state::apply_context_window_override(
             &mut model,

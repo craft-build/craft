@@ -6,6 +6,10 @@ use craft_config::{
     ProviderConfig, StorageConfig, TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
 };
 
+fn escape_md_table(s: &str) -> String {
+    s.replace('|', "\\|")
+}
+
 fn write_table_with_min(out: &mut String, fields: &[ConfigField]) {
     writeln!(out, "| Field | Type | Default | Min | Description |").unwrap();
     writeln!(out, "|-------|------|---------|-----|-------------|").unwrap();
@@ -16,8 +20,8 @@ fn write_table_with_min(out: &mut String, fields: &[ConfigField]) {
             out,
             "| `{name}` | {ty} | `{default}` | {min} | {desc} |",
             name = f.name,
-            ty = f.ty,
-            desc = f.description,
+            ty = escape_md_table(f.ty),
+            desc = escape_md_table(f.description),
         )
         .unwrap();
     }
@@ -32,8 +36,8 @@ fn write_table_no_min(out: &mut String, fields: &[ConfigField]) {
             out,
             "| `{name}` | {ty} | `{default}` | {desc} |",
             name = f.name,
-            ty = f.ty,
-            desc = f.description,
+            ty = escape_md_table(f.ty),
+            desc = escape_md_table(f.description),
         )
         .unwrap();
     }
