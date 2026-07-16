@@ -77,7 +77,7 @@ Replace an exact string match in a file.
 
 ### `edit_lines` *(native, opt-in)*
 
-Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range.
+Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range. Do not use with the batch tool.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -88,7 +88,7 @@ Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new
 
 ### `insert_lines` *(native, opt-in)*
 
-Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved.
+Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved. Do not use with the batch tool.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

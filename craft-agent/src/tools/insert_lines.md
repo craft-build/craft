@@ -1,4 +1,4 @@
-Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved.
+Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved. Do not use with the batch tool.
 
 Since `read` and `grep` show lines as `<nr>: <content>`, this tool works with those line numbers directly. The line number is 1-indexed.
 

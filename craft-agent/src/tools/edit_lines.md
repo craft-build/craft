@@ -1,4 +1,4 @@
-Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range.
+Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range. Do not use with the batch tool.
 
 Since `read` and `grep` show lines as `<nr>: <content>`, this tool works with those line numbers directly. The range is 1-indexed and inclusive on both ends.
 
