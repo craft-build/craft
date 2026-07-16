@@ -12,11 +12,18 @@ pub enum Scope {
     Project(usize),
     /// The user-global config directory (`~/.config/craft` or legacy `~/.craft`).
     Global,
+    /// A skill shipped inside the craft binary itself. Lowest priority: any
+    /// project or global skill of the same name shadows it.
+    Builtin,
 }
 
 impl Scope {
     pub fn is_global(self) -> bool {
         matches!(self, Scope::Global)
+    }
+
+    pub fn is_builtin(self) -> bool {
+        matches!(self, Scope::Builtin)
     }
 }
 
@@ -94,6 +101,10 @@ impl Discovery {
     /// Discover directory-based items (skills) where each subdirectory of
     /// `<prefix>/<kind>` containing `marker` (e.g. `SKILL.md`) is one item named
     /// after the subdirectory. Closer scopes shadow farther ones by name.
+    ///
+    /// Built-in skills (embedded in the binary) are appended last, so any
+    /// project or global skill of the same name shadows them. Only applies to
+    /// the `skills` kind with the `SKILL.md` marker.
     pub fn discover_dirs(&self, kind: &str, marker: &str) -> Vec<DiscoveredFile> {
         let mut ordered: Vec<DiscoveredFile> = Vec::new();
         for (depth, ancestor) in self.cwd.ancestors().enumerate() {
@@ -105,7 +116,21 @@ impl Discovery {
         for dir in self.global_dirs(kind) {
             self.collect_dirs(&dir, marker, Scope::Global, &mut ordered);
         }
+        if kind == "skills" && marker == "SKILL.md" {
+            self.collect_builtins(&mut ordered);
+        }
         dedupe_by_name(ordered)
+    }
+
+    fn collect_builtins(&self, out: &mut Vec<DiscoveredFile>) {
+        for (name, content) in crate::builtin_skills::BUILTIN_SKILLS {
+            out.push(DiscoveredFile {
+                name: (*name).to_owned(),
+                path: PathBuf::from(format!("<builtin>/skills/{name}/SKILL.md")),
+                scope: Scope::Builtin,
+                content: (*content).to_owned(),
+            });
+        }
     }
 
     fn global_dirs(&self, kind: &str) -> Vec<PathBuf> {
@@ -285,9 +310,13 @@ mod tests {
 
         let discovery = Discovery::new(root.to_path_buf(), None, None);
         let found = discovery.discover_dirs("skills", "SKILL.md");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "audit");
-        assert!(found[0].path.ends_with("audit/SKILL.md"));
+        let audit = found
+            .iter()
+            .find(|f| f.name == "audit")
+            .expect("audit skill found");
+        assert!(audit.path.ends_with("audit/SKILL.md"));
+        assert!(!audit.scope.is_builtin());
+        assert!(found.iter().all(|f| f.name != "no-skill"));
     }
 
     #[test]
@@ -305,8 +334,11 @@ mod tests {
 
         let discovery = Discovery::new(nested, Some(root.join("home")), None);
         let found = discovery.discover_dirs("skills", "SKILL.md");
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].content, "project");
+        let audit = found
+            .iter()
+            .find(|f| f.name == "audit")
+            .expect("audit skill found");
+        assert_eq!(audit.content, "project");
     }
 
     #[test]
@@ -338,6 +370,57 @@ mod tests {
                 .discover_files("recipes", &["yaml", "yml", "json"])
                 .is_empty()
         );
-        assert!(discovery.discover_dirs("skills", "SKILL.md").is_empty());
+        assert!(discovery.discover_dirs("recipes", "SKILL.md").is_empty());
+    }
+
+    #[test]
+    fn builtins_appended_for_skills() {
+        let tmp = TempDir::new().unwrap();
+        let discovery = Discovery::new(tmp.path().to_path_buf(), None, None);
+        let found = discovery.discover_dirs("skills", "SKILL.md");
+        let builtin_names: Vec<&str> = found
+            .iter()
+            .filter(|f| f.scope.is_builtin())
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(
+            builtin_names,
+            vec!["agents-md-init", "debugging", "run", "stuck", "verify"]
+        );
+    }
+
+    #[test]
+    fn project_skill_shadows_builtin() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join(".craft/skills/run/SKILL.md"),
+            "---\nname: run\ndescription: project override\n---\nproject body",
+        );
+
+        let discovery = Discovery::new(root.to_path_buf(), None, None);
+        let found = discovery.discover_dirs("skills", "SKILL.md");
+        let run = found
+            .iter()
+            .find(|f| f.name == "run")
+            .expect("run skill found");
+        assert_eq!(
+            run.content,
+            "---\nname: run\ndescription: project override\n---\nproject body"
+        );
+        assert!(!run.scope.is_builtin());
+        assert_eq!(
+            found.iter().filter(|f| f.name == "run").count(),
+            1,
+            "builtin run must be shadowed, not duplicated"
+        );
+    }
+
+    #[test]
+    fn builtins_not_appended_for_other_kinds() {
+        let tmp = TempDir::new().unwrap();
+        let discovery = Discovery::new(tmp.path().to_path_buf(), None, None);
+        assert!(discovery.discover_dirs("recipes", "SKILL.md").is_empty());
+        assert!(discovery.discover_dirs("skills", "RECIPE.md").is_empty());
     }
 }

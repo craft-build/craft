@@ -61,6 +61,22 @@ pub(crate) fn create_craft_global(
     craft.set("fn", r#fn::create_fn_table(lua, permissions)?)?;
     craft.set("async", r#async::create_async_table(lua)?)?;
     craft.set(
+        "builtin_skills",
+        lua.create_function(|_lua, ()| {
+            let t = _lua.create_table()?;
+            for (i, (name, content)) in craft_agent::builtin_skills::BUILTIN_SKILLS
+                .iter()
+                .enumerate()
+            {
+                let entry = _lua.create_table()?;
+                entry.set("name", *name)?;
+                entry.set("content", *content)?;
+                t.set(i + 1, entry)?;
+            }
+            Ok(t)
+        })?,
+    )?;
+    craft.set(
         "keymap",
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
     )?;

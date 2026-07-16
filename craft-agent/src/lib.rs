@@ -1,6 +1,7 @@
 //! Async agent loop with tools.
 
 pub mod agent;
+pub mod builtin_skills;
 pub mod cancel;
 pub mod child_guard;
 pub use child_guard::ChildGuard;

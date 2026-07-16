@@ -58,14 +58,21 @@ async fn resolve_skill(name: &str, ctx: &ToolContext) -> Result<ToolOutput, Stri
         Some(d) => d,
         None => return Err(format!("skill '{name}' not found")),
     };
-    let body = ctx
-        .fs
-        .read_text_file(&discovered.path)
-        .await
-        .map_err(|e| format!("failed to read skill '{name}': {e}"))?;
-    Ok(ToolOutput::Plain(format!(
-        "# skill://{name} ({})\n\n{body}",
+    let location_label = if discovered.scope.is_builtin() {
+        format!("<builtin>/skills/{name}/SKILL.md")
+    } else {
         relative_path(&discovered.path.to_string_lossy())
+    };
+    let body = if discovered.scope.is_builtin() {
+        discovered.content
+    } else {
+        ctx.fs
+            .read_text_file(&discovered.path)
+            .await
+            .map_err(|e| format!("failed to read skill '{name}': {e}"))?
+    };
+    Ok(ToolOutput::Plain(format!(
+        "# skill://{name} ({location_label})\n\n{body}",
     )))
 }
 

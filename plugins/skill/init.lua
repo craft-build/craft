@@ -61,8 +61,34 @@ local function find_project_ancestors()
   return dirs
 end
 
+local BUILTIN_LOCATION = "<builtin>"
+
+local function seed_builtin_skills(skills)
+  local builtins = craft.builtin_skills and craft.builtin_skills() or nil
+  if not builtins then
+    return
+  end
+  for _, entry in ipairs(builtins) do
+    local name = entry.name
+    local content = entry.content
+    if name and content and not skills[name] then
+      local fm, body = parse_frontmatter(content)
+      if body and #body > 0 then
+        skills[name] = {
+          name = (fm and fm.name) or name,
+          description = (fm and fm.description) or "",
+          content = body,
+          location = BUILTIN_LOCATION,
+        }
+      end
+    end
+  end
+end
+
 local function discover_skills()
   local skills = {}
+  seed_builtin_skills(skills)
+
   local config = craft.env.config_dir()
   if config then
     scan_skill_dir(craft.fs.joinpath(config, "skills"), skills)
