@@ -979,7 +979,11 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         SetSessionConfigOptionResponse::new(vec![
             methods::mode_config_option(mode_id),
             methods::model_config_option(&spec, &specs),
-            methods::yolo_config_option(srv.session.as_ref().is_some_and(|s| s.handle.permissions.is_yolo())),
+            methods::yolo_config_option(
+                srv.session
+                    .as_ref()
+                    .is_some_and(|s| s.handle.permissions.is_yolo()),
+            ),
         ]),
     ))
 }
@@ -1001,7 +1005,11 @@ fn handle_set_mode_config(
         SetSessionConfigOptionResponse::new(vec![
             methods::mode_config_option(&mode_str),
             methods::model_config_option(&current_model, &specs),
-            methods::yolo_config_option(srv.session.as_ref().is_some_and(|s| s.handle.permissions.is_yolo())),
+            methods::yolo_config_option(
+                srv.session
+                    .as_ref()
+                    .is_some_and(|s| s.handle.permissions.is_yolo()),
+            ),
         ]),
     ))
 }

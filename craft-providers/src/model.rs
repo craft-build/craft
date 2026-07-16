@@ -197,6 +197,7 @@ pub struct ModelInfo {
     pub context_window: Option<u32>,
     pub max_output_tokens: Option<u32>,
     pub supports_thinking: Option<bool>,
+    pub supports_vision: Option<bool>,
     /// Store of additional metadata from the provider.
     pub provider_info: Option<Arc<dyn Any + Send + Sync>>,
 }
@@ -208,6 +209,7 @@ impl ModelInfo {
             context_window: None,
             max_output_tokens: None,
             supports_thinking: None,
+            supports_vision: None,
             provider_info: None,
         }
     }
@@ -269,7 +271,7 @@ impl Model {
             family,
             supports_tool_examples_override: None,
             supports_thinking_override: None,
-            supports_vision_override: static_entry.map(|e| e.supports_vision),
+            supports_vision_override: None,
             pricing,
             max_output_tokens,
             context_window,
@@ -293,8 +295,19 @@ impl Model {
     }
 
     /// Gates vision-only tools (`view_image`) and image blocks at request time.
-    pub fn vision(&self) -> bool {
+    pub fn supports_vision(&self) -> bool {
         self.supports_vision_override
+            .or_else(|| {
+                let guard = crate::model_registry::model_registry().read().unwrap();
+                guard
+                    .discovered(self.provider, &self.id)
+                    .and_then(|d| d.supports_vision)
+            })
+            .or_else(|| {
+                lookup_entry(models_for_provider(self.provider), &self.id)
+                    .ok()
+                    .map(|e| e.supports_vision)
+            })
             .unwrap_or_else(|| self.family.supports_vision())
     }
 
@@ -676,7 +689,7 @@ mod tests {
     #[test_case("mistral/mistral-medium-latest", false ; "generic_no_vision")]
     fn vision_flag_from_model_entry(spec: &str, expected: bool) {
         let model = Model::from_spec(spec).unwrap();
-        assert_eq!(model.vision(), expected);
+        assert_eq!(model.supports_vision(), expected);
     }
 
     #[test]

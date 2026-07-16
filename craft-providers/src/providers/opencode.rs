@@ -176,6 +176,7 @@ impl CatalogData {
                 context_window: Some(meta.context),
                 max_output_tokens: Some(meta.output),
                 supports_thinking: None,
+                supports_vision: None,
                 provider_info: None,
             })
             .collect();

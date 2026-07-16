@@ -85,7 +85,7 @@ pub fn adapt_images_for_model<'a>(model: &Model, messages: &'a [Message]) -> Cow
             _ => false,
         })
     };
-    if model.vision() || !messages.iter().any(has_image) {
+    if model.supports_vision() || !messages.iter().any(has_image) {
         return Cow::Borrowed(messages);
     }
     let adapted = messages
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn adapt_images_keeps_pixels_for_synthetic_vision_model() {
         let model = crate::model::Model::from_spec("synthetic/syn:large:vision").unwrap();
-        assert!(model.vision());
+        assert!(model.supports_vision());
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Image {
@@ -733,7 +733,7 @@ mod tests {
             family: provider.family(),
             supports_tool_examples_override: None,
             supports_thinking_override: None,
-            supports_vision_override: None,
+            supports_vision_override: Some(provider.family().supports_vision()),
             pricing: crate::model::ModelPricing::default(),
             max_output_tokens: 8192,
             context_window: 200_000,

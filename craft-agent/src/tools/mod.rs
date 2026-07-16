@@ -162,7 +162,7 @@ impl ToolFilter {
 /// One gate for every definitions builder (main loop, headless, Lua): a model
 /// without vision never learns `view_image` exists.
 pub fn capability_exclusions(model: &Model) -> &'static [&'static str] {
-    if model.vision() {
+    if model.supports_vision() {
         &[]
     } else {
         &[VIEW_IMAGE_TOOL_NAME]

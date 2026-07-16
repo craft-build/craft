@@ -613,7 +613,7 @@ mod tests {
             family: ModelFamily::Gemini,
             supports_tool_examples_override: None,
             supports_thinking_override: None,
-            supports_vision_override: None,
+            supports_vision_override: Some(true),
             pricing: ModelPricing::default(),
             max_output_tokens: 8192,
             context_window: 1_048_576,
