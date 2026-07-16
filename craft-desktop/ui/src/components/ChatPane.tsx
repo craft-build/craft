@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Tokens } from "../theme";
+import { modeLabel, terminalBg, type Tokens } from "../theme";
 import { useAppDispatch } from "../state/store";
-import { cancelPrompt, resolvePermission, resolveQuestion, sendPrompt, setMode } from "../lib/acp";
+import { cancelPrompt, resolvePermission, resolveQuestion, sendPrompt } from "../lib/acp";
 import type { ChatItem, ContentBlock, QuestionSpec, TabState, ToolCallContent } from "../types";
 import { Markdown, stripAnchors, langFromPath } from "./Markdown";
 import { DiffView } from "./DiffView";
@@ -26,7 +26,27 @@ const STATUS_GLYPH: Record<string, string> = {
   failed: "✗",
 };
 
-const COMPOSER_MODES = ["build", "plan", "flow"];
+function formatTokens(n: number): string {
+  if (n < 1_000) return String(n);
+  if (n < 1_000_000) return `${Math.round(n / 1_000)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+function ContextUsage({ used, size, t }: { used: number; size: number; t: Tokens }) {
+  if (size <= 0) return null;
+  const pct = Math.min(1, used / size);
+  const barColor = pct > 0.95 ? t.danger : pct > 0.8 ? t.warning : t.accent;
+  return (
+    <>
+      <span style={{ fontSize: 11, color: t.textFaint, whiteSpace: "nowrap" }}>
+        {formatTokens(used)} / {formatTokens(size)} tokens
+      </span>
+      <div style={{ flex: 1, height: 4, background: t.border, maxWidth: 220 }}>
+        <div style={{ width: `${pct * 100}%`, height: "100%", background: barColor }} />
+      </div>
+    </>
+  );
+}
 
 export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
   const dispatch = useAppDispatch();
@@ -53,12 +73,6 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
     });
   };
 
-  const switchMode = async (mode: string) => {
-    if (!tab.sessionId) return;
-    await setMode(tab.tabId, tab.sessionId, mode).catch(() => {});
-    dispatch({ type: "SESSION_UPDATE", tabId: tab.tabId, update: { sessionUpdate: "current_mode_update", currentModeId: mode } });
-  };
-
   return (
     <>
       {tab.connectionError && (
@@ -67,7 +81,6 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
             flex: "none",
             margin: "12px 20px 0",
             padding: "9px 12px",
-            borderRadius: 8,
             background: t.warningDim,
             border: `1px solid ${t.warning}`,
             display: "flex",
@@ -96,26 +109,14 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
         ))}
       </div>
 
-      <div style={{ flex: "none", padding: "12px 16px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
-        <div style={{ display: "flex", gap: 6 }}>
-          {COMPOSER_MODES.map((m) => (
-            <div
-              key={m}
-              onClick={() => switchMode(m)}
-              style={{
-                padding: "4px 10px",
-                borderRadius: 6,
-                fontSize: 10.5,
-                cursor: "pointer",
-                background: tab.mode === m ? t.accentDim : t.bgInset,
-                color: tab.mode === m ? t.accent : t.textFaint,
-              }}
-            >
-              {m[0].toUpperCase() + m.slice(1)}
-            </div>
-          ))}
-        </div>
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 8, padding: "10px 12px", borderRadius: 10, background: t.bgInset, border: `1px solid ${t.border}` }}>
+      <div style={{ flex: "none", borderTop: `1px solid ${t.border}` }}>
+        {tab.contextSize > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", borderBottom: `1px solid ${t.border}` }}>
+            <ContextUsage used={tab.contextUsed} size={tab.contextSize} t={t} />
+          </div>
+        )}
+        <div style={{ padding: "10px 20px 14px", display: "flex", alignItems: "flex-end", gap: 8 }}>
+          <span style={{ color: t.textFaint, paddingBottom: 9 }}>&#10095;</span>
           <textarea
             value={tab.composerText}
             onChange={(e) => dispatch({ type: "COMPOSER_TEXT", tabId: tab.tabId, text: e.target.value })}
@@ -125,7 +126,7 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
                 send();
               }
             }}
-            placeholder="Ask craft to make a change…"
+            placeholder="Message the agent… ( / for commands )"
             rows={1}
             style={{
               flex: 1,
@@ -135,18 +136,18 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
               outline: "none",
               color: t.text,
               fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 13,
+              fontSize: 12.5,
               lineHeight: 1.5,
               maxHeight: 120,
+              padding: "8px 0",
             }}
           />
           <div
             onClick={tab.pending ? stop : send}
             style={{
               flex: "none",
-              padding: "8px 14px",
-              borderRadius: 7,
-              fontSize: 11.5,
+              padding: "8px 13px",
+              fontSize: 11,
               fontWeight: 600,
               cursor: "pointer",
               background: tab.pending ? t.bgInset : t.accent,
@@ -155,6 +156,14 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
           >
             {tab.pending ? "Stop" : "Send ↵"}
           </div>
+        </div>
+        <div style={{ display: "flex", gap: 16, padding: "0 20px 10px", fontSize: 10, color: t.textFaint }}>
+          <span>⌘N new session</span>
+          <span>/ slash commands</span>
+          <span>esc cancel</span>
+          <span style={{ marginLeft: "auto" }}>
+            {modeLabel(tab.mode)} agent &middot; {tab.cwd}
+          </span>
         </div>
       </div>
     </>
@@ -165,7 +174,7 @@ function ChatItemView({ item, t, tab, streaming }: { item: ChatItem; t: Tokens; 
   if (item.kind === "user") {
     return (
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <div style={{ maxWidth: "70%", padding: "11px 14px", borderRadius: 10, background: t.accentDim2, fontSize: 13, lineHeight: 1.55, color: t.text, whiteSpace: "pre-wrap" }}>
+        <div style={{ maxWidth: "70%", padding: "10px 13px", background: t.bgInset, border: `1px solid ${t.border}`, fontSize: 12.5, lineHeight: 1.55, color: t.text, whiteSpace: "pre-wrap" }}>
           {item.text}
         </div>
       </div>
@@ -174,8 +183,11 @@ function ChatItemView({ item, t, tab, streaming }: { item: ChatItem; t: Tokens; 
 
   if (item.kind === "assistant-text") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: "78%" }}>
-        <Markdown md={item.text} t={t} streaming={streaming} />
+      <div style={{ display: "flex", gap: 8, maxWidth: "80%" }}>
+        <span style={{ color: t.accent, flex: "none" }}>&#9679;</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
+          <Markdown md={item.text} t={t} streaming={streaming} />
+        </div>
       </div>
     );
   }
@@ -229,7 +241,10 @@ function ToolCallRow({
   const mdText = useMemo(() => wrapCodeBlock(text, lang), [text, lang]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", maxWidth: "78%" }}>
+    <div style={{ display: "flex", flexDirection: "column", maxWidth: "82%" }}>
+      <div style={{ fontSize: 10, letterSpacing: 0.5, color: t.textFaint, padding: "0 0 4px 20px" }}>
+        {item.toolKind.toUpperCase()}
+      </div>
       <div
         onClick={() => {
           if (hasOutput) setExpanded((v) => !v);
@@ -239,14 +254,13 @@ function ToolCallRow({
           alignItems: "center",
           gap: 10,
           padding: "9px 12px",
-          borderRadius: expanded ? "8px 8px 0 0" : 8,
-          background: t.bgInset,
-          border: `1px solid ${t.border}`,
+          background: terminalBg(t),
+          borderLeft: `2px solid ${t.accent}`,
           cursor: hasOutput ? "pointer" : "default",
         }}
       >
         <span style={{ fontSize: 12, color: t.accent, flex: "none" }}>{TOOL_ICON[item.toolKind] ?? "●"}</span>
-        <span style={{ fontSize: 12, color: t.textDim, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: 11.5, color: t.textDim, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {item.title}
         </span>
         {stats && (
@@ -258,8 +272,8 @@ function ToolCallRow({
         {hasOutput && <span style={{ fontSize: 10, color: t.textFaint, flex: "none" }}>{expanded ? "▾" : "▸"}</span>}
         <span
           style={{
-            fontSize: 12,
-            color: t.textFaint,
+            fontSize: 11,
+            color: t.success,
             flex: "none",
             animation: item.status === "in_progress" ? "pulse 1.4s ease-in-out infinite" : undefined,
           }}
@@ -271,7 +285,6 @@ function ToolCallRow({
         <div
           style={{
             padding: "9px 12px",
-            borderRadius: "0 0 8px 8px",
             background: t.bg,
             border: `1px solid ${t.border}`,
             borderTop: "none",
@@ -322,34 +335,34 @@ function PermissionCard({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, maxWidth: "78%", padding: 14, borderRadius: 9, background: t.bgInset, border: `1px solid ${t.warning}` }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 9, maxWidth: "82%", padding: 13, background: terminalBg(t), borderLeft: `2px solid ${t.warning}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 12, color: t.warning }}>&#9888;</span>
-        <span style={{ fontSize: 12, color: t.text, fontWeight: 600 }}>Permission requested</span>
+        <span style={{ fontSize: 11, color: t.warning }}>&#9888;</span>
+        <span style={{ fontSize: 11.5, color: t.text, fontWeight: 600 }}>Permission requested</span>
       </div>
-      <div style={{ fontSize: 12.5, padding: "9px 11px", borderRadius: 6, background: t.bg, color: t.text, overflow: "auto", whiteSpace: "pre-wrap" }}>
+      <div style={{ fontSize: 12, padding: "8px 10px", background: t.bg, color: t.text, overflow: "auto", whiteSpace: "pre-wrap" }}>
         {item.title}
       </div>
       {!item.resolved ? (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {rejectOnce && (
-            <div onClick={() => choose(rejectOnce.optionId)} style={{ padding: "8px 14px", borderRadius: 7, fontSize: 11.5, cursor: "pointer", background: t.bg, color: t.textDim, border: `1px solid ${t.border}` }}>
+            <div onClick={() => choose(rejectOnce.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: t.bg, color: t.textDim, border: `1px solid ${t.border}` }}>
               Deny
             </div>
           )}
           {allowOnce && (
-            <div onClick={() => choose(allowOnce.optionId)} style={{ padding: "8px 14px", borderRadius: 7, fontSize: 11.5, cursor: "pointer", background: t.accent, color: t.accentText, fontWeight: 600 }}>
+            <div onClick={() => choose(allowOnce.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: t.accent, color: t.accentText, fontWeight: 600 }}>
               Allow once
             </div>
           )}
           {others.map((o) => (
-            <div key={o.optionId} onClick={() => choose(o.optionId)} style={{ padding: "8px 14px", borderRadius: 7, fontSize: 11.5, cursor: "pointer", background: "transparent", color: t.textFaint, border: `1px solid ${t.border}` }}>
+            <div key={o.optionId} onClick={() => choose(o.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: "transparent", color: t.textFaint, border: `1px solid ${t.border}` }}>
               {o.name}
             </div>
           ))}
         </div>
       ) : (
-        <div style={{ fontSize: 11.5, color: t.textFaint }}>
+        <div style={{ fontSize: 11, color: t.textFaint }}>
           {item.chosenOptionId === allowOnce?.optionId ? "Allowed once." : "Resolved."}
         </div>
       )}
@@ -416,7 +429,6 @@ function QuestionCard({
         gap: 12,
         maxWidth: "85%",
         padding: 14,
-        borderRadius: 9,
         background: t.bgInset,
         border: `1px solid ${t.border}`,
       }}
@@ -440,7 +452,6 @@ function QuestionCard({
                 style={{
                   fontSize: 12,
                   padding: "6px 9px",
-                  borderRadius: 6,
                   border: `1px solid ${t.border}`,
                   background: t.bg,
                   color: t.text,
@@ -461,7 +472,6 @@ function QuestionCard({
                           alignItems: "flex-start",
                           gap: 7,
                           padding: "5px 8px",
-                          borderRadius: 6,
                           cursor: item.resolved ? "default" : "pointer",
                           background: chosen ? t.accentDim2 : "transparent",
                         }}
@@ -498,7 +508,6 @@ function QuestionCard({
             onClick={() => submit(false)}
             style={{
               padding: "8px 14px",
-              borderRadius: 7,
               fontSize: 11.5,
               cursor: canSubmit ? "pointer" : "default",
               background: canSubmit ? t.accent : t.accentDim,
@@ -513,7 +522,6 @@ function QuestionCard({
             onClick={() => submit(true)}
             style={{
               padding: "8px 14px",
-              borderRadius: 7,
               fontSize: 11.5,
               cursor: "pointer",
               background: "transparent",

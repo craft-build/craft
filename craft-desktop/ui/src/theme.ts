@@ -56,6 +56,13 @@ export function modeColor(mode: string, t: Tokens): string {
   }
 }
 
+// A darker recess than `bg` for terminal-style blocks (tool output,
+// permission commands) — `bg` is already the darkest surface token the
+// backend emits, so we shade further rather than adding a new server token.
+export function terminalBg(t: Tokens): string {
+  return `color-mix(in oklch, ${t.bg} 90%, black)`;
+}
+
 export function modeLabel(mode: string): string {
   switch (mode) {
     case "build":

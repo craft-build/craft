@@ -87,9 +87,8 @@ export function Onboarding() {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div
             style={{
-              width: 40,
-              height: 40,
-              borderRadius: 10,
+              width: 36,
+              height: 36,
               background: t.accent,
               display: "flex",
               alignItems: "center",
@@ -120,14 +119,13 @@ export function Onboarding() {
               display: "flex",
               alignItems: "center",
               gap: 10,
-              padding: "12px 14px",
-              borderRadius: 8,
+              padding: "11px 13px",
               background: t.bgInset,
               border: `1px solid ${t.border}`,
               cursor: "pointer",
             }}
           >
-            <span style={{ color: t.textFaint }}>&#9656;</span>
+            <span style={{ color: t.textFaint }}>&#10095;</span>
             <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {cwd || "Choose a folder…"}
             </span>
@@ -145,7 +143,6 @@ export function Onboarding() {
                   flex: 1,
                   textAlign: "center",
                   padding: "9px 0",
-                  borderRadius: 7,
                   fontSize: 12,
                   cursor: "pointer",
                   background: mode === m ? t.accentDim : t.bgInset,
@@ -168,8 +165,7 @@ export function Onboarding() {
               display: "flex",
               alignItems: "center",
               gap: 10,
-              padding: "12px 14px",
-              borderRadius: 8,
+              padding: "11px 13px",
               background: t.bgInset,
               border: `1px solid ${yolo ? t.warning : t.border}`,
               cursor: "pointer",
@@ -215,7 +211,6 @@ export function Onboarding() {
           style={{
             marginTop: 6,
             padding: "13px 0",
-            borderRadius: 8,
             background: starting ? t.bgInset : t.accent,
             color: starting ? t.textFaint : t.accentText,
             textAlign: "center",
