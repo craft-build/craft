@@ -134,6 +134,7 @@ pub async fn run(
     let input: &Value = hook_input.as_ref().unwrap_or(input);
 
     if name == crate::tools::QUESTION_TOOL_NAME
+        && entry.is_none()
         && let Some(rx) = ctx.user_response_rx.as_deref()
     {
         return run_headless_question(id, &tool_id, input, ctx, rx, started).await;
