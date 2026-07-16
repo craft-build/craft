@@ -618,7 +618,7 @@ pub(super) async fn process_tool_calls(
             warn!(tool = %name, "doom loop detected, skipping execution");
             outcome.doom_loops += 1;
             immediate_errors.push(ToolDoneEvent::error(id.clone(), DOOM_LOOP_MESSAGE));
-        } else if trust.is_dropped(&name) {
+        } else if !is_failure_limit_exempt(&name) && trust.is_dropped(&name) {
             warn!(tool = %name, "tool dropped due to repeated failures");
             immediate_errors.push(ToolDoneEvent::error(
                 id.clone(),
@@ -626,7 +626,12 @@ pub(super) async fn process_tool_calls(
             ));
         } else {
             let is_read_only = ToolDedupCache::is_read_only(&name);
-            match guardrails.check_before_call(&name, &input, is_read_only) {
+            let decision = if is_failure_limit_exempt(&name) {
+                super::guardrails::GuardrailDecision::Allow
+            } else {
+                guardrails.check_before_call(&name, &input, is_read_only)
+            };
+            match decision {
                 super::guardrails::GuardrailDecision::Block => {
                     warn!(tool = %name, "guardrail blocked tool call");
                     immediate_errors.push(ToolDoneEvent::error(
@@ -891,6 +896,18 @@ fn is_write_tool(name: &str) -> bool {
     )
 }
 
+/// Edit tools have built-in stale-file detection (`check_before_edit`,
+/// `line_anchor_hash`) that returns a recoverable "re-read" error when the
+/// file changed underneath the agent. That is normal control flow, not a stuck
+/// loop, so these tools are exempt from failure-count guardrails and trust
+/// decay — blocking them would prevent the re-read recovery they request.
+fn is_failure_limit_exempt(name: &str) -> bool {
+    matches!(
+        name,
+        crate::tools::EDIT_TOOL_NAME | crate::tools::MULTIEDIT_TOOL_NAME
+    )
+}
+
 /// Runs the configured formatter over every path the batch just wrote and
 /// returns a synthetic `format` event when files were reformatted or
 /// formatting errored. Returns `None` for a clean/skipped batch.
@@ -1047,19 +1064,24 @@ fn record_tool_result(
     trust: &mut TrustTracker,
     dedup: &mut ToolDedupCache,
 ) {
+    let exempt = is_failure_limit_exempt(&done.tool);
     if done.is_error {
-        trust.record_failure(&done.tool);
+        if !exempt {
+            trust.record_failure(&done.tool);
+        }
     } else {
         trust.record_success(&done.tool);
     }
     let input_val = inputs_by_id.get(&done.id).unwrap_or(&NULL_VALUE);
-    guardrails.record_result(
-        &done.tool,
-        input_val,
-        &done.output.as_text(),
-        done.is_error,
-        is_read_only,
-    );
+    if !exempt {
+        guardrails.record_result(
+            &done.tool,
+            input_val,
+            &done.output.as_text(),
+            done.is_error,
+            is_read_only,
+        );
+    }
     if is_read_only
         && !done.is_error
         && let Some(key) = dedup_key
@@ -1104,6 +1126,62 @@ mod tests {
             .collect();
         let input = serde_json::json!({"path": "/a"});
         assert_eq!(recent_calls(&entries).is_doom_loop(name, &input), expected);
+    }
+
+    #[test_case(crate::tools::EDIT_TOOL_NAME, true      ; "edit_exempt")]
+    #[test_case(crate::tools::MULTIEDIT_TOOL_NAME, true ; "multiedit_exempt")]
+    #[test_case("bash", false                            ; "bash_not_exempt")]
+    #[test_case(crate::tools::WRITE_TOOL_NAME, false     ; "write_not_exempt")]
+    fn failure_limit_exempt_classification(tool: &str, expected: bool) {
+        assert_eq!(is_failure_limit_exempt(tool), expected);
+    }
+
+    #[test]
+    fn repeated_edit_failures_do_not_trigger_guardrails_or_trust() {
+        use craft_config::TrustDecayConfig;
+
+        let mut guardrails = super::super::guardrails::ToolGuardrails::new();
+        let config = TrustDecayConfig {
+            warn_after: 2,
+            drop_after: 3,
+            min_tools: 2,
+            reset_on_success: true,
+        };
+        let mut trust = TrustTracker::new(config);
+        let mut dedup = ToolDedupCache::new();
+        let input = serde_json::json!({"path": "/x.rs", "old_string": "a", "new_string": "b"});
+
+        for i in 0..10 {
+            let done = ToolDoneEvent {
+                id: format!("e{i}"),
+                tool: Arc::from(crate::tools::EDIT_TOOL_NAME),
+                output: ToolOutput::Plain("file changed since last read".into()),
+                is_error: true,
+                annotation: None,
+                written_path: None,
+            };
+            let mut inputs = HashMap::new();
+            inputs.insert(done.id.clone(), input.clone());
+            record_tool_result(
+                &done,
+                false,
+                None,
+                &inputs,
+                &mut guardrails,
+                &mut trust,
+                &mut dedup,
+            );
+        }
+
+        assert!(
+            !trust.is_dropped(crate::tools::EDIT_TOOL_NAME),
+            "edit must never be trust-dropped"
+        );
+        assert_eq!(
+            guardrails.check_before_call(crate::tools::EDIT_TOOL_NAME, &input, false),
+            super::super::guardrails::GuardrailDecision::Allow,
+            "edit must never be guardrail-blocked"
+        );
     }
 
     #[tokio::test]
