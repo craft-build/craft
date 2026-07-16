@@ -596,6 +596,7 @@ pub enum AgentEvent {
         stop_reason: Option<StopReason>,
     },
     AutoCompacting,
+    CompactionDone,
     AdvisorNote {
         severity: String,
         message: String,

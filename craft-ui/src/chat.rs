@@ -121,6 +121,9 @@ impl Chat {
                     "Auto-compacting conversation...".into(),
                 ));
             }
+            AgentEvent::CompactionDone => {
+                self.messages_panel.flush();
+            }
             AgentEvent::QueueItemConsumed { text, image_count } => {
                 return ChatEventResult::QueueItemConsumed { text, image_count };
             }
@@ -388,6 +391,16 @@ impl Chat {
     #[cfg(test)]
     pub fn last_message_role(&self) -> Option<&DisplayRole> {
         self.messages_panel.last_message_role()
+    }
+
+    #[cfg(test)]
+    pub fn streaming_text_is_empty(&self) -> bool {
+        self.messages_panel.streaming_text_is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn streaming_thinking_is_empty(&self) -> bool {
+        self.messages_panel.streaming_thinking_is_empty()
     }
 }
 
@@ -964,5 +977,38 @@ mod tests {
         assert_eq!(display[0].role, DisplayRole::Thinking);
         assert_eq!(display[0].text, "reasoning");
         assert_eq!(display[1].role, DisplayRole::Assistant);
+    }
+
+    #[test]
+    fn compaction_done_flushes_streaming_buffers() {
+        let mut chat = Chat::new("Main".into(), UiConfig::default());
+
+        chat.handle_event(AgentEvent::AutoCompacting, None);
+        assert_eq!(chat.message_count(), 1);
+
+        chat.handle_event(
+            AgentEvent::TextDelta {
+                text: "summary".into(),
+            },
+            None,
+        );
+        chat.handle_event(
+            AgentEvent::ThinkingDelta {
+                text: "thinking".into(),
+            },
+            None,
+        );
+        assert!(!chat.streaming_text_is_empty());
+        assert!(!chat.streaming_thinking_is_empty());
+
+        chat.handle_event(AgentEvent::CompactionDone, None);
+        assert!(chat.streaming_text_is_empty());
+        assert!(chat.streaming_thinking_is_empty());
+        assert_eq!(chat.message_count(), 3);
+
+        chat.handle_event(AgentEvent::TextDelta { text: "new".into() }, None);
+        chat.flush();
+        assert_eq!(chat.message_count(), 4);
+        assert_eq!(chat.last_message_text(), "new");
     }
 }

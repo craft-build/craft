@@ -652,6 +652,16 @@ impl MessagesPanel {
         self.messages.last().map(|m| &m.role)
     }
 
+    #[cfg(test)]
+    pub fn streaming_text_is_empty(&self) -> bool {
+        self.streaming_text.is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn streaming_thinking_is_empty(&self) -> bool {
+        self.streaming_thinking.is_empty()
+    }
+
     pub fn flush(&mut self) {
         self.flush_thinking();
         if !self.streaming_text.is_empty() {
