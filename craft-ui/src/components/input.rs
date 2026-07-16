@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 
 use super::scrollbar::render_vertical_scrollbar;
 use super::{apply_scroll_delta, visual_line_count};
@@ -323,7 +323,6 @@ impl InputBox {
         frame: &mut Frame,
         area: Rect,
         streaming: bool,
-        border_style: Style,
         focused: bool,
         top_right_hint: Option<Line<'_>>,
     ) {
@@ -414,18 +413,26 @@ impl InputBox {
         }
 
         let text = Text::from(styled_lines);
-        let mut block = Block::default()
-            .borders(Borders::TOP | Borders::BOTTOM)
-            .border_type(BorderType::Plain)
-            .border_style(border_style);
-        if let Some(hint) = top_right_hint {
-            block = block.title_top(hint.right_aligned());
-        }
+        let block = Block::default()
+            .padding(ratatui::widgets::Padding::new(2, 1, 1, 0))
+            .style(Style::new().bg(theme::current().layer01));
         let paragraph = Paragraph::new(text)
             .style(Style::new().fg(theme::current().foreground))
             .scroll((self.scroll_y, 0))
             .block(block);
         frame.render_widget(paragraph, area);
+
+        if let Some(hint) = top_right_hint {
+            let hint_area = Rect::new(area.x, area.y, area.width, 1);
+            frame.render_widget(
+                Block::default().style(Style::new().bg(theme::current().layer01)),
+                hint_area,
+            );
+            frame.render_widget(
+                Paragraph::new(hint).alignment(ratatui::layout::Alignment::Right),
+                hint_area,
+            );
+        }
 
         if max_scroll > 0 {
             let inner = area.inner(ratatui::layout::Margin::new(0, 1));
@@ -778,14 +785,13 @@ mod tests {
         width: u16,
         height: u16,
         streaming: bool,
-        border_style: Style,
     ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, width, height);
-                input.view(frame, area, streaming, border_style, true, None);
+                input.view(frame, area, streaming, true, None);
             })
             .unwrap();
         terminal
@@ -796,13 +802,7 @@ mod tests {
         width: u16,
         height: u16,
     ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
-        render_input_with(
-            input,
-            width,
-            height,
-            false,
-            Style::new().fg(theme::current().mode_build),
-        )
+        render_input_with(input, width, height, false)
     }
 
     fn has_scrollbar_thumb(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> bool {
@@ -870,12 +870,19 @@ mod tests {
             .to_string()
     }
 
+    fn row_content(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        row: u16,
+    ) -> String {
+        rendered_row(terminal, row).trim_start().to_string()
+    }
+
     #[test]
     fn prefix_on_single_line() {
         let mut input = InputBox::new(InputHistory::default());
         type_text(&mut input, "hello");
         let terminal = render_input(&mut input, 20, 4);
-        let row = rendered_row(&terminal, 1);
+        let row = row_content(&terminal, 1);
         assert!(row.starts_with(CHEVRON), "row: {row:?}");
         assert!(row.contains("hello"));
     }
@@ -887,10 +894,13 @@ mod tests {
         input.buffer.add_line();
         type_text(&mut input, "bbb");
         let terminal = render_input(&mut input, 20, 5);
-        let row0 = rendered_row(&terminal, 1);
-        let row1 = rendered_row(&terminal, 2);
+        let row0 = row_content(&terminal, 1);
+        let row1_raw = rendered_row(&terminal, 2);
         assert!(row0.starts_with(CHEVRON), "row0: {row0:?}");
-        assert!(row1.starts_with(NEWLINE_PAD), "row1: {row1:?}");
+        assert!(
+            !row1_raw.trim_start().starts_with(CHEVRON),
+            "row1 should not have chevron: {row1_raw:?}"
+        );
     }
 
     #[test]
@@ -899,8 +909,8 @@ mod tests {
         let ew = effective_width(14);
         type_text(&mut input, &"x".repeat(ew + 3));
         let terminal = render_input(&mut input, 14, 5);
-        let row0 = rendered_row(&terminal, 1);
-        let row1 = rendered_row(&terminal, 2);
+        let row0 = row_content(&terminal, 1);
+        let row1 = row_content(&terminal, 2);
         assert!(row0.starts_with(CHEVRON), "row0: {row0:?}");
         assert!(
             !row1.starts_with(CHEVRON) && !row1.starts_with(NEWLINE_PAD),
@@ -928,7 +938,7 @@ mod tests {
     fn placeholder_has_prefix() {
         let mut input = InputBox::new(InputHistory::default());
         let terminal = render_input(&mut input, 40, 4);
-        let row = rendered_row(&terminal, 1);
+        let row = row_content(&terminal, 1);
         assert!(row.starts_with(CHEVRON), "placeholder row: {row:?}");
     }
 
@@ -1049,5 +1059,30 @@ mod tests {
         type_text(&mut input, "read");
         input.handle_paste_with_spaces("file.rs");
         assert_eq!(input.buffer.value(), "read file.rs");
+    }
+
+    #[test]
+    fn top_row_has_no_border_line() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "hello");
+        let terminal = render_input(&mut input, 20, 4);
+        let buf = terminal.backend().buffer();
+        let top_row: String = (0..buf.area.width)
+            .map(|col| buf.cell((col, 0)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            !top_row.contains('─'),
+            "top row should have no separator line: {top_row:?}"
+        );
+    }
+
+    #[test]
+    fn layer01_background_applied() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "hello");
+        let terminal = render_input(&mut input, 20, 4);
+        let buf = terminal.backend().buffer();
+        let bg = buf.cell((0, 1)).unwrap().bg;
+        assert_eq!(bg, theme::current().layer01);
     }
 }

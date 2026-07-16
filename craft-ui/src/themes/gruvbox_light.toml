@@ -105,7 +105,6 @@ assistant            = { fg = "foreground" }
 assistant_prefix     = { fg = "orange" }
 thinking             = { fg = "comment", modifiers = ["italic"] }
 tool                 = { fg = "foreground" }
-tool_bg              = { bg = "background_2" }
 tool_prefix          = { fg = "foreground", modifiers = ["bold"] }
 tool_path            = { fg = "blue" }
 tool_annotation      = { fg = "comment" }

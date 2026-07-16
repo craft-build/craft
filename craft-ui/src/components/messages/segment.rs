@@ -56,6 +56,7 @@ pub(super) struct Segment {
     highlight_key: HighlightKey,
     pub spinner_lines: Vec<usize>,
     pub content_indent: &'static str,
+    pub indent_style: ratatui::style::Style,
     pub hyperlinks: Vec<crate::hyperlink::Hyperlink>,
     pub image: Option<std::sync::Arc<crate::image_render::ImageRenderState>>,
 }
@@ -161,6 +162,7 @@ impl Segment {
         self.highlight_key = HighlightKey::from_request(tl.highlight.as_ref());
         self.spinner_lines = tl.spinner_lines;
         self.content_indent = tl.content_indent;
+        self.indent_style = tl.indent_style;
         self.truncation = tl.truncation;
         self.hyperlinks = tl.hyperlinks;
         self.set_lines(tl.lines);
@@ -182,6 +184,7 @@ impl Segment {
             self.pending_highlight = None;
             self.spinner_lines = tl.spinner_lines;
             self.content_indent = tl.content_indent;
+            self.indent_style = tl.indent_style;
             self.hyperlinks = tl.hyperlinks;
         } else {
             self.apply_highlight(tl, worker);
@@ -195,11 +198,12 @@ impl Segment {
     pub fn apply_highlight_result(&mut self, lines: Vec<Line<'static>>) {
         if let Some((start, end)) = self.highlight_range {
             let indent = self.content_indent;
+            let indent_style = self.indent_style;
             let indented: Vec<Line<'static>> = lines
                 .into_iter()
                 .map(|mut line| {
                     if !indent.is_empty() {
-                        line.spans.insert(0, Span::raw(indent));
+                        line.spans.insert(0, Span::styled(indent, indent_style));
                     }
                     line
                 })

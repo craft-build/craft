@@ -104,11 +104,15 @@ current_line = "#44475a"
 selection    = "#363848"
 
 [ui]
+layer01           = { bg = "#21222c" }
+layer02           = { bg = "#1e1f26" }
+text_primary      = { fg = "foreground" }
+text_secondary    = { fg = "#e6e6e0" }
+text_helper       = { fg = "comment" }
 user              = { fg = "cyan" }
 assistant         = { fg = "foreground" }
 assistant_prefix  = { fg = "pink" }
 thinking          = { fg = "comment", modifiers = ["italic"] }
-tool_bg           = { bg = "#222430" }
 tool              = { fg = "foreground" }
 tool_path         = { fg = "orange" }
 tool_annotation   = { fg = "comment" }

@@ -330,12 +330,17 @@ pub fn style_by_name(name: &str) -> Style {
 pub struct Theme {
     pub background: Color,
     pub foreground: Color,
+    pub status_bg: Color,
+    pub layer01: Color,
+    pub layer02: Color,
+    pub text_primary: Color,
+    pub text_secondary: Color,
+    pub text_helper: Color,
 
     pub user: Style,
     pub assistant: Style,
     pub assistant_prefix: Style,
     pub thinking: Style,
-    pub tool_bg: Style,
     pub tool: Style,
     pub tool_path: Style,
     pub tool_annotation: Style,
@@ -475,6 +480,38 @@ fn resolve_style(def: &StyleDef, palette: &HashMap<String, Color>) -> Style {
         style = style.add_modifier(resolve_modifier(m));
     }
     style
+}
+
+const STATUS_BG_LERP: f32 = 0.12;
+
+fn status_bg_color(
+    ui: &HashMap<String, StyleDef>,
+    palette: &HashMap<String, Color>,
+    background: Color,
+    foreground: Color,
+) -> Color {
+    if let Some(def) = ui.get("status_bg")
+        && let Some(bg) = resolve_style(def, palette).bg
+    {
+        return bg;
+    }
+    // `layer01` (the composer background) resolves `current_line` first, so
+    // prefer `selection` here to keep the status bar visibly distinct from
+    // it rather than coincidentally landing on the same palette color.
+    if let Some(c) = palette.get("selection") {
+        return *c;
+    }
+    if let Some(c) = palette.get("current_line") {
+        return *c;
+    }
+    match (background, foreground) {
+        (Color::Rgb(bg_r, bg_g, bg_b), Color::Rgb(fg_r, fg_g, fg_b)) => Color::Rgb(
+            lerp_u8(bg_r, fg_r, STATUS_BG_LERP),
+            lerp_u8(bg_g, fg_g, STATUS_BG_LERP),
+            lerp_u8(bg_b, fg_b, STATUS_BG_LERP),
+        ),
+        _ => background,
+    }
 }
 
 fn scope_fg(
@@ -653,9 +690,52 @@ impl Theme {
             Modifier::BOLD,
         );
 
+        let layer_color = |ui_key: &str, fallback_palette: &[&str], lerp_t: f32| -> Color {
+            if let Some(def) = ui.get(ui_key)
+                && let Some(bg) = resolve_style(def, &palette).bg
+            {
+                return bg;
+            }
+            for key in fallback_palette {
+                if let Some(c) = palette.get(*key) {
+                    return *c;
+                }
+            }
+            let bg = color("background");
+            let fg = color("foreground");
+            match (bg, fg) {
+                (Color::Rgb(br, bg_, bb), Color::Rgb(fr, fgg, fb)) => Color::Rgb(
+                    lerp_u8(br, fr, lerp_t),
+                    lerp_u8(bg_, fgg, lerp_t),
+                    lerp_u8(bb, fb, lerp_t),
+                ),
+                _ => bg,
+            }
+        };
+
+        let text_color = |ui_key: &str, fallback_palette: &[&str]| -> Color {
+            if let Some(def) = ui.get(ui_key)
+                && let Some(fg) = resolve_style(def, &palette).fg
+            {
+                return fg;
+            }
+            for key in fallback_palette {
+                if let Some(c) = palette.get(*key) {
+                    return *c;
+                }
+            }
+            color("foreground")
+        };
+
         Ok(Self {
             background: color("background"),
             foreground: color("foreground"),
+            status_bg: status_bg_color(&ui, &palette, color("background"), color("foreground")),
+            layer01: layer_color("layer01", &["current_line", "selection"], 0.08),
+            layer02: layer_color("layer02", &["current_line"], 0.16),
+            text_primary: text_color("text_primary", &["foreground"]),
+            text_secondary: text_color("text_secondary", &["foreground"]),
+            text_helper: text_color("text_helper", &["comment"]),
 
             user: style("user"),
             assistant: style("assistant"),
@@ -666,7 +746,6 @@ impl Theme {
                 color("foreground"),
                 0.3,
             ),
-            tool_bg: style("tool_bg"),
             tool: style("tool"),
             tool_path: style("tool_path"),
             tool_annotation: style("tool_annotation"),
@@ -860,6 +939,15 @@ mod tests {
     }
 
     #[test]
+    fn dracula_layer_colors() {
+        let t = dracula();
+        assert_eq!(t.layer01, Color::Rgb(0x21, 0x22, 0x2c));
+        assert_eq!(t.layer02, Color::Rgb(0x1e, 0x1f, 0x26));
+        assert_eq!(t.text_primary, Color::Rgb(0xf8, 0xf8, 0xf2));
+        assert_eq!(t.text_helper, Color::Rgb(0x62, 0x72, 0xa4));
+    }
+
+    #[test]
     fn dracula_derivations() {
         let t = dracula();
         assert_eq!(t.mode_build, Color::Rgb(0x8b, 0xe9, 0xfd));
@@ -870,6 +958,38 @@ mod tests {
         assert_eq!(t.code_gutter.fg, Some(Color::Rgb(0xff, 0xb8, 0x6c)));
         assert_eq!(t.list_marker.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
         assert_eq!(t.bold.fg, Some(Color::Rgb(0xff, 0xb8, 0x6c)));
+    }
+
+    #[test]
+    fn status_bg_uses_selection_when_present() {
+        let t = dracula();
+        assert_eq!(t.status_bg, Color::Rgb(0x36, 0x38, 0x48));
+    }
+
+    #[test]
+    fn status_bg_falls_back_to_lerped_background() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        assert_eq!(theme.status_bg, Color::Rgb(0x40, 0x42, 0x4c));
+    }
+
+    #[test]
+    fn status_bg_ui_override_takes_precedence() {
+        let toml = r##"
+[palette]
+foreground = "#f8f8f2"
+background = "#282a36"
+current_line = "#44475a"
+
+[ui]
+status_bg = { bg = "#112233" }
+"##;
+        let theme = Theme::from_toml(toml).unwrap();
+        assert_eq!(theme.status_bg, Color::Rgb(0x11, 0x22, 0x33));
     }
 
     #[test]

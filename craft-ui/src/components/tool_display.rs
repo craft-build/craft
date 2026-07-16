@@ -76,6 +76,11 @@ pub(crate) fn output_limits_from_hints(
 pub const TOOL_INDICATOR: &str = "● ";
 pub const TOOL_BODY_INDENT: &str = "  ";
 
+/// Left bar + indent for top-level (non-batch) tool calls: deeper than the
+/// 2-column "❯ "/"● " role prefixes used for user/assistant messages, with
+/// the bar itself carrying the tool's status color in place of a dot.
+pub(crate) const TOP_LEVEL_BAR_PREFIX: &str = "  │ ";
+
 const TOOL_SEPARATOR: &str = "──────────────────";
 const CODE_OUTPUT_DIVIDER: &str = "  ────────────";
 const BATCH_INDENT: &str = "  ";
@@ -217,28 +222,30 @@ pub struct RoleStyle {
 }
 
 pub fn assistant_style() -> RoleStyle {
+    let t = theme::current();
     RoleStyle {
-        prefix: "craft> ",
-        text_style: theme::current().assistant,
-        prefix_style: theme::current().assistant_prefix,
+        prefix: "● ",
+        text_style: Style::new().fg(t.text_secondary),
+        prefix_style: t.assistant_prefix,
         use_markdown: true,
     }
 }
 
 pub fn user_style() -> RoleStyle {
+    let t = theme::current();
     RoleStyle {
-        prefix: "you> ",
-        text_style: theme::current().assistant,
-        prefix_style: theme::current().user,
+        prefix: "❯ ",
+        text_style: Style::new().fg(t.text_primary),
+        prefix_style: t.user,
         use_markdown: true,
     }
 }
 
 pub fn thinking_style() -> RoleStyle {
     RoleStyle {
-        prefix: "thinking> ",
+        prefix: "○ ",
         text_style: theme::current().thinking,
-        prefix_style: theme::current().thinking,
+        prefix_style: Style::new().fg(theme::current().text_helper),
         use_markdown: true,
     }
 }
@@ -269,6 +276,9 @@ pub struct ToolLines {
     pub highlight: Option<HighlightRequest>,
     pub spinner_lines: Vec<usize>,
     pub content_indent: &'static str,
+    /// Style for `content_indent` when re-indenting lines swapped in later
+    /// (async syntax highlighting); carries the left bar's status color.
+    pub indent_style: Style,
     pub truncation: SectionFlags,
     pub hyperlinks: Vec<crate::hyperlink::Hyperlink>,
 }
@@ -499,6 +509,11 @@ struct ToolLineBuilder {
     content_range: (usize, usize),
     width: u16,
     outer_indent: &'static str,
+    /// True for top-level (non-batch) tool calls, which use the colored
+    /// left-bar indent scheme instead of the plain batch indent.
+    is_top_level: bool,
+    /// Status color for the left bar; only meaningful when `is_top_level`.
+    bar_style: Style,
     truncation: SectionFlags,
     limits: RenderLimits,
     keep: Keep,
@@ -516,13 +531,21 @@ impl ToolLineBuilder {
         hints: &ToolRenderHints,
     ) -> Self {
         let limits = RenderLimits::new(expanded, output_limits.max_lines);
+        let is_top_level = outer_indent.is_empty();
+        let indent_reserve = if is_top_level {
+            TOP_LEVEL_BAR_PREFIX.chars().count() as u16
+        } else {
+            outer_indent.len() as u16
+        };
         Self {
             lines: Vec::new(),
             search_text: String::new(),
             spinner_lines: Vec::new(),
             content_range: (0, 0),
-            width: width.saturating_sub(outer_indent.len() as u16),
+            width: width.saturating_sub(indent_reserve),
             outer_indent,
+            is_top_level,
+            bar_style: Style::default(),
             truncation: SectionFlags::default(),
             limits,
             keep: output_limits.keep,
@@ -530,6 +553,13 @@ impl ToolLineBuilder {
             body_format: hints.body_format,
             hyperlinks: Vec::new(),
         }
+    }
+
+    /// Indent applied inline to body content. Empty for top-level tool
+    /// calls, since [`Self::finish`] applies the full colored bar prefix to
+    /// every line (including the header) uniformly.
+    fn body_indent(&self) -> &'static str {
+        if self.is_top_level { "" } else { TOOL_BODY_INDENT }
     }
 
     fn apply_output_format(&mut self, output: Option<&ToolOutput>) {
@@ -547,7 +577,7 @@ impl ToolLineBuilder {
         output: Option<&ToolOutput>,
     ) {
         let mut spans = vec![Span::styled(
-            format!("{tool_name}> "),
+            format!("{tool_name} "),
             theme::current().tool_prefix,
         )];
         let mut header_uri = None;
@@ -565,7 +595,7 @@ impl ToolLineBuilder {
             header_uri = uri;
             spans.extend(styled);
         }
-        let mut copy = format!("{tool_name}> {header}");
+        let mut copy = format!("{tool_name} {header}");
         if let Some(ann) = annotation {
             spans.push(Span::styled(
                 format!(" ({ann})"),
@@ -612,6 +642,18 @@ impl ToolLineBuilder {
     }
 
     fn prepend_indicator(&mut self, indicator: Indicator, started_at: Instant) {
+        if self.is_top_level {
+            // The colored left bar (applied uniformly in `finish`) conveys
+            // status instead of a dot, so there's nothing to insert here.
+            self.bar_style = match indicator {
+                Indicator::Pending => theme::current().tool_dim,
+                Indicator::InProgress => theme::current().spinner,
+                Indicator::Success => theme::current().tool_success,
+                Indicator::Error => theme::current().tool_error,
+            };
+            return;
+        }
+
         let (text, style) = match indicator {
             Indicator::Pending => ("○ ".into(), theme::current().tool_dim),
             Indicator::InProgress => {
@@ -633,8 +675,11 @@ impl ToolLineBuilder {
         self.truncation.script |= content.truncation.script;
         self.truncation.output |= content.truncation.output;
         let start = self.lines.len();
+        let indent = self.body_indent();
         for mut line in content.lines {
-            line.spans.insert(0, Span::raw(TOOL_BODY_INDENT));
+            if !indent.is_empty() {
+                line.spans.insert(0, Span::raw(indent));
+            }
             self.lines.push(line);
         }
         self.content_range = (start, self.lines.len());
@@ -664,7 +709,10 @@ impl ToolLineBuilder {
             }
             match self.body_format {
                 BodyFormat::Markdown => self.push_markdown_body(text),
-                BodyFormat::Plain => push_text_lines(&mut self.lines, text, TOOL_BODY_INDENT),
+                BodyFormat::Plain => {
+                    let indent = self.body_indent();
+                    push_text_lines(&mut self.lines, text, indent);
+                }
             }
             if let Some(full) = &resolved.full_text {
                 self.push_search_text(full);
@@ -679,17 +727,19 @@ impl ToolLineBuilder {
 
     fn push_markdown_body(&mut self, text: &str) {
         let style = theme::current().assistant;
-        let indent = TOOL_BODY_INDENT.len() as u16;
+        let indent = self.body_indent();
         let md_lines = text_to_lines(
             text,
             "",
             style,
             style,
-            self.width.saturating_sub(indent),
+            self.width.saturating_sub(indent.chars().count() as u16),
             Some(craft_markdown::render::TOOL_OUTPUT_MAX_LINE_BYTES),
         );
         for mut line in md_lines {
-            line.spans.insert(0, Span::raw(TOOL_BODY_INDENT));
+            if !indent.is_empty() {
+                line.spans.insert(0, Span::raw(indent));
+            }
             self.lines.push(line);
         }
     }
@@ -699,7 +749,10 @@ impl ToolLineBuilder {
             self.truncation.output = true;
             let text = truncation_notice(skipped);
             let mut line = Line::from(Span::styled(text, theme::current().tool_dim));
-            line.spans.insert(0, Span::raw(TOOL_BODY_INDENT));
+            let indent = self.body_indent();
+            if !indent.is_empty() {
+                line.spans.insert(0, Span::raw(indent));
+            }
             self.lines.push(line);
         }
     }
@@ -707,11 +760,8 @@ impl ToolLineBuilder {
     fn push_snapshot(&mut self, snapshot: &BufferSnapshot, search_fallback: Option<&str>) {
         let start = self.lines.len();
         let total = snapshot.lines.len();
-        self.lines.extend(snapshot_to_lines_range(
-            snapshot,
-            TOOL_BODY_INDENT,
-            0..total,
-        ));
+        self.lines
+            .extend(snapshot_to_lines_range(snapshot, self.body_indent(), 0..total));
         self.content_range = (start, self.lines.len());
         if let Some(text) = search_fallback {
             self.push_search_text(text);
@@ -740,13 +790,22 @@ impl ToolLineBuilder {
         output: Option<Arc<ToolOutput>>,
         content_indent: &'static str,
     ) -> ToolLines {
-        if !self.outer_indent.is_empty() {
+        if self.is_top_level {
+            for line in &mut self.lines {
+                line.spans
+                    .insert(0, Span::styled(TOP_LEVEL_BAR_PREFIX, self.bar_style));
+            }
+        } else if !self.outer_indent.is_empty() {
             for line in &mut self.lines {
                 line.spans.insert(0, Span::raw(self.outer_indent));
             }
         }
         let highlight = HighlightRequest::new(self.content_range, input, output, self.limits);
-        let indent_w = self.outer_indent.chars().count() as u16;
+        let indent_w = if self.is_top_level {
+            TOP_LEVEL_BAR_PREFIX.chars().count() as u16
+        } else {
+            self.outer_indent.chars().count() as u16
+        };
         for hl in &mut self.hyperlinks {
             hl.col_start = hl.col_start.saturating_add(indent_w);
             hl.col_end = hl.col_end.saturating_add(indent_w);
@@ -757,6 +816,11 @@ impl ToolLineBuilder {
             highlight,
             spinner_lines: self.spinner_lines,
             content_indent,
+            indent_style: if self.is_top_level {
+                self.bar_style
+            } else {
+                Style::default()
+            },
             truncation: self.truncation,
             hyperlinks: self.hyperlinks,
         }
@@ -885,7 +949,7 @@ pub fn build_tool_lines(
     b.finish(
         msg.tool_input.clone(),
         msg.tool_output.clone(),
-        TOOL_BODY_INDENT,
+        TOP_LEVEL_BAR_PREFIX,
     )
 }
 
@@ -954,7 +1018,7 @@ pub fn build_instructions_lines(
     let (outer_indent, content_indent) = if in_batch {
         (BATCH_INDENT, BATCH_CONTENT_INDENT)
     } else {
-        ("", TOOL_BODY_INDENT)
+        ("", TOP_LEVEL_BAR_PREFIX)
     };
 
     let header = blocks.first().map_or("", |b| b.path.as_str());
@@ -986,9 +1050,11 @@ pub fn build_instructions_lines(
     let has_truncation =
         code_view::render_instructions(blocks, &mut b.lines, b.limits.output, false);
     b.truncation.output |= has_truncation;
-    let inner_indent = &content_indent[outer_indent.len()..];
+    let inner_indent = b.body_indent();
     for line in &mut b.lines[start..] {
-        line.spans.insert(0, Span::raw(inner_indent));
+        if !inner_indent.is_empty() {
+            line.spans.insert(0, Span::raw(inner_indent));
+        }
     }
     b.content_range = (start, b.lines.len());
 
@@ -1871,7 +1937,7 @@ mod tests {
         }];
         let tl = build_instructions_lines(&blocks, 80, false, Some(1));
         let text = lines_text(&tl);
-        assert!(text.contains("load> "));
+        assert!(text.contains("load "));
         assert_eq!(tl.content_indent, BATCH_CONTENT_INDENT);
         assert!(
             tl.lines

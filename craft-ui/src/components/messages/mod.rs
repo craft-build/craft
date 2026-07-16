@@ -933,11 +933,10 @@ impl MessagesPanel {
             }
             let h = seg.height(width);
             let highlight = self.highlight_segment == Some(i);
-            let style = seg.tool_id.as_ref().map(|_| theme::current().tool_bg);
             if let Some(img) = &seg.image {
-                cursor.render_image(img, seg.lines(), style, frame);
+                cursor.render_image(img, seg.lines(), None, frame);
             } else {
-                cursor.render(seg.lines(), h, style, highlight, &seg.hyperlinks, frame);
+                cursor.render(seg.lines(), h, None, highlight, &seg.hyperlinks, frame);
             }
         }
 

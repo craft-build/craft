@@ -3,7 +3,7 @@ use crate::components::Overlay;
 use crate::components::keybindings::KeybindContext;
 use crate::components::queue_panel;
 use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
-use crate::components::status_bar::{StatusBarContext, UsageStats};
+use crate::components::status_bar::{self, StatusBarContext, UsageStats};
 use crate::selection::{self, SelectableZone, SelectionZone, ZoneRegistry};
 use crate::theme;
 use craft_lua::Split;
@@ -15,12 +15,18 @@ use ratatui::widgets::{Block, Borders, Widget};
 
 use super::{App, Mode, Status};
 
+/// Horizontal/top inset applied to the message transcript so text doesn't
+/// sit flush against the terminal edge, matching the prototype's layout.
+const MSG_PAD_X: u16 = 2;
+const MSG_PAD_TOP: u16 = 1;
+
 struct ViewLayout {
     msg_area: Rect,
     bottom_area: Rect,
     status_area: Rect,
     queue_area: Rect,
     panel_windows: Vec<(usize, Rect)>,
+    model_row_area: Rect,
     input_area: Rect,
     splits: SplitLayout,
     content_area: Rect,
@@ -69,6 +75,7 @@ impl App {
 
         let below_active = splits.rect(Split::Below).is_some();
         let bottom_takeover = form_visible || below_active;
+        let show_model_row = !permission_open && !bottom_takeover && self.is_main_chat();
         let max_bottom = inner.height.saturating_sub(MIN_CHAT_ROWS);
         let bottom_height = if permission_open {
             self.permission_prompt.height(inner.width).min(max_bottom)
@@ -90,6 +97,7 @@ impl App {
                 .sum();
             queue_panel::height(self.queue.panel_len())
                 + panel_h
+                + status_bar::MODEL_ROW_HEIGHT
                 + self.input_box.height(inner.width)
         } else {
             let panel_h: u16 = self
@@ -103,6 +111,12 @@ impl App {
 
         let [msg_area, bottom_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).areas(inner);
+        let msg_area = Rect {
+            x: msg_area.x + MSG_PAD_X,
+            y: msg_area.y + MSG_PAD_TOP,
+            width: msg_area.width.saturating_sub(MSG_PAD_X * 2),
+            height: msg_area.height.saturating_sub(MSG_PAD_TOP),
+        };
 
         let panel_reqs = if bottom_takeover {
             Vec::new()
@@ -123,6 +137,9 @@ impl App {
         for &(_, h) in &panel_reqs {
             constraints.push(Constraint::Length(h));
         }
+        if show_model_row {
+            constraints.push(Constraint::Length(status_bar::MODEL_ROW_HEIGHT));
+        }
         constraints.push(Constraint::Min(1));
 
         let areas = Layout::vertical(constraints).split(bottom_area);
@@ -132,6 +149,11 @@ impl App {
             .enumerate()
             .map(|(i, &(idx, _))| (idx, areas[1 + i]))
             .collect();
+        let model_row_area = if show_model_row {
+            areas[areas.len() - 2]
+        } else {
+            Rect::default()
+        };
         let input_area = areas[areas.len() - 1];
 
         ViewLayout {
@@ -140,6 +162,7 @@ impl App {
             status_area,
             queue_area,
             panel_windows,
+            model_row_area,
             input_area,
             splits,
             content_area: content,
@@ -261,6 +284,13 @@ impl App {
             for &(idx, rect) in &layout.panel_windows {
                 self.float_mgr.view_panel(frame, idx, rect);
             }
+            frame.render_widget(
+                Block::default().style(Style::new().bg(theme::current().layer01)),
+                layout.input_area,
+            );
+            let render_chat = self.resolve_render_chat();
+            let ctx = self.status_bar_context(render_chat);
+            status_bar::view_model_row(frame, layout.model_row_area, &ctx);
             let streaming = self.status == Status::Streaming;
             let panel_hint = (self.state.mode == Mode::Plan)
                 .then(|| self.plan_form.hint_line())
@@ -275,7 +305,6 @@ impl App {
                 frame,
                 layout.input_area,
                 streaming,
-                self.separator_style(),
                 !self.any_overlay_open(),
                 panel_hint,
             );
@@ -375,11 +404,11 @@ impl App {
         overlay_rect
     }
 
-    fn render_status_bar(&mut self, frame: &mut Frame, status_area: Rect, render_chat: usize) {
+    fn status_bar_context(&self, render_chat: usize) -> StatusBarContext<'_> {
         let chat = &self.chats[render_chat];
         let chat_name = (self.chats.len() > 1).then_some(chat.name.as_str());
         let (mode_label, mode_style) = self.mode_label();
-        let ctx = StatusBarContext {
+        StatusBarContext {
             status: &self.status,
             mode_label,
             mode_style,
@@ -401,7 +430,11 @@ impl App {
             thinking_label: self.state.thinking.status_label(),
             fast: self.state.fast,
             restoring: self.restoring.load(std::sync::atomic::Ordering::Relaxed),
-        };
+        }
+    }
+
+    fn render_status_bar(&mut self, frame: &mut Frame, status_area: Rect, render_chat: usize) {
+        let ctx = self.status_bar_context(render_chat);
         self.status_bar.view(frame, status_area, &ctx);
     }
 

@@ -103,7 +103,6 @@ blue             = "#83a598"
 
 [ui]
 assistant_prefix     = { fg = "orange" }
-tool_bg              = { bg = "#1d2021" }
 tool_prefix          = { fg = "foreground", modifiers = ["bold"] }
 strikethrough        = { fg = "comment", modifiers = ["crossed_out"] }
 plan_rule            = { fg = "orange", modifiers = ["bold"] }

@@ -119,7 +119,6 @@ assistant          = { fg = "foreground" }
 assistant_prefix   = { fg = "orange" }
 thinking           = { fg = "comment", modifiers = ["italic"] }
 # surface.sunk
-tool_bg            = { bg = "#181c26" }
 tool               = { fg = "foreground" }
 tool_path          = { fg = "yellow" }
 tool_annotation    = { fg = "comment" }

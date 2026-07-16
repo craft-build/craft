@@ -105,7 +105,6 @@ mode_plan       = "#268bd2"
 
 [ui]
 assistant_prefix   = { fg = "purple" }
-tool_bg            = { bg = "background_2" }
 tool_prefix        = { fg = "foreground", modifiers = ["bold"] }
 strikethrough      = { fg = "comment", modifiers = ["crossed_out"] }
 plan_rule          = { fg = "purple", modifiers = ["bold"] }

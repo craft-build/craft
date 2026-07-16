@@ -117,7 +117,6 @@ diff_new           = { bg = "#1e3028" }
 diff_old_emphasis  = { bg = "#4a2b34" }
 diff_new_emphasis  = { bg = "#2a4535" }
 diff_line_nr       = { fg = "comment" }
-tool_bg            = { bg = "background_2" }
 tool_prefix        = { fg = "foreground", modifiers = ["bold"] }
 tool               = { fg = "foreground" }
 tool_path          = { fg = "blue" }

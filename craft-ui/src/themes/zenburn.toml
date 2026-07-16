@@ -105,7 +105,6 @@ assistant_prefix     = { fg = "cyan" }
 thinking             = { fg = "comment", modifiers = ["italic"] }
 
 tool                 = { fg = "foreground" }
-tool_bg              = { bg = "current_line" }
 tool_prefix          = { fg = "foreground", modifiers = ["bold"] }
 tool_path            = { fg = "cyan" }
 tool_annotation      = { fg = "comment" }

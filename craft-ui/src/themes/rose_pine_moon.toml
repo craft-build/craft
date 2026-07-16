@@ -119,7 +119,6 @@ code_block        = { fg = "foreground" }
 plan_rule         = { fg = "rose", modifiers = ["bold"] }
 horizontal_rule   = { fg = "comment" }
 table_border      = { fg = "comment" }
-tool_bg           = { bg = "background_2" }
 tool              = { fg = "foreground" }
 tool_prefix       = { fg = "foreground", modifiers = ["bold"] }
 tool_path         = { fg = "foam" }

@@ -11,9 +11,9 @@ use crate::theme;
 use craft_providers::{ModelPricing, TokenUsage};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 
 const FAST_LABEL: &str = " [fast]";
 
@@ -23,6 +23,17 @@ pub(crate) fn format_tokens(n: u32) -> String {
         1_000..1_000_000 => format!("{:.1}k", n as f64 / 1_000.0),
         _ => format!("{:.1}m", n as f64 / 1_000_000.0),
     }
+}
+
+const CONTEXT_BAR_WIDTH: usize = 10;
+const BAR_FILL: &str = "█";
+const BAR_EMPTY: &str = "░";
+
+fn context_bar(pct: u32) -> (String, String) {
+    let filled =
+        (((pct as f32 / 100.0) * CONTEXT_BAR_WIDTH as f32).round() as usize).min(CONTEXT_BAR_WIDTH);
+    let empty = CONTEXT_BAR_WIDTH - filled;
+    (BAR_FILL.repeat(filled), BAR_EMPTY.repeat(empty))
 }
 
 pub struct UsageStats<'a> {
@@ -104,6 +115,13 @@ impl StatusBar {
     }
 
     pub fn view(&self, frame: &mut Frame, area: Rect, ctx: &StatusBarContext) {
+        let t = theme::current();
+        let bg = if t.status_bg != Color::Reset {
+            t.status_bg
+        } else {
+            t.layer02
+        };
+        frame.render_widget(Block::default().style(Style::new().bg(bg)), area);
         let mut left_spans = Vec::new();
 
         if *ctx.status == Status::Streaming {
@@ -157,62 +175,11 @@ impl StatusBar {
                 left_spans.push(Span::styled(format!(" {e}"), theme::current().error));
             }
             _ => {
-                let pct = if ctx.stats.context_window > 0 {
-                    (ctx.stats.context_size as f64 / ctx.stats.context_window as f64 * 100.0) as u32
-                } else {
-                    0
-                };
-
                 right_spans.push(Span::styled(
                     self.cwd_branch.clone(),
-                    theme::current().status_dim,
+                    Style::new().fg(theme::current().text_helper),
                 ));
-                right_spans.push(Span::raw("  "));
-                right_spans.push(Span::styled(
-                    ctx.model_id.to_string(),
-                    theme::current().status_dim,
-                ));
-
-                if let Some(ref label) = ctx.thinking_label {
-                    right_spans.push(Span::styled(
-                        format!(" [{label}]"),
-                        theme::current().status_dim,
-                    ));
-                }
-
-                if ctx.fast {
-                    right_spans.push(Span::styled(FAST_LABEL, theme::current().status_dim));
-                }
-
-                let context_text = format!(
-                    "  {}/{} ({}%)",
-                    format_tokens(ctx.stats.context_size),
-                    format_tokens(ctx.stats.context_window),
-                    pct,
-                );
-                let rest_text = if ctx.stats.pricing.is_zero() {
-                    format!("{context_text} ")
-                } else {
-                    format!(
-                        "{context_text} ${:.3} ",
-                        ctx.stats.usage.cost(ctx.stats.pricing, ctx.fast),
-                    )
-                };
-                right_spans.push(Span::styled(
-                    rest_text,
-                    Style::new().fg(theme::current().foreground),
-                ));
-
-                if ctx.stats.show_global && !ctx.stats.pricing.is_zero() {
-                    let global_text = format!(
-                        " \u{03a3}${:.3} ",
-                        ctx.stats.global_usage.cost(ctx.stats.pricing, ctx.fast),
-                    );
-                    right_spans.push(Span::styled(
-                        global_text,
-                        Style::new().fg(theme::current().foreground),
-                    ));
-                }
+                right_spans.push(Span::raw(" "));
             }
         }
 
@@ -235,6 +202,93 @@ impl StatusBar {
             right_area,
         );
     }
+}
+
+/// Total height reserved for [`view_model_row`], including its top padding.
+pub const MODEL_ROW_HEIGHT: u16 = 2;
+const MODEL_ROW_PAD_LEFT: u16 = 2;
+const MODEL_ROW_PAD_RIGHT: u16 = 1;
+const MODEL_ROW_PAD_TOP: u16 = 1;
+
+/// Model/usage row shown above the input box: model id and thinking/fast
+/// annotations on the left, context usage bar and cost right-aligned. Moved
+/// out of the bottom status bar so that bar can stay focused on mode/branch
+/// information.
+pub fn view_model_row(frame: &mut Frame, area: Rect, ctx: &StatusBarContext) {
+    let t = theme::current();
+    frame.render_widget(Block::default().style(Style::new().bg(t.layer01)), area);
+
+    if area.height <= MODEL_ROW_PAD_TOP
+        || area.width <= MODEL_ROW_PAD_LEFT + MODEL_ROW_PAD_RIGHT + 4
+        || matches!(ctx.status, Status::Error { .. })
+    {
+        return;
+    }
+
+    let content = Rect {
+        x: area.x + MODEL_ROW_PAD_LEFT,
+        y: area.y + MODEL_ROW_PAD_TOP,
+        width: area.width - MODEL_ROW_PAD_LEFT - MODEL_ROW_PAD_RIGHT,
+        height: 1,
+    };
+
+    let pct = if ctx.stats.context_window > 0 {
+        (ctx.stats.context_size as f64 / ctx.stats.context_window as f64 * 100.0) as u32
+    } else {
+        0
+    };
+
+    let mut left_spans = vec![Span::styled(
+        ctx.model_id.to_string(),
+        Style::new().fg(t.text_primary).bold(),
+    )];
+
+    if let Some(ref label) = ctx.thinking_label {
+        left_spans.push(Span::styled(format!(" [{label}]"), t.status_dim));
+    }
+
+    if ctx.fast {
+        left_spans.push(Span::styled(FAST_LABEL, t.status_dim));
+    }
+
+    let mut right_spans = vec![Span::styled(
+        format!(
+            "{}/{} ({}%) ",
+            format_tokens(ctx.stats.context_size),
+            format_tokens(ctx.stats.context_window),
+            pct,
+        ),
+        Style::new().fg(t.text_secondary),
+    )];
+    let (filled, empty) = context_bar(pct);
+    right_spans.push(Span::styled(filled, t.accent));
+    right_spans.push(Span::styled(empty, t.status_dim));
+
+    if !ctx.stats.pricing.is_zero() {
+        right_spans.push(Span::styled(
+            format!(" ${:.3}", ctx.stats.usage.cost(ctx.stats.pricing, ctx.fast)),
+            Style::new().fg(t.text_secondary),
+        ));
+        if ctx.stats.show_global {
+            right_spans.push(Span::styled(
+                format!(
+                    " \u{03a3}${:.3}",
+                    ctx.stats.global_usage.cost(ctx.stats.pricing, ctx.fast),
+                ),
+                Style::new().fg(t.text_secondary),
+            ));
+        }
+    }
+
+    let right_width: u16 = right_spans.iter().map(|s| s.width() as u16).sum();
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(content);
+
+    frame.render_widget(Paragraph::new(Line::from(left_spans)), left_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
+        right_area,
+    );
 }
 
 fn collapse_home(path: &str) -> String {
@@ -372,5 +426,15 @@ mod tests {
         bar.flash("Copied".into());
         bar.clear_flash();
         assert!(bar.flash.is_none());
+    }
+
+    #[test_case(0,   (0, 10)  ; "empty")]
+    #[test_case(50,  (5, 5)   ; "half")]
+    #[test_case(100, (10, 0)  ; "full")]
+    #[test_case(150, (10, 0)  ; "over_full_clamps")]
+    fn context_bar_fills(pct: u32, expected: (usize, usize)) {
+        let (filled, empty) = context_bar(pct);
+        assert_eq!(filled.chars().count(), expected.0);
+        assert_eq!(empty.chars().count(), expected.1);
     }
 }
