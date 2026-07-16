@@ -16,6 +16,8 @@ Prioritize technical accuracy over validating the user's beliefs. Provide direct
 
 {{efficient_tools}}
 
+{{subagent_briefing}}
+
 # Conventions
 - Never assume a library is available. Check the project's dependency files first.
 - Match existing code style, naming conventions, and patterns.

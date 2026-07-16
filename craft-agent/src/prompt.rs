@@ -63,6 +63,14 @@ pub const DEFAULT_TONE: &str = r#"- Be concise. Your output is displayed on a CL
 const NATIVE_EFFICIENT_TOOLS: &[&str] = &["batch", "code_execution", "task"];
 const INSTRUCTIONS_MARKER: &str = "{{instructions}}";
 
+pub const DEFAULT_SUBAGENT_BRIEFING: &str = r#"# Delegating to subagents
+A subagent starts with none of this conversation's context. Write its prompt like a briefing for a smart colleague who just walked into the room:
+- State what to accomplish and why. Describe what is already ruled out so it does not redo dead-end work.
+- Give enough surrounding context for judgment calls, not just a narrow instruction.
+- Lookups vs investigations: for a lookup, hand over the exact command or query. For an investigation, hand over the question. Prescribed steps become dead weight when the premise is wrong.
+- Never delegate understanding. Include file paths, line numbers, and what specifically to change. Do not write "based on your findings, fix the bug."
+- Give a response-length hint (e.g. "report in under 200 words") to control the return payload."#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum SlotKind {
@@ -77,6 +85,7 @@ pub enum Slot {
     Tone,
     ToolUsage,
     EfficientTools,
+    SubagentBriefing,
     Conventions,
     AfterInstructions,
 }
@@ -88,6 +97,7 @@ impl Slot {
             Slot::Tone => "{{tone}}",
             Slot::ToolUsage => "{{tool_usage}}",
             Slot::EfficientTools => "{{efficient_tools}}",
+            Slot::SubagentBriefing => "{{subagent_briefing}}",
             Slot::Conventions => "{{conventions}}",
             Slot::AfterInstructions => "{{after_instructions}}",
         }
@@ -95,7 +105,7 @@ impl Slot {
 
     pub fn kind(self) -> SlotKind {
         match self {
-            Slot::Identity | Slot::Tone => SlotKind::Singleton,
+            Slot::Identity | Slot::Tone | Slot::SubagentBriefing => SlotKind::Singleton,
             Slot::ToolUsage
             | Slot::EfficientTools
             | Slot::Conventions
@@ -107,6 +117,7 @@ impl Slot {
         match self {
             Slot::Identity => Some(DEFAULT_IDENTITY),
             Slot::Tone => Some(DEFAULT_TONE),
+            Slot::SubagentBriefing => Some(DEFAULT_SUBAGENT_BRIEFING),
             _ => None,
         }
     }
@@ -368,6 +379,7 @@ mod tests {
     #[test_case(PromptId::System, Slot::EfficientTools, true ; "system_efficient")]
     #[test_case(PromptId::System, Slot::Conventions, true ; "system_conventions")]
     #[test_case(PromptId::System, Slot::AfterInstructions, true ; "system_after")]
+    #[test_case(PromptId::System, Slot::SubagentBriefing, true ; "system_subagent_briefing")]
     #[test_case(PromptId::System, Slot::Identity, true ; "system_identity")]
     #[test_case(PromptId::System, Slot::Tone, true ; "system_tone")]
     #[test_case(PromptId::Research, Slot::Conventions, false ; "research_no_conventions")]
@@ -400,6 +412,7 @@ mod tests {
     #[test_case(Slot::Conventions, SlotKind::Aggregate ; "conventions_aggregate")]
     #[test_case(Slot::ToolUsage, SlotKind::Aggregate ; "tool_usage_aggregate")]
     #[test_case(Slot::EfficientTools, SlotKind::Aggregate ; "efficient_aggregate")]
+    #[test_case(Slot::SubagentBriefing, SlotKind::Singleton ; "subagent_briefing_singleton")]
     #[test_case(Slot::AfterInstructions, SlotKind::Aggregate ; "after_aggregate")]
     fn slot_kind_matches_expectations(slot: Slot, expected: SlotKind) {
         assert_eq!(slot.kind(), expected);
@@ -409,6 +422,33 @@ mod tests {
     fn singleton_default_used_when_empty() {
         let out = assemble(PromptId::System, &ResolvedSlots::default(), "");
         assert!(out.starts_with("You are Craft"));
+    }
+
+    #[test]
+    fn subagent_briefing_default_renders_and_is_overridable() {
+        let out = assemble(PromptId::System, &ResolvedSlots::default(), "");
+        assert!(
+            out.contains("# Delegating to subagents"),
+            "default briefing missing from system prompt:\n{out}"
+        );
+        assert!(
+            !out.contains("{{"),
+            "unfilled marker left in output:\n{out}"
+        );
+
+        let s = slots(
+            PromptId::System,
+            &[(Slot::SubagentBriefing, "- CUSTOM_BRIEFING")],
+        );
+        let out = assemble(PromptId::System, &s, "");
+        assert!(
+            out.contains("- CUSTOM_BRIEFING"),
+            "plugin briefing not applied:\n{out}"
+        );
+        assert!(
+            !out.contains("# Delegating to subagents"),
+            "default briefing should be replaced by plugin entry:\n{out}"
+        );
     }
 
     #[test]

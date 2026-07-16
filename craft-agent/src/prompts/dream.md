@@ -19,4 +19,6 @@ Review your project memory and the recent conversation, then consolidate memory 
 - Prefer fewer, higher-quality entries over many small ones.
 - Do not duplicate information that is obvious from the code or README.
 - Do not remove entries that are still relevant, even if old.
-- Report a one-paragraph summary of what you consolidated at the end.
+- Convert relative dates ("yesterday", "last week") to absolute `YYYY-MM-DD` so entries stay interpretable as time passes.
+- If a memory contradicts what the recent conversation revealed, fix or delete it at the source rather than leaving both versions.
+- Report a one-paragraph summary of what you consolidated at the end. If nothing changed and memory is already tight, say so explicitly — a no-op is a valid outcome.

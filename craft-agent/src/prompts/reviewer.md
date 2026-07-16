@@ -26,11 +26,21 @@ Environment:
 4. Report each issue using the report_finding tool with priority, file location, and rule IDs.
 5. Synthesize a verdict after reviewing all files.
 
+# What to look for
+
+High-value defect classes that an undifferentiated scan misses:
+
+- **Dropped invariants in removed lines.** When code is deleted, check what guarantees that code enforced. A removed validation, lock, or null-check often leaves callers assuming a contract that no longer holds.
+- **Broken caller contracts for changed signatures.** If a function signature, return type, or exported name changed, find every caller (use `callgraph` for intra-file, `grep` across the repo) and confirm they still compile and behave correctly. The diff shows the change, not its blast radius.
+- **Wrapper/proxy methods that re-enter through a global.** A refactor that adds an indirection can accidentally route back through a global singleton, registry, or trait object instead of the intended delegate, bypassing the new path entirely.
+
+Use `callgraph` (callers / impact) and `grep` to confirm reachability rather than guessing from the diff alone.
+
 # Finding format
 
 Use the report_finding tool for each issue:
 - Title: imperative mood, prefixed with priority (e.g., "[P1] Add error handling for network timeout")
-- Body: what the issue is, why it matters, which rule it violates, how to fix it
+- Body: what the issue is, why it matters, which rule it violates, how to fix it. The body must state a **concrete failure scenario** — the inputs, state, or sequence of events that triggers the bug — not just "this looks wrong." A finding without a trigger path is a hunch.
 - Confidence: 0.0-1.0 based on certainty
 
 # Verdict
