@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 47 built-in tools. This is the full reference.
+Craft ships with 48 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -77,14 +77,24 @@ Replace an exact string match in a file.
 
 ### `edit_lines` *(native, opt-in)*
 
-Edit lines by number. Omit `end` to insert before `start` without removing lines. Set `end` to replace or delete (empty `new_string`) a range.
+Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `end` | integer | no | Last line, inclusive. Omit to insert before start without removing lines. |
+| `end` | integer | yes | Last line, inclusive |
 | `new_string` | string | yes | Replacement text. Empty deletes the range. |
 | `path` | string | yes |  |
 | `start` | integer | yes | First line (1-indexed) |
+
+### `insert_lines` *(native, opt-in)*
+
+Insert lines before a given line number. Lines at `line` and below shift down. Existing lines are preserved.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `line` | integer | yes | Line number to insert before (1-indexed). Use 1 to insert at the top. |
+| `new_string` | string | yes | Text to insert |
+| `path` | string | yes |  |
 
 ### `multiedit` *(native)*
 

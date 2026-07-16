@@ -180,6 +180,7 @@ pub const DESKTOP_TOOL_NAME: &str = desktop::Desktop::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
 pub const EDIT_TOOL_NAME: &str = edit::Edit::NAME;
 pub const EDIT_LINES_TOOL_NAME: &str = edit_lines::EditLines::NAME;
+pub const INSERT_LINES_TOOL_NAME: &str = edit_lines::InsertLines::NAME;
 pub const RESOLVE_TOOL_NAME: &str = resolve::Resolve::NAME;
 pub const AST_EDIT_TOOL_NAME: &str = ast_edit::AstEdit::NAME;
 pub const GLOB_TOOL_NAME: &str = "glob";
@@ -680,6 +681,7 @@ register_tools! {
     write::Write,
     edit::Edit,
     edit_lines::EditLines,
+    edit_lines::InsertLines,
     multiedit::MultiEdit,
     apply_patch::ApplyPatch,
     task::Task,
