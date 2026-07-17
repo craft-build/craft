@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde_json::Value;
 
@@ -160,7 +161,7 @@ impl Provider for Synthetic {
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&str>,
+        _session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let auth = lock_unpoison(&self.auth).clone();

@@ -736,6 +736,7 @@ pub fn is_builtin_tool(name: &str) -> bool {
 }
 
 use craft_providers::{Message, ProviderEvent, StreamResponse};
+use craft_storage::id::SessionRef;
 
 struct NullProvider;
 
@@ -748,7 +749,7 @@ impl Provider for NullProvider {
         _: &'a Value,
         _: &'a flume::Sender<ProviderEvent>,
         _: RequestOptions,
-        _: Option<&str>,
+        _: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, crate::AgentError>> {
         Box::pin(async { unimplemented!() })
     }

@@ -17,6 +17,7 @@ use craft_flow::{ApprovalPayload, FlowOutcome, FlowParams, FlowProgress, TaskSta
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
 use craft_storage::flow::FlowStore;
+use craft_storage::id::SessionRef;
 use serde_json::Value;
 use tracing::error;
 
@@ -43,7 +44,7 @@ pub(super) struct AgentLoop {
     agent_tx: flume::Sender<Envelope>,
     answer_rx: Arc<tokio::sync::Mutex<flume::Receiver<String>>>,
     queue: Arc<QueueReceiver>,
-    session_id: Option<String>,
+    session_id: Option<SessionRef>,
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
     btw_system: Arc<ArcSwap<String>>,
@@ -70,7 +71,7 @@ impl AgentLoop {
         queue: Arc<QueueReceiver>,
         cancel_map: Arc<RunCancelMap>,
         init_cancel: CancelToken,
-        session_id: Option<String>,
+        session_id: Option<SessionRef>,
         timeouts: craft_providers::Timeouts,
         lua_handle: Option<EventHandle>,
         btw_system: Arc<ArcSwap<String>>,

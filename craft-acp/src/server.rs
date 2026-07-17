@@ -31,6 +31,7 @@ use craft_lua::{
 };
 use craft_providers::Message;
 use craft_providers::model::Model;
+use craft_storage::id::{CraftId, SessionRef};
 use flume::{Receiver, Sender};
 use serde::Serialize;
 use serde_json::Value;
@@ -536,7 +537,7 @@ async fn handle_request(
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
-                methods::new_session_response(&handle.session_id).config_options(vec![
+                methods::new_session_response(handle.session_id.as_str()).config_options(vec![
                     methods::mode_config_option(methods::MODE_BUILD),
                     methods::model_config_option(&spec, &specs),
                     methods::yolo_config_option(params.yolo),
@@ -553,23 +554,41 @@ async fn handle_request(
                     return;
                 }
             };
-            let session_id = req.session_id.0.to_string();
-            let history = match load_history(&session_id) {
+            let session_ref: SessionRef = match req.session_id.0.parse() {
+                Ok(r) => r,
+                Err(_) => {
+                    srv.respond(
+                        id,
+                        Err(AcpError::resource_not_found(Some(
+                            req.session_id.0.to_string(),
+                        ))),
+                    );
+                    return;
+                }
+            };
+            let history = match load_history(session_ref.id()) {
                 Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
                     return;
                 }
             };
-            let sid = SessionId::from(session_id.clone());
+            let sid = SessionId::from(session_ref.to_string());
             for update in translate::replay_history(&history) {
                 session_update(&srv.out_tx, &sid, update);
             }
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
             let cwd = req.cwd.clone();
-            let handle =
-                spawn_session(params, req.cwd, Some(session_id), history, &mcp_servers, fs).await;
+            let handle = spawn_session(
+                params,
+                req.cwd,
+                Some(session_ref),
+                history,
+                &mcp_servers,
+                fs,
+            )
+            .await;
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
@@ -590,8 +609,19 @@ async fn handle_request(
                     return;
                 }
             };
-            let session_id = req.session_id.0.to_string();
-            let history = match load_history(&session_id) {
+            let session_ref: SessionRef = match req.session_id.0.parse() {
+                Ok(r) => r,
+                Err(_) => {
+                    srv.respond(
+                        id,
+                        Err(AcpError::resource_not_found(Some(
+                            req.session_id.0.to_string(),
+                        ))),
+                    );
+                    return;
+                }
+            };
+            let history = match load_history(session_ref.id()) {
                 Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
@@ -601,8 +631,15 @@ async fn handle_request(
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
             let cwd = req.cwd.clone();
-            let handle =
-                spawn_session(params, req.cwd, Some(session_id), history, &mcp_servers, fs).await;
+            let handle = spawn_session(
+                params,
+                req.cwd,
+                Some(session_ref),
+                history,
+                &mcp_servers,
+                fs,
+            )
+            .await;
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
@@ -631,7 +668,7 @@ async fn handle_request(
 async fn spawn_session(
     params: &AcpParams,
     cwd: PathBuf,
-    session_id: Option<String>,
+    session_id: Option<SessionRef>,
     history: Vec<Message>,
     client_mcp_servers: &[McpServer],
     fs: Arc<dyn FsBackend>,
@@ -724,7 +761,7 @@ fn install_session(
     if let Some(prev) = srv.session.take() {
         teardown_session(&srv.out_tx, prev);
     }
-    let session_id = handle.session_id.clone();
+    let session_id = handle.session_id.to_string();
     let pending = PendingPrompt::default();
     start_event_pump(
         handle.event_rx.clone(),
@@ -765,7 +802,7 @@ fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
     session.handle.task.abort();
 }
 
-fn load_history(session_id: &str) -> Result<Vec<Message>, AcpError> {
+fn load_history(session_id: CraftId) -> Result<Vec<Message>, AcpError> {
     let storage = craft_storage::StateDir::resolve()
         .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
     load_history_from(&storage, session_id)
@@ -773,7 +810,7 @@ fn load_history(session_id: &str) -> Result<Vec<Message>, AcpError> {
 
 fn load_history_from(
     storage: &craft_storage::StateDir,
-    session_id: &str,
+    session_id: CraftId,
 ) -> Result<Vec<Message>, AcpError> {
     let session: craft_storage::sessions::Session<
         Message,
@@ -805,7 +842,7 @@ fn handle_prompt(
 
     let (message, images) = extract_prompt_content(&req.prompt);
     if !message.is_empty() {
-        let sid = SessionId::from(session.handle.session_id.clone());
+        let sid = SessionId::from(session.handle.session_id.to_string());
         session_update(&srv.out_tx, &sid, translate::user_message_chunk(&message));
         if !session.title_sent {
             let title = craft_storage::sessions::generate_title(&[Message::user(message.clone())]);
@@ -859,7 +896,7 @@ fn spawn_flow_prompt(
     let session = srv.session.as_ref().expect("caller holds session.as_mut()");
     let model = Model::from_spec(&session.current_model).unwrap_or_else(|_| params.model.clone());
     let drive_params = crate::flow::FlowDriveParams {
-        session_id: session.handle.session_id.clone(),
+        session_id: session.handle.session_id.to_string(),
         workstream_id,
         project_id: craft_flow::project_id(&session.cwd),
         request,
@@ -911,7 +948,7 @@ fn apply_mode(srv: &mut Server, mode_str: &str) -> Result<(), AcpError> {
     let session = srv.session.as_mut().ok_or_else(no_session)?;
     session.current_mode = new_mode;
 
-    let sid = SessionId::from(session.handle.session_id.clone());
+    let sid = SessionId::from(session.handle.session_id.to_string());
     session_update(
         &srv.out_tx,
         &sid,
@@ -1066,7 +1103,7 @@ fn handle_list_sessions(raw: &Value) -> Result<AgentResponse, AcpError> {
     let sessions = summaries
         .into_iter()
         .map(|s| {
-            AcpSessionInfo::new(s.id, s.cwd)
+            AcpSessionInfo::new(s.id.to_string(), s.cwd)
                 .title(s.title)
                 .updated_at(epoch_to_iso8601(s.updated_at))
         })
@@ -1081,7 +1118,7 @@ fn handle_close_session(srv: &mut Server, raw: &Value) -> Result<AgentResponse, 
     if srv
         .session
         .as_ref()
-        .is_some_and(|s| s.handle.session_id == req.session_id.0.as_ref())
+        .is_some_and(|s| s.handle.session_id.as_str() == req.session_id.0.as_ref())
     {
         if let Some(session) = srv.session.take() {
             teardown_session(&srv.out_tx, session);
@@ -1211,14 +1248,14 @@ fn image_media_type(mime: &str) -> ImageMediaType {
 
 fn start_event_pump(
     event_rx: Receiver<Envelope>,
-    session_id: String,
+    session_id: SessionRef,
     out_tx: Sender<Value>,
     pending: PendingPrompt,
     next_request_id: Arc<AtomicI64>,
     question_request_ids: Arc<Mutex<HashSet<i64>>>,
 ) {
     tokio::spawn(async move {
-        let sid = SessionId::from(session_id);
+        let sid = SessionId::from(session_id.to_string());
         let mut sub_buffers: HashMap<String, String> = HashMap::new();
 
         while let Ok(Envelope {
@@ -1457,7 +1494,7 @@ mod tests {
         session.messages = messages.clone();
         session.save(&dir).unwrap();
 
-        let history = load_history_from(&dir, &session.id).unwrap();
+        let history = load_history_from(&dir, session.id.id()).unwrap();
         assert_eq!(
             serde_json::to_value(&history).unwrap(),
             serde_json::to_value(&messages).unwrap()
@@ -1468,7 +1505,7 @@ mod tests {
     fn load_missing_session_is_resource_not_found() {
         let tmp = TempDir::new().unwrap();
         let dir = StateDir::from_path(tmp.path().to_path_buf());
-        let err = load_history_from(&dir, "missing-id").unwrap_err();
+        let err = load_history_from(&dir, CraftId::generate()).unwrap_err();
         assert_eq!(err.code, AcpError::resource_not_found(None).code);
     }
 

@@ -15,6 +15,7 @@ use craft_providers::Timeouts;
 use craft_providers::provider::{Provider, fetch_all_models, from_model};
 use craft_providers::{Message, Model};
 use craft_storage::StateDir;
+use craft_storage::id::SessionRef;
 use crossterm::event::{
     self, Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
@@ -39,15 +40,15 @@ const ANIMATION_INTERVAL_MS: u64 = 16;
 const IDLE_POLL_INTERVAL_MS: u64 = 100;
 
 pub struct ShutdownResult {
-    session_id: Option<String>,
+    session_id: Option<SessionRef>,
     exit_code: i32,
     handles: AgentHandles,
     storage_writer: Arc<StorageWriter>,
 }
 
 impl ShutdownResult {
-    pub fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
+    pub fn session_id(&self) -> Option<&SessionRef> {
+        self.session_id.as_ref()
     }
 
     pub fn exit_code(&self) -> i32 {
@@ -945,7 +946,7 @@ impl<'t> EventLoop<'t> {
         let session_id = self
             .app
             .has_content()
-            .then(|| self.app.state.session.id.clone());
+            .then_some(self.app.state.session.id.clone());
         craft_agent::mcp::kill_process_groups(&self.handles.mcp_reader().load().pids);
         self.app.cmd_tx = None;
         self.app.answer_tx = None;

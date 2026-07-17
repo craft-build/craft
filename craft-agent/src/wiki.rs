@@ -5,6 +5,7 @@
 use serde_json::Value;
 
 use craft_providers::{Message, Model, RequestOptions, provider::Provider};
+use craft_storage::id::SessionRef;
 
 use crate::AgentError;
 
@@ -19,7 +20,7 @@ pub async fn summarize(
     provider: &dyn Provider,
     model: &Model,
     text: &str,
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<String, AgentError> {
     let (ptx, _prx) = flume::unbounded();
     let messages = vec![Message::user(text.to_string())];

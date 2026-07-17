@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde_json::{Value, json};
 
@@ -198,7 +199,7 @@ impl Provider for Mistral {
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
         opts: RequestOptions,
-        session_id: Option<&'a str>,
+        session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let auth = lock_unpoison(&self.auth).clone();
@@ -212,7 +213,7 @@ impl Provider for Mistral {
 
             let mut extra_headers = vec![];
             if let Some(session_id) = session_id {
-                extra_headers.push(("x-affinity", session_id));
+                extra_headers.push(("x-affinity", session_id.as_str()));
             }
             self.compat
                 .do_stream(model, &extra_headers, &body, event_tx, &auth)

@@ -5,6 +5,7 @@ use crate::components::DisplayRole;
 use crate::components::rewind_picker::RewindEntry;
 use crate::components::{Action, LoadedSession};
 use craft_providers::{Model, TokenUsage};
+use craft_storage::id::CraftId;
 use craft_storage::sessions::StoredSubagent;
 
 use crate::AppSession;
@@ -51,7 +52,7 @@ impl App {
         let cost_usd = usage.cost(&model.pricing, self.state.fast);
         let provider = model.provider.display_name().to_string();
         let record = craft_storage::stats::CostRecord {
-            session_id: self.state.session.id.clone(),
+            session_id: self.state.session.id.as_str().to_string(),
             turn_id: chat.model_id.clone(),
             ts: craft_storage::now_epoch(),
             model: model.spec(),
@@ -254,7 +255,7 @@ impl App {
     pub(super) fn open_session_picker(&mut self) -> Vec<Action> {
         self.session_picker.open(
             &self.state.session.cwd,
-            &self.state.session.id,
+            self.state.session.id.id(),
             &self.storage,
         );
         vec![]
@@ -278,8 +279,8 @@ impl App {
         self.loaded_session_snapshot()
     }
 
-    pub(super) fn load_session(&mut self, session_id: String) -> Vec<Action> {
-        let session = match AppSession::load(&session_id, &self.storage) {
+    pub(super) fn load_session(&mut self, session_id: CraftId) -> Vec<Action> {
+        let session = match AppSession::load(session_id, &self.storage) {
             Ok(s) => s,
             Err(e) => {
                 self.status_bar
@@ -292,13 +293,13 @@ impl App {
         vec![Action::LoadSession(Box::new(loaded))]
     }
 
-    pub(super) fn delete_session(&mut self, session_id: String) -> Vec<Action> {
-        if let Err(e) = AppSession::delete(&session_id, &self.storage) {
+    pub(super) fn delete_session(&mut self, session_id: CraftId) -> Vec<Action> {
+        if let Err(e) = AppSession::delete(session_id, &self.storage) {
             self.status_bar
                 .flash(format!("Failed to delete session: {e}"));
             return vec![];
         }
-        self.session_picker.remove_entry(&session_id);
+        self.session_picker.remove_entry(session_id);
         self.status_bar.flash("Session deleted".into());
         vec![]
     }

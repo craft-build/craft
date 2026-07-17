@@ -299,7 +299,7 @@ async fn run_headless_question(
     };
     let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
 
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = craft_storage::id::CraftId::generate().to_string();
     let _ = ctx.event_tx.send(AgentEvent::QuestionRequest {
         id: request_id.clone(),
         questions: questions.clone(),

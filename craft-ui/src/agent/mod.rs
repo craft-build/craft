@@ -15,6 +15,7 @@ use craft_agent::{
     McpSnapshotReader, ToolOutput, ToolOutputLines,
 };
 use craft_lua::EventHandle;
+use craft_storage::id::SessionRef;
 
 use self::cancel_map::new_run_cancel_map;
 use craft_providers::provider::Provider;
@@ -65,7 +66,7 @@ impl AgentHandles {
         config: AgentConfig,
         tool_output_lines: ToolOutputLines,
         permissions: &Arc<PermissionManager>,
-        session_id: Option<String>,
+        session_id: Option<SessionRef>,
         timeouts: craft_providers::Timeouts,
         lua_handle: Option<EventHandle>,
         mcp_handle: Option<McpHandle>,
@@ -201,7 +202,7 @@ fn spawn_agent_internal(
     permissions: &Arc<PermissionManager>,
     mcp_handle: Option<McpHandle>,
     mcp_config_errors: McpConfigErrors,
-    session_id: Option<String>,
+    session_id: Option<SessionRef>,
     timeouts: craft_providers::Timeouts,
     lua_handle: Option<EventHandle>,
     compression: craft_config::CompressionConfig,

@@ -1,0 +1,5 @@
+disallowed-methods = [
+  { path = "uuid::Uuid::new_v4", reason = "use craft_storage::id::CraftId::generate (base58-encoded UUIDv7)", allow-invalid = true },
+  { path = "uuid::Uuid::new_v7", reason = "use craft_storage::id::CraftId::generate (base58-encoded UUIDv7)", allow-invalid = true },
+  { path = "uuid::Uuid::now_v7", reason = "use craft_storage::id::CraftId::generate (base58-encoded UUIDv7)", allow-invalid = true },
+]

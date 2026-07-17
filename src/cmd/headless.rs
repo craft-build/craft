@@ -14,6 +14,7 @@ use craft_lua::PluginHost;
 use craft_providers::Message;
 use craft_providers::{StopReason, Timeouts, TokenUsage};
 use craft_storage::StateDir;
+use craft_storage::id::SessionRef;
 use craft_storage::sessions::Session;
 
 use crate::print::OutputFormat;
@@ -46,7 +47,7 @@ pub struct HeadlessOutcome {
     pub num_turns: u32,
     pub stop_reason: Option<StopReason>,
     pub is_error: bool,
-    pub session_id: String,
+    pub session_id: SessionRef,
     pub model_id: String,
     /// True once any assistant text has been streamed live to stdout, so the
     /// final print can avoid duplicating it.

@@ -515,7 +515,7 @@ fn load_session_clears_plan() {
         .messages
         .push(Message::user("test".into()));
     app.state.session.save(&app.storage).unwrap();
-    let id = app.state.session.id.clone();
+    let id = app.state.session.id.id();
     app.state.mode = Mode::Build;
     app.state.plan = PlanState::Ready(PathBuf::from("old-plan.md"));
     app.load_session(id);

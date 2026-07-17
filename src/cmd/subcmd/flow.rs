@@ -209,10 +209,9 @@ fn parse_age(input: &str) -> Result<Duration> {
     bail!("invalid age '{input}'; use a number with a d/h/m/s suffix, e.g. 30d")
 }
 
-/// Generate a fresh opaque workstream id. Uses uuid v4 to match session id
-/// formatting.
+/// Generate a fresh opaque workstream id.
 fn new_workstream_id() -> String {
-    uuid::Uuid::new_v4().to_string()
+    craft_storage::id::CraftId::generate().to_string()
 }
 
 fn outcome_stop_reason(outcome: &FlowOutcome) -> StopReasonOrStr {

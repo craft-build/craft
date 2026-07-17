@@ -5,6 +5,7 @@ use tracing::{info, warn};
 
 use craft_providers::provider::Provider;
 use craft_providers::{AgentError, Message, Model, RequestOptions};
+use craft_storage::id::SessionRef;
 
 use crate::AgentError as CrateAgentError;
 
@@ -51,7 +52,7 @@ pub async fn evaluate(
     active_model: &Model,
     judge_model_spec: Option<&str>,
     timeouts: craft_providers::Timeouts,
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<JudgeOutcome, CrateAgentError> {
     let transcript = build_transcript(history);
     let user_msg = format!(
@@ -100,7 +101,7 @@ pub async fn evaluate_criteria(
     active_model: &Model,
     judge_model_spec: Option<&str>,
     timeouts: craft_providers::Timeouts,
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<JudgeOutcome, CrateAgentError> {
     let transcript = build_transcript(history);
     let list = criteria
@@ -159,7 +160,7 @@ async fn collect_text_with(
     model: &Model,
     messages: &[Message],
     system: &str,
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<String, CrateAgentError> {
     let (ptx, _prx) = flume::unbounded();
     let system = system.to_string();
@@ -216,7 +217,7 @@ async fn collect_text(
     provider: &dyn Provider,
     model: &Model,
     messages: &[Message],
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<String, CrateAgentError> {
     let (ptx, _prx) = flume::unbounded();
     let system = JUDGE_SYSTEM.to_string();

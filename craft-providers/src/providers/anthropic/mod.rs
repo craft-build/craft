@@ -17,6 +17,8 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::io::StreamReader;
 use tracing::debug;
 
+use craft_storage::id::SessionRef;
+
 use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{
@@ -372,7 +374,7 @@ impl Provider for Anthropic {
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&str>,
+        _session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let fast = opts.fast && model.supports_fast();

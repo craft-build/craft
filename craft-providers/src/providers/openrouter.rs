@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde_json::{Value, json};
 
@@ -109,7 +110,7 @@ impl Provider for OpenRouter {
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
         opts: RequestOptions,
-        session_id: Option<&'a str>,
+        session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let auth = lock_unpoison(&self.auth).clone();
@@ -162,7 +163,7 @@ impl Provider for OpenRouter {
             }
 
             if let Some(sid) = session_id {
-                body["session_id"] = json!(sid);
+                body["session_id"] = json!(sid.as_str());
             }
 
             let extra_headers = [("HTTP-Referer", REFERER), ("X-OpenRouter-Title", APP_TITLE)];

@@ -4,6 +4,7 @@ use flume::Sender;
 
 use craft_providers::provider::Provider;
 use craft_providers::{Message, Model, ProviderEvent, RequestOptions, ThinkingConfig};
+use craft_storage::id::SessionRef;
 use serde_json::Value;
 
 use crate::components::btw_modal::BtwEvent;
@@ -60,7 +61,7 @@ async fn run_btw(
     messages: Vec<Message>,
     btw_tx: Sender<BtwEvent>,
     system: String,
-    session_id: Option<String>,
+    session_id: Option<SessionRef>,
 ) {
     let (event_tx, event_rx) = flume::unbounded();
     let tools = Value::Array(vec![]);
@@ -75,7 +76,7 @@ async fn run_btw(
             thinking: ThinkingConfig::Off,
             fast: false,
         },
-        session_id.as_deref(),
+        session_id.as_ref(),
     );
 
     let forward_fut = async {

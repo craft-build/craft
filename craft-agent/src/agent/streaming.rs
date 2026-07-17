@@ -5,6 +5,7 @@ use craft_providers::provider::Provider;
 use craft_providers::retry::{MAX_TIMEOUT_RETRIES, RetryState};
 use craft_providers::roles::ChainHop;
 use craft_providers::{Message, Model, ProviderEvent, RequestOptions, StreamResponse};
+use craft_storage::id::SessionRef;
 use serde_json::Value;
 use tracing::warn;
 
@@ -72,7 +73,7 @@ pub(crate) async fn stream_with_retry(
     event_tx: &EventSender,
     cancel: &CancelToken,
     opts: RequestOptions,
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
     fallbacks: &[ChainHop],
     ttsr: Option<Arc<TtsrManager>>,
     turn: u32,
@@ -186,7 +187,7 @@ mod tests {
             _: &'a Value,
             _: &'a flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&'a str>,
+            _: Option<&'a craft_storage::id::SessionRef>,
         ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
             let still_failing = self.fail_forever
                 || self

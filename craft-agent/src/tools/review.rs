@@ -1,8 +1,8 @@
+use craft_storage::id::SessionRef;
 use craft_tool_macro::Tool;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tracing::info;
-use uuid::Uuid;
 
 use super::{DescriptionContext, FileReadTracker, ToolContext, ToolFilter, ToolRegistry};
 use crate::agent;
@@ -95,7 +95,7 @@ impl Review {
             mcp.extend_tools(&mut tools);
         }
 
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = SessionRef::generate();
         let (sub_tx, sub_rx) = flume::unbounded::<crate::Envelope>();
         let sub_event_tx = EventSender::new(sub_tx, ctx.event_tx.run_id());
         let parent_tx = ctx.event_tx.clone();

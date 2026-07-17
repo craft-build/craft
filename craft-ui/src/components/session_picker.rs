@@ -6,6 +6,7 @@ use crate::components::keybindings::{ActionId, KeybindingResolver, key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 
 use craft_storage::StateDir;
+use craft_storage::id::CraftId;
 use crossterm::event::KeyEvent;
 use jiff::Timestamp;
 use ratatui::Frame;
@@ -17,14 +18,14 @@ const FOOTER_HINTS: &[(&str, &str)] = &[("Enter", "open"), (key::DELETE.label, "
 
 pub enum SessionPickerAction {
     Consumed,
-    Select(String),
+    Select(CraftId),
     ConfirmDelete,
-    Delete(String),
+    Delete(CraftId),
     Close,
 }
 
 struct SessionEntry {
-    id: String,
+    id: CraftId,
     title: String,
     relative_time: String,
 }
@@ -41,7 +42,7 @@ impl PickerItem for SessionEntry {
 pub struct SessionPicker {
     picker: ListPicker<SessionEntry>,
     keybindings: std::sync::Arc<KeybindingResolver>,
-    confirming: Option<(String, u64)>,
+    confirming: Option<(CraftId, u64)>,
     pending_rx: Option<flume::Receiver<Result<Vec<SessionEntry>, String>>>,
     flash: Option<String>,
 }
@@ -57,10 +58,9 @@ impl SessionPicker {
         }
     }
 
-    pub fn open(&mut self, cwd: &str, current_session_id: &str, dir: &StateDir) {
+    pub fn open(&mut self, cwd: &str, current_session_id: CraftId, dir: &StateDir) {
         self.picker.open_loading(TITLE);
         let cwd = cwd.to_owned();
-        let current_session_id = current_session_id.to_owned();
         let dir = dir.clone();
         let (tx, rx) = flume::bounded(1);
         thread::spawn(move || {
@@ -68,9 +68,9 @@ impl SessionPicker {
                 .map(|summaries| {
                     summaries
                         .into_iter()
-                        .filter(|s| s.id != current_session_id)
+                        .filter(|s| s.id.id() != current_session_id)
                         .map(|s| SessionEntry {
-                            id: s.id,
+                            id: s.id.id(),
                             title: s.title,
                             relative_time: format_relative_time(s.updated_at),
                         })
@@ -127,7 +127,7 @@ impl SessionPicker {
         self.keybindings = resolver;
     }
 
-    pub fn remove_entry(&mut self, id: &str) {
+    pub fn remove_entry(&mut self, id: CraftId) {
         self.picker.retain(|e| e.id != id);
     }
 
@@ -170,10 +170,10 @@ impl SessionPicker {
             .as_ref()
             .is_some_and(|(id, g)| id == &selected.id && *g == generation)
         {
-            return SessionPickerAction::Delete(selected.id.clone());
+            return SessionPickerAction::Delete(selected.id);
         }
 
-        self.confirming = Some((selected.id.clone(), generation));
+        self.confirming = Some((selected.id, generation));
         SessionPickerAction::ConfirmDelete
     }
 

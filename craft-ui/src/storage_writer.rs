@@ -70,7 +70,9 @@ impl StorageWriter {
                         }
                     };
 
-                    let is_current = log.as_ref().is_some_and(|l| l.session_id() == session.id);
+                    let is_current = log
+                        .as_ref()
+                        .is_some_and(|l| l.session_id() == session.id.id());
                     if !is_current {
                         match open_or_create_log(&sessions_dir, &session) {
                             Ok(l) => log = Some(l),
@@ -135,11 +137,12 @@ fn open_or_create_log(
 ) -> Result<SessionLog, craft_storage::sessions::SessionError> {
     let jsonl_path = sessions_dir.join(format!("{}.jsonl", session.id));
     if jsonl_path.exists() {
+        let id = session.id.id();
         let (_loaded, log) = SessionLog::open::<
             craft_providers::Message,
             craft_providers::TokenUsage,
             craft_agent::ToolOutput,
-        >(sessions_dir, &session.id)?;
+        >(sessions_dir, id)?;
         Ok(log)
     } else {
         AppSession::migrate_to_jsonl(sessions_dir, session)

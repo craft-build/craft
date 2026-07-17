@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod flow;
+pub mod id;
 pub mod input_history;
 pub mod log;
 pub mod model;

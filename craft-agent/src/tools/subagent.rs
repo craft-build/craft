@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use craft_config::ToolOutputLines;
 use craft_providers::{ContentBlock, Message, Model, Role};
+use craft_storage::id::SessionRef;
 use serde_json::Value;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::agent;
 use crate::cancel::CancelMap;
@@ -121,7 +121,7 @@ pub async fn run_subagent(
 
     let tools = build_tools(audience, ctx, &vars, &model);
 
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = SessionRef::generate();
     let (sub_tx, sub_rx) = flume::unbounded::<crate::Envelope>();
     let sub_event_tx = EventSender::new(sub_tx, ctx.event_tx.run_id());
     let parent_tx = ctx.event_tx.clone();

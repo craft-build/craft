@@ -22,6 +22,7 @@ use craft_config::AdvisorConfig;
 use craft_config::model_roles::ModelRole;
 use craft_providers::provider::Provider;
 use craft_providers::{Message, Model, RequestOptions};
+use craft_storage::id::SessionRef;
 
 use crate::AgentError as CrateAgentError;
 
@@ -152,7 +153,7 @@ pub async fn review(
     active_provider: &Arc<dyn Provider>,
     active_model: &Model,
     timeouts: craft_providers::Timeouts,
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<Option<AdvisorNote>, CrateAgentError> {
     let delta = build_delta(history, state.last_reviewed);
     state.last_reviewed = history.len();
@@ -211,7 +212,7 @@ async fn collect_text(
     provider: &dyn Provider,
     model: &Model,
     messages: &[Message],
-    session_id: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<String, CrateAgentError> {
     let (ptx, _prx) = flume::unbounded();
     let system = ADVISOR_SYSTEM.to_string();

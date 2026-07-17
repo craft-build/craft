@@ -32,6 +32,7 @@ use crate::{
     InterruptSource, TurnCompleteEvent,
 };
 use craft_config::ToolOutputLines;
+use craft_storage::id::SessionRef;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
 const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
@@ -73,7 +74,7 @@ pub struct AgentParams {
     pub config: AgentConfig,
     pub tool_output_lines: ToolOutputLines,
     pub permissions: Arc<PermissionManager>,
-    pub session_id: Option<String>,
+    pub session_id: Option<SessionRef>,
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
@@ -122,7 +123,7 @@ pub struct Agent<'h> {
     post_tool_empty_retried: bool,
     permissions: Arc<PermissionManager>,
     opts: RequestOptions,
-    session_id: Option<String>,
+    session_id: Option<SessionRef>,
     timeouts: craft_providers::Timeouts,
     file_tracker: Arc<FileReadTracker>,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
@@ -523,7 +524,7 @@ impl<'h> Agent<'h> {
             &self.event_tx,
             &self.cancel,
             self.opts,
-            self.session_id.as_deref(),
+            self.session_id.as_ref(),
             &self.fallback_chain,
             self.ttsr.clone(),
             self.num_turns,
@@ -699,7 +700,7 @@ impl<'h> Agent<'h> {
             &self.provider,
             &self.model,
             self.timeouts,
-            self.session_id.as_deref(),
+            self.session_id.as_ref(),
         )
         .await;
         match result {
@@ -739,7 +740,7 @@ impl<'h> Agent<'h> {
             &self.model,
             self.config.judge_model.as_deref(),
             self.timeouts,
-            self.session_id.as_deref(),
+            self.session_id.as_ref(),
         )
         .await;
         match outcome {
@@ -782,7 +783,7 @@ impl<'h> Agent<'h> {
             &self.model,
             self.config.judge_model.as_deref(),
             self.timeouts,
-            self.session_id.as_deref(),
+            self.session_id.as_ref(),
         )
         .await;
         match outcome {
@@ -983,7 +984,7 @@ impl<'h> Agent<'h> {
             hooks: self.hooks.clone(),
             snapshot_store: Arc::clone(&self.snapshot_store),
             pending_edits: Arc::clone(&self.pending_edits),
-            session_id: self.session_id.clone(),
+            session_id: self.session_id.as_ref().map(|s| s.as_str().to_string()),
             flow_search: self.flow_search.clone(),
         }
     }
@@ -1317,7 +1318,7 @@ mod tests {
             _: &'a Value,
             _: &'a flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&str>,
+            _: Option<&'a craft_storage::id::SessionRef>,
         ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
             Box::pin(async {
                 let mut responses = self.responses.lock().unwrap();
@@ -1630,7 +1631,7 @@ mod tests {
                 _: &'a Value,
                 _: &'a flume::Sender<ProviderEvent>,
                 _: RequestOptions,
-                _: Option<&'a str>,
+                _: Option<&'a craft_storage::id::SessionRef>,
             ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
                 Box::pin(async {
                     std::future::pending::<()>().await;
@@ -1692,7 +1693,7 @@ mod tests {
             _: &'a Value,
             _: &'a flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&str>,
+            _: Option<&'a craft_storage::id::SessionRef>,
         ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
             Box::pin(async { panic!("LLM should not be called when VCC compaction succeeds") })
         }

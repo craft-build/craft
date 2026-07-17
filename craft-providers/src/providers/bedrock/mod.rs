@@ -20,6 +20,7 @@ use aws_sdk_bedrockruntime::Client as RuntimeClient;
 use aws_smithy_runtime_api::client::result::SdkError;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use aws_smithy_types::timeout::TimeoutConfig;
+use craft_storage::id::SessionRef;
 use flume::Sender;
 use tracing::{debug, warn};
 
@@ -243,7 +244,7 @@ impl Provider for Bedrock {
         tools: &'a serde_json::Value,
         event_tx: &'a Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a str>,
+        _session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let aws_messages = to_aws_messages(messages)?;

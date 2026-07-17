@@ -211,7 +211,6 @@ pub fn format_tokens(v: u64) -> String {
 mod tests {
     use super::*;
     use test_case::test_case;
-    use uuid::Uuid;
 
     fn tmp_ledger() -> (tempfile::TempDir, CostLedger) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -221,7 +220,7 @@ mod tests {
 
     fn rec(model: &str, cost: f64, tokens: u64) -> CostRecord {
         make_record(
-            Uuid::new_v4().to_string(),
+            crate::id::CraftId::generate().to_string(),
             model,
             "anthropic",
             CostUsage {

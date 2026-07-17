@@ -13,11 +13,11 @@ use craft_providers::model::ModelTier;
 use craft_providers::model_registry;
 use craft_providers::provider;
 use craft_providers::{ContentBlock, Model, ModelError, Role};
+use craft_storage::id::SessionRef;
 use craft_tool_macro::Tool;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use super::schema as tool_schema;
 use super::worktree::Worktree;
@@ -170,7 +170,7 @@ impl Task {
             mcp.extend_tools(&mut tools);
         }
 
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = SessionRef::generate();
         let (sub_tx, sub_rx) = flume::unbounded::<crate::Envelope>();
         let sub_event_tx = EventSender::new(sub_tx, ctx.event_tx.run_id());
         let parent_tx = ctx.event_tx.clone();
