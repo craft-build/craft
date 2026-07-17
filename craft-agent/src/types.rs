@@ -581,6 +581,11 @@ pub enum AgentEvent {
         content: String,
     },
     ToolDone(Box<ToolDoneEvent>),
+    PromptProgress {
+        processed: u32,
+        total: u32,
+        cache: u32,
+    },
     BatchProgress(Box<BatchProgressEvent>),
     TurnComplete(Box<TurnCompleteEvent>),
     ToolResultsSubmitted {

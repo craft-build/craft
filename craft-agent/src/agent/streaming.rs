@@ -35,6 +35,15 @@ async fn forward_provider_events(
                 id: id.clone(),
                 name: name.clone(),
             },
+            ProviderEvent::PromptProgress {
+                processed,
+                total,
+                cache,
+            } => AgentEvent::PromptProgress {
+                processed: *processed,
+                total: *total,
+                cache: *cache,
+            },
         };
         if event_tx.send(ae).is_err() {
             break;

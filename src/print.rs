@@ -250,7 +250,8 @@ pub async fn run(
             | AgentEvent::Info { .. }
             | AgentEvent::AdvisorNote { .. }
             | AgentEvent::ModelEscalation { .. }
-            | AgentEvent::StagnationDetected { .. } => {}
+            | AgentEvent::StagnationDetected { .. }
+            | AgentEvent::PromptProgress { .. } => {}
             AgentEvent::Retry {
                 attempt,
                 message,
