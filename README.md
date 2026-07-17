@@ -103,7 +103,7 @@ Runtime difference - Craft also significantly retools the async runtime and netw
 curl -fsSL https://raw.githubusercontent.com/craft-build/craft/main/install.sh | sh
 ```
 
-### Windows
+### Windows (PowerShell)
 
 ```powershell
 # Download and read the script first (don't blindly trust remote scripts).
@@ -120,7 +120,13 @@ One-liner:
 irm https://raw.githubusercontent.com/craft-build/craft/main/install.ps1 | iex
 ```
 
-Installs to `%USERPROFILE%\.cargo\bin` and adds it to your user PATH. Override with `$env:CRAFT_INSTALL_DIR`.
+### Windows (Git Bash)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/craft-build/craft/main/install.sh | sh
+```
+
+Both install to `%USERPROFILE%\.cargo\bin` and add it to your user PATH. Override with `CRAFT_INSTALL_DIR` / `$env:CRAFT_INSTALL_DIR`.
 
 Or build from source:
 

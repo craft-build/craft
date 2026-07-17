@@ -10,6 +10,12 @@ cargo install --locked --git https://github.com/craft-build/craft.git craft
 
 Or download a pre-built binary from [GitHub Releases](https://github.com/craft-build/craft/releases).
 
+On Windows you can use the [PowerShell installer](https://github.com/craft-build/craft/blob/main/install.ps1), or run the shell installer from Git Bash:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/craft-build/craft/main/install.sh | sh
+```
+
 ## API Keys
 
 Export a key for at least one provider:
