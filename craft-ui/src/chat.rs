@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::components::messages::MessagesPanel;
+use crate::components::messages::{MessagesPanel, PromptProgress};
 use crate::components::render_hints::RenderHintsRegistry;
 use crate::components::tool_display::{
     append_annotation, output_limits_from_hints, tool_output_annotation,
@@ -78,8 +78,14 @@ impl Chat {
 
     pub fn handle_event(&mut self, event: AgentEvent, plan_path: Option<&Path>) -> ChatEventResult {
         match event {
-            AgentEvent::ThinkingDelta { text } => self.messages_panel.thinking_delta(&text),
-            AgentEvent::TextDelta { text } => self.messages_panel.text_delta(&text),
+            AgentEvent::ThinkingDelta { text } => {
+                self.messages_panel.clear_prompt_progress();
+                self.messages_panel.thinking_delta(&text);
+            }
+            AgentEvent::TextDelta { text } => {
+                self.messages_panel.clear_prompt_progress();
+                self.messages_panel.text_delta(&text);
+            }
             AgentEvent::ToolPending { id, name } => self.messages_panel.tool_pending(id, &name),
             AgentEvent::ToolStart(e) => self.messages_panel.tool_start(*e),
             AgentEvent::ToolOutput { id, content } => {
@@ -192,7 +198,18 @@ impl Chat {
             AgentEvent::StagnationDetected { .. } => {}
             AgentEvent::ModelEscalation { .. } => {}
             AgentEvent::QuestionRequest { .. } => {}
-            AgentEvent::PromptProgress { .. } => {}
+            AgentEvent::PromptProgress {
+                processed,
+                total,
+                cache,
+            } => {
+                self.messages_panel
+                    .set_prompt_progress((processed < total).then_some(PromptProgress {
+                        processed,
+                        total,
+                        cache,
+                    }));
+            }
         }
         ChatEventResult::Continue
     }

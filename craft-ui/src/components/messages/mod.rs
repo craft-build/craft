@@ -46,6 +46,14 @@ use ratatui::text::{Line, Span};
 
 const THINKING_HIDDEN_HEADER: &str = "thinking> ...";
 
+#[derive(Clone, Copy)]
+pub struct PromptProgress {
+    pub processed: u32,
+    pub total: u32,
+    #[allow(dead_code)]
+    pub cache: u32,
+}
+
 struct LiveBufEntry {
     buf: Arc<SharedBuf>,
     dirty_seen: bool,
@@ -79,6 +87,7 @@ pub struct MessagesPanel {
     image_picker: crate::image_render::ImagePicker,
     show_thinking: bool,
     thinking_collapsed: bool,
+    prompt_progress: Option<PromptProgress>,
 }
 
 impl MessagesPanel {
@@ -124,6 +133,7 @@ impl MessagesPanel {
             image_picker: crate::image_render::ImagePicker::new(),
             show_thinking: ui_config.show_thinking,
             thinking_collapsed: !ui_config.show_thinking,
+            prompt_progress: None,
         }
     }
 
@@ -662,8 +672,17 @@ impl MessagesPanel {
         self.streaming_thinking.is_empty()
     }
 
+    pub fn set_prompt_progress(&mut self, progress: Option<PromptProgress>) {
+        self.prompt_progress = progress;
+    }
+
+    pub fn clear_prompt_progress(&mut self) {
+        self.prompt_progress = None;
+    }
+
     pub fn flush(&mut self) {
         self.flush_thinking();
+        self.prompt_progress = None;
         if !self.streaming_text.is_empty() {
             self.messages.push(DisplayMessage::new(
                 DisplayRole::Assistant,
@@ -963,6 +982,30 @@ impl MessagesPanel {
                     cursor.render(sc.cached_lines(), h, None, false, &[], frame);
                 }
             }
+        }
+
+        if let Some(pp) = self.prompt_progress
+            && pp.total > 0
+        {
+            let ratio = pp.processed as f64 / pp.total as f64;
+            let bar_width = (width as f64 * 0.1).round() as u16;
+            let label = " Processing ";
+            let label_width = label.len() as u16;
+            let total_width = label_width + bar_width;
+            let bar_x = area.x + width.saturating_sub(total_width);
+            let bar_y = area.y + area.height.saturating_sub(1);
+            let bar_area = Rect::new(bar_x, bar_y, total_width, 1);
+            crate::components::progress_bar::render(
+                frame,
+                bar_area,
+                &crate::components::progress_bar::ProgressBarConfig {
+                    ratio,
+                    style: theme::current().progress_bar,
+                    label: Some(label),
+                    label_style: Some(theme::current().tool_dim),
+                    bar_width,
+                },
+            );
         }
 
         if total_lines > area.height {
