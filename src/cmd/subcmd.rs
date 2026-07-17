@@ -106,7 +106,10 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
 
     let has_key = !api_key.is_empty();
     if has_key {
-        let creds = ProviderCredentials { api_key };
+        let creds = ProviderCredentials {
+            api_key,
+            host: None,
+        };
         save_provider_credentials(storage, slug, &creds).context("save credentials")?;
     }
 
@@ -269,7 +272,10 @@ fn login_custom(storage: &StateDir) -> Result<()> {
 
     let has_key = !api_key.is_empty();
     if has_key {
-        let creds = ProviderCredentials { api_key };
+        let creds = ProviderCredentials {
+            api_key,
+            host: None,
+        };
         save_provider_credentials(storage, &slug, &creds).context("save credentials")?;
     }
 

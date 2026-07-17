@@ -141,13 +141,18 @@ impl Copilot {
             return Ok(auth);
         }
 
-        let token = tokio::task::spawn_blocking(auth::load_token)
+        let creds = tokio::task::spawn_blocking(auth::load_token)
             .await
             .map_err(|e| AgentError::Config {
                 message: format!("copilot load_token task: {e}"),
             })??;
-        let endpoint = discover_api_endpoint(&self.client, &token).await;
-        let auth = CopilotAuth { token, endpoint };
+        let host = creds.host.as_deref().unwrap_or("github.com");
+        let endpoint =
+            discover_api_endpoint(&self.client, &creds.api_key, &auth::graphql_url(host)).await;
+        let auth = CopilotAuth {
+            token: creds.api_key,
+            endpoint,
+        };
         *lock_unpoison(&self.auth) = Some(auth.clone());
         Ok(auth)
     }
@@ -430,8 +435,8 @@ struct GraphQlCopilotEndpoints {
     api: String,
 }
 
-async fn discover_api_endpoint(client: &Client, token: &str) -> String {
-    match try_discover_api_endpoint(client, token).await {
+async fn discover_api_endpoint(client: &Client, token: &str, graphql_url: &str) -> String {
+    match try_discover_api_endpoint(client, token, graphql_url).await {
         Ok(endpoint) => endpoint,
         Err(err) => {
             warn!(error = %err, fallback = DEFAULT_API_ENDPOINT, "Copilot endpoint discovery failed");
@@ -440,10 +445,14 @@ async fn discover_api_endpoint(client: &Client, token: &str) -> String {
     }
 }
 
-async fn try_discover_api_endpoint(client: &Client, token: &str) -> Result<String, AgentError> {
+async fn try_discover_api_endpoint(
+    client: &Client,
+    token: &str,
+    graphql_url: &str,
+) -> Result<String, AgentError> {
     let body = json!({ "query": GRAPHQL_QUERY });
     let response = client
-        .post("https://api.github.com/graphql")
+        .post(graphql_url)
         .header("authorization", format!("Bearer {token}"))
         .header("content-type", MIME_JSON)
         .header("user-agent", super::user_agent())

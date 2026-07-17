@@ -114,12 +114,15 @@ pub fn delete_mcp_auth(dir: &StateDir, server_name: &str) -> Result<bool, Storag
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderCredentials {
     pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 impl std::fmt::Debug for ProviderCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderCredentials")
             .field("api_key", &"<redacted>")
+            .field("host", &self.host)
             .finish()
     }
 }
