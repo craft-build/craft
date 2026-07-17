@@ -21,9 +21,24 @@ function Test-Command([string]$Name) {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Get-GitHubHeaders {
+    $headers = @{
+        "User-Agent" = "craft-install"
+        "Accept"     = "application/vnd.github+json"
+    }
+    $token = $env:GITHUB_TOKEN
+    if (-not $token) {
+        $token = $env:GH_TOKEN
+    }
+    if ($token) {
+        $headers["Authorization"] = "Bearer $token"
+    }
+    return $headers
+}
+
 function Get-LatestTag {
     try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers (Get-GitHubHeaders)
     } catch {
         Write-Err "failed to determine latest release tag: $_"
     }

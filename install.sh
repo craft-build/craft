@@ -13,6 +13,22 @@ err() {
     exit 1
 }
 
+github_curl() {
+    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -n "${token}" ]; then
+        curl -fsSL \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: craft-install" \
+            "$@"
+    else
+        curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: craft-install" \
+            "$@"
+    fi
+}
+
 info() {
     printf '\033[36m==>\033[0m %s\n' "$1"
 }
@@ -31,7 +47,7 @@ fi
 
 info "looking up the latest release"
 api_url="https://api.github.com/repos/${REPO}/releases/latest"
-tag="$(curl -fsSL -H 'Accept: application/json' -H 'User-Agent: craft' "$api_url" \
+tag="$(github_curl "$api_url" \
     | grep -o '"tag_name":[[:space:]]*"[^"]*"' \
     | head -n1 \
     | sed -E 's/.*"([^"]+)"$/\1/')"
