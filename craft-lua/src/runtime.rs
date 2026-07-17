@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use arc_swap::ArcSwap;
 use std::thread::{self, JoinHandle};
@@ -223,6 +223,9 @@ pub(crate) struct TaskCell {
     pub(crate) live: Option<LiveCtx>,
     pub(crate) click: Option<RegistryKey>,
     pub(crate) inline_spawn: Option<Vec<PendingAsyncTask>>,
+    /// Set by `TaskScope::new`; `enqueue_async_task` upgrades it so queued
+    /// `craft.async.run` tasks share ownership of `bufs`. See [`BufsClaim`].
+    bufs_claim: Weak<BufsClaim>,
 }
 
 impl TaskCell {
@@ -241,6 +244,7 @@ impl TaskCell {
             live,
             click: None,
             inline_spawn: None,
+            bufs_claim: Weak::new(),
         }
     }
 }
@@ -249,6 +253,13 @@ pub(crate) type TaskHandle = Arc<Mutex<TaskCell>>;
 
 pub(crate) fn lock_cell(handle: &TaskHandle) -> std::sync::MutexGuard<'_, TaskCell> {
     handle.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The buf streamed to the UI on async-task completion. Resolved lazily so an
+/// in-flight highlight rewrite lands before the snapshot; craft has no explicit
+/// root-buf override, so this is `bufs.live_buf()`.
+fn resolve_root_buf(handle: &TaskHandle) -> Option<Arc<SharedBuf>> {
+    lock_cell(handle).bufs.live_buf().cloned()
 }
 
 fn install_interrupt(lua: &Lua, shutdown: Arc<AtomicBool>) {
@@ -288,11 +299,15 @@ pub(crate) struct TaskScope {
     lua: Lua,
     handle: TaskHandle,
     prev: Option<TaskHandle>,
+    /// Dropped after `Drop::drop` runs, so jobs die before bufs can clear.
+    _bufs_claim: Arc<BufsClaim>,
 }
 
 impl TaskScope {
     pub(crate) fn new(lua: &Lua, cell: TaskCell) -> Self {
         let handle: TaskHandle = Arc::new(Mutex::new(cell));
+        let claim = Arc::new(BufsClaim(Arc::clone(&handle)));
+        lock_cell(&handle).bufs_claim = Arc::downgrade(&claim);
         if let Some(bg) = lua.app_data_ref::<RefCell<BgJobMap>>() {
             let live_bg: HashMap<_, _> = bg.borrow_mut().drain().filter(|(_, m)| m.alive).collect();
             if !live_bg.is_empty() {
@@ -304,6 +319,7 @@ impl TaskScope {
             lua: lua.clone(),
             handle,
             prev,
+            _bufs_claim: claim,
         }
     }
 
@@ -351,7 +367,6 @@ impl Drop for TaskScope {
             let mut cell = lock_cell(&self.handle);
             cell.jobs.kill_all();
             cell.jobs.clear(&self.lua);
-            cell.bufs.clear();
             if let Some(k) = cell.click.take() {
                 let _ = self.lua.remove_registry_value(k);
             }
@@ -430,32 +445,31 @@ pub(crate) fn with_live_ctx<R>(lua: &Lua, f: impl FnOnce(&LiveCtx) -> R) -> Opti
 
 pub(crate) fn enqueue_async_task(lua: &Lua, work_fn: RegistryKey) -> Result<(), mlua::Error> {
     let handle = lua.app_data_ref::<TaskHandle>();
-    let (cancel, live_ctx, live_buf) = match &handle {
+    let (cancel, live_ctx) = match &handle {
         Some(h) => {
             let cell = lock_cell(h);
-            (
-                cell.cancel.clone(),
-                cell.live.clone(),
-                cell.bufs.live_buf().cloned(),
-            )
+            (cell.cancel.clone(), cell.live.clone())
         }
-        None => (CancelToken::none(), None, None),
+        None => (CancelToken::none(), None),
     };
 
-    let task = PendingAsyncTask {
+    let mut task = PendingAsyncTask {
         work_fn,
         cancel,
         deadline: Some(Instant::now() + ASYNC_RUN_DEFAULT_DEADLINE),
         live_ctx,
-        live_buf,
+        owner: None,
     };
 
     if let Some(h) = &handle {
         let mut cell = lock_cell(h);
+        // Inline tasks live inside the cell, so a claim there would be a
+        // strong Arc cycle; they run before the scope drops anyway.
         if let Some(inline) = cell.inline_spawn.as_mut() {
             inline.push(task);
             return Ok(());
         }
+        task.owner = cell.bufs_claim.upgrade();
     }
 
     let queue = lua
@@ -540,7 +554,26 @@ pub(crate) struct PendingAsyncTask {
     pub cancel: CancelToken,
     pub deadline: Option<Instant>,
     pub live_ctx: Option<LiveCtx>,
-    pub live_buf: Option<Arc<SharedBuf>>,
+    pub owner: Option<Arc<BufsClaim>>,
+}
+
+/// Shared ownership of a task's `bufs`: the scope holds one clone, each queued
+/// `craft.async.run` task holds one, so the `Arc` strong count is the single
+/// source of truth for liveness. Dropping the last clone clears the store,
+/// breaking Lua GC watcher/click cycles. Root buf is resolved lazily because it
+/// may not exist at enqueue time.
+pub(crate) struct BufsClaim(TaskHandle);
+
+impl BufsClaim {
+    fn root_buf(&self) -> Option<Arc<SharedBuf>> {
+        resolve_root_buf(&self.0)
+    }
+}
+
+impl Drop for BufsClaim {
+    fn drop(&mut self) {
+        lock_cell(&self.0).bufs.clear();
+    }
 }
 
 pub(crate) type SpawnQueue = RefCell<Vec<PendingAsyncTask>>;
@@ -604,11 +637,14 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
             }
 
             if let Some(ref live) = task.live_ctx
-                && let Some(ref buf) = task.live_buf
+                && let Some(buf) = task.owner.as_ref().and_then(|c| c.root_buf())
             {
+                // Always `read`, not `read_if_dirty`: the dirty flag is
+                // consume-once and the UI polls each frame, so the flag
+                // races. Re-emitting identical content is harmless.
                 let _ = live.event_tx.send(craft_agent::AgentEvent::ToolSnapshot {
                     id: live.tool_use_id.clone(),
-                    snapshot: buf.take(),
+                    snapshot: craft_agent::BufferSnapshot::from_arc(buf.read()),
                     theme_gen: None,
                 });
             }
@@ -1147,40 +1183,46 @@ impl LuaRuntime {
         }
     }
 
-    fn call_sync_detached<R: mlua::FromLuaMulti>(
+    /// Resolves a plugin callback and converts its json input, warning on
+    /// failure. `None` when the tool has no such callback registered.
+    fn plugin_fn(
         &self,
-        func: &Function,
-        args: impl mlua::IntoLuaMulti,
-    ) -> mlua::Result<R> {
-        let _scope = TaskScope::detached(&self.lua);
-        func.call::<R>(args)
+        plugin: &str,
+        tool: &str,
+        callback: &'static str,
+        key: impl FnOnce(&ToolKeys) -> Option<&RegistryKey>,
+        input: &Value,
+    ) -> Option<(Function, LuaValue)> {
+        let func = {
+            let plugins = self.plugins.borrow();
+            let key = key(plugins.get(plugin)?.get(tool)?)?;
+            match self.lua.registry_value::<Function>(key) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(plugin, tool, callback, error = %e, "callback registry lookup failed");
+                    return None;
+                }
+            }
+        };
+        match json_to_lua(&self.lua, input) {
+            Ok(v) => Some((func, v)),
+            Err(e) => {
+                tracing::warn!(plugin, tool, callback, error = %e, "callback input conversion failed");
+                None
+            }
+        }
     }
 
-    /// Registers a TaskCtx so `craft.ui.buf()` works inside the handler.
-    fn compute_header(&self, plugin: &str, tool: &str, input: Value) -> HeaderResult {
-        let plugins = self.plugins.borrow();
-        let Some(tk) = plugins.get(plugin).and_then(|p| p.get(tool)) else {
+    /// Async so header fns can yield (highlight, markdown). A sync call would
+    /// hit the C-call boundary and silently fall back to the plain name.
+    async fn compute_header(&self, plugin: &str, tool: &str, input: Value) -> HeaderResult {
+        let Some((func, input_lua)) =
+            self.plugin_fn(plugin, tool, "header", |tk| tk.header.as_ref(), &input)
+        else {
             return HeaderResult::plain(tool.to_string());
-        };
-        let Some(key) = tk.header.as_ref() else {
-            return HeaderResult::plain(tool.to_string());
-        };
-        let func = match self.lua.registry_value::<Function>(key) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!(plugin, tool, error = %e, "header fn registry lookup failed");
-                return HeaderResult::plain(tool.to_string());
-            }
-        };
-        let input_lua = match json_to_lua(&self.lua, &input) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(plugin, tool, error = %e, "header fn input serialization failed");
-                return HeaderResult::plain(tool.to_string());
-            }
         };
 
-        let result = self.call_sync_detached::<LuaValue>(&func, input_lua);
+        let result = run_detached(&self.lua, func.call_async::<LuaValue>(input_lua)).await;
 
         match result {
             Ok(LuaValue::String(s)) => match s.to_str() {
@@ -1263,6 +1305,7 @@ impl LuaRuntime {
         if reply.header.is_none() {
             reply.header = Some(
                 self.compute_header(&plugin_name, &item.tool, item.input)
+                    .await
                     .into_snapshot(),
             );
         }
@@ -1293,30 +1336,20 @@ impl LuaRuntime {
         }
     }
 
-    fn compute_permission_scopes(
+    async fn compute_permission_scopes(
         &self,
         plugin: &str,
         tool: &str,
         input: Value,
     ) -> Option<PermissionScopes> {
-        let plugins = self.plugins.borrow();
-        let tk = plugins.get(plugin)?.get(tool)?;
-        let key = tk.permission_scopes.as_ref()?;
-        let func = match self.lua.registry_value::<Function>(key) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!(plugin, tool, error = %e, "failed to resolve permission_scopes callback");
-                return None;
-            }
-        };
-        let lua_input = match json_to_lua(&self.lua, &input) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(plugin, tool, error = %e, "failed to convert input for permission_scopes");
-                return None;
-            }
-        };
-        let result: LuaValue = match self.call_sync_detached(&func, lua_input) {
+        let (func, lua_input) = self.plugin_fn(
+            plugin,
+            tool,
+            "permission_scopes",
+            |tk| tk.permission_scopes.as_ref(),
+            &input,
+        )?;
+        let result: LuaValue = match run_detached(&self.lua, func.call_async(lua_input)).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(plugin, tool, error = %e, "permission_scopes callback failed");
@@ -1513,13 +1546,8 @@ async fn dispatch_async(
 /// The error message format is load-bearing: the bash plugin's `restore`
 /// parses it to re-render the timeout sentinel on session reload.
 fn timeout_reply(handle: &TaskHandle, plugin: &str, tool: &str) -> ToolCallReply {
-    let (secs, live_buf) = {
-        let cell = lock_cell(handle);
-        (
-            cell.deadline_secs.get().unwrap_or(0),
-            cell.bufs.live_buf().cloned(),
-        )
-    };
+    let secs = lock_cell(handle).deadline_secs.get().unwrap_or(0);
+    let live_buf = resolve_root_buf(handle);
     let qualified = if plugin == tool || plugin.is_empty() {
         tool.to_owned()
     } else {
@@ -1816,7 +1844,7 @@ pub fn spawn(
                             input,
                             reply,
                         } => {
-                            let res = rt.compute_header(&plugin, &tool, input);
+                            let res = rt.compute_header(&plugin, &tool, input).await;
                             let _ = reply.send(res);
                         }
                         Request::ComputePermissionScopes {
@@ -1825,7 +1853,7 @@ pub fn spawn(
                             input,
                             reply,
                         } => {
-                            let res = rt.compute_permission_scopes(&plugin, &tool, input);
+                            let res = rt.compute_permission_scopes(&plugin, &tool, input).await;
                             let _ = reply.send(res);
                         }
                         Request::RunInitLua {
@@ -2244,7 +2272,7 @@ mod tests {
         let queue = lua.app_data_ref::<SpawnQueue>().unwrap();
         let queued = &queue.borrow()[0];
         assert!(queued.live_ctx.is_none());
-        assert!(queued.live_buf.is_none());
+        assert!(queued.owner.is_none());
     }
 
     #[test]
@@ -2307,7 +2335,7 @@ mod tests {
                 cancel,
                 deadline,
                 live_ctx: None,
-                live_buf: None,
+                owner: None,
             });
     }
 

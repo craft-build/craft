@@ -707,6 +707,12 @@ impl SharedBuf {
         Some(Arc::clone(&guard))
     }
 
+    /// Clones the committed lines without clearing the dirty flag (unlike `take`).
+    pub fn read(&self) -> Arc<Vec<SnapshotLine>> {
+        let guard = self.committed.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(&guard)
+    }
+
     pub fn take(&self) -> BufferSnapshot {
         self.dirty.store(false, Ordering::Release);
         let guard = self.committed.lock().unwrap_or_else(|e| e.into_inner());
