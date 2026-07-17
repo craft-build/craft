@@ -114,6 +114,26 @@ mod tests {
     }
 
     #[test]
+    fn encode_decode_empty_array_roundtrips() {
+        let lua = lua_with_json();
+        let result: String = lua
+            .load(r#"local s = json.encode(json.decode('[]')); return s"#)
+            .eval()
+            .unwrap();
+        assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn encode_decode_empty_object_roundtrips() {
+        let lua = lua_with_json();
+        let result: String = lua
+            .load(r#"local s = json.encode(json.decode('{}')); return s"#)
+            .eval()
+            .unwrap();
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
     fn decode_null_roundtrips() {
         let lua = lua_with_json();
         let result: String = lua

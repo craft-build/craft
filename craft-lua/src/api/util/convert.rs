@@ -1,4 +1,4 @@
-use mlua::{Lua, Result as LuaResult, Value};
+use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Value};
 use serde_json::Value as JsonValue;
 
 pub(crate) fn err_pair(lua: &Lua, e: impl std::fmt::Display) -> LuaResult<(Value, Value)> {
@@ -27,6 +27,7 @@ pub(crate) fn json_to_lua(lua: &Lua, value: &JsonValue) -> LuaResult<Value> {
             for (idx, item) in items.iter().enumerate() {
                 table.set(idx + 1, json_to_lua(lua, item)?)?;
             }
+            table.set_metatable(Some(lua.array_metatable()))?;
             Value::Table(table)
         }
         JsonValue::Object(map) => {
