@@ -568,6 +568,7 @@ impl Provider for DynamicProvider {
                 max_output_tokens: Some(m.max_output_tokens),
                 supports_thinking: None,
                 supports_vision: m.supports_vision,
+                pricing: None,
                 provider_info: None,
             })
             .collect();

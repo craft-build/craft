@@ -198,6 +198,7 @@ pub struct ModelInfo {
     pub max_output_tokens: Option<u32>,
     pub supports_thinking: Option<bool>,
     pub supports_vision: Option<bool>,
+    pub pricing: Option<ModelPricing>,
     /// Store of additional metadata from the provider.
     pub provider_info: Option<Arc<dyn Any + Send + Sync>>,
 }
@@ -210,6 +211,7 @@ impl ModelInfo {
             max_output_tokens: None,
             supports_thinking: None,
             supports_vision: None,
+            pricing: None,
             provider_info: None,
         }
     }
@@ -253,7 +255,9 @@ impl Model {
                 let discovered = guard.discovered(provider, model_id);
                 (
                     provider.family(),
-                    ModelPricing::ZERO,
+                    discovered
+                        .and_then(|d| d.pricing.clone())
+                        .unwrap_or(ModelPricing::ZERO),
                     discovered
                         .and_then(|d| d.max_output_tokens)
                         .unwrap_or_else(|| provider.fallback_max_output()),

@@ -179,6 +179,7 @@ impl CatalogData {
                 max_output_tokens: Some(meta.output),
                 supports_thinking: None,
                 supports_vision: None,
+                pricing: None,
                 provider_info: None,
             })
             .collect();

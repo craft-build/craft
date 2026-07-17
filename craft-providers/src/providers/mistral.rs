@@ -265,6 +265,7 @@ impl Provider for Mistral {
                         max_output_tokens: None,
                         supports_thinking,
                         supports_vision: Some(supports_vision),
+                        pricing: None,
                         provider_info: None,
                     })
                 })
