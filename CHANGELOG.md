@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-17
+
+### Added
+
+- **util**: base58-encoded UUIDv7 entity ids via `CraftId` and `SessionRef` in craft-storage, threaded through the codebase replacing bare session ids, with seamless legacy migration of hex-named sessions (`69ed8d12f`)
+- **providers**: `ProviderEvent::PromptProgress` and `AgentEvent::PromptProgress` parse `response.in_progress` SSE events from the llama.cpp `/responses` API and emit prompt-progress data (`dd6f3b2e6`)
+- **providers**: OpenRouter discovered model pricing is scaled to $/M and carried through discovery via an optional `ModelPricing` on `ModelInfo` (`63563d17b`)
+- **ui**: progress bar widget renders prompt-processing progress in the chat viewport, with a new `progress_bar` theme style (`dea1b71f6`)
+- **ui**: prompt-processing progress bar renders its cached portion in a distinct green color (`991afd2f6`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`cfg_aliases` 0.2.2, `self_cell` 1.3.0, `tokio` 1.52.4)
+
+### Fixed
+
+- **providers**: missing `output_index` in the Responses API SSE stream (e.g. llama.cpp) now falls back to `tool_accumulators.len()` for new accumulators (`1151c3749`)
+- **providers**: `reasoning` field aliased to `reasoning_content` for vLLM thinking-content compatibility (`f0f4c13a9`)
+- **session**: load-path migration drains all legacy files, so a session with both `.json` and `.jsonl` siblings no longer appears twice in the picker (`7bc0c152b`)
+- **agent**: `functions.` prefix emitted by Codex-post-trained models is stripped from tool names at the top of dispatch (`caff9d87e`)
+- **copilot**: GitHub Enterprise (`*.ghe.com`) hosts supported for token discovery and the Copilot GraphQL endpoint (`c5f9a2eab`)
+- **lua**: `json.decode('[]')` now roundtrips back to `[]` instead of `{}` (`312bbb223`)
+
 ## [0.9.2] - 2026-07-16
 
 ### Added
@@ -1276,7 +1299,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/craft-build/craft/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/craft-build/craft/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/craft-build/craft/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/craft-build/craft/compare/v0.8.7...v0.9.0
