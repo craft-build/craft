@@ -42,6 +42,7 @@ use craft_agent::{
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 const THINKING_HIDDEN_HEADER: &str = "thinking> ...";
@@ -50,7 +51,6 @@ const THINKING_HIDDEN_HEADER: &str = "thinking> ...";
 pub struct PromptProgress {
     pub processed: u32,
     pub total: u32,
-    #[allow(dead_code)]
     pub cache: u32,
 }
 
@@ -1001,6 +1001,8 @@ impl MessagesPanel {
                 &crate::components::progress_bar::ProgressBarConfig {
                     ratio,
                     style: theme::current().progress_bar,
+                    cache_ratio: pp.cache as f64 / pp.total as f64,
+                    cache_style: Style::new().fg(Color::Green),
                     label: Some(label),
                     label_style: Some(theme::current().tool_dim),
                     bar_width,
