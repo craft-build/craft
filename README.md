@@ -97,9 +97,30 @@ Runtime difference - Craft also significantly retools the async runtime and netw
 
 ## Installation
 
+### Linux / macOS
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/craft-build/craft/main/install.sh | sh
 ```
+
+### Windows
+
+```powershell
+# Download and read the script first (don't blindly trust remote scripts).
+irm https://raw.githubusercontent.com/craft-build/craft/main/install.ps1 -OutFile install.ps1
+Get-Content install.ps1
+
+# Then run.
+.\install.ps1
+```
+
+One-liner:
+
+```powershell
+irm https://raw.githubusercontent.com/craft-build/craft/main/install.ps1 | iex
+```
+
+Installs to `%USERPROFILE%\.cargo\bin` and adds it to your user PATH. Override with `$env:CRAFT_INSTALL_DIR`.
 
 Or build from source:
 
