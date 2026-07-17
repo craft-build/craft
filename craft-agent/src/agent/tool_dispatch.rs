@@ -79,6 +79,10 @@ pub async fn run(
     ctx: &ToolContext,
     emit: Emit,
 ) -> ToolDoneEvent {
+    // Some models (post-trained on Codex sessions) emit tool names as
+    // `functions.<name>` instead of just `<name>`, so every call fails with
+    // "unknown tool". Strip the prefix before any lookup.
+    let name = name.strip_prefix("functions.").unwrap_or(name);
     let entry = registry.get(name);
     // LLM providers send tool names in wire format (server__tool) but our
     // internal index uses server.tool. Only convert if the name isn't a
