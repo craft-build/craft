@@ -19,6 +19,10 @@ use self::discovery::parse_www_authenticate;
 use super::error::McpError;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(600);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// In-band refresh blocks requests waiting on the transport's auth lock, so it
+/// gets a much tighter budget than the interactive flow.
+const SILENT_REFRESH_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthError {
@@ -51,7 +55,8 @@ pub async fn authenticate(
         server: server_name.into(),
         reason: e.to_string(),
     };
-    let client = build_http_client().map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
+    let client =
+        build_http_client(HTTP_TIMEOUT).map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
 
     let existing = tokio::task::spawn_blocking({
         let storage = storage.clone();
@@ -64,44 +69,16 @@ pub async fn authenticate(
 
     if let Some(existing) = existing
         && let Some(ref tokens) = existing.tokens
+        && !tokens.is_expired()
     {
-        if !tokens.is_expired() {
-            return Ok(existing);
-        }
-        if !tokens.refresh.is_empty() {
-            let auth_server = discover_auth_server_for(&client, server_url, None)
-                .await
-                .map_err(&wrap)?;
-            match token::refresh_token(
-                &client,
-                &auth_server.token_endpoint,
-                &tokens.refresh,
-                &existing.client_id,
-                existing.client_secret.as_deref(),
-                server_url,
-            )
-            .await
-            {
-                Ok(new_tokens) => {
-                    let data = McpAuthData {
-                        tokens: Some(new_tokens),
-                        ..existing
-                    };
-                    let result = data.clone();
-                    tokio::task::spawn_blocking({
-                        let storage = storage.clone();
-                        let server_name = server_name.to_string();
-                        move || save_mcp_auth(&storage, &server_name, &data)
-                    })
-                    .await
-                    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?
-                    .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
-                    return Ok(result);
-                }
-                Err(e) => {
-                    warn!(server = server_name, error = %e, "token refresh failed, starting full flow");
-                }
-            }
+        return Ok(existing);
+    }
+
+    match silent_refresh(storage, server_name, server_url).await {
+        Ok(Some(data)) => return Ok(data),
+        Ok(None) => {}
+        Err(e) => {
+            warn!(server = server_name, error = %e, "token refresh failed, starting full flow");
         }
     }
 
@@ -273,6 +250,69 @@ pub async fn authenticate(
     Ok(result)
 }
 
+/// Refresh stored tokens without any user interaction. `Ok(None)` means an
+/// interactive flow is required (no stored auth or no refresh token).
+pub async fn silent_refresh(
+    storage: &StateDir,
+    server_name: &str,
+    server_url: &str,
+) -> Result<Option<McpAuthData>, OAuthError> {
+    let existing = tokio::task::spawn_blocking({
+        let storage = storage.clone();
+        let server_name = server_name.to_string();
+        let server_url = server_url.to_string();
+        move || load_mcp_auth(&storage, &server_name, &server_url)
+    })
+    .await
+    .map_err(|e| OAuthError::Other(e.to_string()))?;
+
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+
+    let Some(ref tokens) = existing.tokens else {
+        return Ok(None);
+    };
+
+    if tokens.refresh.is_empty() {
+        return Ok(None);
+    }
+
+    let client = build_http_client(SILENT_REFRESH_HTTP_TIMEOUT)
+        .map_err(|e| OAuthError::Other(e.to_string()))?;
+
+    let auth_server = discover_auth_server_for(&client, server_url, None).await?;
+
+    let new_tokens = token::refresh_token(
+        &client,
+        &auth_server.token_endpoint,
+        &tokens.refresh,
+        &existing.client_id,
+        existing.client_secret.as_deref(),
+        server_url,
+    )
+    .await?;
+
+    let data = McpAuthData {
+        tokens: Some(new_tokens),
+        ..existing
+    };
+
+    let to_save = data.clone();
+    tokio::task::spawn_blocking({
+        let storage = storage.clone();
+        let server_name = server_name.to_string();
+        move || save_mcp_auth(&storage, &server_name, &to_save)
+    })
+    .await
+    .map_err(|e| OAuthError::Other(e.to_string()))?
+    .map_err(|e| OAuthError::Other(e.to_string()))?;
+
+    info!(server = server_name, "MCP OAuth tokens refreshed");
+
+    Ok(Some(data))
+}
+
 async fn discover_auth_server_for(
     client: &Client,
     server_url: &str,
@@ -293,9 +333,9 @@ fn is_headless() -> bool {
         && std::env::var_os("WAYLAND_DISPLAY").is_none()
 }
 
-fn build_http_client() -> Result<Client, reqwest::Error> {
+fn build_http_client(timeout: Duration) -> Result<Client, reqwest::Error> {
     Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
         .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
         .build()
 }

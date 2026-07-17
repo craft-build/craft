@@ -582,7 +582,7 @@ fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
                     return;
                 }
             };
-            let auth_data = match craft_agent::mcp::oauth::authenticate(
+            if let Err(e) = craft_agent::mcp::oauth::authenticate(
                 &server_name,
                 &server_url,
                 www_auth.as_deref(),
@@ -591,19 +591,11 @@ fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
             )
             .await
             {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(server = %server_name, error = %e, "background OAuth failed");
-                    return;
-                }
-            };
-            let Some(ref tokens) = auth_data.tokens else {
+                tracing::warn!(server = %server_name, error = %e, "background OAuth failed");
                 return;
-            };
+            }
             handle.send(McpCommand::Reconnect {
                 server: server_name.clone(),
-                url: server_url,
-                token: tokens.access.clone(),
             });
             tracing::info!(server = %server_name, "MCP server authenticated via OAuth");
         });
