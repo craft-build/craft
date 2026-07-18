@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-07-18
+
+### Added
+
+- **install**: Windows `install.ps1` installer script (`bf5b690b8`)
+- **install**: GitHub token auth supported in installers (`28b9bf8b2`)
+- **install**: Git Bash on Windows documented (`df0005144`)
+- **update**: resolved install directory shown in the confirmation prompt (`f3b7a4091`)
+- **ui**: colored left border for batch subtools (`d34f1bf52`)
+
+### Changed
+
+- **providers**: model-tiers cache uses a multi-tier-friendly format (`beaaa80ed`)
+- **tools**: desktop native tool removed (`7cdc45ba3`)
+- **agent**: unreliable hashline anchor feature removed (`961de0787`)
+- **plugins**: `{ llm_output, is_error = true }` blessed (`4455ef39b`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`aws-lc-rs` 1.17.3, `aws-lc-sys` 0.43.0, `ignore` 0.4.30, `portable-atomic` 1.14.0, `tokio` 1.53.0)
+
+### Fixed
+
+- **lua**: stray async snapshot and yielding plugin callbacks fixed (`00332b305`)
+- **mcp**: OAuth token silently refreshed on 401 instead of restarting (`e9825ffa9`)
+- **providers**: JSON object arguments from llama.cpp handled in the Responses API (`9aab5312c`)
+- **providers**: reasoning events handled in OpenAI Responses API streaming (`553a47f6e`)
+- **cmd**: `auth login` uses a dynamic provider (`255fc4bab`)
+
 ## [0.9.3] - 2026-07-17
 
 ### Added
@@ -1299,7 +1325,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/craft-build/craft/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/craft-build/craft/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/craft-build/craft/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/craft-build/craft/compare/v0.9.0...v0.9.1
