@@ -17,10 +17,6 @@ struct EditEntry {
     new_string: String,
     #[param(description = "Replace all occurrences (default false)")]
     replace_all: Option<bool>,
-    #[param(
-        description = "Optional 12-char hex content-hash anchor of the target line(s). When set, the applier verifies the hash against the current matched lines before writing; a stale anchor is rejected with the current content so you can retry."
-    )]
-    line_anchor_hash: Option<String>,
 }
 
 #[derive(Tool, Debug, Clone, Deserialize)]
@@ -70,40 +66,15 @@ impl MultiEdit {
         }
         let mut content = before.to_owned();
         for (i, edit) in self.edits.iter().enumerate() {
-            content = if let Some(ref anchor) = edit.line_anchor_hash {
-                let anchored = super::hashline::AnchoredEdit {
-                    line_anchor_hash: anchor.clone(),
-                    old_text: edit.old_string.clone(),
-                    new_text: edit.new_string.clone(),
-                };
-                match super::hashline::apply_anchored(
-                    &content,
-                    &anchored,
-                    edit.replace_all.unwrap_or(false),
-                ) {
-                    super::hashline::AnchorOutcome::Applied { content, .. } => content,
-                    super::hashline::AnchorOutcome::Stale { current } => {
-                        return Err(Self::edit_failure(
-                            i,
-                            edit,
-                            &super::hashline::stale_message(&current),
-                        ));
-                    }
-                    super::hashline::AnchorOutcome::NotFound => {
-                        return Err(Self::edit_failure(i, edit, super::fuzzy_replace::NO_MATCH));
-                    }
-                }
-            } else {
-                super::fuzzy_replace::replace(
-                    &content,
-                    &edit.old_string,
-                    &edit.new_string,
-                    edit.replace_all.unwrap_or(false),
-                    None,
-                )
-                .map_err(|e| Self::edit_failure(i, edit, &e))?
-                .content
-            };
+            content = super::fuzzy_replace::replace(
+                &content,
+                &edit.old_string,
+                &edit.new_string,
+                edit.replace_all.unwrap_or(false),
+                None,
+            )
+            .map_err(|e| Self::edit_failure(i, edit, &e))?
+            .content;
         }
         Ok(content)
     }

@@ -21,4 +21,3 @@ Use these to cut down the number of tools you reach for.
 - Prefer grep to locate content instead of scanning full files.
 - Call in parallel when reading multiple files.
 - Avoid tiny repeated slices - read a larger window if you need more context.
-- Each non-blank line is shown with a 12-hex-char anchor in `⟦…⟧`, e.g. `42: let x = 1;  ⟦a1b2c3d4e5f6⟧`. Copy that hash into the `edit`/`multiedit` `line_anchor_hash` field for single-line edits — no need to recompute it. (The anchor hashes the line content, trim-normalized; multi-line regions hash the joined region.)

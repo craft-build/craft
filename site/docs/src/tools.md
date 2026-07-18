@@ -68,7 +68,6 @@ Replace an exact string match in a file.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `line_anchor_hash` | string | no |  | Optional 12-char hex content-hash anchor of the target line(s). When set, the applier verifies the hash against the current matched lines before writing; a stale anchor is rejected and the current content is returned so you can retry. Compute it by hashing the trim-normalized target lines (blank lines ignored). |
 | `new_string` | string | yes |  | Replacement string |
 | `occurrence` | integer | no |  | When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error. |
 | `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |

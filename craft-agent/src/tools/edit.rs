@@ -21,10 +21,6 @@ pub struct Edit {
         description = "When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error."
     )]
     occurrence: Option<usize>,
-    #[param(
-        description = "Optional 12-char hex content-hash anchor of the target line(s). When set, the applier verifies the hash against the current matched lines before writing; a stale anchor is rejected and the current content is returned so you can retry. Compute it by hashing the trim-normalized target lines (blank lines ignored)."
-    )]
-    line_anchor_hash: Option<String>,
 }
 
 impl Edit {
@@ -44,33 +40,13 @@ impl Edit {
 
         let before = ctx.fs.read_text_file(p).await?;
 
-        let result = if let Some(ref anchor) = self.line_anchor_hash {
-            let edit = super::hashline::AnchoredEdit {
-                line_anchor_hash: anchor.clone(),
-                old_text: self.old_string.clone(),
-                new_text: self.new_string.clone(),
-            };
-            match super::hashline::apply_anchored(&before, &edit, self.replace_all.unwrap_or(false))
-            {
-                super::hashline::AnchorOutcome::Applied { content, pass } => {
-                    super::fuzzy_replace::ReplaceResult { content, pass }
-                }
-                super::hashline::AnchorOutcome::Stale { current } => {
-                    return Err(super::hashline::stale_message(&current));
-                }
-                super::hashline::AnchorOutcome::NotFound => {
-                    return Err(super::fuzzy_replace::NO_MATCH.into());
-                }
-            }
-        } else {
-            super::fuzzy_replace::replace(
-                &before,
-                &self.old_string,
-                &self.new_string,
-                self.replace_all.unwrap_or(false),
-                self.occurrence,
-            )?
-        };
+        let result = super::fuzzy_replace::replace(
+            &before,
+            &self.old_string,
+            &self.new_string,
+            self.replace_all.unwrap_or(false),
+            self.occurrence,
+        )?;
 
         let validation = super::validation::validate_edit(p, &before, &result.content);
 
@@ -179,7 +155,6 @@ mod tests {
             new_string: "fn new() {}".into(),
             replace_all: None,
             occurrence: None,
-            line_anchor_hash: None,
         }
         .execute(&ctx)
         .await
@@ -197,7 +172,6 @@ mod tests {
             new_string: "let x = 9;".into(),
             replace_all: Some(true),
             occurrence: None,
-            line_anchor_hash: None,
         }
         .execute(&ctx)
         .await
@@ -226,7 +200,6 @@ mod tests {
             new_string: "const A: u8 = 9;\\nconst B: u8 = 2;".into(),
             replace_all: None,
             occurrence: None,
-            line_anchor_hash: None,
         }
         .execute(&ctx)
         .await
@@ -238,56 +211,5 @@ mod tests {
         assert_eq!(before, original);
         assert_eq!(after, updated);
         assert_eq!(fs::read_to_string(&path).unwrap(), updated);
-    }
-
-    const STALE_PREFIX: &str = "stale line anchor";
-
-    #[tokio::test]
-    async fn anchor_edit_applies_when_hash_matches() {
-        let dir = TempDir::new().unwrap();
-        let ctx = stub_ctx(&AgentMode::Build);
-        let content = "fn foo() {\n    bar();\n}";
-        let path = temp_file(&dir, "f.rs", content);
-        pre_read(&ctx, &path);
-        let anchor = super::super::hashline::anchor_hash(content);
-        Edit {
-            path: path.clone(),
-            old_string: "fn foo() {\n    bar();\n}".into(),
-            new_string: "fn foo() {\n    baz();\n}".into(),
-            replace_all: None,
-            occurrence: None,
-            line_anchor_hash: Some(anchor),
-        }
-        .execute(&ctx)
-        .await
-        .unwrap();
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "fn foo() {\n    baz();\n}"
-        );
-    }
-
-    #[tokio::test]
-    async fn stale_anchor_rejected_before_write() {
-        let dir = TempDir::new().unwrap();
-        let ctx = stub_ctx(&AgentMode::Build);
-        let stale = "fn foo() {\n    bar();\n}";
-        let actual = "fn foo() {\n    CHANGED();\n}";
-        let path = temp_file(&dir, "f.rs", actual);
-        pre_read(&ctx, &path);
-        let anchor = super::super::hashline::anchor_hash(stale);
-        let err = Edit {
-            path: path.clone(),
-            old_string: "fn foo() {\n    CHANGED();\n}".into(),
-            new_string: "fn foo() {\n    baz();\n}".into(),
-            replace_all: None,
-            occurrence: None,
-            line_anchor_hash: Some(anchor),
-        }
-        .execute(&ctx)
-        .await
-        .unwrap_err();
-        assert!(err.contains(STALE_PREFIX), "got: {err}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), actual);
     }
 }

@@ -900,8 +900,8 @@ fn is_write_tool(name: &str) -> bool {
     )
 }
 
-/// Edit tools have built-in stale-file detection (`check_before_edit`,
-/// `line_anchor_hash`) that returns a recoverable "re-read" error when the
+/// Edit tools have built-in stale-file detection (`check_before_edit`)
+/// that returns a recoverable "re-read" error when the
 /// file changed underneath the agent. That is normal control flow, not a stuck
 /// loop, so these tools are exempt from failure-count guardrails and trust
 /// decay — blocking them would prevent the re-read recovery they request.

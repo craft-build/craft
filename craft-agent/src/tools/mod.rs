@@ -24,7 +24,6 @@ pub mod flow_search;
 pub mod fs_backend;
 mod fuzzy_replace;
 pub mod grep;
-pub mod hashline;
 mod inspect;
 mod internal_urls;
 pub(crate) mod interpreter_bridge;

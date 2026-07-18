@@ -316,13 +316,7 @@ impl ToolOutput {
                 let mut out: String = lines
                     .iter()
                     .enumerate()
-                    .map(|(i, line)| {
-                        let mut s = format!("{}: {line}", start_line + i);
-                        if !line.trim().is_empty() {
-                            let _ = write!(s, "  ⟦{}⟧", crate::tools::hashline::anchor_hash(line));
-                        }
-                        s
-                    })
+                    .map(|(i, line)| format!("{}: {line}", start_line + i))
                     .collect::<Vec<_>>()
                     .join("\n");
                 let remaining = lines_remaining_after(*total_lines, *start_line, lines.len());
@@ -1000,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn read_code_display_text_with_instructions_has_line_anchors() {
+    fn read_code_display_text_with_instructions_includes_lines() {
         let lines = vec!["fn foo()".to_string(), "fn bar()".to_string()];
         let output = ToolOutput::ReadCode {
             path: "a.rs".into(),
@@ -1016,14 +1010,10 @@ mod tests {
         };
         let text = output.as_text();
         for (i, line) in lines.iter().enumerate() {
-            let marker = format!(
-                "{}: {line}  ⟦{}⟧",
-                10 + i,
-                crate::tools::hashline::anchor_hash(line)
-            );
+            let marker = format!("{}: {line}", 10 + i);
             assert!(
                 text.contains(&marker),
-                "expected line anchor marker {marker:?} in:\n{text}"
+                "expected line marker {marker:?} in:\n{text}"
             );
         }
         assert!(text.contains("Truncated lines: 12-100"));
@@ -1031,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn read_code_display_text_appends_per_line_anchor() {
+    fn read_code_display_text_shows_numbered_lines() {
         let line = "let x = 42;";
         let output = ToolOutput::ReadCode {
             path: "a.rs".into(),
@@ -1043,7 +1033,7 @@ mod tests {
             no_compress: false,
         };
         let text = output.as_display_text();
-        let expected = format!("1: {line}  ⟦{}⟧", crate::tools::hashline::anchor_hash(line));
+        let expected = format!("1: {line}");
         assert_eq!(text, expected);
     }
 

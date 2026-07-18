@@ -51,46 +51,6 @@ pub(super) fn replace(
     })
 }
 
-/// Returns the actual matched substring the way the first successful pass would
-/// replace it, without applying the replacement. Used by hashline anchors to
-/// verify the matched region against a content hash.
-pub(super) fn locate(content: &str, old_string: &str) -> Option<String> {
-    const PASSES: &[(Replacer, Pass)] = &[
-        (exact, Pass::Exact),
-        (line_trimmed, Pass::LineTrimmed),
-        (block_anchor, Pass::BlockAnchor),
-        (whitespace_normalized, Pass::WhitespaceNormalized),
-        (indentation_flexible, Pass::IndentationFlexible),
-        (unicode_normalized, Pass::UnicodeNormalized),
-        (trimmed_boundary, Pass::TrimmedBoundary),
-        (context_aware, Pass::ContextAware),
-    ];
-
-    let collect_positions = |candidates: &[String]| -> Vec<(usize, usize)> {
-        let mut positions = Vec::new();
-        for matched in candidates {
-            for (start, _) in content.match_indices(matched.as_str()) {
-                positions.push((start, start + matched.len()));
-            }
-        }
-        positions.sort();
-        positions.dedup();
-        positions
-    };
-
-    for &(r, _) in PASSES {
-        let candidates = r(content, old_string);
-        if candidates.is_empty() {
-            continue;
-        }
-        let positions = collect_positions(&candidates);
-        if let Some(&(start, end)) = positions.first() {
-            return Some(content[start..end].to_string());
-        }
-    }
-    None
-}
-
 fn replace_inner(
     content: &str,
     old_string: &str,
