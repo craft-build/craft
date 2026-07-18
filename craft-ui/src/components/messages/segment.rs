@@ -57,6 +57,7 @@ pub(super) struct Segment {
     pub spinner_lines: Vec<usize>,
     pub content_indent: &'static str,
     pub indent_style: ratatui::style::Style,
+    pub has_bar: bool,
     pub hyperlinks: Vec<crate::hyperlink::Hyperlink>,
     pub image: Option<std::sync::Arc<crate::image_render::ImageRenderState>>,
 }
@@ -163,6 +164,7 @@ impl Segment {
         self.spinner_lines = tl.spinner_lines;
         self.content_indent = tl.content_indent;
         self.indent_style = tl.indent_style;
+        self.has_bar = tl.has_bar;
         self.truncation = tl.truncation;
         self.hyperlinks = tl.hyperlinks;
         self.set_lines(tl.lines);
@@ -185,6 +187,7 @@ impl Segment {
             self.spinner_lines = tl.spinner_lines;
             self.content_indent = tl.content_indent;
             self.indent_style = tl.indent_style;
+            self.has_bar = tl.has_bar;
             self.hyperlinks = tl.hyperlinks;
         } else {
             self.apply_highlight(tl, worker);

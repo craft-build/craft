@@ -1317,7 +1317,11 @@ impl MessagesPanel {
                 .as_deref()
                 .is_some_and(segment::is_child_segment);
             for &line_idx in &seg.spinner_lines.clone() {
-                let span_idx = if line_idx == 0 && !is_child { 0 } else { 1 };
+                let span_idx = if line_idx == 0 && (!is_child || seg.has_bar) {
+                    0
+                } else {
+                    1
+                };
                 seg.update_spinner(line_idx, span_idx, spinner_span.clone());
             }
         }

@@ -85,6 +85,7 @@ const TOOL_SEPARATOR: &str = "────────────────�
 const CODE_OUTPUT_DIVIDER: &str = "  ────────────";
 const BATCH_INDENT: &str = "  ";
 const BATCH_CONTENT_INDENT: &str = "    ";
+const BATCH_BAR_PREFIX: &str = "  │ ";
 
 pub(crate) fn tool_output_annotation(output: &ToolOutput) -> Option<String> {
     match output {
@@ -279,6 +280,7 @@ pub struct ToolLines {
     /// Style for `content_indent` when re-indenting lines swapped in later
     /// (async syntax highlighting); carries the left bar's status color.
     pub indent_style: Style,
+    pub has_bar: bool,
     pub truncation: SectionFlags,
     pub hyperlinks: Vec<crate::hyperlink::Hyperlink>,
 }
@@ -514,6 +516,7 @@ struct ToolLineBuilder {
     is_top_level: bool,
     /// Status color for the left bar; only meaningful when `is_top_level`.
     bar_style: Style,
+    has_bar: bool,
     truncation: SectionFlags,
     limits: RenderLimits,
     keep: Keep,
@@ -546,6 +549,7 @@ impl ToolLineBuilder {
             outer_indent,
             is_top_level,
             bar_style: Style::default(),
+            has_bar: false,
             truncation: SectionFlags::default(),
             limits,
             keep: output_limits.keep,
@@ -646,7 +650,7 @@ impl ToolLineBuilder {
     }
 
     fn prepend_indicator(&mut self, indicator: Indicator, started_at: Instant) {
-        if self.is_top_level {
+        if self.is_top_level || self.has_bar {
             // The colored left bar (applied uniformly in `finish`) conveys
             // status instead of a dot, so there's nothing to insert here.
             self.bar_style = match indicator {
@@ -802,6 +806,11 @@ impl ToolLineBuilder {
                 line.spans
                     .insert(0, Span::styled(TOP_LEVEL_BAR_PREFIX, self.bar_style));
             }
+        } else if self.has_bar {
+            for line in &mut self.lines {
+                line.spans
+                    .insert(0, Span::styled(BATCH_BAR_PREFIX, self.bar_style));
+            }
         } else if !self.outer_indent.is_empty() {
             for line in &mut self.lines {
                 line.spans.insert(0, Span::raw(self.outer_indent));
@@ -810,6 +819,8 @@ impl ToolLineBuilder {
         let highlight = HighlightRequest::new(self.content_range, input, output, self.limits);
         let indent_w = if self.is_top_level {
             TOP_LEVEL_BAR_PREFIX.chars().count() as u16
+        } else if self.has_bar {
+            BATCH_BAR_PREFIX.chars().count() as u16
         } else {
             self.outer_indent.chars().count() as u16
         };
@@ -823,13 +834,14 @@ impl ToolLineBuilder {
             highlight,
             spinner_lines: self.spinner_lines,
             content_indent,
-            indent_style: if self.is_top_level {
+            indent_style: if self.is_top_level || self.has_bar {
                 self.bar_style
             } else {
                 Style::default()
             },
             truncation: self.truncation,
             hyperlinks: self.hyperlinks,
+            has_bar: self.has_bar,
         }
     }
 }
@@ -979,7 +991,8 @@ pub fn build_batch_entry_lines(
         append_annotation(&mut annotation, &suffix);
     }
 
-    let mut b = ToolLineBuilder::new(rctx.width, BATCH_INDENT, expanded, limits, hints);
+    let mut b = ToolLineBuilder::new(rctx.width, BATCH_BAR_PREFIX, expanded, limits, hints);
+    b.has_bar = true;
     b.apply_output_format(entry.output.as_ref());
     b.push_header(
         &entry.tool,
@@ -1004,7 +1017,7 @@ pub fn build_batch_entry_lines(
     b.finish(
         entry.input.clone().map(Arc::new),
         entry.output.clone().map(Arc::new),
-        BATCH_CONTENT_INDENT,
+        "  │   ",
     )
 }
 
