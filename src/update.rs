@@ -9,6 +9,7 @@ use craft_storage::{StateDir, StorageError};
 const INSTALL_SCRIPT_URL: &str =
     "https://raw.githubusercontent.com/craft-build/craft/main/install.sh";
 const BACKUP_FILENAME: &str = "craft_backup";
+const INSTALL_DIR_ENV: &str = "CRAFT_INSTALL_DIR";
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
@@ -79,7 +80,7 @@ fn backup_binary(exe_path: &Path, storage: &StateDir) -> Result<PathBuf, UpdateE
     Ok(backup_path)
 }
 
-fn execute_script(script: &str) -> Result<(), UpdateError> {
+fn execute_script(script: &str, install_dir: &Path) -> Result<(), UpdateError> {
     let mut tmp = tempfile::NamedTempFile::new().map_err(UpdateError::WriteScript)?;
     tmp.write_all(script.as_bytes())
         .map_err(UpdateError::WriteScript)?;
@@ -87,6 +88,7 @@ fn execute_script(script: &str) -> Result<(), UpdateError> {
 
     let status = std::process::Command::new("sh")
         .arg(tmp.path())
+        .env(INSTALL_DIR_ENV, install_dir)
         .status()
         .map_err(UpdateError::ExecScript)?;
 
@@ -146,8 +148,11 @@ fn restore_backup(backup_path: &Path, exe_path: &Path) -> Result<(), UpdateError
     Ok(())
 }
 
-fn prompt_yes() -> bool {
-    eprint!("Run this script? [y/N] ");
+fn prompt_yes(install_dir: &Path) -> bool {
+    eprint!(
+        "Install to {} and run this script? [y/N] ",
+        install_dir.display()
+    );
     let _ = std::io::stderr().flush();
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).is_ok() && input.trim().eq_ignore_ascii_case("y")
@@ -165,6 +170,17 @@ pub async fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateErro
     println!();
 
     let exe_path = std::env::current_exe().map_err(UpdateError::CurrentExe)?;
+    let install_dir = match std::env::var_os(INSTALL_DIR_ENV).filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => exe_path
+            .parent()
+            .ok_or_else(|| {
+                UpdateError::CurrentExe(std::io::Error::other(
+                    "binary path has no parent directory",
+                ))
+            })?
+            .to_path_buf(),
+    };
     let storage = StateDir::resolve()?;
 
     let script = fetch_script().await?;
@@ -175,14 +191,14 @@ pub async fn update(skip_confirm: bool, no_color: bool) -> Result<(), UpdateErro
         println!("{}", craft_ui::highlight_ansi("bash", &script));
     }
 
-    if !skip_confirm && !prompt_yes() {
+    if !skip_confirm && !prompt_yes(&install_dir) {
         println!("Aborted.");
         return Ok(());
     }
 
     let backup_path = backup_binary(&exe_path, &storage)?;
 
-    execute_script(&script)?;
+    execute_script(&script, &install_dir)?;
 
     println!();
     println!("Updated successfully.");
