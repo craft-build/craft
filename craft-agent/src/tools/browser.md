@@ -55,6 +55,24 @@ A note on setup: the browser needs the Playwright driver installed. If a browser
 
 **Dropdowns.** `select` picks `value` in the `<select>` matched by `selector`.
 
+## Tauri and webview apps
+
+The browser tool can inspect and drive the **web frontend** of a Tauri app when that frontend is served over HTTP, such as `http://localhost:1420` in `craft-desktop` dev mode. Point the browser at the dev URL, match the app window size, and use the normal browser actions:
+
+```json
+{"action": "open", "url": "http://localhost:1420", "width": 1440, "height": 900}
+```
+
+After the page loads you can screenshot the viewport, query interactables, click, type, or run JavaScript just like any other web page.
+
+What the browser tool **cannot** do without modifying the target app:
+
+- Drive the **native app shell** (menus, native dialogs, OS permissions, deep links).
+- Exercise **Tauri native commands** (`invoke` calls). These only exist inside the webview runtime, not in the served HTML.
+- Work when the webview is not served over HTTP, such as a built app loading `tauri://localhost` on macOS.
+
+This means the browser tool is a good fit for automated checks of the frontend UI, but it is not a full replacement for native UI automation.
+
 ## Migration from the old tools
 
 This single tool replaces `browser_screenshot`, `browser_navigate`, `browser_click`, and `browser_text`:

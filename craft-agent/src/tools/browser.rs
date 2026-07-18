@@ -1284,6 +1284,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_url_accepts_local_dev_server() {
+        assert_eq!(
+            validate_url("http://localhost:1420").unwrap(),
+            "http://localhost:1420"
+        );
+    }
+
+    #[test]
     fn validate_url_trims_whitespace() {
         assert_eq!(
             validate_url("  https://example.com  ").unwrap(),

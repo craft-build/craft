@@ -77,10 +77,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "wiki_append",
         ],
     ),
-    (
-        "Web & Desktop",
-        &["browser", "desktop", "webfetch", "websearch"],
-    ),
+    ("Web", &["browser", "webfetch", "websearch"]),
 ];
 
 struct ToolInfo {
