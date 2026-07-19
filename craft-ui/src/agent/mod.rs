@@ -199,6 +199,34 @@ impl AgentHandles {
             warn!("agent did not finish within {timeout:?}, forcing shutdown");
         }
     }
+
+    /// Hand back the agent task, dropping every channel so the loop can
+    /// wind down. The caller sends `CancelAll` first and then awaits all
+    /// tabs at once via [`join_all`] instead of paying a serial timeout
+    /// per tab.
+    pub(crate) fn into_task(self) -> tokio::task::JoinHandle<()> {
+        self.task
+    }
+}
+
+/// Wait for every agent task under one shared timeout, not one per task.
+pub(crate) fn join_all(tasks: Vec<tokio::task::JoinHandle<()>>, timeout: Duration) {
+    info!(
+        count = tasks.len(),
+        "waiting for agents to finish (timeout {timeout:?})"
+    );
+    tokio::runtime::Handle::current().block_on(async move {
+        let mut set = tokio::task::JoinSet::from_iter(tasks);
+        let drain = async { while set.join_next().await.is_some() {} };
+        tokio::pin!(drain);
+        let finished = tokio::select! {
+            _ = &mut drain => true,
+            _ = tokio::time::sleep(timeout) => false,
+        };
+        if !finished {
+            warn!("agents did not finish within {timeout:?}, forcing shutdown");
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -293,5 +321,41 @@ fn spawn_agent_internal(
         flow_progress_rx,
         repomap_enabled,
         task,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    const LONG_TIMEOUT: Duration = Duration::from_secs(60);
+    const SHORT_TIMEOUT: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn join_all_returns_when_all_tasks_complete() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+        join_all(Vec::new(), LONG_TIMEOUT);
+        join_all(
+            (0..3).map(|_| tokio::spawn(async {})).collect(),
+            LONG_TIMEOUT,
+        );
+    }
+
+    #[test]
+    fn join_all_stuck_task_returns_after_shared_timeout() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+        let start = Instant::now();
+        join_all(
+            vec![
+                tokio::spawn(async {}),
+                tokio::spawn(async { std::future::pending::<()>().await }),
+            ],
+            SHORT_TIMEOUT,
+        );
+        assert!(start.elapsed() >= SHORT_TIMEOUT);
     }
 }

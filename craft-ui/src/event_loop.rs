@@ -57,19 +57,22 @@ const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 const NOT_LIVE_ERR: &str = "session not live";
 
-/// Per-tab persistence outcome after `shutdown`: `Some` iff the tab had
-/// content and was saved; `None` means a deliberately unpersisted empty tab.
+/// Tabs carry their in-memory sessions so `/reload` reopens them without a
+/// disk round-trip; `session_has_content` tells which ones were saved.
 pub(crate) struct ShutdownReport {
     pub exit: ExitRequest,
-    pub tabs: Vec<Option<CraftId>>,
+    pub tabs: Vec<AppSession>,
     pub focused: usize,
 }
 
 impl ShutdownReport {
     /// Focused tab's saved id, for the exit/resume hint. `None` if the focused
     /// tab was empty (no content) and so was never persisted.
-    pub fn session_id(&self) -> Option<&CraftId> {
-        self.tabs.get(self.focused).and_then(|slot| slot.as_ref())
+    pub fn session_id(&self) -> Option<CraftId> {
+        self.tabs
+            .get(self.focused)
+            .filter(|s| crate::app::session_has_content(s))
+            .map(|s| s.id.id())
     }
 
     pub fn exit_code(&self) -> i32 {
@@ -80,7 +83,7 @@ impl ShutdownReport {
         self.exit
     }
 
-    pub fn tabs(&self) -> &[Option<CraftId>] {
+    pub fn tabs(&self) -> &[AppSession] {
         &self.tabs
     }
 
@@ -1480,19 +1483,20 @@ impl<'t> EventLoop<'t> {
             rt.app.answer_tx = None;
         }
         let mut tabs = Vec::with_capacity(self.sessions.len());
-        let runtime = tokio::runtime::Handle::current();
+        let mut agent_tasks = Vec::with_capacity(self.sessions.len());
         for rt in self.sessions.drain(..) {
-            tabs.push(persisted_tab(&rt.app));
-            rt.handles.send_cancel_all();
-            drop(rt.app);
-            // `shutdown_no_mcp`: MCP is a single shared handle across every
-            // runtime, so it must be torn down exactly once after the loop,
-            // not once per session (each extra call stalls the full
-            // MCP_SHUTDOWN_TIMEOUT after the run loop has already exited).
-            runtime.block_on(rt.handles.shutdown_no_mcp(AGENT_SHUTDOWN_TIMEOUT));
+            let SessionRuntime {
+                mut app, handles, ..
+            } = rt;
+            app.save_session();
+            // `app` drops at the end of this iteration, closing the channels
+            // the agent loop waits on, so `join_all` can finish.
+            tabs.push(app.state.session);
+            agent_tasks.push(handles.into_task());
         }
+        crate::agent::join_all(agent_tasks, AGENT_SHUTDOWN_TIMEOUT);
         if let Some(ref h) = mcp_handle {
-            runtime.block_on(h.shutdown());
+            tokio::runtime::Handle::current().block_on(h.shutdown());
         }
         match Arc::try_unwrap(self.ctx.storage_writer) {
             Ok(writer) => writer.shutdown(AGENT_SHUTDOWN_TIMEOUT),
@@ -1506,12 +1510,6 @@ impl<'t> EventLoop<'t> {
             focused: self.focused,
         }
     }
-}
-
-/// Uses the same `has_content` check as `App::save_session`, so the report and
-/// the disk can never disagree about which tabs were saved.
-pub(crate) fn persisted_tab(app: &App) -> Option<CraftId> {
-    app.has_content().then_some(app.state.session.id.id())
 }
 
 fn scroll_delta(kind: MouseEventKind, lines: u32) -> i32 {

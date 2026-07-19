@@ -40,15 +40,15 @@ pub type AppSession = craft_storage::sessions::Session<Message, TokenUsage, Tool
 pub(crate) use agent::AgentCommand;
 pub use event_loop::EventLoopParams;
 
-/// How a UI generation ended. On `Reload`, each tab is its saved session id,
-/// or `None` for an empty tab, so the caller can reopen everything from disk.
+/// How a UI generation ended. On `Reload`, each tab carries its in-memory
+/// session so the caller reopens everything without re-reading from disk.
 pub enum RunOutcome {
     Exit {
         session_id: Option<craft_storage::id::CraftId>,
         code: i32,
     },
     Reload {
-        tabs: Vec<Option<craft_storage::id::CraftId>>,
+        tabs: Vec<AppSession>,
         focused: usize,
     },
 }
@@ -67,7 +67,7 @@ pub fn run(
             focused: report.focused(),
         },
         _ => RunOutcome::Exit {
-            session_id: report.session_id().copied(),
+            session_id: report.session_id(),
             code: report.exit_code(),
         },
     })

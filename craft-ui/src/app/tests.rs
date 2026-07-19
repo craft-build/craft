@@ -14,8 +14,8 @@ use craft_agent::{
 };
 use craft_config::{PermissionsConfig, UiConfig};
 use craft_lua::{HintReader, KeymapReader, LuaCommandReader};
-use craft_providers::{ContentBlock, Effort, Role, TokenUsage};
-use craft_storage::sessions::StoredThinking;
+use craft_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
+use craft_storage::sessions::{StoredMode, StoredThinking};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use std::env;
@@ -1575,6 +1575,57 @@ fn submit_exit_quits(input: &str) {
     });
     assert_eq!(app.exit_request, ExitRequest::Success);
     assert!(matches!(&actions[0], Action::Quit));
+}
+
+#[test]
+fn session_has_content_covers_each_branch() {
+    let mut session = AppSession::new("test-model", "/tmp/test");
+    assert!(!session_has_content(&session));
+
+    session.meta.input_draft = Some("draft".into());
+    assert!(session_has_content(&session));
+    session.meta.input_draft = None;
+
+    session.meta.queued_messages = vec!["queued".into()];
+    assert!(session_has_content(&session));
+    session.meta.queued_messages.clear();
+
+    session.meta.mode = Some(StoredMode::Plan);
+    assert!(session_has_content(&session));
+    session.meta.mode = Some(StoredMode::Build);
+
+    session.messages.push(Message::user("hello".into()));
+    assert!(session_has_content(&session));
+}
+
+#[test]
+fn save_session_syncs_ephemeral_content_into_meta() {
+    let mut app = test_app();
+    app.save_session();
+    assert!(!session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    app.save_session();
+    assert!(session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    app.save_session();
+    assert!(app.state.session.meta.input_draft.is_none());
+    assert!(!session_has_content(&app.state.session));
+
+    app.update(Msg::Key(key(KeyCode::Tab)));
+    app.save_session();
+    assert_eq!(app.state.session.meta.mode, Some(StoredMode::Plan));
+    assert!(session_has_content(&app.state.session));
+
+    let mut queued = app_with_queued_message();
+    queued.save_session();
+    let session = &queued.state.session;
+    assert!(session.messages.is_empty());
+    assert!(session.meta.input_draft.is_none());
+    assert_eq!(session.meta.mode, Some(StoredMode::Build));
+    assert_eq!(session.meta.queued_messages, vec!["queued".to_string()]);
+    assert!(session_has_content(session));
 }
 
 #[test_case(0, "hello"            ; "no_images")]
