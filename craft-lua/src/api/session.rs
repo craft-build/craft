@@ -113,6 +113,23 @@ pub(crate) fn create_session_table(
     )?;
 
     t.set(
+        "prompt",
+        lua.create_async_function({
+            let tx = tx.clone();
+            move |lua, (text, opts): (String, Option<Table>)| {
+                let tx = tx.clone();
+                async move {
+                    let id = match opts {
+                        Some(opts) => opts.get("session")?,
+                        None => None,
+                    };
+                    roundtrip(lua, tx, SessionRequest::Prompt { id, text }).await
+                }
+            }
+        })?,
+    )?;
+
+    t.set(
         "set_title",
         lua.create_async_function({
             let tx = tx.clone();
@@ -177,6 +194,42 @@ mod tests {
             .unwrap();
         assert_eq!(err, None);
         assert_eq!(val.get::<String>("focused").unwrap(), "abc");
+    }
+
+    #[tokio::test]
+    async fn prompt_forwards_text_and_explicit_session_id() {
+        prompt_forwards_text_and_session_id(
+            "return session.prompt('hi', { session = 'abc' })",
+            Some("abc"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn prompt_defaults_to_focused_session() {
+        prompt_forwards_text_and_session_id("return session.prompt('hi')", None).await;
+    }
+
+    async fn prompt_forwards_text_and_session_id(code: &str, expected_id: Option<&str>) {
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = lua_with_session(Some(tx));
+        let expected_id = expected_id.map(str::to_owned);
+        let checker = std::thread::spawn(move || {
+            let Ok(UiAction::Session {
+                req: SessionRequest::Prompt { id, text },
+                reply_tx,
+            }) = rx.recv()
+            else {
+                panic!("expected prompt request");
+            };
+            assert_eq!(id, expected_id);
+            assert_eq!(text, "hi");
+            reply_tx.send(Ok(json!("queued"))).unwrap();
+        });
+        let (val, err): (String, Option<String>) = lua.load(code).eval_async().await.unwrap();
+        checker.join().unwrap();
+        assert_eq!(err, None);
+        assert_eq!(val, "queued");
     }
 
     #[tokio::test]

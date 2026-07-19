@@ -77,7 +77,7 @@ pub(crate) use crate::agent::QueuedMessage;
 pub(crate) use mode::{Mode, PlanState, PlanTrigger};
 #[cfg(test)]
 use mouse::EDGE_SCROLL_LINES;
-pub(crate) use queue::MessageQueue;
+pub(crate) use queue::{MessageQueue, SubmitOutcome};
 use session_state::SessionState;
 
 pub(crate) const RESTORE_RUN_ID: u64 = u64::MAX;
@@ -1265,13 +1265,7 @@ impl App {
             }];
         }
         let msg: QueuedMessage = sub.into();
-        if self.status == Status::Streaming {
-            self.queue_and_notify(msg);
-            vec![]
-        } else {
-            self.run_id += 1;
-            self.start_from_queue(&msg, false)
-        }
+        self.submit_or_queue(msg)
     }
 
     fn handle_cancel(&mut self) -> Vec<Action> {
@@ -2011,17 +2005,10 @@ impl App {
             return vec![];
         };
         let rendered = cmd.render(args);
-        let msg = QueuedMessage {
+        self.submit_or_queue(QueuedMessage {
             text: rendered,
             images: Vec::new(),
-        };
-        if self.status == Status::Streaming {
-            self.queue_and_notify(msg);
-            vec![]
-        } else {
-            self.run_id += 1;
-            self.start_from_queue(&msg, false)
-        }
+        })
     }
 
     fn cmd_cd(&mut self, args: &str) -> Vec<Action> {
