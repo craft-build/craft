@@ -14,7 +14,7 @@ use craft_agent::{
 };
 use craft_config::{PermissionsConfig, UiConfig};
 use craft_lua::{HintReader, KeymapReader, LuaCommandReader};
-use craft_providers::{ContentBlock, Role, TokenUsage};
+use craft_providers::{ContentBlock, Effort, Role, TokenUsage};
 use craft_storage::sessions::StoredThinking;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -2385,6 +2385,12 @@ fn thinking_explicit_args() {
         args: "8192".into(),
     });
     assert_eq!(app.state.thinking, ThinkingConfig::Budget(8192));
+
+    app.execute_command(ParsedCommand {
+        name: "/thinking".into(),
+        args: "high".into(),
+    });
+    assert_eq!(app.state.thinking, ThinkingConfig::Effort(Effort::High));
 }
 
 #[test]

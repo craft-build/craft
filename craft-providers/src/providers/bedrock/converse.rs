@@ -189,11 +189,10 @@ pub(crate) fn to_aws_tools(tools: &Value) -> Option<ToolConfiguration> {
 
 pub(crate) fn inference_config(model: &Model, opts: &RequestOptions) -> InferenceConfiguration {
     let mut builder = InferenceConfiguration::builder();
-    let max_tokens = if model.max_output_tokens > 0 {
-        i32::try_from(model.max_output_tokens).unwrap_or(FALLBACK_MAX_TOKENS)
-    } else {
-        FALLBACK_MAX_TOKENS
-    };
+    let max_tokens = model
+        .max_output_tokens
+        .map(|n| i32::try_from(n).unwrap_or(FALLBACK_MAX_TOKENS))
+        .unwrap_or(FALLBACK_MAX_TOKENS);
     builder = builder.max_tokens(max_tokens);
     if opts.thinking.is_enabled()
         && let crate::types::ThinkingConfig::Budget(_) = opts.thinking

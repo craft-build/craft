@@ -7,7 +7,9 @@ use tracing::warn;
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
-use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig};
+use crate::{
+    AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig, dialect,
+};
 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyPool, ResolvedAuth, lock_unpoison};
@@ -128,20 +130,15 @@ impl Provider for DeepSeek {
 
             // DeepSeek enables reasoning by default; Adaptive and Budget
             // use the model's default reasoning behavior.
-            match thinking {
-                ThinkingConfig::Off => {
-                    body["thinking"] = serde_json::json!({"type": "disabled"});
-                }
-                ThinkingConfig::Adaptive => {
-                    body["thinking"] = serde_json::json!({"type": "enabled"});
-                    pad_reasoning_content(&model.id, &mut body);
-                }
-                ThinkingConfig::Budget(_) => {
-                    body["thinking"] = serde_json::json!({"type": "enabled"});
-                    body["reasoning_effort"] = serde_json::json!("max");
+            if thinking.is_enabled() {
+                body["thinking"] = serde_json::json!({"type": "enabled"});
+                thinking.apply_reasoning_effort(&mut body, &dialect::DEEPSEEK, model);
+                if matches!(thinking, ThinkingConfig::Budget(_)) {
                     warn!("DeepSeek reasoning does not support token budgets");
-                    pad_reasoning_content(&model.id, &mut body);
                 }
+                pad_reasoning_content(&model.id, &mut body);
+            } else {
+                body["thinking"] = serde_json::json!({"type": "disabled"});
             }
 
             self.compat

@@ -9,7 +9,7 @@ use std::ops::AddAssign;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use craft_storage::sessions::StoredTokenUsage;
+use craft_storage::sessions::{MIN_THINKING_BUDGET, StoredTokenUsage};
 use serde::{Deserialize, Serialize};
 
 use crate::provider::ProviderKind;
@@ -228,7 +228,8 @@ pub struct Model {
     pub supports_thinking_override: Option<bool>,
     pub supports_vision_override: Option<bool>,
     pub pricing: ModelPricing,
-    pub max_output_tokens: u32,
+    /// `None` when unknown, see [`ProviderKind::fallback_max_output`].
+    pub max_output_tokens: Option<u32>,
     pub context_window: u32,
 }
 
@@ -247,7 +248,7 @@ impl Model {
             Some(e) => (
                 e.family,
                 e.pricing.clone(),
-                e.max_output_tokens,
+                Some(e.max_output_tokens),
                 anthropic::shared::long_context_window(model_id).unwrap_or(e.context_window),
             ),
             None => {
@@ -260,7 +261,7 @@ impl Model {
                         .unwrap_or(ModelPricing::ZERO),
                     discovered
                         .and_then(|d| d.max_output_tokens)
-                        .unwrap_or_else(|| provider.fallback_max_output()),
+                        .or_else(|| provider.fallback_max_output()),
                     discovered
                         .and_then(|d| d.context_window)
                         .unwrap_or_else(|| provider.fallback_context_window()),
@@ -296,6 +297,15 @@ impl Model {
     pub fn supports_tool_examples(&self) -> bool {
         self.supports_tool_examples_override
             .unwrap_or_else(|| self.family.supports_tool_examples())
+    }
+
+    /// Half the output window, so the answer always has room after the
+    /// thinking. `None` when the window is unknown: callers must then let
+    /// budgets through unclamped. Providers cap further only where the API
+    /// documents a hard limit (currently just Google).
+    pub fn max_thinking_budget(&self) -> Option<u32> {
+        self.max_output_tokens
+            .map(|n| (n / 2).max(MIN_THINKING_BUDGET))
     }
 
     /// Gates vision-only tools (`view_image`) and image blocks at request time.
@@ -626,8 +636,9 @@ mod tests {
                 let model = Model::from_tier(provider, tier).unwrap();
                 assert_eq!(model.provider, provider);
                 assert_eq!(model.tier, tier);
-                assert!(model.max_output_tokens > 0);
-                assert!(model.context_window >= model.max_output_tokens);
+                let max_output = model.max_output_tokens.unwrap();
+                assert!(max_output > 0);
+                assert!(model.context_window >= max_output);
             }
         }
     }
@@ -713,7 +724,6 @@ mod tests {
             (0.0, 0.0, 0.0, 0.0)
         );
     }
-
     #[test_case("claude-opus-4-8" ; "opus_4_8")]
     fn supports_fast_true_for_anthropic_opus(model_id: &str) {
         let model = Model::from_base(ProviderKind::Anthropic, model_id, None);

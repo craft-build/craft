@@ -23,7 +23,7 @@ use crate::model::{Model, ModelInfo, ModelPricing};
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::anthropic::shared;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use crate::{AgentError, EffortScale, Message, ProviderEvent, RequestOptions, StreamResponse};
+use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
 use super::{ResolvedAuth, http_client};
 
@@ -496,7 +496,7 @@ impl Opencode {
     ) -> Result<StreamResponse, AgentError> {
         let mut body = self.chat_compat.build_body(model, messages, system, tools);
         opts.thinking
-            .apply_reasoning_effort(&mut body, EffortScale::PreferHigh);
+            .apply_reasoning_effort(&mut body, &dialect::PREFER_HIGH, model);
         self.chat_compat
             .do_stream(model, &[], &body, event_tx, auth)
             .await
@@ -601,7 +601,7 @@ impl Provider for Opencode {
 
             let model = Model {
                 id: actual_id.to_string(),
-                max_output_tokens: meta.output,
+                max_output_tokens: Some(meta.output),
                 context_window: meta.context,
                 ..model_for_stream
             };

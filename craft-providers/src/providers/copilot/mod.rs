@@ -13,6 +13,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
+use super::anthropic::shared;
 use super::{MIME_JSON, lock_unpoison, openai::responses, openai_compat};
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
@@ -291,13 +292,13 @@ impl Copilot {
         let auth = self.auth().await?;
         let mut body = json!({
             "model": model.id,
-            "max_tokens": model.max_output_tokens,
+            "max_tokens": model.max_output_tokens.unwrap_or(shared::FALLBACK_MAX_TOKENS),
             "system": [{"type": "text", "text": system}],
             "messages": anthropic_messages(messages),
             "tools": tools,
             "stream": true,
         });
-        thinking.apply_to_body(&mut body, &model.id);
+        thinking.apply_to_body(&mut body, model);
 
         let response = self
             .build_post(&auth, MESSAGES_PATH, Some("conversation-agent"), &body)?

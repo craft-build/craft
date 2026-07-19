@@ -415,7 +415,7 @@ pub(crate) fn test_model() -> craft_providers::Model {
         supports_thinking_override: None,
         supports_vision_override: Some(true),
         pricing: test_pricing(),
-        max_output_tokens: 8192,
+        max_output_tokens: Some(8192),
         context_window: TEST_CONTEXT_WINDOW,
     }
 }

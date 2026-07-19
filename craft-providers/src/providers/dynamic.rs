@@ -475,7 +475,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         supports_thinking_override: script_model.supports_thinking,
         supports_vision_override: script_model.supports_vision,
         pricing: script_model.pricing.clone().unwrap_or_default(),
-        max_output_tokens: script_model.max_output_tokens,
+        max_output_tokens: Some(script_model.max_output_tokens),
         context_window: script_model.context_window,
     })
 }
@@ -493,7 +493,7 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
         supports_thinking_override: script_model.supports_thinking,
         supports_vision_override: script_model.supports_vision,
         pricing: script_model.pricing.clone().unwrap_or_default(),
-        max_output_tokens: script_model.max_output_tokens,
+        max_output_tokens: Some(script_model.max_output_tokens),
         context_window: script_model.context_window,
     })
 }

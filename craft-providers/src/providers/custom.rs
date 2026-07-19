@@ -145,7 +145,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
     let max_output_tokens = declared
         .and_then(|m| m.max_output_tokens)
         .or(cached.as_ref().and_then(|c| c.max_output_tokens))
-        .unwrap_or_else(|| kind.fallback_max_output());
+        .or_else(|| kind.fallback_max_output());
     let context_window = declared
         .and_then(|m| m.context_window)
         .or(cached.as_ref().and_then(|c| c.context_window))
