@@ -1,8 +1,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::c_int;
+use std::panic::catch_unwind;
 use std::path::PathBuf;
+use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use arc_swap::ArcSwap;
@@ -17,7 +20,7 @@ use craft_agent::tools::{
 };
 use craft_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
 use include_dir::Dir;
-use mlua::{Function, Lua, RegistryKey, Value as LuaValue, VmState};
+use mlua::{Compiler, Function, Lua, RegistryKey, Value as LuaValue, ffi};
 use serde_json::Value;
 
 use craft_config::RawConfig;
@@ -51,9 +54,14 @@ const NIL_WITHOUT_FINISH_MSG: &str =
 pub(crate) const CANCELLED_MSG: &str = "cancelled";
 const MAX_INFLIGHT_TOOLS: usize = 64;
 const GC_STEP_INTERVAL: usize = 4;
-const INTERRUPT_CANCEL_CHECK_INTERVAL: u32 = 128;
+const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const OPT_LEVEL_JIT: u8 = 2;
+const OPT_LEVEL_DEBUGGABLE: u8 = 1;
+const DEBUG_INFO_FULL: u8 = 2;
 const ASYNC_RUN_DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
+/// Async tasks spawned during restore may spawn further tasks; cap the rounds.
 const RESTORE_SPAWN_ROUNDS: usize = 8;
+/// Keeps a buggy plugin's restore task from freezing the lua loop.
 const RESTORE_ASYNC_DEADLINE: Duration = Duration::from_secs(10);
 const TURN_END_EVENT: &str = "TurnEnd";
 
@@ -262,33 +270,130 @@ fn resolve_root_buf(handle: &TaskHandle) -> Option<Arc<SharedBuf>> {
     lock_cell(handle).bufs.live_buf().cloned()
 }
 
-fn install_interrupt(lua: &Lua, shutdown: Arc<AtomicBool>) {
-    let interrupt_lua = lua.clone();
-    let interrupt_tick = Cell::new(0u32);
-    lua.set_interrupt(move |_| {
-        if shutdown.load(Ordering::Acquire) {
-            return Err(mlua::Error::runtime(INTERRUPT_SHUTDOWN_MSG));
-        }
-        let tick = interrupt_tick.get().wrapping_add(1);
-        interrupt_tick.set(tick);
-        if !tick.is_multiple_of(INTERRUPT_CANCEL_CHECK_INTERVAL) {
-            return Ok(VmState::Continue);
-        }
-        let stop = interrupt_lua.app_data_ref::<TaskHandle>().and_then(|h| {
-            let cell = lock_cell(&h);
-            if cell.cancel.is_cancelled() {
-                Some(INTERRUPT_CANCELLED_MSG)
-            } else if cell.deadline.get().is_some_and(|d| Instant::now() > d) {
-                Some(INTERRUPT_DEADLINE_MSG)
-            } else {
-                None
+/// Sole place the `--no-jit` flag touches VM state. Called once at VM
+/// creation, before any chunk (init.lua included) is compiled. Jit off
+/// drops to the O1 interpreter with full debug info: that combination
+/// keeps the most usable backtraces.
+fn apply_jit(lua: &Lua, enabled: bool) {
+    lua.enable_jit(enabled);
+    let compiler = if enabled {
+        Compiler::new().set_optimization_level(OPT_LEVEL_JIT)
+    } else {
+        Compiler::new()
+            .set_optimization_level(OPT_LEVEL_DEBUGGABLE)
+            .set_debug_level(DEBUG_INFO_FULL)
+    };
+    lua.set_compiler(compiler);
+}
+
+type InterruptFn = unsafe extern "C-unwind" fn(*mut ffi::lua_State, c_int);
+
+/// The poker thread and the VM thread race on this field, so the write
+/// must be atomic to stay defined behavior on the Rust side.
+fn store_interrupt(state: *mut ffi::lua_State, cb: Option<InterruptFn>) {
+    let raw = cb.map_or(ptr::null_mut(), |f| f as *mut ());
+    unsafe {
+        let slot = &raw mut (*ffi::lua_callbacks(state)).interrupt;
+        AtomicPtr::from_ptr(slot.cast::<*mut ()>()).store(raw, Ordering::Release);
+    }
+}
+
+/// Shutdown flag mirrored into app data so the watchdog interrupt can
+/// re-check it on the Lua thread.
+struct ShutdownFlag(Arc<AtomicBool>);
+
+/// Cancellation watchdog. A resident mlua interrupt fires at every
+/// safepoint and costs ~100ns a pop, which ate most of the codegen win
+/// (see `benches/luau_perf.rs`). So the VM runs with no interrupt at
+/// all, and this thread arms a one-shot native one every poll tick.
+/// Luau documents `lua_callbacks(L)->interrupt` as safe to assign from
+/// another thread, and the VM only pays a null check per safepoint.
+/// The callback re-checks shutdown/cancel/deadline on the Lua thread
+/// before raising, so a stale poke never kills the wrong task.
+struct Watchdog {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn spawn(lua: &Lua, shutdown: Arc<AtomicBool>) -> Self {
+        lua.set_app_data(ShutdownFlag(shutdown));
+        let main_state =
+            lua.exec_raw_lua(|raw| unsafe { ffi::lua_mainthread(raw.state()) }) as usize;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = thread::spawn({
+            let stop = Arc::clone(&stop);
+            // Keeps the VM alive while this thread can still write to it,
+            // even if a refactor reorders drops.
+            let keep_alive = lua.clone();
+            move || {
+                let _keep_alive = keep_alive;
+                loop {
+                    thread::park_timeout(WATCHDOG_POLL_INTERVAL);
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    store_interrupt(main_state as *mut ffi::lua_State, Some(watchdog_interrupt));
+                }
             }
         });
-        if let Some(msg) = stop {
-            return Err(mlua::Error::runtime(msg));
+        Self {
+            stop,
+            thread: Some(thread),
         }
-        Ok(VmState::Continue)
-    });
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+    }
+}
+
+/// One-shot interrupt armed by [`Watchdog`]: disarms itself, re-checks the
+/// kill conditions, and raises a plain string error that unwinds like any
+/// Lua error. Must not raise during GC (`gc >= 0`), same rule mlua follows.
+unsafe extern "C-unwind" fn watchdog_interrupt(state: *mut ffi::lua_State, gc: c_int) {
+    if gc >= 0 {
+        return;
+    }
+    store_interrupt(state, None);
+    // A Rust panic must not unwind into the VM; treat it as "no kill".
+    let msg = catch_unwind(|| interrupt_reason(state)).unwrap_or(None);
+    if let Some(msg) = msg {
+        unsafe {
+            // A safepoint frame may have zero free slots; grow before pushing
+            // (raw pushes assert a free slot). On failure the next poke retries.
+            if ffi::lua_checkstack(state, 1) == 0 {
+                return;
+            }
+            ffi::lua_pushlstring(state, msg.as_ptr().cast(), msg.len());
+            ffi::lua_error(state);
+        }
+    }
+}
+
+fn interrupt_reason(state: *mut ffi::lua_State) -> Option<&'static str> {
+    let lua = unsafe { Lua::get_or_init_from_ptr(state) };
+    if lua
+        .app_data_ref::<ShutdownFlag>()
+        .is_some_and(|f| f.0.load(Ordering::Relaxed))
+    {
+        return Some(INTERRUPT_SHUTDOWN_MSG);
+    }
+    let handle = lua.app_data_ref::<TaskHandle>()?;
+    let cell = lock_cell(&handle);
+    if cell.cancel.is_cancelled() {
+        Some(INTERRUPT_CANCELLED_MSG)
+    } else if cell.deadline.get().is_some_and(|d| Instant::now() > d) {
+        Some(INTERRUPT_DEADLINE_MSG)
+    } else {
+        None
+    }
 }
 
 /// Publishes a `TaskCell` into `Lua::app_data` for the duration of a
@@ -687,6 +792,9 @@ type PluginMap = Rc<RefCell<HashMap<Arc<str>, HashMap<Arc<str>, ToolKeys>>>>;
 /// Plugins run sandboxed: `require`/`io`/`package` are removed, and
 /// `os`/`debug` go through Luau's built-in restrictions.
 struct LuaRuntime {
+    /// Held for its Drop (joins the poker thread). Field order doesn't
+    /// matter: the thread keeps its own `Lua` clone alive.
+    _watchdog: Watchdog,
     lua: Lua,
     pending: PendingTools,
     plugins: PluginMap,
@@ -712,11 +820,13 @@ impl LuaRuntime {
         hint_writer: HintWriter,
         embed_tx: Option<crate::api::embed::EmbedChannel>,
         terminal_backend: Arc<dyn TerminalBackend>,
+        jit: bool,
     ) -> Result<Self, PluginError> {
         let lua = Lua::new();
+        apply_jit(&lua, jit);
         let pending: PendingTools = Arc::new(Mutex::new(Vec::new()));
 
-        install_interrupt(&lua, Arc::clone(&shutdown));
+        let watchdog = Watchdog::spawn(&lua, Arc::clone(&shutdown));
 
         let globals = lua.globals();
         for name in &["require", "io", "package"] {
@@ -751,6 +861,7 @@ impl LuaRuntime {
         lua.set_app_data::<RefCell<BgJobMap>>(RefCell::new(BgJobMap::new()));
 
         Ok(Self {
+            _watchdog: watchdog,
             lua,
             pending,
             plugins: Rc::new(RefCell::new(HashMap::new())) as PluginMap,
@@ -1594,7 +1705,7 @@ fn timeout_reply(handle: &TaskHandle, plugin: &str, tool: &str) -> ToolCallReply
     }
 }
 
-/// Deadlines work in two layers: the interrupt hook catches tight CPU
+/// Deadlines work in two layers: the watchdog interrupt catches tight CPU
 /// loops, and the dispatch loop catches I/O waits between job events.
 #[allow(clippy::too_many_arguments)]
 async fn run_tool_call(
@@ -1696,7 +1807,7 @@ async fn run_tool_call(
         }
     });
 
-    // Both the dispatch loop and the interrupt hook read the live
+    // Both the dispatch loop and the watchdog interrupt read the live
     // deadline from TaskCell. The outer `tool.rs` timeout is the
     // absolute backstop.
     let reply = call_future.await;
@@ -1721,6 +1832,7 @@ pub fn spawn(
     bundled_dirs: &'static [&'static Dir<'static>],
     embed_tx: Option<crate::api::embed::EmbedChannel>,
     terminal_backend: Arc<dyn TerminalBackend>,
+    jit: bool,
 ) -> Result<LuaThread, PluginError> {
     let (tx, rx) = flume::unbounded::<Request>();
     let tx_clone = tx.clone();
@@ -1744,9 +1856,10 @@ pub fn spawn(
                  command_writer,
                  keymap_writer,
                  hint_writer,
-                 embed_tx,
-                 terminal_backend,
-             ) {
+                  embed_tx,
+                  terminal_backend,
+                  jit,
+              ) {
                 Ok(r) => {
                     let _ = init_tx.send(Ok(()));
                     r
@@ -2065,8 +2178,31 @@ mod tests {
         assert!(lock_cell(&handle).bufs.live_buf().is_none());
     }
 
-    fn looping_callback(lua: &Lua) -> Function {
-        lua.load("for _ = 1, 100000 do end return true")
+    fn watchdog_lua(shutdown: bool) -> (Lua, Watchdog) {
+        let lua = Lua::new();
+        let watchdog = Watchdog::spawn(&lua, Arc::new(AtomicBool::new(shutdown)));
+        (lua, watchdog)
+    }
+
+    /// Generous vs the ~10ms expected kill; only a broken watchdog gets here.
+    const WATCHDOG_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// `while true do end` only stops if the watchdog kills it, so run it
+    /// on a helper thread: a broken watchdog fails the test fast under any
+    /// harness (not just nextest's terminate-after) instead of hanging it.
+    /// The leaked thread then spins until the test process exits.
+    fn hot_loop_expecting_kill(lua: &Lua) -> mlua::Error {
+        let f = lua.load("while true do end").into_function().unwrap();
+        let (tx, rx) = flume::bounded(1);
+        thread::spawn(move || drop(tx.send(f.call::<bool>(()))));
+        rx.recv_timeout(WATCHDOG_TEST_TIMEOUT)
+            .expect("watchdog never killed the hot loop")
+            .unwrap_err()
+    }
+
+    /// Runs long enough (50ms) to guarantee several watchdog pokes.
+    fn timed_loop(lua: &Lua) -> Function {
+        lua.load("local t = os.clock() while os.clock() - t < 0.05 do end return true")
             .into_function()
             .unwrap()
     }
@@ -2084,21 +2220,19 @@ mod tests {
 
     #[test]
     fn stale_cancelled_handle_aborts_callback_without_fresh_scope() {
-        let lua = Lua::new();
-        install_interrupt(&lua, Arc::new(AtomicBool::new(false)));
+        let (lua, _watchdog) = watchdog_lua(false);
         lua.set_app_data::<TaskHandle>(cancelled_handle());
-        let err = looping_callback(&lua).call::<bool>(()).unwrap_err();
+        let err = hot_loop_expecting_kill(&lua);
         assert!(err.to_string().contains(INTERRUPT_CANCELLED_MSG));
     }
 
     #[test]
     fn fresh_task_scope_shields_callback_from_stale_cancelled_handle() {
-        let lua = Lua::new();
-        install_interrupt(&lua, Arc::new(AtomicBool::new(false)));
+        let (lua, _watchdog) = watchdog_lua(false);
         lua.set_app_data::<TaskHandle>(cancelled_handle());
 
         let scope = TaskScope::detached(&lua);
-        let result = looping_callback(&lua).call::<bool>(());
+        let result = timed_loop(&lua).call::<bool>(());
         drop(scope);
 
         assert!(result.unwrap());
@@ -2106,15 +2240,31 @@ mod tests {
 
     #[test]
     fn shutdown_flag_aborts_callback_even_with_fresh_scope() {
-        let lua = Lua::new();
-        let shutdown = Arc::new(AtomicBool::new(true));
-        install_interrupt(&lua, shutdown);
+        let (lua, _watchdog) = watchdog_lua(true);
 
         let scope = TaskScope::detached(&lua);
-        let err = looping_callback(&lua).call::<bool>(()).unwrap_err();
+        let err = hot_loop_expecting_kill(&lua);
         drop(scope);
 
         assert!(err.to_string().contains(INTERRUPT_SHUTDOWN_MSG));
+    }
+
+    #[test]
+    fn jit_busy_loop_killed_at_deadline() {
+        let (lua, _watchdog) = watchdog_lua(false);
+        apply_jit(&lua, true);
+
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let cell = TaskCell::new(
+            CancelToken::none(),
+            Some(deadline),
+            None,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        );
+        lua.set_app_data::<TaskHandle>(Arc::new(Mutex::new(cell)));
+
+        let err = hot_loop_expecting_kill(&lua);
+        assert!(err.to_string().contains(INTERRUPT_DEADLINE_MSG));
     }
 
     fn task_cell(live: Option<LiveCtx>) -> TaskCell {

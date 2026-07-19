@@ -112,15 +112,27 @@ impl PluginHost {
         registry: Arc<ToolRegistry>,
         embed_tx: Option<crate::api::embed::EmbedChannel>,
     ) -> Result<Self, PluginError> {
-        Self::with_terminal_backend(registry, embed_tx, Arc::new(LocalTerminal))
+        Self::with_jit(registry, embed_tx, true)
+    }
+
+    /// `jit: false` (the `--no-jit` flag) runs plugin Lua on the O1
+    /// interpreter with full debug info. Applied at VM creation, so
+    /// every chunk gets it, init.lua files included.
+    pub fn with_jit(
+        registry: Arc<ToolRegistry>,
+        embed_tx: Option<crate::api::embed::EmbedChannel>,
+        jit: bool,
+    ) -> Result<Self, PluginError> {
+        Self::with_terminal_backend(registry, embed_tx, Arc::new(LocalTerminal), jit)
     }
 
     pub fn with_terminal_backend(
         registry: Arc<ToolRegistry>,
         embed_tx: Option<crate::api::embed::EmbedChannel>,
         terminal_backend: Arc<dyn TerminalBackend>,
+        jit: bool,
     ) -> Result<Self, PluginError> {
-        let lua = runtime::spawn(registry, *BUNDLED_DIRS, embed_tx, terminal_backend)?;
+        let lua = runtime::spawn(registry, *BUNDLED_DIRS, embed_tx, terminal_backend, jit)?;
         Ok(Self { inner: Some(lua) })
     }
 
@@ -177,6 +189,9 @@ impl PluginHost {
     }
 
     pub fn load_builtins(&mut self, config: &PluginsConfig) -> Result<(), PluginError> {
+        if self.inner.is_none() {
+            return Ok(());
+        }
         for builtin in &config.tools {
             let dir = match BUNDLED_PLUGINS.iter().find(|p| p.name == builtin.as_str()) {
                 Some(p) => &p.dir,
@@ -399,6 +414,25 @@ mod tests {
     use crate::api::util::command::{LuaCommandInfo, LuaCommandWriter};
     use craft_agent::prompt::{PromptId, Slot};
     use craft_agent::tools::ToolRegistry;
+
+    /// jit=true is exercised by the whole integration suite
+    /// (`tests/plugin_host.rs` boots hosts via `new`); only the O1
+    /// interpreter path needs its own coverage.
+    #[test]
+    fn with_jit_off_loads_builtins_and_registers_tools() {
+        let reg = Arc::new(ToolRegistry::new());
+        let mut host = PluginHost::with_jit(Arc::clone(&reg), None, false).unwrap();
+        host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+            .unwrap();
+        assert!(reg.has("glob"));
+    }
+
+    #[test]
+    fn load_builtins_on_disabled_host_is_noop() {
+        let mut host = PluginHost::disabled();
+        host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+            .unwrap();
+    }
 
     #[test]
     fn command_writer_reader_pair_works() {

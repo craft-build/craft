@@ -150,7 +150,7 @@ etcetera = "0.11"
 dotenvy = "0.15"
 tree-sitter = "0.26"
 include_dir = "0.7"
-mlua = { version = "0.11", features = ["luau", "async", "send", "serde", "macros"] }
+mlua = { version = "0.11", features = ["luau", "luau-jit", "async", "send", "serde", "macros"] }
 minijinja = "2"
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"

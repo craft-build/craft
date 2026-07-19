@@ -25,7 +25,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Outline { path }) => {
-            subcmd::outline(&path, cli.no_plugins).await?;
+            subcmd::outline(&path, cli.no_plugins, cli.no_jit).await?;
         }
         Some(Command::Models) => {
             subcmd::models().await;
@@ -55,7 +55,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             MigrateAction::Xdg => migrate::xdg()?,
         },
         Some(Command::Acp { yolo }) => {
-            subcmd::acp::run(yolo).await?;
+            subcmd::acp::run(yolo, cli.no_jit).await?;
         }
         Some(Command::Run(args)) => {
             subcmd::run::run(args).await?;
@@ -98,7 +98,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             tools,
             names,
         }) => {
-            subcmd::prompt(&variant, plan, tools, names)?;
+            subcmd::prompt(&variant, plan, tools, names, cli.no_jit)?;
         }
         None => {
             tui::run(cli).await?;

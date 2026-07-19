@@ -76,7 +76,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     let mut plugin_host = if cli.no_plugins {
         PluginHost::disabled()
     } else {
-        PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
+        PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !cli.no_jit)
             .context("initialize lua plugin host")?
     };
 
@@ -84,9 +84,10 @@ pub async fn run(cli: Cli) -> Result<()> {
     if !cli.no_plugins {
         let (tx, rx) = flume::unbounded::<craft_agent::EmbedRequest>();
         embed_rx = Some(rx);
-        plugin_host = PluginHost::new(
+        plugin_host = PluginHost::with_jit(
             Arc::clone(ToolRegistry::native_arc()),
             Some(craft_lua::EmbedChannel::new(tx)),
+            !cli.no_jit,
         )
         .context("initialize lua plugin host")?;
     }

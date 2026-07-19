@@ -12,15 +12,16 @@ use craft_storage::flow::FlowStore;
 
 use crate::setup;
 
-pub async fn run(yolo: bool) -> Result<()> {
+pub async fn run(yolo: bool, no_jit: bool) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     craft_providers::model_registry::load_from_storage(&storage);
 
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
-        .context("initialize lua plugin host")?;
+    let mut plugin_host =
+        PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !no_jit)
+            .context("initialize lua plugin host")?;
 
     let raw_config = plugin_host
         .load_init_files(&cwd)

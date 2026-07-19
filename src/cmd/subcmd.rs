@@ -534,14 +534,14 @@ pub fn completions(shell: crate::cli::CompletionShell) -> Result<()> {
     Ok(())
 }
 
-pub async fn outline(path: &str, no_plugins: bool) -> Result<()> {
+pub async fn outline(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
     let mut host = if no_plugins {
         PluginHost::disabled()
     } else {
-        PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
+        PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !no_jit)
             .context("initialize lua plugin host")?
     };
 
@@ -609,6 +609,7 @@ pub fn prompt(
     plan: bool,
     tools: bool,
     names: bool,
+    no_jit: bool,
 ) -> Result<()> {
     use crate::cli::PromptVariant;
     use craft_agent::AgentMode;
@@ -626,7 +627,8 @@ pub fn prompt(
 
     let vars = template::env_vars();
     let reg = ToolRegistry::native_arc();
-    let mut host = PluginHost::new(Arc::clone(reg), None).context("initialize lua plugin host")?;
+    let mut host = PluginHost::with_jit(Arc::clone(reg), None, !no_jit)
+        .context("initialize lua plugin host")?;
     let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
