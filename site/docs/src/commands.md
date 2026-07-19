@@ -23,6 +23,7 @@ Type `/` in the input box to open the command palette.
 | `/thinking` | Toggle extended thinking (off, adaptive, or budget) |
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/exit` | Exit the application |
+| `/reload` | Reload plugins and config |
 | `/goal` | Set a goal the agent must meet before stopping (blank to clear) |
 | `/recipe` | Browse and run a recipe |
 | `/dream` | Consolidate and curate project memory |

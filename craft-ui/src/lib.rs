@@ -40,13 +40,35 @@ pub type AppSession = craft_storage::sessions::Session<Message, TokenUsage, Tool
 pub(crate) use agent::AgentCommand;
 pub use event_loop::EventLoopParams;
 
+/// How a UI generation ended. On `Reload`, each tab is its saved session id,
+/// or `None` for an empty tab, so the caller can reopen everything from disk.
+pub enum RunOutcome {
+    Exit {
+        session_id: Option<craft_storage::id::CraftId>,
+        code: i32,
+    },
+    Reload {
+        tabs: Vec<Option<craft_storage::id::CraftId>>,
+        focused: usize,
+    },
+}
+
 pub fn run(
     handle: tokio::runtime::Handle,
     params: EventLoopParams,
     initial_prompt: Option<String>,
-) -> Result<event_loop::ShutdownResult> {
+) -> Result<RunOutcome> {
     let _guard = handle.enter();
     let (_guard, mut terminal) = terminal::TerminalGuard::init()?;
-    let el = event_loop::EventLoop::new(&mut terminal, params)?;
-    el.run(initial_prompt)
+    let report = event_loop::EventLoop::new(&mut terminal, params)?.run(initial_prompt)?;
+    Ok(match report.exit_request() {
+        components::ExitRequest::Reload => RunOutcome::Reload {
+            tabs: report.tabs().to_vec(),
+            focused: report.focused(),
+        },
+        _ => RunOutcome::Exit {
+            session_id: report.session_id().copied(),
+            code: report.exit_code(),
+        },
+    })
 }

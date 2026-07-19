@@ -108,6 +108,11 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 0,
     },
     BuiltinCommand {
+        name: "/reload",
+        description: "Reload plugins and config",
+        max_args: 0,
+    },
+    BuiltinCommand {
         name: "/goal",
         description: "Set a goal the agent must meet before stopping (blank to clear)",
         max_args: usize::MAX,

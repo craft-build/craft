@@ -1183,9 +1183,13 @@ impl App {
     }
 
     fn quit(&mut self) -> Vec<Action> {
+        self.quit_with(ExitRequest::Success)
+    }
+
+    fn quit_with(&mut self, req: ExitRequest) -> Vec<Action> {
         self.save_session();
         self.save_input_history();
-        self.exit_request = ExitRequest::Success;
+        self.exit_request = req;
         vec![Action::Quit]
     }
 
@@ -1665,6 +1669,7 @@ impl App {
                 vec![]
             }
             "/exit" => self.quit(),
+            "/reload" => self.quit_with(ExitRequest::Reload),
             "/goal" => {
                 let goal = cmd.args.trim().to_string();
                 if goal.is_empty() {

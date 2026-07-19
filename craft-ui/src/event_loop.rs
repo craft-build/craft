@@ -26,7 +26,7 @@ use craft_providers::Timeouts;
 use craft_providers::provider::{Provider, fetch_all_models, from_model};
 use craft_providers::{Message, Model};
 use craft_storage::StateDir;
-use craft_storage::id::{CraftId, CraftIdParseError, SessionRef};
+use craft_storage::id::{CraftId, CraftIdParseError};
 use crossterm::event::{
     Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
@@ -56,32 +56,47 @@ const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
 
-pub struct ShutdownResult {
-    session_id: Option<SessionRef>,
-    exit_code: i32,
+/// Per-tab persistence outcome after `shutdown`: `Some` iff the tab had
+/// content and was saved; `None` means a deliberately unpersisted empty tab.
+pub(crate) struct ShutdownReport {
+    pub exit: ExitRequest,
+    pub tabs: Vec<Option<CraftId>>,
+    pub focused: usize,
 }
 
-impl ShutdownResult {
-    pub fn session_id(&self) -> Option<&SessionRef> {
-        self.session_id.as_ref()
+impl ShutdownReport {
+    /// Focused tab's saved id, for the exit/resume hint. `None` if the focused
+    /// tab was empty (no content) and so was never persisted.
+    pub fn session_id(&self) -> Option<&CraftId> {
+        self.tabs.get(self.focused).and_then(|slot| slot.as_ref())
     }
 
     pub fn exit_code(&self) -> i32 {
-        self.exit_code
+        self.exit.code()
     }
 
-    /// No-op now that `shutdown` consumes every runtime internally. Kept for
-    /// callers that pair creation with teardown (`src/cmd/tui.rs`).
-    pub async fn cleanup(self) {}
+    pub fn exit_request(&self) -> ExitRequest {
+        self.exit
+    }
+
+    pub fn tabs(&self) -> &[Option<CraftId>] {
+        &self.tabs
+    }
+
+    pub fn focused(&self) -> usize {
+        self.focused
+    }
 }
 
-type RunResult = Result<ShutdownResult>;
+type RunResult = Result<ShutdownReport>;
 
 pub struct EventLoopParams {
     pub model: Model,
     pub needs_login: bool,
     pub commands: Vec<CustomCommand>,
-    pub session: AppSession,
+    pub sessions: Vec<AppSession>,
+    pub focused: usize,
+    pub startup_warnings: Vec<String>,
     pub storage: StateDir,
     pub config: AgentConfig,
     pub compression: craft_config::CompressionConfig,
@@ -472,7 +487,9 @@ impl<'t> EventLoop<'t> {
             model,
             needs_login,
             commands,
-            session,
+            sessions,
+            focused,
+            startup_warnings,
             storage,
             config,
             compression,
@@ -493,8 +510,11 @@ impl<'t> EventLoop<'t> {
             watch_enabled,
         } = params;
 
-        std::thread::spawn(crate::highlight::warmup);
-        crate::update::spawn_check();
+        static PROCESS_WARMUP: std::sync::Once = std::sync::Once::new();
+        PROCESS_WARMUP.call_once(|| {
+            std::thread::spawn(crate::highlight::warmup);
+            crate::update::spawn_check();
+        });
 
         let storage_writer = Arc::new(StorageWriter::new(storage.clone())?);
         let model_slot = Arc::new(ArcSwap::from_pointee(ModelSlot {
@@ -531,14 +551,22 @@ impl<'t> EventLoop<'t> {
             flow_store,
         };
 
-        let mut rt = ctx.spawn_runtime(session);
-        rt.app.exit_on_done = exit_on_done;
+        let mut runtimes: Vec<SessionRuntime> =
+            sessions.into_iter().map(|s| ctx.spawn_runtime(s)).collect();
+        if runtimes.is_empty() {
+            return Err(eyre!("event loop needs at least one session"));
+        }
+        let focused = focused.min(runtimes.len() - 1);
+        let focused_app = &mut runtimes[focused].app;
+        focused_app.exit_on_done = exit_on_done;
         if needs_login {
-            rt.app.login_picker.open(rt.app.storage.clone());
+            focused_app.login_picker.open(focused_app.storage.clone());
         }
         if !ctx.mcp_config_errors.is_empty() {
-            rt.app
-                .flash(format!("MCP config error: {}", ctx.mcp_config_errors));
+            focused_app.flash(format!("MCP config error: {}", ctx.mcp_config_errors));
+        }
+        for w in startup_warnings {
+            focused_app.flash(w);
         }
 
         // Single embed consumer: the EmbeddingService is stateless, so one task
@@ -557,8 +585,8 @@ impl<'t> EventLoop<'t> {
 
         Ok(Self {
             terminal,
-            sessions: vec![rt],
-            focused: 0,
+            sessions: runtimes,
+            focused,
             ctx,
             input: InputReader::spawn(),
             _embed_rx: embed_rx_owned,
@@ -1416,12 +1444,8 @@ impl<'t> EventLoop<'t> {
         }
     }
 
-    fn shutdown(mut self) -> ShutdownResult {
-        let focused = &self.sessions[self.focused].app;
-        let exit_code = focused.exit_request.code();
-        let session_id = focused
-            .has_content()
-            .then_some(focused.state.session.id.clone());
+    fn shutdown(mut self) -> ShutdownReport {
+        let exit = self.sessions[self.focused].app.exit_request;
         let mcp_handle = self.ctx.mcp_handle.clone();
         if let Some(ref h) = mcp_handle {
             craft_agent::mcp::kill_process_groups(&h.reader().load().pids);
@@ -1432,8 +1456,10 @@ impl<'t> EventLoop<'t> {
             rt.app.cmd_tx = None;
             rt.app.answer_tx = None;
         }
+        let mut tabs = Vec::with_capacity(self.sessions.len());
         let runtime = tokio::runtime::Handle::current();
         for rt in self.sessions.drain(..) {
+            tabs.push(persisted_tab(&rt.app));
             rt.handles.send_cancel_all();
             drop(rt.app);
             // `shutdown_no_mcp`: MCP is a single shared handle across every
@@ -1451,11 +1477,18 @@ impl<'t> EventLoop<'t> {
                 warn!("storage writer has outstanding references, skipping graceful shutdown")
             }
         }
-        ShutdownResult {
-            session_id,
-            exit_code,
+        ShutdownReport {
+            exit,
+            tabs,
+            focused: self.focused,
         }
     }
+}
+
+/// Uses the same `has_content` check as `App::save_session`, so the report and
+/// the disk can never disagree about which tabs were saved.
+pub(crate) fn persisted_tab(app: &App) -> Option<CraftId> {
+    app.has_content().then_some(app.state.session.id.id())
 }
 
 fn scroll_delta(kind: MouseEventKind, lines: u32) -> i32 {
