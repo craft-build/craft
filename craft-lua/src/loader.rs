@@ -10,6 +10,7 @@ use craft_config::{PluginsConfig, RawConfig};
 use include_dir::{Dir, include_dir};
 
 use crate::api::keymap::KeymapReader;
+use crate::api::options::{PluginOptionSpecs, PluginOpts};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
@@ -141,12 +142,11 @@ impl PluginHost {
     }
 
     /// Boots the runtime and loads every default bundled plugin into `registry`.
-    /// Convenience over `new` + `load_builtins(PluginsConfig::from_tools(defaults))`
-    /// for callers (tests, docgen, headless runs) that want the full builtin set
-    /// without permuting a config.
+    /// For callers like tests and docgen that want the full builtin set
+    /// without building a config.
     pub fn with_all_builtins(registry: Arc<ToolRegistry>) -> Result<Self, PluginError> {
         let mut host = Self::new(registry, None)?;
-        host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))?;
+        host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))?;
         Ok(host)
     }
 
@@ -192,15 +192,30 @@ impl PluginHost {
         if self.inner.is_none() {
             return Ok(());
         }
-        for builtin in &config.tools {
+        for (plugin, opts) in &config.opts {
+            let keys: Vec<&str> = opts.keys().map(String::as_str).collect();
+            if !BUNDLED_PLUGINS.iter().any(|p| p.name == plugin.as_str()) {
+                return Err(PluginError::UnknownPluginOptions {
+                    plugin: plugin.clone(),
+                    keys: keys.join(", "),
+                });
+            }
+            if !config.names.contains(plugin) {
+                tracing::warn!(
+                    plugin = plugin.as_str(),
+                    keys = keys.join(", "),
+                    "plugin is disabled; its plugins.{} options are ignored until re-enabled",
+                    plugin
+                );
+            }
+        }
+        for builtin in &config.names {
             let dir = match BUNDLED_PLUGINS.iter().find(|p| p.name == builtin.as_str()) {
                 Some(p) => &p.dir,
                 None => {
-                    tracing::warn!(
-                        builtin = builtin.as_str(),
-                        "unknown builtin plugin, skipping"
-                    );
-                    continue;
+                    return Err(PluginError::UnknownPlugin {
+                        plugin: builtin.clone(),
+                    });
                 }
             };
             let init = dir
@@ -211,7 +226,19 @@ impl PluginHost {
                     source: mlua::Error::runtime("bundled plugin missing init.lua"),
                 })?;
             let name: Arc<str> = Arc::from(builtin.as_str());
-            self.send_load(name, init.to_owned(), None, PluginPermissions::trusted())?;
+            let opts = config
+                .opts
+                .get(builtin.as_str())
+                .cloned()
+                .map(Arc::new)
+                .unwrap_or_default();
+            self.send_load(
+                name,
+                init.to_owned(),
+                None,
+                PluginPermissions::trusted(),
+                opts,
+            )?;
         }
         Ok(())
     }
@@ -244,6 +271,7 @@ impl PluginHost {
         source: String,
         plugin_dir: Option<PathBuf>,
         permissions: PluginPermissions,
+        opts: PluginOpts,
     ) -> Result<(), PluginError> {
         let tx = self.tx()?;
         let (reply_tx, reply_rx) = flume::bounded(1);
@@ -252,10 +280,21 @@ impl PluginHost {
             source,
             plugin_dir,
             permissions,
+            opts,
             reply: reply_tx,
         })
         .map_err(|_| PluginError::HostDead)?;
         reply_rx.recv().map_err(|_| PluginError::HostDead)?
+    }
+
+    /// Option specs declared by loaded plugins via `craft.api.register_options`,
+    /// keyed by plugin name. Used by docgen.
+    pub fn plugin_options(&self) -> Result<PluginOptionSpecs, PluginError> {
+        let tx = self.tx()?;
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        tx.send(Request::CollectPluginOptions { reply: reply_tx })
+            .map_err(|_| PluginError::HostDead)?;
+        reply_rx.recv().map_err(|_| PluginError::HostDead)
     }
 
     pub fn send_run_init_lua(
@@ -289,11 +328,21 @@ impl PluginHost {
     }
 
     pub fn load_source(&self, name: &str, source: &str) -> Result<(), PluginError> {
+        self.load_source_with_opts(name, source, serde_json::Map::new())
+    }
+
+    pub fn load_source_with_opts(
+        &self,
+        name: &str,
+        source: &str,
+        opts: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), PluginError> {
         self.send_load(
             Arc::from(name),
             source.to_owned(),
             None,
             PluginPermissions::trusted(),
+            Arc::new(opts),
         )
     }
 
@@ -303,7 +352,13 @@ impl PluginHost {
         source: &str,
         permissions: PluginPermissions,
     ) -> Result<(), PluginError> {
-        self.send_load(Arc::from(name), source.to_owned(), None, permissions)
+        self.send_load(
+            Arc::from(name),
+            source.to_owned(),
+            None,
+            permissions,
+            PluginOpts::default(),
+        )
     }
 
     pub fn load_plugin_file(&self, path: &Path) -> Result<(), PluginError> {
@@ -317,7 +372,11 @@ impl PluginHost {
             .file_stem()
             .and_then(|s| s.to_str())
             .map_or_else(|| Arc::from("user"), Arc::from);
-        self.send_load(name, source, plugin_dir, permissions)
+        // Test-only path today. Once user plugin dirs exist: derive a real
+        // plugin name, since the hardcoded "user" would collide across files,
+        // pass the `plugins.<name>` opts through, and teach the
+        // unknown-plugin guards about user plugin names.
+        self.send_load(name, source, plugin_dir, permissions, PluginOpts::default())
     }
 
     pub fn event_handle(&self) -> Option<EventHandle> {
@@ -422,7 +481,7 @@ mod tests {
     fn with_jit_off_loads_builtins_and_registers_tools() {
         let reg = Arc::new(ToolRegistry::new());
         let mut host = PluginHost::with_jit(Arc::clone(&reg), None, false).unwrap();
-        host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+        host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
             .unwrap();
         assert!(reg.has("glob"));
     }
@@ -430,7 +489,7 @@ mod tests {
     #[test]
     fn load_builtins_on_disabled_host_is_noop() {
         let mut host = PluginHost::disabled();
-        host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+        host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
             .unwrap();
     }
 

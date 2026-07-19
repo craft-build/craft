@@ -27,7 +27,6 @@ craft.setup({
         },
     },
     agent = {
-        bash_timeout_secs = 180,
         max_output_lines = 3000,
     },
     provider = {
@@ -35,6 +34,9 @@ craft.setup({
     },
     storage = {
         max_log_files = 5,
+    },
+    plugins = {
+        bash = { timeout_secs = 180 },
     },
 })
 ```
@@ -44,7 +46,7 @@ All fields are optional. Typos in field names cause an error right away.
 `craft.setup()` can only be called once per init.lua.
 
 ## Full Reference
-
+ 
 ### Top-level
 
 | Field | Type | Default | Description |
@@ -121,13 +123,10 @@ Remappable actions:
 |-------|------|---------|-----|-------------|
 | `max_output_bytes` | usize | `51200` | 1024 | Max tool output size (bytes) |
 | `max_output_lines` | usize | `2000` | 10 | Max tool output lines |
-| `max_response_bytes` | usize | `5242880` | 1024 | Max LLM response size (bytes) |
-| `max_line_bytes` | usize | `3000` | 80 | Max bytes per line before truncation |
-| `bash_timeout_secs` | u64 | `120` | 5 | Bash command timeout (seconds) |
+| `max_line_bytes` | usize | `3000` | 80 | Max bytes per line before truncation (read tool) |
 | `code_execution_timeout_secs` | u64 | `30` | 5 | Code execution timeout (seconds) |
 | `max_continuation_turns` | u32 | `3` | 1 | Max automatic continuation turns |
 | `compaction_buffer` | u32 \| string | `20%` | - | Context reserved for compaction: token count or percent of the context window (e.g. "20%") |
-| `search_result_limit` | usize | `100` | 10 | Max results from grep/glob searches |
 | `interpreter_max_memory_mb` | usize | `50` | 10 | Memory limit for code interpreter (MB) |
 
 ### `agent.validation`
@@ -246,18 +245,61 @@ Each `ModelThreshold` may set:
 | `mode` | string | `"workspace_write"` | Sandbox mode. One of: `workspace_write`, `read_only`, `danger_full_access`, `off` |
 | `network` | bool | `true` | Allow network access in sandboxed tools |
 
-## Tools
+## Plugins
 
-The `tools` table lets you turn tools on or off. By default `webfetch` and `websearch` are on. `bash` is off by default.
+The `plugins` table turns plugins on or off and passes options to them. All bundled plugins are on by default. Set `enabled = false` to turn one off.
+
+Each plugin checks its own options at startup. A typo, a wrong type, or an unknown plugin name gives you a clear error right away. The old `tools` table is gone. If your config still uses it, Craft stops at startup and shows you the new form.
 
 ```lua
 craft.setup({
-    tools = {
-        bash = { enabled = true },
+    plugins = {
+        bash = { timeout_secs = 180 },
         websearch = { enabled = false },
     },
 })
 ```
+
+### `plugins.bash`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `timeout_secs` | integer | `120` | 5 | Kill the command after this many seconds. A call's `timeout` param overrides it. |
+
+### `plugins.glob`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `search_result_limit` | integer | `100` | 10 | Max files returned per search. |
+
+### `plugins.grep`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_line_bytes` | integer | `500` | 80 | Skip lines longer than this many bytes. |
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `search_result_limit` | integer | `100` | 10 | Max match groups per search. A call's `limit` param overrides it. |
+
+### `plugins.webfetch`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `max_response_bytes` | integer | `5242880` | 1024 | Stop reading a response after this many bytes. |
+
+### `plugins.websearch`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `max_response_bytes` | integer | `5242880` | 1024 | Stop reading a response after this many bytes. |
 
 ## Validation
 
@@ -302,14 +344,14 @@ Before:
 
 ```toml
 [agent]
-bash_timeout_secs = 180
+max_output_lines = 3000
 ```
 
 After:
 
 ```lua
 craft.setup({
-    agent = { bash_timeout_secs = 180 },
+    agent = { max_output_lines = 3000 },
 })
 ```
 

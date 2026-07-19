@@ -413,8 +413,14 @@ pub(crate) fn create_api_table(
     lua: &Lua,
     pending: PendingTools,
     plugin: Arc<str>,
+    opts: crate::api::options::PluginOpts,
 ) -> LuaResult<Table> {
     let t = lua.create_table()?;
+
+    t.set(
+        "register_options",
+        crate::api::options::create_register_options_fn(lua, Arc::clone(&plugin), opts)?,
+    )?;
 
     t.set(
         "register_tool",

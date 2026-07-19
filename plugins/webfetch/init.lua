@@ -62,6 +62,15 @@ end
 
 local truncate = require("craft.truncate")
 local ToolView = require("craft.tool_view")
+local output_limits = require("craft.output_limits")
+
+local opts = craft.api.register_options(output_limits.extend({
+  max_response_bytes = {
+    default = 5 * 1024 * 1024,
+    min = 1024,
+    desc = "Stop reading a response after this many bytes.",
+  },
+}))
 
 local function web_view_opts(ctx)
   local tol = ctx:tool_output_lines()
@@ -111,13 +120,11 @@ craft.api.register_tool({
       return { llm_output = "error: unknown format: " .. tostring(fmt), is_error = true }
     end
 
-    local max_response = ctx:config("max_response_bytes", (5 * 1024 * 1024))
-    local max_lines = ctx:config("max_output_lines", 2000)
-    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
+    local max_lines, max_bytes = output_limits.resolve(opts, ctx)
 
     local resp, err = craft.net.request(url, {
       timeout = input.timeout or 30,
-      max_bytes = max_response,
+      max_bytes = opts.max_response_bytes,
       headers = {
         ["Accept"] = ACCEPT_HEADERS[fmt],
       },

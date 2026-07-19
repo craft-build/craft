@@ -1,6 +1,7 @@
 local truncate = require("craft.truncate")
 local extract_image_output = require("craft.image_uri")
 local ToolView = require("craft.tool_view")
+local output_limits = require("craft.output_limits")
 
 local RTK_REWRITE_TIMEOUT_MS = 2000
 local RTK_UNSUPPORTED_FLAGS = {
@@ -314,6 +315,14 @@ Commands run in ]] .. cwd .. [[ by default.
 - Interactive commands (sudo, ssh prompts) fail immediately.
 - Set `background=true` for long-running commands. Returns a `task_id` for use with bash_status, bash_watch, bash_kill.]]
 
+local opts = craft.api.register_options(output_limits.extend({
+  timeout_secs = {
+    default = 120,
+    min = 5,
+    desc = "Kill the command after this many seconds. A call's `timeout` param overrides it.",
+  },
+}))
+
 craft.api.register_tool({
   name = "bash",
   kind = "execute",
@@ -418,9 +427,8 @@ craft.api.register_tool({
     if deny then
       return { llm_output = deny, is_error = true }
     end
-    local timeout_secs = input.timeout or ctx:config("bash_timeout_secs", 120)
-    local max_lines = ctx:config("max_output_lines", 2000)
-    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
+    local timeout_secs = input.timeout or opts.timeout_secs
+    local max_lines, max_bytes = output_limits.resolve(opts, ctx)
 
     if not input.background then
       ctx:set_deadline(timeout_secs)
@@ -576,8 +584,7 @@ craft.api.register_tool({
       return { llm_output = 'error: unknown task_id "' .. id .. '"', is_error = true }
     end
 
-    local max_lines = ctx:config("max_output_lines", 2000)
-    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
+    local max_lines, max_bytes = output_limits.resolve(opts, ctx)
 
     local output = table.concat(job.output_parts)
     output = compress_output(output)
@@ -628,8 +635,7 @@ craft.api.register_tool({
       return { llm_output = 'error: unknown task_id "' .. id .. '"', is_error = true }
     end
 
-    local max_lines = ctx:config("max_output_lines", 2000)
-    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
+    local max_lines, max_bytes = output_limits.resolve(opts, ctx)
     local timeout_secs = input.timeout or 60
     local pattern = input.pattern
 

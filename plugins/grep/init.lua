@@ -2,10 +2,20 @@ local truncate = require("craft.truncate")
 local ToolView = require("craft.tool_view")
 local shorten_path = require("craft.shorten_path")
 local color = require("craft.color")
+local output_limits = require("craft.output_limits")
 
 local NO_MATCHES = "No files found"
 local MAX_PER_CALL_LIMIT = 1000
 local DIM_FACTOR = 0.3
+
+local opts = craft.api.register_options(output_limits.extend({
+  search_result_limit = {
+    default = 100,
+    min = 10,
+    desc = "Max match groups per search. A call's `limit` param overrides it.",
+  },
+  max_line_bytes = { default = 500, min = 80, desc = "Skip lines longer than this many bytes." },
+}))
 
 local function has_context(groups)
   for _, group in ipairs(groups) do
@@ -239,13 +249,11 @@ craft.api.register_tool({
     end
     pattern = pattern:gsub('"$', "")
 
-    local search_limit = ctx:config("search_result_limit", 100)
-    local max_lines = ctx:config("max_output_lines", 2000)
-    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
+    local max_lines, max_bytes = output_limits.resolve(opts, ctx)
 
-    local limit = math.min(input.limit or search_limit, MAX_PER_CALL_LIMIT)
+    local limit = math.min(input.limit or opts.search_result_limit, MAX_PER_CALL_LIMIT)
 
-    local max_line_bytes = ctx:config("max_line_bytes")
+    local max_line_bytes = opts.max_line_bytes
 
     local entries, err = craft.fs.grep(pattern, {
       path = input.path,

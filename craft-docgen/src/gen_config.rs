@@ -1,10 +1,13 @@
 use std::fmt::Write;
+use std::sync::Arc;
 
+use craft_agent::tools::ToolRegistry;
 use craft_config::{
-    AgentConfig, CompressionConfig, ConfigField, DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_MAX_LOG_FILES,
-    DEFAULT_MAX_OUTPUT_LINES, DEFAULT_MOUSE_SCROLL_LINES, FlowConfig, MIN_TOOL_OUTPUT_LINES,
-    ProviderConfig, StorageConfig, TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
+    AgentConfig, CompressionConfig, ConfigField, DEFAULT_MAX_LOG_FILES, DEFAULT_MAX_OUTPUT_LINES,
+    DEFAULT_MOUSE_SCROLL_LINES, FlowConfig, MIN_TOOL_OUTPUT_LINES, ProviderConfig, StorageConfig,
+    TOP_LEVEL_FIELDS, ToolOutputLines, UiConfig,
 };
+use craft_lua::{PluginHost, PluginOptionSpecs};
 
 fn escape_md_table(s: &str) -> String {
     s.replace('|', "\\|")
@@ -63,6 +66,41 @@ fn write_section(out: &mut String, heading: &str, fields: &[ConfigField]) {
         write_table_no_min(out, fields);
     }
     writeln!(out).unwrap();
+}
+
+fn write_plugin_options(out: &mut String, specs: &PluginOptionSpecs) {
+    for (plugin, options) in specs {
+        writeln!(out, "### `plugins.{plugin}`\n").unwrap();
+        writeln!(out, "| Field | Type | Default | Min | Description |").unwrap();
+        writeln!(out, "|-------|------|---------|-----|-------------|").unwrap();
+        for o in options {
+            let default = o
+                .default
+                .as_ref()
+                .map_or("-".to_string(), |d| format!("`{d}`"));
+            let min = o.min.map_or("-".to_string(), |m| m.to_string());
+            writeln!(
+                out,
+                "| `{name}` | {ty} | {default} | {min} | {desc} |",
+                name = o.name,
+                ty = o.ty,
+                desc = escape_md_table(&o.desc),
+            )
+            .unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+}
+
+fn collect_plugin_options() -> PluginOptionSpecs {
+    let host =
+        PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).expect("loading builtins");
+    let specs = host.plugin_options().expect("collecting plugin options");
+    assert!(
+        !specs.is_empty(),
+        "no plugin declared options; the plugins reference would be empty"
+    );
+    specs
 }
 
 fn write_tool_output_section(out: &mut String) {
@@ -334,7 +372,6 @@ craft.setup({{
         }},
     }},
     agent = {{
-        bash_timeout_secs = {bash_timeout},
         max_output_lines = {max_output_lines},
     }},
     provider = {{
@@ -342,6 +379,9 @@ craft.setup({{
     }},
     storage = {{
         max_log_files = {max_log_files},
+    }},
+    plugins = {{
+        bash = {{ timeout_secs = 180 }},
     }},
 }})
 ```
@@ -351,11 +391,10 @@ All fields are optional. Typos in field names cause an error right away.
 `craft.setup()` can only be called once per init.lua.
 
 ## Full Reference
-",
+ ",
         mouse_scroll = DEFAULT_MOUSE_SCROLL_LINES + 2,
         tol_bash = ToolOutputLines::DEFAULT.bash + 3,
         tol_read = ToolOutputLines::DEFAULT.read + 2,
-        bash_timeout = DEFAULT_BASH_TIMEOUT_SECS + 60,
         max_output_lines = DEFAULT_MAX_OUTPUT_LINES + 1000,
         max_log_files = DEFAULT_MAX_LOG_FILES / 2,
     )
@@ -394,12 +433,16 @@ All fields are optional. Typos in field names cause an error right away.
     .unwrap();
     writeln!(out).unwrap();
 
-    writeln!(out, "## Tools\n").unwrap();
+    writeln!(out, "## Plugins\n").unwrap();
     writeln!(
         out,
-        "The `tools` table lets you turn tools on or off. \
-         By default `webfetch` and `websearch` are on. \
-         `bash` is off by default.\n"
+        "The `plugins` table turns plugins on or off and passes options to \
+         them. All bundled plugins are on by default. Set \
+         `enabled = false` to turn one off.\n\n\
+         Each plugin checks its own options at startup. A typo, a wrong \
+         type, or an unknown plugin name gives you a clear error right \
+         away. The old `tools` table is gone. If your config still uses \
+         it, Craft stops at startup and shows you the new form.\n"
     )
     .unwrap();
     writeln!(
@@ -407,14 +450,16 @@ All fields are optional. Typos in field names cause an error right away.
         "\
 ```lua
 craft.setup({{
-    tools = {{
-        bash = {{ enabled = true }},
+    plugins = {{
+        bash = {{ timeout_secs = 180 }},
         websearch = {{ enabled = false }},
     }},
 }})
 ```\n"
     )
     .unwrap();
+
+    write_plugin_options(&mut out, &collect_plugin_options());
 
     writeln!(out, "## Validation\n").unwrap();
     writeln!(
@@ -466,14 +511,14 @@ Before:
 
 ```toml
 [agent]
-bash_timeout_secs = 180
+max_output_lines = 3000
 ```
 
 After:
 
 ```lua
 craft.setup({{
-    agent = {{ bash_timeout_secs = 180 }},
+    agent = {{ max_output_lines = 3000 }},
 }})
 ```
 

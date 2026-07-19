@@ -10,6 +10,7 @@ use craft_config_macro::ConfigSection;
 use craft_storage::paths;
 use craft_storage::sessions::{StoredThinking, ThinkingParseError};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use thiserror::Error;
 use tracing::warn;
 
@@ -21,17 +22,14 @@ const PERMISSIONS_FILE: &str = "permissions.toml";
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 50 * 1024;
 pub const DEFAULT_MAX_OUTPUT_LINES: usize = 2000;
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 pub const DEFAULT_MAX_LINE_BYTES: usize = 3000;
 pub const DEFAULT_FLASH_DURATION_MS: u64 = 1500;
 pub const DEFAULT_TYPEWRITER_MS_PER_CHAR: u64 = 4;
 pub const DEFAULT_MOUSE_SCROLL_LINES: u32 = 3;
 
-pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_CODE_EXECUTION_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_MAX_CONTINUATION_TURNS: u32 = 3;
 pub const DEFAULT_COMPACTION_BUFFER: CompactionBuffer = CompactionBuffer::Percent(20);
-pub const DEFAULT_SEARCH_RESULT_LIMIT: usize = 100;
 pub const DEFAULT_INTERPRETER_MAX_MEMORY_MB: usize = 50;
 
 pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -42,27 +40,21 @@ pub const DEFAULT_MAX_LOG_BYTES_MB: u64 = 200;
 pub const DEFAULT_MAX_LOG_FILES: u32 = 10;
 pub const DEFAULT_INPUT_HISTORY_SIZE: usize = 100;
 
-pub const DEFAULT_MAX_FILE_SIZE_MB: u64 = 2;
-
 pub const MIN_OUTPUT_BYTES: usize = 1024;
 pub const MIN_OUTPUT_LINES: usize = 10;
-pub const MIN_RESPONSE_BYTES: usize = 1024;
 pub const MIN_LINE_BYTES: usize = 80;
-pub const MIN_BASH_TIMEOUT_SECS: u64 = 5;
 pub const MIN_CODE_EXECUTION_TIMEOUT_SECS: u64 = 5;
 pub const MIN_MAX_CONTINUATION_TURNS: u32 = 1;
 pub const MIN_COMPACTION_BUFFER: u32 = 1_000;
 const MAX_COMPACTION_PERCENT: u8 = 99;
 const COMPACTION_BUFFER_EXPECTED: &str =
     r#"a token count (e.g. 12000) or a percent of the context window (e.g. "20%")"#;
-pub const MIN_SEARCH_RESULT_LIMIT: usize = 10;
 pub const MIN_INTERPRETER_MAX_MEMORY_MB: usize = 10;
 pub const MIN_MOUSE_SCROLL_LINES: u32 = 1;
 pub const MIN_TOOL_OUTPUT_LINES: usize = 1;
 pub const MIN_MAX_LOG_BYTES_MB: u64 = 1;
 pub const MIN_MAX_LOG_FILES: u32 = 1;
 pub const MIN_INPUT_HISTORY_SIZE: usize = 10;
-pub const MIN_MAX_FILE_SIZE_MB: u64 = 1;
 pub const MIN_CONNECT_TIMEOUT_SECS: u64 = 1;
 pub const MIN_LOW_SPEED_TIMEOUT_SECS: u64 = 1;
 pub const MIN_STREAM_TIMEOUT_SECS: u64 = 10;
@@ -174,6 +166,20 @@ pub enum ConfigError {
     },
     #[error("invalid config: always_thinking: {0}")]
     Thinking(#[from] ThinkingParseError),
+    #[error(
+        "invalid config: the `tools` table in craft.setup was renamed to `plugins` \
+         (plugins can provide more than tools).\n\n\
+         Fix your config with:\n\n    \
+         sed -i.bak 's/^\\( *\\)tools *=/\\1plugins =/' ~/.config/craft/init.lua\n\n\
+         Run it on .craft/init.lua too if you keep a project config. \
+         A .bak backup is left next to the file."
+    )]
+    RenamedToolsTable,
+    #[error(
+        "invalid config: plugins.{plugin}: no bundled plugin is named \"{plugin}\" \
+         (bundled plugins: {valid})"
+    )]
+    UnknownPlugin { plugin: String, valid: String },
 }
 
 fn check(
@@ -237,7 +243,10 @@ pub struct RawConfig {
     pub repomap: RepoMapFileConfig,
     #[serde(default)]
     pub watch: WatchFileConfig,
-    pub tools: HashMap<String, ToolFileConfig>,
+    pub plugins: HashMap<String, PluginFileConfig>,
+    /// Renamed to `plugins`; kept so old configs fail with a pointer to the
+    /// new name instead of a generic unknown-field error.
+    tools: HashMap<String, PluginFileConfig>,
 }
 
 impl RawConfig {
@@ -251,18 +260,26 @@ impl RawConfig {
         self.sandbox.merge(overlay.sandbox);
         self.repomap.merge(overlay.repomap);
         self.watch.merge(overlay.watch);
+        for (name, plugin) in overlay.plugins {
+            let entry = self.plugins.entry(name).or_default();
+            if plugin.enabled.is_some() {
+                entry.enabled = plugin.enabled;
+            }
+            entry.opts.extend(plugin.opts);
+        }
         self.tools.extend(overlay.tools);
     }
 
     pub fn into_config(self, no_rtk: bool) -> Result<Config, ConfigError> {
+        self.validate_plugin_tables()?;
         let mut disabled_tools: Vec<String> = self
-            .tools
+            .plugins
             .iter()
             .filter(|(_, cfg)| cfg.enabled == Some(false))
             .map(|(name, _)| name.clone())
             .collect();
         for &name in OPT_IN_TOOLS {
-            if self.tools.get(name).and_then(|t| t.enabled) != Some(true) {
+            if self.plugins.get(name).and_then(|t| t.enabled) != Some(true) {
                 disabled_tools.push(name.to_string());
             }
         }
@@ -283,17 +300,47 @@ impl RawConfig {
             compression: CompressionConfig::from_file(self.compression),
             sandbox: SandboxConfig::from_file(self.sandbox),
             permissions: PermissionsConfig::default(),
-            plugins: PluginsConfig::from_tools(self.tools),
+            plugins: PluginsConfig::from_plugins(self.plugins),
             repomap,
             watch: WatchConfig::from_file(self.watch),
         })
     }
+
+    /// A `plugins.<name>` key that matches no bundled plugin is a typo or an
+    /// old config, so fail loudly instead of letting it silently drift.
+    /// The legacy `tools` table is rejected with a pointer to `plugins`.
+    /// `OPT_IN_TOOLS` names (native edit sub-tools toggled through the
+    /// plugins table) are accepted even though they are not Lua plugins.
+    fn validate_plugin_tables(&self) -> Result<(), ConfigError> {
+        if !self.tools.is_empty() {
+            return Err(ConfigError::RenamedToolsTable);
+        }
+        let mut unknown: Vec<&String> = self
+            .plugins
+            .keys()
+            .filter(|name| {
+                !DEFAULT_BUILTINS.contains(&name.as_str()) && !OPT_IN_TOOLS.contains(&name.as_str())
+            })
+            .collect();
+        unknown.sort();
+        if let Some(&plugin) = unknown.first() {
+            return Err(ConfigError::UnknownPlugin {
+                plugin: plugin.clone(),
+                valid: DEFAULT_BUILTINS.join(", "),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Default, Debug)]
-#[serde(default, deny_unknown_fields)]
-pub struct ToolFileConfig {
+#[serde(default)]
+pub struct PluginFileConfig {
     pub enabled: Option<bool>,
+    /// Plugin-specific options passed through opaquely; each plugin declares
+    /// and validates its own via `craft.api.register_options`.
+    #[serde(flatten)]
+    pub opts: JsonMap<String, JsonValue>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -455,13 +502,10 @@ impl<'de> Deserialize<'de> for CompactionBuffer {
 pub struct AgentFileConfig {
     pub max_output_bytes: Option<usize>,
     pub max_output_lines: Option<usize>,
-    pub max_response_bytes: Option<usize>,
     pub max_line_bytes: Option<usize>,
-    pub bash_timeout_secs: Option<u64>,
     pub code_execution_timeout_secs: Option<u64>,
     pub max_continuation_turns: Option<u32>,
     pub compaction_buffer: Option<CompactionBuffer>,
-    pub search_result_limit: Option<usize>,
     pub interpreter_max_memory_mb: Option<usize>,
     #[serde(default)]
     pub trust_decay: TrustDecayConfig,
@@ -491,13 +535,10 @@ impl AgentFileConfig {
             overlay,
             max_output_bytes,
             max_output_lines,
-            max_response_bytes,
             max_line_bytes,
-            bash_timeout_secs,
             code_execution_timeout_secs,
             max_continuation_turns,
             compaction_buffer,
-            search_result_limit,
             interpreter_max_memory_mb,
             hooks_enabled,
             judge_model
@@ -1417,14 +1458,8 @@ pub struct AgentConfig {
     #[config(default = DEFAULT_MAX_OUTPUT_LINES, min = MIN_OUTPUT_LINES, desc = "Max tool output lines")]
     pub max_output_lines: usize,
 
-    #[config(default = DEFAULT_MAX_RESPONSE_BYTES, min = MIN_RESPONSE_BYTES, desc = "Max LLM response size (bytes)")]
-    pub max_response_bytes: usize,
-
-    #[config(default = DEFAULT_MAX_LINE_BYTES, min = MIN_LINE_BYTES, desc = "Max bytes per line before truncation")]
+    #[config(default = DEFAULT_MAX_LINE_BYTES, min = MIN_LINE_BYTES, desc = "Max bytes per line before truncation (read tool)")]
     pub max_line_bytes: usize,
-
-    #[config(default = DEFAULT_BASH_TIMEOUT_SECS, min = MIN_BASH_TIMEOUT_SECS, desc = "Bash command timeout (seconds)")]
-    pub bash_timeout_secs: u64,
 
     #[config(default = DEFAULT_CODE_EXECUTION_TIMEOUT_SECS, min = MIN_CODE_EXECUTION_TIMEOUT_SECS, desc = "Code execution timeout (seconds)")]
     pub code_execution_timeout_secs: u64,
@@ -1434,9 +1469,6 @@ pub struct AgentConfig {
 
     #[config(default = DEFAULT_COMPACTION_BUFFER, ty = "u32 | string", default_doc = "20%", desc = "Context reserved for compaction: token count or percent of the context window (e.g. \"20%\")")]
     pub compaction_buffer: CompactionBuffer,
-
-    #[config(default = DEFAULT_SEARCH_RESULT_LIMIT, min = MIN_SEARCH_RESULT_LIMIT, desc = "Max results from grep/glob searches")]
-    pub search_result_limit: usize,
 
     #[config(default = DEFAULT_INTERPRETER_MAX_MEMORY_MB, min = MIN_INTERPRETER_MAX_MEMORY_MB, desc = "Memory limit for code interpreter (MB)")]
     pub interpreter_max_memory_mb: usize,
@@ -1512,11 +1544,7 @@ impl AgentConfig {
             no_rtk,
             max_output_bytes: file.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES),
             max_output_lines: file.max_output_lines.unwrap_or(DEFAULT_MAX_OUTPUT_LINES),
-            max_response_bytes: file
-                .max_response_bytes
-                .unwrap_or(DEFAULT_MAX_RESPONSE_BYTES),
             max_line_bytes: file.max_line_bytes.unwrap_or(DEFAULT_MAX_LINE_BYTES),
-            bash_timeout_secs: file.bash_timeout_secs.unwrap_or(DEFAULT_BASH_TIMEOUT_SECS),
             code_execution_timeout_secs: file
                 .code_execution_timeout_secs
                 .unwrap_or(DEFAULT_CODE_EXECUTION_TIMEOUT_SECS),
@@ -1524,9 +1552,6 @@ impl AgentConfig {
                 .max_continuation_turns
                 .unwrap_or(DEFAULT_MAX_CONTINUATION_TURNS),
             compaction_buffer: file.compaction_buffer.unwrap_or(DEFAULT_COMPACTION_BUFFER),
-            search_result_limit: file
-                .search_result_limit
-                .unwrap_or(DEFAULT_SEARCH_RESULT_LIMIT),
             interpreter_max_memory_mb: file
                 .interpreter_max_memory_mb
                 .unwrap_or(DEFAULT_INTERPRETER_MAX_MEMORY_MB),
@@ -1755,18 +1780,21 @@ impl SandboxConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct PluginsConfig {
-    pub tools: Vec<String>,
+    pub names: Vec<String>,
+    /// Per-plugin option tables, without `enabled`. Each plugin validates
+    /// its own via `craft.api.register_options` at load time.
+    pub opts: HashMap<String, JsonMap<String, JsonValue>>,
 }
 
 impl PluginsConfig {
-    pub fn from_tools(tools: HashMap<String, ToolFileConfig>) -> Self {
+    pub fn from_plugins(plugins: HashMap<String, PluginFileConfig>) -> Self {
         let mut all: Vec<String> = DEFAULT_BUILTINS
             .iter()
-            .filter(|name| tools.get(**name).and_then(|t| t.enabled).unwrap_or(true))
+            .filter(|name| plugins.get(**name).and_then(|t| t.enabled).unwrap_or(true))
             .map(|s| s.to_string())
             .collect();
 
-        let mut extra: Vec<&String> = tools
+        let mut extra: Vec<&String> = plugins
             .iter()
             .filter(|(name, cfg)| {
                 !DEFAULT_BUILTINS.contains(&name.as_str()) && cfg.enabled.unwrap_or(false)
@@ -1776,7 +1804,13 @@ impl PluginsConfig {
         extra.sort();
         all.extend(extra.into_iter().cloned());
 
-        Self { tools: all }
+        let opts = plugins
+            .into_iter()
+            .filter(|(_, cfg)| !cfg.opts.is_empty())
+            .map(|(name, cfg)| (name, cfg.opts))
+            .collect();
+
+        Self { names: all, opts }
     }
 }
 
@@ -2622,14 +2656,14 @@ tasks = []
         let raw = RawConfig {
             agent: AgentFileConfig {
                 max_output_lines: Some(5000),
-                bash_timeout_secs: Some(60),
+                code_execution_timeout_secs: Some(60),
                 ..Default::default()
             },
             ..Default::default()
         };
         let config = raw.into_config(false).unwrap();
         assert_eq!(config.agent.max_output_lines, 5000);
-        assert_eq!(config.agent.bash_timeout_secs, 60);
+        assert_eq!(config.agent.code_execution_timeout_secs, 60);
         assert_eq!(config.agent.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
     }
 
@@ -2668,7 +2702,6 @@ tasks = []
 
     #[test_case("max_output_bytes",  0 ; "zero_output_bytes")]
     #[test_case("max_output_lines",  0 ; "zero_output_lines")]
-    #[test_case("max_response_bytes", 0 ; "zero_response_bytes")]
     #[test_case("max_line_bytes",    0 ; "zero_line_bytes")]
     #[test_case("max_output_bytes",  500 ; "below_min_output_bytes")]
     #[test_case("max_line_bytes",    10 ; "below_min_line_bytes")]
@@ -2677,7 +2710,6 @@ tasks = []
         match field {
             "max_output_bytes" => config.max_output_bytes = value,
             "max_output_lines" => config.max_output_lines = value,
-            "max_response_bytes" => config.max_response_bytes = value,
             "max_line_bytes" => config.max_line_bytes = value,
             _ => unreachable!(),
         }
@@ -2710,7 +2742,7 @@ tasks = []
     #[test_case("provider", "connect_timeout_secs", 0 ; "provider_zero_connect_timeout")]
     #[test_case("storage",  "max_log_files",        0 ; "storage_zero_log_files")]
     #[test_case("ui",       "mouse_scroll_lines",   0 ; "ui_zero_scroll_lines")]
-    #[test_case("agent",    "bash_timeout_secs",    1 ; "agent_bash_timeout_too_low")]
+    #[test_case("agent",    "code_execution_timeout_secs", 1 ; "agent_code_execution_timeout_too_low")]
     fn validate_rejects_invalid_sections(section: &str, field: &str, value: u64) {
         let mut config = Config {
             always_yolo: false,
@@ -2733,7 +2765,9 @@ tasks = []
             }
             ("storage", "max_log_files") => config.storage.max_log_files = value as u32,
             ("ui", "mouse_scroll_lines") => config.ui.mouse_scroll_lines = value as u32,
-            ("agent", "bash_timeout_secs") => config.agent.bash_timeout_secs = value,
+            ("agent", "code_execution_timeout_secs") => {
+                config.agent.code_execution_timeout_secs = value
+            }
             _ => unreachable!(),
         }
         let err = config.validate().unwrap_err();
@@ -3308,49 +3342,65 @@ tasks = []
     fn plugins_default_builtins_populated_when_enabled() {
         let config = RawConfig::default().into_config(false).unwrap();
         assert!(
-            !config.plugins.tools.is_empty(),
+            !config.plugins.names.is_empty(),
             "enabled plugins should have default builtins"
         );
     }
 
-    #[test]
-    fn merge_tools_overlay_replaces_and_preserves() {
-        let mut base = RawConfig {
-            ui: UiFileConfig {
-                flash_duration_ms: Some(2000),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        base.tools.insert(
-            "glob".to_string(),
-            ToolFileConfig {
-                enabled: Some(true),
-            },
-        );
-        base.tools.insert(
-            "websearch".to_string(),
-            ToolFileConfig {
-                enabled: Some(true),
-            },
-        );
+    fn plugin_enabled(enabled: bool) -> PluginFileConfig {
+        PluginFileConfig {
+            enabled: Some(enabled),
+            opts: JsonMap::new(),
+        }
+    }
 
-        let mut overlay = RawConfig::default();
-        overlay.tools.insert(
-            "websearch".to_string(),
-            ToolFileConfig {
-                enabled: Some(false),
-            },
-        );
-        overlay.tools.insert(
-            "alpha_tool".to_string(),
-            ToolFileConfig {
-                enabled: Some(true),
-            },
-        );
+    #[test]
+    fn merge_plugins_overlay_wins_per_key() {
+        let mut base: RawConfig = toml::from_str(
+            "[plugins.glob]\nenabled = true\n\
+             [plugins.websearch]\nenabled = true\n\
+             [plugins.grep]\nenabled = true\nsearch_result_limit = 200\nmax_line_bytes = 900\n",
+        )
+        .unwrap();
+        let overlay: RawConfig = toml::from_str(
+            "[plugins.websearch]\nenabled = false\n\
+             [plugins.alpha_tool]\nenabled = true\n\
+             [plugins.grep]\nsearch_result_limit = 50\n",
+        )
+        .unwrap();
 
         base.merge(overlay);
-        assert_eq!(base.ui.flash_duration_ms, Some(2000), "base preserved");
+        assert_eq!(
+            base.plugins["glob"].enabled,
+            Some(true),
+            "base-only key preserved"
+        );
+        assert_eq!(
+            base.plugins["websearch"].enabled,
+            Some(false),
+            "overlay replaces"
+        );
+        assert_eq!(
+            base.plugins["alpha_tool"].enabled,
+            Some(true),
+            "overlay-only key added"
+        );
+        let grep = &base.plugins["grep"];
+        assert_eq!(
+            grep.enabled,
+            Some(true),
+            "enabled preserved when overlay omits it"
+        );
+        assert_eq!(
+            grep.opts["search_result_limit"],
+            serde_json::json!(50),
+            "overlay opt wins"
+        );
+        assert_eq!(
+            grep.opts["max_line_bytes"],
+            serde_json::json!(900),
+            "base opt preserved"
+        );
     }
 
     #[test]
@@ -3407,7 +3457,6 @@ tasks = []
 
     #[test_case("[ui]\nsplash_animaton = true\n" ; "top_level_typo")]
     #[test_case("agent = { bsh_timeout_secs = 60 }\n" ; "nested_section_typo")]
-    #[test_case("[tools.bash]\nenabled = true\ntypo_field = 42\n" ; "tool_config_typo")]
     fn deny_unknown_fields_rejects(toml_str: &str) {
         let result: Result<RawConfig, _> = toml::from_str(toml_str);
         assert!(
@@ -3417,66 +3466,61 @@ tasks = []
     }
 
     #[test]
-    fn deny_unknown_fields_accepts_valid_tools() {
-        const VALID: &str = "[tools.bash]\nenabled = true\n[tools.websearch]\nenabled = false\n";
+    fn deny_unknown_fields_accepts_valid_plugins() {
+        const VALID: &str =
+            "[plugins.bash]\nenabled = true\n[plugins.websearch]\nenabled = false\n";
         let result: Result<RawConfig, _> = toml::from_str(VALID);
         assert!(
             result.is_ok(),
-            "valid tools section should parse: {:?}",
+            "valid plugins section should parse: {:?}",
             result.err()
         );
     }
 
     #[test]
-    fn plugins_from_tools_default() {
-        let plugins = PluginsConfig::from_tools(HashMap::new());
-        let expected: Vec<String> = DEFAULT_BUILTINS.iter().map(|s| s.to_string()).collect();
-        assert_eq!(plugins.tools, expected);
+    fn plugin_extra_keys_parse_into_opts() {
+        let raw: RawConfig =
+            toml::from_str("[plugins.bash]\nenabled = true\ntimeout_secs = 180\n").unwrap();
+        let bash = &raw.plugins["bash"];
+        assert_eq!(bash.enabled, Some(true));
+        assert_eq!(bash.opts["timeout_secs"], serde_json::json!(180));
     }
 
     #[test]
-    fn plugins_from_tools_enable_disable_and_sort() {
-        let mut tools = HashMap::new();
-        tools.insert(
-            "websearch".to_string(),
-            ToolFileConfig {
-                enabled: Some(false),
-            },
-        );
-        tools.insert(
-            "zeta".to_string(),
-            ToolFileConfig {
-                enabled: Some(true),
-            },
-        );
-        tools.insert(
-            "alpha".to_string(),
-            ToolFileConfig {
-                enabled: Some(true),
-            },
-        );
-        tools.insert("custom_tool".to_string(), ToolFileConfig { enabled: None });
+    fn from_plugins_default() {
+        let plugins = PluginsConfig::from_plugins(HashMap::new());
+        let expected: Vec<String> = DEFAULT_BUILTINS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(plugins.names, expected);
+    }
 
-        let plugins = PluginsConfig::from_tools(tools);
+    #[test]
+    fn from_plugins_enable_disable_and_sort() {
+        let mut entries = HashMap::new();
+        entries.insert("websearch".to_string(), plugin_enabled(false));
+        entries.insert("zeta".to_string(), plugin_enabled(true));
+        entries.insert("alpha".to_string(), plugin_enabled(true));
+        entries.insert("custom_tool".to_string(), PluginFileConfig::default());
+
+        let plugins = PluginsConfig::from_plugins(entries);
         assert!(
-            !plugins.tools.contains(&"websearch".to_string()),
+            !plugins.names.contains(&"websearch".to_string()),
             "disabled builtin removed"
         );
         assert!(
-            plugins.tools.contains(&"glob".to_string()),
+            plugins.names.contains(&"glob".to_string()),
             "untouched builtin stays"
         );
         assert!(
-            plugins.tools.contains(&"bash".to_string()),
+            plugins.names.contains(&"bash".to_string()),
             "bash is a default builtin"
         );
         assert!(
-            !plugins.tools.contains(&"custom_tool".to_string()),
+            !plugins.names.contains(&"custom_tool".to_string()),
             "enabled=None non-default ignored"
         );
 
         let extras: Vec<_> = plugins
-            .tools
+            .names
             .iter()
             .filter(|t| !DEFAULT_BUILTINS.contains(&t.as_str()))
             .cloned()
@@ -3489,18 +3533,65 @@ tasks = []
     }
 
     #[test]
-    fn plugins_from_tools_all_builtins_disabled() {
-        let mut tools = HashMap::new();
-        for name in DEFAULT_BUILTINS {
-            tools.insert(
-                name.to_string(),
-                ToolFileConfig {
-                    enabled: Some(false),
-                },
-            );
-        }
-        let plugins = PluginsConfig::from_tools(tools);
-        assert!(plugins.tools.is_empty());
+    fn into_config_wires_plugin_names_and_opts() {
+        let raw: RawConfig = toml::from_str(
+            "[plugins.bash]\ntimeout_secs = 180\n[plugins.websearch]\nenabled = false\n",
+        )
+        .unwrap();
+        let config = raw.into_config(false).unwrap();
+        assert!(config.plugins.names.contains(&"bash".to_string()));
+        assert!(!config.plugins.names.contains(&"websearch".to_string()));
+        assert!(
+            config.plugins.names.contains(&"glob".to_string()),
+            "untouched builtin stays"
+        );
+        assert_eq!(
+            config.plugins.opts["bash"]["timeout_secs"],
+            serde_json::json!(180)
+        );
+        assert!(
+            !config.plugins.opts.contains_key("websearch"),
+            "enabled-only tables produce no opts"
+        );
+    }
+
+    #[test]
+    fn disabled_plugin_keeps_opts_but_not_load_entry() {
+        let raw: RawConfig =
+            toml::from_str("[plugins.bash]\nenabled = false\ntimeout_secs = 180\n").unwrap();
+        let config = raw.into_config(false).unwrap();
+        assert!(!config.plugins.names.contains(&"bash".to_string()));
+        assert_eq!(
+            config.plugins.opts["bash"]["timeout_secs"],
+            serde_json::json!(180),
+            "opts survive for when the plugin is re-enabled"
+        );
+    }
+
+    #[test_case("enabled = false" ; "enabled_false")]
+    #[test_case("search_result_limit = 50" ; "opts_only")]
+    fn unknown_plugin_name_errors(body: &str) {
+        let raw: RawConfig = toml::from_str(&format!("[plugins.gerp]\n{body}\n")).unwrap();
+        let Err(err) = raw.into_config(false) else {
+            panic!("plugins.gerp should be rejected");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no bundled plugin is named \"gerp\"") && msg.contains("grep"),
+            "error should name the typo and list bundled plugins, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn renamed_tools_table_errors() {
+        let raw: RawConfig = toml::from_str("[tools.bash]\nenabled = true\n").unwrap();
+        let Err(err) = raw.into_config(false) else {
+            panic!("old tools table should be rejected");
+        };
+        assert!(
+            err.to_string().contains("renamed to `plugins`"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3535,29 +3626,15 @@ tasks = []
     }
 
     #[test]
-    fn into_config_tools_flow_to_plugins() {
-        let mut tools = HashMap::new();
-        tools.insert(
-            "bash".to_string(),
-            ToolFileConfig {
-                enabled: Some(true),
-            },
-        );
-        tools.insert(
-            "websearch".to_string(),
-            ToolFileConfig {
-                enabled: Some(false),
-            },
-        );
-        let raw = RawConfig {
-            tools,
-            ..Default::default()
-        };
+    fn into_config_plugins_flow_to_names() {
+        let raw: RawConfig = toml::from_str(
+            "[plugins.bash]\nenabled = true\n[plugins.websearch]\nenabled = false\n",
+        )
+        .unwrap();
         let config = raw.into_config(false).unwrap();
-
-        assert!(config.plugins.tools.contains(&"bash".to_string()));
-        assert!(!config.plugins.tools.contains(&"websearch".to_string()));
-        assert!(config.plugins.tools.contains(&"glob".to_string()));
+        assert!(config.plugins.names.contains(&"bash".to_string()));
+        assert!(!config.plugins.names.contains(&"websearch".to_string()));
+        assert!(config.plugins.names.contains(&"glob".to_string()));
     }
 
     #[test]
@@ -3585,17 +3662,12 @@ tasks = []
             );
         }
 
-        let mut tools = HashMap::new();
+        let mut plugins = HashMap::new();
         for &name in OPT_IN_TOOLS {
-            tools.insert(
-                name.to_string(),
-                ToolFileConfig {
-                    enabled: Some(true),
-                },
-            );
+            plugins.insert(name.to_string(), plugin_enabled(true));
         }
         let enabled_config = RawConfig {
-            tools,
+            plugins,
             ..Default::default()
         }
         .into_config(false)

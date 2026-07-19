@@ -861,13 +861,13 @@ fn setup_happy_path() {
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let raw = host
         .send_run_init_lua(
-            "craft.setup({ agent = { bash_timeout_secs = 120 } })".to_owned(),
+            "craft.setup({ agent = { max_output_lines = 3000 } })".to_owned(),
             "test_init.lua".to_owned(),
             None,
         )
         .unwrap();
     let raw = raw.expect("expected Some(RawConfig)");
-    assert_eq!(raw.agent.bash_timeout_secs, Some(120));
+    assert_eq!(raw.agent.max_output_lines, Some(3000));
 }
 
 #[test_case::test_case(
@@ -896,9 +896,14 @@ fn setup_compaction_buffer(lua_src: &str, expected: craft_config::CompactionBuff
     ; "unknown_field"
 )]
 #[test_case::test_case(
-    r#"craft.setup({ agent = { bash_timeout_secs = "not a number" } })"#,
+    r#"craft.setup({ agent = { max_output_lines = "not a number" } })"#,
     ""
     ; "wrong_type"
+)]
+#[test_case::test_case(
+    "craft.setup({ agent = { bash_timeout_secs = 120 } })",
+    UNKNOWN_FIELD_ERR
+    ; "moved_plugin_option"
 )]
 fn setup_rejects_bad_input(lua_src: &str, expected_substr: &str) {
     let reg = fresh_registry();
@@ -941,20 +946,20 @@ fn setup_not_called_returns_none() {
 }
 
 #[test]
-fn setup_tools_section() {
+fn setup_plugins_section() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
     let raw = host
         .send_run_init_lua(
-            "craft.setup({ tools = { websearch = { enabled = false }, bash = { enabled = true } } })"
+            "craft.setup({ plugins = { websearch = { enabled = false }, bash = { enabled = true } } })"
                 .to_owned(),
             "test_init.lua".to_owned(),
             None,
         )
         .unwrap()
         .expect("expected Some(RawConfig)");
-    assert_eq!(raw.tools["websearch"].enabled, Some(false));
-    assert_eq!(raw.tools["bash"].enabled, Some(true));
+    assert_eq!(raw.plugins["websearch"].enabled, Some(false));
+    assert_eq!(raw.plugins["bash"].enabled, Some(true));
 }
 
 #[test]
@@ -968,10 +973,10 @@ fn setup_all_sections_at_once() {
                 always_fast = true,
                 always_thinking = "adaptive",
                 ui = { splash_animation = false, mouse_scroll_lines = 5 },
-                agent = { bash_timeout_secs = 120, max_output_lines = 9000 },
+                agent = { max_output_lines = 9000 },
                 provider = { default_model = "anthropic/claude-opus-4-6" },
                 storage = { max_log_files = 3 },
-                tools = { bash = { enabled = true } },
+                plugins = { bash = { enabled = true, timeout_secs = 180 } },
             })"#
             .to_owned(),
             "test_init.lua".to_owned(),
@@ -987,14 +992,17 @@ fn setup_all_sections_at_once() {
     );
     assert_eq!(raw.ui.splash_animation, Some(false));
     assert_eq!(raw.ui.mouse_scroll_lines, Some(5));
-    assert_eq!(raw.agent.bash_timeout_secs, Some(120));
     assert_eq!(raw.agent.max_output_lines, Some(9000));
     assert_eq!(
         raw.provider.default_model.as_deref(),
         Some("anthropic/claude-opus-4-6")
     );
     assert_eq!(raw.storage.max_log_files, Some(3));
-    assert_eq!(raw.tools["bash"].enabled, Some(true));
+    assert_eq!(raw.plugins["bash"].enabled, Some(true));
+    assert_eq!(
+        raw.plugins["bash"].opts["timeout_secs"],
+        serde_json::json!(180)
+    );
 }
 
 #[test]
@@ -1207,7 +1215,7 @@ async fn ctx_set_deadline_twice_errors() {
 async fn bash_timeout_round_trip() {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
         .unwrap();
     host.set_sandbox_config(craft_config::SandboxConfig {
         mode: craft_config::SandboxMode::Off,
@@ -1265,7 +1273,7 @@ async fn bash_timeout_round_trip() {
 async fn memory_write_restore_rebuilds_body_from_input_content() {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
         .unwrap();
 
     let summary = "wrote n.md (1 lines)";
@@ -1451,7 +1459,7 @@ async fn user_plugin_with_fs_read_can_read_but_not_write() {
 fn builtin_plugin_has_all_permissions() {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
         .unwrap();
     assert!(reg.has("bash"));
 }
@@ -1489,7 +1497,7 @@ async fn bash_permission_scopes_unparseable_command() {
 async fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    host.load_builtins(&PluginsConfig::from_tools(HashMap::new()))
+    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
         .unwrap();
 
     let input = serde_json::json!({ "command": command });
@@ -1504,5 +1512,234 @@ async fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
         !scopes.scopes.iter().any(|s| s.contains("\"command\"")),
         "fell back to raw JSON scope: {:?}",
         scopes.scopes
+    );
+}
+
+const OPTS_PROBE_PLUGIN: &str = r#"
+local opts = craft.api.register_options({
+    timeout_secs = { default = 120, min = 5, desc = "Timeout." },
+    label = { type = "string", desc = "Label." },
+})
+craft.api.register_tool({
+    name = "opts_probe",
+    description = "returns merged opts",
+    schema = { type = "object", properties = {}, additionalProperties = false },
+    audiences = { "main" },
+    handler = function(input, ctx)
+        return (craft.json.encode({
+            timeout_secs = opts.timeout_secs,
+            label = opts.label,
+        }))
+    end
+})
+"#;
+
+const UNKNOWN_OPTION_ERR: &str =
+    "unknown option \"typo\" for plugins.opts_plugin (valid options: label, timeout_secs)";
+const OPTION_TYPE_ERR: &str =
+    "invalid value for plugins.opts_plugin.timeout_secs: expected integer";
+const OPTION_MIN_ERR: &str =
+    "invalid value for plugins.opts_plugin.timeout_secs: 1 is below minimum (5)";
+const OPTION_DESC_ERR: &str = "option \"timeout_secs\": desc is required";
+const OPTION_NO_TYPE_ERR: &str = "option \"bare\": type is required when there is no default";
+const OPTION_SPEC_KEY_ERR: &str = "option \"timeout_secs\": unknown spec key \"mins\"";
+const OPTION_DEFAULT_TYPE_ERR: &str =
+    "option \"timeout_secs\": default 120 does not match type string";
+const OPTION_DEFAULT_MIN_ERR: &str = "option \"timeout_secs\": default 1 is below min (5)";
+const OPTION_MIN_ON_STRING_ERR: &str = "option \"label\": min is not allowed for type string";
+const OPTION_RESERVED_ERR: &str = "option \"enabled\": reserved name";
+const OPTION_TWICE_ERR: &str = "register_options: called more than once";
+const UNDECLARED_OPTS_ERR: &str = "unknown options in plugins.bare_plugin: timeout_secs \
+(this plugin declares no options via craft.api.register_options)";
+
+fn json_obj(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    v.as_object().expect("test opts must be an object").clone()
+}
+
+#[tokio::test]
+async fn register_options_defaults_when_user_sets_nothing() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_source_with_opts(
+        "opts_plugin",
+        OPTS_PROBE_PLUGIN,
+        json_obj(serde_json::json!({})),
+    )
+    .unwrap();
+
+    let out = exec_tool(&reg, "opts_probe", serde_json::json!({}))
+        .await
+        .unwrap();
+    let snap: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(snap["timeout_secs"], serde_json::json!(120));
+    assert!(snap["label"].is_null());
+}
+
+#[tokio::test]
+async fn register_options_user_value_wins_over_default() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_source_with_opts(
+        "opts_plugin",
+        OPTS_PROBE_PLUGIN,
+        json_obj(serde_json::json!({ "timeout_secs": 30, "label": "x" })),
+    )
+    .unwrap();
+
+    let out = exec_tool(&reg, "opts_probe", serde_json::json!({}))
+        .await
+        .unwrap();
+    let snap: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(snap["timeout_secs"], serde_json::json!(30));
+    assert_eq!(snap["label"], serde_json::json!("x"));
+}
+
+#[test_case::test_case(
+    serde_json::json!({ "typo": 1 }),
+    UNKNOWN_OPTION_ERR
+    ; "unknown_key"
+)]
+#[test_case::test_case(
+    serde_json::json!({ "timeout_secs": "abc" }),
+    OPTION_TYPE_ERR
+    ; "wrong_type"
+)]
+#[test_case::test_case(
+    serde_json::json!({ "timeout_secs": 1 }),
+    OPTION_MIN_ERR
+    ; "below_min"
+)]
+fn register_options_rejects_bad_user_opts(opts: serde_json::Value, expected: &str) {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_source_with_opts("opts_plugin", OPTS_PROBE_PLUGIN, json_obj(opts))
+        .expect_err("plugin load should fail");
+    assert!(err.to_string().contains(expected), "got: {err}");
+}
+
+#[test_case::test_case(
+    r#"craft.api.register_options({ timeout_secs = { default = 120 } })"#,
+    OPTION_DESC_ERR
+    ; "missing_desc"
+)]
+#[test_case::test_case(
+    r#"craft.api.register_options({ bare = { desc = "no type or default" } })"#,
+    OPTION_NO_TYPE_ERR
+    ; "missing_type_and_default"
+)]
+#[test_case::test_case(
+    r#"craft.api.register_options({ timeout_secs = { default = 120, mins = 5, desc = "T." } })"#,
+    OPTION_SPEC_KEY_ERR
+    ; "unknown_spec_key"
+)]
+#[test_case::test_case(
+    r#"craft.api.register_options({ timeout_secs = { type = "string", default = 120, desc = "T." } })"#,
+    OPTION_DEFAULT_TYPE_ERR
+    ; "default_contradicts_type"
+)]
+#[test_case::test_case(
+    r#"craft.api.register_options({ timeout_secs = { default = 1, min = 5, desc = "T." } })"#,
+    OPTION_DEFAULT_MIN_ERR
+    ; "default_below_min"
+)]
+#[test_case::test_case(
+    r#"craft.api.register_options({ label = { type = "string", min = 1, desc = "L." } })"#,
+    OPTION_MIN_ON_STRING_ERR
+    ; "min_on_string"
+)]
+#[test_case::test_case(
+    r#"craft.api.register_options({ enabled = { default = true, desc = "E." } })"#,
+    OPTION_RESERVED_ERR
+    ; "reserved_enabled"
+)]
+#[test_case::test_case(
+    r#"
+    craft.api.register_options({ a = { default = 1, desc = "A." } })
+    craft.api.register_options({ b = { default = 2, desc = "B." } })
+    "#,
+    OPTION_TWICE_ERR
+    ; "called_twice"
+)]
+fn register_options_rejects_bad_spec(src: &str, expected: &str) {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_source("opts_plugin", src)
+        .expect_err("plugin load should fail");
+    assert!(err.to_string().contains(expected), "got: {err}");
+}
+
+#[test]
+fn builtin_opts_flow_from_setup_plugins() {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let raw = host
+        .send_run_init_lua(
+            "craft.setup({ plugins = { grep = { search_result_limit = 42 } } })".to_owned(),
+            "test_init.lua".to_owned(),
+            None,
+        )
+        .unwrap()
+        .expect("expected Some(RawConfig)");
+    host.load_builtins(&PluginsConfig::from_plugins(raw.plugins))
+        .unwrap();
+
+    let options = host.plugin_options().unwrap();
+    let grep = options.get("grep").expect("grep options registered");
+    let limit = grep
+        .iter()
+        .find(|o| o.name == "search_result_limit")
+        .expect("search_result_limit declared");
+    assert!(limit.default.is_some(), "declared default surfaces");
+    assert!(limit.min.is_some(), "declared min surfaces");
+    assert!(!limit.desc.is_empty(), "declared desc surfaces");
+}
+
+#[test]
+fn undeclared_opts_fail_the_load() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_source_with_opts(
+            "bare_plugin",
+            "local x = 1",
+            json_obj(serde_json::json!({ "timeout_secs": 30 })),
+        )
+        .expect_err("plugin load should fail");
+    assert!(err.to_string().contains(UNDECLARED_OPTS_ERR), "got: {err}");
+}
+
+#[test]
+fn opts_for_unknown_plugin_fail_load_builtins() {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let mut config = PluginsConfig::from_plugins(HashMap::new());
+    config.opts.insert(
+        "bsah".to_owned(),
+        json_obj(serde_json::json!({ "timeout_secs": 5 })),
+    );
+    let err = host
+        .load_builtins(&config)
+        .expect_err("load_builtins should fail");
+    assert!(
+        err.to_string()
+            .contains("plugins.bsah sets options (timeout_secs)"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn unknown_plugin_name_fails_load_builtins() {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let mut config = PluginsConfig::from_plugins(HashMap::new());
+    config.names.push("gerp".to_string());
+    let err = host
+        .load_builtins(&config)
+        .expect_err("load_builtins should fail");
+    assert!(
+        err.to_string().contains("no bundled plugin named \"gerp\""),
+        "got: {err}"
     );
 }

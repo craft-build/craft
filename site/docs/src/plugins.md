@@ -20,6 +20,7 @@ Project settings override global ones. See [Configuration](./configuration.md).
 | `register_tool({ ... })` | A tool the model can call. Takes `name`, `kind`, `description`, `schema`, and a handler |
 | `register_command({ ... })` | A slash command shown in the palette. Takes `name`, `description`, and a handler |
 | `register_prompt_hint({ ... })` | Extra context injected into the prompt based on a trigger |
+| `register_options({ ... })` | Declare the options your plugin accepts under `plugins.<name>` in `craft.setup`. Returns the user's values merged with your defaults |
 | `set_prompt({ ... })` | Override a singleton prompt slot (`identity` or `tone`). Takes `slot`, `content` (string or callback), and optional `prompt` |
 
 A minimal custom tool:
@@ -46,6 +47,26 @@ craft.api.register_tool({
 })
 ```
 
+### Plugin options
+
+`register_options` is how a plugin reads its `plugins.<name>` table. Call it once at the top level of your plugin file. An unknown key, a wrong type, or a value below `min` fails the plugin load with a clear message, so users catch typos right away. The specs also feed the generated configuration docs.
+
+```lua
+local opts = craft.api.register_options({
+  timeout_secs = { default = 120, min = 5, desc = "Kill the command after this many seconds." },
+  label = { type = "string", desc = "Label shown in the UI." },
+})
+```
+
+Each spec table accepts:
+
+- `default` (boolean, number, or string): used when the user sets nothing. Its Lua type becomes the option type.
+- `type` (`"boolean"`, `"integer"`, `"number"`, or `"string"`): required when there is no `default`.
+- `min` (number): minimum accepted value, numeric options only.
+- `desc` (string, required): one line shown in the configuration docs.
+
+The returned table is the merged options: the user's value where set, otherwise the default, or `nil` when neither exists.
+
 ## Prompt slots
 
 The system prompt is assembled from named slots. Two kinds exist:
@@ -71,9 +92,9 @@ craft.api.set_prompt({
 
 ## Built-in Plugins
 
-These ship with Craft and are enabled by default (turn any off in [configuration](./configuration.md#tools)):
+These ship with Craft and are enabled by default (turn any off under [plugins](./configuration.md#plugins)):
 
-`bash`, `glob`, `index`, `memory`, `question`, `skill`, `webfetch`, `websearch`
+`bash`, `glob`, `grep`, `memory`, `question`, `sessions`, `skill`, `todo_write`, `view_image`, `webfetch`, `websearch`
 
 They live in the `plugins/` directory of the source tree and are bundled into the binary.
 

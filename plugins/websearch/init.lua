@@ -5,6 +5,15 @@ local DEFAULT_NUM_RESULTS = 8
 local parse_sse_response = require("parse_sse")
 local truncate = require("craft.truncate")
 local ToolView = require("craft.tool_view")
+local output_limits = require("craft.output_limits")
+
+local opts = craft.api.register_options(output_limits.extend({
+  max_response_bytes = {
+    default = 5 * 1024 * 1024,
+    min = 1024,
+    desc = "Stop reading a response after this many bytes.",
+  },
+}))
 
 local function web_view_opts(ctx)
   local tol = ctx:tool_output_lines()
@@ -66,9 +75,7 @@ craft.api.register_tool({
       return { llm_output = "error: failed to encode request: " .. tostring(encode_err), is_error = true }
     end
 
-    local max_response = ctx:config("max_response_bytes", (5 * 1024 * 1024))
-    local max_lines = ctx:config("max_output_lines", 2000)
-    local max_bytes = ctx:config("max_output_bytes", (50 * 1024))
+    local max_lines, max_bytes = output_limits.resolve(opts, ctx)
 
     local headers = {
       ["Content-Type"] = "application/json",
@@ -84,7 +91,7 @@ craft.api.register_tool({
       body = payload,
       headers = headers,
       timeout = REQUEST_TIMEOUT_SECS,
-      max_bytes = max_response,
+      max_bytes = opts.max_response_bytes,
     })
     if not resp then
       return { llm_output = "error: " .. tostring(err), is_error = true }

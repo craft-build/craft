@@ -30,6 +30,7 @@ use crate::api::create_craft_global;
 use crate::api::r#fn::{JobMeta, JobStore};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
+use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{
     LuaOutputFormat, LuaTool, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply,
@@ -100,6 +101,7 @@ pub enum Request {
         source: String,
         plugin_dir: Option<PathBuf>,
         permissions: PluginPermissions,
+        opts: PluginOpts,
         reply: flume::Sender<LoadResult>,
     },
     CallTool {
@@ -140,6 +142,9 @@ pub enum Request {
     },
     CollectPromptSlots {
         reply: flume::Sender<craft_agent::prompt::ResolvedSlots>,
+    },
+    CollectPluginOptions {
+        reply: flume::Sender<PluginOptionSpecs>,
     },
     SetTerminalBackend {
         backend: Arc<dyn TerminalBackend>,
@@ -847,6 +852,7 @@ impl LuaRuntime {
         lua.set_app_data(SpawnQueue::default());
         lua.set_app_data(command_writer);
         lua.set_app_data(PromptHintCallbacks::default());
+        lua.set_app_data(PluginOptionSpecs::default());
         lua.set_app_data(HintStore::new());
         lua.set_app_data(crate::api::hooks::HookHandlerMap::new());
         lua.set_app_data(AutocmdStore::default());
@@ -876,6 +882,9 @@ impl LuaRuntime {
     }
 
     fn drop_plugin_keys(&mut self, name: &str) {
+        if let Some(mut store) = self.lua.app_data_mut::<PluginOptionSpecs>() {
+            store.remove(name);
+        }
         if let Some(mut store) = self.lua.app_data_mut::<AutocmdStore>() {
             store.clear_plugin(name);
         }
@@ -1179,12 +1188,32 @@ impl LuaRuntime {
         })
     }
 
+    /// `plugins.<name>` options only reach a plugin through
+    /// `craft.api.register_options`; if the plugin never declared any, every
+    /// key the user set is a typo or unsupported, so fail the load loudly.
+    fn check_opts_consumed(&self, name: &str, opts: &PluginOpts) -> Result<(), mlua::Error> {
+        if opts.is_empty()
+            || self
+                .lua
+                .app_data_ref::<PluginOptionSpecs>()
+                .is_some_and(|store| store.contains_key(name))
+        {
+            return Ok(());
+        }
+        let keys: Vec<&str> = opts.keys().map(String::as_str).collect();
+        Err(mlua::Error::runtime(format!(
+            "unknown options in plugins.{name}: {} (this plugin declares no options via craft.api.register_options)",
+            keys.join(", ")
+        )))
+    }
+
     async fn load_source(
         &mut self,
         name: Arc<str>,
         source: &str,
         plugin_dir: Option<PathBuf>,
         permissions: &PluginPermissions,
+        opts: PluginOpts,
         config_store: Option<&ConfigStore>,
     ) -> LoadResult {
         let stale = self.drain_pending();
@@ -1206,6 +1235,7 @@ impl LuaRuntime {
             Arc::clone(&name),
             self.ui_action_tx.clone(),
             permissions,
+            Arc::clone(&opts),
             self.embed_tx.clone(),
         )
         .map_err(&map_err)?;
@@ -1228,6 +1258,7 @@ impl LuaRuntime {
             .exec_async()
             .await;
 
+        let exec_result = exec_result.and_then(|()| self.check_opts_consumed(&name, &opts));
         if let Err(e) = exec_result {
             let stale = self.drain_pending();
             self.discard_pending(stale);
@@ -1518,6 +1549,7 @@ impl LuaRuntime {
             source,
             plugin_dir,
             &PluginPermissions::trusted(),
+            PluginOpts::default(),
             Some(&config_store),
         )
         .await?;
@@ -1901,10 +1933,20 @@ pub fn spawn(
                             source,
                             plugin_dir,
                             permissions,
+                            opts,
                             reply,
                         } => {
                             drain_barrier(&rt.lua, &gate).await;
-                            let res = rt.load_source(Arc::clone(&name), &source, plugin_dir, &permissions, None).await;
+                            let res = rt
+                                .load_source(
+                                    Arc::clone(&name),
+                                    &source,
+                                    plugin_dir,
+                                    &permissions,
+                                    opts,
+                                    None,
+                                )
+                                .await;
                             let _ = reply.send(res);
                         }
                         Request::CallTool {
@@ -2001,6 +2043,9 @@ pub fn spawn(
                         Request::CollectPromptSlots { reply } => {
                             let slots = rt.collect_prompt_slots().await;
                             let _ = reply.send(slots);
+                        }
+                        Request::CollectPluginOptions { reply } => {
+                            let _ = reply.send(collect_plugin_options(&rt.lua));
                         }
                     Request::SetTerminalBackend { backend } => {
                         gate.drain().await;
