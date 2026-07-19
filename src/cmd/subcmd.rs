@@ -16,7 +16,9 @@ use craft_config::{load_env_files, load_permissions};
 use craft_lua::PluginHost;
 use craft_providers::model::Model;
 use craft_providers::provider::fetch_all_models;
-use craft_providers::{copilot_auth, dynamic, openai_auth};
+use craft_providers::{
+    ProviderData, catalog_provider, catalog_providers, copilot_auth, dynamic, openai_auth,
+};
 use craft_storage::StateDir;
 use craft_storage::auth::{
     ProviderCredentials, delete_provider_credentials, load_provider_credentials,
@@ -44,25 +46,60 @@ fn credential_path(slug: &str) -> String {
     }
 }
 
-fn mask_key(key: &str) -> String {
-    let chars: Vec<char> = key.chars().collect();
-    if chars.len() > 8 {
-        let first: String = chars[..4].iter().collect();
-        let last: String = chars[chars.len() - 4..].iter().collect();
-        format!("{first}...{last}")
-    } else {
-        "****".to_string()
-    }
-}
-
 pub async fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()> {
-    let slug = provider.map(slugify);
-    match slug.as_deref() {
-        Some("openai") => openai_auth::login(storage).await?,
-        Some("copilot") => copilot_auth::login(storage)?,
-        Some(s) => login_provider(s, storage)?,
+    match provider {
+        Some(slug) => {
+            let slug = slugify(slug);
+            if slug == "openai" {
+                openai_auth::login(storage).await?;
+            } else if slug == "copilot" {
+                copilot_auth::login(storage)?;
+            } else if builtin_provider(&slug).is_none()
+                && dynamic::display_name(&slug).is_none()
+                && ProvidersConfig::load().get(&slug).is_none()
+                && let Some(provider_data) = catalog_provider(&slug)
+            {
+                login_catalog_provider(&provider_data, storage)?;
+            } else {
+                login_provider(&slug, storage)?;
+            }
+        }
         None => login_interactive(storage)?,
     }
+    Ok(())
+}
+
+fn login_catalog_provider(provider: &ProviderData, storage: &StateDir) -> Result<()> {
+    println!();
+    if let Some(var) = provider.env_keys.first() {
+        println!("  Provider: {} (env: {var})", provider.slug);
+    } else {
+        println!("  Provider: {}", provider.slug);
+    }
+    print!("  API key: ");
+    io::stdout().flush()?;
+    let mut key = String::new();
+    io::stdin().read_line(&mut key)?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        println!("  Skipped (no key entered)");
+        return Ok(());
+    }
+    let creds = ProviderCredentials {
+        api_key: key,
+        host: None,
+    };
+    save_provider_credentials(storage, &provider.slug, &creds).context("save credentials")?;
+    println!("  \x1b[32m✓\x1b[0m Saved credentials for {}", provider.slug);
+    println!("  Credentials: {}", credential_path(&provider.slug));
+    println!(
+        "  You can also set via: {}",
+        provider
+            .env_keys
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "API key environment variable".to_string())
+    );
     Ok(())
 }
 
@@ -161,7 +198,7 @@ fn login_interactive(storage: &StateDir) -> Result<()> {
     let custom_slugs: Vec<&String> = config
         .providers
         .keys()
-        .filter(|s| builtin_provider(s).is_none())
+        .filter(|s| builtin_provider(s).is_none() && *s != "opencode")
         .collect();
 
     println!();
@@ -191,6 +228,20 @@ fn login_interactive(storage: &StateDir) -> Result<()> {
             .unwrap_or(slug);
         println!("  {} {}. {:<14} {}", status, idx, slug, display);
     }
+
+    let catalog_entries = catalog_providers();
+    for cat in &catalog_entries {
+        idx += 1;
+        let status = if load_provider_credentials(storage, &cat.slug).is_some() {
+            "\x1b[32m✓\x1b[0m"
+        } else {
+            " "
+        };
+        println!(
+            "  {} {}. {:<14} {}",
+            status, idx, cat.slug, cat.display_name
+        );
+    }
     idx += 1;
     let custom_idx = idx;
     println!("    {}. Custom provider...", custom_idx);
@@ -211,9 +262,12 @@ fn login_interactive(storage: &StateDir) -> Result<()> {
     } else if choice <= builtins.len() {
         let slug = builtins[choice - 1].slug;
         login_provider(slug, storage)?;
-    } else {
+    } else if choice <= builtins.len() + custom_slugs.len() {
         let slug = custom_slugs[choice - builtins.len() - 1];
         login_provider(slug, storage)?;
+    } else {
+        let provider = &catalog_entries[choice - builtins.len() - custom_slugs.len() - 1];
+        login_catalog_provider(provider, storage)?;
     }
 
     Ok(())
@@ -411,10 +465,12 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
                 .and_then(|d| d.plan.as_deref())
                 .map(|p| format!(" ({})", p))
                 .unwrap_or_default();
-            let masked = mask_key(&creds.api_key);
             println!(
                 "  \x1b[32m✓\x1b[0m {:<14} {} (key: {}){}",
-                b.slug, display, masked, plan_info
+                b.slug,
+                display,
+                creds.masked_api_key(),
+                plan_info
             );
         } else if env::var(b.default_api_key_env).is_ok() {
             println!(
@@ -432,15 +488,18 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
     }
 
     for (slug, def) in &config.providers {
-        if builtin_provider(slug).is_some() {
+        if builtin_provider(slug).is_some()
+            || (slug == "opencode" && def.enable_free_models.is_some())
+        {
             continue;
         }
         let display = def.display_name.as_deref().unwrap_or(slug);
         if let Some(creds) = load_provider_credentials(storage, slug) {
-            let masked = mask_key(&creds.api_key);
             println!(
                 "  \x1b[32m✓\x1b[0m {:<14} {} (key: {})",
-                slug, display, masked
+                slug,
+                display,
+                creds.masked_api_key()
             );
         } else {
             let default_env = format!("{}_API_KEY", slug.to_uppercase().replace('-', "_"));
@@ -454,6 +513,31 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
                 println!(
                     "  \x1b[31m✗\x1b[0m {:<14} {} (run: craft auth login {})",
                     slug, display, slug
+                );
+            }
+        }
+    }
+
+    let catalog_entries = catalog_providers();
+    if !catalog_entries.is_empty() {
+        println!("  \x1b[1mCatalog Providers (models.dev):\x1b[0m");
+        for entry in &catalog_entries {
+            if let Some(creds) = load_provider_credentials(storage, &entry.slug) {
+                println!(
+                    "  \x1b[32m✓\x1b[0m {:<14} {} (key: {})",
+                    entry.slug,
+                    entry.display_name,
+                    creds.masked_api_key()
+                );
+            } else if let Some(env) = entry.env_key_set() {
+                println!(
+                    "  \x1b[33m~\x1b[0m {:<14} {} (via {})",
+                    entry.slug, entry.display_name, env
+                );
+            } else {
+                println!(
+                    "  \x1b[31m✗\x1b[0m {:<14} {} (run: craft auth login {})",
+                    entry.slug, entry.display_name, entry.slug
                 );
             }
         }

@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Wrap;
 
 use craft_config::providers::{self, Protocol, ProviderDef, ProvidersConfig, slugify};
+use craft_providers::catalog_providers_if_available;
 use craft_storage::auth::{
     ProviderCredentials, load_provider_credentials, save_provider_credentials,
 };
@@ -19,6 +20,7 @@ use crate::theme;
 
 const TITLE: &str = " Login ";
 const CUSTOM_SLUG: &str = "custom";
+const CATALOG_UNAVAILABLE_SLUG: &str = "catalog-unavailable";
 
 const PROTOCOLS: &[(&str, &str)] = &[
     ("openai", "OpenAI-compatible"),
@@ -33,11 +35,16 @@ struct ProviderItem {
     has_key: bool,
     has_env: bool,
     configured: bool,
+    section: Option<&'static str>,
 }
 
 impl PickerItem for ProviderItem {
     fn label(&self) -> &str {
         &self.display_name
+    }
+
+    fn section(&self) -> Option<&str> {
+        self.section
     }
 
     fn detail(&self) -> Option<&str> {
@@ -197,12 +204,13 @@ impl LoginPicker {
                     has_key,
                     has_env,
                     configured,
+                    section: None,
                 }
             })
             .collect();
 
         for (slug, def) in &config.providers {
-            if providers::builtin_provider(slug).is_some() {
+            if slug == "opencode" || providers::builtin_provider(slug).is_some() {
                 continue;
             }
             let has_key = load_provider_credentials(&storage, slug).is_some();
@@ -216,6 +224,31 @@ impl LoginPicker {
                 has_key,
                 has_env,
                 configured: false,
+                section: None,
+            });
+        }
+
+        if let Some(catalog) = catalog_providers_if_available() {
+            for cat in catalog {
+                let has_key = cat.load_key_from_storage(&storage).is_some();
+                let has_env = cat.env_key_set().is_some();
+                items.push(ProviderItem {
+                    slug: cat.slug.clone(),
+                    display_name: cat.display_name.clone(),
+                    has_key,
+                    has_env,
+                    configured: false,
+                    section: Some("Providers from Models.dev"),
+                });
+            }
+        } else {
+            items.push(ProviderItem {
+                slug: CATALOG_UNAVAILABLE_SLUG.to_string(),
+                display_name: "Models.dev providers (not yet downloaded)".to_string(),
+                has_key: false,
+                has_env: false,
+                configured: false,
+                section: Some("Providers from Models.dev"),
             });
         }
 
@@ -225,6 +258,7 @@ impl LoginPicker {
             has_key: false,
             has_env: false,
             configured: false,
+            section: None,
         });
 
         self.provider_items = items.clone();
@@ -252,7 +286,9 @@ impl LoginPicker {
             Step::Closed => return LoginPickerAction::Consumed,
             Step::PickProvider(picker) => match picker.handle_key(key) {
                 PickerAction::Select(_, item) => {
-                    if item.slug == CUSTOM_SLUG {
+                    if item.slug == CATALOG_UNAVAILABLE_SLUG {
+                        StepAction::None
+                    } else if item.slug == CUSTOM_SLUG {
                         StepAction::GoCustomName
                     } else {
                         let slug = item.slug.clone();
@@ -264,7 +300,12 @@ impl LoginPicker {
                         if has_plans {
                             StepAction::GoPickPlan { slug }
                         } else {
-                            let display_name = providers::resolve_display_name(&slug, def);
+                            let display_name =
+                                if providers::builtin_provider(&slug).is_some() || def.is_some() {
+                                    providers::resolve_display_name(&slug, def)
+                                } else {
+                                    item.display_name.clone()
+                                };
                             let needs_url =
                                 providers::builtin_provider(&slug).is_some_and(|b| b.needs_url);
                             if needs_url {

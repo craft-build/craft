@@ -118,6 +118,19 @@ pub struct ProviderCredentials {
     pub host: Option<String>,
 }
 
+impl ProviderCredentials {
+    pub fn masked_api_key(&self) -> String {
+        let chars: Vec<char> = self.api_key.chars().collect();
+        if chars.len() > 8 {
+            let first: String = chars[..4].iter().collect();
+            let last: String = chars[chars.len() - 4..].iter().collect();
+            format!("{first}...{last}")
+        } else {
+            "****".to_string()
+        }
+    }
+}
+
 impl std::fmt::Debug for ProviderCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderCredentials")
