@@ -100,7 +100,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         .await
         .context("resolve model")?;
 
-    setup::init_logging(&storage, &config.storage);
+    setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
 
     let prompt_slots = plugin_host

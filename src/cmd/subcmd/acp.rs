@@ -56,7 +56,7 @@ pub async fn run(yolo: bool, no_jit: bool) -> Result<()> {
 
     let model = setup::resolve_model(None, &config.provider, &storage).await?;
 
-    setup::init_logging(&storage, &config.storage);
+    setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
 
     let (mcp_config, _mcp_config_errors) = craft_agent::mcp::config::load_config(&cwd);

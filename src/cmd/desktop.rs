@@ -118,7 +118,7 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
 
     let model = setup::resolve_model(args.model.as_deref(), &config.provider, &storage).await?;
 
-    setup::init_logging(&storage, &config.storage);
+    setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
 
     let commands = discover_commands(args.no_commands);

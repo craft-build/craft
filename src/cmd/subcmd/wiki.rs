@@ -76,7 +76,7 @@ async fn ingest(source: PathBuf, model_spec: Option<String>) -> Result<()> {
         .into_config(false)
         .context("invalid config")?;
 
-    setup::init_logging(&storage, &config.storage);
+    setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
 
     let abs_source = if source.is_absolute() {

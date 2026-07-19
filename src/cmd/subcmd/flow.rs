@@ -77,7 +77,7 @@ async fn run_pipeline(
         .context("invalid config")?;
     let _ = load_permissions(&cwd);
 
-    setup::init_logging(&storage, &config.storage);
+    setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
 
     let model = setup::resolve_model(None, &config.provider, &storage).await?;
