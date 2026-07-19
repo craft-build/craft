@@ -953,6 +953,7 @@ impl<'t> EventLoop<'t> {
                 let _ = reply_tx.send(reply);
             }
             SessionRequest::SetTitle { id, title } => {
+                let title = craft_storage::sessions::normalize_title(&title);
                 let reply = (|| {
                     let id = parse_session_id(&id)?;
                     if let Some(i) = self.position(id) {
