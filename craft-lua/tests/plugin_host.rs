@@ -712,6 +712,71 @@ async fn async_job_on_exit_receives_exit_code() {
 }
 
 #[tokio::test]
+async fn jobwait_fires_callbacks_while_waiting() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let src = format!(
+        r#"craft.api.register_tool({{
+            name = "job_stream",
+            description = "streams lines during jobwait",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function(input, ctx)
+                local seen = {{}}
+                local exit_code
+                local id = craft.fn.jobstart("echo a; echo b; exit 7", {{
+                    on_stdout = function(_, line) seen[#seen + 1] = line end,
+                    on_exit = function(_, code) exit_code = code end,
+                }})
+                local res = craft.fn.jobwait(id)
+                return table.concat(seen, ",")
+                    .. " exit=" .. tostring(exit_code)
+                    .. " stdout=" .. (res.stdout:gsub("\n", ","))
+            end
+        }})"#,
+    );
+    host.load_source("job_stream", &src).unwrap();
+    let out = exec_tool(&reg, "job_stream", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(out, "a,b exit=7 stdout=a,b");
+}
+
+/// Job callbacks must fire while a detached command handler is parked
+/// (the homepage `/standup` example: jobstart, then a parked loop).
+#[tokio::test]
+async fn job_callbacks_fire_while_command_handler_parked() {
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    host.load_source(
+        "p",
+        r#"
+        craft.api.register_command({
+            name = "/stream",
+            description = "streams job output while parked",
+            handler = function()
+                craft.fn.jobstart("echo hi", {
+                    on_stdout = function(_, line) craft.ui.flash("job:" .. line) end,
+                })
+                craft.async.await(1, function(_cb) end)
+            end,
+        })
+        "#,
+    )
+    .unwrap();
+    let rx = host.ui_action_rx().expect("ui action rx available");
+    let handle = host.event_handle().expect("event handle available");
+    handle.run_command(Arc::from("p"), Arc::from("/stream"), String::new());
+
+    let action = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("job callbacks starved while command handler was parked");
+    match action {
+        craft_lua::UiAction::Flash(msg) => assert_eq!(msg, "job:hi"),
+        _ => panic!("expected Flash"),
+    }
+}
+
+#[tokio::test]
 async fn jobstart_invalid_cwd_errors_with_expanded_path() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();

@@ -83,6 +83,12 @@ function ToolView:append(line)
   end
 end
 
+function ToolView:append_text(text)
+  for _, line in ipairs(craft.split(text, "\n")) do
+    self:append(line)
+  end
+end
+
 function ToolView:set_highlight(content, ext)
   ext = ext or "md"
   if content:sub(-1) == "\n" then
@@ -91,10 +97,7 @@ function ToolView:set_highlight(content, ext)
   if content == "" then
     return false
   end
-  local lines = {}
-  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-    lines[#lines + 1] = line
-  end
+  local lines = craft.split(content, "\n")
 
   local fmt = line_nr_fmt(#lines)
   for idx, line in ipairs(lines) do
@@ -185,7 +188,7 @@ end
 function ToolView.restore(output, opts)
   local buf = craft.ui.buf()
   local view = ToolView.new(buf, opts)
-  for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+  for _, line in ipairs(craft.split(output, "\n")) do
     view:append(line)
   end
   view:finish()

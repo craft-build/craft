@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
+use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table, Value};
 
 use crate::api::fs::expand_tilde;
 use crate::plugin_permissions::{
@@ -320,20 +320,20 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
 
                 let exit_code = loop {
                     let event = tokio::select! {
+                        biased;
                         event = rx.recv_async() => event.ok(),
                         _ = tokio::time::sleep(timeout) => None,
                     };
 
+                    let Some(event) = event else {
+                        with_task_jobs(&lua, |store| store.put_receiver(job_id, rx));
+                        return Ok(mlua::Value::Nil);
+                    };
+                    deliver_job_event(&lua, job_id, &event)?;
                     match event {
-                        None => {
-                            with_task_jobs(&lua, |store| store.put_receiver(job_id, rx));
-                            return Ok(mlua::Value::Nil);
-                        }
-                        Some(JobEvent::Stdout(line)) => stdout_lines.push(line),
-                        Some(JobEvent::Stderr(line)) => stderr_lines.push(line),
-                        Some(JobEvent::Exit(code)) => {
-                            break code;
-                        }
+                        JobEvent::Stdout(line) => stdout_lines.push(line),
+                        JobEvent::Stderr(line) => stderr_lines.push(line),
+                        JobEvent::Exit(code) => break code,
                     }
                 };
 
@@ -364,6 +364,30 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
     )?;
 
     Ok(t)
+}
+
+/// Fire the job's Lua callback for {event} (if any) and mark the job
+/// dead on exit. Shared by `jobwait` and the async dispatch loop so
+/// both deliver events identically.
+pub(crate) fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> LuaResult<()> {
+    let callback = with_task_jobs(lua, |store| {
+        store
+            .callback_key(job_id, event)
+            .and_then(|key| lua.registry_value::<Function>(key).ok())
+    });
+    if let Some(callback) = callback {
+        let arg: Value = match event {
+            JobEvent::Stdout(line) | JobEvent::Stderr(line) => {
+                Value::String(lua.create_string(line)?)
+            }
+            JobEvent::Exit(code) => Value::Integer(*code as i64),
+        };
+        callback.call::<()>((job_id, arg))?;
+    }
+    if let JobEvent::Exit(_) = event {
+        with_task_jobs(lua, |store| store.mark_dead(job_id));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

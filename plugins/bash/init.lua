@@ -385,7 +385,7 @@ craft.api.register_tool({
       view:append({ { "Timed out after " .. timeout_secs .. "s", "dim" } })
     elseif output:match("^Background task:") then
       view:clear()
-      for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+      for _, line in ipairs(craft.split(output, "\n")) do
         if line ~= "" then
           view:append({ { line, "dim" } })
         end
@@ -394,23 +394,17 @@ craft.api.register_tool({
     elseif is_error then
       local body, code = output:match("^(.-)\nExit code: (%d+)$")
       if body then
-        for line in (body .. "\n"):gmatch("([^\n]*)\n") do
-          view:append(line)
-        end
+        view:append_text(body)
         view:append({ { "Exit code: " .. code, "dim" } })
       else
-        for line in (output .. "\n"):gmatch("([^\n]*)\n") do
-          view:append(line)
-        end
+        view:append_text(output)
       end
     else
       if output == "Exit code: 0" or output == "" then
         view:clear()
         view:append({ { "No output", "dim" } })
       else
-        for line in (output .. "\n"):gmatch("([^\n]*)\n") do
-          view:append(line)
-        end
+        view:append_text(output)
       end
     end
     view:finish()

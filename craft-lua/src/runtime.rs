@@ -27,7 +27,7 @@ use craft_config::RawConfig;
 
 use crate::api::autocmd::AutocmdStore;
 use crate::api::create_craft_global;
-use crate::api::r#fn::{JobMeta, JobStore};
+use crate::api::r#fn::{JobMeta, JobStore, deliver_job_event};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
@@ -44,7 +44,7 @@ use crate::api::util::ctx::LuaCtx;
 use crate::api::util::setup::ConfigStore;
 use crate::error::PluginError;
 use crate::plugin_permissions::PluginPermissions;
-use crate::terminal_backend::{JobEvent, TerminalBackend};
+use crate::terminal_backend::TerminalBackend;
 
 const INTERRUPT_SHUTDOWN_MSG: &str = "plugin interrupted: host shutting down";
 const INTERRUPT_CANCELLED_MSG: &str = "plugin interrupted: task cancelled";
@@ -458,9 +458,34 @@ impl TaskScope {
     }
 }
 
+/// Runs an async system callback under a [detached] scope so callers
+/// can't forget to set one up.
+///
+/// Job callbacks (`on_stdout` etc.) are pumped whenever {fut} is
+/// suspended, so a handler parked in e.g. `win:recv()` still streams
+/// job output, like Neovim firing callbacks from its idle event loop.
+///
+/// [detached]: TaskScope::detached
 pub(crate) async fn run_detached<F: std::future::Future>(lua: &Lua, fut: F) -> F::Output {
     let scope = TaskScope::detached(lua);
-    let out = scope.scope_future(fut).await;
+    let handle = Arc::clone(scope.handle());
+    let pump = async {
+        let mut event_buf = Vec::new();
+        loop {
+            lock_cell(&handle).jobs.drain_events(&mut event_buf);
+            for (job_id, event) in event_buf.drain(..) {
+                if let Err(e) = deliver_job_event(lua, job_id, &event) {
+                    tracing::warn!(error = %strip_traceback(&e), "detached job callback failed");
+                }
+            }
+            tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
+        }
+    };
+    let out = tokio::select! {
+        biased;
+        out = scope.scope_future(fut) => out,
+        _ = pump => unreachable!("pump never completes"),
+    };
     drop(scope);
     out
 }
@@ -1588,25 +1613,8 @@ fn drain_bg_job_events(lua: &Lua, handle: &TaskHandle) {
     let mut event_buf = Vec::new();
     lock_cell(handle).jobs.drain_events(&mut event_buf);
     for (job_id, event) in event_buf {
-        let is_exit = matches!(event, JobEvent::Exit(_));
-        let callback = lock_cell(handle)
-            .jobs
-            .callback_key(job_id, &event)
-            .and_then(|k| lua.registry_value::<Function>(k).ok());
-        if let Some(func) = callback {
-            let arg: LuaValue = match &event {
-                JobEvent::Stdout(line) | JobEvent::Stderr(line) => lua
-                    .create_string(line)
-                    .map(LuaValue::String)
-                    .unwrap_or(LuaValue::Nil),
-                JobEvent::Exit(code) => LuaValue::Integer(*code as i64),
-            };
-            if let Err(e) = func.call::<()>((job_id, arg)) {
-                tracing::warn!(job_id, error = %strip_traceback(&e), "bg job callback error");
-            }
-        }
-        if is_exit {
-            lock_cell(handle).jobs.mark_dead(job_id);
+        if let Err(e) = deliver_job_event(lua, job_id, &event) {
+            tracing::warn!(job_id, error = %strip_traceback(&e), "bg job callback error");
         }
     }
 }
@@ -1675,31 +1683,8 @@ async fn dispatch_async(
         }
 
         for (job_id, event) in event_buf.drain(..) {
-            let is_exit = matches!(event, JobEvent::Exit(_));
-
-            let callback = lock_cell(&handle)
-                .jobs
-                .callback_key(job_id, &event)
-                .and_then(|k| lua.registry_value::<Function>(k).ok());
-
-            if let Some(func) = callback {
-                let arg: LuaValue = match &event {
-                    JobEvent::Stdout(line) | JobEvent::Stderr(line) => lua
-                        .create_string(line)
-                        .map(LuaValue::String)
-                        .unwrap_or(LuaValue::Nil),
-                    JobEvent::Exit(code) => LuaValue::Integer(*code as i64),
-                };
-                if let Err(e) = func.call::<()>((job_id, arg)) {
-                    return ToolCallReply::err(format!(
-                        "job callback error: {}",
-                        strip_traceback(&e)
-                    ));
-                }
-            }
-
-            if is_exit {
-                lock_cell(&handle).jobs.mark_dead(job_id);
+            if let Err(e) = deliver_job_event(lua, job_id, &event) {
+                return ToolCallReply::err(format!("job callback error: {}", strip_traceback(&e)));
             }
         }
     }

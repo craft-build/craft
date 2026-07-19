@@ -13,6 +13,7 @@ pub(crate) mod net;
 pub(crate) mod options;
 pub(crate) mod session;
 pub(crate) mod slot;
+pub(crate) mod split;
 pub(crate) mod text;
 pub(crate) mod tool;
 pub(crate) mod treesitter;
@@ -67,6 +68,7 @@ pub(crate) fn create_craft_global(
         ui::create_ui_table(lua, ui_action_tx, Arc::clone(&plugin))?,
     )?;
     craft.set("fn", r#fn::create_fn_table(lua, permissions)?)?;
+    split::register(&craft, lua)?;
     craft.set("async", r#async::create_async_table(lua)?)?;
     craft.set(
         "builtin_skills",
