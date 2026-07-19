@@ -195,6 +195,23 @@ impl PluginHost {
         if self.inner.is_none() {
             return Ok(());
         }
+        for (plugin, opts) in &config.opts {
+            let keys: Vec<&str> = opts.keys().map(String::as_str).collect();
+            if !BUNDLED_PLUGINS.iter().any(|p| p.name == plugin.as_str()) {
+                return Err(PluginError::UnknownPluginOptions {
+                    plugin: plugin.clone(),
+                    keys: keys.join(", "),
+                });
+            }
+            if !config.names.contains(plugin) {
+                tracing::warn!(
+                    plugin = plugin.as_str(),
+                    keys = keys.join(", "),
+                    "plugin is disabled; its plugins.{} options are ignored until re-enabled",
+                    plugin
+                );
+            }
+        }
         for builtin in &config.names {
             let dir = match BUNDLED_PLUGINS.iter().find(|p| p.name == builtin.as_str()) {
                 Some(p) => &p.dir,
@@ -407,6 +424,18 @@ impl EventHandle {
         &self.tx
     }
 
+    /// Test constructor that wraps an arbitrary request channel.
+    pub(crate) fn from_tx(tx: flume::Sender<Request>) -> Self {
+        Self { tx }
+    }
+
+    /// Test handle whose every dispatch fails, simulating a dead lua host.
+    pub fn disconnected_for_test() -> Self {
+        let (tx, rx) = flume::bounded(0);
+        drop(rx);
+        Self { tx }
+    }
+
     pub fn set_sandbox_config(&self, config: craft_config::SandboxConfig) {
         let _ = self.tx.send(Request::SetSandboxConfig { config });
     }
@@ -448,8 +477,8 @@ impl EventHandle {
         });
     }
 
-    pub fn run_keybind_callback(&self, id: u64) {
-        let _ = self.tx.try_send(Request::RunKeybindCallback { id });
+    pub fn run_keybind_callback(&self, id: u64) -> bool {
+        self.tx.try_send(Request::RunKeybindCallback { id }).is_ok()
     }
 }
 

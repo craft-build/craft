@@ -1035,7 +1035,9 @@ impl App {
             return actions;
         }
 
-        if self.dispatch_override(key) {
+        if !(self.status == Status::Streaming && self.is_streaming_stop_key(key))
+            && self.dispatch_override(key)
+        {
             return vec![];
         }
 
@@ -1068,14 +1070,19 @@ impl App {
         let key = normalize_key(key);
         let snap = self.keymap_reader.load();
         for entry in &snap.entries {
-            if entry.key == key.code && entry.modifiers == key.modifiers {
-                if let Some(ref handle) = self.lua_event_handle {
-                    handle.run_keybind_callback(entry.id);
-                }
+            if entry.key == key.code
+                && entry.modifiers == key.modifiers
+                && let Some(ref handle) = self.lua_event_handle
+                && handle.run_keybind_callback(entry.id)
+            {
                 return true;
             }
         }
         false
+    }
+
+    fn is_streaming_stop_key(&self, key: KeyEvent) -> bool {
+        self.keybindings.matches(ActionId::Quit, key) || key.code == KeyCode::Esc
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {

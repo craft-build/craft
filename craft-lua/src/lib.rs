@@ -28,6 +28,8 @@ pub mod test_support {
     use crate::KeymapReader;
     use crate::api::keymap::{KeymapEntry, KeymapWriter};
     use crate::api::util::command::{LuaCommandInfo, LuaCommandReader, LuaCommandWriter};
+    use crate::loader::EventHandle;
+    use crate::runtime::Request;
 
     pub struct LuaCommandWriterHandle(LuaCommandWriter);
 
@@ -47,4 +49,16 @@ pub mod test_support {
         writer.publish(entries);
         reader
     }
+
+    /// Live `EventHandle` paired with a probe that observes every dispatched
+    /// request. The probe is unused by most callers; it exists so a test can
+    /// hold a live runtime while exercising the override path.
+    pub fn probed_event_handle() -> (EventHandle, RequestProbe) {
+        let (tx, rx) = flume::unbounded();
+        (EventHandle::from_tx(tx), RequestProbe(rx))
+    }
+
+    /// Sink for requests dispatched by a probed `EventHandle`.
+    #[expect(dead_code, reason = "holds the channel open for the test handle")]
+    pub struct RequestProbe(flume::Receiver<Request>);
 }
