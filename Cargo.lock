@@ -1888,6 +1888,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-zig",
  "tree-sitter-zsh",
+ "unicode-width",
  "yaml_serde",
 ]
 

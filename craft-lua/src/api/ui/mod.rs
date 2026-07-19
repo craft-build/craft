@@ -10,6 +10,7 @@ use crate::api::util::command::{
     Anchor, Border, DEFAULT_ORDER, DEFAULT_ZINDEX, Dimension, FloatConfig, HintEntries, HintWriter,
     Split, TitlePos, UiAction, WinCommand, WinEvent,
 };
+pub(crate) mod blit;
 pub(crate) mod buf;
 pub(crate) mod win;
 

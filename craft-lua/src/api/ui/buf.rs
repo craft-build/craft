@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use craft_agent::types::InlineStyle;
 use craft_agent::{SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
-use mlua::{Function, Result as LuaResult, UserData, UserDataMethods, Value as LuaValue};
+use mlua::{Function, Result as LuaResult, Table, UserData, UserDataMethods, Value as LuaValue};
 
+use super::blit;
 use crate::runtime::{self};
 
 /// `live_buf` tracks the first buffer a handler creates, which is the one
@@ -105,6 +106,32 @@ impl UserData for BufHandle {
         });
 
         methods.add_method("len", |_lua, this, ()| Ok(this.buf.len()));
+
+        methods.add_method(
+            "blit",
+            |_lua, this, (fb, width, height, opts): (mlua::Buffer, u32, u32, Option<Table>)| {
+                let mut format = blit::DEFAULT_FORMAT.to_owned();
+                let mut cell = blit::DEFAULT_CELL.to_owned();
+                if let Some(opts) = opts {
+                    for pair in opts.pairs::<String, String>() {
+                        match pair? {
+                            (key, val) if key == "format" => format = val,
+                            (key, val) if key == "char" => cell = val,
+                            (key, _) => {
+                                return Err(mlua::Error::external(format!(
+                                    "blit: unknown opts key {key:?}"
+                                )));
+                            }
+                        }
+                    }
+                }
+                let fmt = blit::parse_format(&format).map_err(mlua::Error::external)?;
+                let lines = blit::render(&fb.to_vec(), width as usize, height as usize, fmt, &cell)
+                    .map_err(mlua::Error::external)?;
+                this.buf.set_lines(lines);
+                Ok(())
+            },
+        );
 
         methods.add_method("on", |lua, _this, (event, callback): (String, Function)| {
             if event != "click" {
@@ -579,5 +606,42 @@ mod tests {
             runtime::lock_cell(&handle).click.is_some(),
             "second on() should replace, not remove"
         );
+    }
+
+    #[test]
+    fn blit_replaces_content_with_rendered_frame() {
+        let lua = test_lua();
+        set_buf_global(&lua);
+
+        lua.load(
+            r#"
+            buf:set_lines({ "a", "b", "c" })
+            local fb = buffer.create(2 * 2 * 3)
+            buffer.writeu8(fb, 0, 255)
+            buffer.writeu8(fb, 4, 255)
+            buffer.writeu8(fb, 8, 255)
+            buf:blit(fb, 2, 2)
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+        let mut bytes = [0u8; 12];
+        (bytes[0], bytes[4], bytes[8]) = (255, 255, 255);
+        let fmt = blit::parse_format(blit::DEFAULT_FORMAT).unwrap();
+        let expected = blit::render(&bytes, 2, 2, fmt, blit::DEFAULT_CELL).unwrap();
+        let ud: mlua::AnyUserData = lua.globals().get("buf").unwrap();
+        assert_eq!(*ud.borrow::<BufHandle>().unwrap().buf.read(), expected);
+    }
+
+    #[test_case(r#"buf:blit(buffer.create(3), 1, 1, { fromat = "bgra" })"#, "unknown opts key" ; "opts_key_typo")]
+    #[test_case(r#"buf:blit(buffer.create(3), 1, 1, { format = "argb" })"#, "unknown format" ; "unknown_format")]
+    #[test_case(r#"buf:blit(buffer.create(5), 1, 1)"#, "needs exactly 3" ; "wrong_size")]
+    fn blit_throws(code: &str, expected: &str) {
+        let lua = test_lua();
+        set_buf_global(&lua);
+
+        let err = lua.load(code).exec().unwrap_err().to_string();
+        assert!(err.contains(expected), "expected {expected:?} in: {err}");
     }
 }
