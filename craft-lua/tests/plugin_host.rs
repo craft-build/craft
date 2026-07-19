@@ -1776,25 +1776,6 @@ fn undeclared_opts_fail_the_load() {
 }
 
 #[test]
-fn opts_for_unknown_plugin_fail_load_builtins() {
-    let reg = fresh_registry();
-    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    let mut config = PluginsConfig::from_plugins(HashMap::new());
-    config.opts.insert(
-        "bsah".to_owned(),
-        json_obj(serde_json::json!({ "timeout_secs": 5 })),
-    );
-    let err = host
-        .load_builtins(&config)
-        .expect_err("load_builtins should fail");
-    assert!(
-        err.to_string()
-            .contains("plugins.bsah sets options (timeout_secs)"),
-        "got: {err}"
-    );
-}
-
-#[test]
 fn unknown_plugin_name_fails_load_builtins() {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();

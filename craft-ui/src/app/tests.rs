@@ -2962,3 +2962,147 @@ fn flow_done_does_not_finalize_running_chunks_to_blocked() {
     );
     assert!(!app.flow_failed);
 }
+
+#[test]
+fn override_shadows_builtin_ctrl_when_no_overlay_open() {
+    let entry = craft_lua::KeymapEntry {
+        key: kb::HELP.code,
+        modifiers: kb::HELP.modifiers,
+        desc: "plugin help override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 1,
+    };
+    let reader = craft_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.keymap_reader = reader;
+    assert!(!app.help_modal.is_open());
+
+    let actions = app.update(Msg::Key(kb::HELP.to_key_event()));
+
+    assert!(actions.is_empty());
+    assert!(
+        !app.help_modal.is_open(),
+        "override must consume the key before the built-in HELP handler runs"
+    );
+}
+
+#[test]
+fn override_shadows_quit_builtin() {
+    let entry = craft_lua::KeymapEntry {
+        key: kb::QUIT.code,
+        modifiers: kb::QUIT.modifiers,
+        desc: "plugin quit override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 3,
+    };
+    let reader = craft_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.status = Status::Idle;
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+
+    assert!(actions.is_empty());
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::None,
+        "override must consume Ctrl+C before the built-in quit handler runs"
+    );
+}
+
+#[test]
+fn override_shadows_tab_mode_toggle() {
+    let entry = craft_lua::KeymapEntry {
+        key: KeyCode::Tab,
+        modifiers: KeyModifiers::NONE,
+        desc: "plugin tab override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 4,
+    };
+    let reader = craft_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let initial_mode = app.state.mode;
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(key(KeyCode::Tab)));
+
+    assert!(actions.is_empty());
+    assert_eq!(
+        app.state.mode, initial_mode,
+        "override must consume Tab before the built-in mode toggle runs"
+    );
+}
+
+#[test]
+fn override_shadows_esc_builtin() {
+    let entry = craft_lua::KeymapEntry {
+        key: KeyCode::Esc,
+        modifiers: KeyModifiers::NONE,
+        desc: "plugin esc override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 5,
+    };
+    let reader = craft_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(actions.is_empty());
+    assert!(
+        app.last_esc.is_none(),
+        "override must consume Esc before the built-in esc handler runs"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn override_does_not_shadow_suspend() {
+    let entry = craft_lua::KeymapEntry {
+        key: kb::SUSPEND.code,
+        modifiers: kb::SUSPEND.modifiers,
+        desc: "plugin suspend override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 6,
+    };
+    let reader = craft_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(kb::SUSPEND.to_key_event()));
+
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::Suspend)),
+        "suspend is non-remappable: override must not shadow Ctrl+Z"
+    );
+}
+
+#[test]
+fn builtin_runs_when_no_override() {
+    let mut app = test_app();
+    assert!(!app.help_modal.is_open());
+
+    app.update(Msg::Key(kb::HELP.to_key_event()));
+
+    assert!(app.help_modal.is_open());
+}
+
+#[test]
+fn overlay_wins_over_override_when_plan_form_open() {
+    let entry = craft_lua::KeymapEntry {
+        key: kb::PLAN_TOGGLE.code,
+        modifiers: kb::PLAN_TOGGLE.modifiers,
+        desc: "plugin plan override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 2,
+    };
+    let reader = craft_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = plan_app();
+    app.keymap_reader = reader;
+    assert!(app.plan_form.is_visible());
+    assert!(app.lua_event_handle.is_none());
+
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
+
+    assert!(!app.plan_form.is_visible());
+}

@@ -25,6 +25,8 @@ pub use terminal_backend::{
 };
 
 pub mod test_support {
+    use crate::KeymapReader;
+    use crate::api::keymap::{KeymapEntry, KeymapWriter};
     use crate::api::util::command::{LuaCommandInfo, LuaCommandReader, LuaCommandWriter};
 
     pub struct LuaCommandWriterHandle(LuaCommandWriter);
@@ -38,5 +40,11 @@ pub mod test_support {
     pub fn lua_command_writer_pair() -> (LuaCommandWriterHandle, LuaCommandReader) {
         let (writer, reader) = LuaCommandWriter::new();
         (LuaCommandWriterHandle(writer), reader)
+    }
+
+    pub fn keymap_reader_with(entries: Vec<KeymapEntry>) -> KeymapReader {
+        let (writer, reader) = KeymapWriter::new();
+        writer.publish(entries);
+        reader
     }
 }

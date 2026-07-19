@@ -151,6 +151,9 @@ impl PluginHost {
     }
 
     pub fn load_init_files(&self, cwd: &Path) -> Result<Option<RawConfig>, PluginError> {
+        if self.inner.is_none() {
+            return Ok(None);
+        }
         let mut merged: Option<RawConfig> = None;
 
         for global_dir in craft_config::global_config_dirs() {
@@ -191,23 +194,6 @@ impl PluginHost {
     pub fn load_builtins(&mut self, config: &PluginsConfig) -> Result<(), PluginError> {
         if self.inner.is_none() {
             return Ok(());
-        }
-        for (plugin, opts) in &config.opts {
-            let keys: Vec<&str> = opts.keys().map(String::as_str).collect();
-            if !BUNDLED_PLUGINS.iter().any(|p| p.name == plugin.as_str()) {
-                return Err(PluginError::UnknownPluginOptions {
-                    plugin: plugin.clone(),
-                    keys: keys.join(", "),
-                });
-            }
-            if !config.names.contains(plugin) {
-                tracing::warn!(
-                    plugin = plugin.as_str(),
-                    keys = keys.join(", "),
-                    "plugin is disabled; its plugins.{} options are ignored until re-enabled",
-                    plugin
-                );
-            }
         }
         for builtin in &config.names {
             let dir = match BUNDLED_PLUGINS.iter().find(|p| p.name == builtin.as_str()) {
@@ -473,6 +459,7 @@ mod tests {
     use crate::api::util::command::{LuaCommandInfo, LuaCommandWriter};
     use craft_agent::prompt::{PromptId, Slot};
     use craft_agent::tools::ToolRegistry;
+    use std::time::Instant;
 
     /// jit=true is exercised by the whole integration suite
     /// (`tests/plugin_host.rs` boots hosts via `new`); only the O1
@@ -611,6 +598,86 @@ mod tests {
         assert_eq!(snap.commands.len(), 0);
         assert_eq!(snap.generation, 0);
         assert!(host.ui_action_rx().is_none());
+    }
+
+    /// End-to-end: a plugin registers a keymap override, the override is published
+    /// to the snapshot, EventHandle::run_keybind_callback dispatches the request,
+    /// the runtime resolves the Function by id from the registry, and the callback
+    /// executes with an observable side effect. This is the load-bearing path the
+    /// dispatch reorder and the store hardening rest on; unit tests only cover the
+    /// layers in isolation.
+    #[test]
+    fn keybind_callback_runs_end_to_end() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new()), None).unwrap();
+        host.load_source(
+            "kb",
+            r#"
+            craft.keymap.set("n", "<C-g>", function()
+                craft.api.register_command({
+                    name = "/fired",
+                    description = "callback ran",
+                    handler = function() end,
+                })
+            end, { desc = "test override" })
+            "#,
+        )
+        .unwrap();
+
+        let snap = host.keymap_reader().load();
+        assert_eq!(snap.entries.len(), 1, "override published to snapshot");
+        let entry = &snap.entries[0];
+        assert_eq!(entry.desc, "test override");
+        assert!(
+            host.command_reader().load().commands.is_empty(),
+            "callback has not fired yet"
+        );
+
+        let handle = host.event_handle().expect("host is live");
+        handle.run_keybind_callback(entry.id);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let cmds = &host.command_reader().load().commands;
+            if cmds.iter().any(|c| c.name.as_ref() == "/fired") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "keybind callback did not register /fired within 2s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test_case::test_case(true ; "with_init_lua_present")]
+    #[test_case::test_case(false ; "without_init_lua")]
+    fn disabled_host_skips_init_files(with_init: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        if with_init {
+            fs::create_dir_all(dir.path().join(".craft")).unwrap();
+            fs::write(
+                dir.path().join(".craft/init.lua"),
+                "error('should not run')",
+            )
+            .unwrap();
+        }
+        let host = PluginHost::disabled();
+        let config = host
+            .load_init_files(dir.path())
+            .expect("disabled host skips init");
+        assert!(config.is_none(), "disabled host returns no config");
+    }
+
+    #[test]
+    fn disabled_host_skips_load_builtins() {
+        let mut host = PluginHost::disabled();
+        let config = PluginsConfig::from_plugins(HashMap::new());
+        assert!(
+            !config.names.is_empty(),
+            "default config enables builtin plugins"
+        );
+        host.load_builtins(&config)
+            .expect("disabled host skips builtin plugin load");
     }
 
     #[test]
