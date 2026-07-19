@@ -285,6 +285,12 @@ craft.setup({
 | `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
 | `search_result_limit` | integer | `100` | 10 | Max match groups per search. A call's `limit` param overrides it. |
 
+### `plugins.skill`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `plugin_dev` | boolean | `true` | - | Offer the builtin plugin-dev skill for writing craft plugins. |
+
 ### `plugins.webfetch`
 
 | Field | Type | Default | Min | Description |

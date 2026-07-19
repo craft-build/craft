@@ -14,6 +14,7 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         include_str!("../skills/agents-md-init/SKILL.md"),
     ),
     ("debugging", include_str!("../skills/debugging/SKILL.md")),
+    ("plugin-dev", include_str!("../skills/plugin-dev/SKILL.md")),
     ("run", include_str!("../skills/run/SKILL.md")),
     ("stuck", include_str!("../skills/stuck/SKILL.md")),
     ("verify", include_str!("../skills/verify/SKILL.md")),

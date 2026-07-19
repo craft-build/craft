@@ -1,10 +1,18 @@
 local SKILL_FILE = "SKILL.md"
 local NOT_FOUND = "skill not found: "
+local PLUGIN_DEV_SKILL_NAME = "plugin-dev"
 local shorten_path = require("craft.shorten_path")
 local ToolView = require("craft.tool_view")
 local helpers = require("skill_helpers")
 local parse_frontmatter = helpers.parse_frontmatter
 local build_skill_list = helpers.build_skill_list
+
+local opts = craft.api.register_options({
+  plugin_dev = {
+    default = true,
+    desc = "Offer the builtin plugin-dev skill for writing craft plugins.",
+  },
+})
 
 local PROJECT_SKILL_DIRS = {
   ".craft/skills",
@@ -68,10 +76,11 @@ local function seed_builtin_skills(skills)
   if not builtins then
     return
   end
+  local plugin_dev_enabled = opts.plugin_dev ~= false
   for _, entry in ipairs(builtins) do
     local name = entry.name
     local content = entry.content
-    if name and content and not skills[name] then
+    if name and content and not skills[name] and not (name == PLUGIN_DEV_SKILL_NAME and not plugin_dev_enabled) then
       local fm, body = parse_frontmatter(content)
       if body and #body > 0 then
         skills[name] = {

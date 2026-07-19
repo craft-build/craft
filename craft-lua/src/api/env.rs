@@ -34,6 +34,20 @@ pub(crate) fn create_env_table(lua: &Lua, perms: &PluginPermissions) -> LuaResul
     )?;
 
     t.set(
+        "logs_dir",
+        lua.create_function({
+            let perms = perms.clone();
+            move |lua, ()| {
+                perms.guard(Env, lua, |_| {
+                    Ok(craft_storage::paths::logs_dir()
+                        .ok()
+                        .and_then(|p| p.to_str().map(String::from)))
+                })
+            }
+        })?,
+    )?;
+
+    t.set(
         "legacy_dir",
         lua.create_function({
             let perms = perms.clone();
