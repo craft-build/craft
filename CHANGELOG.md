@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-07-19
+
+### Added
+
+- **outline**: YAML files indexed in the outline tool (`1f37fbd42`)
+- **lua**: `craft.session.prompt()` sends raw prompts to live sessions (`e990ee374`)
+- **lua**: `buf:blit` pixel canvas for plugins (`e243257a4`)
+- **lua**: streamed job callbacks into parked handlers, plus `craft.spi` helpers (`4c520d7ee`)
+- **lua**: Luau JIT plus a watchdog that stays out of the VM's way (`6b06d8c94`)
+- **skill**: built-in `plugin-dev` skill so craft can write plugins (`bbc7cb0ac`)
+- **providers**: login for models.dev catalog providers (`a0c6a8ea6`)
+- **sessions**: run sessions concurrently with a Lua-driven `/session` (`f3ea2166f`)
+- **ui**: `/reload` rebuilds plugins and config without leaving the TUI (`9bd1b99ce`)
+
+### Changed
+
+- **providers**: one `Effort` model instead of per-provider effort (`22cd0dbf8`)
+- **config**: tool settings moved into their plugins (`ed5a24a93`)
+- **ui**: highlight `REVERSED` folded into the Paragraph widget style (`87556a1e7`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`futures` 0.3.33, `jiff` 0.2.33, `proc-macro2` 1.0.107, `quote` 1.0.47, `serde` 1.0.229, `tauri-plugin-dialog` 2.7.2, `thiserror` 2.0.19, `webpki-roots` 1.0.9)
+
+### Fixed
+
+- **sessions**: time label stays aligned when a title has newlines (`9cc980059`)
+- **keymap**: overrides guarded on dead host and streaming cancel keys (`6025af697`)
+- **keymap**: Lua keymap overrides dispatch before built-in ctrl bindings (`d1498a106`)
+- **agent**: speaks Streamable HTTP to remote MCPs, not 2024-11-05 SSE (`15a9d7660`)
+- **storage**: logs written to the logs dir, not the state dir (`45b72847e`)
+- **ui**: splash bench updated for accent-aware render (`d75ded964`)
+- **lua**: drain barrier catches async jobs queued during the drain (`02e929dc3`)
+
 ## [0.9.4] - 2026-07-18
 
 ### Added
