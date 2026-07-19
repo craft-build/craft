@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -29,7 +29,7 @@ impl RenderCursor {
         &mut self,
         lines: &[Line<'static>],
         h: u16,
-        style: Option<ratatui::style::Style>,
+        style: Option<Style>,
         highlight: bool,
         hyperlinks: &[crate::hyperlink::Hyperlink],
         frame: &mut Frame,
@@ -46,24 +46,17 @@ impl RenderCursor {
             .min(self.bottom.saturating_sub(self.y));
         let seg_area = Rect::new(self.viewport.x, self.y, self.viewport.width, visible_h);
         let mut p = Paragraph::new(lines.to_vec()).wrap(Wrap { trim: false });
-        if let Some(s) = style {
-            p = p.style(s);
+        let mut base = style.unwrap_or_default();
+        if highlight {
+            base = base.add_modifier(Modifier::REVERSED);
         }
+        p = p.style(base);
         let scroll = self.skip;
         if scroll > 0 {
             p = p.scroll((scroll, 0));
             self.skip = 0;
         }
         frame.render_widget(p, seg_area);
-        if highlight {
-            for row in seg_area.y..seg_area.y + seg_area.height {
-                for col in seg_area.x..seg_area.x + seg_area.width {
-                    if let Some(cell) = frame.buffer_mut().cell_mut((col, row)) {
-                        cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
-                    }
-                }
-            }
-        }
         if !hyperlinks.is_empty() && !crate::terminal::is_muxed() {
             inject_hyperlinks(hyperlinks, seg_area, scroll, frame);
         }
@@ -76,7 +69,7 @@ impl RenderCursor {
         &mut self,
         img: &crate::image_render::ImageRenderState,
         caption: &[Line<'static>],
-        style: Option<ratatui::style::Style>,
+        style: Option<Style>,
         frame: &mut Frame,
     ) {
         let caption_h = super::segment::wrapped_line_count(caption, self.viewport.width);
