@@ -68,6 +68,7 @@ tree-sitter-objc = { workspace = true }
 tree-sitter-perl = { workspace = true }
 tree-sitter-svelte-next = { workspace = true }
 tree-sitter-zsh = { workspace = true }
+tree-sitter-yaml = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

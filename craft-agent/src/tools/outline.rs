@@ -166,6 +166,7 @@ pub enum LangId {
     Perl,
     SvelteNext,
     Zsh,
+    Yaml,
 }
 
 impl LangId {
@@ -210,6 +211,7 @@ impl LangId {
             "perl" => Some(Self::Perl),
             "svelte-next" => Some(Self::SvelteNext),
             "zsh" => Some(Self::Zsh),
+            "yaml" | "yml" => Some(Self::Yaml),
             _ => None,
         }
     }
@@ -249,6 +251,7 @@ impl LangId {
             Self::Perl => tree_sitter_perl::LANGUAGE.into(),
             Self::SvelteNext => tree_sitter_svelte_next::LANGUAGE.into(),
             Self::Zsh => tree_sitter_zsh::LANGUAGE.into(),
+            Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         }
     }
 
@@ -287,6 +290,7 @@ impl LangId {
             Self::Perl => "perl",
             Self::SvelteNext => "svelte",
             Self::Zsh => "zsh",
+            Self::Yaml => "yaml",
         }
     }
 
@@ -312,6 +316,7 @@ impl LangId {
             Self::Perl => ".",
             Self::SvelteNext => ".",
             Self::Zsh => ".",
+            Self::Yaml => ".",
             _ => "/",
         }
     }
@@ -403,6 +408,9 @@ struct DirEntry {
 }
 
 pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
+    if matches!(lang, LangId::Yaml) {
+        return extract_yaml_symbols(content, lang);
+    }
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&lang.ts_language()).is_err() {
         error!(
@@ -509,6 +517,120 @@ pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
     }
 
     symbols
+}
+
+fn extract_yaml_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&lang.ts_language()).is_err() {
+        error!(
+            lang = lang.name(),
+            "outline parser rejected language abi, skipping"
+        );
+        return vec![];
+    }
+    let Some(tree) = parser.parse(content, None) else {
+        error!(
+            lang = lang.name(),
+            "outline parser returned no tree, skipping"
+        );
+        return vec![];
+    };
+
+    let source = content.as_bytes();
+    let mut symbols = Vec::new();
+    let root = tree.root_node();
+
+    for stream_child in yaml_children(&root) {
+        if stream_child.kind() != "document" {
+            yaml_collect_pairs(&stream_child, source, &mut symbols, None);
+            continue;
+        }
+        for doc_child in yaml_children(&stream_child) {
+            yaml_collect_pairs(&doc_child, source, &mut symbols, None);
+        }
+    }
+
+    symbols.sort_by_key(|s| (s.range.start_row, s.range.start_col));
+    symbols
+}
+
+fn yaml_children<'a>(node: &tree_sitter::Node<'a>) -> Vec<tree_sitter::Node<'a>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).collect()
+}
+
+fn yaml_collect_pairs(
+    node: &tree_sitter::Node,
+    source: &[u8],
+    out: &mut Vec<Symbol>,
+    parent_name: Option<&str>,
+) {
+    match node.kind() {
+        "block_mapping" | "flow_mapping" => {}
+        "block_node" | "flow_node" | "block_sequence" | "flow_sequence" | "block_sequence_item" => {
+            for child in yaml_children(node) {
+                yaml_collect_pairs(&child, source, out, parent_name);
+            }
+            return;
+        }
+        _ => return,
+    }
+
+    for pair in yaml_children(node)
+        .iter()
+        .filter(|c| matches!(c.kind(), "block_mapping_pair" | "flow_pair"))
+    {
+        let Some(key_node) = pair.child_by_field_name("key") else {
+            continue;
+        };
+        let Some(name) = yaml_key_text(&key_node, source) else {
+            continue;
+        };
+
+        let start = pair.start_position();
+        let end = pair.end_position();
+        let scope_chain = parent_name.map(|p| vec![p.to_string()]).unwrap_or_default();
+        out.push(Symbol {
+            name: name.clone(),
+            kind: SymbolKind::Constant,
+            range: Range {
+                start_row: start.row,
+                start_col: start.column,
+                end_row: end.row,
+                end_col: end.column,
+            },
+            signature: None,
+            scope_chain,
+            exported: false,
+            import_segments: Vec::new(),
+            is_child: false,
+        });
+
+        if parent_name.is_none()
+            && let Some(value) = pair.child_by_field_name("value")
+        {
+            yaml_collect_pairs(&value, source, out, Some(&name));
+        }
+    }
+}
+
+fn yaml_key_text(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let raw = node.utf8_text(source).ok()?;
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    if unquoted.is_empty() {
+        None
+    } else {
+        Some(unquoted.to_string())
+    }
 }
 
 fn is_name_capture(idx: u32, query: &Query) -> bool {
@@ -1101,6 +1223,7 @@ fn lang_parts(lang: LangId) -> (&'static LazyLock<Option<Query>>, &'static str) 
         LangId::Perl => (&PERL_QUERY, PERL_SRC),
         LangId::SvelteNext => (&SVELTE_NEXT_QUERY, SVELTE_NEXT_SRC),
         LangId::Zsh => (&ZSH_QUERY, ZSH_SRC),
+        LangId::Yaml => (&YAML_QUERY, YAML_SRC),
     }
 }
 
@@ -1157,6 +1280,7 @@ const ALL_LANGS: &[LangId] = &[
     LangId::Perl,
     LangId::SvelteNext,
     LangId::Zsh,
+    LangId::Yaml,
 ];
 
 const RUST_SRC: &str = r#"
@@ -1442,6 +1566,13 @@ const ZSH_SRC: &str = r#"
 static ZSH_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_query("zsh", &tree_sitter_zsh::LANGUAGE.into(), ZSH_SRC));
 
+const YAML_SRC: &str = r#"
+(block_mapping_pair key: (_) @const.name) @const.def
+(flow_pair key: (_) @const.name) @const.def
+"#;
+static YAML_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("yaml", &tree_sitter_yaml::LANGUAGE.into(), YAML_SRC));
+
 super::impl_tool!(Outline, kind = "outline", tier = super::ToolTier::Core);
 
 impl super::ToolInvocation for Outline {
@@ -1640,5 +1771,113 @@ type Alias = int
                 .iter()
                 .any(|s| s.name == "foo" && s.kind == SymbolKind::Function)
         );
+    }
+
+    #[test]
+    fn yaml_outline_extracts_top_level_keys() {
+        let src = "name: craft\nversion: \"0.9.4\"\ndescription: agent\n";
+        let symbols = extract_symbols(src, LangId::Yaml);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"name"));
+        assert!(names.contains(&"version"));
+        assert!(names.contains(&"description"));
+        assert!(symbols.iter().all(|s| s.kind == SymbolKind::Constant));
+    }
+
+    #[test]
+    fn yaml_outline_nests_one_level_of_children() {
+        let src = "\
+services:
+  web:
+    image: nginx
+  db:
+    image: postgres
+";
+        let symbols = extract_symbols(src, LangId::Yaml);
+        let tree = build_outline_tree(&symbols);
+        let services = tree
+            .iter()
+            .find(|e| e.name == "services")
+            .expect("services root");
+        let member_names: Vec<&str> = services.members.iter().map(|m| m.name.as_str()).collect();
+        assert!(member_names.contains(&"web"));
+        assert!(member_names.contains(&"db"));
+        assert!(
+            !member_names.contains(&"image"),
+            "depth-2 keys must not be indexed, got {member_names:?}"
+        );
+    }
+
+    #[test]
+    fn yaml_outline_unwraps_sequence_of_mappings() {
+        let src = "\
+items:
+  - name: first
+    value: 1
+  - name: second
+    value: 2
+";
+        let symbols = extract_symbols(src, LangId::Yaml);
+        let tree = build_outline_tree(&symbols);
+        let items = tree.iter().find(|e| e.name == "items").expect("items root");
+        let member_names: Vec<&str> = items.members.iter().map(|m| m.name.as_str()).collect();
+        assert!(member_names.contains(&"name"));
+        assert!(member_names.contains(&"value"));
+        assert!(
+            !member_names.contains(&"first"),
+            "scalar values must not be indexed, got {member_names:?}"
+        );
+    }
+
+    #[test]
+    fn yaml_outline_skips_scalar_sequence_values() {
+        let src = "ports:\n  - 8080\n  - 8443\nenv:\n  - FOO=1\n";
+        let symbols = extract_symbols(src, LangId::Yaml);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"ports"));
+        assert!(names.contains(&"env"));
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("8080") || n.contains("FOO")),
+            "sequence scalars must not be indexed, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn yaml_outline_handles_multi_document_stream() {
+        let src = "---\ntitle: first\n---\ntitle: second\n";
+        let symbols = extract_symbols(src, LangId::Yaml);
+        let titles = symbols.iter().filter(|s| s.name == "title").count();
+        assert_eq!(titles, 2, "expected a title from each document");
+    }
+
+    #[test]
+    fn yaml_outline_strips_quotes_from_keys() {
+        let src = "\"full name\": craft\n'machine': x86\n";
+        let symbols = extract_symbols(src, LangId::Yaml);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"full name"));
+        assert!(names.contains(&"machine"));
+    }
+
+    #[test]
+    fn yaml_outline_scalar_only_document_yields_nothing() {
+        let symbols = extract_symbols("just a scalar\n", LangId::Yaml);
+        assert!(
+            symbols.is_empty(),
+            "scalar-only document must yield no symbols"
+        );
+    }
+
+    #[test]
+    fn yaml_outline_renders() {
+        let src = "name: craft\nservices:\n  web:\n    image: nginx\n";
+        let symbols = extract_symbols(src, LangId::Yaml);
+        let tree = build_outline_tree(&symbols);
+        let text = render_file_outline("compose.yaml", &tree, LangId::Yaml);
+        assert!(text.contains("compose.yaml"));
+        assert!(text.contains("name"));
+        assert!(text.contains("services"));
     }
 }
