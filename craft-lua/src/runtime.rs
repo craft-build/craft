@@ -656,6 +656,25 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
     }
 }
 
+/// Barrier for load/clear ops: drains queued `craft.async.run` tasks and
+/// waits for every in-flight task, looping until both are quiescent. A bare
+/// `gate.drain()` is not enough: a click handler that runs during the drain
+/// can enqueue an async job into the spawn queue, which only the dispatcher
+/// loop would spawn - after the barrier already passed.
+async fn drain_barrier(lua: &Lua, gate: &Rc<InflightGate>) {
+    loop {
+        drain_spawn_queue(lua, gate);
+        gate.drain().await;
+        let empty = lua
+            .app_data_ref::<SpawnQueue>()
+            .map(|q| q.borrow().is_empty())
+            .unwrap_or(true);
+        if empty {
+            return;
+        }
+    }
+}
+
 struct ToolKeys {
     handler: RegistryKey,
     header: Option<RegistryKey>,
@@ -1771,7 +1790,7 @@ pub fn spawn(
                             permissions,
                             reply,
                         } => {
-                            gate.drain().await;
+                            drain_barrier(&rt.lua, &gate).await;
                             let res = rt.load_source(Arc::clone(&name), &source, plugin_dir, &permissions, None).await;
                             let _ = reply.send(res);
                         }
@@ -1809,7 +1828,7 @@ pub fn spawn(
                             });
                         }
                         Request::ClearPlugin { plugin, reply } => {
-                            gate.drain().await;
+                            drain_barrier(&rt.lua, &gate).await;
                             rt.clear_plugin(&plugin);
                             let _ = reply.send(());
                         }
@@ -1862,7 +1881,7 @@ pub fn spawn(
                             plugin_dir,
                             reply,
                         } => {
-                            gate.drain().await;
+                            drain_barrier(&rt.lua, &gate).await;
                             let res = rt.run_init_lua(&source, &source_name, plugin_dir).await;
                             let _ = reply.send(res);
                         }
