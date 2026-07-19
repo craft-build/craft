@@ -13,7 +13,6 @@ Type `/` in the input box to open the command palette.
 | `/usage` | Show token usage breakdown |
 | `/stats` | Show cost and usage stats |
 | `/queue` | Remove items from queue |
-| `/sessions` | Browse and switch sessions |
 | `/model` | Switch model |
 | `/theme` | Switch color theme |
 | `/mcp` | Configure MCP servers |
@@ -37,6 +36,8 @@ Type `/` in the input box to open the command palette.
 | `/map-toggle` | Toggle repo map injection on/off |
 | `/watch` | Toggle watch mode (AI comments in editor drive the agent) |
 | `/memory` | View, edit, and delete memory files |
+| `/rename` | Rename the current session |
+| `/sessions` | Browse and switch sessions |
 
 ## Custom commands
 

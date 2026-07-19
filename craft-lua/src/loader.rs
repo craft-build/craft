@@ -67,6 +67,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/view_image"),
     },
     BundledPlugin {
+        name: "sessions",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/sessions"),
+    },
+    BundledPlugin {
         name: "lib",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/lib"),
     },
@@ -426,6 +430,22 @@ mod tests {
                 .iter()
                 .map(|c| c.name.as_ref())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sessions_builtin_registers_commands() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
+        let snap = host.command_reader().load();
+        let names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
+        assert!(
+            names.contains(&"/sessions"),
+            "expected /sessions command, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"/rename"),
+            "expected /rename command, got: {names:?}"
         );
     }
 

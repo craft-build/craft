@@ -1,5 +1,11 @@
 //! Modal list picker with search. Supports immediate (`open`) or lazy loading
 //! (`open_loading` → `resolve`) where a spinner is shown until items arrive.
+//!
+//! The lazy-loading primitives (`open_loading`/`resolve`/`is_loading`) and the
+//! toggle/retain/generation helpers are generic modal facilities retained for
+//! future Rust-driven pickers; they have no current non-test consumer after
+//! the `/sessions` picker moved to a Lua plugin.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::sync::OnceLock;

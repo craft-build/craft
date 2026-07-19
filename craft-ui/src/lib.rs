@@ -1,7 +1,7 @@
-//! Single-threaded ratatui event loop; the agent runs on tokio tasks.
-//! `AgentHandles` bundles all flume channels to the agent. `dispatch()` processes
-//! `Action`s returned by `App::update()`. Scroll and drag events are coalesced from
-//! the queue to avoid jank.
+//! Multi-session ratatui event loop; each session owns an `App` plus an agent
+//! running on tokio tasks. `AgentHandles` bundles all flume channels to a
+//! session's agent. `dispatch()` processes `Action`s returned by `App::update()`.
+//! Scroll and drag events are coalesced from the queue to avoid jank.
 
 pub mod animation;
 pub mod app;
@@ -26,6 +26,7 @@ pub mod update;
 
 mod agent;
 mod event_loop;
+mod input;
 mod terminal;
 mod watch;
 

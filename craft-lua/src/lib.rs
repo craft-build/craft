@@ -11,7 +11,8 @@ pub use api::hooks::LuaHooks;
 pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use api::util::command::{
     Anchor, Axis, Border, Dimension, Edge, FloatConfig, FloatConfigPatch, HintReader, HintSnapshot,
-    LuaCommandInfo, LuaCommandReader, Split, TitlePos, UiAction, WinCommand, WinEvent,
+    LuaCommandInfo, LuaCommandReader, SessionReply, SessionRequest, Split, TitlePos, UiAction,
+    WinCommand, WinEvent,
 };
 pub use error::PluginError;
 pub use loader::{EventHandle, PluginHost};

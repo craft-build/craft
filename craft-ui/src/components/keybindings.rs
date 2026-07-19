@@ -260,7 +260,6 @@ pub enum KeybindContext {
     Picker,
     FormInput,
     TaskPicker,
-    SessionPicker,
     RewindPicker,
     ThemePicker,
     ModelPicker,
@@ -279,7 +278,6 @@ impl KeybindContext {
             Self::Picker => "Pickers",
             Self::FormInput => "Form",
             Self::TaskPicker => "Task Picker",
-            Self::SessionPicker => "Session Picker",
             Self::RewindPicker => "Rewind Picker",
             Self::ThemePicker => "Theme Picker",
             Self::ModelPicker => "Model Picker",
@@ -293,7 +291,6 @@ impl KeybindContext {
     pub const fn parent(self) -> Option<KeybindContext> {
         match self {
             Self::TaskPicker
-            | Self::SessionPicker
             | Self::RewindPicker
             | Self::ThemePicker
             | Self::ModelPicker
@@ -659,13 +656,6 @@ pub const KEYBINDS: &[Keybind] = &[
         label: KeyLabel::Single("Type"),
         description: "Filter",
         context: KeybindContext::Picker,
-        platform: Platform::All,
-    },
-    Keybind {
-        action_id: Some(ActionId::Delete),
-        label: KeyLabel::Single(key::DELETE.label),
-        description: "Delete session",
-        context: KeybindContext::SessionPicker,
         platform: Platform::All,
     },
     Keybind {

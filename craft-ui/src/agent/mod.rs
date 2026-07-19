@@ -117,6 +117,15 @@ impl AgentHandles {
         let _ = self.cmd_tx.try_send(AgentCommand::CancelAll);
     }
 
+    /// True if the agent task has exited (cleanly or panicked). Used by the
+    /// supervisor to surface "agent stopped unexpectedly" — `agent_rx`
+    /// disconnect is NOT a reliable signal because `App.restore_event_tx`
+    /// holds a clone of `agent_tx` that keeps the channel connected after
+    /// the task drops.
+    pub(crate) fn task_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
     pub(crate) fn cancel(self) {
         self.send_cancel_all();
     }
@@ -173,9 +182,12 @@ impl AgentHandles {
         old.cancel();
     }
 
-    pub(crate) async fn shutdown(self, timeout: Duration) {
+    /// Tear down the agent task without touching the shared MCP handle.
+    /// Use this in the multi-session loop where one `McpHandle` is shared
+    /// across every runtime; the caller shuts MCP down exactly once after
+    /// all per-runtime agents have stopped.
+    pub(crate) async fn shutdown_no_mcp(self, timeout: Duration) {
         self.send_cancel_all();
-        let mcp_handle = self.mcp_handle;
         let mut task = self.task;
         drop((self.cmd_tx, self.agent_rx, self.answer_tx, self.queue));
         info!("waiting for agent to finish (timeout {timeout:?})");
@@ -185,10 +197,6 @@ impl AgentHandles {
         };
         if !finished {
             warn!("agent did not finish within {timeout:?}, forcing shutdown");
-        }
-
-        if let Some(ref handle) = mcp_handle {
-            handle.shutdown().await;
         }
     }
 }

@@ -25,7 +25,6 @@ pub(crate) mod render_hints;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;
 pub(crate) mod search_modal;
-pub(crate) mod session_picker;
 pub(crate) mod split_layout;
 pub mod stats_modal;
 pub mod status_bar;

@@ -58,11 +58,6 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 0,
     },
     BuiltinCommand {
-        name: "/sessions",
-        description: "Browse and switch sessions",
-        max_args: 0,
-    },
-    BuiltinCommand {
         name: "/model",
         description: "Switch model",
         max_args: 0,
@@ -734,7 +729,6 @@ mod tests {
     #[test_case("/cd ", true        ; "one_arg_cmd_with_space")]
     #[test_case("/cd ~/foo", true   ; "one_arg_cmd_mid_arg")]
     #[test_case("/cd  ~/foo", true  ; "one_arg_cmd_double_space")]
-    #[test_case("/sessions ", false ; "zero_arg_sessions_with_space")]
     #[test_case("/btw hello world", true ; "btw_stays_active_with_many_args")]
     fn sync_respects_max_args(input: &str, expect_active: bool) {
         let p = synced(input);
@@ -926,7 +920,6 @@ mod tests {
     #[test_case("/cmp", "/compact" ; "compact_fuzzy")]
     #[test_case("/new", "/new" ; "new_exact")]
     #[test_case("/tsk", "/tasks" ; "tasks_fuzzy")]
-    #[test_case("/sess", "/sessions" ; "sessions_prefix")]
     fn nucleo_highlights_matching_indices(input: &str, expected_cmd: &str) {
         let p = synced(input);
         assert!(p.is_active(), "Input '{}' should activate palette", input);

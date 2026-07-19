@@ -339,14 +339,6 @@ impl App {
             overlay_rect = self.file_picker.view(frame, full);
         }
 
-        if self.session_picker.is_open() {
-            self.session_picker.tick();
-            overlay_rect = self.session_picker.view(frame, full);
-            if let Some(flash) = self.session_picker.take_flash() {
-                self.status_bar.flash(flash);
-            }
-        }
-
         macro_rules! render_if_open {
             ($overlay:expr) => {
                 if $overlay.is_open() {
@@ -536,8 +528,6 @@ impl App {
             contexts.push(KeybindContext::FormInput);
         } else if self.queue.focus().is_some() {
             contexts.push(KeybindContext::QueueFocus);
-        } else if self.session_picker.is_open() {
-            contexts.push(KeybindContext::SessionPicker);
         } else if self.rewind_picker.is_open() {
             contexts.push(KeybindContext::RewindPicker);
         } else if self.task_picker.is_open() {

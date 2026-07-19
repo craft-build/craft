@@ -45,7 +45,6 @@ use crate::components::recipe_picker::{RecipePicker, RecipePickerAction};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
-use crate::components::session_picker::{SessionPicker, SessionPickerAction};
 use crate::components::stats_modal::StatsModal;
 use crate::components::status_bar::StatusBar;
 use crate::components::theme_picker::{ThemePicker, ThemePickerAction};
@@ -148,7 +147,6 @@ pub struct App {
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
-    pub(super) session_picker: SessionPicker,
     pub(super) recipe_picker: RecipePicker,
     pub(super) rewind_picker: RewindPicker,
     pub(super) help_modal: HelpModal,
@@ -213,6 +211,10 @@ pub struct App {
     pub(super) restoring: Arc<AtomicBool>,
     pub(super) repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
     pub(super) watch_enabled: bool,
+    /// Per-session warning channel drained by the event loop's selector.
+    /// Background tasks (wiki ingest, model fetch) post human-readable
+    /// messages here so they surface as flashes on the owning session.
+    pub(crate) warn_tx: Option<flume::Sender<String>>,
 }
 
 macro_rules! define_overlays {
@@ -285,7 +287,6 @@ impl App {
             model_picker: ModelPicker::new(available_models),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
-            session_picker: SessionPicker::new(),
             recipe_picker: RecipePicker::new(),
             rewind_picker: RewindPicker::new(),
             help_modal: HelpModal::new(),
@@ -339,13 +340,14 @@ impl App {
             restoring: Arc::new(AtomicBool::new(false)),
             repomap_enabled: Arc::new(std::sync::atomic::AtomicBool::new(repomap_enabled)),
             watch_enabled,
+            warn_tx: None,
         };
         app.task_picker.set_keybindings(app.keybindings.clone());
         app.theme_picker.set_keybindings(app.keybindings.clone());
         app.model_picker.set_keybindings(app.keybindings.clone());
         app.model_picker
             .set_recents(craft_storage::model::read_recents(&app.storage));
-        app.session_picker.set_keybindings(app.keybindings.clone());
+        // `/sessions` is now a Lua plugin (plugins/sessions) driving craft.session.*.
         app.rewind_picker.set_keybindings(app.keybindings.clone());
         app.login_picker.set_keybindings(app.keybindings.clone());
         app.mcp_picker.set_keybindings(app.keybindings.clone());
@@ -693,7 +695,6 @@ impl App {
                 }
             };
         }
-        try_picker!(self.session_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.task_picker);
         try_picker!(self.model_picker);
@@ -828,7 +829,6 @@ impl App {
         // an overlay (task picker, search, file picker, etc) has focus so the
         // overlay's keys (Up/Down/Enter) aren't swallowed.
         let overlay_open = self.task_picker.is_open()
-            || self.session_picker.is_open()
             || self.search_modal.is_open()
             || self.file_picker.is_open()
             || self.help_modal.is_open()
@@ -961,26 +961,6 @@ impl App {
                     self.active_chat = self.task_picker_original.take().unwrap_or(0);
                     vec![]
                 }
-            });
-        }
-
-        if self.session_picker.is_open() {
-            return Some(match self.session_picker.handle_key(key) {
-                SessionPickerAction::Consumed => vec![],
-                SessionPickerAction::Select(id) => self.load_session(id),
-                SessionPickerAction::ConfirmDelete => {
-                    let label = self
-                        .keybindings
-                        .binds(ActionId::Delete)
-                        .first()
-                        .map(|b| b.label)
-                        .unwrap_or(key::DELETE.label);
-                    self.status_bar
-                        .flash(format!("Press {label} again to confirm delete"));
-                    vec![]
-                }
-                SessionPickerAction::Delete(id) => self.delete_session(id),
-                SessionPickerAction::Close => vec![],
             });
         }
 
@@ -1613,7 +1593,6 @@ impl App {
                 self.queue.set_focus();
                 vec![]
             }
-            "/sessions" => self.open_session_picker(),
             "/model" => {
                 self.model_picker.open(&self.state.model.spec());
                 vec![Action::RefreshModels]
@@ -2145,7 +2124,6 @@ impl App {
         search_modal,
         file_picker,
         task_picker,
-        session_picker,
         recipe_picker,
         rewind_picker,
         theme_picker,
@@ -2171,7 +2149,6 @@ impl App {
     pub fn is_animating(&self) -> bool {
         !self.image_paste_rx.is_empty()
             || self.btw_modal.is_animating()
-            || self.session_picker.is_loading()
             || self.file_picker.is_loading()
             || self.float_mgr.is_open()
             || self
@@ -2225,7 +2202,6 @@ impl App {
         }
         try_picker!(self.file_picker);
         try_picker!(self.task_picker);
-        try_picker!(self.session_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
         try_picker!(self.model_picker);

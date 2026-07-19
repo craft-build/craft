@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::chat::{Chat, DONE_TEXT, history_to_display};
 use crate::components::DisplayRole;
+use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::rewind_picker::RewindEntry;
 use crate::components::{Action, LoadedSession};
 use craft_providers::{Model, TokenUsage};
@@ -27,6 +28,14 @@ impl App {
 
     pub(crate) fn has_content(&self) -> bool {
         self.has_messages() || self.has_ephemeral()
+    }
+
+    /// True when the session is blocked on the user (permission prompt,
+    /// pending auth retry, or any other `PendingInput`). Used by the
+    /// multi-session supervisor to report `needs_input` status.
+    pub(crate) fn awaiting_input(&self) -> bool {
+        matches!(self.permission_prompt, PermissionPrompt::Open { .. })
+            || self.pending_input != PendingInput::None
     }
 
     pub(crate) fn save_session(&mut self) {
@@ -252,15 +261,6 @@ impl App {
         ))]
     }
 
-    pub(super) fn open_session_picker(&mut self) -> Vec<Action> {
-        self.session_picker.open(
-            &self.state.session.cwd,
-            self.state.session.id.id(),
-            &self.storage,
-        );
-        vec![]
-    }
-
     pub(crate) fn apply_loaded_session(
         &mut self,
         session: AppSession,
@@ -279,7 +279,7 @@ impl App {
         self.loaded_session_snapshot()
     }
 
-    pub(super) fn load_session(&mut self, session_id: CraftId) -> Vec<Action> {
+    pub(crate) fn load_session(&mut self, session_id: CraftId) -> Vec<Action> {
         let session = match AppSession::load(session_id, &self.storage) {
             Ok(s) => s,
             Err(e) => {
@@ -291,16 +291,5 @@ impl App {
         self.save_session();
         let loaded = self.apply_loaded_session(session, &self.state.model.clone());
         vec![Action::LoadSession(Box::new(loaded))]
-    }
-
-    pub(super) fn delete_session(&mut self, session_id: CraftId) -> Vec<Action> {
-        if let Err(e) = AppSession::delete(session_id, &self.storage) {
-            self.status_bar
-                .flash(format!("Failed to delete session: {e}"));
-            return vec![];
-        }
-        self.session_picker.remove_entry(session_id);
-        self.status_bar.flash("Session deleted".into());
-        vec![]
     }
 }

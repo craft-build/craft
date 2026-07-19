@@ -10,6 +10,7 @@ pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
 pub(crate) mod net;
+pub(crate) mod session;
 pub(crate) mod slot;
 pub(crate) mod text;
 pub(crate) mod tool;
@@ -54,6 +55,10 @@ pub(crate) fn create_craft_global(
     craft.set("yaml", yaml::create_yaml_table(lua)?)?;
     craft.set("net", net::create_net_table(lua, permissions)?)?;
     craft.set("text", text::create_text_table(lua)?)?;
+    craft.set(
+        "session",
+        session::create_session_table(lua, ui_action_tx.clone())?,
+    )?;
     craft.set(
         "ui",
         ui::create_ui_table(lua, ui_action_tx, Arc::clone(&plugin))?,

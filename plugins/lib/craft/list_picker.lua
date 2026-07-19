@@ -6,6 +6,72 @@ ListPicker.__index = ListPicker
 local DETAIL_RIGHT_PAD = 2
 local NO_MATCHES_LABEL = "  (no matches)"
 
+local function split_words(query)
+  local words = {}
+  for w in (query or ""):lower():gmatch("%S+") do
+    words[#words + 1] = w
+  end
+  return words
+end
+
+-- Words may come in any order: "441 review" still hits "review gh pr 441".
+local function matches(label, words)
+  local hay = label:lower()
+  for _, w in ipairs(words) do
+    if not hay:find(w, 1, true) then
+      return false
+    end
+  end
+  return true
+end
+
+-- Word hits can overlap ("alpha" and "phab" in "alphabet"), which would nest
+-- highlights, so the ranges are merged before styling.
+local function match_ranges(label, words)
+  local hay = label:lower()
+  local ranges = {}
+  for _, w in ipairs(words) do
+    local s, e = hay:find(w, 1, true)
+    if s then
+      ranges[#ranges + 1] = { s, e }
+    end
+  end
+  table.sort(ranges, function(a, b)
+    return a[1] < b[1]
+  end)
+  local merged = {}
+  for _, r in ipairs(ranges) do
+    local last = merged[#merged]
+    if last and r[1] <= last[2] + 1 then
+      last[2] = math.max(last[2], r[2])
+    else
+      merged[#merged + 1] = r
+    end
+  end
+  return merged
+end
+
+-- Split `label` into `{ { text, style }, ... }` spans, painting the merged
+-- match ranges with `match_style` and the rest with `base`.
+local function highlight_spans(label, words, base, match_style)
+  local ranges = match_ranges(label, words)
+  if #ranges == 0 then
+    return { { label, base } }
+  end
+  local spans, pos = {}, 1
+  for _, r in ipairs(ranges) do
+    if r[1] > pos then
+      spans[#spans + 1] = { label:sub(pos, r[1] - 1), base }
+    end
+    spans[#spans + 1] = { label:sub(r[1], r[2]), match_style }
+    pos = r[2] + 1
+  end
+  if pos <= #label then
+    spans[#spans + 1] = { label:sub(pos), base }
+  end
+  return spans
+end
+
 local function filter_items(items, query)
   if query == "" then
     local indices = {}
@@ -206,5 +272,8 @@ end
 ListPicker._render_lines = render_lines
 ListPicker._filter_items = filter_items
 ListPicker._find_match_pos = find_match_pos
+ListPicker.split_words = split_words
+ListPicker.matches = matches
+ListPicker.highlight_spans = highlight_spans
 
 return ListPicker

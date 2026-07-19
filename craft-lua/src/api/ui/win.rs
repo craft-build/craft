@@ -1,13 +1,20 @@
-use mlua::{Table, UserData, UserDataMethods};
+use std::cell::Cell;
+use std::time::Duration;
+
+use mlua::{AnyUserData, Lua, Result as LuaResult, Table, UserData, UserDataMethods};
 
 use super::{parse_footer, try_parse_dimension};
 use crate::api::util::command::{Anchor, Border, FloatConfigPatch, TitlePos, WinCommand, WinEvent};
 
+/// All mutable state is in `Cell`s so every Lua method takes a shared
+/// borrow and `recv` never needs to re-borrow mutably after waking.
+/// mlua's userdata lock is exclusive even for shared borrows, so `recv`
+/// additionally must not hold any borrow across its await; see below.
 pub(crate) struct WinHandle {
     event_rx: flume::Receiver<WinEvent>,
     cmd_tx: flume::Sender<WinCommand>,
-    closed: bool,
-    visible: bool,
+    closed: Cell<bool>,
+    visible: Cell<bool>,
     init_width: u16,
     init_height: u16,
 }
@@ -23,26 +30,25 @@ impl WinHandle {
         Self {
             event_rx,
             cmd_tx,
-            closed: false,
-            visible,
+            closed: Cell::new(false),
+            visible: Cell::new(visible),
             init_width,
             init_height,
         }
     }
 
-    fn send(&mut self, cmd: WinCommand) {
-        if let Err(flume::TrySendError::Disconnected(_)) = self.cmd_tx.try_send(cmd) {
-            self.closed = true;
+    fn close(&self) {
+        if self.closed.replace(true) {
+            return;
+        }
+        if let Err(flume::TrySendError::Full(cmd)) = self.cmd_tx.try_send(WinCommand::Close) {
+            let _ = self.cmd_tx.send(cmd);
         }
     }
 
-    fn close(&mut self) {
-        if self.closed {
-            return;
-        }
-        self.closed = true;
-        if let Err(flume::TrySendError::Full(cmd)) = self.cmd_tx.try_send(WinCommand::Close) {
-            let _ = self.cmd_tx.send(cmd);
+    fn send(&self, cmd: WinCommand) {
+        if let Err(flume::TrySendError::Disconnected(_)) = self.cmd_tx.try_send(cmd) {
+            self.closed.set(true);
         }
     }
 }
@@ -53,53 +59,90 @@ impl Drop for WinHandle {
     }
 }
 
+fn tagged(lua: &Lua, ty: &str) -> LuaResult<Table> {
+    let tbl = lua.create_table()?;
+    tbl.set("type", ty)?;
+    Ok(tbl)
+}
+
+fn event_table(lua: &Lua, event: WinEvent) -> LuaResult<Table> {
+    match event {
+        WinEvent::Key { key } => {
+            let tbl = tagged(lua, "key")?;
+            tbl.set("key", key)?;
+            Ok(tbl)
+        }
+        WinEvent::Resize { width, height } => {
+            let tbl = tagged(lua, "resize")?;
+            tbl.set("width", width)?;
+            tbl.set("height", height)?;
+            Ok(tbl)
+        }
+        WinEvent::Paste { text } => {
+            let tbl = tagged(lua, "paste")?;
+            tbl.set("text", text)?;
+            Ok(tbl)
+        }
+        WinEvent::Close => tagged(lua, "close"),
+    }
+}
+
 impl UserData for WinHandle {
     fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("width", |_, this| Ok(this.init_width));
         fields.add_field_method_get("height", |_, this| Ok(this.init_height));
-        fields.add_field_method_get("visible", |_, this| Ok(this.visible));
+        fields.add_field_method_get("visible", |_, this| Ok(this.visible.get()));
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_async_method_mut("recv", |lua, mut this, ()| async move {
-            if this.closed {
-                return Ok(mlua::Value::Nil);
-            }
-            match this.event_rx.recv_async().await {
-                Ok(WinEvent::Key { key }) => {
-                    let tbl = lua.create_table()?;
-                    tbl.set("type", "key")?;
-                    tbl.set("key", key)?;
-                    Ok(mlua::Value::Table(tbl))
+        // recv() blocks until the next event; recv(timeout_ms) additionally
+        // resolves to `{ type = "timeout" }` so plugins can animate.
+        //
+        // Registered as an async function (not method) on purpose: an async
+        // method's userdata borrow is held across the await, and mlua's lock
+        // rejects ALL other borrows meanwhile (shared ones included), so any
+        // win call from another coroutine would fail while a recv is parked,
+        // which is virtually always for an event-loop plugin. Only the
+        // cloned receiver is kept across the suspension.
+        methods.add_async_function(
+            "recv",
+            |lua, (ud, timeout_ms): (AnyUserData, Option<u64>)| async move {
+                let rx = {
+                    let this = ud.borrow::<WinHandle>()?;
+                    if this.closed.get() {
+                        return Ok(mlua::Value::Nil);
+                    }
+                    this.event_rx.clone()
+                };
+                let event = match timeout_ms {
+                    Some(ms) => {
+                        let sleep = tokio::time::sleep(Duration::from_millis(ms));
+                        tokio::select! {
+                            biased;
+                            res = rx.recv_async() => Some(res),
+                            () = sleep => None,
+                        }
+                    }
+                    None => Some(rx.recv_async().await),
+                };
+                match event {
+                    Some(Ok(event)) => {
+                        if matches!(event, WinEvent::Close) {
+                            ud.borrow::<WinHandle>()?.closed.set(true);
+                        }
+                        Ok(mlua::Value::Table(event_table(&lua, event)?))
+                    }
+                    Some(Err(_)) => {
+                        ud.borrow::<WinHandle>()?.closed.set(true);
+                        Ok(mlua::Value::Nil)
+                    }
+                    None => Ok(mlua::Value::Table(tagged(&lua, "timeout")?)),
                 }
-                Ok(WinEvent::Resize { width, height }) => {
-                    let tbl = lua.create_table()?;
-                    tbl.set("type", "resize")?;
-                    tbl.set("width", width)?;
-                    tbl.set("height", height)?;
-                    Ok(mlua::Value::Table(tbl))
-                }
-                Ok(WinEvent::Paste { text }) => {
-                    let tbl = lua.create_table()?;
-                    tbl.set("type", "paste")?;
-                    tbl.set("text", text)?;
-                    Ok(mlua::Value::Table(tbl))
-                }
-                Ok(WinEvent::Close) => {
-                    this.closed = true;
-                    let tbl = lua.create_table()?;
-                    tbl.set("type", "close")?;
-                    Ok(mlua::Value::Table(tbl))
-                }
-                Err(_) => {
-                    this.closed = true;
-                    Ok(mlua::Value::Nil)
-                }
-            }
-        });
+            },
+        );
 
-        methods.add_method_mut("set_config", |_, this, opts: Table| {
-            if this.closed {
+        methods.add_method("set_config", |_, this, opts: Table| {
+            if this.closed.get() {
                 return Ok(());
             }
             let mut patch = FloatConfigPatch::default();
@@ -132,49 +175,49 @@ impl UserData for WinHandle {
             Ok(())
         });
 
-        methods.add_method_mut("set_cursor", |_, this, row: usize| {
-            if this.closed {
+        methods.add_method("set_cursor", |_, this, row: usize| {
+            if this.closed.get() {
                 return Ok(());
             }
             this.send(WinCommand::SetCursor(row.saturating_sub(1)));
             Ok(())
         });
 
-        methods.add_method_mut("close", |_, this, ()| {
+        methods.add_method("close", |_, this, ()| {
             this.close();
             Ok(())
         });
 
-        methods.add_method_mut("is_open", |_, this, ()| {
-            if !this.closed && this.cmd_tx.is_disconnected() {
-                this.closed = true;
+        methods.add_method("is_open", |_, this, ()| {
+            if !this.closed.get() && this.cmd_tx.is_disconnected() {
+                this.closed.set(true);
             }
-            Ok(!this.closed)
+            Ok(!this.closed.get())
         });
 
-        methods.add_method_mut("show", |_, this, ()| {
-            if this.closed {
+        methods.add_method("show", |_, this, ()| {
+            if this.closed.get() {
                 return Ok(());
             }
-            this.visible = true;
+            this.visible.set(true);
             this.send(WinCommand::SetVisible(true));
             Ok(())
         });
 
-        methods.add_method_mut("hide", |_, this, ()| {
-            if this.closed {
+        methods.add_method("hide", |_, this, ()| {
+            if this.closed.get() {
                 return Ok(());
             }
-            this.visible = false;
+            this.visible.set(false);
             this.send(WinCommand::SetVisible(false));
             Ok(())
         });
 
-        methods.add_method_mut("is_visible", |_, this, ()| {
-            if !this.closed && this.cmd_tx.is_disconnected() {
-                this.closed = true;
+        methods.add_method("is_visible", |_, this, ()| {
+            if !this.closed.get() && this.cmd_tx.is_disconnected() {
+                this.closed.set(true);
             }
-            Ok(this.visible && !this.closed)
+            Ok(this.visible.get() && !this.closed.get())
         });
     }
 }
@@ -196,9 +239,9 @@ mod tests {
 
     #[test]
     fn close_is_idempotent_including_drop() {
-        let (_event_tx, cmd_rx, mut handle) = make_channels();
+        let (_event_tx, cmd_rx, handle) = make_channels();
         handle.close();
-        assert!(handle.closed);
+        assert!(handle.closed.get());
         handle.close();
         drop(handle);
         assert!(matches!(cmd_rx.try_recv(), Ok(WinCommand::Close)));
@@ -214,7 +257,7 @@ mod tests {
 
     #[test]
     fn drop_after_close_does_not_resend() {
-        let (_event_tx, cmd_rx, mut handle) = make_channels();
+        let (_event_tx, cmd_rx, handle) = make_channels();
         handle.close();
         assert!(matches!(cmd_rx.try_recv(), Ok(WinCommand::Close)));
         drop(handle);
@@ -225,25 +268,25 @@ mod tests {
     fn close_does_not_panic_when_receiver_dropped() {
         let (event_tx, event_rx) = flume::bounded::<WinEvent>(8);
         let (cmd_tx, cmd_rx) = flume::bounded::<WinCommand>(8);
-        let mut handle = WinHandle::new(event_rx, cmd_tx, 80, 24, true);
+        let handle = WinHandle::new(event_rx, cmd_tx, 80, 24, true);
         drop(cmd_rx);
         handle.close();
-        assert!(handle.closed);
+        assert!(handle.closed.get());
         drop(event_tx);
     }
 
     #[test]
     fn send_detects_disconnect() {
-        let (_event_tx, cmd_rx, mut handle) = make_channels();
+        let (_event_tx, cmd_rx, handle) = make_channels();
         drop(cmd_rx);
-        assert!(!handle.closed);
+        assert!(!handle.closed.get());
         handle.send(WinCommand::SetVisible(true));
-        assert!(handle.closed);
+        assert!(handle.closed.get());
     }
 
     #[test]
     fn close_delivers_when_channel_full() {
-        let (_event_tx, cmd_rx, mut handle) = make_channels();
+        let (_event_tx, cmd_rx, handle) = make_channels();
         for _ in 0..8 {
             handle.send(WinCommand::SetVisible(true));
         }
@@ -267,7 +310,59 @@ mod tests {
     fn is_disconnected_marks_closed() {
         let (_event_tx, cmd_rx, handle) = make_channels();
         drop(cmd_rx);
-        assert!(!handle.closed);
+        assert!(!handle.closed.get());
         assert!(handle.cmd_tx.is_disconnected());
+    }
+
+    #[tokio::test]
+    async fn recv_timeout_returns_timeout_event() {
+        let lua = mlua::Lua::new();
+        let (_event_tx, _cmd_rx, handle) = make_channels();
+        lua.globals().set("win", handle).unwrap();
+        let ty: String = lua
+            .load("return win:recv(5).type")
+            .eval_async()
+            .await
+            .unwrap();
+        assert_eq!(ty, "timeout");
+    }
+
+    #[tokio::test]
+    async fn recv_timeout_delivers_pending_event() {
+        let lua = mlua::Lua::new();
+        let (event_tx, _cmd_rx, handle) = make_channels();
+        event_tx
+            .try_send(WinEvent::Key {
+                key: "enter".into(),
+            })
+            .unwrap();
+        lua.globals().set("win", handle).unwrap();
+        let got: String = lua
+            .load("local ev = win:recv(1000) return ev.type .. ':' .. ev.key")
+            .eval_async()
+            .await
+            .unwrap();
+        assert_eq!(got, "key:enter");
+    }
+
+    #[tokio::test]
+    async fn win_methods_work_while_recv_is_parked() {
+        let lua = mlua::Lua::new();
+        let (event_tx, cmd_rx, handle) = make_channels();
+        lua.globals().set("win", handle).unwrap();
+        let recv_task = tokio::spawn(
+            lua.load("return win:recv(5000).type")
+                .eval_async::<String>(),
+        );
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        lua.load("win:set_cursor(3)").exec_async().await.unwrap();
+        event_tx
+            .send_async(WinEvent::Key { key: "x".into() })
+            .await
+            .unwrap();
+        assert_eq!(recv_task.await.unwrap().unwrap(), "key");
+        assert!(matches!(cmd_rx.try_recv(), Ok(WinCommand::SetCursor(2))));
     }
 }
