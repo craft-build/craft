@@ -17,8 +17,10 @@ use tracing::{debug, warn};
 
 use craft_storage::id::SessionRef;
 
+use async_trait::async_trait;
+
 use crate::model::Model;
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use super::{MIME_JSON, lock_unpoison, shared};
@@ -569,179 +571,171 @@ impl Bedrock {
     }
 }
 
+#[async_trait]
 impl Provider for Bedrock {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let thinking = opts.thinking;
-            if self.needs_refresh() {
-                debug!("Bedrock creds near expiry, refreshing before request");
-                self.reload_auth().await?;
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let thinking = opts.thinking;
+        if self.needs_refresh() {
+            debug!("Bedrock creds near expiry, refreshing before request");
+            self.reload_auth().await?;
+        }
+        let auth = lock_unpoison(&self.auth).clone();
+        let requested_id = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| model.id.clone());
+        let long_context = requested_id.ends_with(shared::LONG_CONTEXT_SUFFIX)
+            || shared::has_native_1m(&requested_id);
+        let short_id = shared::strip_long_context(&requested_id);
+        let model_id = resolve_bedrock_model_id(short_id, &auth.region);
+
+        let mut body = shared::build_request_body_with_system(
+            model,
+            messages,
+            &[shared::SystemBlock {
+                r#type: "text",
+                text: system,
+                cache_control: Some(shared::EPHEMERAL),
+            }],
+            tools,
+            thinking,
+        );
+        body["anthropic_version"] = json!(BEDROCK_API_VERSION);
+        let has_examples = tools
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|t| t.get("input_examples").is_some()));
+        let mut betas = Vec::new();
+        if has_examples {
+            betas.push(shared::BETA_TOOL_EXAMPLES_BEDROCK);
+        }
+        if long_context {
+            betas.push(shared::LONG_CONTEXT_BETA);
+        }
+        if !betas.is_empty() {
+            body["anthropic_beta"] = json!(betas);
+        }
+
+        let encoded_model = super::super::urlenc(&model_id);
+        let url = match &self.base_url {
+            Some(base) => format!("{base}/model/{encoded_model}/invoke-with-response-stream"),
+            None => format!(
+                "https://bedrock-runtime.{}.amazonaws.com/model/{encoded_model}/invoke-with-response-stream",
+                auth.region
+            ),
+        };
+
+        let json_body = serde_json::to_vec(&body)?;
+
+        let (host, _, _) = parse_url(&url);
+        let host = host.to_string();
+        let extra_headers = vec![("content-type", MIME_JSON), ("host", &host)];
+
+        let timestamp = now_timestamp();
+        let signing_headers = match &auth.kind {
+            AuthKind::SigV4 {
+                access_key,
+                secret_key,
+                session_token,
+                expires_at: _,
+            } => Some(sign_request_sigv4(
+                "POST",
+                &url,
+                &extra_headers,
+                &json_body,
+                access_key,
+                secret_key,
+                session_token.as_deref(),
+                &auth.region,
+                "bedrock",
+                &timestamp,
+            )),
+            AuthKind::Bearer { token } => {
+                Some(vec![("Authorization".into(), format!("Bearer {token}"))])
             }
-            let auth = lock_unpoison(&self.auth).clone();
-            let requested_id = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| model.id.clone());
-            let long_context = requested_id.ends_with(shared::LONG_CONTEXT_SUFFIX)
-                || shared::has_native_1m(&requested_id);
-            let short_id = shared::strip_long_context(&requested_id);
-            let model_id = resolve_bedrock_model_id(short_id, &auth.region);
+            AuthKind::None => None,
+        };
 
-            let mut body = shared::build_request_body_with_system(
-                model,
-                messages,
-                &[shared::SystemBlock {
-                    r#type: "text",
-                    text: system,
-                    cache_control: Some(shared::EPHEMERAL),
-                }],
-                tools,
-                thinking,
-            );
-            body["anthropic_version"] = json!(BEDROCK_API_VERSION);
-            let has_examples = tools
-                .as_array()
-                .is_some_and(|arr| arr.iter().any(|t| t.get("input_examples").is_some()));
-            let mut betas = Vec::new();
-            if has_examples {
-                betas.push(shared::BETA_TOOL_EXAMPLES_BEDROCK);
+        let mut builder = self
+            .client
+            .post(&url)
+            .header("user-agent", super::super::user_agent());
+        for (k, v) in &extra_headers {
+            builder = builder.header(*k, *v);
+        }
+        if let Some(ref sign_hdrs) = signing_headers {
+            for (k, v) in sign_hdrs {
+                builder = builder.header(k.as_str(), v.as_str());
             }
-            if long_context {
-                betas.push(shared::LONG_CONTEXT_BETA);
+        }
+
+        debug!(model = %model_id, region = %auth.region, "sending Bedrock request");
+
+        let response = builder.body(json_body).send().await?;
+        if !response.status().is_success() {
+            return Err(AgentError::from_response(response).await);
+        }
+
+        let mut parser = shared::EventParser::new();
+        let mut frame_buf = Vec::new();
+        let mut read_buf = [0u8; 8192];
+
+        let stream = response.bytes_stream();
+        let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
+
+        loop {
+            let n = reader.read(&mut read_buf).await?;
+            if n == 0 {
+                break;
             }
-            if !betas.is_empty() {
-                body["anthropic_beta"] = json!(betas);
-            }
+            frame_buf.extend_from_slice(&read_buf[..n]);
 
-            let encoded_model = super::super::urlenc(&model_id);
-            let url = match &self.base_url {
-                Some(base) => format!("{base}/model/{encoded_model}/invoke-with-response-stream"),
-                None => format!(
-                    "https://bedrock-runtime.{}.amazonaws.com/model/{encoded_model}/invoke-with-response-stream",
-                    auth.region
-                ),
-            };
-
-            let json_body = serde_json::to_vec(&body)?;
-
-            let (host, _, _) = parse_url(&url);
-            let host = host.to_string();
-            let extra_headers = vec![("content-type", MIME_JSON), ("host", &host)];
-
-            let timestamp = now_timestamp();
-            let signing_headers = match &auth.kind {
-                AuthKind::SigV4 {
-                    access_key,
-                    secret_key,
-                    session_token,
-                    expires_at: _,
-                } => Some(sign_request_sigv4(
-                    "POST",
-                    &url,
-                    &extra_headers,
-                    &json_body,
-                    access_key,
-                    secret_key,
-                    session_token.as_deref(),
-                    &auth.region,
-                    "bedrock",
-                    &timestamp,
-                )),
-                AuthKind::Bearer { token } => {
-                    Some(vec![("Authorization".into(), format!("Bearer {token}"))])
-                }
-                AuthKind::None => None,
-            };
-
-            let mut builder = self
-                .client
-                .post(&url)
-                .header("user-agent", super::super::user_agent());
-            for (k, v) in &extra_headers {
-                builder = builder.header(*k, *v);
-            }
-            if let Some(ref sign_hdrs) = signing_headers {
-                for (k, v) in sign_hdrs {
-                    builder = builder.header(k.as_str(), v.as_str());
-                }
-            }
-
-            debug!(model = %model_id, region = %auth.region, "sending Bedrock request");
-
-            let response = builder.body(json_body).send().await?;
-            if !response.status().is_success() {
-                return Err(AgentError::from_response(response).await);
-            }
-
-            let mut parser = shared::EventParser::new();
-            let mut frame_buf = Vec::new();
-            let mut read_buf = [0u8; 8192];
-
-            let stream = response.bytes_stream();
-            let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
-
-            loop {
-                let n = reader.read(&mut read_buf).await?;
-                if n == 0 {
+            while frame_buf.len() >= MIN_EVENTSTREAM_FRAME {
+                let peek_total =
+                    u32::from_be_bytes([frame_buf[0], frame_buf[1], frame_buf[2], frame_buf[3]])
+                        as usize;
+                if frame_buf.len() < peek_total {
                     break;
                 }
-                frame_buf.extend_from_slice(&read_buf[..n]);
 
-                while frame_buf.len() >= MIN_EVENTSTREAM_FRAME {
-                    let peek_total = u32::from_be_bytes([
-                        frame_buf[0],
-                        frame_buf[1],
-                        frame_buf[2],
-                        frame_buf[3],
-                    ]) as usize;
-                    if frame_buf.len() < peek_total {
-                        break;
-                    }
+                let (consumed, payload) = decode_eventstream_frame(&frame_buf)?;
+                frame_buf.drain(..consumed);
 
-                    let (consumed, payload) = decode_eventstream_frame(&frame_buf)?;
-                    frame_buf.drain(..consumed);
+                let Some(payload) = payload else {
+                    continue;
+                };
 
-                    let Some(payload) = payload else {
-                        continue;
-                    };
+                let (event_type, json) = decode_event_payload(&payload)?;
 
-                    let (event_type, json) = decode_event_payload(&payload)?;
-
-                    if let ControlFlow::Break(()) =
-                        parser.process(&event_type, &json, event_tx).await?
-                    {
-                        return Ok(parser.finish());
-                    }
+                if let ControlFlow::Break(()) = parser.process(&event_type, &json, event_tx).await?
+                {
+                    return Ok(parser.finish());
                 }
             }
+        }
 
-            Ok(parser.finish())
-        })
+        Ok(parser.finish())
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async {
-            let models: Vec<String> = shared::models()
-                .iter()
-                .map(|entry| entry.prefixes[0].to_string())
-                .collect();
-            Ok(models)
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let models: Vec<String> = shared::models()
+            .iter()
+            .map(|entry| entry.prefixes[0].to_string())
+            .collect();
+        Ok(models)
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            let new_auth = resolve_bedrock_auth().await?;
-            *lock_unpoison(&self.auth) = new_auth;
-            debug!("reloaded Bedrock auth from env");
-            Ok(())
-        })
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        let new_auth = resolve_bedrock_auth().await?;
+        *lock_unpoison(&self.auth) = new_auth;
+        debug!("reloaded Bedrock auth from env");
+        Ok(())
     }
 }
 

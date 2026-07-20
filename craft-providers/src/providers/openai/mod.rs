@@ -9,7 +9,7 @@ use crate::model::{ModelEntry, ModelFamily, ModelPricing, ModelTier};
 const GPT_5_6_CONTEXT_WINDOW: u32 = 372_000;
 const GPT_5_6_MAX_OUTPUT_TOKENS: u32 = 128_000;
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &["gpt-5.6-luna"],

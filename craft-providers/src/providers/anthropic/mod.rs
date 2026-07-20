@@ -19,8 +19,10 @@ use tracing::debug;
 
 use craft_storage::id::SessionRef;
 
+use async_trait::async_trait;
+
 use crate::model::Model;
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::{
     AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, UsageLimit,
 };
@@ -50,8 +52,6 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     login_url: Some("https://console.anthropic.com/settings/keys"),
     needs_url: false,
 });
-
-pub(crate) use shared::models;
 
 fn resolve_auth_from_key(key: &str) -> super::ResolvedAuth {
     super::ResolvedAuth {
@@ -365,107 +365,97 @@ impl Anthropic {
     }
 }
 
+#[async_trait]
 impl Provider for Anthropic {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let fast = opts.fast && model.supports_fast();
-            let thinking = opts.thinking;
-            let system_blocks = if let Some(prefix) = &self.system_prefix {
-                vec![
-                    shared::SystemBlock {
-                        r#type: "text",
-                        text: prefix,
-                        cache_control: None,
-                    },
-                    shared::SystemBlock {
-                        r#type: "text",
-                        text: system,
-                        cache_control: Some(shared::EPHEMERAL),
-                    },
-                ]
-            } else {
-                vec![shared::SystemBlock {
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let fast = opts.fast && model.supports_fast();
+        let thinking = opts.thinking;
+        let system_blocks = if let Some(prefix) = &self.system_prefix {
+            vec![
+                shared::SystemBlock {
+                    r#type: "text",
+                    text: prefix,
+                    cache_control: None,
+                },
+                shared::SystemBlock {
                     r#type: "text",
                     text: system,
                     cache_control: Some(shared::EPHEMERAL),
-                }]
-            };
+                },
+            ]
+        } else {
+            vec![shared::SystemBlock {
+                r#type: "text",
+                text: system,
+                cache_control: Some(shared::EPHEMERAL),
+            }]
+        };
 
-            let mut body = shared::build_request_body_with_system(
-                model,
-                messages,
-                &system_blocks,
-                tools,
-                thinking,
-            );
-            body["model"] = json!(shared::strip_long_context(&model.id));
-            body["stream"] = json!(true);
-            apply_fast_mode(&mut body, fast);
-            let long_context =
-                model.id.ends_with(shared::LONG_CONTEXT_SUFFIX) || shared::has_native_1m(&model.id);
+        let mut body = shared::build_request_body_with_system(
+            model,
+            messages,
+            &system_blocks,
+            tools,
+            thinking,
+        );
+        body["model"] = json!(shared::strip_long_context(&model.id));
+        body["stream"] = json!(true);
+        apply_fast_mode(&mut body, fast);
+        let long_context =
+            model.id.ends_with(shared::LONG_CONTEXT_SUFFIX) || shared::has_native_1m(&model.id);
 
-            debug!(model = %model.id, num_messages = messages.len(), ?thinking, fast, long_context, "sending API request");
-            self.do_stream_request(&body, event_tx, fast, long_context)
-                .await
-        })
+        debug!(model = %model.id, num_messages = messages.len(), ?thinking, fast, long_context, "sending API request");
+        self.do_stream_request(&body, event_tx, fast, long_context)
+            .await
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async {
-            let infos = self.do_list_models_with_info().await?;
-            Ok(infos.into_iter().map(|i| i.id).collect())
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let infos = self.do_list_models_with_info().await?;
+        Ok(infos.into_iter().map(|i| i.id).collect())
     }
 
-    fn list_models_with_info(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
-        Box::pin(self.do_list_models_with_info())
+    async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
+        self.do_list_models_with_info().await
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            let pool = KeyPool::resolve("anthropic", ENV_VAR)?;
-            *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
-            debug!("reloaded Anthropic auth from env");
-            Ok(())
-        })
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        let pool = KeyPool::resolve("anthropic", ENV_VAR)?;
+        *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
+        debug!("reloaded Anthropic auth from env");
+        Ok(())
     }
 
-    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async {
-            Ok(self
-                .key_pool
-                .as_ref()
-                .is_some_and(|p| p.rotate_auth(&self.auth, resolve_auth_from_key)))
-        })
+    async fn rotate_key(&self) -> Result<bool, AgentError> {
+        Ok(self
+            .key_pool
+            .as_ref()
+            .is_some_and(|p| p.rotate_auth(&self.auth, resolve_auth_from_key)))
     }
 
-    fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
-        Box::pin(async move {
-            if !usage_eligible(&lock_unpoison(&self.auth)) {
-                return Ok(None);
-            }
-            let response = self
-                .build_request("GET", Some(USAGE_URL))
-                .header("anthropic-beta", OAUTH_BETA)
-                .send()
-                .await?;
-            if response.status().as_u16() != 200 {
-                return Err(AgentError::from_response(response).await);
-            }
-            let parsed: OauthUsage = serde_json::from_str(&response.text().await?)?;
-            Ok(Some(parsed.into()))
-        })
+    async fn fetch_usage(&self) -> Result<Option<ProviderUsage>, AgentError> {
+        if !usage_eligible(&lock_unpoison(&self.auth)) {
+            return Ok(None);
+        }
+        let response = self
+            .build_request("GET", Some(USAGE_URL))
+            .header("anthropic-beta", OAUTH_BETA)
+            .send()
+            .await?;
+        if response.status().as_u16() != 200 {
+            return Err(AgentError::from_response(response).await);
+        }
+        let parsed: OauthUsage = serde_json::from_str(&response.text().await?)?;
+        Ok(Some(parsed.into()))
     }
 }
 

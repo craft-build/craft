@@ -6,18 +6,20 @@ use flume::Sender;
 use serde_json::Value;
 
 use craft_config::providers::{
-    Protocol, ProviderDef, ProvidersConfig, builtin_provider, resolve_api_key_env,
-    resolve_base_url, resolve_protocol,
+    Protocol, ProviderDef, ProvidersConfig, resolve_api_key_env, resolve_base_url, resolve_protocol,
 };
 
 use super::openai::responses;
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{ResolvedAuth, lock_unpoison};
+use crate::manifest::ManifestRegistry;
 use crate::model::{FastPricing, Model, ModelPricing, ModelTier};
-use crate::provider::{BoxFuture, Provider, ProviderKind};
+use crate::provider::{Provider, ProviderKind};
 use crate::providers::Timeouts;
 use crate::types::ThinkingConfig;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
+
+use async_trait::async_trait;
 
 #[derive(Debug, Clone, Default)]
 struct CachedModelInfo {
@@ -39,12 +41,35 @@ static CUSTOM_OPENAI_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "custom",
 };
 
+fn protocol_kind(protocol: Protocol) -> ProviderKind {
+    match protocol {
+        Protocol::Openai | Protocol::OpenaiResponses => ProviderKind::OpenAi,
+        Protocol::Anthropic => ProviderKind::Anthropic,
+        Protocol::Google => ProviderKind::Google,
+    }
+}
+
+/// Builtins win their slug in `from_spec`/`create`, so every custom path skips
+/// them. Key off the manifest (all builtins), not `builtin_provider`, which
+/// omits `openrouter`/`opencode`/`bedrock` and would let them shadow the builtin.
+fn is_builtin_slug(slug: &str) -> bool {
+    ManifestRegistry::get(slug).is_some()
+}
+
+pub fn base_kind(slug: &str) -> Option<ProviderKind> {
+    let config = ProvidersConfig::load();
+    Some(protocol_kind(config.get(slug)?.protocol?))
+}
+
 /// Specs declared statically in `providers.toml` (no HTTP).
 pub fn declared_model_specs() -> Vec<String> {
-    let config = ProvidersConfig::load();
+    declared_specs_from(&ProvidersConfig::load())
+}
+
+fn declared_specs_from(config: &ProvidersConfig) -> Vec<String> {
     let mut specs = Vec::new();
     for (slug, def) in &config.providers {
-        if builtin_provider(slug).is_some() {
+        if is_builtin_slug(slug) {
             continue;
         }
         if resolve_protocol(slug, Some(def)).is_none() {
@@ -59,15 +84,37 @@ pub fn declared_model_specs() -> Vec<String> {
     specs
 }
 
-pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
+/// Outcome of resolving a tier against `providers.toml` in a single read.
+pub enum TierLookup {
+    Model(Model),
+    /// Provider exists but declares no model at this tier; carries the base kind
+    /// so the caller can inherit the base protocol's default.
+    NoModelForTier(ProviderKind),
+    Unknown,
+}
+
+pub fn resolve_tier(slug: &str, tier: ModelTier) -> TierLookup {
+    // Builtins are never overridden through providers.toml (from_spec/create
+    // check builtin first); keep the tier path consistent with that.
+    if is_builtin_slug(slug) {
+        return TierLookup::Unknown;
+    }
     let config = ProvidersConfig::load();
-    let def = config.get(slug)?;
-    let declared = def
+    let Some(def) = config.get(slug) else {
+        return TierLookup::Unknown;
+    };
+    let Some(protocol) = def.protocol else {
+        return TierLookup::Unknown;
+    };
+    let kind = protocol_kind(protocol);
+    match def
         .models
-        .as_ref()?
-        .iter()
-        .find(|m| ModelTier::from(m.tier) == tier)?;
-    lookup_model(slug, &declared.id)
+        .as_ref()
+        .and_then(|ms| ms.iter().find(|m| ModelTier::from(m.tier) == tier))
+    {
+        Some(declared) => TierLookup::Model(model_from_def(def, kind, slug, &declared.id)),
+        None => TierLookup::NoModelForTier(kind),
+    }
 }
 
 fn resolve_custom_auth_from_def(slug: &str, def: &ProviderDef) -> Result<ResolvedAuth, AgentError> {
@@ -127,14 +174,22 @@ fn create_from_def(
 }
 
 pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
+    if is_builtin_slug(slug) {
+        return None;
+    }
     let config = ProvidersConfig::load();
     let def = config.get(slug)?;
-    let kind = match def.protocol? {
-        Protocol::Openai | Protocol::OpenaiResponses => ProviderKind::OpenAi,
-        Protocol::Anthropic => ProviderKind::Anthropic,
-        Protocol::Google => ProviderKind::Google,
-    };
-    let declared = def.models.as_ref()?.iter().find(|m| m.id == model_id);
+    let kind = protocol_kind(def.protocol?);
+    Some(model_from_def(def, kind, slug, model_id))
+}
+
+/// Build a model from an already-loaded provider definition so tier resolution
+/// and id lookup can share one `providers.toml` read instead of loading twice.
+fn model_from_def(def: &ProviderDef, kind: ProviderKind, slug: &str, model_id: &str) -> Model {
+    let declared = def
+        .models
+        .as_ref()
+        .and_then(|ms| ms.iter().find(|m| m.id == model_id));
 
     let cache_key = format!("{slug}/{model_id}");
     let cached = discovered_cache().read().unwrap().get(&cache_key).cloned();
@@ -151,7 +206,9 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         .or(cached.as_ref().and_then(|c| c.context_window))
         .unwrap_or_else(|| kind.fallback_context_window());
     let supports_tool_examples_override = declared.and_then(|m| m.supports_tool_examples);
-    let supports_thinking_override = declared.and_then(|m| m.supports_thinking);
+    let supports_thinking_override = declared
+        .and_then(|m| m.supports_thinking)
+        .or_else(|| ManifestRegistry::get(&kind.to_string()).map(|m| m.supports_thinking));
     let supports_vision_override = declared.and_then(|m| m.supports_vision);
     let pricing = declared
         .filter(|m| m.has_pricing())
@@ -169,10 +226,9 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         })
         .unwrap_or_default();
 
-    Some(Model {
+    Model {
         id: model_id.to_string(),
-        provider: kind,
-        dynamic_slug: Some(slug.to_string()),
+        provider: Arc::from(slug),
         tier,
         family: kind.family(),
         supports_tool_examples_override,
@@ -181,14 +237,14 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         pricing,
         max_output_tokens,
         context_window,
-    })
+    }
 }
 
 pub async fn discover_models(timeouts: Timeouts) -> Vec<String> {
     let config = ProvidersConfig::load();
     let mut all_specs = Vec::new();
     for (slug, def) in &config.providers {
-        if builtin_provider(slug).is_some() {
+        if is_builtin_slug(slug) {
             continue;
         }
         if !def.discover_models {
@@ -233,52 +289,83 @@ struct CustomOpenAiProvider {
     protocol: Protocol,
 }
 
+#[async_trait]
 impl Provider for CustomOpenAiProvider {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
-        opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-
-            if self.protocol == Protocol::OpenaiResponses {
-                let body = responses::build_body(model, messages, system, tools);
-                return responses::do_stream(
-                    self.compat.client(),
-                    model,
-                    &body,
-                    event_tx,
-                    &auth,
-                    self.compat.stream_timeout(),
-                )
-                .await;
-            }
-
-            let mut body = self.compat.build_body(model, messages, system, tools);
-            if matches!(opts.thinking, ThinkingConfig::Off) {
-                body["thinking"] = serde_json::json!({"type": "disabled"});
-            }
-            self.compat
-                .do_stream(model, &[], &body, event_tx, &auth)
-                .await
-        })
-    }
-
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        let auth = lock_unpoison(&self.auth).clone();
-        Box::pin(async move { self.compat.do_list_models(&auth).await })
-    }
-
-    fn list_models_with_info(
+    async fn stream_message(
         &self,
-    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
+        opts: RequestOptions,
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
         let auth = lock_unpoison(&self.auth).clone();
-        Box::pin(async move { self.compat.do_list_models_with_info(&auth).await })
+
+        if self.protocol == Protocol::OpenaiResponses {
+            let body = responses::build_body(model, messages, system, tools);
+            return responses::do_stream(
+                self.compat.client(),
+                model,
+                &body,
+                event_tx,
+                &auth,
+                self.compat.stream_timeout(),
+            )
+            .await;
+        }
+
+        let mut body = self.compat.build_body(model, messages, system, tools);
+        if matches!(opts.thinking, ThinkingConfig::Off) {
+            body["thinking"] = serde_json::json!({"type": "disabled"});
+        }
+        self.compat
+            .do_stream(model, &[], &body, event_tx, &auth)
+            .await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        self.compat.do_list_models(&auth).await
+    }
+
+    async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        self.compat.do_list_models_with_info(&auth).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn openai_def(model_id: &str) -> ProviderDef {
+        serde_json::from_str(&format!(
+            r#"{{"protocol":"openai","models":[{{"id":"{model_id}"}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    // `openrouter` is a builtin whose slug is absent from the `builtin_provider`
+    // inventory; the old guard leaked it into the picker, where it then resolved
+    // as the builtin and silently dropped the custom model. Listing must skip
+    // every builtin slug so a providers.toml entry can never shadow one.
+    #[test]
+    fn declared_specs_skip_builtin_named_entries_but_keep_custom() {
+        let mut config = ProvidersConfig::default();
+        config.upsert("openrouter".to_string(), openai_def("shadow-model"));
+        config.upsert("my-custom".to_string(), openai_def("real-model"));
+
+        let specs = declared_specs_from(&config);
+        assert!(
+            !specs.iter().any(|s| s.starts_with("openrouter/")),
+            "builtin slug must be skipped in custom listing: {specs:?}"
+        );
+        assert!(specs.contains(&"my-custom/real-model".to_string()));
+
+        // Resolution owns the builtin slug regardless of the providers.toml entry.
+        let model = Model::from_spec("openrouter/shadow-model").unwrap();
+        assert_eq!(model.provider.as_ref(), "openrouter");
     }
 }

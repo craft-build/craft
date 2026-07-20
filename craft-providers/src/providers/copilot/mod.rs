@@ -16,7 +16,9 @@ use tracing::{debug, warn};
 use super::anthropic::shared;
 use super::{MIME_JSON, lock_unpoison, openai::responses, openai_compat};
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
-use crate::provider::{BoxFuture, Provider};
+use async_trait::async_trait;
+
+use crate::provider::Provider;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig};
 
 pub mod auth;
@@ -42,7 +44,7 @@ const RESPONSES_PATH: &str = "/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
 const MODELS_PATH: &str = "/models";
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &["gpt-5-mini", "gpt-5 mini", "claude-haiku-4.5"],
@@ -555,59 +557,55 @@ fn guess_endpoint(model_id: &str) -> Endpoint {
     }
 }
 
+#[async_trait]
 impl Provider for Copilot {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let mut prefixed_system = String::new();
-            let system = super::with_prefix(&self.system_prefix, system, &mut prefixed_system);
-            let endpoint = self.model_endpoint(&model.id).await?;
-            debug!(model = %model.id, ?endpoint, "running Copilot request");
-            match endpoint {
-                Endpoint::ChatCompletions => {
-                    self.stream_chat_completions(model, messages, system, tools, event_tx)
-                        .await
-                }
-                Endpoint::Responses => {
-                    self.stream_responses(model, messages, system, tools, event_tx)
-                        .await
-                }
-                Endpoint::Messages => {
-                    self.stream_messages(model, messages, system, tools, event_tx, opts.thinking)
-                        .await
-                }
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let mut prefixed_system = String::new();
+        let system = super::with_prefix(&self.system_prefix, system, &mut prefixed_system);
+        let endpoint = self.model_endpoint(&model.id).await?;
+        debug!(model = %model.id, ?endpoint, "running Copilot request");
+        match endpoint {
+            Endpoint::ChatCompletions => {
+                self.stream_chat_completions(model, messages, system, tools, event_tx)
+                    .await
             }
-        })
+            Endpoint::Responses => {
+                self.stream_responses(model, messages, system, tools, event_tx)
+                    .await
+            }
+            Endpoint::Messages => {
+                self.stream_messages(model, messages, system, tools, event_tx, opts.thinking)
+                    .await
+            }
+        }
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async move {
-            let models = self.fetch_models().await?;
-            let ids = models
-                .iter()
-                .map(|model| model.id.clone())
-                .collect::<Vec<_>>();
-            let mut guard = lock_unpoison(&self.models);
-            guard.clear();
-            guard.extend(models.into_iter().map(|model| (model.id.clone(), model)));
-            Ok(ids)
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let models = self.fetch_models().await?;
+        let ids = models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        let mut guard = lock_unpoison(&self.models);
+        guard.clear();
+        guard.extend(models.into_iter().map(|model| (model.id.clone(), model)));
+        Ok(ids)
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            *lock_unpoison(&self.auth) = None;
-            lock_unpoison(&self.models).clear();
-            Ok(())
-        })
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        *lock_unpoison(&self.auth) = None;
+        lock_unpoison(&self.models).clear();
+        Ok(())
     }
 }
 

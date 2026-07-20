@@ -407,8 +407,7 @@ pub(crate) fn test_pricing() -> ModelPricing {
 pub(crate) fn test_model() -> craft_providers::Model {
     craft_providers::Model {
         id: "test-model".into(),
-        provider: craft_providers::provider::ProviderKind::Anthropic,
-        dynamic_slug: None,
+        provider: std::sync::Arc::<str>::from("anthropic"),
         tier: craft_providers::ModelTier::Medium,
         family: craft_providers::ModelFamily::Claude,
         supports_tool_examples_override: None,

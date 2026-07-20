@@ -1,12 +1,15 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 
+use async_trait::async_trait;
 use flume::Sender;
 use serde_json::Value;
-use strum::{Display, EnumIter, EnumString, IntoEnumIterator};
+use strum::{Display, EnumIter, EnumString};
 use tracing::{debug, warn};
 
-use crate::model::{Model, ModelFamily, models_for_provider};
+use crate::manifest::ManifestRegistry;
+use crate::model::{Model, ModelFamily};
 use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::anthropic::bedrock;
@@ -263,65 +266,61 @@ impl ProviderKind {
             }
         }
     }
-
-    pub async fn is_available(self) -> bool {
-        self.create(Timeouts::default()).await.is_ok()
-    }
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+#[async_trait]
 pub trait Provider: Send + Sync {
     #[allow(clippy::too_many_arguments)]
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>>;
+        session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError>;
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>>;
+    async fn list_models(&self) -> Result<Vec<String>, AgentError>;
 
     /// Richer variant of `list_models` that may include per-model metadata
     /// discovered from the provider's API. Defaults to wrapping `list_models`.
-    fn list_models_with_info(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
-        Box::pin(async {
-            let ids = self.list_models().await?;
-            Ok(ids.into_iter().map(crate::model::ModelInfo::new).collect())
-        })
+    async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
+        let ids = self.list_models().await?;
+        Ok(ids.into_iter().map(crate::model::ModelInfo::new).collect())
     }
 
     /// Fetch provider-side usage quota (remaining percentage / reset times).
     /// `Ok(None)` means the provider does not expose a programmatic usage endpoint.
-    fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
-        Box::pin(async { Ok(None) })
+    async fn fetch_usage(&self) -> Result<Option<ProviderUsage>, AgentError> {
+        Ok(None)
     }
 
-    fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async { Ok(()) })
+    async fn refresh_auth(&self) -> Result<(), AgentError> {
+        Ok(())
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async { Ok(()) })
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        Ok(())
     }
 
-    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async { Ok(false) })
+    async fn rotate_key(&self) -> Result<bool, AgentError> {
+        Ok(false)
     }
 
     fn adjust_model(&self, _model: &mut Model) {}
 }
 
-async fn provider_for_slug(
+pub async fn provider_for_slug(
     slug: &str,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
+    if let Ok(kind) = ProviderKind::from_str(slug) {
+        return kind.create(timeouts).await;
+    }
     if dynamic::display_name(slug).is_some() {
         dynamic::create(slug, timeouts).await
     } else {
@@ -329,15 +328,15 @@ async fn provider_for_slug(
     }
 }
 
+pub async fn provider_available(slug: &str) -> bool {
+    provider_for_slug(slug, Timeouts::default()).await.is_ok()
+}
+
 pub async fn from_model(
     model: &mut Model,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    if let Some(slug) = &model.dynamic_slug {
-        debug!(slug, model = %model.id, "slug provider created");
-        return provider_for_slug(slug, timeouts).await;
-    }
-    let provider = model.provider.create(timeouts).await?;
+    let provider = provider_for_slug(&model.provider, timeouts).await?;
     provider.adjust_model(model);
     debug!(provider = %model.provider, model = %model.id, "provider created");
     Ok(provider)
@@ -357,29 +356,26 @@ pub(crate) struct UnconfiguredProvider;
 
 const NOT_CONFIGURED: &str = "no provider configured — run /login or `craft auth login`";
 
+#[async_trait]
 impl Provider for UnconfiguredProvider {
-    fn stream_message<'a>(
-        &'a self,
-        _model: &'a Model,
-        _messages: &'a [Message],
-        _system: &'a str,
-        _tools: &'a Value,
-        _event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        _model: &Model,
+        _messages: &[Message],
+        _system: &str,
+        _tools: &Value,
+        _event_tx: &Sender<ProviderEvent>,
         _opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async {
-            Err(AgentError::Config {
-                message: NOT_CONFIGURED.to_string(),
-            })
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        Err(AgentError::Config {
+            message: NOT_CONFIGURED.to_string(),
         })
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async {
-            Err(AgentError::Config {
-                message: NOT_CONFIGURED.to_string(),
-            })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        Err(AgentError::Config {
+            message: NOT_CONFIGURED.to_string(),
         })
     }
 }
@@ -397,25 +393,30 @@ pub async fn fetch_all_models(
     let mut futs: futures::stream::FuturesUnordered<BoxFuture<'static, ModelBatch>> =
         futures::stream::FuturesUnordered::new();
 
-    for kind in ProviderKind::iter() {
-        let Ok(provider) = kind.create(timeouts).await else {
-            warn!(provider = %kind, "failed to create provider, skipping");
+    for manifest in ManifestRegistry::builtins() {
+        let slug = manifest.slug;
+        let Ok(provider) = provider_for_slug(slug, timeouts).await else {
+            warn!(provider = slug, "failed to create provider, skipping");
             continue;
         };
+        let display_name = manifest.display_name;
+        let accepts_arbitrary = manifest.accepts_arbitrary_models;
+        let static_models = manifest.models;
+        let tx_slug: std::sync::Arc<str> = std::sync::Arc::from(slug);
         futs.push(Box::pin(async move {
             match provider.list_models_with_info().await {
                 Ok(models) => {
-                    if kind.accepts_arbitrary_models() {
+                    if accepts_arbitrary {
                         crate::model_registry::model_registry()
                             .write()
                             .unwrap()
-                            .set_known_models(kind, models.clone());
+                            .set_known_models(&tx_slug, models.clone());
                     }
                     let mut specs: Vec<String> =
-                        models.iter().map(|m| format!("{kind}/{}", m.id)).collect();
-                    for entry in models_for_provider(kind) {
+                        models.iter().map(|m| format!("{slug}/{}", m.id)).collect();
+                    for entry in static_models {
                         for prefix in entry.prefixes {
-                            let spec = format!("{kind}/{prefix}");
+                            let spec = format!("{slug}/{prefix}");
                             if !specs.contains(&spec) {
                                 specs.push(spec);
                             }
@@ -427,17 +428,16 @@ pub async fn fetch_all_models(
                     }
                 }
                 Err(e) => {
-                    warn!(provider = %kind, error = %e, "failed to list models, using static fallback");
-                    let fallback: Vec<String> = models_for_provider(kind)
+                    warn!(provider = slug, error = %e, "failed to list models, using static fallback");
+                    let fallback: Vec<String> = static_models
                         .iter()
                         .flat_map(|entry| entry.prefixes.iter())
-                        .map(|p| format!("{kind}/{p}"))
+                        .map(|p| format!("{slug}/{p}"))
                         .collect();
                     ModelBatch {
                         models: fallback,
                         warnings: vec![format!(
-                            "{}: {e} (using static fallback)",
-                            kind.display_name()
+                            "{display_name}: {e} (using static fallback)"
                         )],
                     }
                 }

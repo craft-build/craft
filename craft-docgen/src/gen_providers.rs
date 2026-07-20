@@ -1,4 +1,5 @@
-use craft_providers::model::{ModelEntry, ModelTier, models_for_provider};
+use craft_providers::manifest::ManifestRegistry;
+use craft_providers::model::{ModelEntry, ModelTier};
 use craft_providers::provider::ProviderKind;
 use std::fmt::Write;
 use strum::IntoEnumIterator;
@@ -230,7 +231,7 @@ fn build_sections() -> Vec<ProviderSection> {
                     auth_line: format!("{} (also supports OAuth device flow)", format_auth(kind)),
                     urls: vec![kind.base_url()],
                     features: kind.features(),
-                    entries: models_for_provider(kind),
+                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
                 });
             }
             ProviderKind::Copilot => {
@@ -243,7 +244,7 @@ fn build_sections() -> Vec<ProviderSection> {
                     ),
                     urls: vec![kind.base_url()],
                     features: kind.features(),
-                    entries: models_for_provider(kind),
+                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
                 });
             }
             _ => {
@@ -253,7 +254,7 @@ fn build_sections() -> Vec<ProviderSection> {
                     auth_line: format_auth(kind),
                     urls: vec![kind.base_url()],
                     features: kind.features(),
-                    entries: models_for_provider(kind),
+                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
                 });
             }
         }

@@ -26,8 +26,9 @@ use tracing::{debug, warn};
 
 use crate::AgentError;
 use crate::model::{Model, ModelInfo, TokenUsage};
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::types::{Message, ProviderEvent, RequestOptions, Role, StreamResponse};
+use async_trait::async_trait;
 
 use super::Timeouts;
 
@@ -235,100 +236,96 @@ impl Bedrock {
     }
 }
 
+#[async_trait]
 impl Provider for Bedrock {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a serde_json::Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &serde_json::Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let aws_messages = to_aws_messages(messages)?;
-            let aws_tools = to_aws_tools(tools);
-            let system_blocks = vec![system_block(system)];
-            let inference = inference_config(model, &opts);
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let aws_messages = to_aws_messages(messages)?;
+        let aws_tools = to_aws_tools(tools);
+        let system_blocks = vec![system_block(system)];
+        let inference = inference_config(model, &opts);
 
-            let mut builder = self
-                .rt
-                .converse_stream()
-                .model_id(&model.id)
-                .set_messages(Some(aws_messages));
-            for sb in system_blocks {
-                builder = builder.system(sb);
-            }
-            if let Some(tc) = aws_tools {
-                builder = builder.tool_config(tc);
-            }
-            builder = builder.inference_config(inference);
+        let mut builder = self
+            .rt
+            .converse_stream()
+            .model_id(&model.id)
+            .set_messages(Some(aws_messages));
+        for sb in system_blocks {
+            builder = builder.system(sb);
+        }
+        if let Some(tc) = aws_tools {
+            builder = builder.tool_config(tc);
+        }
+        builder = builder.inference_config(inference);
 
-            debug!(model = %model.id, region = %self.region, "sending Bedrock ConverseStream");
+        debug!(model = %model.id, region = %self.region, "sending Bedrock ConverseStream");
 
-            let resp = builder.send().await.map_err(map_send_error)?;
-            // Drive the SDK EventReceiver inline: its type lives in the SDK's
-            // private `event_receiver` module, so we never name it; we call
-            // `.recv()` on the value from `resp.stream` and delegate per-event
-            // assembly to the pure, tested `stream::process_event`.
-            use crate::types::{ContentBlock, StopReason};
-            let mut receiver = resp.stream;
-            let mut content_blocks: Vec<ContentBlock> = Vec::new();
-            let mut block_states: Vec<stream::BlockState> = Vec::new();
-            let mut usage = TokenUsage::default();
-            let mut stop_reason: Option<StopReason> = None;
-            loop {
-                let event = match receiver.recv().await {
-                    Ok(Some(ev)) => ev,
-                    Ok(None) => break,
-                    Err(err) => return Err(stream::map_recv_error(err)),
-                };
-                stream::process_event(
-                    &event,
-                    &mut content_blocks,
-                    &mut block_states,
-                    &mut usage,
-                    &mut stop_reason,
-                    event_tx,
-                )
-                .await?;
-                if stop_reason.is_some() {
-                    break;
-                }
+        let resp = builder.send().await.map_err(map_send_error)?;
+        // Drive the SDK EventReceiver inline: its type lives in the SDK's
+        // private `event_receiver` module, so we never name it; we call
+        // `.recv()` on the value from `resp.stream` and delegate per-event
+        // assembly to the pure, tested `stream::process_event`.
+        use crate::types::{ContentBlock, StopReason};
+        let mut receiver = resp.stream;
+        let mut content_blocks: Vec<ContentBlock> = Vec::new();
+        let mut block_states: Vec<stream::BlockState> = Vec::new();
+        let mut usage = TokenUsage::default();
+        let mut stop_reason: Option<StopReason> = None;
+        loop {
+            let event = match receiver.recv().await {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,
+                Err(err) => return Err(stream::map_recv_error(err)),
+            };
+            stream::process_event(
+                &event,
+                &mut content_blocks,
+                &mut block_states,
+                &mut usage,
+                &mut stop_reason,
+                event_tx,
+            )
+            .await?;
+            if stop_reason.is_some() {
+                break;
             }
-            Ok(StreamResponse {
-                message: Message {
-                    role: Role::Assistant,
-                    content: content_blocks,
-                    ..Default::default()
-                },
-                usage,
-                stop_reason,
-            })
+        }
+        Ok(StreamResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content_blocks,
+                ..Default::default()
+            },
+            usage,
+            stop_reason,
         })
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async {
-            let models = self.list_inference_profiles().await?;
-            Ok(models.into_iter().map(|m| m.id).collect())
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let models = self.list_inference_profiles().await?;
+        Ok(models.into_iter().map(|m| m.id).collect())
     }
 
-    fn list_models_with_info(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
-        Box::pin(self.list_inference_profiles())
+    async fn list_models_with_info(&self) -> Result<Vec<ModelInfo>, AgentError> {
+        self.list_inference_profiles().await
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
+    async fn reload_auth(&self) -> Result<(), AgentError> {
         // The AWS SDK refreshes short-lived credentials (SSO, IMDS, web identity)
         // automatically via its credentials cache between requests. Region and
         // profile changes, however, are baked into the clients at construction
         // and require a process restart to take effect.
-        Box::pin(async {
-            debug!("bedrock reload_auth: no-op (SDK manages credential refresh)");
-            Ok(())
-        })
+        debug!("bedrock reload_auth: no-op (SDK manages credential refresh)");
+        Ok(())
     }
 }
 

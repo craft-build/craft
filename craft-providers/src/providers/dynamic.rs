@@ -5,6 +5,8 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use craft_config::providers::ProvidersConfig;
 use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde::Deserialize;
@@ -12,7 +14,8 @@ use serde_json::Value;
 use strum::IntoEnumIterator;
 use tracing::{debug, warn};
 
-use crate::model::{Model, ModelPricing, ModelTier, models_for_provider};
+use crate::manifest::ManifestRegistry;
+use crate::model::{Model, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider, ProviderKind};
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
@@ -309,7 +312,27 @@ fn discover_in(dir: &Path) -> Vec<DynamicProviderMeta> {
 static DISCOVERED: OnceLock<Vec<DynamicProviderMeta>> = OnceLock::new();
 
 fn discover() -> &'static [DynamicProviderMeta] {
-    DISCOVERED.get_or_init(|| providers_dir().map(|d| discover_in(&d)).unwrap_or_default())
+    DISCOVERED.get_or_init(|| {
+        // Load config first: it hard-exits on malformed providers.toml, so fail
+        // before spawning every provider script.
+        let custom = ProvidersConfig::load();
+        let mut metas = providers_dir().map(|d| discover_in(&d)).unwrap_or_default();
+        // A script and a providers.toml entry must not share a slug. The script
+        // loses, the same way it already loses to a builtin, and we say so
+        // instead of silently picking a winner.
+        metas.retain(|m| {
+            if custom.get(&m.slug).is_some() {
+                warn!(
+                    slug = %m.slug,
+                    "provider slug also defined in providers.toml, skipping script"
+                );
+                false
+            } else {
+                true
+            }
+        });
+        metas
+    })
 }
 
 fn find_meta(slug: &str) -> Option<&'static DynamicProviderMeta> {
@@ -437,7 +460,10 @@ pub fn dynamic_model_specs_for(slug: &str) -> Vec<String> {
         return Vec::new();
     };
     if meta.models.is_empty() {
-        models_for_provider(meta.base)
+        let base_slug = meta.base.to_string();
+        ManifestRegistry::get(&base_slug)
+            .map(|m| m.models)
+            .unwrap_or(&[])
             .iter()
             .flat_map(|entry| entry.prefixes.iter())
             .map(|prefix| format!("{slug}/{prefix}"))
@@ -467,8 +493,7 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         .max_by_key(|m| m.id.len())?;
     Some(Model {
         id: model_id.to_string(),
-        provider: meta.base,
-        dynamic_slug: Some(slug.to_string()),
+        provider: Arc::from(slug),
         tier: script_model.tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
@@ -485,8 +510,7 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
     let script_model = meta.models.iter().find(|m| m.tier == tier)?;
     Some(Model {
         id: script_model.id.clone(),
-        provider: meta.base,
-        dynamic_slug: Some(slug.to_string()),
+        provider: Arc::from(slug),
         tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
@@ -530,34 +554,34 @@ impl DynamicProvider {
     }
 }
 
+#[async_trait]
 impl Provider for DynamicProvider {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+        session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
         self.inner
             .stream_message(model, messages, system, tools, event_tx, opts, session_id)
+            .await
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
         if self.models.is_empty() {
-            return self.inner.list_models();
+            return self.inner.list_models().await;
         }
         let ids = self.models.iter().map(|m| m.id.clone()).collect();
-        Box::pin(async move { Ok(ids) })
+        Ok(ids)
     }
 
-    fn list_models_with_info(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
+    async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
         if self.models.is_empty() {
-            return self.inner.list_models_with_info();
+            return self.inner.list_models_with_info().await;
         }
         let infos = self
             .models
@@ -572,19 +596,19 @@ impl Provider for DynamicProvider {
                 provider_info: None,
             })
             .collect();
-        Box::pin(async move { Ok(infos) })
+        Ok(infos)
     }
 
-    fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        self.run_auth_script("refresh")
+    async fn refresh_auth(&self) -> Result<(), AgentError> {
+        self.run_auth_script("refresh").await
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        self.run_auth_script("reload")
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        self.run_auth_script("reload").await
     }
 
-    fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
-        self.inner.fetch_usage()
+    async fn fetch_usage(&self) -> Result<Option<ProviderUsage>, AgentError> {
+        self.inner.fetch_usage().await
     }
 }
 

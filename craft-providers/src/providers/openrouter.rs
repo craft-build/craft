@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde_json::{Value, json};
 
 use crate::model::{Model, ModelEntry, ModelInfo, ModelPricing};
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::{
     AgentError, Effort, EffortDialect, Message, ProviderEvent, RequestOptions, StreamResponse,
     dialect,
@@ -40,7 +41,7 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
 
 /// OpenRouter exposes 300+ models — too many to enumerate statically.
 /// Use explicit model names (e.g. `openrouter:anthropic/claude-sonnet-4`).
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[]
 }
 
@@ -178,74 +179,69 @@ fn parse_model(m: &Value) -> Option<ModelInfo> {
     })
 }
 
+#[async_trait]
 impl Provider for OpenRouter {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            let mut buf = String::new();
-            let system = super::with_prefix(&self.system_prefix, system, &mut buf);
-            let mut body = self.compat.build_body(model, messages, system, tools);
+        session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        let mut buf = String::new();
+        let system = super::with_prefix(&self.system_prefix, system, &mut buf);
+        let mut body = self.compat.build_body(model, messages, system, tools);
 
-            body["cache_control"] = json!({"type": "ephemeral"});
+        body["cache_control"] = json!({"type": "ephemeral"});
 
-            let reasoning_info: Option<Arc<OpenRouterModelInfo>> = {
-                let guard = crate::model_registry::model_registry().read().unwrap();
-                guard
-                    .discovered(model.provider, &model.id)
-                    .and_then(|d| d.provider_info.clone())
-                    .map(|arc| {
-                        Arc::downcast::<OpenRouterModelInfo>(arc).expect("wrong provider info type")
-                    })
-            };
+        let reasoning_info: Option<Arc<OpenRouterModelInfo>> = {
+            let guard = crate::model_registry::model_registry().read().unwrap();
+            // Discovery keys by the builtin slug; a dynamic wrap's model
+            // carries its own slug, so don't key by model.provider.
+            guard
+                .discovered("openrouter", &model.id)
+                .and_then(|d| d.provider_info.clone())
+                .map(|arc| {
+                    Arc::downcast::<OpenRouterModelInfo>(arc).expect("wrong provider info type")
+                })
+        };
 
-            let effort_dialect = effort_dialect(reasoning_info.as_deref());
-            if model.supports_thinking()
-                && let Some(effort) = opts.thinking.effort_str(&effort_dialect, model)
-            {
-                body["reasoning"] = json!({"effort": effort});
-            }
+        let effort_dialect = effort_dialect(reasoning_info.as_deref());
+        if model.supports_thinking()
+            && let Some(effort) = opts.thinking.effort_str(&effort_dialect, model)
+        {
+            body["reasoning"] = json!({"effort": effort});
+        }
 
-            if let Some(sid) = session_id {
-                body["session_id"] = json!(sid.as_str());
-            }
+        if let Some(sid) = session_id {
+            body["session_id"] = json!(sid.as_str());
+        }
 
-            let extra_headers = [("HTTP-Referer", REFERER), ("X-OpenRouter-Title", APP_TITLE)];
-            self.compat
-                .do_stream(model, &extra_headers, &body, event_tx, &auth)
-                .await
-        })
+        let extra_headers = [("HTTP-Referer", REFERER), ("X-OpenRouter-Title", APP_TITLE)];
+        self.compat
+            .do_stream(model, &extra_headers, &body, event_tx, &auth)
+            .await
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async move {
-            let models = self.list_models_with_info().await?;
-            Ok(models.into_iter().map(|m| m.id).collect())
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let models = self.list_models_with_info().await?;
+        Ok(models.into_iter().map(|m| m.id).collect())
     }
 
-    fn list_models_with_info(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            self.compat.fetch_and_parse_models(&auth, parse_model).await
-        })
+    async fn list_models_with_info(&self) -> Result<Vec<ModelInfo>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        self.compat.fetch_and_parse_models(&auth, parse_model).await
     }
 
-    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async {
-            Ok(self
-                .key_pool
-                .as_ref()
-                .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
-        })
+    async fn rotate_key(&self) -> Result<bool, AgentError> {
+        Ok(self
+            .key_pool
+            .as_ref()
+            .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
     }
 }
 
@@ -322,8 +318,7 @@ mod tests {
     fn openrouter_model(info: Option<&OpenRouterModelInfo>) -> (EffortDialect<'_>, Model) {
         let model = Model {
             id: "test-model".into(),
-            provider: crate::provider::ProviderKind::OpenRouter,
-            dynamic_slug: None,
+            provider: "openrouter".into(),
             tier: crate::model::ModelTier::Medium,
             family: crate::model::ModelFamily::Generic,
             supports_tool_examples_override: None,

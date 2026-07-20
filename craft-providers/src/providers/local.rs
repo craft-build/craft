@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use craft_storage::id::SessionRef;
 use flume::Sender;
 use futures::future::join_all;
@@ -8,7 +9,7 @@ use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::model::Model;
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 use craft_config::providers::Protocol;
@@ -126,92 +127,83 @@ impl LocalEndpoint {
     }
 }
 
+#[async_trait]
 impl Provider for LocalEndpoint {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
 
-            if matches!(self.protocol, Some(Protocol::OpenaiResponses)) {
-                let mut buf = String::new();
-                let system = super::with_prefix(&self.system_prefix, system, &mut buf);
-                let mut body = responses::build_body(model, messages, system, tools);
-                body["return_progress"] = serde_json::Value::Bool(true);
-                return responses::do_stream(
-                    self.compat.client(),
-                    model,
-                    &body,
-                    event_tx,
-                    &auth,
-                    self.compat.stream_timeout(),
-                )
-                .await;
-            }
-
+        if matches!(self.protocol, Some(Protocol::OpenaiResponses)) {
             let mut buf = String::new();
             let system = super::with_prefix(&self.system_prefix, system, &mut buf);
-            let mut body = self.compat.build_body(model, messages, system, tools);
+            let mut body = responses::build_body(model, messages, system, tools);
+            body["return_progress"] = serde_json::Value::Bool(true);
+            return responses::do_stream(
+                self.compat.client(),
+                model,
+                &body,
+                event_tx,
+                &auth,
+                self.compat.stream_timeout(),
+            )
+            .await;
+        }
 
-            if self.thinking_budget_field {
-                opts.thinking.apply_local_thinking(&mut body, model);
-            }
+        let mut buf = String::new();
+        let system = super::with_prefix(&self.system_prefix, system, &mut buf);
+        let mut body = self.compat.build_body(model, messages, system, tools);
 
-            self.compat
-                .do_stream(model, &[], &body, event_tx, &auth)
-                .await
-        })
+        if self.thinking_budget_field {
+            opts.thinking.apply_local_thinking(&mut body, model);
+        }
+
+        self.compat
+            .do_stream(model, &[], &body, event_tx, &auth)
+            .await
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            match self.discovery_mode {
-                DiscoveryMode::None => self.compat.do_list_models(&auth).await,
-                DiscoveryMode::LlamaCpp => Ok(self
-                    .discover_llamacpp_models(&auth)
-                    .await?
-                    .into_iter()
-                    .map(|m| m.id)
-                    .collect()),
-                DiscoveryMode::Ollama => Ok(self
-                    .discover_ollama_models(&auth)
-                    .await?
-                    .into_iter()
-                    .map(|m| m.id)
-                    .collect()),
-            }
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        match self.discovery_mode {
+            DiscoveryMode::None => self.compat.do_list_models(&auth).await,
+            DiscoveryMode::LlamaCpp => Ok(self
+                .discover_llamacpp_models(&auth)
+                .await?
+                .into_iter()
+                .map(|m| m.id)
+                .collect()),
+            DiscoveryMode::Ollama => Ok(self
+                .discover_ollama_models(&auth)
+                .await?
+                .into_iter()
+                .map(|m| m.id)
+                .collect()),
+        }
     }
 
-    fn list_models_with_info(
-        &self,
-    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            match self.discovery_mode {
-                DiscoveryMode::None => self.compat.do_list_models_with_info(&auth).await,
-                DiscoveryMode::LlamaCpp => self.discover_llamacpp_models(&auth).await,
-                DiscoveryMode::Ollama => self.discover_ollama_models(&auth).await,
-            }
-        })
+    async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        match self.discovery_mode {
+            DiscoveryMode::None => self.compat.do_list_models_with_info(&auth).await,
+            DiscoveryMode::LlamaCpp => self.discover_llamacpp_models(&auth).await,
+            DiscoveryMode::Ollama => self.discover_ollama_models(&auth).await,
+        }
     }
 
-    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async {
-            Ok(self.key_pool.as_ref().is_some_and(|p| {
-                p.rotate_headers(&self.auth, |key| {
-                    vec![("authorization".into(), format!("Bearer {key}"))]
-                })
-            }))
-        })
+    async fn rotate_key(&self) -> Result<bool, AgentError> {
+        Ok(self.key_pool.as_ref().is_some_and(|p| {
+            p.rotate_headers(&self.auth, |key| {
+                vec![("authorization".into(), format!("Bearer {key}"))]
+            })
+        }))
     }
 }
 

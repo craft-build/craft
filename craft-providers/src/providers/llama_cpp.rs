@@ -14,6 +14,6 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     needs_url: true,
 });
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[]
 }

@@ -13,13 +13,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use craft_storage::{StateDir, atomic_write};
 use tracing::warn;
 
-use crate::model::{ModelInfo, ModelTier, models_for_provider};
-use crate::provider::ProviderKind;
+use crate::model::{ModelInfo, ModelTier};
 
 const TIERS_FILE: &str = "model-tiers";
 
@@ -60,7 +59,7 @@ pub struct ModelRegistry {
     /// Ordered model info per provider, populated from `list_models()`.
     /// Not persisted - rebuilt every session. Used for auto-tier assignment
     /// and discovered metadata lookup.
-    known_models: HashMap<ProviderKind, Vec<ModelInfo>>,
+    known_models: HashMap<Arc<str>, Vec<ModelInfo>>,
 }
 
 impl ModelRegistry {
@@ -68,8 +67,8 @@ impl ModelRegistry {
         self.overrides = overrides;
     }
 
-    pub fn set_known_models(&mut self, provider: ProviderKind, models: Vec<ModelInfo>) {
-        self.known_models.insert(provider, models);
+    pub fn set_known_models(&mut self, provider: &Arc<str>, models: Vec<ModelInfo>) {
+        self.known_models.insert(Arc::clone(provider), models);
     }
 
     pub fn set(&mut self, spec: String, tier: ModelTier) {
@@ -87,9 +86,9 @@ impl ModelRegistry {
     }
 
     /// Lookup discovered metadata for a model by ID.
-    pub fn discovered(&self, provider: ProviderKind, model_id: &str) -> Option<&ModelInfo> {
+    pub fn discovered(&self, provider: &str, model_id: &str) -> Option<&ModelInfo> {
         self.known_models
-            .get(&provider)?
+            .get(provider)?
             .iter()
             .find(|m| m.id == model_id)
     }
@@ -101,7 +100,7 @@ impl ModelRegistry {
     pub fn tier_for(
         &self,
         spec: &str,
-        provider: ProviderKind,
+        provider: &str,
         static_tier: Option<ModelTier>,
     ) -> ModelTier {
         let mut tiers = self
@@ -120,7 +119,7 @@ impl ModelRegistry {
             return t;
         }
         if let Some((_, model_id)) = spec.split_once('/')
-            && let Some(models) = self.known_models.get(&provider)
+            && let Some(models) = self.known_models.get(provider)
             && let Some(pos) = models.iter().position(|m| m.id == model_id)
         {
             return tier_for_position(pos);
@@ -128,7 +127,7 @@ impl ModelRegistry {
         ModelTier::Medium
     }
 
-    pub fn spec_for_tier(&self, provider: ProviderKind, tier: ModelTier) -> Option<String> {
+    pub fn spec_for_tier(&self, provider: &str, tier: ModelTier) -> Option<String> {
         let prefix = format!("{provider}/");
         if let Some(spec) = self.overrides.get(&tier)
             && spec.starts_with(&prefix)
@@ -143,15 +142,17 @@ impl ModelRegistry {
         (!self.claimed_elsewhere(&candidate, tier)).then_some(candidate)
     }
 
-    fn static_candidate(&self, provider: ProviderKind, tier: ModelTier) -> Option<String> {
-        models_for_provider(provider)
+    fn static_candidate(&self, provider: &str, tier: ModelTier) -> Option<String> {
+        let manifest = crate::manifest::ManifestRegistry::get(provider)?;
+        manifest
+            .models
             .iter()
             .find(|e| e.default && e.tier == tier)
             .map(|e| format!("{provider}/{}", e.prefixes[0]))
     }
 
-    fn positional_candidate(&self, provider: ProviderKind, tier: ModelTier) -> Option<String> {
-        let models = self.known_models.get(&provider).filter(|m| !m.is_empty())?;
+    fn positional_candidate(&self, provider: &str, tier: ModelTier) -> Option<String> {
+        let models = self.known_models.get(provider).filter(|m| !m.is_empty())?;
         let slot = match tier {
             ModelTier::Strong => 0,
             ModelTier::Medium => 1,
@@ -173,7 +174,8 @@ impl ModelRegistry {
             return Some(spec.clone());
         }
 
-        for (provider, models) in &self.known_models {
+        for provider in self.known_models.keys() {
+            let models = &self.known_models[provider];
             if models.is_empty() {
                 continue;
             }
@@ -259,7 +261,7 @@ mod tests {
         reg.set_overrides(overrides.iter().map(|(t, s)| (*t, s.to_string())).collect());
         if !models.is_empty() {
             reg.set_known_models(
-                ProviderKind::Ollama,
+                &Arc::<str>::from("ollama"),
                 models
                     .iter()
                     .map(|s| ModelInfo::new(s.to_string()))
@@ -274,7 +276,7 @@ mod tests {
         let mut reg = make_map(&[], &["pos0", "pos1", "pos2"]);
         reg.set("ollama/pos1".into(), ModelTier::Weak);
 
-        let t = |spec, static_tier| reg.tier_for(spec, ProviderKind::Ollama, static_tier);
+        let t = |spec, static_tier| reg.tier_for(spec, "ollama", static_tier);
 
         assert_eq!(t("ollama/pos1", Some(ModelTier::Strong)), ModelTier::Weak);
         assert_eq!(t("ollama/pos0", Some(ModelTier::Weak)), ModelTier::Weak);
@@ -292,7 +294,7 @@ mod tests {
         reg.set("ollama/multi".into(), ModelTier::Compaction);
         reg.set("ollama/compact-only".into(), ModelTier::Compaction);
 
-        let t = |spec| reg.tier_for(spec, ProviderKind::Ollama, None);
+        let t = |spec| reg.tier_for(spec, "ollama", None);
 
         assert_eq!(t("ollama/multi"), ModelTier::Strong);
         assert_eq!(t("ollama/compact-only"), ModelTier::Compaction);
@@ -304,23 +306,17 @@ mod tests {
             &[(ModelTier::Strong, "ollama/custom")],
             &["big", "mid", "small"],
         );
-        let s = |t| reg.spec_for_tier(ProviderKind::Ollama, t);
+        let s = |t| reg.spec_for_tier("ollama", t);
 
         assert_eq!(s(ModelTier::Strong), Some("ollama/custom".into()));
         assert_eq!(s(ModelTier::Medium), Some("ollama/mid".into()));
         assert_eq!(s(ModelTier::Weak), Some("ollama/small".into()));
 
         let scoped = make_map(&[(ModelTier::Strong, "openai/gpt-foo")], &[]);
-        assert_eq!(
-            scoped.spec_for_tier(ProviderKind::Ollama, ModelTier::Strong),
-            None
-        );
+        assert_eq!(scoped.spec_for_tier("ollama", ModelTier::Strong), None);
 
         let conflict = make_map(&[(ModelTier::Weak, "ollama/big")], &["big", "mid", "small"]);
-        assert_eq!(
-            conflict.spec_for_tier(ProviderKind::Ollama, ModelTier::Strong),
-            None
-        );
+        assert_eq!(conflict.spec_for_tier("ollama", ModelTier::Strong), None);
     }
 
     #[test]
@@ -359,12 +355,12 @@ mod tests {
         info_a.context_window = Some(32_000);
         let mut info_b = ModelInfo::new("model-b".into());
         info_b.context_window = Some(128_000);
-        reg.set_known_models(ProviderKind::LlamaCpp, vec![info_a, info_b]);
-        let info = reg.discovered(ProviderKind::LlamaCpp, "model-a").unwrap();
+        reg.set_known_models(&Arc::<str>::from("llama-cpp"), vec![info_a, info_b]);
+        let info = reg.discovered("llama-cpp", "model-a").unwrap();
         assert_eq!(info.id, "model-a");
         assert_eq!(info.context_window, Some(32_000));
-        assert!(reg.discovered(ProviderKind::LlamaCpp, "model-x").is_none());
-        assert!(reg.discovered(ProviderKind::Ollama, "model-a").is_none());
+        assert!(reg.discovered("llama-cpp", "model-x").is_none());
+        assert!(reg.discovered("ollama", "model-a").is_none());
     }
 
     #[test]

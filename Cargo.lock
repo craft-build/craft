@@ -1638,6 +1638,7 @@ dependencies = [
  "arc-swap",
  "ast-grep-core",
  "ast-grep-language",
+ "async-trait",
  "base64 0.22.1",
  "bitflags 2.13.1",
  "craft-config",
@@ -1908,6 +1909,7 @@ dependencies = [
 name = "craft-providers"
 version = "0.9.5"
 dependencies = [
+ "async-trait",
  "aws-config",
  "aws-sdk-bedrock",
  "aws-sdk-bedrockruntime",

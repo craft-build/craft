@@ -58,7 +58,8 @@ pub async fn run(export: bool) -> Result<()> {
 
     if !current_ok {
         for kind in ProviderKind::iter() {
-            if current_model.as_ref().is_some_and(|m| m.provider == kind) {
+            let slug = kind.to_string();
+            if current_model.as_ref().is_some_and(|m| *m.provider == *slug) {
                 continue;
             }
             let provider = match kind.create(timeouts).await {
@@ -74,7 +75,7 @@ pub async fn run(export: bool) -> Result<()> {
             };
             let ping = ping_provider(&*provider).await;
             if ping.is_ok()
-                && let Ok(model) = Model::from_tier(kind, ModelTier::Strong)
+                && let Ok(model) = Model::from_tier(&slug, ModelTier::Strong)
             {
                 let spec = model.spec();
                 persist_model(&storage, &spec).context("persist healed model")?;

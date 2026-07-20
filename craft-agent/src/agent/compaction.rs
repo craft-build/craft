@@ -687,7 +687,8 @@ fn build_static_summary(messages: &[Message]) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use craft_providers::provider::{BoxFuture, Provider};
+    use async_trait::async_trait;
+    use craft_providers::provider::Provider;
     use craft_providers::{
         ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason,
         StreamResponse, TokenUsage,
@@ -710,26 +711,25 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Provider for MockProvider {
-        fn stream_message<'a>(
-            &'a self,
-            _: &'a Model,
-            _: &'a [Message],
-            _: &'a str,
-            _: &'a Value,
-            _: &'a flume::Sender<ProviderEvent>,
+        async fn stream_message(
+            &self,
+            _: &Model,
+            _: &[Message],
+            _: &str,
+            _: &Value,
+            _: &flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&'a craft_storage::id::SessionRef>,
-        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-            Box::pin(async {
-                let mut responses = self.responses.lock().unwrap();
-                assert!(!responses.is_empty(), "MockProvider: no more responses");
-                Ok(responses.remove(0))
-            })
+            _: Option<&craft_storage::id::SessionRef>,
+        ) -> Result<StreamResponse, AgentError> {
+            let mut responses = self.responses.lock().unwrap();
+            assert!(!responses.is_empty(), "MockProvider: no more responses");
+            Ok(responses.remove(0))
         }
 
-        fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-            Box::pin(async { unimplemented!() })
+        async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+            unimplemented!()
         }
     }
 
@@ -1395,31 +1395,30 @@ mod tests {
         overflows_left: Mutex<usize>,
     }
 
+    #[async_trait]
     impl Provider for OverflowProvider {
-        fn stream_message<'a>(
-            &'a self,
-            _: &'a Model,
-            _: &'a [Message],
-            _: &'a str,
-            _: &'a Value,
-            _: &'a flume::Sender<ProviderEvent>,
+        async fn stream_message(
+            &self,
+            _: &Model,
+            _: &[Message],
+            _: &str,
+            _: &Value,
+            _: &flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&'a craft_storage::id::SessionRef>,
-        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-            Box::pin(async move {
-                let mut left = self.overflows_left.lock().unwrap();
-                if *left > 0 {
-                    *left -= 1;
-                    return Err(AgentError::ContextOverflow {
-                        message: "too long".into(),
-                    });
-                }
-                Ok(text_response(StopReason::EndTurn))
-            })
+            _: Option<&craft_storage::id::SessionRef>,
+        ) -> Result<StreamResponse, AgentError> {
+            let mut left = self.overflows_left.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(AgentError::ContextOverflow {
+                    message: "too long".into(),
+                });
+            }
+            Ok(text_response(StopReason::EndTurn))
         }
 
-        fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-            Box::pin(async { unimplemented!() })
+        async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+            unimplemented!()
         }
     }
 

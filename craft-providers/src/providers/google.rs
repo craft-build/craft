@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use flume::Sender;
 use futures::TryStreamExt;
 use futures::io::{AsyncBufReadExt, BufReader};
@@ -14,7 +15,7 @@ use tracing::warn;
 use craft_storage::id::SessionRef;
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::{
     AgentError, ContentBlock, Message, ProviderEvent, RequestOptions, Role, StopReason,
     StreamResponse, ThinkingConfig, TokenUsage,
@@ -50,7 +51,7 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &["gemini-2.5-pro"],
@@ -239,64 +240,60 @@ impl Google {
     }
 }
 
+#[async_trait]
 impl Provider for Google {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(self.do_stream(model, messages, system, tools, event_tx, opts.thinking))
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        self.do_stream(model, messages, system, tools, event_tx, opts.thinking)
+            .await
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
         let request = self.build_request("GET", &self.models_url());
-        Box::pin(async move {
-            let response = request.send().await?;
-            if response.status().as_u16() != 200 {
-                return Err(AgentError::from_response(response).await);
-            }
-            let body_text = response.text().await?;
-            let models_response: ModelsListResponse = serde_json::from_str(&body_text)?;
-            let mut ids: Vec<String> = models_response
-                .models
-                .into_iter()
-                .filter(|m| {
-                    m.supported_generation_methods
-                        .iter()
-                        .any(|m| m == "generateContent")
-                })
-                .map(|m| {
-                    m.name
-                        .strip_prefix("models/")
-                        .map(String::from)
-                        .unwrap_or(m.name)
-                })
-                .collect();
-            ids.sort();
-            Ok(ids)
-        })
+        let response = request.send().await?;
+        if response.status().as_u16() != 200 {
+            return Err(AgentError::from_response(response).await);
+        }
+        let body_text = response.text().await?;
+        let models_response: ModelsListResponse = serde_json::from_str(&body_text)?;
+        let mut ids: Vec<String> = models_response
+            .models
+            .into_iter()
+            .filter(|m| {
+                m.supported_generation_methods
+                    .iter()
+                    .any(|m| m == "generateContent")
+            })
+            .map(|m| {
+                m.name
+                    .strip_prefix("models/")
+                    .map(String::from)
+                    .unwrap_or(m.name)
+            })
+            .collect();
+        ids.sort();
+        Ok(ids)
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            let pool = KeyPool::resolve("google", ENV_VAR)?;
-            *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
-            Ok(())
-        })
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        let pool = KeyPool::resolve("google", ENV_VAR)?;
+        *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
+        Ok(())
     }
 
-    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async {
-            Ok(self
-                .key_pool
-                .as_ref()
-                .is_some_and(|p| p.rotate_auth(&self.auth, resolve_auth_from_key)))
-        })
+    async fn rotate_key(&self) -> Result<bool, AgentError> {
+        Ok(self
+            .key_pool
+            .as_ref()
+            .is_some_and(|p| p.rotate_auth(&self.auth, resolve_auth_from_key)))
     }
 }
 
@@ -622,8 +619,7 @@ mod tests {
     fn test_model() -> Model {
         Model {
             id: "gemini-2.5-flash".into(),
-            provider: crate::provider::ProviderKind::Google,
-            dynamic_slug: None,
+            provider: Arc::<str>::from("google"),
             tier: ModelTier::Medium,
             family: ModelFamily::Gemini,
             supports_tool_examples_override: None,

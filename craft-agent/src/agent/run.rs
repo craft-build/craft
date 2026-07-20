@@ -1267,7 +1267,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use craft_providers::provider::{BoxFuture, Provider};
+    use async_trait::async_trait;
+    use craft_providers::provider::Provider;
     use craft_providers::{
         ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason,
         StreamResponse, TokenUsage,
@@ -1309,26 +1310,25 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Provider for MockProvider {
-        fn stream_message<'a>(
-            &'a self,
-            _: &'a Model,
-            _: &'a [Message],
-            _: &'a str,
-            _: &'a Value,
-            _: &'a flume::Sender<ProviderEvent>,
+        async fn stream_message(
+            &self,
+            _: &Model,
+            _: &[Message],
+            _: &str,
+            _: &Value,
+            _: &flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&'a craft_storage::id::SessionRef>,
-        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-            Box::pin(async {
-                let mut responses = self.responses.lock().unwrap();
-                assert!(!responses.is_empty(), "MockProvider: no more responses");
-                Ok(responses.remove(0))
-            })
+            _: Option<&craft_storage::id::SessionRef>,
+        ) -> Result<StreamResponse, AgentError> {
+            let mut responses = self.responses.lock().unwrap();
+            assert!(!responses.is_empty(), "MockProvider: no more responses");
+            Ok(responses.remove(0))
         }
 
-        fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-            Box::pin(async { unimplemented!() })
+        async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+            unimplemented!()
         }
     }
 
@@ -1622,24 +1622,23 @@ mod tests {
     #[tokio::test]
     async fn cancel_token_aborts_during_api_call() {
         struct HangingProvider;
+        #[async_trait]
         impl Provider for HangingProvider {
-            fn stream_message<'a>(
-                &'a self,
-                _: &'a Model,
-                _: &'a [Message],
-                _: &'a str,
-                _: &'a Value,
-                _: &'a flume::Sender<ProviderEvent>,
+            async fn stream_message(
+                &self,
+                _: &Model,
+                _: &[Message],
+                _: &str,
+                _: &Value,
+                _: &flume::Sender<ProviderEvent>,
                 _: RequestOptions,
-                _: Option<&'a craft_storage::id::SessionRef>,
-            ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-                Box::pin(async {
-                    std::future::pending::<()>().await;
-                    unreachable!()
-                })
+                _: Option<&craft_storage::id::SessionRef>,
+            ) -> Result<StreamResponse, AgentError> {
+                std::future::pending::<()>().await;
+                unreachable!()
             }
-            fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-                Box::pin(async { unimplemented!() })
+            async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+                unimplemented!()
             }
         }
 
@@ -1684,21 +1683,22 @@ mod tests {
     }
 
     struct PanickingProvider;
+    #[async_trait]
     impl Provider for PanickingProvider {
-        fn stream_message<'a>(
-            &'a self,
-            _: &'a Model,
-            _: &'a [Message],
-            _: &'a str,
-            _: &'a Value,
-            _: &'a flume::Sender<ProviderEvent>,
+        async fn stream_message(
+            &self,
+            _: &Model,
+            _: &[Message],
+            _: &str,
+            _: &Value,
+            _: &flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&'a craft_storage::id::SessionRef>,
-        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-            Box::pin(async { panic!("LLM should not be called when VCC compaction succeeds") })
+            _: Option<&craft_storage::id::SessionRef>,
+        ) -> Result<StreamResponse, AgentError> {
+            panic!("LLM should not be called when VCC compaction succeeds")
         }
-        fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-            Box::pin(async { unimplemented!() })
+        async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+            unimplemented!()
         }
     }
 

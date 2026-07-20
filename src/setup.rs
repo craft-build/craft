@@ -4,19 +4,13 @@ use color_eyre::Result;
 use color_eyre::eyre::Context;
 
 use craft_providers::model::{Model, ModelTier};
-use craft_providers::provider::ProviderKind;
+use craft_providers::provider::provider_available;
 use craft_storage::StateDir;
 use craft_storage::log::RotatingFileWriter;
 use craft_storage::model::read_model;
 use tracing_subscriber::EnvFilter;
 
-const PROVIDER_PRIORITY: &[ProviderKind] = &[
-    ProviderKind::Anthropic,
-    ProviderKind::OpenAi,
-    ProviderKind::Copilot,
-    ProviderKind::Synthetic,
-    ProviderKind::DeepSeek,
-];
+const PROVIDER_PRIORITY: &[&str] = &["anthropic", "openai", "copilot", "synthetic", "deepseek"];
 
 pub async fn resolve_model(
     explicit: Option<&str>,
@@ -45,9 +39,9 @@ pub async fn resolve_model(
 
 async fn auto_detect_model() -> Option<Model> {
     for tier in [ModelTier::Strong, ModelTier::Medium] {
-        for &provider in PROVIDER_PRIORITY {
-            if provider.is_available().await
-                && let Ok(model) = Model::from_tier(provider, tier)
+        for &slug in PROVIDER_PRIORITY {
+            if provider_available(slug).await
+                && let Ok(model) = Model::from_tier(slug, tier)
             {
                 return Some(model);
             }

@@ -104,24 +104,14 @@ impl Task {
                 (Model::clone(&ctx.model), Arc::clone(&ctx.provider))
             } else {
                 let mut resolved_model = {
+                    let slug = &ctx.model.provider;
                     let map = model_registry::model_registry()
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
-                    ctx.model
-                        .dynamic_slug
-                        .is_none()
-                        .then(|| map.spec_for_tier(ctx.model.provider, effective))
-                        .flatten()
+                    map.spec_for_tier(slug, effective)
                         .or_else(|| map.spec_for_tier_any(effective))
                         .and_then(|spec| Model::from_spec(&spec).ok())
-                        .or_else(|| {
-                            Model::from_tier_dynamic(
-                                ctx.model.provider,
-                                effective,
-                                ctx.model.dynamic_slug.as_deref(),
-                            )
-                            .ok()
-                        })
+                        .or_else(|| Model::from_tier_dynamic(slug, effective).ok())
                         .ok_or_else(|| format!("no model available for tier {effective}"))?
                 };
                 let resolved_provider = provider::from_model(&mut resolved_model, ctx.timeouts)

@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde_json::{Value, json};
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
@@ -58,7 +59,7 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &[
@@ -190,96 +191,87 @@ impl Mistral {
     }
 }
 
+#[async_trait]
 impl Provider for Mistral {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
-        opts: RequestOptions,
-        session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            let mut buf = String::new();
-            let system = super::with_prefix(&self.system_prefix, system, &mut buf);
-            let mut body = self.compat.build_body(model, messages, system, tools);
-            opts.thinking
-                .apply_reasoning_effort(&mut body, &dialect::HIGH_ONLY, model);
-            // Convert assistant messages to Mistral's expected format with thinking content
-            convert_assistant_messages_in_place(body.get_mut("messages").unwrap());
-
-            let mut extra_headers = vec![];
-            if let Some(session_id) = session_id {
-                extra_headers.push(("x-affinity", session_id.as_str()));
-            }
-            self.compat
-                .do_stream(model, &extra_headers, &body, event_tx, &auth)
-                .await
-        })
-    }
-
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            self.compat.do_list_models(&auth).await
-        })
-    }
-
-    fn list_models_with_info(
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_message(
         &self,
-    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            self.compat
-                .fetch_and_parse_models(&auth, |m| {
-                    let has_completion_chat = m
-                        .get("capabilities")
-                        .and_then(Value::as_object)
-                        .and_then(|c| c.get("completion_chat"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    if !has_completion_chat {
-                        return None;
-                    }
-                    let id = m["id"].as_str()?;
-                    let context_window = m["max_context_length"]
-                        .as_u64()
-                        .and_then(|v| u32::try_from(v).ok());
-                    let supports_thinking = m
-                        .get("capabilities")
-                        .and_then(Value::as_object)
-                        .and_then(|c| c.get("reasoning"))
-                        .and_then(Value::as_bool);
-                    let supports_vision = m
-                        .get("capabilities")
-                        .and_then(Value::as_object)
-                        .and_then(|c| c.get("vision"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    Some(crate::model::ModelInfo {
-                        id: id.to_string(),
-                        context_window,
-                        max_output_tokens: None,
-                        supports_thinking,
-                        supports_vision: Some(supports_vision),
-                        pricing: None,
-                        provider_info: None,
-                    })
-                })
-                .await
-        })
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
+        opts: RequestOptions,
+        session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        let mut buf = String::new();
+        let system = super::with_prefix(&self.system_prefix, system, &mut buf);
+        let mut body = self.compat.build_body(model, messages, system, tools);
+        opts.thinking
+            .apply_reasoning_effort(&mut body, &dialect::HIGH_ONLY, model);
+        convert_assistant_messages_in_place(body.get_mut("messages").unwrap());
+
+        let mut extra_headers = vec![];
+        if let Some(session_id) = session_id {
+            extra_headers.push(("x-affinity", session_id.as_str()));
+        }
+        self.compat
+            .do_stream(model, &extra_headers, &body, event_tx, &auth)
+            .await
     }
 
-    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async {
-            Ok(self
-                .key_pool
-                .as_ref()
-                .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        self.compat.do_list_models(&auth).await
+    }
+
+    async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        self.compat
+            .fetch_and_parse_models(&auth, |m| {
+                let has_completion_chat = m
+                    .get("capabilities")
+                    .and_then(Value::as_object)
+                    .and_then(|c| c.get("completion_chat"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !has_completion_chat {
+                    return None;
+                }
+                let id = m["id"].as_str()?;
+                let context_window = m["max_context_length"]
+                    .as_u64()
+                    .and_then(|v| u32::try_from(v).ok());
+                let supports_thinking = m
+                    .get("capabilities")
+                    .and_then(Value::as_object)
+                    .and_then(|c| c.get("reasoning"))
+                    .and_then(Value::as_bool);
+                let supports_vision = m
+                    .get("capabilities")
+                    .and_then(Value::as_object)
+                    .and_then(|c| c.get("vision"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                Some(crate::model::ModelInfo {
+                    id: id.to_string(),
+                    context_window,
+                    max_output_tokens: None,
+                    supports_thinking,
+                    supports_vision: Some(supports_vision),
+                    pricing: None,
+                    provider_info: None,
+                })
+            })
+            .await
+    }
+
+    async fn rotate_key(&self) -> Result<bool, AgentError> {
+        Ok(self
+            .key_pool
+            .as_ref()
+            .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
     }
 
     fn adjust_model(&self, model: &mut Model) {

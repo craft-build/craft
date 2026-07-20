@@ -1,12 +1,13 @@
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde_json::Value;
 use tracing::warn;
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::{
     AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig, dialect,
 };
@@ -37,7 +38,7 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) fn models() -> &'static [ModelEntry] {
+pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
             prefixes: &["deepseek-v4-flash"],
@@ -110,66 +111,58 @@ impl DeepSeek {
     }
 }
 
+#[async_trait]
 impl Provider for DeepSeek {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
-        opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let thinking = opts.thinking;
-            let auth = lock_unpoison(&self.auth).clone();
-            let mut buf = String::new();
-            let system = super::with_prefix(&self.system_prefix, system, &mut buf);
-            let mut body = self.compat.build_body(model, messages, system, tools);
-
-            // DeepSeek enables reasoning by default; Adaptive and Budget
-            // use the model's default reasoning behavior.
-            if thinking.is_enabled() {
-                body["thinking"] = serde_json::json!({"type": "enabled"});
-                thinking.apply_reasoning_effort(&mut body, &dialect::DEEPSEEK, model);
-                if matches!(thinking, ThinkingConfig::Budget(_)) {
-                    warn!("DeepSeek reasoning does not support token budgets");
-                }
-                pad_reasoning_content(&model.id, &mut body);
-            } else {
-                body["thinking"] = serde_json::json!({"type": "disabled"});
-            }
-
-            self.compat
-                .do_stream(model, &[], &body, event_tx, &auth)
-                .await
-        })
-    }
-
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            self.compat.do_list_models(&auth).await
-        })
-    }
-
-    fn list_models_with_info(
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_message(
         &self,
-    ) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
-        Box::pin(async move {
-            let auth = lock_unpoison(&self.auth).clone();
-            self.compat.do_list_models_with_info(&auth).await
-        })
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
+        opts: RequestOptions,
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let thinking = opts.thinking;
+        let auth = lock_unpoison(&self.auth).clone();
+        let mut buf = String::new();
+        let system = super::with_prefix(&self.system_prefix, system, &mut buf);
+        let mut body = self.compat.build_body(model, messages, system, tools);
+
+        // DeepSeek enables reasoning by default; Adaptive and Budget
+        // use the model's default reasoning behavior.
+        if thinking.is_enabled() {
+            body["thinking"] = serde_json::json!({"type": "enabled"});
+            thinking.apply_reasoning_effort(&mut body, &dialect::DEEPSEEK, model);
+            if matches!(thinking, ThinkingConfig::Budget(_)) {
+                warn!("DeepSeek reasoning does not support token budgets");
+            }
+            pad_reasoning_content(&model.id, &mut body);
+        } else {
+            body["thinking"] = serde_json::json!({"type": "disabled"});
+        }
+
+        self.compat
+            .do_stream(model, &[], &body, event_tx, &auth)
+            .await
     }
 
-    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async {
-            Ok(self
-                .key_pool
-                .as_ref()
-                .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        self.compat.do_list_models(&auth).await
+    }
+
+    async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        self.compat.do_list_models_with_info(&auth).await
+    }
+
+    async fn rotate_key(&self) -> Result<bool, AgentError> {
+        Ok(self
+            .key_pool
+            .as_ref()
+            .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
     }
 }
 

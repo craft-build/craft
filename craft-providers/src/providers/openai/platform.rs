@@ -7,7 +7,9 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::model::Model;
-use crate::provider::{BoxFuture, Provider};
+use async_trait::async_trait;
+
+use crate::provider::Provider;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
 use super::super::lock_unpoison;
@@ -183,92 +185,85 @@ impl OpenAi {
     }
 }
 
+#[async_trait]
 impl Provider for OpenAi {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let mut buf = String::new();
-            let system = super::super::with_prefix(&self.system_prefix, system, &mut buf);
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let mut buf = String::new();
+        let system = super::super::with_prefix(&self.system_prefix, system, &mut buf);
 
-            if is_codex_model(&model.id) {
-                let body = super::responses::build_body(model, messages, system, tools);
-                let stream_timeout = self.compat.stream_timeout();
-                return self
-                    .with_oauth_retry(|| async {
-                        let codex_auth = self.codex_auth()?;
-                        super::responses::do_stream(
-                            self.compat.client(),
-                            model,
-                            &body,
-                            event_tx,
-                            &codex_auth,
-                            stream_timeout,
-                        )
-                        .await
-                    })
-                    .await;
-            }
-
-            let mut body = self.compat.build_body(model, messages, system, tools);
-            opts.thinking
-                .apply_reasoning_effort(&mut body, &dialect::STANDARD, model);
-            self.with_oauth_retry(|| async {
-                let auth = self.current_auth();
-                self.compat
-                    .do_stream(model, &[], &body, event_tx, &auth)
+        if is_codex_model(&model.id) {
+            let body = super::responses::build_body(model, messages, system, tools);
+            let stream_timeout = self.compat.stream_timeout();
+            return self
+                .with_oauth_retry(|| async {
+                    let codex_auth = self.codex_auth()?;
+                    super::responses::do_stream(
+                        self.compat.client(),
+                        model,
+                        &body,
+                        event_tx,
+                        &codex_auth,
+                        stream_timeout,
+                    )
                     .await
-            })
-            .await
+                })
+                .await;
+        }
+
+        let mut body = self.compat.build_body(model, messages, system, tools);
+        opts.thinking
+            .apply_reasoning_effort(&mut body, &dialect::STANDARD, model);
+        self.with_oauth_retry(|| async {
+            let auth = self.current_auth();
+            self.compat
+                .do_stream(model, &[], &body, event_tx, &auth)
+                .await
         })
+        .await
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async {
-            if self.is_oauth() {
-                let models = super::models()
-                    .iter()
-                    .flat_map(|e| e.prefixes.iter())
-                    .filter(|id| is_codex_model(id))
-                    .map(|&s| s.to_string())
-                    .collect();
-                return Ok(models);
-            }
-            self.with_oauth_retry(|| async {
-                let auth = self.current_auth();
-                self.compat.do_list_models(&auth).await
-            })
-            .await
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        if self.is_oauth() {
+            let models = super::models()
+                .iter()
+                .flat_map(|e| e.prefixes.iter())
+                .filter(|id| is_codex_model(id))
+                .map(|&s| s.to_string())
+                .collect();
+            return Ok(models);
+        }
+        self.with_oauth_retry(|| async {
+            let auth = self.current_auth();
+            self.compat.do_list_models(&auth).await
         })
+        .await
     }
 
-    fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            if self.is_oauth() {
-                self.refresh_oauth().await
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            let Some(storage) = self.storage.clone() else {
-                return Ok(());
-            };
-            let resolved = auth::resolve(&storage).await?;
-            *lock_unpoison(&self.auth) = resolved;
-            debug!("reloaded OpenAI auth from storage");
+    async fn refresh_auth(&self) -> Result<(), AgentError> {
+        if self.is_oauth() {
+            self.refresh_oauth().await
+        } else {
             Ok(())
-        })
+        }
+    }
+
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        let Some(storage) = self.storage.clone() else {
+            return Ok(());
+        };
+        let resolved = auth::resolve(&storage).await?;
+        *lock_unpoison(&self.auth) = resolved;
+        debug!("reloaded OpenAI auth from storage");
+        Ok(())
     }
 
     fn adjust_model(&self, model: &mut Model) {

@@ -64,6 +64,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use async_trait::async_trait;
 use humantime::format_duration;
 use ignore::WalkBuilder;
 use serde_json::Value;
@@ -736,22 +737,23 @@ use craft_storage::id::SessionRef;
 
 struct NullProvider;
 
+#[async_trait]
 impl Provider for NullProvider {
-    fn stream_message<'a>(
-        &'a self,
-        _: &'a Model,
-        _: &'a [Message],
-        _: &'a str,
-        _: &'a Value,
-        _: &'a flume::Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        _: &Model,
+        _: &[Message],
+        _: &str,
+        _: &Value,
+        _: &flume::Sender<ProviderEvent>,
         _: RequestOptions,
-        _: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, crate::AgentError>> {
-        Box::pin(async { unimplemented!() })
+        _: Option<&SessionRef>,
+    ) -> Result<StreamResponse, crate::AgentError> {
+        unimplemented!()
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, crate::AgentError>> {
-        Box::pin(async { unimplemented!() })
+    async fn list_models(&self) -> Result<Vec<String>, crate::AgentError> {
+        unimplemented!()
     }
 }
 

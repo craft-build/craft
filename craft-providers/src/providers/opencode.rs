@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use async_trait::async_trait;
 use craft_config::providers::builtin_provider;
 use craft_storage::StateDir;
 use craft_storage::auth::load_provider_credentials;
@@ -20,7 +21,7 @@ use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 use crate::model::{Model, ModelInfo, ModelPricing};
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::Provider;
 use crate::providers::anthropic::shared;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
@@ -575,67 +576,63 @@ impl Opencode {
     }
 }
 
+#[async_trait]
 impl Provider for Opencode {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
+    async fn stream_message(
+        &self,
+        model: &Model,
+        messages: &[Message],
+        system: &str,
+        tools: &Value,
+        event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        Box::pin(async move {
-            let model_for_stream = model.clone();
+        _session_id: Option<&SessionRef>,
+    ) -> Result<StreamResponse, AgentError> {
+        let model_for_stream = model.clone();
 
-            self.ensure_catalog_populated().await.ok();
-            let model_id = &model_for_stream.id;
-            let (sub_provider, actual_id) =
-                model_id.split_once('/').unwrap_or(("opencode", model_id));
+        self.ensure_catalog_populated().await.ok();
+        let model_id = &model_for_stream.id;
+        let (sub_provider, actual_id) = model_id.split_once('/').unwrap_or(("opencode", model_id));
 
-            let (meta, api_format, auth) = self.lookup(sub_provider, actual_id).await?;
+        let (meta, api_format, auth) = self.lookup(sub_provider, actual_id).await?;
 
-            let mut buf = String::new();
-            let system = super::with_prefix(&self.system_prefix, system, &mut buf);
+        let mut buf = String::new();
+        let system = super::with_prefix(&self.system_prefix, system, &mut buf);
 
-            let model = Model {
-                id: actual_id.to_string(),
-                max_output_tokens: Some(meta.output),
-                context_window: meta.context,
-                ..model_for_stream
-            };
+        let model = Model {
+            id: actual_id.to_string(),
+            max_output_tokens: Some(meta.output),
+            context_window: meta.context,
+            ..model_for_stream
+        };
 
-            match api_format {
-                EndpointType::ChatCompletions => {
-                    self.handle_catalog_chat_completions(
-                        &model, messages, system, tools, event_tx, &auth, &opts,
-                    )
-                    .await
-                }
-                EndpointType::Messages => {
-                    self.handle_catalog_messages(
-                        &model, messages, system, tools, event_tx, &auth, &opts,
-                    )
-                    .await
-                }
+        match api_format {
+            EndpointType::ChatCompletions => {
+                self.handle_catalog_chat_completions(
+                    &model, messages, system, tools, event_tx, &auth, &opts,
+                )
+                .await
             }
-        })
+            EndpointType::Messages => {
+                self.handle_catalog_messages(
+                    &model, messages, system, tools, event_tx, &auth, &opts,
+                )
+                .await
+            }
+        }
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-        Box::pin(async {
-            let models = self.do_list_models().await?;
-            Ok(models.into_iter().map(|m| m.id).collect())
-        })
+    async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+        let models = self.do_list_models().await?;
+        Ok(models.into_iter().map(|m| m.id).collect())
     }
 
-    fn list_models_with_info(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
-        Box::pin(self.do_list_models())
+    async fn list_models_with_info(&self) -> Result<Vec<ModelInfo>, AgentError> {
+        self.do_list_models().await
     }
 
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async { Ok(()) })
+    async fn reload_auth(&self) -> Result<(), AgentError> {
+        Ok(())
     }
 }
 

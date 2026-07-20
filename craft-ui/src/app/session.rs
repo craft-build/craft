@@ -60,7 +60,7 @@ impl App {
             .and_then(|spec| Model::from_spec(spec).ok());
         let model = resolved.as_ref().unwrap_or(&self.state.model);
         let cost_usd = usage.cost(&model.pricing, self.state.fast);
-        let provider = model.provider.display_name().to_string();
+        let provider = model.provider_display_name().to_string();
         let record = craft_storage::stats::CostRecord {
             session_id: self.state.session.id.as_str().to_string(),
             turn_id: chat.model_id.clone(),

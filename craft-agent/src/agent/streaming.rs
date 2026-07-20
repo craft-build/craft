@@ -173,7 +173,7 @@ pub(crate) async fn stream_with_retry(
 mod tests {
     use super::*;
     use crate::EventSender;
-    use craft_providers::provider::BoxFuture;
+    use async_trait::async_trait;
     use craft_providers::{AgentError, ContentBlock, Message, Role, StopReason};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -187,17 +187,18 @@ mod tests {
         seen_model: Arc<std::sync::Mutex<Option<String>>>,
     }
 
+    #[async_trait]
     impl Provider for MockProvider {
-        fn stream_message<'a>(
-            &'a self,
-            model: &'a Model,
-            _: &'a [Message],
-            _: &'a str,
-            _: &'a Value,
-            _: &'a flume::Sender<ProviderEvent>,
+        async fn stream_message(
+            &self,
+            model: &Model,
+            _: &[Message],
+            _: &str,
+            _: &Value,
+            _: &flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&'a craft_storage::id::SessionRef>,
-        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+            _: Option<&craft_storage::id::SessionRef>,
+        ) -> Result<StreamResponse, AgentError> {
             let still_failing = self.fail_forever
                 || self
                     .fail_then_succeed
@@ -206,29 +207,27 @@ mod tests {
                     })
                     .is_ok();
             *self.seen_model.lock().unwrap() = Some(model.id.clone());
-            Box::pin(async move {
-                if still_failing {
-                    return Err(AgentError::Api {
-                        status: 429,
-                        message: "rate limited".into(),
-                    });
-                }
-                Ok(StreamResponse {
-                    message: Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::Text { text: "ok".into() }],
-                        display_text: None,
-                    },
-                    usage: craft_providers::TokenUsage::default(),
-                    stop_reason: Some(StopReason::EndTurn),
-                })
+            if still_failing {
+                return Err(AgentError::Api {
+                    status: 429,
+                    message: "rate limited".into(),
+                });
+            }
+            Ok(StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text { text: "ok".into() }],
+                    display_text: None,
+                },
+                usage: craft_providers::TokenUsage::default(),
+                stop_reason: Some(StopReason::EndTurn),
             })
         }
-        fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, AgentError>> {
-            Box::pin(async { Ok(vec![]) })
+        async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+            Ok(vec![])
         }
-        fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-            Box::pin(async { Ok(false) })
+        async fn rotate_key(&self) -> Result<bool, AgentError> {
+            Ok(false)
         }
     }
 

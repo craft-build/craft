@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 craft-providers = { workspace = true }
+async-trait = { workspace = true }
 craft-config = { workspace = true }
 craft-interpreter = { workspace = true }
 craft-repomap = { workspace = true }
