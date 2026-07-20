@@ -515,6 +515,7 @@ mod tests {
             (super::super::WRITE_TOOL_NAME, MAIN | GEN | INT),
             (super::super::EDIT_TOOL_NAME, MAIN | GEN | INT),
             (super::super::EDIT_LINES_TOOL_NAME, MAIN | GEN | INT),
+            (super::super::INSERT_LINES_TOOL_NAME, MAIN | GEN | INT),
             (super::super::MULTIEDIT_TOOL_NAME, MAIN | GEN | INT),
             (super::super::APPLY_PATCH_TOOL_NAME, MAIN | GEN | INT),
             (super::super::BATCH_TOOL_NAME, MAIN | RES | GEN),

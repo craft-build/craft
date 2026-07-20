@@ -385,7 +385,14 @@ mod tests {
             .collect();
         assert_eq!(
             builtin_names,
-            vec!["agents-md-init", "debugging", "run", "stuck", "verify"]
+            vec![
+                "agents-md-init",
+                "debugging",
+                "plugin-dev",
+                "run",
+                "stuck",
+                "verify",
+            ]
         );
     }
 
