@@ -166,6 +166,7 @@ pub enum LangId {
     Perl,
     SvelteNext,
     Zsh,
+    Sql,
     Yaml,
 }
 
@@ -211,6 +212,7 @@ impl LangId {
             "perl" => Some(Self::Perl),
             "svelte-next" => Some(Self::SvelteNext),
             "zsh" => Some(Self::Zsh),
+            "sql" => Some(Self::Sql),
             "yaml" | "yml" => Some(Self::Yaml),
             _ => None,
         }
@@ -251,6 +253,7 @@ impl LangId {
             Self::Perl => tree_sitter_perl::LANGUAGE.into(),
             Self::SvelteNext => tree_sitter_svelte_next::LANGUAGE.into(),
             Self::Zsh => tree_sitter_zsh::LANGUAGE.into(),
+            Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
             Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         }
     }
@@ -290,6 +293,7 @@ impl LangId {
             Self::Perl => "perl",
             Self::SvelteNext => "svelte",
             Self::Zsh => "zsh",
+            Self::Sql => "sql",
             Self::Yaml => "yaml",
         }
     }
@@ -316,6 +320,7 @@ impl LangId {
             Self::Perl => ".",
             Self::SvelteNext => ".",
             Self::Zsh => ".",
+            Self::Sql => ".",
             Self::Yaml => ".",
             _ => "/",
         }
@@ -1223,6 +1228,7 @@ fn lang_parts(lang: LangId) -> (&'static LazyLock<Option<Query>>, &'static str) 
         LangId::Perl => (&PERL_QUERY, PERL_SRC),
         LangId::SvelteNext => (&SVELTE_NEXT_QUERY, SVELTE_NEXT_SRC),
         LangId::Zsh => (&ZSH_QUERY, ZSH_SRC),
+        LangId::Sql => (&SQL_QUERY, SQL_SRC),
         LangId::Yaml => (&YAML_QUERY, YAML_SRC),
     }
 }
@@ -1280,6 +1286,7 @@ const ALL_LANGS: &[LangId] = &[
     LangId::Perl,
     LangId::SvelteNext,
     LangId::Zsh,
+    LangId::Sql,
     LangId::Yaml,
 ];
 
@@ -1573,6 +1580,29 @@ const YAML_SRC: &str = r#"
 static YAML_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_query("yaml", &tree_sitter_yaml::LANGUAGE.into(), YAML_SRC));
 
+// SQL DDL: surface the shape of schema objects (tables, views, materialized
+// views, types, functions, triggers, indexes, schemas). DML (SELECT/INSERT/
+// UPDATE/DELETE) and ALTER/DROP are not matched, so they contribute no
+// symbols -- same noise filtering as other extractors that ignore usage nodes.
+// The `.` immediate-sibling anchor pins the name to the token right after the
+// leading keyword (trigger/index/schema names share their node type with later
+// references inside the same statement). tree-sitter-sequel as published has no
+// `create_procedure` node, so procedures are not captured here either.
+const SQL_SRC: &str = r#"
+(create_table (object_reference) @class.name) @class.def
+(create_view (object_reference) @class.name) @class.def
+(create_materialized_view (object_reference) @class.name) @class.def
+(create_type (object_reference) @class.name) @class.def
+(create_function (object_reference) @fn.name) @fn.def
+(create_trigger (keyword_trigger) . (object_reference) @fn.name) @fn.def
+(create_index (keyword_index) . (identifier) @fn.name) @fn.def
+(create_schema (keyword_schema) . (identifier) @mod.name) @mod.def
+(create_table (column_definitions (column_definition name: (identifier) @field.name) @field.def))
+(create_type (column_definitions (column_definition name: (identifier) @field.name) @field.def))
+"#;
+static SQL_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("sql", &tree_sitter_sequel::LANGUAGE.into(), SQL_SRC));
+
 super::impl_tool!(Outline, kind = "outline", tier = super::ToolTier::Core);
 
 impl super::ToolInvocation for Outline {
@@ -1770,6 +1800,64 @@ type Alias = int
             symbols
                 .iter()
                 .any(|s| s.name == "foo" && s.kind == SymbolKind::Function)
+        );
+    }
+
+    #[test]
+    fn sql_outline_extracts_ddl_definitions() {
+        let src = "\
+CREATE TABLE public.users (id INT PRIMARY KEY, name VARCHAR(255));
+CREATE VIEW active_users AS SELECT id FROM users;
+CREATE MATERIALIZED VIEW mv_totals AS SELECT sum(amount) FROM orders;
+CREATE FUNCTION add_one(x INT) RETURNS INT LANGUAGE plpgsql AS $$ BEGIN RETURN x + 1; END; $$;
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE INDEX idx_users_email ON users (email);
+CREATE TYPE mood AS ENUM ('sad', 'ok');
+CREATE SCHEMA analytics;
+";
+        let symbols = extract_symbols(src, LangId::Sql);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"public.users"), "table name: {names:?}");
+        assert!(names.contains(&"active_users"), "view name: {names:?}");
+        assert!(names.contains(&"mv_totals"), "materialized view: {names:?}");
+        assert!(names.contains(&"add_one"), "function name: {names:?}");
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "set_updated_at" && s.kind == SymbolKind::Function),
+            "trigger name should win over table/callee: {names:?}"
+        );
+        assert!(names.contains(&"idx_users_email"), "index name: {names:?}");
+        assert!(names.contains(&"mood"), "type name: {names:?}");
+        assert!(names.contains(&"analytics"), "schema name: {names:?}");
+
+        let tree = build_outline_tree(&symbols);
+        let users = tree
+            .iter()
+            .find(|e| e.name == "public.users")
+            .expect("users table entry");
+        let cols: Vec<&str> = users.members.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            cols.contains(&"id"),
+            "table columns nest as members: {cols:?}"
+        );
+        assert!(cols.contains(&"name"));
+    }
+
+    #[test]
+    fn sql_outline_skips_dml_and_alter() {
+        let src = "\
+SELECT * FROM users;
+INSERT INTO users (id) VALUES (1);
+UPDATE users SET name = 'x' WHERE id = 1;
+DELETE FROM users WHERE id = 1;
+ALTER TABLE users ADD COLUMN age INT;
+DROP TABLE users;
+";
+        let symbols = extract_symbols(src, LangId::Sql);
+        assert!(
+            symbols.is_empty(),
+            "DML/ALTER/DROP must yield no symbols, got {symbols:?}"
         );
     }
 

@@ -56,6 +56,7 @@ pub enum LangId {
     Css,
     Fish,
     Perl,
+    Sql,
 }
 
 impl LangId {
@@ -86,6 +87,7 @@ impl LangId {
             "css" => Some(Self::Css),
             "fish" => Some(Self::Fish),
             "perl" => Some(Self::Perl),
+            "sql" => Some(Self::Sql),
             _ => None,
         }
     }
@@ -117,6 +119,7 @@ impl LangId {
             Self::Css => tree_sitter_css::LANGUAGE.into(),
             Self::Fish => tree_sitter_fish::language(),
             Self::Perl => tree_sitter_perl::LANGUAGE.into(),
+            Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
         }
     }
 }
@@ -326,6 +329,7 @@ fn lang_tags_query(lang: LangId) -> &'static LazyLock<Option<Query>> {
         LangId::Css => &CSS_TAGS_QUERY,
         LangId::Fish => &FISH_TAGS_QUERY,
         LangId::Perl => &PERL_TAGS_QUERY,
+        LangId::Sql => &SQL_TAGS_QUERY,
     }
 }
 
@@ -588,6 +592,25 @@ const PERL_TAGS_SRC: &str = r#"
 static PERL_TAGS_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_tags_query("perl", &tree_sitter_perl::LANGUAGE.into(), PERL_TAGS_SRC));
 
+// SQL DDL: surface the names of schema objects an agent would navigate by.
+// DML (select/insert/update/delete) and ALTER/DROP are intentionally not
+// matched, so they contribute no tags -- same noise filtering as other
+// extractors that ignore usage nodes.
+// Note: tree-sitter-sequel as published has no `create_procedure` node, so
+// procedures are not captured here either.
+const SQL_TAGS_SRC: &str = r#"
+(create_table (object_reference) @name.definition.class) @definition.class
+(create_view (object_reference) @name.definition.class) @definition.class
+(create_materialized_view (object_reference) @name.definition.class) @definition.class
+(create_type (object_reference) @name.definition.class) @definition.class
+(create_function (object_reference) @name.definition.function) @definition.function
+(create_trigger (object_reference) @name.definition.function) @definition.function
+(create_index (object_reference) @name.definition.function) @definition.function
+(create_schema (identifier) @name.definition.module) @definition.module
+"#;
+static SQL_TAGS_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_tags_query("sql", &tree_sitter_sequel::LANGUAGE.into(), SQL_TAGS_SRC));
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,6 +661,32 @@ fn main() {
         assert!(def_names.contains(&"foo"));
         assert!(def_names.contains(&"Bar"));
         assert!(def_names.contains(&"baz"));
+    }
+
+    #[test]
+    fn sql_tags_extract_ddl_definitions() {
+        let src = r#"
+CREATE TABLE public.users (id INT PRIMARY KEY);
+CREATE VIEW active_users AS SELECT id FROM users;
+CREATE FUNCTION add_one(x INT) RETURNS INT LANGUAGE plpgsql AS $$ BEGIN RETURN x + 1; END; $$;
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON users EXECUTE FUNCTION update_timestamp();
+CREATE INDEX idx_users_email ON users (email);
+CREATE TYPE mood AS ENUM ('sad', 'ok');
+CREATE SCHEMA analytics;
+SELECT * FROM users;
+INSERT INTO users VALUES (1);
+"#;
+        let tags = extract_tags(src, LangId::Sql, "schema.sql");
+        let defs: Vec<&str> = tags
+            .iter()
+            .filter(|t| t.kind == TagKind::Def)
+            .map(|t| t.ident.as_str())
+            .collect();
+        assert!(defs.contains(&"users"));
+        assert!(defs.contains(&"active_users"));
+        assert!(defs.contains(&"add_one"));
+        assert!(defs.contains(&"mood"));
+        assert!(defs.contains(&"analytics"));
     }
 
     #[test]

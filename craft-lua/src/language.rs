@@ -35,6 +35,7 @@ pub enum Language {
     Perl,
     SvelteNext,
     Zsh,
+    Sql,
     Yaml,
 }
 
@@ -74,6 +75,7 @@ impl Language {
             "perl" => Some(Self::Perl),
             "svelte-next" => Some(Self::SvelteNext),
             "zsh" => Some(Self::Zsh),
+            "sql" => Some(Self::Sql),
             "yaml" => Some(Self::Yaml),
             _ => None,
         }
@@ -113,6 +115,7 @@ impl Language {
             "pl" | "pm" => Some(Self::Perl),
             "svelte" => Some(Self::SvelteNext),
             "zsh" => Some(Self::Zsh),
+            "sql" => Some(Self::Sql),
             "yaml" | "yml" => Some(Self::Yaml),
             _ => None,
         }
@@ -153,6 +156,7 @@ impl Language {
             Self::Perl => tree_sitter_perl::LANGUAGE.into(),
             Self::SvelteNext => tree_sitter_svelte_next::LANGUAGE.into(),
             Self::Zsh => tree_sitter_zsh::LANGUAGE.into(),
+            Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
             Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
         }
     }
