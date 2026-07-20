@@ -37,6 +37,7 @@ pub enum Language {
     Zsh,
     Sql,
     Yaml,
+    Toml,
 }
 
 impl Language {
@@ -77,6 +78,7 @@ impl Language {
             "zsh" => Some(Self::Zsh),
             "sql" => Some(Self::Sql),
             "yaml" => Some(Self::Yaml),
+            "toml" => Some(Self::Toml),
             _ => None,
         }
     }
@@ -117,6 +119,7 @@ impl Language {
             "zsh" => Some(Self::Zsh),
             "sql" => Some(Self::Sql),
             "yaml" | "yml" => Some(Self::Yaml),
+            "toml" => Some(Self::Toml),
             _ => None,
         }
     }
@@ -158,6 +161,7 @@ impl Language {
             Self::Zsh => tree_sitter_zsh::LANGUAGE.into(),
             Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
             Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+            Self::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
         }
     }
 }

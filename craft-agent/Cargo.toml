@@ -79,6 +79,7 @@ tree-sitter-perl = { workspace = true }
 tree-sitter-svelte-next = { workspace = true }
 tree-sitter-zsh = { workspace = true }
 tree-sitter-yaml = { workspace = true }
+tree-sitter-toml-ng = { workspace = true }
 fastembed = { workspace = true }
 magika = { workspace = true }
 ast-grep-core = { workspace = true }

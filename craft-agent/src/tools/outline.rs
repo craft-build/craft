@@ -168,6 +168,7 @@ pub enum LangId {
     Zsh,
     Sql,
     Yaml,
+    Toml,
 }
 
 impl LangId {
@@ -214,6 +215,7 @@ impl LangId {
             "zsh" => Some(Self::Zsh),
             "sql" => Some(Self::Sql),
             "yaml" | "yml" => Some(Self::Yaml),
+            "toml" => Some(Self::Toml),
             _ => None,
         }
     }
@@ -255,6 +257,7 @@ impl LangId {
             Self::Zsh => tree_sitter_zsh::LANGUAGE.into(),
             Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
             Self::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+            Self::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
         }
     }
 
@@ -295,6 +298,7 @@ impl LangId {
             Self::Zsh => "zsh",
             Self::Sql => "sql",
             Self::Yaml => "yaml",
+            Self::Toml => "toml",
         }
     }
 
@@ -322,6 +326,7 @@ impl LangId {
             Self::Zsh => ".",
             Self::Sql => ".",
             Self::Yaml => ".",
+            Self::Toml => ".",
             _ => "/",
         }
     }
@@ -415,6 +420,9 @@ struct DirEntry {
 pub fn extract_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
     if matches!(lang, LangId::Yaml) {
         return extract_yaml_symbols(content, lang);
+    }
+    if matches!(lang, LangId::Toml) {
+        return extract_toml_symbols(content, lang);
     }
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&lang.ts_language()).is_err() {
@@ -635,6 +643,166 @@ fn yaml_key_text(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
         None
     } else {
         Some(unquoted.to_string())
+    }
+}
+
+const TOML_FIELD_TRUNCATE_THRESHOLD: usize = 8;
+const TOML_VALUE_TRUNCATE: usize = 60;
+
+fn extract_toml_symbols(content: &str, lang: LangId) -> Vec<Symbol> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&lang.ts_language()).is_err() {
+        error!(
+            lang = lang.name(),
+            "outline parser rejected language abi, skipping"
+        );
+        return vec![];
+    }
+    let Some(tree) = parser.parse(content, None) else {
+        error!(
+            lang = lang.name(),
+            "outline parser returned no tree, skipping"
+        );
+        return vec![];
+    };
+
+    let source = content.as_bytes();
+    let mut symbols = Vec::new();
+    let root = tree.root_node();
+
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        match child.kind() {
+            "pair" => {
+                if let Some(sym) = toml_pair_symbol(&child, source, None, true) {
+                    symbols.push(sym);
+                }
+            }
+            "table" => toml_push_table(&child, source, false, &mut symbols),
+            "table_array_element" => toml_push_table(&child, source, true, &mut symbols),
+            _ => {}
+        }
+    }
+
+    symbols.sort_by_key(|s| (s.range.start_row, s.range.start_col));
+    symbols
+}
+
+fn toml_key_node<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "bare_key" | "dotted_key" | "quoted_key" => return Some(child),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn toml_value_node<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+    let mut cursor = node.walk();
+    let mut seen_key = false;
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "bare_key" | "dotted_key" | "quoted_key" => seen_key = true,
+            "string" | "integer" | "float" | "boolean" | "offset_date_time" | "local_date_time"
+            | "local_date" | "local_time" | "array" | "inline_table"
+                if seen_key =>
+            {
+                return Some(child);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn toml_pair_symbol(
+    node: &tree_sitter::Node,
+    source: &[u8],
+    parent: Option<&str>,
+    include_value: bool,
+) -> Option<Symbol> {
+    let key_node = toml_key_node(node)?;
+    let name = key_node.utf8_text(source).ok()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let signature = if include_value {
+        toml_value_node(node)
+            .and_then(|v| v.utf8_text(source).ok())
+            .map(|raw| {
+                let collapsed: String = raw.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+                let trimmed = collapsed.trim();
+                let sig = format!("{name} = {trimmed}");
+                if sig.chars().count() > TOML_VALUE_TRUNCATE {
+                    let boundary = sig.floor_char_boundary(TOML_VALUE_TRUNCATE);
+                    format!("{}…", &sig[..boundary])
+                } else {
+                    sig
+                }
+            })
+    } else {
+        None
+    };
+    let start = node.start_position();
+    let end = node.end_position();
+    let scope_chain = parent.map(|p| vec![p.to_string()]).unwrap_or_default();
+    Some(Symbol {
+        name,
+        kind: SymbolKind::Constant,
+        range: Range {
+            start_row: start.row,
+            start_col: start.column,
+            end_row: end.row,
+            end_col: end.column,
+        },
+        signature,
+        scope_chain,
+        exported: false,
+        import_segments: Vec::new(),
+        is_child: false,
+    })
+}
+
+fn toml_push_table(node: &tree_sitter::Node, source: &[u8], is_array: bool, out: &mut Vec<Symbol>) {
+    let header_path = toml_key_node(node)
+        .and_then(|k| k.utf8_text(source).ok())
+        .map(|t| t.trim().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let label = if is_array {
+        format!("[[{header_path}]]")
+    } else {
+        format!("[{header_path}]")
+    };
+    let start = node.start_position();
+    let end = node.end_position();
+    out.push(Symbol {
+        name: label.clone(),
+        kind: SymbolKind::Constant,
+        range: Range {
+            start_row: start.row,
+            start_col: start.column,
+            end_row: end.row,
+            end_col: end.column,
+        },
+        signature: None,
+        scope_chain: Vec::new(),
+        exported: false,
+        import_segments: Vec::new(),
+        is_child: false,
+    });
+
+    let mut cursor = node.walk();
+    let pair_nodes: Vec<tree_sitter::Node> = node
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "pair")
+        .collect();
+    for (i, pair) in pair_nodes.iter().enumerate() {
+        let include_value = i < TOML_FIELD_TRUNCATE_THRESHOLD;
+        if let Some(sym) = toml_pair_symbol(pair, source, Some(&label), include_value) {
+            out.push(sym);
+        }
     }
 }
 
@@ -1230,6 +1398,7 @@ fn lang_parts(lang: LangId) -> (&'static LazyLock<Option<Query>>, &'static str) 
         LangId::Zsh => (&ZSH_QUERY, ZSH_SRC),
         LangId::Sql => (&SQL_QUERY, SQL_SRC),
         LangId::Yaml => (&YAML_QUERY, YAML_SRC),
+        LangId::Toml => (&TOML_QUERY, TOML_SRC),
     }
 }
 
@@ -1579,6 +1748,15 @@ const YAML_SRC: &str = r#"
 "#;
 static YAML_QUERY: LazyLock<Option<Query>> =
     LazyLock::new(|| build_query("yaml", &tree_sitter_yaml::LANGUAGE.into(), YAML_SRC));
+
+// TOML has no functions, classes, or imports, just nested tables of key/value
+// pairs, so `extract_toml_symbols` walks the tree directly instead of running
+// this query. The query is kept only so `all_queries_compile_against_grammar`
+// stays uniform across every language; the grammar declares no named fields on
+// `pair`, so the query matches the node itself rather than a keyed child.
+const TOML_SRC: &str = "(pair) @const.def\n";
+static TOML_QUERY: LazyLock<Option<Query>> =
+    LazyLock::new(|| build_query("toml", &tree_sitter_toml_ng::LANGUAGE.into(), TOML_SRC));
 
 // SQL DDL: surface the shape of schema objects (tables, views, materialized
 // views, types, functions, triggers, indexes, schemas). DML (SELECT/INSERT/
@@ -1967,5 +2145,124 @@ items:
         assert!(text.contains("compose.yaml"));
         assert!(text.contains("name"));
         assert!(text.contains("services"));
+    }
+
+    #[test]
+    fn toml_outline_extracts_top_level_pairs() {
+        let src = "title = \"TOML Example\"\nversion = 1\n";
+        let symbols = extract_symbols(src, LangId::Toml);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"title"));
+        assert!(names.contains(&"version"));
+        assert!(symbols.iter().all(|s| s.kind == SymbolKind::Constant));
+        let title = symbols.iter().find(|s| s.name == "title").expect("title");
+        assert!(
+            title
+                .signature
+                .as_deref()
+                .unwrap_or("")
+                .contains("TOML Example"),
+            "top-level pair should keep value in signature, got {:?}",
+            title.signature
+        );
+    }
+
+    #[test]
+    fn toml_outline_renders_table_header_and_pairs() {
+        let src = "[package]\nname = \"craft\"\nversion = \"0.9.5\"\n";
+        let symbols = extract_symbols(src, LangId::Toml);
+        let tree = build_outline_tree(&symbols);
+        let text = render_file_outline("Cargo.toml", &tree, LangId::Toml);
+        assert!(text.contains("Cargo.toml"));
+        assert!(text.contains("[package]"));
+        assert!(text.contains("name"));
+        assert!(text.contains("version"));
+        let package = tree
+            .iter()
+            .find(|e| e.name == "[package]")
+            .expect("[package] root");
+        let member_names: Vec<&str> = package.members.iter().map(|m| m.name.as_str()).collect();
+        assert!(member_names.contains(&"name"));
+        assert!(member_names.contains(&"version"));
+    }
+
+    #[test]
+    fn toml_outline_handles_table_array_elements() {
+        let src = "[[bin]]\nname = \"craft\"\npath = \"src/main.rs\"\n";
+        let symbols = extract_symbols(src, LangId::Toml);
+        let tree = build_outline_tree(&symbols);
+        let bin = tree
+            .iter()
+            .find(|e| e.name == "[[bin]]")
+            .expect("[[bin]] root");
+        let member_names: Vec<&str> = bin.members.iter().map(|m| m.name.as_str()).collect();
+        assert!(member_names.contains(&"name"));
+        assert!(member_names.contains(&"path"));
+    }
+
+    #[test]
+    fn toml_outline_keeps_dotted_and_quoted_keys() {
+        let src = "a.b.c = 1\n[\"quoted.section\"]\n\"weird.key\" = 1\n";
+        let symbols = extract_symbols(src, LangId::Toml);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"a.b.c"));
+        assert!(names.contains(&"[\"quoted.section\"]"));
+        assert!(names.contains(&"\"weird.key\""));
+    }
+
+    #[test]
+    fn toml_outline_truncates_pairs_past_threshold() {
+        let mut src = "[data]\n".to_string();
+        for i in 1..=9 {
+            src.push_str(&format!("k{i} = {i}\n"));
+        }
+        let symbols = extract_symbols(&src, LangId::Toml);
+        let data = symbols
+            .iter()
+            .find(|s| s.name == "[data]")
+            .expect("[data] header");
+        let pairs: Vec<&Symbol> = symbols
+            .iter()
+            .filter(|s| s.scope_chain == vec!["[data]".to_string()])
+            .collect();
+        assert_eq!(pairs.len(), 9);
+        let with_value = pairs.iter().filter(|s| s.signature.is_some()).count();
+        assert_eq!(
+            with_value, TOML_FIELD_TRUNCATE_THRESHOLD,
+            "first {} pairs should keep their value, got {with_value}",
+            TOML_FIELD_TRUNCATE_THRESHOLD
+        );
+        let k9 = pairs.iter().find(|s| s.name == "k9").expect("k9 pair");
+        assert!(
+            k9.signature.is_none(),
+            "9th pair should drop value past threshold, got {:?}",
+            k9.signature
+        );
+        let _ = data;
+    }
+
+    #[test]
+    fn toml_outline_ignores_comments() {
+        let src = "# top comment\n[server]\n# inline comment\nhost = \"localhost\" # trailing\n";
+        let symbols = extract_symbols(src, LangId::Toml);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"[server]"));
+        assert!(names.contains(&"host"));
+        assert!(
+            !symbols
+                .iter()
+                .any(|s| s.name.contains("comment") || s.name.contains("trailing")),
+            "comments must not become symbols, got {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn toml_outline_empty_table_keeps_header() {
+        let src = "top = \"value\"\n[empty]\n[next]\nx = 1\n";
+        let symbols = extract_symbols(src, LangId::Toml);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"top"));
+        assert!(names.contains(&"[empty]"));
+        assert!(names.contains(&"[next]"));
     }
 }
