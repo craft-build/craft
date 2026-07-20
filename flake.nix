@@ -61,7 +61,7 @@
                                  '#![doc = "Monty Python bridge."]'
               done
             '';
-            buildInputs = with pkgs; [ openssl ];
+            buildInputs = with pkgs; [ openssl stdenv.cc.cc.lib ];
             doCheck = false;
           };
         in
@@ -97,6 +97,10 @@
 
             SSL_CERT_FILE = certs;
             NIX_SSL_CERT_FILE = certs;
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.openssl
+              pkgs.stdenv.cc.cc.lib
+            ];
           };
         }
       );
