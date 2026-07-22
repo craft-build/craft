@@ -11,7 +11,7 @@ import type {
   ToolCallUpdateEvent,
 } from "../types";
 import type { Tokens } from "../theme";
-import { getTheme } from "../lib/acp";
+import { getTheme, type ListCommandsResponse } from "../lib/acp";
 
 export interface AppState {
   tokens: Tokens | null;
@@ -54,6 +54,8 @@ export type Action =
     }
   | { type: "QUESTION_RESOLVED"; tabId: string; requestId: unknown; answers: string[][] }
   | { type: "COMPOSER_TEXT"; tabId: string; text: string }
+  | { type: "COMMANDS_LOADED"; tabId: string; commands: ListCommandsResponse }
+  | { type: "CLEAR_ITEMS"; tabId: string }
   | { type: "PROMPT_SENT"; tabId: string; text: string }
   | { type: "PROMPT_DONE"; tabId: string }
   | { type: "CONNECTION_CLOSED"; tabId: string }
@@ -260,6 +262,10 @@ function reducer(state: AppState, action: Action): AppState {
       }));
     case "COMPOSER_TEXT":
       return updateTab(state, action.tabId, (t) => ({ ...t, composerText: action.text }));
+    case "COMMANDS_LOADED":
+      return updateTab(state, action.tabId, (t) => ({ ...t, commands: action.commands }));
+    case "CLEAR_ITEMS":
+      return updateTab(state, action.tabId, (t) => ({ ...t, items: [] }));
     case "PROMPT_SENT":
       return updateTab(state, action.tabId, (t) => ({
         ...t,

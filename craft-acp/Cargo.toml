@@ -9,6 +9,7 @@ craft-config = { workspace = true }
 craft-flow = { workspace = true }
 craft-lua = { workspace = true }
 craft-providers = { workspace = true }
+craft-repomap = { workspace = true }
 craft-storage = { workspace = true }
 agent-client-protocol-schema = { workspace = true }
 flume = { workspace = true }

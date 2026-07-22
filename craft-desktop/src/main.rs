@@ -29,6 +29,8 @@ fn main() {
             commands::get_theme,
             commands::list_themes,
             commands::set_theme,
+            commands::list_commands,
+            commands::craft_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running craft-desktop");

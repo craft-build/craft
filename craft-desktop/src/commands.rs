@@ -190,6 +190,30 @@ pub async fn cancel_prompt(
     Ok(())
 }
 
+/// Fetches the server-side command palette for this tab's session cwd.
+/// Returns `{ commands: [...], custom: [...] }` — the frontend caches this
+/// per session and uses it to render the `/` palette. The server already
+/// runs in the session's cwd so no cwd parameter is sent.
+#[tauri::command]
+pub async fn list_commands(state: State<'_, AppState>, tab_id: String) -> Result<Value, String> {
+    let client = get_client(&state, &tab_id).await?;
+    client.list_commands().await.map_err(to_err)
+}
+
+/// Dispatches a `_craft/*` extension request. `method` MUST start with
+/// `_craft/`; the client enforces this before sending. Used by the desktop
+/// command palette for `/compact`, `/cd`, `/dream`, `/wiki`, etc.
+#[tauri::command]
+pub async fn craft_command(
+    state: State<'_, AppState>,
+    tab_id: String,
+    method: String,
+    params: Value,
+) -> Result<Value, String> {
+    let client = get_client(&state, &tab_id).await?;
+    client.craft_command(&method, params).await.map_err(to_err)
+}
+
 /// Ends a tab: kills its dedicated `craft acp` process. Session history is
 /// persisted continuously during the run (every turn), so this is safe even
 /// mid-session — nothing to explicitly flush.

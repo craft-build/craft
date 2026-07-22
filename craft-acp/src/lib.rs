@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod flow;
 pub mod mcp;
 pub mod methods;

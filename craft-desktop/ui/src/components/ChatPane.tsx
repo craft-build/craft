@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { modeLabel, terminalBg, type Tokens } from "../theme";
 import { useAppDispatch } from "../state/store";
-import { cancelPrompt, resolvePermission, resolveQuestion, sendPrompt } from "../lib/acp";
+import { cancelPrompt, craftCommandRoute, listCommands, resolvePermission, resolveQuestion, sendPrompt, setConfigOption, setMode } from "../lib/acp";
 import type { ChatItem, ContentBlock, QuestionSpec, TabState, ToolCallContent } from "../types";
 import { Markdown, stripAnchors, langFromPath } from "./Markdown";
 import { DiffView } from "./DiffView";
+import { CommandPalette, type PaletteItem } from "./CommandPalette";
 
 const TOOL_ICON: Record<string, string> = {
   read: "◎",
@@ -51,11 +52,19 @@ function ContextUsage({ used, size, t }: { used: number; size: number; t: Tokens
 export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
   const dispatch = useAppDispatch();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const paletteKeyRef = useRef<((e: React.KeyboardEvent<HTMLTextAreaElement>) => void) | null>(null);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [tab.items.length]);
+
+  useEffect(() => {
+    if (!tab.sessionId || tab.commands) return;
+    listCommands(tab.tabId)
+      .then((commands) => dispatch({ type: "COMMANDS_LOADED", tabId: tab.tabId, commands }))
+      .catch(() => {});
+  }, [tab.tabId, tab.sessionId, tab.commands, dispatch]);
 
   const send = async () => {
     const text = tab.composerText.trim();
@@ -73,8 +82,55 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
     });
   };
 
+  const routeCommand = async (item: PaletteItem, args: string) => {
+    const sessionId = tab.sessionId;
+    if (!sessionId) return;
+    dispatch({ type: "COMPOSER_TEXT", tabId: tab.tabId, text: "" });
+
+    switch (item.strategy) {
+      case "client":
+        if (item.name === "/clear") {
+          dispatch({ type: "CLEAR_ITEMS", tabId: tab.tabId });
+        }
+        return;
+      case "acp_standard":
+        if (item.name === "/mode") {
+          const mode = args.trim() || "build";
+          await setMode(tab.tabId, sessionId, mode).catch(() => {});
+        } else if (item.name === "/yolo") {
+          const next = tab.configOptions.find((c) => c.id === "yolo")?.currentValue === "true" ? "false" : "true";
+          await setConfigOption(tab.tabId, sessionId, "yolo", next).catch(() => {});
+        }
+        return;
+      case "craft_request":
+        await craftCommandRoute(tab.tabId, sessionId, item, args).catch(() => {});
+        return;
+      case "passthrough":
+      default:
+        await sendPrompt(tab.tabId, sessionId, `${item.name} ${args}`.trim()).catch(() => {});
+        return;
+    }
+  };
+
+  const onPaletteComplete = (text: string) => {
+    dispatch({ type: "COMPOSER_TEXT", tabId: tab.tabId, text });
+  };
+
+  const paletteOpen = tab.composerText.startsWith("/") && !tab.pending;
+
   return (
     <>
+      {paletteOpen && (
+        <CommandPalette
+          composerText={tab.composerText}
+          commands={tab.commands}
+          t={t}
+          onRoute={routeCommand}
+          onComplete={onPaletteComplete}
+          onClose={() => dispatch({ type: "COMPOSER_TEXT", tabId: tab.tabId, text: "" })}
+          keyHandlerRef={paletteKeyRef}
+        />
+      )}
       {tab.connectionError && (
         <div
           style={{
@@ -121,6 +177,13 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
             value={tab.composerText}
             onChange={(e) => dispatch({ type: "COMPOSER_TEXT", tabId: tab.tabId, text: e.target.value })}
             onKeyDown={(e) => {
+              if (paletteOpen) {
+                const handler = paletteKeyRef.current;
+                if (handler) {
+                  handler(e);
+                  if (e.defaultPrevented) return;
+                }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send();

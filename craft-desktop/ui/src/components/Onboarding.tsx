@@ -55,6 +55,7 @@ export function Onboarding() {
         connectionError: null,
         contextUsed: 0,
         contextSize: 0,
+        commands: null,
       };
       dispatch({ type: "START_SESSION", tab });
     } catch (e) {

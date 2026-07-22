@@ -2,6 +2,8 @@
 // consumes. Field names are camelCase to match the JSON craft-acp emits
 // (see agent-client-protocol-schema's `#[serde(rename_all = "camelCase")]`).
 
+import type { ListCommandsResponse } from "./lib/acp";
+
 export type ToolCallStatus = "pending" | "in_progress" | "completed" | "failed";
 export type ToolKind =
   | "read"
@@ -229,4 +231,7 @@ export interface TabState {
   connectionError: string | null;
   contextUsed: number;
   contextSize: number;
+  /** Cached `_craft/listCommands` response for the `/` palette. Null until
+   * fetched (right after session start). */
+  commands: ListCommandsResponse | null;
 }

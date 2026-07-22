@@ -34,7 +34,7 @@ use craft_providers::model::Model;
 use craft_storage::id::{CraftId, SessionRef};
 use flume::{Receiver, Sender};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::oneshot;
@@ -46,7 +46,8 @@ const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 const DELEGATION_TIMEOUT: Duration = Duration::from_secs(60);
 const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const TODO_WRITE_TOOL: &str = "todo_write";
-const TODO_UPDATE_METHOD: &str = "session/todo_update";
+const TODO_UPDATE_METHOD_LEGACY: &str = "session/todo_update";
+const TODO_UPDATE_METHOD: &str = "_craft/session/todo_update";
 
 type PendingPrompt = Arc<Mutex<Option<RequestId>>>;
 type ModelSpecs = Arc<Mutex<Vec<String>>>;
@@ -349,13 +350,13 @@ fn shell_arg() -> &'static str {
     }
 }
 
-struct SessionState {
-    handle: InteractiveHandle,
-    current_mode: AgentMode,
-    current_model: String,
-    pending_prompt: PendingPrompt,
-    title_sent: bool,
-    cwd: PathBuf,
+pub(crate) struct SessionState {
+    pub(crate) handle: InteractiveHandle,
+    pub(crate) current_mode: AgentMode,
+    pub(crate) current_model: String,
+    pub(crate) pending_prompt: PendingPrompt,
+    pub(crate) title_sent: bool,
+    pub(crate) cwd: PathBuf,
 }
 
 struct SessionInfo {
@@ -366,8 +367,8 @@ struct SessionInfo {
 
 type SharedSession = Arc<Mutex<Option<SessionInfo>>>;
 
-struct Server {
-    out_tx: Sender<Value>,
+pub(crate) struct Server {
+    pub(crate) out_tx: Sender<Value>,
     model_specs: ModelSpecs,
     shared_session: SharedSession,
     pending_requests: PendingRequests,
@@ -380,6 +381,29 @@ struct Server {
 impl Server {
     fn respond(&self, id: RequestId, result: Result<AgentResponse, AcpError>) {
         send(&self.out_tx, Response::new(id, result));
+    }
+
+    /// Respond with a raw JSON `Value` result. Used by `_craft/*` extension
+    /// methods whose payloads aren't part of the typed `AgentResponse` enum.
+    fn respond_value(&self, id: RequestId, result: Result<Value, AcpError>) {
+        match result {
+            Ok(value) => send(
+                &self.out_tx,
+                json!({ "jsonrpc": "2.0", "id": id, "result": value }),
+            ),
+            Err(e) => send(&self.out_tx, Response::<AgentResponse>::new(id, Err(e))),
+        }
+    }
+
+    /// Active session's cwd, for command discovery / wiki / repomap.
+    pub(crate) fn session_cwd(&self) -> Option<&Path> {
+        self.session.as_ref().map(|s| s.cwd.as_path())
+    }
+
+    /// Borrow the active session mutably for `_craft/*` handlers that need to
+    /// drive the agent (compact, command/run, meta/prompt).
+    pub(crate) fn session_mut(&mut self) -> Option<&mut SessionState> {
+        self.session.as_mut()
     }
 }
 
@@ -660,6 +684,15 @@ async fn handle_request(
         },
         "session/set_mode" => handle_set_mode(srv, raw),
         "session/set_config_option" => handle_set_config(srv, raw),
+        method if method.starts_with("_craft/") => {
+            match crate::commands::dispatch(srv, method, raw).await {
+                Ok(value) => {
+                    srv.respond_value(id, Ok(value));
+                    return;
+                }
+                Err(e) => Err(e),
+            }
+        }
         _ => Err(AcpError::method_not_found()),
     };
     srv.respond(id, result);
@@ -1441,21 +1474,28 @@ fn todo_update_from_event(event: &AgentEvent) -> Option<&serde_json::Value> {
 }
 
 fn emit_todo_update(out_tx: &Sender<Value>, sid: &SessionId, todos: &serde_json::Value) {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": TODO_UPDATE_METHOD,
-        "params": { "sessionId": sid, "todos": todos }
-    });
-    if out_tx.send(msg).is_err() {
-        warn!("ACP: failed to send todo_update, channel closed");
+    // During the `_craft/` migration we emit both the legacy non-prefixed name
+    // (kept so older clients keep rendering todos) and the new spec-blessed
+    // `_craft/` prefixed name. The legacy emitter is dropped in the release
+    // after desktop ships the new reader.
+    let params = serde_json::json!({ "sessionId": sid, "todos": todos });
+    for method in [TODO_UPDATE_METHOD, TODO_UPDATE_METHOD_LEGACY] {
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        if out_tx.send(msg).is_err() {
+            warn!("ACP: failed to send todo_update, channel closed");
+        }
     }
 }
 
-fn no_session() -> AcpError {
+pub(crate) fn no_session() -> AcpError {
     AcpError::invalid_request().data(json_str("no active session"))
 }
 
-fn parse_params<T: serde::de::DeserializeOwned>(raw: &Value) -> Result<T, AcpError> {
+pub(crate) fn parse_params<T: serde::de::DeserializeOwned>(raw: &Value) -> Result<T, AcpError> {
     serde_json::from_value(raw.get("params").cloned().unwrap_or(Value::Null))
         .map_err(|e| AcpError::invalid_params().data(json_str(&e)))
 }

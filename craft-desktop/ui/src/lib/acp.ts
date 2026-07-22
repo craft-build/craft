@@ -68,6 +68,78 @@ export function cancelPrompt(tabId: string, sessionId: string): Promise<void> {
   return invoke("cancel_prompt", { tabId, sessionId });
 }
 
+export function listCommands(tabId: string): Promise<ListCommandsResponse> {
+  return invoke("list_commands", { tabId });
+}
+
+export function craftCommand(
+  tabId: string,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<unknown> {
+  return invoke("craft_command", { tabId, method, params });
+}
+
+/** Maps a `/name` builtin to its `_craft/*` method and dispatches. The method
+ * (and, for `_craft/meta/prompt`, the `kind`) come from the server's
+ * `_craft/listCommands` response, so this function does not keep its own
+ * copy of the routing table. Custom commands (`/project:foo`) route through
+ * `_craft/command/run`. */
+export async function craftCommandRoute(
+  tabId: string,
+  sessionId: string,
+  item: { name: string; customName?: string; method?: string; metaKind?: string },
+  args: string,
+): Promise<unknown> {
+  if (item.customName) {
+    return craftCommand(tabId, "_craft/command/run", {
+      sessionId,
+      name: item.customName,
+      args,
+    });
+  }
+  const method = item.method;
+  if (!method) {
+    throw new Error(`no _craft method for ${item.name}`);
+  }
+  const params: Record<string, unknown> = { sessionId };
+  if (method === "_craft/meta/prompt") {
+    if (!item.metaKind) {
+      throw new Error(`meta command ${item.name} has no kind`);
+    }
+    params.kind = item.metaKind;
+  } else if (item.name === "/cd") {
+    params.cwd = args.trim();
+  }
+  return craftCommand(tabId, method, params);
+}
+
+export interface CommandDescriptor {
+  name: string;
+  description: string;
+  maxArgs: number;
+  strategy: "acp_standard" | "craft_request" | "passthrough" | "client";
+  category: string;
+  /** `_craft/*` method for `craft_request` commands; absent otherwise.
+   * Server-provided so the client doesn't keep its own routing table. */
+  method?: string;
+  /** `kind` for `_craft/meta/prompt` commands; absent otherwise. */
+  metaKind?: string;
+}
+
+export interface CustomCommandDescriptor {
+  name: string;
+  displayName: string;
+  description: string;
+  acceptsArgs: boolean;
+  scope: "project" | "user";
+}
+
+export interface ListCommandsResponse {
+  commands: CommandDescriptor[];
+  custom: CustomCommandDescriptor[];
+}
+
 export function closeTab(tabId: string): Promise<void> {
   return invoke("close_tab", { tabId });
 }

@@ -237,6 +237,27 @@ impl AcpClient {
         self.notify("session/cancel", json!({ "sessionId": session_id }));
     }
 
+    /// Enumerate the server's command palette (builtins + custom commands
+    /// discovered from the session cwd). Wrapped in a struct so the frontend
+    /// can route each entry by `strategy` without re-implementing discovery.
+    pub async fn list_commands(&self) -> Result<Value, ClientError> {
+        self.call("_craft/listCommands", json!({})).await
+    }
+
+    /// Dispatch a `_craft/*` request. Used by the desktop command palette for
+    /// commands whose `strategy` is `craft_request` (compact, btw, cd,
+    /// command/run, meta/prompt, wiki/*, map/*, etc.). The method string is
+    /// server-validated to start with `_craft/` so this can't be used to send
+    /// arbitrary JSON-RPC.
+    pub async fn craft_command(&self, method: &str, params: Value) -> Result<Value, ClientError> {
+        if !method.starts_with("_craft/") {
+            return Err(ClientError::Agent(json!({
+                "message": "craft_command requires a _craft/ method"
+            })));
+        }
+        self.call(method, params).await
+    }
+
     /// Replies to an incoming `session/request_permission` request. `option_id`
     /// is `None` to send a `cancelled` outcome (e.g. the user closed the prompt).
     pub fn respond_permission(&self, request_id: Value, option_id: Option<&str>) {
@@ -307,7 +328,7 @@ fn handle_incoming(app: &AppHandle, tab_id: &str, value: Value, pending: &Pendin
                 json!({ "tabId": tab_id, "requestId": request_id, "params": params }),
             );
         }
-        ("session/todo_update", None) => {
+        ("session/todo_update", None) | ("_craft/session/todo_update", None) => {
             let todos = params.get("todos").cloned().unwrap_or(Value::Array(vec![]));
             let _ = app.emit(
                 TODO_UPDATE_EVENT,

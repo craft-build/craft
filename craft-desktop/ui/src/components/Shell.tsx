@@ -167,6 +167,7 @@ function Sidebar({
         connectionError: null,
         contextUsed: 0,
         contextSize: 0,
+        commands: null,
       },
     });
     const resp = await loadSession(tabId, row.sessionId, active.cwd).catch(() => null);

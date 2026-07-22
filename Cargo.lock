@@ -1618,6 +1618,7 @@ dependencies = [
  "craft-flow",
  "craft-lua",
  "craft-providers",
+ "craft-repomap",
  "craft-storage",
  "flume",
  "getrandom 0.4.3",
