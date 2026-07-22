@@ -316,12 +316,10 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                 }
 
                 if !text.is_empty() || !tool_calls.is_empty() || !reasoning_text.is_empty() {
-                    let mut msg_obj = json!({"role": "assistant"});
-                    if !text.is_empty() {
-                        msg_obj["content"] = Value::String(text);
-                    } else if !reasoning_text.is_empty() {
-                        msg_obj["content"] = Value::String(String::new());
-                    }
+                    // Always emit string `content` (""): some OpenAI-compatible
+                    // backends (e.g. Cloudflare Workers AI gpt-oss) reject
+                    // omitted/null content on assistant tool-call messages.
+                    let mut msg_obj = json!({"role": "assistant", "content": text});
                     if !reasoning_text.is_empty() {
                         msg_obj["reasoning_content"] = Value::String(reasoning_text);
                     }
@@ -1012,6 +1010,30 @@ data: [DONE]\n";
         assert_eq!(asst["role"], "assistant");
         assert_eq!(asst["reasoning_content"], "Just thinking...");
         assert_eq!(asst["content"], "");
+    }
+
+    #[test]
+    fn convert_messages_assistant_tool_calls_only_has_content() {
+        let messages = vec![
+            Message::user("list files".to_string()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tc_1".to_string(),
+                    name: "bash".to_string(),
+                    input: json!({"command": "ls"}),
+                }],
+                ..Default::default()
+            },
+        ];
+
+        let wire = convert_messages(&messages, "be helpful");
+
+        assert_eq!(wire[2]["role"], "assistant");
+        // `content` must be a present string ("") even with only tool_calls;
+        // strict OpenAI-compatible backends reject null/omitted content.
+        assert_eq!(wire[2]["content"], "");
+        assert_eq!(wire[2]["tool_calls"][0]["function"]["name"], "bash");
     }
 
     #[tokio::test]
