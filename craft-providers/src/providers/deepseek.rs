@@ -3,11 +3,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use craft_storage::id::SessionRef;
 use flume::Sender;
+use serde::Deserialize;
 use serde_json::Value;
 use tracing::warn;
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::Provider;
+use crate::types::{ProviderUsage, UsageLimit};
 use crate::{
     AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, ThinkingConfig, dialect,
 };
@@ -17,6 +19,7 @@ use super::{KeyPool, ResolvedAuth, lock_unpoison};
 
 const PAD: &str = "";
 const V4_MARKER: &str = "deepseek-v4";
+const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
 
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     slug: "deepseek",
@@ -74,6 +77,51 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             supports_vision: false,
         },
     ]
+}
+
+#[derive(Deserialize)]
+struct BalanceResponse {
+    balance_infos: Vec<BalanceInfo>,
+}
+
+#[derive(Deserialize)]
+struct BalanceInfo {
+    currency: String,
+    total_balance: String,
+    granted_balance: String,
+    topped_up_balance: String,
+}
+
+impl From<BalanceResponse> for ProviderUsage {
+    fn from(resp: BalanceResponse) -> Self {
+        let limits = resp
+            .balance_infos
+            .into_iter()
+            .map(|b| {
+                let symbol = match b.currency.as_str() {
+                    "USD" => "$",
+                    "CNY" => "¥",
+                    _ => "",
+                };
+
+                UsageLimit {
+                    label: "Balance".into(),
+                    percentage: None,
+                    reset_at: None,
+                    detail: Some(format!(
+                        "total: {}{}, topped-up: {}{}, granted: {}{}",
+                        symbol,
+                        b.total_balance,
+                        symbol,
+                        b.topped_up_balance,
+                        symbol,
+                        b.granted_balance
+                    )),
+                }
+            })
+            .collect();
+        ProviderUsage { plan: None, limits }
+    }
 }
 
 pub struct DeepSeek {
@@ -157,6 +205,13 @@ impl Provider for DeepSeek {
     async fn list_models_with_info(&self) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
         let auth = lock_unpoison(&self.auth).clone();
         self.compat.do_list_models_with_info(&auth).await
+    }
+
+    async fn fetch_usage(&self) -> Result<Option<ProviderUsage>, AgentError> {
+        let auth = lock_unpoison(&self.auth).clone();
+        let body = self.compat.get_text(&auth, BALANCE_URL).await?;
+        let parsed: BalanceResponse = serde_json::from_str(&body)?;
+        Ok(Some(parsed.into()))
     }
 
     async fn rotate_key(&self) -> Result<bool, AgentError> {
