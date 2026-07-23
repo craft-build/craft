@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-23
+
+### Added
+
+- **providers**: route model and provider lookups through slug-based manifests (`66fb945df`)
+- **index**: SQL language indexing (`ebfd18364`)
+- **outline**: TOML language indexing (`632a4bf3c`)
+- **acp**: `_craft/*` command palette surface for desktop (`3a8a446d8`)
+- **providers**: per-provider base URL overrides (`01343965d`)
+- **ui**: configurable startup theme via `ui.theme` (`b143630ab`)
+- **deepseek**: quota report for the `/usage` command (`d0e9c7c1b`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`bytemuck` 1.25.2, `clap` 4.6.4, `hyper` 1.11.0, `jiff` 0.2.34, `libc` 0.2.189, `serde_json` 1.0.151, `syn` 3.0.3, `tokio` 1.53.1, `tokio-util` 0.7.19, `zerocopy` 0.8.55)
+
+### Fixed
+
+- **nix**: provide `libstdc++` in devShell and package runtime deps (`8769f7800`)
+- **providers**: read DeepSeek cache hits and price them (`4a5af882d`)
+- **glob**: mark the `pattern` param as required (`631b71408`)
+- **providers**: emit string content on assistant tool-call messages (`3d162ed46`)
+- **plugins**: cap visible bash output lines at 500 bytes (`69fd3e4a9`)
+- **ui**: show a failed tool's error below its snapshot without duplicating (`026342534`)
+- **mcp**: respect server capabilities from `initialize` (`15f150302`)
+- **ui**: sync discovered context window to all sessions after model discovery (`6b183ae03`)
+- **lua**: add a leading slash to command names when missing (`1f515bb7a`)
+- **providers**: make `UsageLimit.percentage` optional (`a9cc3e124`)
+- **ui**: let `Ctrl+T` reopen a dismissed plan form despite overrides (`93381bca2`)
+- **code_execution**: refresh the script clock after each tool await (`7b1e2cc77`)
+
 ## [0.9.5] - 2026-07-19
 
 ### Added
