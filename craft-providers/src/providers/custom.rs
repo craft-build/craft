@@ -34,6 +34,7 @@ fn discovered_cache() -> &'static RwLock<HashMap<String, CachedModelInfo>> {
 }
 
 static CUSTOM_OPENAI_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+    slug: "",
     api_key_env: "",
     base_url: "",
     max_tokens_field: "max_tokens",

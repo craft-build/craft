@@ -18,6 +18,7 @@ use crate::{
 const STREAM_DONE: &str = "[DONE]";
 
 pub(crate) struct OpenAiCompatConfig {
+    pub slug: &'static str,
     pub api_key_env: &'static str,
     pub base_url: &'static str,
     pub max_tokens_field: &'static str,
@@ -119,13 +120,21 @@ impl OpenAiCompatProvider {
         body
     }
 
+    fn base_url(&self, auth: &ResolvedAuth) -> String {
+        if let Some(explicit) = auth.base_url.as_deref() {
+            return explicit.to_string();
+        }
+        craft_config::providers::base_url_override(self.config.slug)
+            .unwrap_or_else(|| self.config.base_url.to_string())
+    }
+
     fn build_request(
         &self,
         method: &str,
         path: &str,
         auth: &ResolvedAuth,
     ) -> reqwest::RequestBuilder {
-        let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
+        let base = self.base_url(auth);
         auth.configure_request(
             self.client
                 .request(method.parse().unwrap(), format!("{base}{path}"))
@@ -177,7 +186,7 @@ impl OpenAiCompatProvider {
         auth: &ResolvedAuth,
         parse_fn: impl Fn(&Value) -> Option<crate::model::ModelInfo>,
     ) -> Result<Vec<crate::model::ModelInfo>, AgentError> {
-        let base = auth.base_url.as_deref().unwrap_or(self.config.base_url);
+        let base = self.base_url(auth);
         let url = format!("{base}/models");
         let body_text = self.get_text(auth, &url).await?;
         let body: Value = serde_json::from_str(&body_text)?;

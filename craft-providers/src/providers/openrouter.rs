@@ -20,6 +20,7 @@ const APP_TITLE: &str = "craft";
 const PER_MILLION: f64 = 1_000_000.0;
 
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+    slug: "openrouter",
     api_key_env: "OPENROUTER_API_KEY",
     base_url: "https://openrouter.ai/api/v1",
     max_tokens_field: "max_tokens",

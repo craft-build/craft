@@ -21,6 +21,7 @@ const TEXT: &str = "text";
 const TYPE: &str = "type";
 
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+    slug: "mistral",
     api_key_env: "MISTRAL_API_KEY",
     base_url: "https://api.mistral.ai/v1",
     max_tokens_field: "max_tokens",
