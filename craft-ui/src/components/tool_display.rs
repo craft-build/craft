@@ -944,7 +944,7 @@ pub fn build_tool_lines(
             msg.tool_output.as_deref()
         },
     );
-    if let Some(ref snapshot) = msg.render_snapshot {
+    let show_output = if let Some(ref snapshot) = msg.render_snapshot {
         let search_text = msg
             .tool_output
             .as_ref()
@@ -954,7 +954,27 @@ pub fn build_tool_lines(
             })
             .or(body);
         b.push_snapshot(snapshot, search_text);
+        // A denial can land while the snapshot still shows only the
+        // pre-permission script preview, so the error goes below it.
+        // But a collapsed snapshot keeps just a window of the output,
+        // so checking the full text would duplicate long outputs. The
+        // last line is a reliable probe: a tail-keep view always shows
+        // it, a bare script preview never does.
+        matches!(status, ToolStatus::Error) && {
+            let err_text = msg.tool_output.as_deref().map(|o| o.as_text());
+            let tail = err_text
+                .as_deref()
+                .or(body)
+                .map_or("", str::trim)
+                .lines()
+                .next_back()
+                .map_or("", str::trim);
+            !tail.is_empty() && !snapshot.text().contains(tail)
+        }
     } else {
+        true
+    };
+    if show_output {
         let resolved = resolve_output(
             msg.tool_output.as_deref(),
             body,
@@ -1693,7 +1713,75 @@ mod tests {
         );
     }
 
-    #[test_case(None,       None,    "bash",  false ; "none_output_none_body")]
+    const DENIAL_MSG: &str = "Permission denied: user rejected";
+
+    fn error_snapshot_msg(snapshot_lines: &[&str], output: &str) -> DisplayMessage {
+        DisplayMessage {
+            role: DisplayRole::Tool(Box::new(ToolRole {
+                id: "t1".into(),
+                status: ToolStatus::Error,
+                name: "code_execution".into(),
+            })),
+            text: "2 lines".into(),
+            tool_output: Some(Arc::new(ToolOutput::Plain(output.into()))),
+            ..snapshot_msg(make_snapshot(
+                snapshot_lines
+                    .iter()
+                    .map(|t| {
+                        vec![SnapshotSpan {
+                            text: (*t).into(),
+                            style: SpanStyle::Default,
+                        }]
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
+    #[test_case(
+        &["1 print('hi')"], DENIAL_MSG,
+        Some("1 print('hi')"), None
+        ; "denial_shown_below_script_preview")]
+    #[test_case(
+        &[DENIAL_MSG], DENIAL_MSG,
+        None, None
+        ; "denial_in_snapshot_not_duplicated")]
+    #[test_case(
+        &["... (15 lines) (click to expand)", "tail line", "Exit code: 2"],
+        "head line\ntail line\nExit code: 2",
+        None, Some("head line")
+        ; "collapsed_tail_view_not_duplicated")]
+    fn error_snapshot_output_renders_once(
+        snapshot: &[&str],
+        output: &str,
+        shown: Option<&str>,
+        hidden: Option<&str>,
+    ) {
+        let msg = error_snapshot_msg(snapshot, output);
+        let tl = build_tool_lines(
+            &msg,
+            ToolStatus::Error,
+            &test_rctx(80, &reg()),
+            SectionFlags::default(),
+        );
+        let text = lines_text(&tl);
+        let tail = output.lines().next_back().unwrap();
+        assert_eq!(
+            text.matches(tail).count(),
+            1,
+            "output tail must render exactly once: {text}"
+        );
+        if let Some(shown) = shown {
+            assert!(text.contains(shown), "snapshot content must stay: {text}");
+        }
+        if let Some(hidden) = hidden {
+            assert!(
+                !text.contains(hidden),
+                "hidden lines must stay hidden: {text}"
+            );
+        }
+    }
+
     #[test_case(None,       Some("hello"), "bash", true ; "none_output_with_body")]
     #[test_case(
         Some(ToolOutput::Plain("world".into())), None, "bash", true

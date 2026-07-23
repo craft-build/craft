@@ -752,6 +752,19 @@ impl BufferSnapshot {
             .map(|l| l.spans.iter().map(|s| s.text.as_str()).collect())
             .unwrap_or_default()
     }
+
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            for span in &line.spans {
+                out.push_str(&span.text);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
