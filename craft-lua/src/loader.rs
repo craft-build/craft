@@ -671,6 +671,27 @@ mod tests {
     }
 
     #[test]
+    fn register_command_adds_missing_leading_slash() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(reg, None).unwrap();
+        host.load_source(
+            "noslash",
+            r#"
+            craft.api.register_command({
+                name = "hello",
+                description = "no slash",
+                handler = function() end,
+            })
+            "#,
+        )
+        .unwrap();
+
+        let snap = host.command_reader().load();
+        assert_eq!(snap.commands.len(), 1);
+        assert_eq!(snap.commands[0].name.as_ref(), "/hello");
+    }
+
+    #[test]
     fn command_reader_generation_increments_on_publish() {
         let (writer, reader) = LuaCommandWriter::new();
         assert_eq!(reader.load().generation, 0);

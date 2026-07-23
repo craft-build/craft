@@ -675,13 +675,16 @@ fn register_tool_from_lua(lua: &Lua, spec: &Table, pending: PendingTools) -> Lua
 }
 
 fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaResult<()> {
-    let name: String = spec
+    let mut name: String = spec
         .get("name")
         .map_err(|_| mlua::Error::runtime("register_command: missing 'name'"))?;
     if name.is_empty() {
         return Err(mlua::Error::runtime(
             "register_command: name must be non-empty",
         ));
+    }
+    if !name.starts_with('/') {
+        name.insert(0, '/');
     }
     let description: String = spec.get("description").unwrap_or_default();
     let handler: Function = spec
