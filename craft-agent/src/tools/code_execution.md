@@ -6,6 +6,6 @@ Use for chained/dependent tool calls and filtering/processing results, e.g. filt
 - Use `asyncio.gather()` for concurrency within one execution.
 - Available libs: re, asyncio, sys, os, json. No other imports, no classes, no filesystem/network access.
 - Fresh sandbox each run: no state persists between executions.
-- 30 second timeout (configurable via `timeout` parameter).
+- 30s script timeout (`timeout` param); time awaiting tool calls doesn't count.
 - Skip it when a single tool call needs no transformation.
 - NOT a thinking scratchpad. Reason in your response text.

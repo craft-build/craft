@@ -51,7 +51,7 @@ pub struct CodeExecution {
         description = "Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file')`. Use `await asyncio.gather(...)` for concurrency."
     )]
     code: String,
-    #[param(description = "Timeout in seconds (default 30, max 300)")]
+    #[param(description = "Script execution timeout in seconds (default 30)")]
     timeout: Option<u64>,
 }
 
