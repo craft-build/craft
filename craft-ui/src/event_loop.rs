@@ -757,18 +757,24 @@ impl<'t> EventLoop<'t> {
             .config
             .resolve_compaction_buffer(slot_model.model.context_window);
         for rt in &mut self.sessions {
-            if rt.app.state.session.model != spec {
+            // Compute the context_window this session should have after its own
+            // override is applied to the slot's base, so we also resync when
+            // model discovery updates the base context_window without changing
+            // the spec (e.g. LlamaCpp populating a previously default 128k).
+            let mut expected = slot_model.model.clone();
+            crate::app::session_state::apply_context_window_override(
+                &mut expected,
+                &rt.app.state.context_window_overrides,
+                reserve,
+                buffer,
+            );
+            if rt.app.state.session.model != spec
+                || rt.app.state.model.context_window != expected.context_window
+            {
                 // The shared slot holds the BASE model; apply this session's
                 // own context-window overrides before installing it so one
                 // session's override doesn't leak into another.
-                let mut owned = slot_model.model.clone();
-                crate::app::session_state::apply_context_window_override(
-                    &mut owned,
-                    &rt.app.state.context_window_overrides,
-                    reserve,
-                    buffer,
-                );
-                rt.app.update_model(&owned);
+                rt.app.update_model(&expected);
             }
         }
         drop(slot_model);
