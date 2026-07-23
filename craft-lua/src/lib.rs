@@ -59,6 +59,14 @@ pub mod test_support {
     }
 
     /// Sink for requests dispatched by a probed `EventHandle`.
-    #[expect(dead_code, reason = "holds the channel open for the test handle")]
     pub struct RequestProbe(flume::Receiver<Request>);
+
+    impl RequestProbe {
+        /// `Some(())` when the probed handle dispatched a request since the
+        /// last call, `None` when the channel is empty. Used by keymap tests
+        /// to assert whether a plugin override callback actually fired.
+        pub fn try_recv(&self) -> Option<()> {
+            self.0.try_recv().ok().map(|_| ())
+        }
+    }
 }

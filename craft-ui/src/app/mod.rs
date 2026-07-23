@@ -1022,6 +1022,14 @@ impl App {
             });
         }
 
+        if self.keybindings.matches(ActionId::PlanToggle, key)
+            && self.state.mode == Mode::Plan
+            && self.state.plan.is_ready()
+        {
+            self.plan_form.toggle();
+            return Some(vec![]);
+        }
+
         None
     }
 
