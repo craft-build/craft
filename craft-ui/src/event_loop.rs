@@ -493,7 +493,7 @@ impl<'t> EventLoop<'t> {
             commands,
             sessions,
             focused,
-            startup_warnings,
+            mut startup_warnings,
             storage,
             config,
             compression,
@@ -513,6 +513,16 @@ impl<'t> EventLoop<'t> {
             embed_rx,
             watch_enabled,
         } = params;
+
+        if let Some(ref name) = ui_config.theme {
+            match crate::theme::load_by_name(name) {
+                Ok(theme) => {
+                    crate::theme::set_current_name(name);
+                    crate::theme::set(theme);
+                }
+                Err(e) => startup_warnings.push(format!("config ui.theme: {e}")),
+            }
+        }
 
         static PROCESS_WARMUP: std::sync::Once = std::sync::Once::new();
         PROCESS_WARMUP.call_once(|| {

@@ -352,6 +352,7 @@ pub struct UiFileConfig {
     pub typewriter_ms_per_char: Option<u64>,
     pub mouse_scroll_lines: Option<u32>,
     pub show_thinking: Option<bool>,
+    pub theme: Option<String>,
     pub tool_output_lines: Option<ToolOutputLinesFile>,
     pub keybindings: Option<HashMap<String, KeybindingOverride>>,
 }
@@ -383,7 +384,8 @@ impl UiFileConfig {
             flash_duration_ms,
             typewriter_ms_per_char,
             mouse_scroll_lines,
-            show_thinking
+            show_thinking,
+            theme
         );
         match (self.tool_output_lines.as_mut(), overlay.tool_output_lines) {
             (Some(base), Some(over)) => base.merge(over),
@@ -952,6 +954,9 @@ pub struct UiConfig {
     )]
     pub show_thinking: bool,
 
+    #[config(skip, default = "None")]
+    pub theme: Option<String>,
+
     #[config(skip, default = "ToolOutputLines::default()")]
     pub tool_output_lines: ToolOutputLines,
 
@@ -999,6 +1004,7 @@ impl UiConfig {
                 .unwrap_or(DEFAULT_TYPEWRITER_MS_PER_CHAR),
             mouse_scroll_lines: f.mouse_scroll_lines.unwrap_or(DEFAULT_MOUSE_SCROLL_LINES),
             show_thinking: f.show_thinking.unwrap_or(true),
+            theme: f.theme,
             tool_output_lines: ToolOutputLines::from_file(f.tool_output_lines),
             keybindings: KeybindingsConfig::from_file(f.keybindings),
         }
