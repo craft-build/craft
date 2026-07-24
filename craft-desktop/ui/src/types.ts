@@ -215,6 +215,11 @@ export interface SessionSummary {
   updatedAt?: string;
 }
 
+export interface SshTarget {
+  host: string;
+  remoteCraft?: string;
+}
+
 export interface TabState {
   tabId: string;
   sessionId: string | null;
@@ -231,6 +236,9 @@ export interface TabState {
   connectionError: string | null;
   contextUsed: number;
   contextSize: number;
+  /** Null for a local session; set for SSH-launched tabs so history, prompt
+   * routing, and titles reuse the same transport. */
+  ssh: SshTarget | null;
   /** Cached `_craft/listCommands` response for the `/` palette. Null until
    * fetched (right after session start). */
   commands: ListCommandsResponse | null;

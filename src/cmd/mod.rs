@@ -54,8 +54,8 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Migrate { action }) => match action {
             MigrateAction::Xdg => migrate::xdg()?,
         },
-        Some(Command::Acp { yolo }) => {
-            subcmd::acp::run(yolo, cli.no_jit).await?;
+        Some(Command::Acp { yolo, cwd }) => {
+            subcmd::acp::run(yolo, cwd, cli.no_jit).await?;
         }
         Some(Command::Run(args)) => {
             subcmd::run::run(args).await?;

@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use color_eyre::Result;
@@ -12,11 +13,17 @@ use craft_storage::flow::FlowStore;
 
 use crate::setup;
 
-pub async fn run(yolo: bool, no_jit: bool) -> Result<()> {
+pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_jit: bool) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     craft_providers::model_registry::load_from_storage(&storage);
 
-    let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
+    let cwd = match cwd {
+        Some(p) => {
+            std::env::set_current_dir(&p).with_context(|| format!("chdir to {}", p.display()))?;
+            p
+        }
+        None => env::current_dir().unwrap_or_else(|_| ".".into()),
+    };
     load_env_files(&cwd);
 
     let mut plugin_host =

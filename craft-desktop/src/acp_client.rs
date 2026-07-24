@@ -7,7 +7,7 @@
 //! shapes directly, since the UI needs to render them anyway.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -31,7 +31,7 @@ const TODO_UPDATE_EVENT: &str = "acp://todo-update";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("failed to launch `{0} acp`: {1}")]
+    #[error("failed to launch `{0}`: {1}")]
     Spawn(String, std::io::Error),
     #[error("craft process ended before responding")]
     Disconnected,
@@ -45,6 +45,20 @@ pub enum ClientError {
 
 type PendingMap = std::sync::Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 
+/// Where and how to launch the `craft acp` process. `Local` spawns the
+/// resolved binary directly; `Ssh` forwards ACP over an `ssh` connection so
+/// the tab drives a remote agent instead of a local one.
+#[derive(Debug)]
+pub enum LaunchTarget {
+    Local {
+        craft_binary: PathBuf,
+    },
+    Ssh {
+        host: String,
+        remote_craft: Option<String>,
+    },
+}
+
 pub struct AcpClient {
     stdin_tx: flume::Sender<Value>,
     pending: PendingMap,
@@ -53,30 +67,20 @@ pub struct AcpClient {
 }
 
 impl AcpClient {
-    /// Spawns `<craft_binary> acp [--yolo]` in `cwd` and starts the reader/writer
-    /// tasks. Events for this client are tagged with `tab_id` so the frontend
-    /// can route them to the right session tab.
+    /// Spawns the `craft acp` process (locally or over `ssh`) and starts the
+    /// reader/writer tasks. Events for this client are tagged with `tab_id` so
+    /// the frontend can route them to the right session tab.
     pub fn spawn(
         app: AppHandle,
         tab_id: String,
-        craft_binary: &Path,
+        target: &LaunchTarget,
         cwd: &Path,
         yolo: bool,
     ) -> Result<Self, ClientError> {
-        let mut cmd = Command::new(craft_binary);
-        cmd.arg("acp");
-        if yolo {
-            cmd.arg("--yolo");
-        }
-        cmd.current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let label = launch_label(target);
+        let mut cmd = build_command(target, cwd, yolo);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ClientError::Spawn(craft_binary.display().to_string(), e))?;
+        let mut child = cmd.spawn().map_err(|e| ClientError::Spawn(label, e))?;
 
         let mut stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
@@ -349,5 +353,100 @@ fn handle_incoming(app: &AppHandle, tab_id: &str, value: Value, pending: &Pendin
                 "unhandled ACP message"
             );
         }
+    }
+}
+
+fn launch_label(target: &LaunchTarget) -> String {
+    match target {
+        LaunchTarget::Local { craft_binary } => format!("{} acp", craft_binary.display()),
+        LaunchTarget::Ssh { host, .. } => format!("ssh {host} (remote craft acp)"),
+    }
+}
+
+fn build_command(target: &LaunchTarget, cwd: &Path, yolo: bool) -> Command {
+    match target {
+        LaunchTarget::Local { craft_binary } => {
+            let mut cmd = Command::new(craft_binary);
+            cmd.arg("acp").arg("--cwd").arg(cwd);
+            if yolo {
+                cmd.arg("--yolo");
+            }
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            cmd
+        }
+        LaunchTarget::Ssh { host, remote_craft } => {
+            let craft = remote_craft.as_deref().unwrap_or("craft");
+            let remote = ssh_remote_command(craft, &cwd.to_string_lossy(), yolo);
+            let mut cmd = Command::new("ssh");
+            cmd.args(["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30"])
+                .arg(host)
+                .arg("--")
+                .arg(remote);
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            cmd
+        }
+    }
+}
+
+const SQ: char = '\u{27}';
+const BS: char = '\u{5c}';
+
+/// Single-quote a string for a POSIX remote shell, escaping embedded single
+/// quotes as the `'\''` sequence. Used to build the `--cwd` argument passed
+/// through `ssh`.
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(SQ);
+    for ch in s.chars() {
+        if ch == SQ {
+            out.push(SQ);
+            out.push(BS);
+            out.push(SQ);
+            out.push(SQ);
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push(SQ);
+    out
+}
+
+/// Builds the remote command `ssh` executes: `exec <craft> acp --cwd '<path>' [--yolo]`.
+fn ssh_remote_command(craft: &str, cwd: &str, yolo: bool) -> String {
+    let mut s = format!("exec {craft} acp --cwd {}", shell_quote(cwd));
+    if yolo {
+        s.push_str(" --yolo");
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use test_case::test_case;
+
+    #[test_case("abc", "'abc'"; "plain")]
+    #[test_case("a b c", "'a b c'"; "spaces")]
+    fn shell_quote_cases(input: &str, expected: &str) {
+        assert_eq!(shell_quote(input), expected);
+    }
+
+    #[test]
+    fn shell_quote_embedded_quote() {
+        let expected: String = [SQ, 'a', SQ, BS, SQ, SQ, 'b', SQ].into_iter().collect();
+        assert_eq!(shell_quote("a'b"), expected);
+    }
+
+    #[test_case("craft", "/home/user/proj", false, "exec craft acp --cwd '/home/user/proj'"; "no_yolo")]
+    #[test_case("craft", "/tmp/x", true, "exec craft acp --cwd '/tmp/x' --yolo"; "yolo")]
+    #[test_case("/home/u/.cargo/bin/craft", "/home/u/my proj", false, "exec /home/u/.cargo/bin/craft acp --cwd '/home/u/my proj'"; "spaces_in_path")]
+    fn ssh_remote_command_cases(craft: &str, cwd: &str, yolo: bool, expected: &str) {
+        assert_eq!(ssh_remote_command(craft, cwd, yolo), expected);
     }
 }

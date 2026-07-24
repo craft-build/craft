@@ -257,6 +257,9 @@ pub enum Command {
         /// Skip all permission prompts (allow everything)
         #[arg(long)]
         yolo: bool,
+        /// Working directory to run the ACP server in (chdir before startup)
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
     },
     /// Run a headless agent query (a prompt or a recipe file) and print the result
     Run(RunCommand),

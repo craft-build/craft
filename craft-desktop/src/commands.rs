@@ -1,15 +1,34 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::acp_client::AcpClient;
+use crate::acp_client::{AcpClient, LaunchTarget};
 use crate::state::AppState;
 use crate::theme::{self, ThemeName, ThemeTokens};
 
 fn to_err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
+}
+
+#[derive(serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SshTarget {
+    pub host: String,
+    pub remote_craft: Option<String>,
+}
+
+fn build_launch_target(craft_binary: &Path, ssh: Option<SshTarget>) -> LaunchTarget {
+    match ssh {
+        Some(s) => LaunchTarget::Ssh {
+            host: s.host,
+            remote_craft: s.remote_craft,
+        },
+        None => LaunchTarget::Local {
+            craft_binary: craft_binary.to_path_buf(),
+        },
+    }
 }
 
 async fn get_client(state: &State<'_, AppState>, tab_id: &str) -> Result<Arc<AcpClient>, String> {
@@ -33,15 +52,11 @@ pub async fn start_session(
     tab_id: String,
     cwd: String,
     yolo: bool,
+    ssh: Option<SshTarget>,
 ) -> Result<Value, String> {
-    let client = AcpClient::spawn(
-        app,
-        tab_id.clone(),
-        &state.craft_binary,
-        &PathBuf::from(&cwd),
-        yolo,
-    )
-    .map_err(to_err)?;
+    let target = build_launch_target(&state.craft_binary, ssh);
+    let client = AcpClient::spawn(app, tab_id.clone(), &target, &PathBuf::from(&cwd), yolo)
+        .map_err(to_err)?;
     client.initialize().await.map_err(to_err)?;
     let resp = client
         .new_session(&PathBuf::from(&cwd))
@@ -60,15 +75,11 @@ pub async fn load_session(
     tab_id: String,
     session_id: String,
     cwd: String,
+    ssh: Option<SshTarget>,
 ) -> Result<Value, String> {
-    let client = AcpClient::spawn(
-        app,
-        tab_id.clone(),
-        &state.craft_binary,
-        &PathBuf::from(&cwd),
-        false,
-    )
-    .map_err(to_err)?;
+    let target = build_launch_target(&state.craft_binary, ssh);
+    let client = AcpClient::spawn(app, tab_id.clone(), &target, &PathBuf::from(&cwd), false)
+        .map_err(to_err)?;
     client.initialize().await.map_err(to_err)?;
     let resp = client
         .load_session(&session_id, &PathBuf::from(&cwd))
@@ -85,17 +96,13 @@ pub async fn list_sessions(
     app: AppHandle,
     state: State<'_, AppState>,
     cwd: Option<String>,
+    ssh: Option<SshTarget>,
 ) -> Result<Value, String> {
     let probe_id = format!("__list_sessions_{}", probe_nonce());
     let probe_cwd = cwd.clone().unwrap_or_else(|| ".".to_string());
-    let client = AcpClient::spawn(
-        app,
-        probe_id,
-        &state.craft_binary,
-        &PathBuf::from(&probe_cwd),
-        false,
-    )
-    .map_err(to_err)?;
+    let target = build_launch_target(&state.craft_binary, ssh);
+    let client = AcpClient::spawn(app, probe_id, &target, &PathBuf::from(&probe_cwd), false)
+        .map_err(to_err)?;
     client.initialize().await.map_err(to_err)?;
     let resp = client
         .list_sessions(cwd.as_deref().map(std::path::Path::new))

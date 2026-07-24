@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { NewSessionResponse, QuestionSpec, TodoItem } from "../types";
+import type { NewSessionResponse, QuestionSpec, SshTarget, TodoItem } from "../types";
 import type { Tokens, ThemeName } from "../theme";
 
 export function getTheme(): Promise<Tokens> {
@@ -15,20 +15,26 @@ export function setTheme(name: string): Promise<Tokens> {
   return invoke("set_theme", { name });
 }
 
-export function startSession(tabId: string, cwd: string, yolo: boolean): Promise<NewSessionResponse> {
-  return invoke("start_session", { tabId, cwd, yolo });
+export function startSession(
+  tabId: string,
+  cwd: string,
+  yolo: boolean,
+  ssh: SshTarget | null,
+): Promise<NewSessionResponse> {
+  return invoke("start_session", { tabId, cwd, yolo, ssh });
 }
 
 export function loadSession(
   tabId: string,
   sessionId: string,
   cwd: string,
+  ssh: SshTarget | null,
 ): Promise<NewSessionResponse> {
-  return invoke("load_session", { tabId, sessionId, cwd });
+  return invoke("load_session", { tabId, sessionId, cwd, ssh });
 }
 
-export function listSessions(cwd?: string): Promise<{ sessions: unknown[] }> {
-  return invoke("list_sessions", { cwd });
+export function listSessions(cwd?: string, ssh?: SshTarget | null): Promise<{ sessions: unknown[] }> {
+  return invoke("list_sessions", { cwd, ssh });
 }
 
 export function sendPrompt(tabId: string, sessionId: string, text: string): Promise<void> {

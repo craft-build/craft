@@ -136,7 +136,7 @@ function Sidebar({
   useEffect(() => {
     if (state.historyOpen && !fetchedRef.current) {
       fetchedRef.current = true;
-      listSessions(active.cwd)
+      listSessions(active.cwd, active.ssh)
         .then((resp) => {
           const sessions = (resp as unknown as { sessions?: unknown[] }).sessions ?? [];
           dispatch({ type: "HISTORY_LOADED", sessions: sessions as never });
@@ -149,13 +149,14 @@ function Sidebar({
 
   const openHistorySession = async (row: AppState["historySessions"][number]) => {
     const tabId = crypto.randomUUID();
+    const baseTitle = row.title?.trim() || row.sessionId.slice(0, 8);
     dispatch({
       type: "START_SESSION",
       tab: {
         tabId,
         sessionId: null,
         cwd: active.cwd,
-        title: row.title?.trim() || row.sessionId.slice(0, 8),
+        title: active.ssh ? `${active.ssh.host}:${baseTitle}` : baseTitle,
         mode: "build",
         modes: [],
         configOptions: [],
@@ -167,10 +168,11 @@ function Sidebar({
         connectionError: null,
         contextUsed: 0,
         contextSize: 0,
+        ssh: active.ssh,
         commands: null,
       },
     });
-    const resp = await loadSession(tabId, row.sessionId, active.cwd).catch(() => null);
+    const resp = await loadSession(tabId, row.sessionId, active.cwd, active.ssh).catch(() => null);
     if (!resp) {
       dispatch({ type: "TAB_CLOSED", tabId });
       return;

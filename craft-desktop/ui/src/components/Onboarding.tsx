@@ -3,7 +3,7 @@ import { homeDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../state/store";
 import { setMode as setSessionMode, startSession } from "../lib/acp";
-import type { TabState } from "../types";
+import type { SshTarget, TabState } from "../types";
 
 const MODES = ["build", "plan", "flow"] as const;
 const MODE_LABELS: Record<string, string> = { build: "Build", plan: "Plan", flow: "Flow" };
@@ -13,6 +13,10 @@ export function Onboarding() {
   const dispatch = useAppDispatch();
   const t = state.tokens;
   const [cwd, setCwd] = useState("");
+  const [transport, setTransport] = useState<"local" | "ssh">("local");
+  const [host, setHost] = useState("");
+  const [remoteCwd, setRemoteCwd] = useState("");
+  const [remoteCraft, setRemoteCraft] = useState("");
   const [mode, setMode] = useState<string>("build");
   const [yolo, setYolo] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -30,20 +34,27 @@ export function Onboarding() {
   };
 
   const start = async () => {
-    if (!cwd || starting) return;
+    if (starting) return;
+    if (transport === "local" && !cwd) return;
+    if (transport === "ssh" && (!host || !remoteCwd || !remoteCwd.startsWith("/"))) return;
     setStarting(true);
     setError(null);
     const tabId = crypto.randomUUID();
     try {
-      const resp = await startSession(tabId, cwd, yolo);
+      const ssh: SshTarget | null =
+        transport === "ssh" ? { host, remoteCraft: remoteCraft.trim() || undefined } : null;
+      const effectiveCwd = transport === "local" ? cwd : remoteCwd;
+      const resp = await startSession(tabId, effectiveCwd, yolo, ssh);
       if (mode !== "build") {
         await setSessionMode(tabId, resp.sessionId, mode).catch(() => {});
       }
+      const basename = effectiveCwd.split("/").filter(Boolean).pop() ?? effectiveCwd;
+      const title = ssh ? `${ssh.host}:${basename}` : basename;
       const tab: TabState = {
         tabId,
         sessionId: resp.sessionId,
-        cwd,
-        title: cwd.split("/").filter(Boolean).pop() ?? cwd,
+        cwd: effectiveCwd,
+        title,
         mode,
         modes: resp.modes?.availableModes ?? [],
         configOptions: resp.configOptions ?? [],
@@ -55,6 +66,7 @@ export function Onboarding() {
         connectionError: null,
         contextUsed: 0,
         contextSize: 0,
+        ssh,
         commands: null,
       };
       dispatch({ type: "START_SESSION", tab });
@@ -113,25 +125,115 @@ export function Onboarding() {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>WORKING DIRECTORY</div>
-          <div
-            onClick={pickDirectory}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              padding: "11px 13px",
-              background: t.bgInset,
-              border: `1px solid ${t.border}`,
-              cursor: "pointer",
-            }}
-          >
-            <span style={{ color: t.textFaint }}>&#10095;</span>
-            <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {cwd || "Choose a folder…"}
-            </span>
+          <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>TRANSPORT</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {(["local", "ssh"] as const).map((tr) => (
+              <div
+                key={tr}
+                onClick={() => setTransport(tr)}
+                style={{
+                  flex: 1,
+                  textAlign: "center",
+                  padding: "9px 0",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  background: transport === tr ? t.accentDim : t.bgInset,
+                  color: transport === tr ? t.accent : t.textDim,
+                  border: `1px solid ${transport === tr ? t.accent : t.border}`,
+                  fontWeight: 500,
+                }}
+              >
+                {tr === "local" ? "Local" : "SSH"}
+              </div>
+            ))}
           </div>
         </div>
+
+        {transport === "local" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>WORKING DIRECTORY</div>
+            <div
+              onClick={pickDirectory}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "11px 13px",
+                background: t.bgInset,
+                border: `1px solid ${t.border}`,
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ color: t.textFaint }}>&#10095;</span>
+              <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {cwd || "Choose a folder…"}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>HOST</div>
+              <input
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                placeholder="user@host"
+                style={{
+                  padding: "11px 13px",
+                  background: t.bgInset,
+                  border: `1px solid ${t.border}`,
+                  fontSize: 13,
+                  color: t.text,
+                  outline: "none",
+                  width: "100%",
+                  boxSizing: "border-box",
+                }}
+              />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>REMOTE PATH</div>
+              <input
+                value={remoteCwd}
+                onChange={(e) => setRemoteCwd(e.target.value)}
+                placeholder="/home/user/project"
+                style={{
+                  padding: "11px 13px",
+                  background: t.bgInset,
+                  border: `1px solid ${remoteCwd && !remoteCwd.startsWith("/") ? t.danger : t.border}`,
+                  fontSize: 13,
+                  color: t.text,
+                  outline: "none",
+                  width: "100%",
+                  boxSizing: "border-box",
+                }}
+              />
+              {remoteCwd && !remoteCwd.startsWith("/") && (
+                <div style={{ fontSize: 11, color: t.danger }}>Remote path must start with /</div>
+              )}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>REMOTE CRAFT PATH (OPTIONAL)</div>
+              <input
+                value={remoteCraft}
+                onChange={(e) => setRemoteCraft(e.target.value)}
+                placeholder="craft"
+                style={{
+                  padding: "11px 13px",
+                  background: t.bgInset,
+                  border: `1px solid ${t.border}`,
+                  fontSize: 13,
+                  color: t.text,
+                  outline: "none",
+                  width: "100%",
+                  boxSizing: "border-box",
+                }}
+              />
+              <div style={{ fontSize: 10.5, color: t.textFaint, lineHeight: 1.5 }}>
+                Leave blank to use craft on the remote PATH. Requires key-based (non-interactive) auth and the host key already accepted.
+              </div>
+            </div>
+          </div>
+        )}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontSize: 10.5, color: t.textFaint, letterSpacing: 0.5 }}>DEFAULT MODE</div>
