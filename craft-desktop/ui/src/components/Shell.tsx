@@ -65,7 +65,7 @@ export function Shell() {
             whiteSpace: "nowrap",
           }}
         >
-          harness &mdash; {active.title} &mdash; zsh &mdash; 120&times;40
+          {active.title}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "none", position: "relative" }}>
           <YoloToggle active={active} t={t} />
