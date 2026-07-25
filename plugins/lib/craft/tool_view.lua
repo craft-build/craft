@@ -205,6 +205,17 @@ function ToolView:set_highlight(content, ext)
   return true
 end
 
+-- Content rows on screen, for callers with their own per-row click targets. A
+-- single hidden line is drawn as itself instead of a notice, so it counts as
+-- content too. Rows line up with `all_lines` under keep = "head"; keep = "tail"
+-- prints its notice first and shifts them.
+function ToolView:visible_count()
+  if self.expanded then
+    return #self.all_lines
+  end
+  return self.ring_count + (self.skipped == 1 and 1 or 0)
+end
+
 function ToolView:toggle()
   self.expanded = not self.expanded
   self:flush()
@@ -266,12 +277,12 @@ function ToolView:finish()
   end
 end
 
--- Rebuild a collapsed view from a tool's saved llm_output, click-to-toggle
--- wired. For `restore` hooks.
-function ToolView.restore(output, opts)
+-- Rebuild a collapsed view from pre-split lines, click-to-toggle wired. For
+-- `restore` hooks that transform the output before rendering.
+function ToolView.restore_lines(lines, opts)
   local buf = craft.ui.buf()
   local view = ToolView.new(buf, opts)
-  for _, line in ipairs(craft.split(output, "\n")) do
+  for _, line in ipairs(lines) do
     view:append(line)
   end
   view:finish()
@@ -279,6 +290,25 @@ function ToolView.restore(output, opts)
     view:toggle()
   end)
   return buf
+end
+
+-- Rebuild a collapsed view from a tool's saved llm_output, click-to-toggle
+-- wired. For `restore` hooks.
+function ToolView.restore(output, opts)
+  return ToolView.restore_lines(craft.split(output, "\n"), opts)
+end
+
+-- Same, for tools whose live output goes through markdown (`format =
+-- "markdown"`); {opts.width} is the wrap width. Errors stay plain, as they do
+-- live.
+function ToolView.restore_markdown(output, is_error, opts)
+  if not is_error then
+    local ok, md_lines = pcall(craft.ui.markdown, output, opts.width)
+    if ok then
+      return ToolView.restore_lines(md_lines, opts)
+    end
+  end
+  return ToolView.restore(output, opts)
 end
 
 return ToolView
