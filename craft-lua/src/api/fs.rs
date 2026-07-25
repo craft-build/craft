@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fs::FileType;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use mlua::{IntoLua, Lua, Result as LuaResult, Table};
 
@@ -171,6 +172,11 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                         tbl.set("size", meta.len())?;
                         tbl.set("is_file", meta.is_file())?;
                         tbl.set("is_dir", meta.is_dir())?;
+                        if let Ok(modified) = meta.modified()
+                            && let Ok(dur) = modified.duration_since(UNIX_EPOCH)
+                        {
+                            tbl.set("mtime", dur.as_secs_f64())?;
+                        }
                         Ok((mlua::Value::Table(tbl), mlua::Value::Nil))
                     }
                     Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -759,6 +765,7 @@ mod tests {
         assert!(f.get::<bool>("is_file").unwrap());
         assert!(!f.get::<bool>("is_dir").unwrap());
         assert_eq!(f.get::<u64>("size").unwrap(), 5);
+        assert!(f.get::<f64>("mtime").unwrap() > 0.0);
 
         let d: Table = metadata
             .call_async::<Table>(tmp.path().to_str().unwrap())
