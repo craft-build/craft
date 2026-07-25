@@ -565,8 +565,9 @@ craft.api.register_command({
 craft.api.register_command({
   name = "/rename",
   description = "Rename the current session",
-  handler = function(args)
-    local title = (args or ""):match("^%s*(.-)%s*$")
+  nargs = "+",
+  handler = function(opts)
+    local title = opts.args:match("^%s*(.-)%s*$")
     if title == "" then
       craft.ui.flash(RENAME_USAGE)
       return

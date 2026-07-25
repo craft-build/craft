@@ -742,7 +742,7 @@ mod tests {
     #[test_case("/cd ~/foo", true   ; "one_arg_cmd_mid_arg")]
     #[test_case("/cd  ~/foo", true  ; "one_arg_cmd_double_space")]
     #[test_case("/btw hello world", true ; "btw_stays_active_with_many_args")]
-    fn sync_respects_max_args(input: &str, expect_active: bool) {
+    fn sync_respects_nargs(input: &str, expect_active: bool) {
         let p = synced(input);
         assert_eq!(p.is_active(), expect_active);
     }

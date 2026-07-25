@@ -2020,8 +2020,14 @@ pub fn spawn(
                                 let g = Rc::clone(&gate);
                                 tokio::task::spawn_local(async move {
                                     let run = async {
+                                        let opts = lua.create_table()?;
+                                        opts.set(
+                                            "fargs",
+                                            lua.create_sequence_from(args.split_whitespace())?,
+                                        )?;
+                                        opts.set("args", args)?;
                                         let thread = lua.create_thread(func)?;
-                                        thread.into_async::<()>(args)?.await
+                                        thread.into_async::<()>(opts)?.await
                                     };
                                     if let Err(e) = run_detached(&lua, run).await {
                                         tracing::warn!(plugin = %plugin, command = %command, error = %e, "command handler failed");

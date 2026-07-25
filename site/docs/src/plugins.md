@@ -18,12 +18,12 @@ Project settings override global ones. See [Configuration](./configuration.md).
 | Function | Registers |
 |----------|-----------|
 | `register_tool({ ... })` | A tool the model can call. Takes `name`, `kind`, `description`, `schema`, and a handler |
-| `register_command({ ... })` | A slash command shown in the palette. Takes `name`, `description`, optional `max_args`, and a handler |
+| `register_command({ ... })` | A slash command shown in the palette. Takes `name`, `description`, optional `nargs`, and a handler |
 | `register_prompt_hint({ ... })` | Extra context injected into the prompt based on a trigger |
 | `register_options({ ... })` | Declare the options your plugin accepts under `plugins.<name>` in `craft.setup`. Returns the user's values merged with your defaults |
 | `set_prompt({ ... })` | Override a singleton prompt slot (`identity` or `tone`). Takes `slot`, `content` (string or callback), and optional `prompt` |
 
-Slash commands accept a `max_args` option that caps how many whitespace-separated arguments they take. It defaults to `0` (no arguments) and `-1` means unlimited. With `max_args = 1` the command matches `/cmd foo` but stops matching on `/cmd foo bar`, sending the extra input to the model as a normal message. The handler always gets the raw argument string, not a list, so a plugin can use this to register a command with sub-commands.
+Slash commands accept an `nargs` option that controls how many whitespace-separated arguments they take, spelled like Neovim's `nargs`: `0` (the default), `1`, `"?"` (zero or one), `"*"` (any number), or `"+"` (one or more). Type more than allowed and the command quietly stops matching, sending the input to the model as a normal message. Only the upper bound is checked, so with `"+"` you still handle an empty `opts.args` yourself. The handler receives one `opts` table: `opts.args` is the raw argument string (whitespace kept, may be empty) and `opts.fargs` is the same string split into words.
 
 A minimal custom tool:
 

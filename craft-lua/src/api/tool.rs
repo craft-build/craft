@@ -30,6 +30,7 @@ const TOOL_NAME_MAX: usize = 64;
 const TOOL_HANDLER_RETURN_ERR: &str =
     "tool handler must return string or {output=string, is_error?=bool}";
 const TIMEOUT_PARSE_ERR: &str = "register_tool: 'timeout' must be a positive number, 0, or false";
+const NARGS_ERR: &str = r#"register_command: 'nargs' must be 0, 1, "?", "*", or "+""#;
 const MAX_HINT_CONTENT_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone)]
@@ -679,6 +680,21 @@ fn register_tool_from_lua(lua: &Lua, spec: &Table, pending: PendingTools) -> Lua
     Ok(())
 }
 
+/// Matching only needs an upper bound, so "+" and "*" both become MAX;
+/// minimums ("+" vs "*") are left for handlers to enforce.
+fn parse_nargs(spec: &Table) -> LuaResult<usize> {
+    match spec.get::<LuaValue>("nargs")? {
+        LuaValue::Nil | LuaValue::Integer(0) | LuaValue::Number(0.0) => Ok(0),
+        LuaValue::Integer(1) | LuaValue::Number(1.0) => Ok(1),
+        LuaValue::String(s) => match s.to_string_lossy().as_ref() {
+            "?" => Ok(1),
+            "*" | "+" => Ok(usize::MAX),
+            _ => Err(mlua::Error::runtime(NARGS_ERR)),
+        },
+        _ => Err(mlua::Error::runtime(NARGS_ERR)),
+    }
+}
+
 fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaResult<()> {
     let mut name: String = spec
         .get("name")
@@ -692,21 +708,7 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         name.insert(0, '/');
     }
     let description: String = spec.get("description").unwrap_or_default();
-    let max_args: i64 = spec
-        .get::<Option<i64>>("max_args")
-        .map_err(|_| mlua::Error::runtime("register_command: 'max_args' must be an integer"))?
-        .unwrap_or(0);
-    let max_args: usize = match max_args {
-        -1 => usize::MAX,
-        n if n >= 0 => n
-            .try_into()
-            .map_err(|_| mlua::Error::runtime("register_command: 'max_args' is too large"))?,
-        _ => {
-            return Err(mlua::Error::runtime(
-                "register_command: 'max_args' must be non-negative or -1 for unlimited",
-            ));
-        }
-    };
+    let max_args = parse_nargs(spec)?;
     let handler: Function = spec
         .get("handler")
         .map_err(|_| mlua::Error::runtime("register_command: missing 'handler'"))?;
