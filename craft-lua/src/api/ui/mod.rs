@@ -165,6 +165,40 @@ pub(crate) fn create_ui_table(
         })?,
     )?;
 
+    // Display width in terminal cells, matching ratatui. Wide glyphs (CJK,
+    // emoji) count as 2 cells instead of 1 codepoint.
+    t.set(
+        "display_width",
+        lua.create_function(|_lua, text: String| {
+            use unicode_width::UnicodeWidthStr;
+            Ok(text.width())
+        })?,
+    )?;
+
+    // Split at a display-cell boundary; head is never wider than max_width.
+    // A wide glyph in a too-narrow column yields an empty head, so callers
+    // needing forward progress force-take the first char themselves.
+    t.set(
+        "truncate_text",
+        lua.create_function(|lua, (text, max_width): (String, usize)| {
+            use unicode_width::UnicodeWidthChar;
+            let mut width = 0;
+            let mut idx = 0;
+            for (i, c) in text.char_indices() {
+                let w = UnicodeWidthChar::width(c).unwrap_or(0);
+                if width + w > max_width {
+                    break;
+                }
+                width += w;
+                idx = i + c.len_utf8();
+            }
+            let tbl = lua.create_table()?;
+            tbl.set("head", &text[..idx])?;
+            tbl.set("tail", &text[idx..])?;
+            Ok(tbl)
+        })?,
+    )?;
+
     if let Some(tx) = ui_action_tx {
         let flash_tx = tx.clone();
         t.set(
