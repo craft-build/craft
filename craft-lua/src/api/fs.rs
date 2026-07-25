@@ -411,14 +411,47 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
     let p = perms.clone();
     t.set(
         "rm",
-        lua.create_async_function(move |lua, path: String| {
+        lua.create_async_function(move |lua, (path, opts): (String, Option<Table>)| {
             let p = p.clone();
             async move {
                 if !p.is_allowed(FsWrite) {
                     return Err(crate::plugin_permissions::denied_error(FsWrite));
                 }
                 let abs = make_absolute(&path)?;
-                result_pair(&lua, tokio::fs::remove_file(&abs).await.map(|()| true))
+                let recursive = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("recursive").ok())
+                    .unwrap_or(false);
+                let force = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("force").ok())
+                    .unwrap_or(false);
+                let result = async {
+                    let meta = match tokio::fs::symlink_metadata(&abs).await {
+                        Ok(m) => m,
+                        Err(e) if force && e.kind() == ErrorKind::NotFound => {
+                            return Ok::<(), std::io::Error>(());
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    if meta.is_dir() {
+                        if recursive {
+                            tokio::fs::remove_dir_all(&abs).await
+                        } else {
+                            tokio::fs::remove_dir(&abs).await
+                        }
+                    } else {
+                        match tokio::fs::remove_file(&abs).await {
+                            Ok(()) => Ok(()),
+                            Err(e) if meta.file_type().is_symlink() => {
+                                tokio::fs::remove_dir(&abs).await.map_err(|_| e)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                }
+                .await;
+                result_pair(&lua, result.map(|()| true))
             }
         })?,
     )?;
@@ -936,6 +969,142 @@ mod tests {
             "should fail for nonexistent"
         );
         assert!(matches!(err, mlua::Value::String(_)));
+    }
+
+    #[tokio::test]
+    async fn rm_force_ignores_missing() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("ghost.txt");
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("force", true).unwrap();
+        let (ok, err): (mlua::Value, mlua::Value) =
+            rm.call_async((file.to_str().unwrap(), opts)).await.unwrap();
+        assert!(
+            matches!(ok, mlua::Value::Boolean(true)),
+            "force should suppress NotFound"
+        );
+        assert!(matches!(err, mlua::Value::Nil));
+    }
+
+    #[tokio::test]
+    async fn rm_force_ignores_missing_dir() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("never_existed");
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("recursive", true).unwrap();
+        opts.set("force", true).unwrap();
+        let (ok, err): (mlua::Value, mlua::Value) =
+            rm.call_async((dir.to_str().unwrap(), opts)).await.unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(matches!(err, mlua::Value::Nil));
+    }
+
+    #[tokio::test]
+    async fn rm_empty_dir_without_recursive() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("emptydir");
+        std::fs::create_dir(&dir).unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) =
+            rm.call_async(dir.to_str().unwrap()).await.unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn rm_nonempty_dir_without_recursive_fails() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("nonempty");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("child.txt"), "x").unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let (ok, err): (mlua::Value, mlua::Value) =
+            rm.call_async(dir.to_str().unwrap()).await.unwrap();
+        assert!(
+            matches!(ok, mlua::Value::Nil),
+            "should fail without recursive"
+        );
+        assert!(matches!(err, mlua::Value::String(_)));
+        assert!(dir.exists(), "non-empty dir should still exist");
+    }
+
+    #[tokio::test]
+    async fn rm_recursive_removes_tree() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("tree");
+        std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), "b").unwrap();
+        std::fs::write(dir.join("sub/deeper/c.txt"), "c").unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("recursive", true).unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) =
+            rm.call_async((dir.to_str().unwrap(), opts)).await.unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(!dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rm_symlink_removes_link_not_target() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.txt");
+        std::fs::write(&target, "data").unwrap();
+        let link = tmp.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) =
+            rm.call_async(link.to_str().unwrap()).await.unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(!link.exists(), "symlink should be removed");
+        assert!(target.exists(), "target should remain");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rm_recursive_symlink_to_dir_does_not_follow() {
+        let tmp = TempDir::new().unwrap();
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir_all(real_dir.join("sub")).unwrap();
+        std::fs::write(real_dir.join("sub/keep.txt"), "data").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let rm: mlua::Function = tbl.get("rm").unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("recursive", true).unwrap();
+        let (ok, _): (mlua::Value, mlua::Value) =
+            rm.call_async((link.to_str().unwrap(), opts)).await.unwrap();
+        assert!(matches!(ok, mlua::Value::Boolean(true)));
+        assert!(!link.exists(), "symlink should be removed");
+        assert!(real_dir.exists(), "target dir should remain");
+        assert!(
+            real_dir.join("sub/keep.txt").exists(),
+            "target dir contents should remain"
+        );
     }
 
     #[tokio::test]

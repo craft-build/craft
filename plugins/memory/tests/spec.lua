@@ -32,18 +32,7 @@ local function mktmpdir()
 end
 
 local function rmtree(dir)
-  local entries = craft.fs.dir(dir)
-  if entries then
-    for _, e in ipairs(entries) do
-      local p = craft.fs.joinpath(dir, e[1])
-      if e[2] == "directory" then
-        rmtree(p)
-      else
-        craft.fs.rm(p)
-      end
-    end
-  end
-  craft.fs.rm(dir)
+  craft.fs.rm(dir, { recursive = true })
 end
 
 case("fnv1a_known_vectors", function()
