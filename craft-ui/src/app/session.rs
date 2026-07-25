@@ -110,8 +110,11 @@ impl App {
 
     pub(super) fn reset_ui_chrome(&mut self) {
         self.chats.clear();
-        self.chats
-            .push(Chat::new("Main".into(), self.ui_config.clone()));
+        self.chats.push(Chat::new(
+            "Main".into(),
+            self.ui_config.clone(),
+            self.lua_event_handle.clone(),
+        ));
         self.active_chat = 0;
         self.chat_index.clear();
         self.status = super::Status::Idle;
@@ -153,9 +156,12 @@ impl App {
         for sa in std::mem::take(&mut self.state.session.meta.subagents) {
             let idx = self.chats.len();
             self.chat_index.insert(sa.tool_use_id.clone(), idx);
-            let mut chat = Chat::new(sa.name, self.ui_config.clone());
+            let mut chat = Chat::new(
+                sa.name,
+                self.ui_config.clone(),
+                self.lua_event_handle.clone(),
+            );
             chat.model_id = sa.model;
-            chat.set_lua_event_handle(self.lua_event_handle.clone());
             chat.set_restore_event_tx(self.restore_event_tx.clone());
             if let Some(messages) = self.state.session.subagent_messages.get(&sa.tool_use_id) {
                 let (display, items) = history_to_display(
@@ -170,11 +176,12 @@ impl App {
             self.chats.push(chat);
         }
 
-        if let Some(eh) = &self.lua_event_handle {
-            eh.send_restore_complete(restoring);
-        } else {
+        let eh = &self.lua_event_handle;
+        if eh.is_disconnected() {
             self.restoring
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            eh.send_restore_complete(restoring);
         }
     }
 
@@ -192,9 +199,10 @@ impl App {
     }
 
     fn fire_restore_items(&self, items: Vec<craft_lua::RestoreItem>) {
-        let (Some(eh), Some(tx)) = (&self.lua_event_handle, &self.restore_event_tx) else {
+        let Some(tx) = &self.restore_event_tx else {
             return;
         };
+        let eh = &self.lua_event_handle;
         let theme_gen = crate::theme::generation();
         for mut item in items {
             item.theme_gen = Some(theme_gen);
@@ -211,9 +219,8 @@ impl App {
 
     pub(super) fn reset_session(&mut self) -> Vec<Action> {
         self.reset_ui_chrome();
-        if let Some(ref handle) = self.lua_event_handle {
-            handle.fire_autocmd("SessionReset", serde_json::json!({}));
-        }
+        self.lua_event_handle
+            .fire_autocmd("SessionReset", serde_json::json!({}));
         self.state.token_usage = TokenUsage::default();
         self.state.context_size = 0;
         self.state.plan = PlanState::None;
@@ -221,9 +228,8 @@ impl App {
             self.enter_plan();
         }
         self.state.session = AppSession::new(&self.state.session.model, &self.state.session.cwd);
-        if let Some(ref handle) = self.lua_event_handle {
-            handle.fire_autocmd("SessionStart", serde_json::json!({}));
-        }
+        self.lua_event_handle
+            .fire_autocmd("SessionStart", serde_json::json!({}));
         vec![Action::NewSession]
     }
 

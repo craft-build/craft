@@ -13,7 +13,7 @@ use craft_storage::flow::FlowStore;
 
 use crate::setup;
 
-pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_jit: bool) -> Result<()> {
+pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_plugins: bool, no_jit: bool) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     craft_providers::model_registry::load_from_storage(&storage);
 
@@ -31,7 +31,7 @@ pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_jit: bool) -> Result<()> {
             .context("initialize lua plugin host")?;
 
     let raw_config = plugin_host
-        .load_init_files(&cwd)
+        .load_init_files_or_skip(no_plugins, &cwd)
         .context("load init.lua files")?;
 
     let mut config = raw_config
@@ -51,9 +51,9 @@ pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_jit: bool) -> Result<()> {
         .load_builtins(&config.plugins)
         .context("load builtin plugins")?;
 
-    if let Some(handle) = plugin_host.event_handle().as_ref() {
-        handle.set_sandbox_config(config.sandbox.clone());
-    }
+    plugin_host
+        .event_handle()
+        .set_sandbox_config(config.sandbox.clone());
 
     let timeouts = craft_providers::Timeouts {
         connect: config.provider.connect_timeout,
@@ -68,10 +68,7 @@ pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_jit: bool) -> Result<()> {
 
     let (mcp_config, _mcp_config_errors) = craft_agent::mcp::config::load_config(&cwd);
 
-    let prompt_slots = plugin_host
-        .event_handle()
-        .map(|h| h.collect_prompt_slots())
-        .unwrap_or_default();
+    let prompt_slots = plugin_host.event_handle().collect_prompt_slots();
 
     let flow_store = Arc::new(FlowStore::new(&storage).context("init flow store")?);
 

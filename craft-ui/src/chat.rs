@@ -60,14 +60,18 @@ pub struct Chat {
 }
 
 impl Chat {
-    pub fn new(name: String, ui_config: UiConfig) -> Self {
+    pub fn new(
+        name: String,
+        ui_config: UiConfig,
+        lua_event_handle: craft_lua::EventHandle,
+    ) -> Self {
         Self {
             name,
             token_usage: TokenUsage::default(),
             context_size: 0,
             model_id: None,
             pending_turn_usage: None,
-            messages_panel: MessagesPanel::new(ui_config),
+            messages_panel: MessagesPanel::new(ui_config, lua_event_handle),
             finished: false,
         }
     }
@@ -276,10 +280,6 @@ impl Chat {
 
     pub fn handle_click(&mut self, row: u16, area: Rect) {
         self.messages_panel.handle_click(row, area);
-    }
-
-    pub fn set_lua_event_handle(&mut self, handle: Option<craft_lua::EventHandle>) {
-        self.messages_panel.set_lua_event_handle(handle);
     }
 
     pub fn set_restore_event_tx(&mut self, tx: Option<craft_agent::EventSender>) {
@@ -671,7 +671,11 @@ mod tests {
 
     #[test]
     fn tool_lifecycle() {
-        let mut chat = Chat::new("Main".into(), UiConfig::default());
+        let mut chat = Chat::new(
+            "Main".into(),
+            UiConfig::default(),
+            craft_lua::EventHandle::disconnected_for_test(),
+        );
         chat.handle_event(tool_start("t1", "bash"), None);
         assert_eq!(chat.in_progress_count(), 1);
 
@@ -684,7 +688,11 @@ mod tests {
 
     #[test]
     fn plan_write_renders_file_content() {
-        let mut chat = Chat::new("Main".into(), UiConfig::default());
+        let mut chat = Chat::new(
+            "Main".into(),
+            UiConfig::default(),
+            craft_lua::EventHandle::disconnected_for_test(),
+        );
         let dir = tempfile::tempdir().unwrap();
         let plan_path = dir.path().join("plan.md");
         std::fs::write(&plan_path, "# My Plan\n\n- Step 1").unwrap();
@@ -703,7 +711,11 @@ mod tests {
 
     #[test]
     fn plan_write_ignores_different_path() {
-        let mut chat = Chat::new("Main".into(), UiConfig::default());
+        let mut chat = Chat::new(
+            "Main".into(),
+            UiConfig::default(),
+            craft_lua::EventHandle::disconnected_for_test(),
+        );
         let plan_path = Path::new("/plans/123.md");
         chat.handle_event(tool_start("w1", "write"), Some(plan_path));
         chat.handle_event(
@@ -715,7 +727,11 @@ mod tests {
 
     #[test]
     fn plan_edit_shows_path_only() {
-        let mut chat = Chat::new("Main".into(), UiConfig::default());
+        let mut chat = Chat::new(
+            "Main".into(),
+            UiConfig::default(),
+            craft_lua::EventHandle::disconnected_for_test(),
+        );
         let dir = tempfile::tempdir().unwrap();
         let plan_path = dir.path().join("plan.md");
         std::fs::write(&plan_path, "# My Plan\n\n- Step 1").unwrap();
@@ -999,7 +1015,11 @@ mod tests {
 
     #[test]
     fn compaction_done_flushes_streaming_buffers() {
-        let mut chat = Chat::new("Main".into(), UiConfig::default());
+        let mut chat = Chat::new(
+            "Main".into(),
+            UiConfig::default(),
+            craft_lua::EventHandle::disconnected_for_test(),
+        );
 
         chat.handle_event(AgentEvent::AutoCompacting, None);
         assert_eq!(chat.message_count(), 1);

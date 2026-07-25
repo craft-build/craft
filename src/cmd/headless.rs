@@ -63,15 +63,11 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let plugin_host = if opts.no_plugins {
-        PluginHost::disabled()
-    } else {
-        PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
-            .context("initialize lua plugin host")?
-    };
+    let plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
+        .context("initialize lua plugin host")?;
 
     let raw_config = plugin_host
-        .load_init_files(&cwd)
+        .load_init_files_or_skip(opts.no_plugins, &cwd)
         .context("load init.lua files")?;
     let mut config = raw_config
         .unwrap_or_default()
@@ -86,9 +82,9 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
     }
     config.validate()?;
 
-    if let Some(handle) = plugin_host.event_handle().as_ref() {
-        handle.set_sandbox_config(config.sandbox.clone());
-    }
+    plugin_host
+        .event_handle()
+        .set_sandbox_config(config.sandbox.clone());
 
     let timeouts = Timeouts {
         connect: config.provider.connect_timeout,
@@ -103,11 +99,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
     setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
 
-    let prompt_slots = plugin_host
-        .event_handle()
-        .as_ref()
-        .map(|h| h.collect_prompt_slots())
-        .unwrap_or_default();
+    let prompt_slots = plugin_host.event_handle().collect_prompt_slots();
 
     let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd).await;
     if !mcp_config_errors.is_empty() {

@@ -82,15 +82,11 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
 
     load_env_files(&cwd);
 
-    let plugin_host = if args.no_plugins {
-        PluginHost::disabled()
-    } else {
-        PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
-            .context("initialize lua plugin host")?
-    };
+    let plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
+        .context("initialize lua plugin host")?;
 
     let raw_config = plugin_host
-        .load_init_files(&cwd)
+        .load_init_files_or_skip(args.no_plugins, &cwd)
         .context("load init.lua files")?;
 
     let mut config = raw_config
@@ -106,9 +102,9 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
     }
     config.validate()?;
 
-    if let Some(handle) = plugin_host.event_handle().as_ref() {
-        handle.set_sandbox_config(config.sandbox.clone());
-    }
+    plugin_host
+        .event_handle()
+        .set_sandbox_config(config.sandbox.clone());
 
     let timeouts = craft_providers::Timeouts {
         connect: config.provider.connect_timeout,

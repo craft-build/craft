@@ -110,8 +110,8 @@ pub struct EventLoopParams {
     pub lua_command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,
     pub hint_reader: HintReader,
-    pub ui_action_rx: Option<flume::Receiver<UiAction>>,
-    pub lua_event_handle: Option<EventHandle>,
+    pub ui_action_rx: flume::Receiver<UiAction>,
+    pub lua_event_handle: EventHandle,
     pub provider: Arc<dyn Provider>,
     pub mcp_handle: Option<McpHandle>,
     pub mcp_config_errors: McpConfigErrors,
@@ -202,7 +202,7 @@ struct SpawnCx {
     lua_command_reader: LuaCommandReader,
     keymap_reader: KeymapReader,
     hint_reader: HintReader,
-    lua_event_handle: Option<EventHandle>,
+    lua_event_handle: EventHandle,
     mcp_handle: Option<McpHandle>,
     mcp_config_errors: McpConfigErrors,
     /// Shared across runtimes: model resolution is a global concept, and the
@@ -257,10 +257,10 @@ impl SpawnCx {
             self.input_history_size,
             Arc::clone(&permissions),
             Arc::clone(&self.custom_commands),
+            self.lua_event_handle.clone(),
             self.config.repomap.enabled,
             self.watch_enabled,
         );
-        app.lua_event_handle = self.lua_event_handle.clone();
         app.flow_parallel_chunks = self.config.flow.parallel_chunks;
         handles.apply_to_app(&mut app);
         app.propagate_lua_handles();
@@ -303,7 +303,7 @@ pub(crate) struct EventLoop<'t> {
     _embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
-    ui_action_rx: Option<flume::Receiver<UiAction>>,
+    ui_action_rx: flume::Receiver<UiAction>,
     _model_fetch_task: tokio::task::JoinHandle<()>,
 }
 
@@ -659,12 +659,8 @@ impl<'t> EventLoop<'t> {
             Ok(ev) => Some(Wake::Input(ev)),
             Err(_) => Some(Wake::InputGone),
         });
-        if let Some(rx) = self
-            .ui_action_rx
-            .as_ref()
-            .filter(|rx| !rx.is_disconnected())
-        {
-            sel = sel.recv(rx, |res| res.ok().map(Wake::Ui));
+        if !self.ui_action_rx.is_disconnected() {
+            sel = sel.recv(&self.ui_action_rx, |res| res.ok().map(Wake::Ui));
         }
         sel = sel.recv(&self.warn_rx, |res| res.ok().map(|w| Wake::Warn(None, w)));
         for (i, rt) in self.sessions.iter().enumerate() {
@@ -821,9 +817,7 @@ impl<'t> EventLoop<'t> {
     }
 
     fn emit_status_changes(&mut self) {
-        let Some(handle) = self.ctx.lua_event_handle.as_ref() else {
-            return;
-        };
+        let handle = &self.ctx.lua_event_handle;
         for (i, rt) in self.sessions.iter_mut().enumerate() {
             let status = SessionStatus::of(&rt.app);
             if status == rt.last_status {

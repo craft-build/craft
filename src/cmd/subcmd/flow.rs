@@ -124,10 +124,7 @@ async fn run_pipeline(
     // closing the gap where the pipeline previously only ran under the
     // deterministic provider-free DefaultRunner. The event channel surfaces
     // stage subagent events for `--print --output-format stream-json` consumers.
-    let prompt_slots = plugin_host
-        .event_handle()
-        .map(|h| h.collect_prompt_slots())
-        .unwrap_or_default();
+    let prompt_slots = plugin_host.event_handle().collect_prompt_slots();
     let timeouts = craft_providers::Timeouts {
         connect: config.provider.connect_timeout,
         low_speed: config.provider.low_speed_timeout,

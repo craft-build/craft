@@ -46,7 +46,7 @@ pub(super) struct AgentLoop {
     queue: Arc<QueueReceiver>,
     session_id: Option<SessionRef>,
     timeouts: craft_providers::Timeouts,
-    lua_handle: Option<EventHandle>,
+    lua_handle: EventHandle,
     btw_system: Arc<ArcSwap<String>>,
     compression: craft_config::CompressionConfig,
     doom: SharedDoomTracker,
@@ -73,7 +73,7 @@ impl AgentLoop {
         init_cancel: CancelToken,
         session_id: Option<SessionRef>,
         timeouts: craft_providers::Timeouts,
-        lua_handle: Option<EventHandle>,
+        lua_handle: EventHandle,
         btw_system: Arc<ArcSwap<String>>,
         compression: craft_config::CompressionConfig,
         subagent_cancels: Arc<CancelMap<String>>,
@@ -227,10 +227,7 @@ impl AgentLoop {
             }
         }
 
-        let prompt_slots = match self.lua_handle.as_ref() {
-            Some(h) => h.collect_prompt_slots_async().await,
-            None => craft_agent::prompt::ResolvedSlots::default(),
-        };
+        let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
         let model = self.model_slot.load();
         let compact = self
             .config
@@ -281,10 +278,8 @@ impl AgentLoop {
                     excluded: Vec::new(),
                     mcp: self.mcp_handle.clone(),
                 }),
-                hooks: self
-                    .lua_handle
-                    .as_ref()
-                    .map(|h| craft_lua::LuaHooks::new(h.clone()) as Arc<dyn craft_agent::Hooks>),
+                hooks: Some(craft_lua::LuaHooks::new(self.lua_handle.clone())
+                    as Arc<dyn craft_agent::Hooks>),
             },
         )
         .with_loaded_instructions(self.instructions.loaded.clone())
@@ -345,10 +340,7 @@ impl AgentLoop {
                 tool: "flow".into(),
                 message: "flow mode without a workstream id".into(),
             })?;
-        let prompt_slots = match self.lua_handle.as_ref() {
-            Some(h) => h.collect_prompt_slots_async().await,
-            None => craft_agent::prompt::ResolvedSlots::default(),
-        };
+        let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
         let cwd = self.vars.apply("{cwd}").into_owned();
         let project_id = craft_flow::project_id(std::path::Path::new(&cwd));
         // Build the embedder once for the whole run: it feeds both the

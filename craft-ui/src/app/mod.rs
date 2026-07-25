@@ -204,7 +204,7 @@ pub struct App {
     pub(crate) ui_config: UiConfig,
     pub(crate) keybindings: Arc<KeybindingResolver>,
     pub(crate) permissions: Arc<PermissionManager>,
-    pub(crate) lua_event_handle: Option<EventHandle>,
+    pub(crate) lua_event_handle: EventHandle,
     pub(super) keymap_reader: KeymapReader,
     pub(super) hint_reader: HintReader,
     subagent_answers: HashMap<String, flume::Sender<String>>,
@@ -258,6 +258,7 @@ impl App {
         input_history_size: usize,
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[craft_agent::command::CustomCommand]>,
+        lua_event_handle: EventHandle,
         repomap_enabled: bool,
         watch_enabled: bool,
     ) -> Self {
@@ -273,7 +274,11 @@ impl App {
             Arc::new(resolver)
         };
         let mut app = Self {
-            chats: vec![Chat::new("Main".into(), ui_config.clone())],
+            chats: vec![Chat::new(
+                "Main".into(),
+                ui_config.clone(),
+                lua_event_handle.clone(),
+            )],
             active_chat: 0,
             chat_index: HashMap::new(),
             input_box: InputBox::new(
@@ -335,7 +340,7 @@ impl App {
             ui_config,
             keybindings,
             permissions,
-            lua_event_handle: None,
+            lua_event_handle,
             keymap_reader,
             hint_reader,
             subagent_answers: HashMap::new(),
@@ -364,10 +369,8 @@ impl App {
     }
 
     pub(crate) fn propagate_lua_handles(&mut self) {
-        let handle = self.lua_event_handle.clone();
         let tx = self.restore_event_tx.clone();
         for chat in &mut self.chats {
-            chat.set_lua_event_handle(handle.clone());
             chat.set_restore_event_tx(tx.clone());
         }
     }
@@ -378,14 +381,12 @@ impl App {
             .iter_mut()
             .flat_map(|c| c.drain_pending_restores())
             .collect();
-        let Some(handle) = &self.lua_event_handle else {
-            return;
-        };
         let Some(event_tx) = &self.restore_event_tx else {
             return;
         };
         for item in items {
-            handle.request_restore(item, event_tx.clone());
+            self.lua_event_handle
+                .request_restore(item, event_tx.clone());
         }
     }
 
@@ -1083,8 +1084,7 @@ impl App {
         for entry in &snap.entries {
             if entry.key == key.code
                 && entry.modifiers == key.modifiers
-                && let Some(ref handle) = self.lua_event_handle
-                && handle.run_keybind_callback(entry.id)
+                && self.lua_event_handle.run_keybind_callback(entry.id)
             {
                 return true;
             }
@@ -1511,9 +1511,8 @@ impl App {
                     self.chat_index.clear();
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
-                    if let Some(ref handle) = self.lua_event_handle {
-                        handle.fire_autocmd("TurnEnd", serde_json::json!({}));
-                    }
+                    self.lua_event_handle
+                        .fire_autocmd("TurnEnd", serde_json::json!({}));
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Success;
                     }
@@ -1528,9 +1527,8 @@ impl App {
                     for chat in &mut self.chats {
                         chat.fail_in_progress_with_message(message.clone());
                     }
-                    if let Some(ref handle) = self.lua_event_handle {
-                        handle.fire_autocmd("TurnError", serde_json::json!({ "message": message }));
-                    }
+                    self.lua_event_handle
+                        .fire_autocmd("TurnError", serde_json::json!({ "message": message }));
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Error;
                     }
@@ -1558,9 +1556,12 @@ impl App {
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
         }
-        let mut chat = Chat::new(subagent.name.clone(), self.ui_config.clone());
+        let mut chat = Chat::new(
+            subagent.name.clone(),
+            self.ui_config.clone(),
+            self.lua_event_handle.clone(),
+        );
         chat.model_id = subagent.model.clone();
-        chat.set_lua_event_handle(self.lua_event_handle.clone());
         chat.set_restore_event_tx(self.restore_event_tx.clone());
         if let Some(ref prompt) = subagent.prompt {
             chat.push_user_message(prompt);
@@ -1651,9 +1652,7 @@ impl App {
                 } else {
                     craft_config::SandboxConfig::default()
                 };
-                if let Some(handle) = &self.lua_event_handle {
-                    handle.set_sandbox_config(sandbox_cfg);
-                }
+                self.lua_event_handle.set_sandbox_config(sandbox_cfg);
                 let msg = if enabled {
                     "YOLO mode enabled"
                 } else {
@@ -1873,10 +1872,11 @@ impl App {
         let Some(lua_cmd) = self.command_palette.find_lua_command(name) else {
             return;
         };
-        let Some(handle) = &self.lua_event_handle else {
-            return;
-        };
-        handle.run_command(Arc::clone(&lua_cmd.plugin), Arc::clone(&lua_cmd.name), args);
+        self.lua_event_handle.run_command(
+            Arc::clone(&lua_cmd.plugin),
+            Arc::clone(&lua_cmd.name),
+            args,
+        );
     }
 
     fn execute_mcp_prompt(&mut self, name: &str, args: &str) -> Vec<Action> {

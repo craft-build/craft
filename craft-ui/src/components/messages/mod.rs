@@ -83,7 +83,7 @@ pub struct MessagesPanel {
     tool_output_lines: ToolOutputLines,
     render_hints: RenderHintsRegistry,
     pending_restores: Vec<RestoreItem>,
-    lua_event_handle: Option<EventHandle>,
+    lua_event_handle: EventHandle,
     restore_event_tx: Option<craft_agent::EventSender>,
     image_picker: crate::image_render::ImagePicker,
     show_thinking: bool,
@@ -92,7 +92,7 @@ pub struct MessagesPanel {
 }
 
 impl MessagesPanel {
-    pub fn new(ui_config: UiConfig) -> Self {
+    pub fn new(ui_config: UiConfig, lua_event_handle: EventHandle) -> Self {
         let thinking = thinking_style();
         let assistant = assistant_style();
         let ms = ui_config.typewriter_ms_per_char;
@@ -129,7 +129,7 @@ impl MessagesPanel {
             tool_output_lines: ui_config.tool_output_lines,
             render_hints: RenderHintsRegistry::new(),
             pending_restores: Vec::new(),
-            lua_event_handle: None,
+            lua_event_handle,
             restore_event_tx: None,
             image_picker: crate::image_render::ImagePicker::new(),
             show_thinking: ui_config.show_thinking,
@@ -158,10 +158,6 @@ impl MessagesPanel {
         self.live_bufs.clear();
         self.highlight_segment = None;
         self.thinking_collapsed = !self.show_thinking;
-    }
-
-    pub fn set_lua_event_handle(&mut self, handle: Option<EventHandle>) {
-        self.lua_event_handle = handle;
     }
 
     pub fn set_restore_event_tx(&mut self, tx: Option<craft_agent::EventSender>) {
@@ -782,10 +778,8 @@ impl MessagesPanel {
             }
             if let Some(mut item) = self.lua_restore_item(tool_id) {
                 item.expanded = expanded;
-                if let (Some(eh), Some(tx)) =
-                    (self.lua_event_handle.clone(), self.restore_event_tx.clone())
-                {
-                    eh.request_restore(item, tx);
+                if let Some(tx) = self.restore_event_tx.clone() {
+                    self.lua_event_handle.request_restore(item, tx);
                 }
             }
             return true;

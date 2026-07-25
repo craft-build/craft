@@ -622,14 +622,12 @@ pub async fn outline(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut host = if no_plugins {
-        PluginHost::disabled()
-    } else {
-        PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !no_jit)
-            .context("initialize lua plugin host")?
-    };
+    let mut host = PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !no_jit)
+        .context("initialize lua plugin host")?;
 
-    let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
+    let raw_config = host
+        .load_init_files_or_skip(no_plugins, &cwd)
+        .context("load init.lua files")?;
 
     let mut config = raw_config
         .unwrap_or_default()
@@ -693,6 +691,7 @@ pub fn prompt(
     plan: bool,
     tools: bool,
     names: bool,
+    no_plugins: bool,
     no_jit: bool,
 ) -> Result<()> {
     use crate::cli::PromptVariant;
@@ -713,7 +712,9 @@ pub fn prompt(
     let reg = ToolRegistry::native_arc();
     let mut host = PluginHost::with_jit(Arc::clone(reg), None, !no_jit)
         .context("initialize lua plugin host")?;
-    let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
+    let raw_config = host
+        .load_init_files_or_skip(no_plugins, &cwd)
+        .context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
         .into_config(false)
@@ -743,10 +744,7 @@ pub fn prompt(
 
     let cwd_str = cwd.to_string_lossy();
     let instructions = load_instruction_text(&cwd_str);
-    let slots = host
-        .event_handle()
-        .map(|h| h.collect_prompt_slots())
-        .unwrap_or_default();
+    let slots = host.event_handle().collect_prompt_slots();
 
     let model = StateDir::resolve()
         .ok()

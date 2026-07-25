@@ -71,7 +71,7 @@ impl AgentHandles {
         permissions: &Arc<PermissionManager>,
         session_id: Option<SessionRef>,
         timeouts: craft_providers::Timeouts,
-        lua_handle: Option<EventHandle>,
+        lua_handle: EventHandle,
         mcp_handle: Option<McpHandle>,
         mcp_config_errors: McpConfigErrors,
         compression: craft_config::CompressionConfig,
@@ -149,7 +149,7 @@ impl AgentHandles {
         tool_output_lines: ToolOutputLines,
         permissions: &Arc<PermissionManager>,
         app: &mut App,
-        lua_handle: Option<EventHandle>,
+        lua_handle: EventHandle,
     ) {
         // The output channel survives the respawn, so this bump is the only
         // thing that makes the old loop's in-flight envelopes stale. It lives
@@ -250,7 +250,7 @@ fn spawn_agent_internal(
     mcp_config_errors: McpConfigErrors,
     session_id: Option<SessionRef>,
     timeouts: craft_providers::Timeouts,
-    lua_handle: Option<EventHandle>,
+    lua_handle: EventHandle,
     compression: craft_config::CompressionConfig,
     flow_store: std::sync::Arc<craft_storage::flow::FlowStore>,
     embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
@@ -396,7 +396,7 @@ mod tests {
             &permissions,
             None,
             craft_providers::Timeouts::default(),
-            None,
+            EventHandle::disconnected_for_test(),
             None,
             McpConfigErrors::new(PathBuf::new()),
             craft_config::CompressionConfig::default(),
@@ -420,7 +420,7 @@ mod tests {
             ToolOutputLines::default(),
             permissions,
             app,
-            None,
+            EventHandle::disconnected_for_test(),
         );
     }
 

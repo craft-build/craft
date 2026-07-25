@@ -55,7 +55,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             MigrateAction::Xdg => migrate::xdg()?,
         },
         Some(Command::Acp { yolo, cwd }) => {
-            subcmd::acp::run(yolo, cwd, cli.no_jit).await?;
+            subcmd::acp::run(yolo, cwd, cli.no_plugins, cli.no_jit).await?;
         }
         Some(Command::Run(args)) => {
             subcmd::run::run(args).await?;
@@ -98,7 +98,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             tools,
             names,
         }) => {
-            subcmd::prompt(&variant, plan, tools, names, cli.no_jit)?;
+            subcmd::prompt(&variant, plan, tools, names, cli.no_plugins, cli.no_jit)?;
         }
         None => {
             tui::run(cli).await?;

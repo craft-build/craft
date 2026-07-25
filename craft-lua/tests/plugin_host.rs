@@ -765,8 +765,8 @@ async fn job_callbacks_fire_while_command_handler_parked() {
         "#,
     )
     .unwrap();
-    let rx = host.ui_action_rx().expect("ui action rx available");
-    let handle = host.event_handle().expect("event handle available");
+    let rx = host.ui_action_rx();
+    let handle = host.event_handle();
     handle.run_command(Arc::from("p"), Arc::from("/stream"), String::new());
 
     let action = rx
@@ -1186,9 +1186,8 @@ fn command_handler_receives_args_and_fargs(args: &str, expected_flash: &str) {
         "#,
     )
     .unwrap();
-    let rx = host.ui_action_rx().expect("ui action rx available");
+    let rx = host.ui_action_rx();
     host.event_handle()
-        .expect("event handle available")
         .run_command(Arc::from("p"), Arc::from("/echo"), args.to_owned());
 
     let action = rx
@@ -1356,7 +1355,7 @@ async fn bash_timeout_round_trip() {
     let err = exec_tool(&reg, "bash", input.clone()).await.unwrap_err();
     assert_eq!(err, BASH_TIMEOUT_MSG);
 
-    let handle = host.event_handle().expect("event handle available");
+    let handle = host.event_handle();
     let (tx, rx) = flume::unbounded();
     let event_tx = craft_agent::EventSender::new(tx, 0);
     handle.request_restore(
@@ -1409,7 +1408,7 @@ async fn memory_write_restore_rebuilds_body_from_input_content() {
     let summary = "wrote n.md (1 lines)";
     let input = serde_json::json!({"command": "write", "path": "n.md", "content": "gamma"});
 
-    let handle = host.event_handle().expect("event handle available");
+    let handle = host.event_handle();
     let (tx, rx) = flume::unbounded();
     handle.request_restore(
         craft_lua::RestoreItem {
@@ -1450,7 +1449,7 @@ async fn memory_write_restore_rebuilds_body_from_input_content() {
 async fn restore_snapshot_text(src: &str, tool: &str, expanded: bool) -> String {
     let host = PluginHost::new(fresh_registry(), None).unwrap();
     host.load_source("restore_plugin", src).unwrap();
-    let handle = host.event_handle().expect("event handle available");
+    let handle = host.event_handle();
     let (tx, rx) = flume::unbounded();
 
     handle.request_restore(

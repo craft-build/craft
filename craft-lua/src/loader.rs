@@ -83,19 +83,16 @@ static BUNDLED_DIRS: LazyLock<&'static [&'static Dir<'static>]> = LazyLock::new(
 });
 
 pub struct PluginHost {
-    inner: Option<LuaThread>,
+    inner: LuaThread,
 }
 
 impl Drop for PluginHost {
     fn drop(&mut self) {
-        let Some(ref mut inner) = self.inner else {
+        let Some(handle) = self.inner.join.take() else {
             return;
         };
-        let Some(handle) = inner.join.take() else {
-            return;
-        };
-        inner.shutdown.store(true, Ordering::Release);
-        let _ = inner.tx.send(Request::Shutdown);
+        self.inner.shutdown.store(true, Ordering::Release);
+        let _ = self.inner.tx.send(Request::Shutdown);
         let (done_tx, done_rx) = flume::bounded(1);
         std::thread::spawn(move || {
             let _ = done_tx.send(handle.join().is_err());
@@ -134,11 +131,7 @@ impl PluginHost {
         jit: bool,
     ) -> Result<Self, PluginError> {
         let lua = runtime::spawn(registry, *BUNDLED_DIRS, embed_tx, terminal_backend, jit)?;
-        Ok(Self { inner: Some(lua) })
-    }
-
-    pub fn disabled() -> Self {
-        Self { inner: None }
+        Ok(Self { inner: lua })
     }
 
     /// Stop the Lua thread from taking new work without joining it, so the
@@ -149,11 +142,9 @@ impl PluginHost {
     /// makes every later host call fail right at the send; `&mut self`
     /// rules out a call racing the swap. `Drop` still joins the thread.
     pub fn begin_shutdown(&mut self) {
-        if let Some(ref mut inner) = self.inner {
-            inner.shutdown.store(true, Ordering::Release);
-            let _ = inner.tx.send(Request::Shutdown);
-            inner.tx = flume::unbounded().0;
-        }
+        self.inner.shutdown.store(true, Ordering::Release);
+        let _ = self.inner.tx.send(Request::Shutdown);
+        self.inner.tx = flume::unbounded().0;
     }
 
     /// Boots the runtime and loads every default bundled plugin into `registry`.
@@ -166,9 +157,6 @@ impl PluginHost {
     }
 
     pub fn load_init_files(&self, cwd: &Path) -> Result<Option<RawConfig>, PluginError> {
-        if self.inner.is_none() {
-            return Ok(None);
-        }
         let mut merged: Option<RawConfig> = None;
 
         for global_dir in craft_config::global_config_dirs() {
@@ -181,6 +169,21 @@ impl PluginHost {
         )?;
 
         Ok(merged)
+    }
+
+    /// `--no-plugins` recovery path: skip every user `init.lua` while the
+    /// host and builtin plugins stay live. Centralized so every entry point
+    /// (TUI, outline, acp, prompt, headless, desktop) honors the flag
+    /// identically.
+    pub fn load_init_files_or_skip(
+        &self,
+        no_plugins: bool,
+        cwd: &Path,
+    ) -> Result<Option<RawConfig>, PluginError> {
+        if no_plugins {
+            return Ok(None);
+        }
+        self.load_init_files(cwd)
     }
 
     fn run_init_file(
@@ -207,9 +210,6 @@ impl PluginHost {
     }
 
     pub fn load_builtins(&mut self, config: &PluginsConfig) -> Result<(), PluginError> {
-        if self.inner.is_none() {
-            return Ok(());
-        }
         for (plugin, opts) in &config.opts {
             let keys: Vec<&str> = opts.keys().map(String::as_str).collect();
             if !BUNDLED_PLUGINS.iter().any(|p| p.name == plugin.as_str()) {
@@ -261,26 +261,18 @@ impl PluginHost {
         Ok(())
     }
 
-    fn tx(&self) -> Result<&flume::Sender<Request>, PluginError> {
-        self.inner
-            .as_ref()
-            .map(|r| &r.tx)
-            .ok_or(PluginError::HostDead)
-    }
-
     pub fn set_terminal_backend(
         &self,
         backend: Arc<dyn TerminalBackend>,
     ) -> Result<(), PluginError> {
-        let tx = self.tx()?;
-        tx.send(Request::SetTerminalBackend { backend })
+        self.inner
+            .tx
+            .send(Request::SetTerminalBackend { backend })
             .map_err(|_| PluginError::HostDead)
     }
 
     pub fn set_sandbox_config(&self, config: craft_config::SandboxConfig) {
-        if let Ok(tx) = self.tx() {
-            let _ = tx.send(Request::SetSandboxConfig { config });
-        }
+        let _ = self.inner.tx.send(Request::SetSandboxConfig { config });
     }
 
     fn send_load(
@@ -291,26 +283,28 @@ impl PluginHost {
         permissions: PluginPermissions,
         opts: PluginOpts,
     ) -> Result<(), PluginError> {
-        let tx = self.tx()?;
         let (reply_tx, reply_rx) = flume::bounded(1);
-        tx.send(Request::LoadSource {
-            name,
-            source,
-            plugin_dir,
-            permissions,
-            opts,
-            reply: reply_tx,
-        })
-        .map_err(|_| PluginError::HostDead)?;
+        self.inner
+            .tx
+            .send(Request::LoadSource {
+                name,
+                source,
+                plugin_dir,
+                permissions,
+                opts,
+                reply: reply_tx,
+            })
+            .map_err(|_| PluginError::HostDead)?;
         reply_rx.recv().map_err(|_| PluginError::HostDead)?
     }
 
     /// Option specs declared by loaded plugins via `craft.api.register_options`,
     /// keyed by plugin name. Used by docgen.
     pub fn plugin_options(&self) -> Result<PluginOptionSpecs, PluginError> {
-        let tx = self.tx()?;
         let (reply_tx, reply_rx) = flume::bounded(1);
-        tx.send(Request::CollectPluginOptions { reply: reply_tx })
+        self.inner
+            .tx
+            .send(Request::CollectPluginOptions { reply: reply_tx })
             .map_err(|_| PluginError::HostDead)?;
         reply_rx.recv().map_err(|_| PluginError::HostDead)
     }
@@ -321,26 +315,28 @@ impl PluginHost {
         source_name: String,
         plugin_dir: Option<PathBuf>,
     ) -> Result<Option<RawConfig>, PluginError> {
-        let tx = self.tx()?;
         let (reply_tx, reply_rx) = flume::bounded(1);
-        tx.send(Request::RunInitLua {
-            source,
-            source_name,
-            plugin_dir,
-            reply: reply_tx,
-        })
-        .map_err(|_| PluginError::HostDead)?;
+        self.inner
+            .tx
+            .send(Request::RunInitLua {
+                source,
+                source_name,
+                plugin_dir,
+                reply: reply_tx,
+            })
+            .map_err(|_| PluginError::HostDead)?;
         reply_rx.recv().map_err(|_| PluginError::HostDead)?
     }
 
     pub fn unload(&self, plugin: &str) -> Result<(), PluginError> {
-        let tx = self.tx()?;
         let (reply_tx, reply_rx) = flume::bounded(1);
-        tx.send(Request::ClearPlugin {
-            plugin: Arc::from(plugin),
-            reply: reply_tx,
-        })
-        .map_err(|_| PluginError::HostDead)?;
+        self.inner
+            .tx
+            .send(Request::ClearPlugin {
+                plugin: Arc::from(plugin),
+                reply: reply_tx,
+            })
+            .map_err(|_| PluginError::HostDead)?;
         reply_rx.recv().map_err(|_| PluginError::HostDead)?;
         Ok(())
     }
@@ -397,35 +393,26 @@ impl PluginHost {
         self.send_load(name, source, plugin_dir, permissions, PluginOpts::default())
     }
 
-    pub fn event_handle(&self) -> Option<EventHandle> {
-        self.inner
-            .as_ref()
-            .map(|t| EventHandle { tx: t.tx.clone() })
+    pub fn event_handle(&self) -> EventHandle {
+        EventHandle {
+            tx: self.inner.tx.clone(),
+        }
     }
 
     pub fn command_reader(&self) -> LuaCommandReader {
-        self.inner
-            .as_ref()
-            .map(|t| t.command_reader.clone())
-            .unwrap_or_else(LuaCommandReader::empty)
+        self.inner.command_reader.clone()
     }
 
     pub fn keymap_reader(&self) -> KeymapReader {
-        self.inner
-            .as_ref()
-            .map(|t| t.keymap_reader.clone())
-            .unwrap_or_else(KeymapReader::empty)
+        self.inner.keymap_reader.clone()
     }
 
     pub fn hint_reader(&self) -> HintReader {
-        self.inner
-            .as_ref()
-            .map(|t| t.hint_reader.clone())
-            .unwrap_or_else(HintReader::empty)
+        self.inner.hint_reader.clone()
     }
 
-    pub fn ui_action_rx(&self) -> Option<flume::Receiver<UiAction>> {
-        self.inner.as_ref().map(|t| t.ui_action_rx.clone())
+    pub fn ui_action_rx(&self) -> flume::Receiver<UiAction> {
+        self.inner.ui_action_rx.clone()
     }
 }
 
@@ -449,6 +436,15 @@ impl EventHandle {
         let (tx, rx) = flume::bounded(0);
         drop(rx);
         Self { tx }
+    }
+
+    /// True when no runtime is draining requests. Production handles stay
+    /// connected for the host's lifetime; the `disconnected_for_test`
+    /// handle and a host whose thread has shut down both report true.
+    /// Callers use this to skip async side effects (e.g. a restore-complete
+    /// flip) that no live consumer would ever observe.
+    pub fn is_disconnected(&self) -> bool {
+        self.tx.is_disconnected()
     }
 
     pub fn set_sandbox_config(&self, config: craft_config::SandboxConfig) {
@@ -517,13 +513,6 @@ mod tests {
         assert!(reg.has("glob"));
     }
 
-    #[test]
-    fn load_builtins_on_disabled_host_is_noop() {
-        let mut host = PluginHost::disabled();
-        host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
-            .unwrap();
-    }
-
     /// The second call sends `Shutdown` on a sender that is already
     /// disconnected; it must swallow that error and keep rejecting work.
     #[test]
@@ -533,11 +522,6 @@ mod tests {
         assert!(host.load_source("late", "return {}").is_err());
         host.begin_shutdown();
         assert!(host.load_source("later", "return {}").is_err());
-    }
-
-    #[test]
-    fn begin_shutdown_on_disabled_host_is_noop() {
-        PluginHost::disabled().begin_shutdown();
     }
 
     /// Regression for the exit drain in `runtime::spawn`. An `EventHandle`
@@ -553,7 +537,7 @@ mod tests {
             r#"craft.api.register_prompt_hint({ slot = "tool_usage", content = "live" })"#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         host.begin_shutdown();
 
         let slots = handle.collect_prompt_slots();
@@ -700,15 +684,6 @@ mod tests {
         assert!(reader.load().generation > 0);
     }
 
-    #[test]
-    fn disabled_host_returns_defaults() {
-        let host = PluginHost::disabled();
-        let snap = host.command_reader().load();
-        assert_eq!(snap.commands.len(), 0);
-        assert_eq!(snap.generation, 0);
-        assert!(host.ui_action_rx().is_none());
-    }
-
     /// End-to-end: a plugin registers a keymap override, the override is published
     /// to the snapshot, EventHandle::run_keybind_callback dispatches the request,
     /// the runtime resolves the Function by id from the registry, and the callback
@@ -741,7 +716,7 @@ mod tests {
             "callback has not fired yet"
         );
 
-        let handle = host.event_handle().expect("host is live");
+        let handle = host.event_handle();
         handle.run_keybind_callback(entry.id);
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -758,35 +733,36 @@ mod tests {
         }
     }
 
-    #[test_case::test_case(true ; "with_init_lua_present")]
-    #[test_case::test_case(false ; "without_init_lua")]
-    fn disabled_host_skips_init_files(with_init: bool) {
-        let dir = tempfile::tempdir().unwrap();
-        if with_init {
-            fs::create_dir_all(dir.path().join(".craft")).unwrap();
-            fs::write(
-                dir.path().join(".craft/init.lua"),
-                "error('should not run')",
-            )
-            .unwrap();
-        }
-        let host = PluginHost::disabled();
-        let config = host
-            .load_init_files(dir.path())
-            .expect("disabled host skips init");
-        assert!(config.is_none(), "disabled host returns no config");
-    }
-
+    /// `load_init_files_or_skip` is the single seam every entry point
+    /// (TUI, outline, acp, prompt, headless, desktop) uses to honor
+    /// `--no-plugins`. Verify both halves: the flag skips a broken
+    /// init.lua, and absence runs it (so the skip path is not a tautology
+    /// that hides a regression in the unconditional loader).
     #[test]
-    fn disabled_host_skips_load_builtins() {
-        let mut host = PluginHost::disabled();
-        let config = PluginsConfig::from_plugins(HashMap::new());
+    fn load_init_files_or_skip_respects_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".craft")).unwrap();
+        fs::write(
+            dir.path().join(".craft/init.lua"),
+            "error('broken init lua must not run')",
+        )
+        .unwrap();
+
+        let host = PluginHost::new(Arc::new(ToolRegistry::new()), None).unwrap();
+
+        let skipped = host
+            .load_init_files_or_skip(true, dir.path())
+            .expect("no-plugins skips broken init.lua");
         assert!(
-            !config.names.is_empty(),
-            "default config enables builtin plugins"
+            skipped.is_none(),
+            "--no-plugins must skip user init.lua entirely"
         );
-        host.load_builtins(&config)
-            .expect("disabled host skips builtin plugin load");
+
+        let ran = host.load_init_files_or_skip(false, dir.path());
+        assert!(
+            ran.is_err(),
+            "without --no-plugins the broken init.lua must surface as an error"
+        );
     }
 
     #[test]
@@ -806,7 +782,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         let slots = handle.collect_prompt_slots();
         let general = slots.get(
             craft_agent::prompt::PromptId::General,
@@ -837,7 +813,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         assert!(
             handle
                 .collect_prompt_slots()
@@ -863,7 +839,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         let slots = handle.collect_prompt_slots();
         for &pid in craft_agent::prompt::PromptId::ALL {
             if pid.has_slot(craft_agent::prompt::Slot::ToolUsage) {
@@ -891,7 +867,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         let slots = handle.collect_prompt_slots();
         assert!(
             slots
@@ -945,7 +921,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         let slots = handle.collect_prompt_slots();
         assert_eq!(
             slots
@@ -999,7 +975,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         let slots = handle.collect_prompt_slots();
         let entries = slots.get(
             craft_agent::prompt::PromptId::System,
@@ -1027,7 +1003,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let handle = host.event_handle().unwrap();
+        let handle = host.event_handle();
         assert_eq!(
             handle
                 .collect_prompt_slots()
@@ -1099,7 +1075,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let slots = host.event_handle().collect_prompt_slots();
         assert_eq!(
             hint_contents(&slots, PromptId::System, Slot::Identity),
             ["Custom identity".to_string()]
@@ -1122,7 +1098,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let slots = host.event_handle().collect_prompt_slots();
         assert_eq!(
             hint_contents(&slots, PromptId::System, Slot::Tone),
             ["Custom tone".to_string()]
@@ -1145,7 +1121,7 @@ mod tests {
             r#"craft.api.set_prompt({ slot = "identity", content = "ZZZ" })"#,
         )
         .unwrap();
-        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let slots = host.event_handle().collect_prompt_slots();
         let entries = slots.get(PromptId::System, Slot::Identity);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries.last().unwrap().content, "ZZZ");
@@ -1174,7 +1150,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let slots = host.event_handle().collect_prompt_slots();
         assert_eq!(
             hint_contents(&slots, PromptId::System, Slot::Identity),
             ["New identity".to_string()]
@@ -1196,7 +1172,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let slots = host.event_handle().collect_prompt_slots();
         assert_eq!(
             hint_contents(&slots, PromptId::System, Slot::Identity),
             ["Explicit identity".to_string()]
@@ -1228,7 +1204,7 @@ mod tests {
             r#"craft.api.set_prompt({ slot = "identity", content = "SET" })"#,
         )
         .unwrap();
-        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let slots = host.event_handle().collect_prompt_slots();
         assert_eq!(
             hint_contents(&slots, PromptId::System, Slot::ToolUsage),
             ["HINT".to_string()]
@@ -1300,7 +1276,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let slots = host.event_handle().unwrap().collect_prompt_slots();
+        let slots = host.event_handle().collect_prompt_slots();
         assert_eq!(
             hint_contents(&slots, PromptId::System, Slot::Identity),
             ["Dyn identity".to_string()]

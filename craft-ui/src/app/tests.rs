@@ -56,6 +56,7 @@ fn test_app_with_lua(lua_commands: LuaCommandReader) -> App {
         100,
         permissions,
         Arc::from([]),
+        craft_lua::EventHandle::disconnected_for_test(),
         true,
         false,
     );
@@ -92,6 +93,7 @@ fn tempdir_app() -> (TempDir, StateDir, App) {
         100,
         permissions,
         Arc::from([]),
+        craft_lua::EventHandle::disconnected_for_test(),
         true,
         false,
     );
@@ -607,6 +609,7 @@ fn load_session_clears_plan() {
             PathBuf::from("/tmp"),
         )),
         Arc::from([]),
+        craft_lua::EventHandle::disconnected_for_test(),
         true,
         false,
     );
@@ -1855,7 +1858,7 @@ fn typed_lua_command_with_args_executes() {
         max_args: usize::MAX,
     }]));
     let (handle, probe) = craft_lua::test_support::probed_event_handle();
-    app.lua_event_handle = Some(handle);
+    app.lua_event_handle = handle;
 
     let actions = type_and_submit(&mut app, "/rename my title");
 
@@ -3218,7 +3221,7 @@ fn install_override(
         id: 1,
     }]);
     let (handle, probe) = craft_lua::test_support::probed_event_handle();
-    app.lua_event_handle = Some(handle);
+    app.lua_event_handle = handle;
     probe
 }
 
@@ -3310,7 +3313,7 @@ fn streaming_cancel_wins_over_quit_override() {
 fn dead_host_override_falls_back_to_builtin() {
     let mut app = test_app();
     let _probe = install_override(&mut app, kb::HELP.code, kb::HELP.modifiers);
-    app.lua_event_handle = Some(craft_lua::EventHandle::disconnected_for_test());
+    app.lua_event_handle = craft_lua::EventHandle::disconnected_for_test();
 
     app.update(Msg::Key(kb::HELP.to_key_event()));
 

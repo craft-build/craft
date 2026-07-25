@@ -84,7 +84,7 @@ fn discover_commands(disable: bool) -> Vec<CustomCommand> {
 
 fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config> {
     let raw_config = plugin_host
-        .load_init_files(cwd)
+        .load_init_files_or_skip(cli.no_plugins, cwd)
         .context("load init.lua files")?;
 
     let mut config = raw_config
@@ -135,12 +135,9 @@ async fn build_stack(
 ) -> Result<(Stack, Vec<String>)> {
     let mut warnings = Vec::new();
 
-    let mut plugin_host = if cli.no_plugins {
-        PluginHost::disabled()
-    } else {
+    let mut plugin_host =
         PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !cli.no_jit)
-            .context("initialize lua plugin host")?
-    };
+            .context("initialize lua plugin host")?;
     let mut embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>> = None;
     if !cli.no_plugins {
         let (tx, rx) = flume::unbounded::<craft_agent::EmbedRequest>();
@@ -170,9 +167,9 @@ async fn build_stack(
         }
     }
 
-    if let Some(handle) = plugin_host.event_handle().as_ref() {
-        handle.set_sandbox_config(config.sandbox.clone());
-    }
+    plugin_host
+        .event_handle()
+        .set_sandbox_config(config.sandbox.clone());
 
     let commands = discover_commands(cli.no_commands);
 
@@ -258,12 +255,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
     if cli.is_sdk_mode() {
         let fast = stack.config.always_fast && stack.model.supports_fast();
-        let prompt_slots = stack
-            .plugin_host
-            .event_handle()
-            .as_ref()
-            .map(|h| h.collect_prompt_slots())
-            .unwrap_or_default();
+        let prompt_slots = stack.plugin_host.event_handle().collect_prompt_slots();
         let timeouts = stack.timeouts();
         crate::sdk_mode::run(crate::sdk_mode::SdkParams {
             cli,
@@ -445,6 +437,8 @@ fn warn_stale_config_toml(cwd: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
@@ -520,5 +514,75 @@ mod tests {
 
         std::panic::set_hook(prev_hook);
         assert!(after_panic_ran.load(Ordering::Acquire));
+    }
+
+    /// `--no-plugins` keeps the Lua host live (tools + default keymap
+    /// still load) but skips user `init.lua`, so a broken project
+    /// `init.lua` must not be executed in that mode.
+    #[test]
+    fn no_plugins_skips_broken_init_lua_but_keeps_host_alive() {
+        use clap::Parser;
+        use craft_agent::tools::ToolRegistry;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let craft_dir: PathBuf = dir.path().join(".craft");
+        fs::create_dir_all(&craft_dir).expect("mkdir .craft");
+        fs::write(
+            craft_dir.join("init.lua"),
+            "error('broken init lua must not run')",
+        )
+        .expect("write init.lua");
+
+        let cli = Cli::parse_from(["craft", "--no-plugins"]);
+        assert!(cli.no_plugins);
+
+        let mut plugin_host = PluginHost::with_jit(Arc::new(ToolRegistry::new()), None, true)
+            .expect("live host boots under --no-plugins");
+
+        let config = load_config(&plugin_host, &cli, dir.path())
+            .expect("no-plugins must skip the broken init.lua and still load defaults");
+        assert!(
+            !config.plugins.names.is_empty(),
+            "default builtin plugins must still be enabled under --no-plugins"
+        );
+
+        plugin_host
+            .load_builtins(&config.plugins)
+            .expect("builtins load on the live host under --no-plugins");
+
+        plugin_host.begin_shutdown();
+    }
+
+    /// Negative control for the test above: without `--no-plugins`, the
+    /// same broken `init.lua` must surface as an error so the skip path
+    /// cannot silently regress into a tautology.
+    #[test]
+    fn broken_init_lua_errors_without_no_plugins() {
+        use clap::Parser;
+        use craft_agent::tools::ToolRegistry;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let craft_dir: PathBuf = dir.path().join(".craft");
+        fs::create_dir_all(&craft_dir).expect("mkdir .craft");
+        fs::write(
+            craft_dir.join("init.lua"),
+            "error('broken init lua must not run')",
+        )
+        .expect("write init.lua");
+
+        let cli = Cli::parse_from(["craft"]);
+        assert!(!cli.no_plugins);
+
+        let mut plugin_host = PluginHost::with_jit(Arc::new(ToolRegistry::new()), None, true)
+            .expect("live host boots");
+
+        match load_config(&plugin_host, &cli, dir.path()) {
+            Err(_) => {}
+            Ok(_) => panic!("broken init.lua must error without --no-plugins"),
+        }
+
+        plugin_host.begin_shutdown();
     }
 }

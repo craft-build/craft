@@ -144,7 +144,7 @@ pub async fn run(
     compression: craft_config::CompressionConfig,
     permissions_config: PermissionsConfig,
     timeouts: craft_providers::Timeouts,
-    lua_handle: Option<EventHandle>,
+    lua_handle: EventHandle,
     fast: bool,
 ) -> Result<()> {
     let prompt = match prompt_arg {
@@ -158,10 +158,7 @@ pub async fn run(
 
     let images = load_images(&image_paths)?;
 
-    let prompt_slots = lua_handle
-        .as_ref()
-        .map(|h| h.collect_prompt_slots())
-        .unwrap_or_default();
+    let prompt_slots = lua_handle.collect_prompt_slots();
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd).await;
