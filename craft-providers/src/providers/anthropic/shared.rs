@@ -31,6 +31,7 @@ const NATIVE_1M_PREFIXES: &[&str] = &[
     "claude-sonnet-5",
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
     "claude-fable-5",
 ];
 
@@ -450,19 +451,39 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             tier: ModelTier::Medium,
             family: ModelFamily::Claude,
             default: true,
+            // Introductory rates until 2026-09-01, then 3.00 / 15.00 / 3.75 / 0.30.
             pricing: ModelPricing {
-                input: 3.00,
-                output: 15.00,
-                cache_write: 3.75,
-                cache_read: 0.30,
+                input: 2.00,
+                output: 10.00,
+                cache_write: 2.50,
+                cache_read: 0.20,
                 fast: None,
             },
-            max_output_tokens: 64000,
+            max_output_tokens: 128000,
             context_window: 200_000,
             supports_vision: true,
         },
         ModelEntry {
             prefixes: &["claude-opus-4-8"],
+            tier: ModelTier::Strong,
+            family: ModelFamily::Claude,
+            default: false,
+            pricing: ModelPricing {
+                input: 5.00,
+                output: 25.00,
+                cache_write: 6.25,
+                cache_read: 0.50,
+                fast: Some(FastPricing {
+                    input: 10.00,
+                    output: 50.00,
+                }),
+            },
+            max_output_tokens: 128000,
+            context_window: 200_000,
+            supports_vision: true,
+        },
+        ModelEntry {
+            prefixes: &["claude-opus-5"],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             default: true,
@@ -523,8 +544,10 @@ mod tests {
     }
 
     #[test_case("claude-sonnet-4-6" ; "sonnet_4_6")]
+    #[test_case("claude-sonnet-5" ; "sonnet_5")]
     #[test_case("claude-opus-4-7" ; "opus_4_7")]
     #[test_case("claude-opus-4-8" ; "opus_4_8")]
+    #[test_case("claude-opus-5" ; "opus_5")]
     #[test_case("claude-fable-5" ; "fable_5")]
     #[test_case("claude-opus-4-8-1m" ; "with_1m_suffix")]
     fn has_native_1m_true(model_id: &str) {
@@ -540,6 +563,7 @@ mod tests {
 
     #[test_case("claude-sonnet-4-6", LONG_CONTEXT_WINDOW ; "native_1m_sonnet")]
     #[test_case("claude-opus-4-8", LONG_CONTEXT_WINDOW ; "native_1m_opus")]
+    #[test_case("claude-opus-5", LONG_CONTEXT_WINDOW ; "native_1m_opus_5")]
     #[test_case("claude-fable-5", LONG_CONTEXT_WINDOW ; "native_1m_fable")]
     #[test_case("claude-opus-4-8-1m", LONG_CONTEXT_WINDOW ; "suffix_1m")]
     #[test_case("claude-haiku-4-5", 200_000 ; "base_model")]

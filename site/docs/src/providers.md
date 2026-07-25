@@ -58,10 +58,12 @@ It wins over `providers.toml` and built-in defaults. `ANTHROPIC_BASE_URL` and `O
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
 | Weak | **claude-haiku-4-5** (default) | $1.00 / $5.00 | 200K ctx / 64K out |
-| Medium | **claude-sonnet-5** (default) | $3.00 / $15.00 | 200K ctx / 64K out |
-| Strong | **claude-opus-4-8** (default), claude-fable-5 | $5.00 / $25.00 | 200K ctx / 128K out |
+| Medium | **claude-sonnet-5** (default) | $2.00 / $10.00 | 200K ctx / 128K out |
+| Strong | claude-opus-4-8 | $5.00 / $25.00 | 200K ctx / 128K out |
+| Strong | **claude-opus-5** (default) | $5.00 / $25.00 | 200K ctx / 128K out |
+| Strong | claude-fable-5 | $10.00 / $50.00 | 200K ctx / 128K out |
 
-Defaults: claude-haiku-4-5 (weak), claude-sonnet-5 (medium), claude-opus-4-8 (strong)
+Defaults: claude-haiku-4-5 (weak), claude-sonnet-5 (medium), claude-opus-5 (strong)
 
 Add `-1m` to any Claude model, like `claude-sonnet-4-6-1m`, to use the 1M token context window.
 
@@ -95,9 +97,23 @@ Set `AWS_REGION` to your preferred region (for example `us-east-1`).
 
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
-| Weak | **gpt-5.6-luna** (default), gpt-5.4-nano, gpt-5.4-mini, gpt-4.1-nano | $1.00 / $6.00 | 372K ctx / 128K out |
-| Medium | **gpt-5.6-terra** (default), gpt-4.1-mini, gpt-4.1, o4-mini, gpt-5.1-codex-mini | $2.50 / $15.00 | 372K ctx / 128K out |
-| Strong | **gpt-5.6-sol** (default), gpt-5.5, gpt-5.4, o3, gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex | $5.00 / $30.00 | 372K ctx / 128K out |
+| Weak | **gpt-5.6-luna** (default) | $1.00 / $6.00 | 372K ctx / 128K out |
+| Weak | gpt-5.4-nano | $0.20 / $1.25 | 400K ctx / 128K out |
+| Weak | gpt-5.4-mini | $0.75 / $4.50 | 400K ctx / 128K out |
+| Weak | gpt-4.1-nano | $0.10 / $0.40 | 1047K ctx / 32K out |
+| Medium | **gpt-5.6-terra** (default) | $2.50 / $15.00 | 372K ctx / 128K out |
+| Medium | gpt-4.1-mini | $0.40 / $1.60 | 1047K ctx / 32K out |
+| Medium | gpt-4.1 | $2.00 / $8.00 | 1047K ctx / 32K out |
+| Medium | o4-mini | $1.10 / $4.40 | 200K ctx / 100K out |
+| Medium | gpt-5.1-codex-mini | $0.25 / $2.00 | 400K ctx / 128K out |
+| Strong | **gpt-5.6-sol** (default) | $5.00 / $30.00 | 372K ctx / 128K out |
+| Strong | gpt-5.5 | $5.00 / $30.00 | 1050K ctx / 128K out |
+| Strong | gpt-5.4 | $2.50 / $15.00 | 1050K ctx / 128K out |
+| Strong | o3 | $2.00 / $8.00 | 200K ctx / 100K out |
+| Strong | gpt-5.3-codex | $1.75 / $14.00 | 400K ctx / 128K out |
+| Strong | gpt-5.2-codex | $1.75 / $14.00 | 400K ctx / 128K out |
+| Strong | gpt-5.1-codex-max | $1.25 / $10.00 | 400K ctx / 128K out |
+| Strong | gpt-5.1-codex | $1.25 / $10.00 | 400K ctx / 128K out |
 
 Defaults: gpt-5.6-luna (weak), gpt-5.6-terra (medium), gpt-5.6-sol (strong)
 
@@ -125,7 +141,8 @@ Defaults: gemini-2.5-pro (strong), gemini-2.5-flash (medium), gemini-2.0-flash-l
 |------|--------|-------------------------------|---------|
 | Weak | **gpt-5-mini, gpt-5 mini, claude-haiku-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
 | Medium | **gpt-5.2, gpt-4.1, claude-sonnet-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Strong | **gpt-5.4, gpt-5.3-codex, claude-opus-4.6, grok-code-fast-1** (default), claude-opus-4.7 | $0.00 / $0.00 | 200K ctx / 100K out |
+| Strong | **gpt-5.4, gpt-5.3-codex, claude-opus-4.6, grok-code-fast-1** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
+| Strong | claude-opus-4.7 | $0.00 / $0.00 | 264K ctx / 64K out |
 
 Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
 
@@ -187,9 +204,11 @@ OpenRouter aggregates models from many providers behind a single API. Craft asks
 
 | Tier | Models | Pricing (in/out per 1M tokens) | Context |
 |------|--------|-------------------------------|---------|
-| Weak | syn:small:vision, hf:Qwen/Qwen3.6-27B, **syn:small:text, hf:zai-org/GLM-4.7-Flash** (default) | $0.45 / $3.60 | 256K ctx / 131K out |
+| Weak | syn:small:vision, hf:Qwen/Qwen3.6-27B | $0.45 / $3.60 | 256K ctx / 131K out |
+| Weak | **syn:small:text, hf:zai-org/GLM-4.7-Flash** (default) | $0.10 / $0.50 | 200K ctx / 131K out |
 | Medium | **hf:MiniMaxAI/MiniMax-M3** (default) | $0.60 / $1.20 | 512K ctx / 131K out |
-| Strong | **syn:large:vision, hf:moonshotai/Kimi-K2.6** (default), syn:large:text, hf:zai-org/GLM-5.2 | $0.95 / $4.00 | 256K ctx / 131K out |
+| Strong | **syn:large:vision, hf:moonshotai/Kimi-K2.6** (default) | $0.95 / $4.00 | 256K ctx / 131K out |
+| Strong | syn:large:text, hf:zai-org/GLM-5.2 | $1.40 / $4.40 | 512K ctx / 131K out |
 
 Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), syn:large:vision (strong), syn:small:text (weak)
 

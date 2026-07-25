@@ -39,6 +39,7 @@ const BEDROCK_MODEL_IDS: &[(&str, &str)] = &[
     ("claude-sonnet-5", "anthropic.claude-sonnet-5"),
     ("claude-fable-5", "anthropic.claude-fable-5"),
     ("claude-opus-4-8", "anthropic.claude-opus-4-8"),
+    ("claude-opus-5", "anthropic.claude-opus-5"),
     (
         "claude-haiku-4-5",
         "anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -872,6 +873,8 @@ mod tests {
 
     #[test_case("claude-opus-4-8", "us-east-1",
         "us.anthropic.claude-opus-4-8" ; "short_us")]
+    #[test_case("claude-opus-5", "us-east-1",
+        "us.anthropic.claude-opus-5" ; "short_us_opus_5")]
     #[test_case("claude-sonnet-5", "eu-west-1",
         "eu.anthropic.claude-sonnet-5" ; "short_eu")]
     #[test_case("claude-haiku-4-5", "ap-south-1",
