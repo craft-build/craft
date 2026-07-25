@@ -687,6 +687,21 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
         name.insert(0, '/');
     }
     let description: String = spec.get("description").unwrap_or_default();
+    let max_args: i64 = spec
+        .get::<Option<i64>>("max_args")
+        .map_err(|_| mlua::Error::runtime("register_command: 'max_args' must be an integer"))?
+        .unwrap_or(0);
+    let max_args: usize = match max_args {
+        -1 => usize::MAX,
+        n if n >= 0 => n
+            .try_into()
+            .map_err(|_| mlua::Error::runtime("register_command: 'max_args' is too large"))?,
+        _ => {
+            return Err(mlua::Error::runtime(
+                "register_command: 'max_args' must be non-negative or -1 for unlimited",
+            ));
+        }
+    };
     let handler: Function = spec
         .get("handler")
         .map_err(|_| mlua::Error::runtime("register_command: missing 'handler'"))?;
@@ -704,6 +719,7 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
             CommandEntry {
                 handler: handler_key,
                 description,
+                max_args,
             },
         );
     }

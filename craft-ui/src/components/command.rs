@@ -298,7 +298,7 @@ impl CommandPalette {
         for (i, cmd) in lua_commands.iter().enumerate() {
             push(CommandItem {
                 name: cmd.name.to_string(),
-                max_args: 0,
+                max_args: cmd.max_args,
                 command_type: CommandType::Lua(i),
             });
         }
@@ -473,7 +473,7 @@ impl CommandPalette {
             CommandType::Builtin(cmd) => cmd.max_args > 0,
             CommandType::Custom(i) => self.custom[*i].has_args(),
             CommandType::McpPrompt(i) => !self.mcp_prompts[*i].arguments.is_empty(),
-            CommandType::Lua(_) => false,
+            CommandType::Lua(i) => self.lua_commands[*i].max_args > 0,
         }
     }
 
@@ -947,11 +947,13 @@ mod tests {
                 name: Arc::from("/memory"),
                 description: Arc::from("View memory files"),
                 plugin: Arc::from("memory"),
+                max_args: 0,
             },
             LuaCommandInfo {
                 name: Arc::from("/deploy"),
                 description: Arc::from("Deploy the project"),
                 plugin: Arc::from("deploy_plugin"),
+                max_args: 0,
             },
         ])
     }
@@ -1009,6 +1011,7 @@ mod tests {
             name: Arc::from("/old"),
             description: Arc::from("old command"),
             plugin: Arc::from("p"),
+            max_args: 0,
         }]);
         let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
         p.sync("/");
@@ -1024,11 +1027,13 @@ mod tests {
                 name: Arc::from("/new1"),
                 description: Arc::from("new"),
                 plugin: Arc::from("p"),
+                max_args: 0,
             },
             LuaCommandInfo {
                 name: Arc::from("/new2"),
                 description: Arc::from("new2"),
                 plugin: Arc::from("p"),
+                max_args: 0,
             },
         ]);
         p.sync("/");
@@ -1040,5 +1045,37 @@ mod tests {
         assert_eq!(updated_lua, 2);
         assert!(p.find_lua_command("/old").is_none());
         assert!(p.find_lua_command("/new1").is_some());
+    }
+
+    #[test]
+    fn lua_command_respects_max_args_zero() {
+        let reader = LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: Arc::from("/noargs"),
+            description: Arc::from("takes no args"),
+            plugin: Arc::from("p"),
+            max_args: 0,
+        }]);
+        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader.clone());
+        p.sync("/noargs");
+        assert!(p.is_active());
+
+        p.sync("/noargs foo");
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn lua_command_respects_max_args_one() {
+        let reader = LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: Arc::from("/onearg"),
+            description: Arc::from("takes one arg"),
+            plugin: Arc::from("p"),
+            max_args: 1,
+        }]);
+        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader.clone());
+        p.sync("/onearg foo");
+        assert!(p.is_active());
+
+        p.sync("/onearg foo bar");
+        assert!(!p.is_active());
     }
 }
