@@ -44,6 +44,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use tracing::warn;
 
 const THINKING_HIDDEN_HEADER: &str = "thinking> ...";
 
@@ -241,7 +242,9 @@ impl MessagesPanel {
     }
 
     pub fn tool_done(&mut self, event: ToolDoneEvent) {
-        if let Some(entry) = self.live_bufs.remove(&event.id)
+        let live_entry = self.live_bufs.remove(&event.id);
+        let had_live_buf = live_entry.is_some();
+        if let Some(entry) = live_entry
             && let Some(lines) = entry.buf.read_if_dirty()
         {
             self.store_snapshot(&event.id, BufferSnapshot::from_arc(lines), None);
@@ -277,6 +280,16 @@ impl MessagesPanel {
             | ToolOutput::ReadDir { text, .. }
                 if msg.render_snapshot.is_none() =>
             {
+                if had_live_buf {
+                    // The plugin streamed a body buf but no snapshot ever
+                    // landed: this is the raw llm_output glitch users report.
+                    warn!(
+                        tool_id = %event.id,
+                        tool = %event.tool,
+                        is_error = event.is_error,
+                        "live buf had no snapshot at tool_done; falling back to llm_output"
+                    );
+                }
                 let limits = output_limits_from_hints(&event.tool, hints, &self.tool_output_lines);
                 let tr = truncate_output(text, limits.max_lines, limits.keep);
                 msg.truncated_lines = tr.skipped;
@@ -391,6 +404,12 @@ impl MessagesPanel {
             msg.render_header = Some(snapshot);
             msg.snapshot_theme_gen = theme_gen_val;
             self.rebuild_tool_segment(tool_id);
+        } else {
+            warn!(
+                tool_id,
+                is_header = true,
+                "snapshot dropped: no tool message with this id"
+            );
         }
     }
 
@@ -1115,6 +1134,12 @@ impl MessagesPanel {
             msg.render_snapshot = Some(snapshot);
             msg.snapshot_theme_gen = theme_gen_val;
             self.rebuild_tool_segment(tool_id);
+        } else {
+            warn!(
+                tool_id,
+                is_header = false,
+                "snapshot dropped: no tool message with this id"
+            );
         }
     }
 
