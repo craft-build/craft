@@ -2027,6 +2027,7 @@ version = "0.10.0"
 dependencies = [
  "arboard",
  "arc-swap",
+ "async-trait",
  "base64 0.22.1",
  "color-eyre",
  "craft-agent",

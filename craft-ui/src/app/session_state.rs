@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use craft_agent::ToolOutput;
 use craft_agent::permissions::PermissionManager;
 use craft_config::Effect;
 use craft_flow::{ChunkStatus, Stage};
@@ -12,7 +11,6 @@ use craft_storage::StateDir;
 use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
 
 use crate::AppSession;
-use crate::agent::shared_queue::lock;
 
 use super::mode::{FlowChunkState, FlowState, Mode, PlanState};
 
@@ -139,14 +137,10 @@ impl SessionState {
     pub fn sync_session(
         &mut self,
         shared_history: &Option<Arc<ArcSwap<Vec<Message>>>>,
-        shared_tool_outputs: &Option<Arc<Mutex<HashMap<String, ToolOutput>>>>,
         permissions: &Arc<PermissionManager>,
     ) {
         if let Some(history) = shared_history {
             self.session.messages = Vec::clone(&history.load());
-        }
-        if let Some(outputs) = shared_tool_outputs {
-            self.session.tool_outputs = lock(outputs).clone();
         }
         self.session.token_usage = self.token_usage;
         self.session.meta.context_size = self.context_size;
@@ -380,7 +374,6 @@ mod tests {
             .context_window_overrides
             .insert("test-model".into(), 180_000);
         state.sync_session(
-            &None,
             &None,
             &Arc::new(PermissionManager::new(
                 craft_config::PermissionsConfig::default(),

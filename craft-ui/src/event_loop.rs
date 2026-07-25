@@ -34,16 +34,13 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::AppSession;
-use crate::agent::{
-    AgentCommand, AgentHandles, ModelSlot,
-    shared_queue::{QueueItem, lock},
-};
+use crate::agent::{AgentCommand, AgentHandles, ModelSlot, shared_queue::QueueItem};
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg, QueuedMessage, SubmitOutcome};
 use crate::color_compat;
 use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
-use crate::components::{Action, ExitRequest, LoadedSession, Status};
+use crate::components::{Action, ExitRequest, Status};
 use crate::input::InputReader;
 
 use crate::storage_writer::StorageWriter;
@@ -268,7 +265,7 @@ impl SpawnCx {
         handles.apply_to_app(&mut app);
         app.propagate_lua_handles();
         if resumed {
-            restore_session(&mut app, &handles);
+            app.restore_resumed_session();
         }
         let (warn_tx, warn_rx) = flume::unbounded::<String>();
         let (shell_tx, shell_rx) = flume::unbounded::<ShellEvent>();
@@ -465,21 +462,6 @@ fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -
         warn_rx,
         warn_tx,
         task,
-    }
-}
-
-fn restore_session(app: &mut App, handles: &AgentHandles) {
-    app.permissions
-        .load_session_rules(crate::app::session_state::stored_to_rules(
-            &app.state.session.meta.session_rules,
-        ));
-    *handles
-        .tool_outputs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = app.state.session.tool_outputs.clone();
-    app.restore_display();
-    for w in app.state.warnings.drain(..) {
-        app.status_bar.flash(w);
     }
 }
 
@@ -1153,11 +1135,6 @@ impl<'t> EventLoop<'t> {
         }
     }
 
-    fn respawn_with_tool_outputs(&mut self, idx: usize, loaded: LoadedSession) {
-        self.respawn_agent(idx, loaded.messages);
-        *lock(&self.sessions[idx].handles.tool_outputs) = loaded.tool_outputs;
-    }
-
     fn respawn_agent(&mut self, idx: usize, history: Vec<Message>) {
         let rt = &mut self.sessions[idx];
         let lua_handle = rt.app.lua_event_handle.clone();
@@ -1226,7 +1203,7 @@ impl<'t> EventLoop<'t> {
                         });
                     });
                 } else {
-                    self.respawn_with_tool_outputs(idx, loaded);
+                    self.respawn_agent(idx, loaded.messages);
                 }
             }
             Action::ChangeModel(spec) => self.change_model(spec),
@@ -1358,7 +1335,7 @@ impl<'t> EventLoop<'t> {
                     Err(e) => rt.app.flash(format!("Failed to create provider: {e}")),
                 }
                 if let Some(loaded) = pending_load_session {
-                    self.respawn_with_tool_outputs(idx, *loaded);
+                    self.respawn_agent(idx, loaded.messages);
                 }
             }
             Action::ApplyContextWindowOverride => self.apply_active_context_window_override(idx),

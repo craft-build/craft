@@ -1,5 +1,7 @@
 //! Queue for messages typed while the agent is busy.
 
+use craft_agent::AgentInput;
+
 use super::{Action, App, Status, format_with_images};
 
 use crate::agent::shared_queue::{QueueItem, QueueSender};
@@ -129,7 +131,6 @@ impl App {
                 SubmitOutcome::Rejected(NO_QUEUE_ERR)
             }
         } else {
-            self.run_id += 1;
             SubmitOutcome::Started(self.start_from_queue(&msg, false))
         }
     }
@@ -165,6 +166,18 @@ impl App {
         true
     }
 
+    /// Push restored queue items only here, never in `restore_display`: on
+    /// load/rewind the display is restored before `respawn` swaps the shared
+    /// queue, so pushing earlier would fill a queue that is about to die.
+    pub(crate) fn flush_restored_queue(&mut self) {
+        for text in std::mem::take(&mut self.state.session.meta.queued_messages) {
+            self.queue_and_notify(QueuedMessage {
+                text,
+                images: Vec::new(),
+            });
+        }
+    }
+
     pub(super) fn queue_compact(&mut self) {
         let Some(ref shared) = self.queue.shared else {
             return;
@@ -174,9 +187,12 @@ impl App {
         });
     }
 
-    /// Agent reached a deferred message: time to draw the bubble.
-    /// Immediate-dispatch items skip this event, so no dedup needed.
+    /// Agent reached a deferred message: time to draw the bubble. Restored
+    /// queue items start runs without `start_run`, so this is where the app
+    /// learns the agent is busy. Immediate-dispatch items skip this event,
+    /// so no dedup needed.
     pub(super) fn on_queue_item_consumed(&mut self, text: &str, image_count: usize) {
+        self.status = Status::Streaming;
         self.main_chat()
             .show_user_message(format_with_images(text, image_count));
     }
@@ -188,6 +204,16 @@ impl App {
         msg: &QueuedMessage,
         flow_resume: bool,
     ) -> Vec<Action> {
+        let display = format_with_images(&msg.text, msg.images.len());
+        let input = self.build_agent_input_with(msg, flow_resume);
+        self.start_run(input, display)
+    }
+
+    /// The one place a fresh run starts: every path that emits
+    /// `Action::SendMessage` must go through here so `run_id` bumps exactly
+    /// once per run.
+    pub(super) fn start_run(&mut self, input: AgentInput, display: String) -> Vec<Action> {
+        self.run_id += 1;
         self.status = Status::Streaming;
         if self.state.mode == super::Mode::Flow {
             self.flow_panel.show_if_not_dismissed();
@@ -195,10 +221,7 @@ impl App {
         if let Some(ref handle) = self.lua_event_handle {
             handle.fire_autocmd("TurnStart", serde_json::json!({}));
         }
-        self.main_chat()
-            .show_user_message(format_with_images(&msg.text, msg.images.len()));
-        vec![Action::SendMessage(Box::new(
-            self.build_agent_input_with(msg, flow_resume),
-        ))]
+        self.main_chat().show_user_message(display);
+        vec![Action::SendMessage(Box::new(input))]
     }
 }

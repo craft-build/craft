@@ -34,7 +34,6 @@ pub(crate) mod tool_display;
 pub(crate) mod usage_modal;
 
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -181,7 +180,6 @@ impl ModalScroll {
 
 pub struct LoadedSession {
     pub messages: Vec<Message>,
-    pub tool_outputs: HashMap<String, ToolOutput>,
     pub model_spec: String,
 }
 

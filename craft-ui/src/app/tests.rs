@@ -27,7 +27,7 @@ fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
     app.zones.push(SelectableZone { area, zone });
 }
 
-fn test_app() -> App {
+pub(crate) fn test_app() -> App {
     let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir())).unwrap());
     let permissions = Arc::new(PermissionManager::new(
         PermissionsConfig {
@@ -58,6 +58,42 @@ fn test_app() -> App {
     let (shared_queue, _rx) = shared_queue::queue();
     app.queue.set_shared(shared_queue);
     app
+}
+
+fn tempdir_app() -> (TempDir, StateDir, App) {
+    let tmp = TempDir::new().unwrap();
+    let dir = StateDir::from_path(tmp.path().to_path_buf());
+    let writer =
+        Arc::new(StorageWriter::new(StateDir::from_path(tmp.path().to_path_buf())).unwrap());
+    let permissions = Arc::new(PermissionManager::new(
+        PermissionsConfig {
+            rules: vec![],
+            ..Default::default()
+        },
+        PathBuf::from("/tmp"),
+    ));
+    let model = test_model();
+    let mut app = App::new(
+        &model,
+        AppSession::new("test-model", "/tmp/test"),
+        dir.clone(),
+        Arc::new(ArcSwapOption::empty()),
+        McpSnapshotReader::empty(),
+        McpConfigErrors::new(PathBuf::new()),
+        LuaCommandReader::empty(),
+        KeymapReader::empty(),
+        HintReader::empty(),
+        writer,
+        UiConfig::default(),
+        100,
+        permissions,
+        Arc::from([]),
+        true,
+        false,
+    );
+    let (shared_queue, _rx) = shared_queue::queue();
+    app.queue.set_shared(shared_queue);
+    (tmp, dir, app)
 }
 
 fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Msg {
@@ -344,6 +380,25 @@ fn queue_item_consumed_pushes_deferred_user_message() {
         app.main_chat().last_message_role(),
         Some(&DisplayRole::User),
     );
+}
+
+/// Restored queue items start runs without `start_run`, so the consumed
+/// event is the only signal that the agent went busy: it must flip status
+/// or the busy-guard and esc-to-cancel stay off during the whole run.
+#[test]
+fn queue_item_consumed_marks_agent_streaming() {
+    let mut app = test_app();
+    assert_eq!(app.status, Status::Idle);
+
+    app.update(agent_msg_with_run_id(
+        AgentEvent::QueueItemConsumed {
+            text: "restored".into(),
+            image_count: 0,
+        },
+        app.run_id,
+    ));
+
+    assert_eq!(app.status, Status::Streaming);
 }
 
 #[test_case(error_app as fn(&mut App) ; "error")]
@@ -1628,6 +1683,74 @@ fn save_session_syncs_ephemeral_content_into_meta() {
     assert!(session_has_content(session));
 }
 
+/// `state.session.tool_outputs` is the only store, so a `ToolDone` write
+/// must reach disk or restored sessions lose their tool call widgets.
+#[test]
+fn tool_done_output_persists_to_disk() {
+    let (_tmp, dir, mut app) = tempdir_app();
+    app.state
+        .session
+        .messages
+        .push(Message::user("prompt".into()));
+    app.status = Status::Streaming;
+    app.run_id = 1;
+
+    app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
+        id: "tool-live".into(),
+        tool: "bash".into(),
+        output: ToolOutput::Plain("live output".into()),
+        is_error: false,
+        annotation: None,
+        written_path: None,
+    }))));
+
+    app.save_session();
+    app.state.session.save(&app.storage).unwrap();
+    let id = app.state.session.id.id();
+
+    let loaded = AppSession::load(id, &dir).unwrap();
+    assert!(matches!(
+        loaded.tool_outputs.get("tool-live"),
+        Some(ToolOutput::Plain(s)) if s == "live output"
+    ));
+}
+
+#[test]
+fn restore_resumed_session_flushes_queued_messages_and_round_trips() {
+    let mut app = test_app();
+    app.state.session.meta.queued_messages = vec!["q1".into(), "q2".into()];
+
+    app.restore_resumed_session();
+    assert!(app.state.session.meta.queued_messages.is_empty());
+    assert_eq!(
+        app.queue.text_messages(),
+        vec!["q1".to_string(), "q2".to_string()]
+    );
+
+    app.save_session();
+    assert_eq!(
+        app.state.session.meta.queued_messages,
+        vec!["q1".to_string(), "q2".to_string()]
+    );
+}
+
+#[test]
+fn apply_loaded_session_defers_queued_messages_until_respawn() {
+    let mut app = test_app();
+    let mut session = AppSession::new("test-model", "/tmp/test");
+    session.meta.queued_messages = vec!["deferred".into()];
+    session.messages.push(Message::user("hello".into()));
+
+    let model = app.state.model.clone();
+    app.apply_loaded_session(session, &model);
+
+    assert!(app.queue.is_empty());
+    assert_eq!(
+        app.state.session.meta.queued_messages,
+        vec!["deferred".to_string()]
+    );
+}
+
 #[test_case(0, "hello"            ; "no_images")]
 #[test_case(1, "hello [1 image]"  ; "single_image")]
 #[test_case(2, "hello [2 images]" ; "multiple_images")]
@@ -1772,7 +1895,7 @@ fn rewind_to_middle_truncates_and_populates_input() {
     assert_eq!(app.state.session.messages.len(), 2);
     assert!(app.state.session.tool_outputs.contains_key("tool-1"));
     assert_eq!(app.input_box.buffer.value(), "second prompt");
-    assert_eq!(app.run_id, old_run_id + 1);
+    assert_eq!(app.run_id, old_run_id);
     let expected_ctx = craft_agent::agent::estimate_message_tokens(&app.state.session.messages);
     assert_eq!(app.state.context_size, expected_ctx);
     assert_eq!(app.chats[0].context_size, expected_ctx);
@@ -1781,7 +1904,6 @@ fn rewind_to_middle_truncates_and_populates_input() {
         panic!("expected LoadSession");
     };
     assert_eq!(loaded.messages.len(), 2);
-    assert!(loaded.tool_outputs.contains_key("tool-1"));
 }
 
 #[test]
@@ -2924,18 +3046,13 @@ fn sync_flow_snapshot_reflects_state() {
 
 #[test]
 fn flow_state_persists_through_sync_session() {
-    use std::sync::{Arc, Mutex};
     let mut app = flow_app();
     app.state.flow.stage = Some(craft_flow::Stage::Review);
     app.state
         .flow
         .set_chunk_status("c1", craft_flow::ChunkStatus::NeedsReview);
 
-    app.state.sync_session(
-        &None,
-        &Some(Arc::new(Mutex::new(HashMap::new()))),
-        &app.permissions.clone(),
-    );
+    app.state.sync_session(&None, &app.permissions.clone());
     assert_eq!(app.state.session.meta.flow_stage.as_deref(), Some("review"));
     let chunk = app.state.session.meta.flow_chunks.get("c1").unwrap();
     assert_eq!(chunk.status, "needs_review");

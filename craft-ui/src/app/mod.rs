@@ -1,6 +1,8 @@
 //! Elm-style `update(Msg) -> Vec<Action>`; side effects are dispatched by the caller.
 //! Double-esc: first esc flashes a hint, second within `flash_duration` cancels/rewinds.
-//! `run_id` increments each run so stale events from previous agent runs are ignored.
+//! `run_id` invalidates in-flight agent events. It bumps in exactly three
+//! places, one per transition: `start_run`, `handle_cancel`, and
+//! `AgentHandles::respawn`. Everything else only reads it.
 
 mod btw;
 mod image_paste;
@@ -11,17 +13,16 @@ mod session;
 pub(crate) mod session_state;
 pub(crate) mod shell;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub(crate) mod view;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::AppSession;
-use crate::agent::shared_queue::lock;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
@@ -60,7 +61,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
-    SubagentInfo, ToolOutput,
+    SubagentInfo,
 };
 use craft_config::UiConfig;
 use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader};
@@ -196,7 +197,6 @@ pub struct App {
     pub(crate) storage: StateDir,
     pub(crate) usage_slot: Arc<ArcSwapOption<UsageFetchState>>,
     pub(crate) shared_history: Option<Arc<ArcSwap<Vec<Message>>>>,
-    pub(crate) shared_tool_outputs: Option<Arc<Mutex<HashMap<String, ToolOutput>>>>,
     pub(crate) btw_system: Option<Arc<ArcSwap<String>>>,
     pub(crate) image_paste_rx: Vec<flume::Receiver<Result<ImageSource, String>>>,
     storage_writer: Arc<StorageWriter>,
@@ -328,7 +328,6 @@ impl App {
             storage,
             usage_slot: Arc::new(ArcSwapOption::empty()),
             shared_history: None,
-            shared_tool_outputs: None,
             btw_system: None,
             image_paste_rx: vec![],
             storage_writer,
@@ -1243,7 +1242,6 @@ impl App {
         if self.state.mode == Mode::Flow && self.flow_failed {
             let note = sub.text.trim();
             self.flow_failed = false;
-            self.run_id += 1;
             let msg = QueuedMessage {
                 text: if note.is_empty() {
                     "resume flow from last failure".to_string()
@@ -1402,9 +1400,10 @@ impl App {
             {
                 self.transition_plan(PlanTrigger::WriteDone);
             }
-            if let Some(ref outputs) = self.shared_tool_outputs {
-                lock(outputs).insert(e.id.clone(), e.output.clone());
-            }
+            self.state
+                .session
+                .tool_outputs
+                .insert(e.id.clone(), e.output.clone());
             if let Some(&sub_idx) = self.chat_index.get(&e.id) {
                 let (role, text) = if e.is_error {
                     (DisplayRole::Error, ERROR_TEXT)
@@ -1917,10 +1916,7 @@ impl App {
             self.flash("Agent is busy, try again later".into());
             vec![]
         } else {
-            self.run_id += 1;
-            self.status = Status::Streaming;
-            self.main_chat().show_user_message(display_text);
-            vec![Action::SendMessage(Box::new(input))]
+            self.start_run(input, display_text)
         }
     }
 
@@ -1933,10 +1929,7 @@ impl App {
             text: prompt.to_string(),
             images: Vec::new(),
         });
-        self.run_id += 1;
-        self.status = Status::Streaming;
-        self.main_chat().show_user_message(label.to_string());
-        vec![Action::SendMessage(Box::new(input))]
+        self.start_run(input, label.to_string())
     }
 
     fn run_recipe(&mut self, path: &std::path::Path) -> Vec<Action> {
@@ -1978,10 +1971,7 @@ impl App {
             text: prompt,
             images: Vec::new(),
         });
-        self.run_id += 1;
-        self.status = Status::Streaming;
-        self.main_chat().show_user_message(label);
-        vec![Action::SendMessage(Box::new(input))]
+        self.start_run(input, label)
     }
 
     pub(crate) fn submit_watch_prompt(&mut self, label: String, text: String) -> Vec<Action> {
@@ -1993,10 +1983,7 @@ impl App {
             text,
             images: Vec::new(),
         });
-        self.run_id += 1;
-        self.status = Status::Streaming;
-        self.main_chat().show_user_message(label);
-        vec![Action::SendMessage(Box::new(input))]
+        self.start_run(input, label)
     }
 
     fn parse_prompt_args(prompt: &McpPromptInfo, args: &str) -> HashMap<String, String> {
@@ -2289,7 +2276,6 @@ impl App {
         } else {
             format!("{}.", IMPLEMENT_MSG_PREFIX)
         };
-        self.run_id += 1;
         let msg = QueuedMessage {
             text,
             images: vec![],

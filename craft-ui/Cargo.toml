@@ -55,6 +55,7 @@ shell-words = { workspace = true }
 test-case = { workspace = true }
 tempfile = { workspace = true }
 criterion = { workspace = true }
+async-trait = { workspace = true }
 
 [[bench]]
 name = "splash"

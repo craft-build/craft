@@ -3,16 +3,15 @@ mod cancel_map;
 mod command_router;
 pub(crate) mod shared_queue;
 
-use std::collections::HashMap;
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
     AgentConfig, CancelMap, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle,
-    McpSnapshotReader, ToolOutput, ToolOutputLines,
+    McpSnapshotReader, ToolOutputLines,
 };
 use craft_lua::EventHandle;
 use craft_storage::id::SessionRef;
@@ -39,13 +38,17 @@ pub(crate) enum AgentCommand {
     CancelSubagent { tool_use_id: String },
 }
 
+/// Input channels (`cmd_tx`, `answer_tx`, `queue`) are per-agent, so an old
+/// loop can never steal new input. The output channel (`agent_tx`/`agent_rx`)
+/// is per-tab: `respawn` reuses it, so anyone still holding a sender (a Lua
+/// restore reply, a click, an old agent winding down) can always deliver.
+/// Stale events are filtered by `run_id`, not by killing the channel.
 pub(crate) struct AgentHandles {
     pub(crate) cmd_tx: flume::Sender<AgentCommand>,
     pub(crate) agent_rx: flume::Receiver<Envelope>,
     agent_tx: flume::Sender<Envelope>,
     pub(crate) answer_tx: flume::Sender<String>,
     pub(crate) history: Arc<ArcSwap<Vec<Message>>>,
-    pub(crate) tool_outputs: Arc<Mutex<HashMap<String, ToolOutput>>>,
     pub(crate) mcp_handle: Option<McpHandle>,
     pub(crate) mcp_config_errors: McpConfigErrors,
     pub(crate) queue: QueueSender,
@@ -76,6 +79,7 @@ impl AgentHandles {
         embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
     ) -> Self {
         spawn_agent_internal(
+            flume::unbounded(),
             model_slot,
             initial_history,
             config,
@@ -103,7 +107,6 @@ impl AgentHandles {
         app.answer_tx = Some(self.answer_tx.clone());
         app.cmd_tx = Some(self.cmd_tx.clone());
         app.shared_history = Some(Arc::clone(&self.history));
-        app.shared_tool_outputs = Some(Arc::clone(&self.tool_outputs));
         app.queue.set_shared(self.queue.clone());
         app.btw_system = Some(Arc::clone(&self.btw_system));
         app.repomap_enabled = Arc::clone(&self.repomap_enabled);
@@ -148,6 +151,10 @@ impl AgentHandles {
         app: &mut App,
         lua_handle: Option<EventHandle>,
     ) {
+        // The output channel survives the respawn, so this bump is the only
+        // thing that makes the old loop's in-flight envelopes stale. It lives
+        // here so no caller can respawn without it.
+        app.run_id += 1;
         let slot = model_slot.load();
         let provider = Arc::clone(&slot.provider);
         tokio::spawn(async move {
@@ -161,6 +168,7 @@ impl AgentHandles {
             }),
         );
         let new = spawn_agent_internal(
+            (self.agent_tx.clone(), self.agent_rx.clone()),
             model_slot,
             history,
             config,
@@ -179,6 +187,7 @@ impl AgentHandles {
         // Repoint the app at the new queue before dropping `old`, otherwise the app keeps
         // the last old `QueueSender` alive and the old loop parks in `recv_notify` forever.
         self.apply_to_app(app);
+        app.flush_restored_queue();
         old.cancel();
     }
 
@@ -231,6 +240,7 @@ pub(crate) fn join_all(tasks: Vec<tokio::task::JoinHandle<()>>, timeout: Duratio
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_agent_internal(
+    (agent_tx, agent_rx): (flume::Sender<Envelope>, flume::Receiver<Envelope>),
     model_slot: &Arc<ArcSwap<ModelSlot>>,
     initial_history: Vec<Message>,
     config: AgentConfig,
@@ -245,16 +255,12 @@ fn spawn_agent_internal(
     flow_store: std::sync::Arc<craft_storage::flow::FlowStore>,
     embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
 ) -> AgentHandles {
-    let (agent_tx, agent_rx) = flume::unbounded::<Envelope>();
-    let agent_tx_clone = agent_tx.clone();
     let (cmd_tx, cmd_rx) = flume::unbounded::<AgentCommand>();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
     let (queue_tx, queue_rx) = shared_queue::queue();
     let queue_rx = Arc::new(queue_rx);
     let shared_history: Arc<ArcSwap<Vec<Message>>> =
         Arc::new(ArcSwap::from_pointee(initial_history.clone()));
-    let shared_tool_outputs: Arc<Mutex<HashMap<String, ToolOutput>>> =
-        Arc::new(Mutex::new(HashMap::new()));
     let (init_trigger, init_cancel) = CancelToken::new();
     let cancel_map = Arc::new(new_run_cancel_map(0, init_trigger));
     let subagent_cancels: Arc<CancelMap<String>> = Arc::new(CancelMap::new());
@@ -278,7 +284,7 @@ fn spawn_agent_internal(
         Arc::clone(&shared_history),
         mcp_handle.clone(),
         Arc::clone(permissions),
-        agent_tx_clone,
+        agent_tx.clone(),
         answer_rx,
         queue_rx,
         cancel_map,
@@ -312,7 +318,6 @@ fn spawn_agent_internal(
         agent_tx,
         answer_tx,
         history: shared_history,
-        tool_outputs: shared_tool_outputs,
         mcp_handle,
         mcp_config_errors,
         queue: queue_tx,
@@ -326,12 +331,148 @@ fn spawn_agent_internal(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    use async_trait::async_trait;
+    use craft_agent::AgentEvent;
+    use craft_config::PermissionsConfig;
+    use craft_providers::provider::Provider;
+    use craft_providers::{
+        AgentError, Message, Model, ProviderEvent, RequestOptions, StreamResponse,
+    };
+    use craft_storage::id::SessionRef;
 
     use super::*;
 
     const LONG_TIMEOUT: Duration = Duration::from_secs(60);
     const SHORT_TIMEOUT: Duration = Duration::from_millis(50);
+    const PROBE_TEXT: &str = "probe-through-old-sender";
+    const RESTORED_TEXT: &str = "restored-queued-message";
+
+    struct StubProvider;
+
+    #[async_trait]
+    impl Provider for StubProvider {
+        async fn stream_message(
+            &self,
+            _model: &Model,
+            _messages: &[Message],
+            _system: &str,
+            _tools: &serde_json::Value,
+            _event_tx: &flume::Sender<ProviderEvent>,
+            _opts: RequestOptions,
+            _session_id: Option<&SessionRef>,
+        ) -> Result<StreamResponse, AgentError> {
+            std::future::pending::<Result<StreamResponse, AgentError>>().await
+        }
+
+        async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn stub_spawn() -> (
+        AgentHandles,
+        Arc<ArcSwap<ModelSlot>>,
+        Arc<PermissionManager>,
+    ) {
+        let model_slot = Arc::new(ArcSwap::from_pointee(ModelSlot {
+            model: crate::components::test_model(),
+            provider: Arc::new(StubProvider),
+        }));
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            PathBuf::from("/tmp"),
+        ));
+        let flow_store = Arc::new(craft_storage::flow::FlowStore::from_root(PathBuf::from(
+            "/tmp",
+        )));
+        let handles = AgentHandles::spawn(
+            &model_slot,
+            Vec::new(),
+            AgentConfig::default(),
+            ToolOutputLines::default(),
+            &permissions,
+            None,
+            craft_providers::Timeouts::default(),
+            None,
+            None,
+            McpConfigErrors::new(PathBuf::new()),
+            craft_config::CompressionConfig::default(),
+            flow_store,
+            None,
+        );
+        (handles, model_slot, permissions)
+    }
+
+    fn respawn(
+        handles: &mut AgentHandles,
+        model_slot: &Arc<ArcSwap<ModelSlot>>,
+        permissions: &Arc<PermissionManager>,
+        app: &mut App,
+    ) {
+        handles.respawn(
+            Vec::new(),
+            model_slot,
+            AgentConfig::default(),
+            craft_config::CompressionConfig::default(),
+            ToolOutputLines::default(),
+            permissions,
+            app,
+            None,
+        );
+    }
+
+    /// Senders captured before any respawn (Lua restore replies, clicks) must
+    /// still reach the live receiver, and restored queue items must land in
+    /// the freshly wired queue, not the one that just died.
+    #[test]
+    fn respawn_twice_keeps_channel_and_delivers_restored_queue() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _g = rt.enter();
+        let (mut handles, model_slot, permissions) = stub_spawn();
+        let pre_gen1_sender =
+            craft_agent::EventSender::new(handles.agent_tx.clone(), crate::app::RESTORE_RUN_ID);
+
+        let mut app = crate::app::tests::test_app();
+        let run_id_before = app.run_id;
+        respawn(&mut handles, &model_slot, &permissions, &mut app);
+        assert_eq!(app.run_id, run_id_before + 1);
+
+        app.state.session.meta.queued_messages = vec![RESTORED_TEXT.into()];
+        respawn(&mut handles, &model_slot, &permissions, &mut app);
+        assert_eq!(
+            app.run_id,
+            run_id_before + 2,
+            "each respawn must bump run_id exactly once"
+        );
+        assert!(app.state.session.meta.queued_messages.is_empty());
+
+        pre_gen1_sender
+            .send(AgentEvent::TextDelta {
+                text: PROBE_TEXT.into(),
+            })
+            .expect("pre-generation-1 sender must still deliver after two respawns");
+
+        let mut probe_seen = false;
+        let mut consumed_seen = false;
+        while !(probe_seen && consumed_seen) {
+            let envelope = handles
+                .agent_rx
+                .recv_timeout(LONG_TIMEOUT)
+                .expect("probe or restored queue item never reached the tab channel");
+            match envelope.event {
+                AgentEvent::TextDelta { ref text } if text == PROBE_TEXT => probe_seen = true,
+                AgentEvent::QueueItemConsumed { ref text, .. } => {
+                    assert_eq!(text, RESTORED_TEXT);
+                    assert_eq!(envelope.run_id, app.run_id);
+                    consumed_seen = true;
+                }
+                _ => {}
+            }
+        }
+    }
 
     #[test]
     fn join_all_returns_when_all_tasks_complete() {
