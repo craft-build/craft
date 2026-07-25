@@ -262,6 +262,7 @@ impl Provider for Mistral {
                     supports_thinking,
                     supports_vision: Some(supports_vision),
                     pricing: None,
+                    tier: None,
                     provider_info: None,
                 })
             })
