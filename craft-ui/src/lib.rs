@@ -7,6 +7,7 @@ pub mod animation;
 pub mod app;
 pub mod chat;
 mod clipboard;
+mod color_compat;
 mod components;
 pub use components::command::{BUILTIN_COMMANDS, BuiltinCommand};
 pub use components::keybindings;
@@ -61,6 +62,7 @@ pub fn run(
 ) -> Result<RunOutcome> {
     let _guard = handle.enter();
     let (_guard, mut terminal) = terminal::TerminalGuard::init()?;
+    color_compat::init();
     let report = event_loop::EventLoop::new(&mut terminal, params)?.run(initial_prompt)?;
     Ok(match report.exit_request() {
         components::ExitRequest::Reload => RunOutcome::Reload {

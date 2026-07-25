@@ -40,6 +40,7 @@ use crate::agent::{
 };
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg, QueuedMessage, SubmitOutcome};
+use crate::color_compat;
 use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
 use crate::components::{Action, ExitRequest, LoadedSession, Status};
@@ -630,10 +631,10 @@ impl<'t> EventLoop<'t> {
                 break Err(e);
             }
             crate::terminal::begin_synchronized_output();
-            if let Err(e) = self
-                .terminal
-                .draw(|f| self.sessions[self.focused].app.view(f))
-            {
+            if let Err(e) = self.terminal.draw(|f| {
+                self.sessions[self.focused].app.view(f);
+                color_compat::downgrade_if_needed(f.buffer_mut());
+            }) {
                 crate::terminal::end_synchronized_output();
                 break Err(e.into());
             }

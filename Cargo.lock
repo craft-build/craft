@@ -2061,6 +2061,7 @@ dependencies = [
  "strum 0.28.0",
  "syntect",
  "tempfile",
+ "termini",
  "test-case",
  "tiny-skia",
  "tokio",
@@ -3755,6 +3756,15 @@ name = "hmac-sha256"
 version = "1.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
+
+[[package]]
+name = "home"
+version = "0.5.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "htmd"
@@ -8725,6 +8735,15 @@ dependencies = [
  "nom 7.1.3",
  "phf 0.11.3",
  "phf_codegen 0.11.3",
+]
+
+[[package]]
+name = "termini"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ad441d87dd98bc5eeb31cf2fb7e4839968763006b478efb38668a3bf9da0d59"
+dependencies = [
+ "home",
 ]
 
 [[package]]
