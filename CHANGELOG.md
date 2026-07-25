@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-24
+
+### Added
+
+- **desktop**: SSH launch mode for remote agent sessions (`77770e26a`)
+- **agent**: load AGENTS.md from parent directories (`9643528cf`)
+- **config**: make the input box line cap configurable (`3a511794f`)
+- **lua**: add max_args to register_command for argument limiting (`4bf25d198`)
+- **ui**: audit logs for the tool body snapshot pipeline (`639606d4e`)
+- **agent**: sanitize untrusted tool input schemas (`703e9b9c9`)
+- **list_picker**: sectioned grouping with supporting fs/theme/docgen fixes (`fdfb9a62e`)
+- **lua**: nvim-style command handler opts (args, fargs) and nargs (`fc2266c94`)
+- **providers**: add Claude Opus 5 and Sonnet 5 (`d43e3ff44`)
+- **copilot**: use discovered model metadata (`f62dc5542`)
+- **question**: render answered choices as an artifact card (`9daffad67`)
+
+### Changed
+
+- **startup**: compile plugins to native code after startup, not during (`cb409bdc0`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`either` 1.17.0, `rustls-pki-types` 1.15.1)
+
+### Fixed
+
+- **desktop**: drop stale static labels from title bar (`29a4cd941`)
+- **anthropic**: strip query strings when reducing base_url to an origin (`4e7eaaddf`)
+- **permissions**: normalize both sides of path matches consistently (`aca738eaa`)
+- **fs**: support directory removal in craft.fs.rm (`b129180d1`)
+- **ui**: downgrade RGB to 256 colors when the terminal lacks truecolor (`0b6446fca`)
+- **question**: single/multi answer affordance, shift+backspace, and CJK widths (`14c9a9d5a`)
+- **agent**: preserve tool pairs during compaction (`750693618`)
+- **ui**: keep the agent output and queue alive across respawns (`79a23ed37`)
+- **ui**: drain nucleo before reading palette matches (`0b4c5f53a`)
+- **cli**: --no-plugins keeps builtin plugins, only skips user init.lua (`16f8f3ab4`)
+
 ## [0.10.0] - 2026-07-23
 
 ### Added

@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "craft"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "craft-acp"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "agent-client-protocol-schema",
  "color-eyre",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "craft-agent"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "aho-corasick",
  "arc-swap",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "craft-config"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "craft-config-macro",
  "craft-storage",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "craft-config-macro"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "craft-desktop"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "craft-storage",
  "flume",
@@ -1772,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "craft-docgen"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "craft-agent",
  "craft-config",
@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "craft-flow"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "craft-agent",
  "craft-config",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "craft-highlight"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "serde_json",
  "syntect",
@@ -1818,9 +1818,10 @@ dependencies = [
 
 [[package]]
 name = "craft-interpreter"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "monty",
+ "monty-types",
  "serde_json",
  "test-case",
  "thiserror 2.0.19",
@@ -1829,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "craft-lua"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1902,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "craft-markdown"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "craft-highlight",
  "fastrand",
@@ -1912,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "craft-providers"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1946,7 +1947,7 @@ dependencies = [
 
 [[package]]
 name = "craft-repomap"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "ignore",
  "regex",
@@ -1984,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "craft-sandbox"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "tempfile",
  "test-case",
@@ -1994,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "craft-storage"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "bs58",
  "craft-markdown",
@@ -2014,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "craft-tool-macro"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2023,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "craft-ui"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "arboard",
  "arc-swap",
@@ -2658,9 +2659,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "either"
-version = "1.16.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "embed-resource"
@@ -3290,9 +3291,9 @@ dependencies = [
 
 [[package]]
 name = "get-size-derive2"
-version = "0.9.0"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9f8ab1b98a1284961d722ce994d9a0f3018ab1917618d4113824a72b9f71bc9"
+checksum = "c736d226c32e496b8377813b52269e11ad3a48d8373b68862d0364f04fd1229d"
 dependencies = [
  "attribute-derive",
  "quote",
@@ -3301,9 +3302,9 @@ dependencies = [
 
 [[package]]
 name = "get-size2"
-version = "0.9.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0cd0777a1057362cab35a779e0d79dacecb8d73e2c733eaafeb7ea917b08f03"
+checksum = "823645bc6404ae2915707777061a47d3a031a9ee0bff51b34ec973df3d8d2990"
 dependencies = [
  "compact_str",
  "get-size-derive2",
@@ -4385,6 +4386,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5159,18 +5169,19 @@ dependencies = [
 
 [[package]]
 name = "monty"
-version = "0.0.18"
-source = "git+https://github.com/pydantic/monty.git?tag=v0.0.18#45a3b2d57e6ce723fed4166fb032242ece74a663"
+version = "0.0.19"
+source = "git+https://github.com/pydantic/monty.git?tag=v0.0.19#e347739909877f4fb03877e23dd092286fc7e659"
 dependencies = [
  "ahash",
  "chrono",
  "fancy-regex 0.17.0",
  "hashbrown 0.16.1",
- "indexmap 2.14.0",
  "itertools 0.14.0",
+ "itoa",
  "jiter",
  "libm",
  "monty-macros",
+ "monty-types",
  "num-bigint",
  "num-integer",
  "num-traits",
@@ -5180,20 +5191,37 @@ dependencies = [
  "ruff_python_stdlib",
  "ruff_text_size",
  "serde",
- "serde_json",
  "smallvec",
  "speedate",
  "strum 0.27.2",
+ "unicode-general-category",
+ "unicode-normalization",
+ "unicode_names2",
 ]
 
 [[package]]
 name = "monty-macros"
-version = "0.0.18"
-source = "git+https://github.com/pydantic/monty.git?tag=v0.0.18#45a3b2d57e6ce723fed4166fb032242ece74a663"
+version = "0.0.19"
+source = "git+https://github.com/pydantic/monty.git?tag=v0.0.19#e347739909877f4fb03877e23dd092286fc7e659"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "monty-types"
+version = "0.0.19"
+source = "git+https://github.com/pydantic/monty.git?tag=v0.0.19#e347739909877f4fb03877e23dd092286fc7e659"
+dependencies = [
+ "chrono",
+ "monty-macros",
+ "num-bigint",
+ "num-traits",
+ "serde",
+ "strum 0.27.2",
+ "unicode-general-category",
+ "web-time",
 ]
 
 [[package]]
@@ -7240,10 +7268,12 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_ast"
-version = "0.0.0"
-source = "git+https://github.com/samuelcolvin/ruff.git?rev=6aaa91ac2b269df1414954ccd5134f0e6f5c6d30#6aaa91ac2b269df1414954ccd5134f0e6f5c6d30"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a10ab966362319801f5e85ce5c6aeac69f0cf50936a31e888f5d004e9279f337"
 dependencies = [
  "aho-corasick",
+ "arrayvec",
  "bitflags 2.13.1",
  "compact_str",
  "get-size2",
@@ -7259,8 +7289,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_parser"
-version = "0.0.0"
-source = "git+https://github.com/samuelcolvin/ruff.git?rev=6aaa91ac2b269df1414954ccd5134f0e6f5c6d30#6aaa91ac2b269df1414954ccd5134f0e6f5c6d30"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e3b8436fb010636ea79ce545acc3e391296ef4e804f7cef336dd5f9c8a4aa3a"
 dependencies = [
  "bitflags 2.13.1",
  "bstr",
@@ -7280,8 +7311,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_stdlib"
-version = "0.0.0"
-source = "git+https://github.com/samuelcolvin/ruff.git?rev=6aaa91ac2b269df1414954ccd5134f0e6f5c6d30#6aaa91ac2b269df1414954ccd5134f0e6f5c6d30"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c8860927bf42efdabb31ccb2ac9b8f98ee43897b45536f8023e217b158e49a4"
 dependencies = [
  "bitflags 2.13.1",
  "unicode-ident",
@@ -7289,10 +7321,11 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_trivia"
-version = "0.0.0"
-source = "git+https://github.com/samuelcolvin/ruff.git?rev=6aaa91ac2b269df1414954ccd5134f0e6f5c6d30#6aaa91ac2b269df1414954ccd5134f0e6f5c6d30"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "969e4a14b2550818efea99b9e2361c714c72e4f1fb94799251d55aed20345189"
 dependencies = [
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "ruff_source_file",
  "ruff_text_size",
  "unicode-ident",
@@ -7300,8 +7333,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_source_file"
-version = "0.0.0"
-source = "git+https://github.com/samuelcolvin/ruff.git?rev=6aaa91ac2b269df1414954ccd5134f0e6f5c6d30#6aaa91ac2b269df1414954ccd5134f0e6f5c6d30"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c194e02d121e4a1744464ce3a982c4c196eb039bbf67532d18c8ce09f8da6381"
 dependencies = [
  "memchr",
  "ruff_text_size",
@@ -7309,8 +7343,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_text_size"
-version = "0.0.0"
-source = "git+https://github.com/samuelcolvin/ruff.git?rev=6aaa91ac2b269df1414954ccd5134f0e6f5c6d30#6aaa91ac2b269df1414954ccd5134f0e6f5c6d30"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c91652ad39be604bc4d5299a5d19feccdd89e255609d89a031e7bb8e0d0aef9f"
 dependencies = [
  "get-size2",
 ]
@@ -7404,9 +7439,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.15.0"
+version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
+checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
 dependencies = [
  "web-time",
  "zeroize",
@@ -9872,6 +9907,12 @@ name = "unicode-ccc"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce61d488bcdc9bc8b5d1772c404828b17fc481c0a582b5581e95fb233aef503e"
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-ident"

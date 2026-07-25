@@ -7,10 +7,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use monty::{
-    ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
-    NameLookupResult, PrintWriter, PrintWriterCallback, ResolveFutures, ResourceLimits,
-    RunProgress,
+use monty::{MontyRun, ResolveFutures, RunProgress};
+use monty_types::{
+    CompileOptions, ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject,
+    NameLookupResult, PrintWriter, PrintWriterCallback, ResourceLimits,
 };
 use serde_json::Value;
 use tracing::debug;
@@ -74,7 +74,7 @@ pub fn run(
     limits: ResourceLimits,
 ) -> Result<InterpreterResult, InterpreterError> {
     let mut stdout = String::new();
-    let mut print_writer = PrintWriter::CollectString(&mut stdout);
+    let mut print_writer = PrintWriter::CollectString(&mut stdout, None);
     let output = run_inner(code, tools, resolver, limits, &mut print_writer)?;
     Ok(InterpreterResult { output, stdout })
 }
@@ -105,8 +105,13 @@ fn run_inner(
     limits: ResourceLimits,
     print_writer: &mut PrintWriter<'_>,
 ) -> Result<Option<Value>, InterpreterError> {
-    let runner = MontyRun::new(code.to_owned(), SCRIPT_NAME, vec![])
-        .map_err(|e| InterpreterError::Parse(e.to_string()))?;
+    let runner = MontyRun::new(
+        code.to_owned(),
+        SCRIPT_NAME,
+        vec![],
+        CompileOptions::default(),
+    )
+    .map_err(|e| InterpreterError::Parse(e.to_string()))?;
 
     let tracker = LimitedTracker::new(limits);
 
