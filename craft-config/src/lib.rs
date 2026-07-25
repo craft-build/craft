@@ -26,6 +26,7 @@ pub const DEFAULT_MAX_LINE_BYTES: usize = 3000;
 pub const DEFAULT_FLASH_DURATION_MS: u64 = 1500;
 pub const DEFAULT_TYPEWRITER_MS_PER_CHAR: u64 = 4;
 pub const DEFAULT_MOUSE_SCROLL_LINES: u32 = 3;
+pub const DEFAULT_MAX_INPUT_LINES: u32 = 20;
 
 pub const DEFAULT_CODE_EXECUTION_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_MAX_CONTINUATION_TURNS: u32 = 3;
@@ -51,6 +52,7 @@ const COMPACTION_BUFFER_EXPECTED: &str =
     r#"a token count (e.g. 12000) or a percent of the context window (e.g. "20%")"#;
 pub const MIN_INTERPRETER_MAX_MEMORY_MB: usize = 10;
 pub const MIN_MOUSE_SCROLL_LINES: u32 = 1;
+pub const MIN_MAX_INPUT_LINES: u32 = 1;
 pub const MIN_TOOL_OUTPUT_LINES: usize = 1;
 pub const MIN_MAX_LOG_BYTES_MB: u64 = 1;
 pub const MIN_MAX_LOG_FILES: u32 = 1;
@@ -351,6 +353,7 @@ pub struct UiFileConfig {
     pub flash_duration_ms: Option<u64>,
     pub typewriter_ms_per_char: Option<u64>,
     pub mouse_scroll_lines: Option<u32>,
+    pub max_input_lines: Option<u32>,
     pub show_thinking: Option<bool>,
     pub theme: Option<String>,
     pub tool_output_lines: Option<ToolOutputLinesFile>,
@@ -384,6 +387,7 @@ impl UiFileConfig {
             flash_duration_ms,
             typewriter_ms_per_char,
             mouse_scroll_lines,
+            max_input_lines,
             show_thinking,
             theme
         );
@@ -948,6 +952,9 @@ pub struct UiConfig {
     #[config(default = DEFAULT_MOUSE_SCROLL_LINES, min = MIN_MOUSE_SCROLL_LINES, desc = "Lines per mouse wheel scroll")]
     pub mouse_scroll_lines: u32,
 
+    #[config(default = DEFAULT_MAX_INPUT_LINES, min = MIN_MAX_INPUT_LINES, desc = "Maximum visible input lines")]
+    pub max_input_lines: u32,
+
     #[config(
         default = true,
         desc = "When true (default), show full model reasoning live and persisted. When false, hide reasoning behind an indicator (thinking> ...) with a click-to-expand hint, both while thinking and after it completes"
@@ -1003,6 +1010,7 @@ impl UiConfig {
                 .typewriter_ms_per_char
                 .unwrap_or(DEFAULT_TYPEWRITER_MS_PER_CHAR),
             mouse_scroll_lines: f.mouse_scroll_lines.unwrap_or(DEFAULT_MOUSE_SCROLL_LINES),
+            max_input_lines: f.max_input_lines.unwrap_or(DEFAULT_MAX_INPUT_LINES),
             show_thinking: f.show_thinking.unwrap_or(true),
             theme: f.theme,
             tool_output_lines: ToolOutputLines::from_file(f.tool_output_lines),
@@ -2750,6 +2758,7 @@ tasks = []
     #[test_case("provider", "connect_timeout_secs", 0 ; "provider_zero_connect_timeout")]
     #[test_case("storage",  "max_log_files",        0 ; "storage_zero_log_files")]
     #[test_case("ui",       "mouse_scroll_lines",   0 ; "ui_zero_scroll_lines")]
+    #[test_case("ui",       "max_input_lines",      0 ; "ui_zero_max_input_lines")]
     #[test_case("agent",    "code_execution_timeout_secs", 1 ; "agent_code_execution_timeout_too_low")]
     fn validate_rejects_invalid_sections(section: &str, field: &str, value: u64) {
         let mut config = Config {
@@ -2773,6 +2782,7 @@ tasks = []
             }
             ("storage", "max_log_files") => config.storage.max_log_files = value as u32,
             ("ui", "mouse_scroll_lines") => config.ui.mouse_scroll_lines = value as u32,
+            ("ui", "max_input_lines") => config.ui.max_input_lines = value as u32,
             ("agent", "code_execution_timeout_secs") => {
                 config.agent.code_execution_timeout_secs = value
             }
@@ -3463,6 +3473,16 @@ tasks = []
         };
         let err = raw.into_config(false).err().expect("expected config error");
         assert!(matches!(err, ConfigError::Thinking(_)));
+    }
+
+    #[test]
+    fn max_input_lines_defaults_and_deserializes() {
+        let raw: RawConfig = toml::from_str("").unwrap();
+        let config = raw.into_config(false).unwrap();
+        assert_eq!(config.ui.max_input_lines, DEFAULT_MAX_INPUT_LINES);
+
+        let raw: RawConfig = toml::from_str("[ui]\nmax_input_lines = 5\n").unwrap();
+        assert_eq!(raw.ui.max_input_lines.unwrap(), 5);
     }
 
     #[test_case("[ui]\nsplash_animaton = true\n" ; "top_level_typo")]

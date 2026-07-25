@@ -98,7 +98,7 @@ impl App {
             queue_panel::height(self.queue.panel_len())
                 + panel_h
                 + status_bar::MODEL_ROW_HEIGHT
-                + self.input_box.height(inner.width)
+                + self.input_box.height(inner.width).min(max_bottom)
         } else {
             let panel_h: u16 = self
                 .float_mgr
