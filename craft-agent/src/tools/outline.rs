@@ -1849,9 +1849,15 @@ fn main() {
         let symbols = extract_symbols(RUST_SRC, LangId::Rust);
         let tree = build_outline_tree(&symbols);
         let text = render_file_outline("main.rs", &tree, LangId::Rust);
-        assert!(text.contains("main.rs"));
-        assert!(text.contains("Config"));
-        assert!(text.contains("main"));
+        assert!(
+            text.contains("main.rs"),
+            "missing 'main.rs' in output:\n{text}"
+        );
+        assert!(
+            text.contains("Config"),
+            "missing 'Config' in output:\n{text}"
+        );
+        assert!(text.contains("main"), "missing 'main' in output:\n{text}");
     }
 
     #[test]
@@ -2142,9 +2148,15 @@ items:
         let symbols = extract_symbols(src, LangId::Yaml);
         let tree = build_outline_tree(&symbols);
         let text = render_file_outline("compose.yaml", &tree, LangId::Yaml);
-        assert!(text.contains("compose.yaml"));
-        assert!(text.contains("name"));
-        assert!(text.contains("services"));
+        assert!(
+            text.contains("compose.yaml"),
+            "missing 'compose.yaml' in output:\n{text}"
+        );
+        assert!(text.contains("name"), "missing 'name' in output:\n{text}");
+        assert!(
+            text.contains("services"),
+            "missing 'services' in output:\n{text}"
+        );
     }
 
     #[test]
@@ -2173,10 +2185,19 @@ items:
         let symbols = extract_symbols(src, LangId::Toml);
         let tree = build_outline_tree(&symbols);
         let text = render_file_outline("Cargo.toml", &tree, LangId::Toml);
-        assert!(text.contains("Cargo.toml"));
-        assert!(text.contains("[package]"));
-        assert!(text.contains("name"));
-        assert!(text.contains("version"));
+        assert!(
+            text.contains("Cargo.toml"),
+            "missing 'Cargo.toml' in output:\n{text}"
+        );
+        assert!(
+            text.contains("[package]"),
+            "missing '[package]' in output:\n{text}"
+        );
+        assert!(text.contains("name"), "missing 'name' in output:\n{text}");
+        assert!(
+            text.contains("version"),
+            "missing 'version' in output:\n{text}"
+        );
         let package = tree
             .iter()
             .find(|e| e.name == "[package]")
