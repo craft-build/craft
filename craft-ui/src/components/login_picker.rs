@@ -285,7 +285,7 @@ impl LoginPicker {
         let action = match &mut self.step {
             Step::Closed => return LoginPickerAction::Consumed,
             Step::PickProvider(picker) => match picker.handle_key(key) {
-                PickerAction::Select(_, item) => {
+                PickerAction::Select(item) => {
                     if item.slug == CATALOG_UNAVAILABLE_SLUG {
                         StepAction::None
                     } else if item.slug == CUSTOM_SLUG {
@@ -329,7 +329,7 @@ impl LoginPicker {
                 }
             },
             Step::PickPlan { picker, slug } => match picker.handle_key(key) {
-                PickerAction::Select(_, item) => {
+                PickerAction::Select(item) => {
                     let config = providers::ProvidersConfig::load();
                     StepAction::GoEnterKey {
                         slug: slug.clone(),
@@ -361,7 +361,7 @@ impl LoginPicker {
                 }
             },
             Step::CustomProtocol { picker, slug } => match picker.handle_key(key) {
-                PickerAction::Select(_, item) => StepAction::GoCustomUrl {
+                PickerAction::Select(item) => StepAction::GoCustomUrl {
                     slug: slug.clone(),
                     protocol: item.0.to_string(),
                 },

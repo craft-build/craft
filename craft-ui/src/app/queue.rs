@@ -170,6 +170,7 @@ impl App {
     /// load/rewind the display is restored before `respawn` swaps the shared
     /// queue, so pushing earlier would fill a queue that is about to die.
     pub(crate) fn flush_restored_queue(&mut self) {
+        self.recoverable_queue.clear();
         for text in std::mem::take(&mut self.state.session.meta.queued_messages) {
             self.queue_and_notify(QueuedMessage {
                 text,
@@ -214,6 +215,7 @@ impl App {
     /// once per run.
     pub(super) fn start_run(&mut self, input: AgentInput, display: String) -> Vec<Action> {
         self.run_id += 1;
+        self.recoverable_queue.clear();
         self.status = Status::Streaming;
         if self.state.mode == super::Mode::Flow {
             self.flow_panel.show_if_not_dismissed();

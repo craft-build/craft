@@ -81,7 +81,7 @@ impl RecipePicker {
     pub fn handle_key(&mut self, key: KeyEvent) -> RecipePickerAction {
         match self.picker.handle_key(key) {
             PickerAction::Consumed => RecipePickerAction::Consumed,
-            PickerAction::Select(_, entry) => RecipePickerAction::Select(entry.path),
+            PickerAction::Select(entry) => RecipePickerAction::Select(entry.path),
             PickerAction::Close => RecipePickerAction::Close,
             PickerAction::Toggle(..) => RecipePickerAction::Consumed,
         }

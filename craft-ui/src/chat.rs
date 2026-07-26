@@ -2,7 +2,7 @@
 //! Missing outputs fall back to plain text from `ToolResult`.
 //! Webfetch bodies are hidden to save screen space.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -328,6 +328,11 @@ impl Chat {
 
     pub fn fail_in_progress_with_message(&mut self, message: String) {
         self.messages_panel.fail_in_progress_with_message(message);
+    }
+
+    pub fn fail_in_progress_except(&mut self, message: String, excluded: &HashSet<String>) {
+        self.messages_panel
+            .fail_in_progress_except(message, excluded);
     }
 
     pub fn push(&mut self, msg: DisplayMessage) {
