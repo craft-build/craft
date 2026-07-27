@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-use craft_providers::{Model, ModelPricing, ProviderUsage, TokenUsage};
+use craft_providers::{Model, ModelPricing, ProviderUsage, TokenUsage, format_tokens};
 use craft_storage::sessions::StoredTokenUsage;
 use crossterm::event::{KeyCode, KeyEvent};
 use jiff::Timestamp;
@@ -17,7 +17,6 @@ use crate::components::Overlay;
 use crate::components::keybindings::key;
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
-use crate::components::status_bar::format_tokens;
 use crate::theme;
 
 const TITLE: &str = " Token usage ";

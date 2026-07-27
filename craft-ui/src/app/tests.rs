@@ -722,6 +722,7 @@ fn turn_complete_tracks_usage_and_context_per_chat() {
             message: Default::default(),
             usage: main_usage,
             model: "test".into(),
+            cost: None,
             context_size: None,
             context_window: 0,
         },
@@ -737,6 +738,7 @@ fn turn_complete_tracks_usage_and_context_per_chat() {
             message: Default::default(),
             usage: sub_usage,
             model: "test".into(),
+            cost: None,
             context_size: None,
             context_window: 0,
         })),
@@ -750,6 +752,144 @@ fn turn_complete_tracks_usage_and_context_per_chat() {
     assert_eq!(app.chats[1].token_usage.input, 200);
     assert_eq!(app.chats[0].context_size, main_usage.context_tokens());
     assert_eq!(app.chats[1].context_size, sub_usage.context_tokens());
+}
+
+fn streaming_app() -> App {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app
+}
+
+fn tool_start(id: &str, tool: &str) -> AgentEvent {
+    AgentEvent::ToolStart(Box::new(ToolStartEvent {
+        id: id.into(),
+        tool: tool.into(),
+        summary: id.into(),
+        annotation: None,
+        input: None,
+        raw_input: None,
+        output: None,
+        render_header: None,
+    }))
+}
+
+fn turn_complete(usage: TokenUsage, model: &str, cost: Option<f64>) -> AgentEvent {
+    AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
+        message: Default::default(),
+        usage,
+        model: model.into(),
+        cost,
+        context_size: None,
+        context_window: 0,
+    }))
+}
+
+fn tool_results_submitted() -> AgentEvent {
+    AgentEvent::ToolResultsSubmitted {
+        message: Box::new(Message::user(String::new())),
+    }
+}
+
+const SUB_TOKENS: TokenUsage = TokenUsage {
+    input: 1_000,
+    output: 200,
+    cache_creation: 300,
+    cache_read: 400,
+};
+const SUB_COST: Option<f64> = Some(0.007);
+
+fn sub_turn_complete() -> Msg {
+    subagent_msg(
+        turn_complete(SUB_TOKENS, "child-model", SUB_COST),
+        "task1",
+        Some("research"),
+    )
+}
+
+/// Uses the same formatter as the header: these tests pin which tool gets the
+/// usage, not how it is spelled (craft-providers covers the spelling).
+fn sub_usage_text(turns: u32) -> String {
+    let mut total = TokenUsage::default();
+    for _ in 0..turns {
+        total += SUB_TOKENS;
+    }
+    total.format(SUB_COST.map(|cost| cost * f64::from(turns)))
+}
+
+#[test]
+fn subagent_turn_complete_updates_matching_parent_header_cumulatively() {
+    let mut app = streaming_app();
+    app.update(agent_msg(tool_start("task1", "task")));
+    app.update(agent_msg(tool_start("task2", "task")));
+
+    app.update(sub_turn_complete());
+    app.update(sub_turn_complete());
+
+    assert_eq!(
+        app.chats[0].tool_turn_usage("task1"),
+        Some(sub_usage_text(2).as_str())
+    );
+    assert_eq!(app.chats[0].tool_turn_usage("task2"), None);
+}
+
+#[test_case(false ; "plain_tool_takes_the_parent_turn")]
+#[test_case(true  ; "subagent_stamp_is_not_overwritten")]
+fn parent_turn_flush_stamps_the_last_unstamped_tool(subagent_ran: bool) {
+    let mut app = streaming_app();
+    app.update(agent_msg(turn_complete(
+        TokenUsage {
+            input: 500,
+            output: 100,
+            ..Default::default()
+        },
+        "main-model",
+        Some(0.002),
+    )));
+    app.update(agent_msg(tool_start("task1", "task")));
+    if subagent_ran {
+        app.update(sub_turn_complete());
+    }
+
+    app.update(agent_msg(tool_results_submitted()));
+
+    let expected = if subagent_ran {
+        sub_usage_text(1)
+    } else {
+        TokenUsage {
+            input: 500,
+            output: 100,
+            ..Default::default()
+        }
+        .format(Some(0.002))
+    };
+    assert_eq!(
+        app.chats[0].tool_turn_usage("task1"),
+        Some(expected.as_str())
+    );
+}
+
+#[test]
+fn tool_inside_subagent_chat_gets_its_turn_usage() {
+    let mut app = streaming_app();
+    app.update(agent_msg(tool_start("task1", "task")));
+    app.update(subagent_msg(
+        tool_start("sub_bash", "bash"),
+        "task1",
+        Some("research"),
+    ));
+    app.update(sub_turn_complete());
+
+    app.update(subagent_msg(
+        tool_results_submitted(),
+        "task1",
+        Some("research"),
+    ));
+
+    assert_eq!(
+        app.chats[1].tool_turn_usage("sub_bash"),
+        Some(sub_usage_text(1).as_str())
+    );
 }
 
 #[test]
@@ -766,6 +906,7 @@ fn turn_complete_accumulates_usage_by_model() {
                 ..Default::default()
             },
             model: "main-model".into(),
+            cost: None,
             context_size: None,
             context_window: 0,
         },
@@ -779,6 +920,7 @@ fn turn_complete_accumulates_usage_by_model() {
                 ..Default::default()
             },
             model: "sub-model".into(),
+            cost: None,
             context_size: None,
             context_window: 0,
         })),
@@ -908,9 +1050,7 @@ fn ctrl_x_toggles_tasks_picker() {
 }
 
 fn app_with_subagent_id(id: &str) -> App {
-    let mut app = test_app();
-    app.status = Status::Streaming;
-    app.run_id = 1;
+    let mut app = streaming_app();
     app.update(subagent_msg(
         AgentEvent::TextDelta { text: "x".into() },
         id,
@@ -2555,6 +2695,7 @@ fn stale_non_terminal_event_does_not_save_session() {
             message: Message::user(String::new()),
             usage: TokenUsage::default(),
             model: "mock".into(),
+            cost: None,
             context_size: None,
             context_window: 0,
         })),

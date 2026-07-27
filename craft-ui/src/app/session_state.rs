@@ -31,6 +31,7 @@ pub(crate) struct SessionState {
     pub session: AppSession,
     pub model: Model,
     pub token_usage: TokenUsage,
+    pub cost: Option<f64>,
     pub context_size: u32,
     pub mode: Mode,
     pub plan: PlanState,
@@ -113,6 +114,8 @@ impl SessionState {
         let token_usage = session.token_usage;
         let context_size = session.meta.context_size;
         let context_window_overrides = session.meta.context_window_overrides.clone();
+        let fast = session.meta.fast && model.supports_fast();
+        let cost = model.cost_of(&token_usage, fast);
 
         Self {
             thinking: session
@@ -121,10 +124,11 @@ impl SessionState {
                 .map(Into::into)
                 .filter(|_| model.supports_thinking())
                 .unwrap_or_default(),
-            fast: session.meta.fast && model.supports_fast(),
+            fast,
             session,
             model,
             token_usage,
+            cost,
             context_size,
             mode,
             plan,

@@ -409,10 +409,9 @@ impl App {
                 .as_deref()
                 .unwrap_or(&self.state.session.model),
             stats: UsageStats {
-                usage: &chat.token_usage,
-                global_usage: &self.state.token_usage,
                 context_size: chat.context_size,
-                pricing: &self.state.model.pricing,
+                cost: chat.cost,
+                global_cost: self.state.cost,
                 context_window: self.state.model.context_window,
                 show_global: self.chats.len() > 1,
             },

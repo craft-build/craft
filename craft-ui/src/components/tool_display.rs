@@ -1,5 +1,4 @@
 use super::render_hints::{BodyFormat, HeaderStyle, RenderHintsRegistry, ToolRenderHints};
-use super::status_bar::format_tokens;
 use super::{DisplayMessage, ToolStatus};
 
 use super::code_view;
@@ -15,8 +14,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use unicode_width::UnicodeWidthStr;
-
-use craft_providers::{ModelPricing, TokenUsage};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -338,20 +335,6 @@ impl ToolLines {
 pub fn format_timestamp_now() -> String {
     let zoned = Timestamp::now().to_zoned(TimeZone::system());
     zoned.strftime("%H:%M:%S").to_string()
-}
-
-pub fn format_turn_usage(usage: &TokenUsage, pricing: &ModelPricing, fast: bool) -> String {
-    let tokens = format!(
-        "{}↑ {}↓",
-        format_tokens(usage.total_input()),
-        format_tokens(usage.output),
-    );
-    if pricing.is_zero() {
-        tokens
-    } else {
-        let cost = usage.cost(pricing, fast);
-        format!("{tokens} ${cost:.3}")
-    }
 }
 
 pub fn append_right_info(

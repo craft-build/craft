@@ -150,8 +150,15 @@ impl App {
             &self.ui_config.tool_output_lines,
         );
         self.main_chat().load_messages(display_msgs);
-        self.main_chat().token_usage = self.state.token_usage;
-        self.main_chat().context_size = self.state.context_size;
+        let (usage, context_size, cost) = (
+            self.state.token_usage,
+            self.state.context_size,
+            self.state.cost,
+        );
+        let main = self.main_chat();
+        main.token_usage = usage;
+        main.cost = cost;
+        main.context_size = context_size;
 
         if let Some(draft) = self.state.session.meta.input_draft.take() {
             self.input_box.set_input(draft);
@@ -229,6 +236,7 @@ impl App {
         self.lua_event_handle
             .fire_autocmd("SessionReset", serde_json::json!({}));
         self.state.token_usage = TokenUsage::default();
+        self.state.cost = None;
         self.state.context_size = 0;
         self.state.plan = PlanState::None;
         if self.state.mode == Mode::Plan {

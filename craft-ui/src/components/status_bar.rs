@@ -8,7 +8,7 @@ use super::{RetryInfo, Status};
 use crate::animation::spinner_frame;
 use crate::theme;
 
-use craft_providers::{ModelPricing, TokenUsage};
+use craft_providers::format_tokens;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -16,14 +16,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 const FAST_LABEL: &str = " [fast]";
-
-pub(crate) fn format_tokens(n: u32) -> String {
-    match n {
-        0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1_000.0),
-        _ => format!("{:.1}m", n as f64 / 1_000_000.0),
-    }
-}
 
 const CONTEXT_BAR_WIDTH: usize = 10;
 const BAR_FILL: &str = "█";
@@ -36,11 +28,10 @@ fn context_bar(pct: u32) -> (String, String) {
     (BAR_FILL.repeat(filled), BAR_EMPTY.repeat(empty))
 }
 
-pub struct UsageStats<'a> {
-    pub usage: &'a TokenUsage,
-    pub global_usage: &'a TokenUsage,
+pub struct UsageStats {
     pub context_size: u32,
-    pub pricing: &'a ModelPricing,
+    pub cost: Option<f64>,
+    pub global_cost: Option<f64>,
     pub context_window: u32,
     pub show_global: bool,
 }
@@ -50,7 +41,7 @@ pub struct StatusBarContext<'a> {
     pub mode_label: Cow<'static, str>,
     pub mode_style: Style,
     pub model_id: &'a str,
-    pub stats: UsageStats<'a>,
+    pub stats: UsageStats,
     pub auto_scroll: bool,
     pub chat_name: Option<&'a str>,
     pub retry_info: Option<&'a RetryInfo>,
@@ -264,17 +255,16 @@ pub fn view_model_row(frame: &mut Frame, area: Rect, ctx: &StatusBarContext) {
     right_spans.push(Span::styled(filled, t.accent));
     right_spans.push(Span::styled(empty, t.status_dim));
 
-    if !ctx.stats.pricing.is_zero() {
+    if let Some(cost) = ctx.stats.cost {
         right_spans.push(Span::styled(
-            format!(" ${:.3}", ctx.stats.usage.cost(ctx.stats.pricing, ctx.fast)),
+            format!(" ${cost:.3}"),
             Style::new().fg(t.text_secondary),
         ));
-        if ctx.stats.show_global {
+        if ctx.stats.show_global
+            && let Some(global_cost) = ctx.stats.global_cost
+        {
             right_spans.push(Span::styled(
-                format!(
-                    " \u{03a3}${:.3}",
-                    ctx.stats.global_usage.cost(ctx.stats.pricing, ctx.fast),
-                ),
+                format!(" \u{03a3}${global_cost:.3}"),
                 Style::new().fg(t.text_secondary),
             ));
         }
@@ -364,16 +354,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use test_case::test_case;
-
-    #[test_case(999, "999")]
-    #[test_case(1_000, "1.0k")]
-    #[test_case(12_345, "12.3k")]
-    #[test_case(999_999, "1000.0k")]
-    #[test_case(1_000_000, "1.0m")]
-    #[test_case(1_500_000, "1.5m")]
-    fn format_tokens_display(input: u32, expected: &str) {
-        assert_eq!(format_tokens(input), expected);
-    }
 
     #[test_case("/home/user/projects/app", "/home/user", "~/projects/app" ; "inside_home")]
     #[test_case("/tmp/other", "/home/user", "/tmp/other"                  ; "outside_home")]
