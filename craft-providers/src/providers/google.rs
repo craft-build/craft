@@ -104,9 +104,14 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
     ]
 }
 
-fn resolve_auth_from_key(key: &str) -> ResolvedAuth {
+fn resolve_google_base_url() -> Option<String> {
+    let config = craft_config::providers::ProvidersConfig::load();
+    craft_config::providers::resolve_base_url("google", config.get("google"))
+}
+
+fn resolve_auth_from_key(key: &str, base_url: Option<String>) -> ResolvedAuth {
     ResolvedAuth {
-        base_url: None,
+        base_url,
         headers: vec![("x-goog-api-key".into(), key.to_string())],
     }
 }
@@ -116,17 +121,21 @@ pub struct Google {
     auth: Arc<Mutex<ResolvedAuth>>,
     key_pool: Option<KeyPool>,
     stream_timeout: Duration,
+    /// Env / `providers.toml` / inventory default, resolved once at construction.
+    resolved_base_url: Option<String>,
 }
 
 impl Google {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
         let pool = KeyPool::resolve("google", ENV_VAR)?;
-        let resolved = resolve_auth_from_key(pool.current());
+        let resolved_base_url = resolve_google_base_url();
+        let resolved = resolve_auth_from_key(pool.current(), resolved_base_url.clone());
         Ok(Self {
             client: http_client(timeouts)?,
             auth: Arc::new(Mutex::new(resolved)),
             key_pool: Some(pool),
             stream_timeout: timeouts.stream,
+            resolved_base_url,
         })
     }
 
@@ -134,11 +143,13 @@ impl Google {
         auth: Arc<Mutex<super::ResolvedAuth>>,
         timeouts: super::Timeouts,
     ) -> Result<Self, AgentError> {
+        let resolved_base_url = auth.lock().unwrap().base_url.clone();
         Ok(Self {
             client: http_client(timeouts)?,
             auth,
             key_pool: None,
             stream_timeout: timeouts.stream,
+            resolved_base_url,
         })
     }
 
@@ -285,15 +296,18 @@ impl Provider for Google {
 
     async fn reload_auth(&self) -> Result<(), AgentError> {
         let pool = KeyPool::resolve("google", ENV_VAR)?;
-        *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
+        *lock_unpoison(&self.auth) =
+            resolve_auth_from_key(pool.current(), self.resolved_base_url.clone());
         Ok(())
     }
 
     async fn rotate_key(&self) -> Result<bool, AgentError> {
-        Ok(self
-            .key_pool
-            .as_ref()
-            .is_some_and(|p| p.rotate_auth(&self.auth, resolve_auth_from_key)))
+        let base_url = self.resolved_base_url.clone();
+        Ok(self.key_pool.as_ref().is_some_and(|p| {
+            p.rotate_auth(&self.auth, |key| {
+                resolve_auth_from_key(key, base_url.clone())
+            })
+        }))
     }
 }
 

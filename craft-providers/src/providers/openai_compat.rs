@@ -30,6 +30,12 @@ pub(crate) struct OpenAiCompatProvider {
     client: Client,
     config: &'static OpenAiCompatConfig,
     stream_timeout: Duration,
+    /// Env / `providers.toml` override, resolved once at construction. The
+    /// static compat default stays the last resort because it can be more
+    /// specific than the inventory one (`http://localhost:11434/v1` vs the
+    /// bare ollama host). Request-time `auth.base_url` still wins (custom,
+    /// local, dynamic).
+    resolved_base_url: Option<String>,
 }
 
 impl OpenAiCompatProvider {
@@ -37,10 +43,17 @@ impl OpenAiCompatProvider {
         config: &'static OpenAiCompatConfig,
         timeouts: super::Timeouts,
     ) -> Result<Self, AgentError> {
+        let resolved_base_url = if config.slug.is_empty() {
+            None
+        } else {
+            let providers = craft_config::providers::ProvidersConfig::load();
+            craft_config::providers::configured_base_url(config.slug, providers.get(config.slug))
+        };
         Ok(Self {
             client: super::http_client(timeouts)?,
             config,
             stream_timeout: timeouts.stream,
+            resolved_base_url,
         })
     }
 
@@ -120,11 +133,15 @@ impl OpenAiCompatProvider {
         body
     }
 
+    /// Effective base URL: an auth-supplied value (dynamic/custom providers)
+    /// wins, then the construction-time env / `providers.toml` override, then
+    /// the static compat default.
     fn base_url(&self, auth: &ResolvedAuth) -> String {
         if let Some(explicit) = auth.base_url.as_deref() {
             return explicit.to_string();
         }
-        craft_config::providers::base_url_override(self.config.slug)
+        self.resolved_base_url
+            .clone()
             .unwrap_or_else(|| self.config.base_url.to_string())
     }
 

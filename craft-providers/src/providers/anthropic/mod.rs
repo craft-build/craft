@@ -54,9 +54,14 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-fn resolve_auth_from_key(key: &str) -> super::ResolvedAuth {
+fn resolve_anthropic_base_url() -> Option<String> {
+    let config = craft_config::providers::ProvidersConfig::load();
+    craft_config::providers::resolve_base_url("anthropic", config.get("anthropic"))
+}
+
+fn resolve_auth_from_key(key: &str, base_url: Option<String>) -> super::ResolvedAuth {
     super::ResolvedAuth {
-        base_url: craft_config::providers::resolve_base_url("anthropic", None),
+        base_url,
         headers: vec![("x-api-key".into(), key.to_string())],
     }
 }
@@ -232,21 +237,23 @@ fn origin(base_url: &str) -> &str {
 }
 
 /// True when `base_url` targets the real Anthropic API, directly or via the
-/// configured base-URL override (so quota stays visible behind a proxy).
-fn first_party(base_url: &str) -> bool {
+/// construction-time base-URL override (so quota stays visible behind a proxy).
+fn first_party(base_url: &str, configured_override: Option<&str>) -> bool {
     let target = origin(base_url);
     target.contains("api.anthropic.com")
-        || craft_config::providers::base_url_override("anthropic")
-            .is_some_and(|configured| origin(&configured) == target)
+        || configured_override.is_some_and(|configured| origin(configured) == target)
 }
 
 /// Subscription quota only exists for OAuth tokens against the real Anthropic
 /// API; API keys and anthropic-protocol third-party endpoints have none.
-fn usage_eligible(auth: &super::ResolvedAuth) -> bool {
+fn usage_eligible(auth: &super::ResolvedAuth, configured_override: Option<&str>) -> bool {
     auth.headers
         .iter()
         .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-        && auth.base_url.as_deref().is_none_or(first_party)
+        && auth
+            .base_url
+            .as_deref()
+            .is_none_or(|url| first_party(url, configured_override))
 }
 
 pub struct Anthropic {
@@ -255,12 +262,16 @@ pub struct Anthropic {
     key_pool: Option<KeyPool>,
     system_prefix: Option<String>,
     stream_timeout: Duration,
+    /// Env / `providers.toml` / inventory default, resolved once at construction.
+    /// Reused by key rotation / reload so they do not re-parse providers.toml.
+    resolved_base_url: Option<String>,
 }
 
 impl Anthropic {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
         let pool = KeyPool::resolve("anthropic", ENV_VAR)?;
-        let resolved = resolve_auth_from_key(pool.current());
+        let resolved_base_url = resolve_anthropic_base_url();
+        let resolved = resolve_auth_from_key(pool.current(), resolved_base_url.clone());
         debug!(keys = pool.len(), "using API key authentication");
         Ok(Self {
             client: super::http_client(timeouts)?,
@@ -268,6 +279,7 @@ impl Anthropic {
             key_pool: Some(pool),
             system_prefix: None,
             stream_timeout: timeouts.stream,
+            resolved_base_url,
         })
     }
 
@@ -281,6 +293,10 @@ impl Anthropic {
             key_pool: None,
             system_prefix: None,
             stream_timeout: timeouts.stream,
+            // Custom / dynamic callers own their base URL; treating it as the
+            // anthropic override would make every third-party endpoint look
+            // first party and poll `/api/oauth/usage` against it.
+            resolved_base_url: None,
         })
     }
 
@@ -447,20 +463,26 @@ impl Provider for Anthropic {
 
     async fn reload_auth(&self) -> Result<(), AgentError> {
         let pool = KeyPool::resolve("anthropic", ENV_VAR)?;
-        *lock_unpoison(&self.auth) = resolve_auth_from_key(pool.current());
+        *lock_unpoison(&self.auth) =
+            resolve_auth_from_key(pool.current(), self.resolved_base_url.clone());
         debug!("reloaded Anthropic auth from env");
         Ok(())
     }
 
     async fn rotate_key(&self) -> Result<bool, AgentError> {
-        Ok(self
-            .key_pool
-            .as_ref()
-            .is_some_and(|p| p.rotate_auth(&self.auth, resolve_auth_from_key)))
+        let base_url = self.resolved_base_url.clone();
+        Ok(self.key_pool.as_ref().is_some_and(|p| {
+            p.rotate_auth(&self.auth, |key| {
+                resolve_auth_from_key(key, base_url.clone())
+            })
+        }))
     }
 
     async fn fetch_usage(&self) -> Result<Option<ProviderUsage>, AgentError> {
-        if !usage_eligible(&lock_unpoison(&self.auth)) {
+        if !usage_eligible(
+            &lock_unpoison(&self.auth),
+            self.resolved_base_url.as_deref(),
+        ) {
             return Ok(None);
         }
         let response = self
@@ -533,6 +555,7 @@ mod tests {
     use test_case::test_case;
 
     const TEST_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
+    const THIRD_PARTY_BASE_URL: &str = "https://proxy.example.com/v1/messages";
 
     const USAGE_BODY: &str = r#"{
         "five_hour": {"utilization": 14.0, "resets_at": "2026-02-06T22:00:00+00:00"},
@@ -623,7 +646,36 @@ mod tests {
             base_url: base_url.map(String::from),
             headers: vec![(header.into(), "token".into())],
         };
-        assert_eq!(usage_eligible(&auth), expected);
+        assert_eq!(usage_eligible(&auth, None), expected);
+    }
+
+    #[test]
+    fn with_auth_keeps_third_party_endpoint_ineligible() {
+        let mut auth = crate::providers::ResolvedAuth::bearer("token");
+        auth.base_url = Some(THIRD_PARTY_BASE_URL.into());
+        let provider = Anthropic::with_auth(
+            Arc::new(Mutex::new(auth)),
+            crate::providers::Timeouts::default(),
+        )
+        .unwrap();
+        assert!(provider.resolved_base_url.is_none());
+        assert!(!usage_eligible(
+            &provider.auth.lock().unwrap(),
+            provider.resolved_base_url.as_deref()
+        ));
+    }
+
+    #[test]
+    fn usage_eligible_when_url_matches_configured_override() {
+        let auth = crate::providers::ResolvedAuth {
+            base_url: Some(THIRD_PARTY_BASE_URL.into()),
+            headers: vec![("Authorization".into(), "token".into())],
+        };
+        assert!(usage_eligible(&auth, Some(THIRD_PARTY_BASE_URL)));
+        assert!(!usage_eligible(
+            &auth,
+            Some("https://other-proxy.example.com")
+        ));
     }
 
     #[test_case("https://api.anthropic.com/v1/messages", "https://api.anthropic.com" ; "strips_messages_path")]

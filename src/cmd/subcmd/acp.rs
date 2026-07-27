@@ -65,6 +65,7 @@ pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_plugins: bool, no_jit: boo
 
     setup::init_logging(&config.storage);
     setup::install_panic_log_hook();
+    setup::warn_ignored_provider_fields();
 
     let (mcp_config, _mcp_config_errors) = craft_agent::mcp::config::load_config(&cwd);
 
