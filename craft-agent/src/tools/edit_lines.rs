@@ -73,7 +73,7 @@ impl EditLines {
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
         let path = super::resolve_path(&self.path)?;
         let p = Path::new(&path);
-        ctx.file_tracker.check_before_edit(p)?;
+        ctx.check_before_edit(p)?;
 
         let before = ctx.fs.read_text_file(p).await?;
         let after = Self::replace_lines(&before, self.start, self.end, &self.new_string)?;
@@ -207,7 +207,7 @@ impl InsertLines {
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
         let path = super::resolve_path(&self.path)?;
         let p = Path::new(&path);
-        ctx.file_tracker.check_before_edit(p)?;
+        ctx.check_before_edit(p)?;
 
         let before = ctx.fs.read_text_file(p).await?;
         let after = Self::insert_lines(&before, self.line, &self.new_string)?;

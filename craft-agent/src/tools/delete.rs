@@ -47,7 +47,7 @@ impl Delete {
                 continue;
             }
 
-            ctx.file_tracker.check_before_edit(&path)?;
+            ctx.check_before_edit(&path)?;
             let rel = relative_path(&path.to_string_lossy());
 
             if path.is_file() {

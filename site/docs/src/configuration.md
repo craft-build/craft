@@ -138,6 +138,7 @@ Remappable actions:
 | `max_continuation_turns` | u32 | `3` | 1 | Max automatic continuation turns |
 | `compaction_buffer` | u32 \| string | `20%` | - | Context reserved for compaction: token count or percent of the context window (e.g. "20%") |
 | `interpreter_max_memory_mb` | usize | `50` | 10 | Memory limit for code interpreter (MB) |
+| `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |
 
 ### `agent.validation`
 

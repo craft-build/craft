@@ -512,6 +512,7 @@ pub struct AgentFileConfig {
     pub code_execution_timeout_secs: Option<u64>,
     pub max_continuation_turns: Option<u32>,
     pub compaction_buffer: Option<CompactionBuffer>,
+    pub stale_read_check: Option<bool>,
     pub interpreter_max_memory_mb: Option<usize>,
     #[serde(default)]
     pub trust_decay: TrustDecayConfig,
@@ -545,6 +546,7 @@ impl AgentFileConfig {
             code_execution_timeout_secs,
             max_continuation_turns,
             compaction_buffer,
+            stale_read_check,
             interpreter_max_memory_mb,
             hooks_enabled,
             judge_model
@@ -1488,6 +1490,12 @@ pub struct AgentConfig {
     #[config(default = DEFAULT_INTERPRETER_MAX_MEMORY_MB, min = MIN_INTERPRETER_MAX_MEMORY_MB, desc = "Memory limit for code interpreter (MB)")]
     pub interpreter_max_memory_mb: usize,
 
+    #[config(
+        default = true,
+        desc = "Require re-reading a file that changed on disk before editing it"
+    )]
+    pub stale_read_check: bool,
+
     #[config(skip, default = false)]
     pub no_rtk: bool,
 
@@ -1570,6 +1578,7 @@ impl AgentConfig {
             interpreter_max_memory_mb: file
                 .interpreter_max_memory_mb
                 .unwrap_or(DEFAULT_INTERPRETER_MAX_MEMORY_MB),
+            stale_read_check: file.stale_read_check.unwrap_or(true),
             allowed_tools: Vec::new(),
             disabled_tools,
             trust_decay: file.trust_decay,

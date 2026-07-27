@@ -34,7 +34,7 @@ impl MoveFile {
             return Err(format!("source not found: {}", relative_path(&src)));
         }
 
-        ctx.file_tracker.check_before_edit(&src_path)?;
+        ctx.check_before_edit(&src_path)?;
 
         if src_path.is_file()
             && let Ok(content) = ctx.fs.read_text_file(&src_path).await
@@ -117,7 +117,7 @@ async fn update_imports(
     let mut updates = Vec::new();
 
     for path in candidates {
-        ctx.file_tracker.check_before_edit(&path)?;
+        ctx.check_before_edit(&path)?;
         let content = match ctx.fs.read_text_file(&path).await {
             Ok(c) => c,
             Err(_) => continue,

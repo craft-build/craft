@@ -37,7 +37,7 @@ impl Write {
         let path = super::resolve_path(&self.path)?;
         let output = self.write_output(&path, ctx.config.max_output_lines);
         let p = Path::new(&path);
-        ctx.file_tracker.check_before_edit(p)?;
+        ctx.check_before_edit(p)?;
         if let Some(parent) = p.parent() {
             tokio::fs::create_dir_all(parent)
                 .await

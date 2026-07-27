@@ -82,7 +82,7 @@ impl MultiEdit {
     pub async fn execute(&self, ctx: &super::ToolContext) -> Result<ToolOutput, String> {
         let path = super::resolve_path(&self.path)?;
         let p = Path::new(&path);
-        ctx.file_tracker.check_before_edit(p)?;
+        ctx.check_before_edit(p)?;
 
         let before = ctx.fs.read_text_file(p).await?;
         let after = self.apply_edits(&before)?;

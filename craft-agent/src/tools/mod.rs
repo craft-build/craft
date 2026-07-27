@@ -296,6 +296,15 @@ pub struct ToolContext {
     pub flow_search: flow_search::FlowSearchHandle,
 }
 
+impl ToolContext {
+    pub fn check_before_edit(&self, path: &Path) -> Result<(), String> {
+        if !self.config.stale_read_check {
+            return Ok(());
+        }
+        self.file_tracker.check_before_edit(path)
+    }
+}
+
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
     let expanded = if let Some(rest) = path.strip_prefix("~/") {
         let home = HOME.as_deref().ok_or("cannot expand ~: HOME not set")?;
@@ -1033,6 +1042,29 @@ mod tests {
     fn cap_timeout_expired() {
         let expired = Deadline::At(Instant::now().checked_sub(Duration::from_secs(1)).unwrap());
         assert_eq!(expired.cap_timeout(120).unwrap_err(), DEADLINE_EXCEEDED);
+    }
+
+    #[test_case(true,  false ; "enabled_rejects_stale_file")]
+    #[test_case(false, true  ; "disabled_allows_stale_file")]
+    fn check_before_edit_respects_stale_read_check(check_on: bool, allowed: bool) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("f.rs");
+        fs::write(&path, "v1").unwrap();
+
+        let tracker = FileReadTracker::new();
+        tracker.record_read(&path);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(10))
+            .unwrap();
+
+        let mut ctx = stub_ctx(&AgentMode::Build);
+        ctx.file_tracker = Arc::new(tracker);
+        ctx.config.stale_read_check = check_on;
+
+        assert_eq!(ctx.check_before_edit(&path).is_ok(), allowed);
     }
 
     #[test_case("short",                            "short"                             ; "short_passthrough")]

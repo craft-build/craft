@@ -112,7 +112,7 @@ impl ApplyPatch {
                 PatchHunk::DeleteFile { path } => {
                     let resolved = super::resolve_path(path)?;
                     let p = Path::new(&resolved);
-                    ctx.file_tracker.check_before_edit(p)?;
+                    ctx.check_before_edit(p)?;
                     let old_contents = ctx.fs.read_text_file(p).await.unwrap_or_default();
                     tokio::fs::remove_file(p)
                         .await
@@ -130,7 +130,7 @@ impl ApplyPatch {
                     let resolved = super::resolve_path(path)?;
                     let p = Path::new(&resolved);
                     let chunk_count = chunks.len();
-                    ctx.file_tracker.check_before_edit(p)?;
+                    ctx.check_before_edit(p)?;
                     let original = ctx.fs.read_text_file(p).await?;
                     let new_contents = apply_update_chunks(&original, chunks, path)?;
                     let diff_text = generate_diff_summary(&original, &new_contents);

@@ -72,8 +72,7 @@ impl Resolve {
         let mut skipped = 0usize;
         for file in &pending.files {
             let rel = relative_path_lossy(&file.path);
-            ctx.file_tracker
-                .check_before_edit(&file.path)
+            ctx.check_before_edit(&file.path)
                 .map_err(|e| format!("{rel}: stale read; re-read then re-run ast_edit: {e}"))?;
             let current = ctx
                 .fs

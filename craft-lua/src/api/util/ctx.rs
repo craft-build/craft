@@ -80,6 +80,9 @@ impl UserData for LuaCtx {
         });
 
         methods.add_method("check_before_edit", |_, this, path: String| {
+            if !this.config.stale_read_check {
+                return Ok((true, Option::<String>::None));
+            }
             match this.file_tracker.check_before_edit(Path::new(&path)) {
                 Ok(()) => Ok((true, Option::<String>::None)),
                 Err(msg) => Ok((false, Some(msg))),

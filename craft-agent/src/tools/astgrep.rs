@@ -99,7 +99,7 @@ impl AstGrep {
                 let rel = relative_path(&path.to_string_lossy());
 
                 if apply {
-                    ctx.file_tracker.check_before_edit(&path)?;
+                    ctx.check_before_edit(&path)?;
                     let repl_grep = lang.ast_grep(&new_content);
                     if has_error_or_missing(&repl_grep.root()) {
                         results.push(format!(
