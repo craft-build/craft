@@ -164,6 +164,11 @@ impl AgentLoop {
         let slot = self.model_slot.load();
         self.rebuild_tools(&slot.model);
         if let Some(ref mcp) = self.mcp_handle {
+            // The queue is drained right after this, and a prompt typed during
+            // startup must still carry the MCP tools.
+            if self.init_cancel.race(mcp.ready()).await.is_err() {
+                return false;
+            }
             spawn_oauth_for_needs_auth(mcp);
         }
         !self.init_cancel.is_cancelled()

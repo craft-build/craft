@@ -745,7 +745,11 @@ async fn build_mcp_handle(
         return None;
     }
     let merged = merge_configs(local_config, &client_configs);
-    mcp::start_with_config(merged).await
+    let handle = mcp::start_with_config(merged);
+    if let Some(handle) = &handle {
+        handle.ready().await;
+    }
+    handle
 }
 
 fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {

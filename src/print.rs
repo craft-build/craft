@@ -161,7 +161,7 @@ pub async fn run(
     let prompt_slots = lua_handle.collect_prompt_slots();
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start(&cwd).await;
+    let (mcp_handle, mcp_config_errors) = craft_agent::mcp::start_connected(&cwd).await;
     if !mcp_config_errors.is_empty() {
         eprintln!("MCP config error: {mcp_config_errors}");
     }

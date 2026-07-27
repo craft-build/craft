@@ -470,7 +470,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
     let working_dir = cwd.to_string_lossy().into_owned();
     let (session_id, initial_history) = resolve_session(&cli, &working_dir)?;
 
-    let (mcp_handle, mcp_config_errors) = mcp::start(&cwd).await;
+    let (mcp_handle, mcp_config_errors) = mcp::start_connected(&cwd).await;
     if !mcp_config_errors.is_empty() {
         eprintln!("MCP config error: {mcp_config_errors}");
     }
