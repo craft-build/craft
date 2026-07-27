@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-07-26
+
+### Added
+
+- **config**: `agent.stale_read_check` option to skip the stale read guard before edits, covering `write`, `edit`, `multiedit`, and any plugin sharing the same API (`1f871c843`)
+- **ui**: subtask token usage and cost shown in task child headers as they run (`c41cf830b`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`compact_str` 0.10.0, `get-size2` 0.10.3, `jiff` 0.2.35, `thin-vec` 0.2.19)
+
+### Fixed
+
+- **mcp**: tolerate batch, notification, and ping bodies in http responses (`e0b41a2f5`)
+- **ui**: reconcile stale task state and preserve the shell on agent errors (`4b80398f8`)
+- **ui**: preserve text selection while scrolling (`3b2fa36d0`)
+- **providers**: honor `providers.toml` `base_url` for built-in providers, with env var > config > default precedence (`de20f57c2`)
+- **lua**: `craft.async.on_cancel` hook so cancelled handlers hear about the cancel (`27c225bd6`)
+- **lua**: grace period before the watchdog kills cancelled tasks (`c8714a2bf`)
+
+### Performance
+
+- **mcp**: connect servers in the background, not before the first frame (`d6e52c923`)
+
 ## [0.10.1] - 2026-07-24
 
 ### Added
@@ -1421,7 +1445,11 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/craft-build/craft/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/craft-build/craft/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/craft-build/craft/compare/v0.9.5...v0.10.0
+[0.9.5]: https://github.com/craft-build/craft/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/craft-build/craft/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/craft-build/craft/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/craft-build/craft/compare/v0.9.1...v0.9.2

@@ -42,7 +42,7 @@ uuid = { workspace = true }
 libc = { workspace = true }
 open = { workspace = true }
 jiff = { workspace = true }
-
+get-size2 = "=0.10.1"
 
 [dev-dependencies]
 test-case = { workspace = true }
@@ -70,7 +70,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 authors = ["Tony Solomonik <tony.solomonik@gmail.com>", "Jarrett Tierney <akarifur@pm.me>"]
 license = "MIT"
@@ -201,7 +201,8 @@ shell-words = "1"
 fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 magika = "1"
 agent-client-protocol-schema = "0.13"
-
+get-size2 = "0.10.1"
+compact_str = "0.9.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 reqwest = { version = "0.13", default-features = false, features = [
