@@ -46,7 +46,7 @@ Top-level modules under the global `craft` table:
 - `craft.ui` - UI primitives: `craft.ui.buf()` builds a body buffer; methods `buf:line(spans)`, `buf:on(event, fn)`, etc. Theme colors via `craft.ui.theme_color(name)`.
 - `craft.keymap` - keymap registration, mirrors Neovim's `vim.keymap`.
 - `craft.treesitter` - tree-sitter helpers (`parse`, language query API).
-- `craft.async` - coroutine helpers (`run`, `await`, `wrap`, `join`, `gather`, `semaphore`).
+- `craft.async` - coroutine helpers (`run`, `await`, `wrap`, `join`, `on_cancel`); `on_cancel(fn)` runs `fn` the moment the current task is cancelled, before the host waits for it to wind down.
 - `craft.base64` - Base64 `encode` / `decode`.
 - `craft.image` - image probe and decode helpers.
 - `craft.json` / `craft.yaml` - encode/decode (`(value, err)` pair).
