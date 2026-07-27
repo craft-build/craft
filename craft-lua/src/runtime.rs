@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_int;
+use std::future::Future;
 use std::panic::catch_unwind;
 use std::path::PathBuf;
 use std::ptr;
@@ -53,9 +54,24 @@ const DISPATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const NIL_WITHOUT_FINISH_MSG: &str =
     "handler returned nil without calling ctx:finish() or starting jobs";
 pub(crate) const CANCELLED_MSG: &str = "cancelled";
+const HANDLER_TIMEOUT_MSG: &str = "timeout";
 const MAX_INFLIGHT_TOOLS: usize = 64;
 const GC_STEP_INTERVAL: usize = 4;
 const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How long a doomed task may run without yielding before the watchdog
+/// shoots it. Cleanup after a cancel or a timeout (batch marking its
+/// children cancelled, rerendering its buf) is plain Lua running with the
+/// interrupt already armed, so killing at the first safepoint strands the
+/// UI mid-flight. Every yield hands back a fresh budget, so cleanup may
+/// take as long as it needs, while a loop that never yields dies within
+/// one grace.
+pub const KILL_GRACE: Duration = Duration::from_millis(500);
+/// Wall clock a cancelled handler gets before the host stops waiting for
+/// it. The watchdog alone never ends a task that parks in an await: it
+/// runs no Lua to interrupt and renews its grace at every yield. Long
+/// enough for cleanup that waits on children, short enough that the next
+/// prompt is not stuck behind abandoned work.
+const CANCEL_ABANDON_AFTER: Duration = Duration::from_secs(5);
 const OPT_LEVEL_JIT: u8 = 2;
 const OPT_LEVEL_DEBUGGABLE: u8 = 1;
 const DEBUG_INFO_FULL: u8 = 2;
@@ -251,10 +267,19 @@ pub struct LiveCtx {
     pub tool_use_id: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KillReason {
+    Cancelled,
+    Deadline,
+}
+
 /// The `Mutex` is never contended (Lua is single-threaded) but
 /// `Lua::app_data` requires `Send + Sync` with the `send` feature.
 pub(crate) struct TaskCell {
     pub(crate) cancel: CancelToken,
+    /// End of the current [`KILL_GRACE`], armed by the first watchdog poke
+    /// that sees a doomed task and cleared at every yield.
+    kill_at: Cell<Option<Instant>>,
     pub(crate) deadline: Cell<Option<Instant>>,
     pub(crate) deadline_secs: Cell<Option<u64>>,
     pub(crate) jobs: JobStore,
@@ -276,6 +301,7 @@ impl TaskCell {
     ) -> Self {
         Self {
             cancel,
+            kill_at: Cell::new(None),
             deadline: Cell::new(deadline),
             deadline_secs: Cell::new(None),
             jobs: JobStore::with_backend(backend),
@@ -285,6 +311,40 @@ impl TaskCell {
             inline_spawn: None,
             bufs_claim: Weak::new(),
         }
+    }
+
+    /// Cancel outranks the deadline: once nobody waits for the reply,
+    /// reporting a timeout would only mislead.
+    fn doomed(&self, now: Instant) -> Option<KillReason> {
+        if self.cancel.is_cancelled() {
+            Some(KillReason::Cancelled)
+        } else if self.deadline.get().is_some_and(|d| now > d) {
+            Some(KillReason::Deadline)
+        } else {
+            None
+        }
+    }
+
+    /// [`Self::doomed`] gated by [`KILL_GRACE`]: the task is only shot
+    /// once it has burned a whole grace inside one execution slice.
+    fn kill_due(&self, now: Instant) -> Option<KillReason> {
+        let Some(reason) = self.doomed(now) else {
+            self.renew_kill_grace();
+            return None;
+        };
+        match self.kill_at.get() {
+            Some(kill_at) if now <= kill_at => None,
+            stamp => {
+                self.kill_at.set(Some(now + KILL_GRACE));
+                stamp.is_some().then_some(reason)
+            }
+        }
+    }
+
+    /// The task yielded, so its grace starts over: a task parked in an await
+    /// would otherwise burn the whole budget before it gets to clean up.
+    fn renew_kill_grace(&self) {
+        self.kill_at.set(None);
     }
 }
 
@@ -567,14 +627,10 @@ fn interrupt_reason(state: *mut ffi::lua_State) -> Option<&'static str> {
         return Some(INTERRUPT_SHUTDOWN_MSG);
     }
     let handle = lua.app_data_ref::<TaskHandle>()?;
-    let cell = lock_cell(&handle);
-    if cell.cancel.is_cancelled() {
-        Some(INTERRUPT_CANCELLED_MSG)
-    } else if cell.deadline.get().is_some_and(|d| Instant::now() > d) {
-        Some(INTERRUPT_DEADLINE_MSG)
-    } else {
-        None
-    }
+    Some(match lock_cell(&handle).kill_due(Instant::now())? {
+        KillReason::Cancelled => INTERRUPT_CANCELLED_MSG,
+        KillReason::Deadline => INTERRUPT_DEADLINE_MSG,
+    })
 }
 
 /// Publishes a `TaskCell` into `Lua::app_data` for the duration of a
@@ -642,7 +698,7 @@ impl TaskScope {
 /// job output, like Neovim firing callbacks from its idle event loop.
 ///
 /// [detached]: TaskScope::detached
-pub(crate) async fn run_detached<F: std::future::Future>(lua: &Lua, fut: F) -> F::Output {
+pub(crate) async fn run_detached<F: Future>(lua: &Lua, fut: F) -> F::Output {
     let scope = TaskScope::detached(lua);
     let handle = Arc::clone(scope.handle());
     let pump = async {
@@ -701,7 +757,7 @@ pub(crate) struct ScopedFuture<F> {
     inner: F,
 }
 
-impl<F: std::future::Future> std::future::Future for ScopedFuture<F> {
+impl<F: Future> Future for ScopedFuture<F> {
     type Output = F::Output;
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -710,6 +766,8 @@ impl<F: std::future::Future> std::future::Future for ScopedFuture<F> {
         // SAFETY: `inner` is structurally pinned; `lua`/`handle` are
         // never moved out.
         let this = unsafe { self.get_unchecked_mut() };
+        // A poll means the task yielded, the cooperation the grace rewards.
+        lock_cell(&this.handle).renew_kill_grace();
         let prev = this
             .lua
             .set_app_data::<TaskHandle>(Arc::clone(&this.handle));
@@ -889,22 +947,43 @@ impl Drop for BufsClaim {
 
 pub(crate) type SpawnQueue = RefCell<Vec<PendingAsyncTask>>;
 
+/// Ends `fut` once nobody waits for its reply any more: at `deadline`, or
+/// [`CANCEL_ABANDON_AFTER`] past a cancel. The watchdog cannot do this on
+/// its own, because a task parked in an await runs no Lua to interrupt and
+/// renews its grace at every yield. Biased so a handler that finished in
+/// the same slice still has its result reported.
+async fn until_abandoned(
+    fut: impl Future<Output = Result<LuaValue, mlua::Error>>,
+    deadline: Option<Instant>,
+    cancel: &CancelToken,
+) -> Result<LuaValue, mlua::Error> {
+    tokio::select! {
+        biased;
+        result = fut => result,
+        msg = async {
+            match deadline {
+                Some(dl) => tokio::time::sleep_until(tokio::time::Instant::from_std(dl)).await,
+                None => std::future::pending().await,
+            };
+            HANDLER_TIMEOUT_MSG
+        } => Err(mlua::Error::runtime(msg)),
+        msg = async {
+            cancel.cancelled().await;
+            tokio::time::sleep(CANCEL_ABANDON_AFTER).await;
+            CANCELLED_MSG
+        } => Err(mlua::Error::runtime(msg)),
+    }
+}
+
 async fn run_work_fn(
     lua: &Lua,
     work_fn: &RegistryKey,
     deadline: Option<Instant>,
+    cancel: &CancelToken,
 ) -> Result<LuaValue, mlua::Error> {
     let func: Function = lua.registry_value(work_fn)?;
     let fut = lua.create_thread(func)?.into_async::<LuaValue>(())?;
-    match deadline {
-        Some(dl) => tokio::select! {
-            result = fut => result,
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(dl)) => {
-                Err(mlua::Error::runtime("timeout"))
-            }
-        },
-        None => fut.await,
-    }
+    until_abandoned(fut, deadline, cancel).await
 }
 
 fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
@@ -944,7 +1023,12 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
                     active_terminal_backend(&lua),
                 ),
             );
-            let run = scope.scope_future(run_work_fn(&lua, &task.work_fn, task.deadline));
+            let run = scope.scope_future(run_work_fn(
+                &lua,
+                &task.work_fn,
+                task.deadline,
+                &task.cancel,
+            ));
 
             let result = run.await;
             if let Err(e) = &result {
@@ -1650,7 +1734,12 @@ impl LuaRuntime {
                 if !task.cancel.is_cancelled() {
                     let deadline = Some(Instant::now() + RESTORE_ASYNC_DEADLINE);
                     if let Err(e) = scope
-                        .scope_future(run_work_fn(&self.lua, &task.work_fn, deadline))
+                        .scope_future(run_work_fn(
+                            &self.lua,
+                            &task.work_fn,
+                            deadline,
+                            &task.cancel,
+                        ))
                         .await
                     {
                         tracing::debug!(error = %e, "restore inline async task failed");
@@ -1768,12 +1857,7 @@ async fn dispatch_async(
     tool: &str,
     finish_rx: flume::Receiver<ToolCallReply>,
 ) -> ToolCallReply {
-    let (cancel, has_jobs) = {
-        let cell = lock_cell(&handle);
-        (cell.cancel.clone(), !cell.jobs.is_empty())
-    };
-
-    if !has_jobs {
+    if lock_cell(&handle).jobs.is_empty() {
         lua.gc_collect().ok();
         tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
         return match finish_rx.try_recv() {
@@ -1782,20 +1866,17 @@ async fn dispatch_async(
         };
     }
 
-    let timed_out = || {
-        lock_cell(&handle)
-            .deadline
-            .get()
-            .is_some_and(|d| Instant::now() > d)
-    };
     let mut event_buf = Vec::new();
 
     loop {
-        if cancel.is_cancelled() {
-            return ToolCallReply::err(CANCELLED_MSG);
-        }
-        if timed_out() {
-            return timeout_reply(&handle, plugin, tool);
+        // No grace here: the handler already returned, so there is no Lua
+        // frame left to unwind. Bound before the match so the guard drops
+        // before `timeout_reply`, which locks the same cell.
+        let kill = lock_cell(&handle).doomed(Instant::now());
+        match kill {
+            Some(KillReason::Cancelled) => return ToolCallReply::err(CANCELLED_MSG),
+            Some(KillReason::Deadline) => return timeout_reply(&handle, plugin, tool),
+            None => {}
         }
 
         match finish_rx.try_recv() {
@@ -1911,7 +1992,12 @@ async fn run_tool_call(
     };
     let scope = TaskScope::new(
         &lua,
-        TaskCell::new(cancel, deadline, live, active_terminal_backend(&lua)),
+        TaskCell::new(
+            cancel.clone(),
+            deadline,
+            live,
+            active_terminal_backend(&lua),
+        ),
     );
     let handle = Arc::clone(scope.handle());
 
@@ -1923,21 +2009,7 @@ async fn run_tool_call(
     };
 
     let call_future = scope.scope_future(async {
-        let handler_result = {
-            let deadline = lock_cell(&handle).deadline.get();
-            match deadline {
-                Some(dl) => {
-                    tokio::select! {
-                        result = async_thread => result,
-                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(dl)) => {
-                            Err(mlua::Error::runtime("timeout"))
-                        }
-                    }
-                }
-                None => async_thread.await,
-            }
-        };
-        match handler_result {
+        match until_abandoned(async_thread, deadline, &cancel).await {
             Ok(LuaValue::Nil) => {
                 let live_shared = {
                     let cell = lock_cell(&handle);
@@ -2374,20 +2446,25 @@ mod tests {
         (lua, watchdog)
     }
 
-    /// Generous vs the ~10ms expected kill; only a broken watchdog gets here.
+    /// Generous vs the expected kill (one poll plus [`KILL_GRACE`]); only a
+    /// broken watchdog gets here.
     const WATCHDOG_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const JIT_DEADLINE: Duration = Duration::from_millis(20);
 
-    /// `while true do end` only stops if the watchdog kills it, so run it
-    /// on a helper thread: a broken watchdog fails the test fast under any
-    /// harness (not just nextest's terminate-after) instead of hanging it.
-    /// The leaked thread then spins until the test process exits.
-    fn hot_loop_expecting_kill(lua: &Lua) -> mlua::Error {
+    /// `while true do end` only stops if the watchdog kills it, so run it on
+    /// a helper thread with a bounded wait: a broken watchdog then fails the
+    /// test with a reason instead of hanging the harness. The clock starts
+    /// before the loop can, so the reported time is a lower bound.
+    fn hot_loop_expecting_kill(lua: &Lua) -> (mlua::Error, Duration) {
         let f = lua.load("while true do end").into_function().unwrap();
         let (tx, rx) = flume::bounded(1);
+        let start = Instant::now();
         thread::spawn(move || drop(tx.send(f.call::<bool>(()))));
-        rx.recv_timeout(WATCHDOG_TEST_TIMEOUT)
+        let err = rx
+            .recv_timeout(WATCHDOG_TEST_TIMEOUT)
             .expect("watchdog never killed the hot loop")
-            .unwrap_err()
+            .unwrap_err();
+        (err, start.elapsed())
     }
 
     /// Runs long enough (50ms) to guarantee several watchdog pokes.
@@ -2397,23 +2474,242 @@ mod tests {
             .unwrap()
     }
 
-    fn cancelled_handle() -> TaskHandle {
+    fn cancelled_token() -> CancelToken {
         let (trigger, token) = CancelToken::new();
         trigger.cancel();
+        token
+    }
+
+    fn cancelled_handle() -> TaskHandle {
         Arc::new(Mutex::new(TaskCell::new(
-            token,
+            cancelled_token(),
             None,
             None,
             Arc::new(crate::terminal_backend::LocalTerminal),
         )))
     }
 
+    /// Killing at the first armed safepoint is what froze batch's children
+    /// as in-progress after esc; never killing at all would leave a core
+    /// spinning, which [`WATCHDOG_TEST_TIMEOUT`] catches.
     #[test]
-    fn stale_cancelled_handle_aborts_callback_without_fresh_scope() {
+    fn stale_cancelled_handle_aborts_callback_after_the_grace() {
         let (lua, _watchdog) = watchdog_lua(false);
         lua.set_app_data::<TaskHandle>(cancelled_handle());
-        let err = hot_loop_expecting_kill(&lua);
+
+        let (err, elapsed) = hot_loop_expecting_kill(&lua);
+
         assert!(err.to_string().contains(INTERRUPT_CANCELLED_MSG));
+        assert!(elapsed >= KILL_GRACE, "kill skipped the cleanup grace");
+    }
+
+    /// A healthy poke must leave nothing armed, or the first poke after esc
+    /// kills instantly instead of granting the grace.
+    #[test]
+    fn kill_grace_is_armed_once_then_renewed_per_execution_slice() {
+        let (trigger, token) = CancelToken::new();
+        let cell = TaskCell::new(
+            token,
+            None,
+            None,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        );
+        let start = Instant::now();
+        assert_eq!(cell.kill_due(start), None);
+        assert!(cell.kill_at.get().is_none(), "healthy poke must not arm");
+
+        trigger.cancel();
+        assert_eq!(cell.kill_due(start), None, "first doomed poke only arms");
+        assert_eq!(
+            cell.kill_due(start + KILL_GRACE),
+            None,
+            "cleanup must get a full grace counted from the cancel"
+        );
+        assert_eq!(
+            cell.kill_due(start + KILL_GRACE * 2),
+            Some(KillReason::Cancelled)
+        );
+        assert_eq!(
+            cell.kill_due(start + KILL_GRACE * 2),
+            None,
+            "a raise must refill the grace for whoever catches it"
+        );
+
+        cell.renew_kill_grace();
+        assert_eq!(
+            cell.kill_due(start + KILL_GRACE * 2),
+            None,
+            "yielding must hand the task a fresh budget"
+        );
+    }
+
+    /// A doom that lifts (a handler extending its own deadline) must take
+    /// its stamp with it, or the next cancel kills with no grace at all.
+    #[test]
+    fn a_lifted_doom_disarms_the_grace() {
+        let start = Instant::now();
+        let cell = TaskCell::new(
+            CancelToken::none(),
+            Some(start),
+            None,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        );
+        assert_eq!(
+            cell.kill_due(start + KILL_GRACE),
+            None,
+            "first doomed poke only arms"
+        );
+
+        cell.deadline.set(Some(start + KILL_GRACE * 4));
+
+        assert_eq!(cell.kill_due(start + KILL_GRACE * 2), None);
+        assert!(cell.kill_at.get().is_none(), "healthy poke must disarm");
+    }
+
+    /// The watchdog never reaches a handler parked in an await, so this
+    /// race is what ends it - but not before its cleanup window, and never
+    /// ahead of a result the handler already produced.
+    #[tokio::test]
+    async fn until_abandoned_ends_a_parked_handler_only_after_its_window() {
+        let parked = || std::future::pending::<Result<LuaValue, mlua::Error>>();
+        let early = tokio::time::timeout(
+            Duration::from_millis(50),
+            until_abandoned(parked(), None, &cancelled_token()),
+        )
+        .await;
+        assert!(
+            early.is_err(),
+            "a cancel must not abandon the handler before its window"
+        );
+
+        let err = until_abandoned(parked(), Some(Instant::now()), &CancelToken::none())
+            .await
+            .expect_err("a lapsed deadline must end a parked handler");
+        assert!(err.to_string().contains(HANDLER_TIMEOUT_MSG));
+
+        until_abandoned(
+            std::future::ready(Ok(LuaValue::Boolean(true))),
+            Some(Instant::now()),
+            &cancelled_token(),
+        )
+        .await
+        .expect("a finished handler outranks a doom in the same slice");
+    }
+
+    /// [`ScopedFuture`] is the one place that observes a task yielding, so
+    /// it is what renews the grace.
+    #[tokio::test]
+    async fn scoped_future_poll_renews_kill_grace() {
+        let lua = Lua::new();
+        let scope = TaskScope::new(
+            &lua,
+            TaskCell::new(
+                cancelled_token(),
+                None,
+                None,
+                Arc::new(crate::terminal_backend::LocalTerminal),
+            ),
+        );
+        let handle = Arc::clone(scope.handle());
+        lock_cell(&handle).kill_due(Instant::now());
+        assert!(lock_cell(&handle).kill_at.get().is_some());
+
+        scope.scope_future(std::future::ready(())).await;
+
+        assert!(lock_cell(&handle).kill_at.get().is_none());
+    }
+
+    const DISPATCH_TEST_JOB: &str = "sleep 1";
+    const DISPATCH_TEST_PLUGIN: &str = "shell";
+    const DISPATCH_TEST_TOOL: &str = "run";
+    const DISPATCH_TEST_DEADLINE_SECS: u64 = 7;
+
+    /// Drives the job-polling loop of [`dispatch_async`] to its reply. The
+    /// cell needs a live job or the loop is never entered. Helper thread
+    /// again: `timeout_reply` locks the very cell the loop inspects, so a
+    /// regression there deadlocks and must fail rather than hang the suite.
+    fn drive_dispatch(cell: TaskCell) -> (Result<String, String>, Duration) {
+        let (tx, rx) = flume::bounded(1);
+        thread::spawn(move || {
+            let lua = Lua::new();
+            let scope = TaskScope::new(&lua, cell);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let backend = lock_cell(scope.handle()).jobs.backend();
+                let handle = backend
+                    .start(crate::terminal_backend::TerminalSpec {
+                        cmd: DISPATCH_TEST_JOB.into(),
+                        cwd: None,
+                        env: None,
+                        sandbox: None,
+                    })
+                    .await
+                    .unwrap();
+                let mut cell = lock_cell(scope.handle());
+                let id = cell.jobs.next_id();
+                cell.jobs.register(id, handle, None, None, None, false);
+            });
+            let (_finish_tx, finish_rx) = flume::bounded(1);
+
+            let start = Instant::now();
+            let reply = rt.block_on(dispatch_async(
+                &lua,
+                Arc::clone(scope.handle()),
+                DISPATCH_TEST_PLUGIN,
+                DISPATCH_TEST_TOOL,
+                finish_rx,
+            ));
+            drop(tx.send((reply.result, start.elapsed())));
+        });
+        rx.recv_timeout(WATCHDOG_TEST_TIMEOUT)
+            .expect("dispatch_async never replied: the cell lock is likely held across the reply")
+    }
+
+    /// A timed-out async tool must report the timeout the bash plugin's
+    /// `restore` parses, and must not wedge the whole Lua thread on the
+    /// non-reentrant cell mutex while doing it.
+    #[test]
+    fn dispatch_async_replies_with_timeout_without_deadlocking() {
+        let cell = TaskCell::new(
+            CancelToken::none(),
+            Some(Instant::now()),
+            None,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        );
+        cell.deadline_secs.set(Some(DISPATCH_TEST_DEADLINE_SECS));
+
+        let (result, _) = drive_dispatch(cell);
+
+        assert_eq!(
+            result,
+            Err(format!(
+                "tool {DISPATCH_TEST_PLUGIN}.{DISPATCH_TEST_TOOL} timed out after {DISPATCH_TEST_DEADLINE_SECS}s"
+            ))
+        );
+    }
+
+    /// Esc on an async tool whose deadline also lapsed must say "cancelled",
+    /// not "timed out after 0s", and must reply at once: the handler already
+    /// returned, so there is nothing left to clean up.
+    #[test]
+    fn dispatch_async_cancel_outranks_deadline_with_no_grace() {
+        let cell = TaskCell::new(
+            cancelled_token(),
+            Some(Instant::now()),
+            None,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        );
+
+        let (result, elapsed) = drive_dispatch(cell);
+
+        assert_eq!(result, Err(CANCELLED_MSG.to_owned()));
+        assert!(
+            elapsed < KILL_GRACE,
+            "dispatch loop must not wait out a grace"
+        );
     }
 
     #[test]
@@ -2433,18 +2729,37 @@ mod tests {
         let (lua, _watchdog) = watchdog_lua(true);
 
         let scope = TaskScope::detached(&lua);
-        let err = hot_loop_expecting_kill(&lua);
+        let (err, _) = hot_loop_expecting_kill(&lua);
         drop(scope);
 
         assert!(err.to_string().contains(INTERRUPT_SHUTDOWN_MSG));
     }
 
+    /// Shutdown is checked before the task cell, so a reload or a quit
+    /// never queues behind the cleanup grace of every cancelled runaway.
     #[test]
-    fn jit_busy_loop_killed_at_deadline() {
+    fn shutdown_outranks_the_cleanup_grace() {
+        let (lua, _watchdog) = watchdog_lua(true);
+        lua.set_app_data::<TaskHandle>(cancelled_handle());
+
+        let (err, elapsed) = hot_loop_expecting_kill(&lua);
+
+        assert!(err.to_string().contains(INTERRUPT_SHUTDOWN_MSG));
+        assert!(
+            elapsed < KILL_GRACE,
+            "shutdown waited out the cleanup grace"
+        );
+    }
+
+    /// JIT-compiled code must still hit the interrupt, and the timeout
+    /// path gets the same cleanup grace as the cancel path: a timed-out
+    /// handler also has children to settle and a buf to rerender.
+    #[test]
+    fn jit_busy_loop_killed_a_grace_after_the_deadline() {
         let (lua, _watchdog) = watchdog_lua(false);
         install_compiler(&lua, true);
 
-        let deadline = Instant::now() + Duration::from_millis(20);
+        let deadline = Instant::now() + JIT_DEADLINE;
         let cell = TaskCell::new(
             CancelToken::none(),
             Some(deadline),
@@ -2453,8 +2768,13 @@ mod tests {
         );
         lua.set_app_data::<TaskHandle>(Arc::new(Mutex::new(cell)));
 
-        let err = hot_loop_expecting_kill(&lua);
+        let (err, elapsed) = hot_loop_expecting_kill(&lua);
+
         assert!(err.to_string().contains(INTERRUPT_DEADLINE_MSG));
+        assert!(
+            elapsed >= JIT_DEADLINE + KILL_GRACE,
+            "kill skipped the cleanup grace"
+        );
     }
 
     fn task_cell(live: Option<LiveCtx>) -> TaskCell {
