@@ -74,7 +74,7 @@ export type Action =
 
 export const initialState: AppState = {
   tokens: null,
-  themeName: "dracula",
+  themeName: "craft",
   tabs: [],
   activeTabId: null,
   screen: "onboarding",

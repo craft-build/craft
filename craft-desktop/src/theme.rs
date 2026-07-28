@@ -4,7 +4,7 @@ use craft_storage::StateDir;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-const DEFAULT_THEME: &str = "dracula";
+const DEFAULT_THEME: &str = "craft";
 const RESERVED_KEYS: &[&str] = &["palette", "ui", "inherits"];
 
 const HELIX_TO_TEXTMATE: &[(&str, &str)] = &[
@@ -123,6 +123,11 @@ pub struct ThemeEntry {
 }
 
 pub static BUNDLED_THEMES: &[ThemeEntry] = &[
+    ThemeEntry {
+        name: "craft",
+        label: "Craft",
+        toml: include_str!("../../craft-ui/src/themes/craft.toml"),
+    },
     ThemeEntry {
         name: "ayu_dark",
         label: "Ayu Dark",

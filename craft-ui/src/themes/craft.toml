@@ -1,0 +1,169 @@
+# Craft's own brand theme — dark ink background with a blue → violet → magenta
+# accent range, matching the Craft design system (see site/ terminal prototype).
+# Syntax scopes are Helix-compatible (can use Helix theme files directly)
+#
+# Palette colors are used directly in UI code for simple fg/bg styling.
+# Only styles that need modifiers or non-obvious color combos go in [ui].
+
+"comment"                         = { fg = "comment" }
+"comment.block"                   = { fg = "comment" }
+"comment.block.documentation"     = { fg = "comment" }
+"comment.line"                    = { fg = "comment" }
+"comment.line.documentation"      = { fg = "comment" }
+
+"constant"                        = { fg = "magenta_bright" }
+"constant.builtin"                = { fg = "magenta_bright" }
+"constant.builtin.boolean"        = { fg = "magenta_bright" }
+"constant.character"              = { fg = "cyan_bright" }
+"constant.character.escape"       = { fg = "magenta_bright" }
+"constant.macro"                  = { fg = "violet" }
+"constant.numeric"                = { fg = "magenta_bright" }
+"constructor"                     = { fg = "magenta_bright" }
+
+"error"                           = { fg = "red" }
+"warning"                         = { fg = "amber" }
+"info"                            = { fg = "cyan" }
+"hint"                            = { fg = "violet_bright" }
+
+"diff.delta"                      = { fg = "amber" }
+"diff.minus"                      = { fg = "red" }
+"diff.plus"                       = { fg = "green" }
+
+"function"                        = { fg = "blue_bright" }
+"function.builtin"                = { fg = "blue_bright" }
+"function.call"                   = { fg = "blue_bright" }
+"function.macro"                  = { fg = "violet" }
+"function.method"                 = { fg = "blue_bright" }
+
+"keyword"                         = { fg = "violet_bright" }
+"keyword.control.conditional"     = { fg = "violet_bright" }
+"keyword.control.exception"       = { fg = "magenta_bright" }
+"keyword.control.import"          = { fg = "violet_bright" }
+"keyword.control.repeat"          = { fg = "violet_bright" }
+"keyword.directive"               = { fg = "blue_bright" }
+"keyword.function"                = { fg = "violet_bright" }
+"keyword.operator"                = { fg = "violet_bright" }
+"keyword.return"                  = { fg = "violet_bright" }
+"keyword.storage"                 = { fg = "violet_bright" }
+"keyword.storage.modifier"        = { fg = "violet_bright" }
+"keyword.storage.type"            = { fg = "cyan_bright", modifiers = ["italic"] }
+
+"label"                           = { fg = "cyan_bright" }
+"attribute"                       = { fg = "blue_bright", modifiers = ["italic"] }
+"namespace"                       = { fg = "foreground" }
+"annotation"                      = { fg = "foreground" }
+
+"markup.bold"                     = { fg = "amber", modifiers = ["bold"] }
+"markup.heading"                  = { fg = "violet", modifiers = ["bold"] }
+"markup.italic"                   = { fg = "amber", modifiers = ["italic"] }
+"markup.link.text"                = { fg = "violet_bright" }
+"markup.link.url"                 = { fg = "cyan_bright" }
+"markup.list"                     = { fg = "cyan_bright" }
+"markup.quote"                    = { fg = "amber", modifiers = ["italic"] }
+"markup.raw"                      = { fg = "foreground" }
+"markup.strikethrough"            = { modifiers = ["crossed_out"] }
+
+"punctuation"                     = { fg = "foreground" }
+"punctuation.bracket"             = { fg = "foreground" }
+"punctuation.delimiter"           = { fg = "foreground" }
+"punctuation.special"             = { fg = "magenta_bright" }
+
+"special"                         = { fg = "magenta_bright" }
+
+"string"                          = { fg = "green" }
+"string.regexp"                   = { fg = "red" }
+"string.special"                  = { fg = "amber" }
+"string.symbol"                   = { fg = "green" }
+
+"tag"                             = { fg = "magenta_bright" }
+"tag.attribute"                   = { fg = "violet_bright" }
+"tag.delimiter"                   = { fg = "foreground" }
+
+"type"                            = { fg = "cyan_bright", modifiers = ["italic"] }
+"type.builtin"                    = { fg = "cyan_bright" }
+"type.enum.variant"               = { fg = "foreground", modifiers = ["italic"] }
+
+"variable"                        = { fg = "foreground" }
+"variable.builtin"                = { fg = "magenta_bright", modifiers = ["italic"] }
+"variable.other"                  = { fg = "foreground" }
+"variable.other.member"           = { fg = "foreground" }
+"variable.parameter"              = { fg = "amber", modifiers = ["italic"] }
+
+[palette]
+background     = "#060911"
+foreground     = "#f7f8fb"
+comment        = "#5b6784"
+current_line   = "#0f1424"
+selection      = "#161d30"
+border         = "#28324c"
+fog_200        = "#ccd0dd"
+fog_100        = "#e9ebf1"
+blue           = "#4f8dff"
+blue_bright    = "#6fa8ff"
+violet         = "#9457f2"
+violet_bright  = "#a875f5"
+magenta        = "#e13fea"
+magenta_bright = "#ee6bf0"
+cyan           = "#22d3ee"
+cyan_bright    = "#5fe6f7"
+green          = "#3ddc84"
+amber          = "#f0a93e"
+red            = "#f0455f"
+mode_build     = "#6fa8ff"
+mode_plan      = "#a875f5"
+mode_bash      = "#22d3ee"
+
+[ui]
+layer01           = { bg = "#0f1424" }
+layer02           = { bg = "#161d30" }
+text_primary      = { fg = "foreground" }
+text_secondary    = { fg = "fog_200" }
+text_helper       = { fg = "comment" }
+user              = { fg = "blue" }
+assistant         = { fg = "foreground" }
+assistant_prefix  = { fg = "violet_bright" }
+thinking          = { fg = "comment", modifiers = ["italic"] }
+tool              = { fg = "foreground" }
+tool_path         = { fg = "amber" }
+tool_annotation   = { fg = "comment" }
+tool_prefix       = { fg = "foreground", modifiers = ["bold"] }
+tool_success      = { fg = "green" }
+tool_error        = { fg = "red" }
+tool_dim          = { fg = "comment" }
+error             = { fg = "red" }
+status_dim        = { fg = "comment" }
+strikethrough     = { fg = "comment", modifiers = ["crossed_out"] }
+plan_rule         = { fg = "violet_bright", modifiers = ["bold"] }
+code_block        = { fg = "fog_100" }
+horizontal_rule   = { fg = "comment" }
+table_border      = { fg = "comment" }
+diff_old          = { bg = "#22101a" }
+diff_new          = { bg = "#0d221f" }
+diff_old_emphasis = { bg = "#6b3b46" }
+diff_new_emphasis = { bg = "#34674f" }
+diff_line_nr      = { fg = "comment" }
+todo_completed    = { fg = "green" }
+todo_in_progress  = { fg = "amber" }
+todo_pending      = { fg = "comment" }
+todo_cancelled    = { fg = "red", modifiers = ["crossed_out"] }
+item_selected     = { fg = "background", bg = "blue" }
+item              = { fg = "fog_200" }
+item_desc         = { fg = "comment" }
+accent            = { fg = "blue" }
+panel_border      = { fg = "border" }
+panel_title       = { fg = "foreground", modifiers = ["bold"] }
+cursor            = { fg = "background", bg = "foreground" }
+keybind_key       = { fg = "fog_200", modifiers = ["bold"] }
+keybind_section   = { fg = "comment" }
+input_border      = { fg = "border" }
+keybind_desc      = { fg = "comment" }
+queue             = { fg = "violet_bright" }
+plan_path         = { fg = "amber", modifiers = ["bold"] }
+status_notice     = { fg = "amber" }
+status_retry_error = { fg = "red" }
+status_retry_info = { fg = "comment" }
+input_placeholder = { fg = "comment" }
+queue_delete      = { fg = "red", modifiers = ["bold"] }
+timestamp         = { fg = "comment" }
+spinner           = { fg = "blue_bright" }
+active            = { fg = "blue_bright" }

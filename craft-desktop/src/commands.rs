@@ -233,7 +233,7 @@ pub async fn close_tab(state: State<'_, AppState>, tab_id: String) -> Result<(),
 }
 
 /// Returns the active theme's tokens (resolved from the persisted theme name
-/// via `craft_storage::theme`, falling back to "dracula"). The webview calls
+/// via `craft_storage::theme`, falling back to "craft"). The webview calls
 /// this once on startup.
 #[tauri::command]
 pub fn get_theme() -> Result<ThemeTokens, String> {

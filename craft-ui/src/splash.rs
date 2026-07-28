@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use std::time::Instant;
 
 const LOGO: &str = "craft";
-const TAGLINE: &str = "the efficient coder";
+const TAGLINE: &str = "Craft can edit files, run commands, and open PRs on your behalf.";
 const HELP_SEGMENTS: &[(&str, bool)] = &[
     (key::HELP.label, true),
     (" help", false),
@@ -36,15 +36,40 @@ const FADE_DURATION: f32 = 1.6;
 const LOGO_DELAY: f32 = 0.2;
 /// Seconds over which the logo fades from dim to full brightness.
 const LOGO_RAMP: f32 = 0.8;
+/// Period of the logo's resting brightness breathing pulse, once ramped in.
+const GLOW_PERIOD_SECS: f32 = 2.4;
+/// How far the breathing pulse dips brightness below full (0 = none).
+const GLOW_DEPTH: f32 = 0.12;
 
 // ── Wiring background ────────────────────────────────────────────────────────
 // A field of Manhattan "circuit traces" that run straight, snap at 90° corners,
-// and carry a moving signal pulse — echoing the banner's PCB-trace aesthetic.
+// and carry a moving signal pulse — a quiet PCB-trace texture behind the logo.
 
-/// Banner crimson — the primary signal color.
-const WIRE_CRIMSON: (u8, u8, u8) = (230, 18, 76);
-/// Banner cyan — the secondary signal color.
-const WIRE_CYAN: (u8, u8, u8) = (0, 224, 224);
+/// Brand blue — the gradient's near stop (`--blue-500`).
+const BRAND_BLUE: (u8, u8, u8) = (79, 141, 255);
+/// Brand violet — the gradient's mid stop (`--violet-500`), and the primary
+/// wiring signal color.
+const WIRE_VIOLET: (u8, u8, u8) = (148, 87, 242);
+/// Brand magenta — the gradient's far stop (`--magenta-500`), and the
+/// secondary wiring signal color.
+const WIRE_MAGENTA: (u8, u8, u8) = (225, 63, 234);
+/// Where the blue→violet→magenta gradient crosses its middle stop (matches
+/// the CSS `--grad-brand`'s `55%`).
+const GRADIENT_MID: f32 = 0.55;
+
+// ── Ambient glow ─────────────────────────────────────────────────────────────
+// A soft radial wash behind the whole scene, like the prototype's
+// `circuit-bg` backdrop. Painted first so wires and text sit on top of it.
+
+/// Focal point of the glow, as a fraction of the splash area (x, y).
+const GLOW_CENTER: (f32, f32) = (0.5, 0.34);
+/// Glow radius as a fraction of area width; the vertical radius is derived
+/// from this, corrected for terminal cells being roughly twice as tall as
+/// they are wide, so the glow reads as a rounded blob rather than a diamond.
+const GLOW_RADIUS_X_FRAC: f32 = 0.45;
+const CHAR_ASPECT: f32 = 2.0;
+/// Peak tint strength at the focal point.
+const GLOW_MAX_ALPHA: f32 = 0.30;
 
 /// One trace per this many cells (area.width * area.height), clamped below.
 const TRACE_DENSITY_DIVISOR: usize = 75;
@@ -256,10 +281,11 @@ impl Splash {
         let help_y = tag_y + 2;
         let tip_y = help_y + 2;
 
+        render_glow(area, buf, fade);
         if self.animate {
             self.render_wiring(area, buf, t + self.field_offset, fade, accent);
         }
-        self.render_logo(area, buf, t, fade, top_y, accent);
+        self.render_logo(area, buf, t, fade, top_y);
         render_centered_faded(area, buf, fade, 0.75, tag_y, TAGLINE);
         self.render_help(area, buf, fade, help_y, accent);
         self.render_tip(area, buf, fade, tip_y, accent);
@@ -270,9 +296,10 @@ impl Splash {
         let theme = theme::current();
         let bg = extract_rgb(theme.background, (15, 15, 25));
         let accent_rgb = extract_rgb(accent, (100, 140, 255));
-        // Three signal colors: the two banner accents plus the active theme accent,
-        // so the wiring echoes the banner while still tracking the user's theme.
-        let palette = [WIRE_CRIMSON, WIRE_CYAN, accent_rgb];
+        // Three signal colors: the two brand gradient stops plus the active
+        // mode accent, so the wiring echoes the brand while still tracking
+        // whatever mode (build/plan) is live.
+        let palette = [WIRE_VIOLET, WIRE_MAGENTA, accent_rgb];
 
         let w = area.width as i32;
         let h = area.height as i32;
@@ -379,36 +406,37 @@ impl Splash {
         }
     }
 
-    fn render_logo(
-        &self,
-        area: Rect,
-        buf: &mut Buffer,
-        t: f32,
-        fade: f32,
-        top_y: u16,
-        accent: Color,
-    ) {
+    /// Renders the wordmark with the fixed brand gradient (blue → violet →
+    /// magenta), one stop per character, echoing `--grad-brand`. The gradient
+    /// is a fixed brand asset, not mode-reactive — the wiring behind it
+    /// carries the mode accent instead.
+    fn render_logo(&self, area: Rect, buf: &mut Buffer, t: f32, fade: f32, top_y: u16) {
         let theme = theme::current();
-        let bg = theme.background;
-        let (ac_r, ac_g, ac_b) = extract_rgb(accent, (100, 140, 255));
-        let (bg_r, bg_g, bg_b) = extract_rgb(bg, (15, 15, 25));
+        let (bg_r, bg_g, bg_b) = extract_rgb(theme.background, (15, 15, 25));
 
         let logo_x = area.x + (area.width.saturating_sub(LOGO.len() as u16)) / 2;
-        let alpha = 0.85 * ease_out_cubic(((t - LOGO_DELAY) / LOGO_RAMP).clamp(0.0, 1.0)) * fade;
-        let style = Style::new()
-            .fg(Color::Rgb(
-                lerp_u8(bg_r, ac_r, alpha),
-                lerp_u8(bg_g, ac_g, alpha),
-                lerp_u8(bg_b, ac_b.saturating_add(15), alpha),
-            ))
-            .bg(bg)
-            .add_modifier(Modifier::BOLD);
+        let ramp = ease_out_cubic(((t - LOGO_DELAY) / LOGO_RAMP).clamp(0.0, 1.0));
+        // Gentle breathing glow, echoing the brand's pulsing gradient without
+        // ever going fully dim; negligible while the logo is still ramping in.
+        let glow =
+            1.0 - GLOW_DEPTH * (0.5 - 0.5 * (t * std::f32::consts::TAU / GLOW_PERIOD_SECS).cos());
+        let alpha = 0.95 * ramp * glow * fade;
 
+        let last = LOGO.chars().count().saturating_sub(1).max(1) as f32;
         for (col, ch) in LOGO.chars().enumerate() {
             let x = logo_x + col as u16;
             if x >= area.x + area.width || top_y >= area.y + area.height {
                 continue;
             }
+            let stop = col as f32 / last;
+            let (r, g, b) = gradient_stop(stop);
+            let style = Style::new()
+                .fg(Color::Rgb(
+                    lerp_u8(bg_r, r, alpha),
+                    lerp_u8(bg_g, g, alpha),
+                    lerp_u8(bg_b, b, alpha),
+                ))
+                .add_modifier(Modifier::BOLD);
             if let Some(cell) = buf.cell_mut((x, top_y)) {
                 cell.set_char(ch).set_style(style);
             }
@@ -433,7 +461,7 @@ impl Splash {
             .iter()
             .map(|&(text, highlighted)| {
                 let (target, alpha) = if highlighted { (ac, 0.75) } else { (fg, 0.5) };
-                (text, faded_style(bg_rgb, target, alpha * fade, bg))
+                (text, faded_style(bg_rgb, target, alpha * fade))
             })
             .collect();
 
@@ -459,11 +487,11 @@ impl Splash {
         let segments: &[(&str, Style)] = &[
             (
                 "tip: ",
-                faded_style(bg_rgb, tip_rgb, 0.75 * fade, bg).add_modifier(Modifier::BOLD),
+                faded_style(bg_rgb, tip_rgb, 0.75 * fade).add_modifier(Modifier::BOLD),
             ),
-            (label, faded_style(bg_rgb, ac, 0.75 * fade, bg)),
+            (label, faded_style(bg_rgb, ac, 0.75 * fade)),
             (" ", Style::default()),
-            (desc, faded_style(bg_rgb, fg, 0.5 * fade, bg)),
+            (desc, faded_style(bg_rgb, fg, 0.5 * fade)),
         ];
 
         render_segments(area, buf, tip_y, x_start, segments);
@@ -484,7 +512,6 @@ fn render_version(area: Rect, buf: &mut Buffer, fade: f32, y: u16, new_version: 
         extract_rgb(bg, (15, 15, 25)),
         extract_rgb(theme.foreground, (200, 200, 200)),
         0.4 * fade,
-        bg,
     );
     let x_start = area.x + area.width.saturating_sub(text.chars().count() as u16 + 1);
     render_segments(area, buf, y, x_start, &[(&text, style)]);
@@ -507,7 +534,6 @@ fn render_centered_faded(
         extract_rgb(bg, (15, 15, 25)),
         extract_rgb(theme.foreground, (200, 200, 200)),
         intensity * fade,
-        bg,
     );
     let x_start = area.x + area.width.saturating_sub(text.chars().count() as u16) / 2;
     render_segments(area, buf, y, x_start, &[(text, style)]);
@@ -520,14 +546,71 @@ fn extract_rgb(color: Color, fallback: (u8, u8, u8)) -> (u8, u8, u8) {
     }
 }
 
-fn faded_style(bg: (u8, u8, u8), fg: (u8, u8, u8), alpha: f32, bg_color: Color) -> Style {
-    Style::new()
-        .fg(Color::Rgb(
-            lerp_u8(bg.0, fg.0, alpha),
-            lerp_u8(bg.1, fg.1, alpha),
-            lerp_u8(bg.2, fg.2, alpha),
-        ))
-        .bg(bg_color)
+/// Fades `fg` in from `bg` at `alpha`, leaving the cell's background alone so
+/// the ambient glow painted by [`render_glow`] shows through underneath.
+fn faded_style(bg: (u8, u8, u8), fg: (u8, u8, u8), alpha: f32) -> Style {
+    Style::new().fg(Color::Rgb(
+        lerp_u8(bg.0, fg.0, alpha),
+        lerp_u8(bg.1, fg.1, alpha),
+        lerp_u8(bg.2, fg.2, alpha),
+    ))
+}
+
+/// Blue → violet → magenta stop at `t` in `[0, 1]`, matching `--grad-brand`'s
+/// `0%, 55%, 100%` stops.
+fn gradient_stop(t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    if t < GRADIENT_MID {
+        lerp_rgb(BRAND_BLUE, WIRE_VIOLET, t / GRADIENT_MID)
+    } else {
+        lerp_rgb(
+            WIRE_VIOLET,
+            WIRE_MAGENTA,
+            (t - GRADIENT_MID) / (1.0 - GRADIENT_MID),
+        )
+    }
+}
+
+fn lerp_rgb(from: (u8, u8, u8), to: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    (
+        lerp_u8(from.0, to.0, t),
+        lerp_u8(from.1, to.1, t),
+        lerp_u8(from.2, to.2, t),
+    )
+}
+
+/// Paints a soft radial wash across the whole splash area before anything
+/// else draws, like the prototype's `circuit-bg` backdrop (grid + radial
+/// glow). Only touches cell backgrounds — chars and fg are left alone.
+fn render_glow(area: Rect, buf: &mut Buffer, fade: f32) {
+    let theme = theme::current();
+    let bg = extract_rgb(theme.background, (15, 15, 25));
+    let w = area.width as f32;
+    let h = area.height as f32;
+    if w < 1.0 || h < 1.0 {
+        return;
+    }
+    let fx = w * GLOW_CENTER.0;
+    let fy = h * GLOW_CENTER.1;
+    let rx = (w * GLOW_RADIUS_X_FRAC).max(1.0);
+    let ry = (rx / CHAR_ASPECT).max(1.0);
+
+    for row in 0..area.height {
+        let ny = (row as f32 - fy) / ry;
+        for col in 0..area.width {
+            let nx = (col as f32 - fx) / rx;
+            let d2 = nx * nx + ny * ny;
+            let alpha = (GLOW_MAX_ALPHA * (1.0 - d2)).clamp(0.0, GLOW_MAX_ALPHA) * fade;
+            let (r, g, b) = if alpha <= 0.0 {
+                bg
+            } else {
+                lerp_rgb(bg, WIRE_VIOLET, alpha)
+            };
+            if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                cell.set_bg(Color::Rgb(r, g, b));
+            }
+        }
+    }
 }
 
 fn render_segments(area: Rect, buf: &mut Buffer, y: u16, x_start: u16, segments: &[(&str, Style)]) {
