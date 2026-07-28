@@ -18,6 +18,17 @@ impl AppState {
             clients: Mutex::new(HashMap::new()),
         }
     }
+
+    /// Kills every spawned `craft acp` child. Called from the app-exit run
+    /// loop (`RunEvent::ExitRequested`) so closing the window doesn't orphan
+    /// the ACP servers, which Tauri's drop order would otherwise leave
+    /// running after its tokio runtime has shut down.
+    pub async fn kill_all(&self) {
+        let clients = self.clients.lock().await.drain().collect::<Vec<_>>();
+        for (_, client) in clients {
+            client.kill();
+        }
+    }
 }
 
 /// Locates the `craft` binary craft-desktop drives over ACP. Checked in order:
