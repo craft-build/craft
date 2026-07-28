@@ -62,7 +62,7 @@ use craft_agent::{
 };
 use craft_config::UiConfig;
 use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader};
-use craft_providers::{Message, Model, ThinkingConfig, add_cost};
+use craft_providers::{Message, Model, StopReason, ThinkingConfig, add_cost};
 use craft_storage::StateDir;
 use craft_storage::input_history::InputHistory;
 use craft_storage::model::persist_model;
@@ -391,6 +391,16 @@ impl App {
         self.flow_panel.set_snapshot(snapshot);
     }
 
+    /// Clear the per-run Flow render state (thread counts + stage) so the
+    /// input-bar hint does not show stale `flow · <stage> · 0/<total>` after a
+    /// run ends. Called from terminal `FlowProgress` handlers (Done, Failed,
+    /// Cancelled, NeedsReview) and from `handle_cancel`.
+    fn reset_flow_render_state(&mut self) {
+        self.flow_panel.live_threads = 0;
+        self.flow_panel.total_threads = 0;
+        self.state.flow.stage = None;
+    }
+
     /// Apply a `FlowProgress` event from the pipeline to the live `FlowState`
     /// (so the status line reflects the current stage and thread counts) or
     /// open the goal-approval overlay at the gate. No-op outside Flow mode.
@@ -418,17 +428,17 @@ impl App {
             }
             craft_agent::FlowProgress::Done { .. } => {
                 self.flow_failed = false;
-                self.flow_panel.live_threads = 0;
+                self.reset_flow_render_state();
                 self.flash("Flow run complete.".into());
             }
             craft_agent::FlowProgress::NeedsReview { .. } => {
                 self.flow_failed = false;
-                self.flow_panel.live_threads = 0;
+                self.reset_flow_render_state();
                 self.flash("Flow verification needs review.".into());
             }
             craft_agent::FlowProgress::Failed { stage, reason } => {
                 self.flow_failed = true;
-                self.flow_panel.live_threads = 0;
+                self.reset_flow_render_state();
                 self.status = Status::error(format!(
                     "flow {} failed: {reason} (press Enter to retry)",
                     stage.as_str()
@@ -436,8 +446,8 @@ impl App {
             }
             craft_agent::FlowProgress::Cancelled => {
                 self.flow_failed = false;
-                self.flow_panel.live_threads = 0;
-                self.status = Status::error("flow run cancelled".into());
+                self.reset_flow_render_state();
+                self.flash("flow run cancelled".into());
             }
             craft_agent::FlowProgress::AdvisorNote {
                 severity, message, ..
@@ -1161,6 +1171,7 @@ impl App {
             .push(DisplayMessage::new(DisplayRole::Error, CANCEL_MSG.into()));
         self.queue.clear();
         self.recoverable_queue.clear();
+        self.reset_flow_render_state();
         self.status = Status::Idle;
         vec![Action::CancelAgent {
             run_id: cancelled_run,
@@ -1371,22 +1382,29 @@ impl App {
             return vec![];
         }
 
-        if let ChatEventResult::Done { usage } = &result {
+        if let ChatEventResult::Done { usage, .. } = &result {
             self.record_cost(chat_idx, *usage);
         }
 
         if chat_idx == 0 {
             match result {
-                ChatEventResult::Done { .. } => {
+                ChatEventResult::Done { stop_reason, .. } => {
+                    // Flow goal-approval gate: the run is paused, not finished.
+                    // `do_flow_run` is still alive on `answer_rx`, so keep
+                    // `Streaming` so the cancel key stays reachable. The gate
+                    // is otherwise surfaced via `flow_awaiting_approval`.
+                    let is_goal_gate = stop_reason == Some(StopReason::AwaitingGoalApproval);
                     self.status_bar.clear_flash();
                     self.terminalize_turn(MISSING_TOOL_COMPLETION);
                     self.save_session();
                     self.chat_index.clear();
                     self.subagent_answers.clear();
-                    self.status = Status::Idle;
-                    self.lua_event_handle
-                        .fire_autocmd("TurnEnd", serde_json::json!({}));
-                    if self.exit_on_done {
+                    if !is_goal_gate {
+                        self.status = Status::Idle;
+                        self.lua_event_handle
+                            .fire_autocmd("TurnEnd", serde_json::json!({}));
+                    }
+                    if self.exit_on_done && !is_goal_gate {
                         self.exit_request = ExitRequest::Success;
                     }
                 }

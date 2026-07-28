@@ -66,6 +66,11 @@ enum TurnOutcome {
     Continue,
     Done(Option<StopReason>),
     Overflow,
+    /// A Flow narrow turn type finished its work (EndTurn, no tool calls) but
+    /// is not `general`. Instead of ending the run, the loop shifts back to
+    /// `general` and resumes — the root owner re-derives the next step. Only
+    /// `general` ending without a shift ends a Flow run (via `Done`).
+    ShiftOut,
 }
 
 pub struct AgentParams {
@@ -91,10 +96,6 @@ pub struct AgentParams {
     /// Flow mode only: the between-turn tree-watching advisor with override
     /// power. `None` in Build/Plan and when the advisor is disabled.
     pub flow_advisor: Option<Arc<dyn super::flow_loop::FlowAdvisor + Send + Sync>>,
-    /// Flow mode only: the objective gates. Defaults to `GateSet::cargo()` in
-    /// `Agent::new` when `None` (production); tests inject stubs. Build/Plan
-    /// never consult this.
-    pub flow_gates: Option<super::turn_type::GateSet>,
     /// Flow mode only: channel for emitting `FlowProgress` events from inside
     /// `run_loop`/`turn`. `None` in Build/Plan.
     pub flow_progress_tx: Option<flume::Sender<super::flow_loop::FlowProgress>>,
@@ -176,7 +177,6 @@ pub struct Agent<'h> {
     thread_history: Option<Arc<std::sync::Mutex<super::typed_log::ThreadHistory>>>,
     thread_manager: Option<Arc<std::sync::Mutex<super::threads::ThreadManager>>>,
     flow_advisor: Option<Arc<dyn super::flow_loop::FlowAdvisor + Send + Sync>>,
-    gates: super::turn_type::GateSet,
     thread_id: super::typed_log::ThreadId,
     flow_progress_tx: Option<flume::Sender<super::flow_loop::FlowProgress>>,
     /// Flow mode only: set by the `Tpm -> Plan` goal-approval gate. When set,
@@ -275,9 +275,6 @@ impl<'h> Agent<'h> {
             thread_history: params.flow_thread_history,
             thread_manager: params.flow_thread_manager,
             flow_advisor: params.flow_advisor,
-            gates: params
-                .flow_gates
-                .unwrap_or_else(super::turn_type::GateSet::cargo),
             thread_id: super::typed_log::ThreadId::new(""),
             flow_progress_tx: params.flow_progress_tx,
             pending_approval_stop: None,
@@ -339,6 +336,15 @@ impl<'h> Agent<'h> {
         flow_search: crate::tools::flow_search::FlowSearchHandle,
     ) -> Self {
         self.flow_search = flow_search;
+        self
+    }
+
+    /// Flow mode only: override the root thread id with a child `ThreadId`.
+    /// Used by the `task` tool's Flow integration so a child agent runs its
+    /// shift-enabled loop against its own thread. `Agent::run`'s root-default
+    /// logic only fires when the thread id was not set via this builder.
+    pub fn with_flow_thread_id(mut self, id: super::typed_log::ThreadId) -> Self {
+        self.thread_id = id;
         self
     }
 
@@ -404,19 +410,32 @@ impl<'h> Agent<'h> {
         } else {
             // Flow mode: set the current thread id to the root thread (the
             // workstream id) so typed-log appends and ThreadManager calls
-            // target the root. Spawned subtasks (the existing `task` tool)
-            // would reset this within their own `run_loop`; for the first cut
-            // only the root loop shifts.
-            if let Some(mgr) = self.thread_manager.as_ref() {
-                let root = mgr.lock().unwrap_or_else(|e| e.into_inner()).root.clone();
-                self.thread_id = root;
-            } else if let Some(hist) = self.thread_history.as_ref() {
-                self.thread_id = hist
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .root_thread_id()
-                    .clone();
+            // target the root. A child agent created via `with_flow_thread_id`
+            // keeps its child thread id; the root default only fires when the
+            // id was not overridden.
+            if self.thread_id.as_str().is_empty() {
+                if let Some(mgr) = self.thread_manager.as_ref() {
+                    let root = mgr.lock().unwrap_or_else(|e| e.into_inner()).root.clone();
+                    self.thread_id = root;
+                } else if let Some(hist) = self.thread_history.as_ref() {
+                    self.thread_id = hist
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .root_thread_id()
+                        .clone();
+                }
             }
+        }
+        // Flow goal-approval resume: re-enter as the gate's target type instead
+        // of `general`. `advance_turn_type` advances the ThreadManager, emits
+        // `TurnTypeEntered` (so the host's stage display updates), and pushes
+        // the stage brief (so the model knows the pipeline resumed here, e.g.
+        // "write the plan" rather than re-deriving from scratch). No-op outside
+        // Flow mode or when no resume stage is requested.
+        if matches!(self.mode, AgentMode::Flow(_))
+            && let Some(target) = input.flow_resume_stage
+        {
+            self.advance_turn_type(target, crate::agent::turn_type::ThreadAction::Advance);
         }
         self.goal = input.goal;
         self.goal_criteria = input.goal_criteria.clone();
@@ -463,7 +482,7 @@ impl<'h> Agent<'h> {
             // today's `turn()` body unchanged. The Flow shift path consults
             // the same spec's `.transitions` at the turn boundary (see
             // `apply_shift_if_requested`).
-            let _spec = self.turn_type.spec(&self.gates);
+            let _spec = self.turn_type.spec();
             // Flow mode only: honor a cancel request as a turn boundary.
             // Build/Plan surface cancellation through `turn()`'s existing
             // `self.cancel.is_cancelled()` check (returns `AgentError::Cancelled`).
@@ -530,6 +549,16 @@ impl<'h> Agent<'h> {
                     let stop_reason = self.pending_approval_stop.take().or(stop_reason);
                     self.emit_done(stop_reason)?;
                     return Ok(());
+                }
+                TurnOutcome::ShiftOut => {
+                    // A Flow narrow turn finished without shifting. Commit its
+                    // write, hand control back to `general`, and resume the
+                    // loop so the root owner re-derives the next step.
+                    self.commit_turn_write(self.turn_type);
+                    self.advance_turn_type(
+                        crate::agent::turn_type::TurnType::General,
+                        crate::agent::turn_type::ThreadAction::Advance,
+                    );
                 }
                 TurnOutcome::Overflow => {
                     info!("context overflow detected, attempting auto-compact and retry");
@@ -795,6 +824,13 @@ impl<'h> Agent<'h> {
         } else if let Some(ref goal) = self.goal.clone() {
             let criteria = self.goal_criteria.clone();
             self.run_goal_judge(goal, &criteria, stop_reason).await
+        } else if matches!(self.mode, AgentMode::Flow(_))
+            && self.turn_type != crate::agent::turn_type::TurnType::General
+        {
+            // A Flow narrow turn ended (EndTurn, no tool calls). Don't end the
+            // run — hand control back to `general` so the root owner re-derives
+            // the next step. Only `general` ending without a shift ends a run.
+            Ok(TurnOutcome::ShiftOut)
         } else {
             Ok(TurnOutcome::Done(stop_reason))
         }
@@ -870,7 +906,7 @@ impl<'h> Agent<'h> {
         let Some(hist) = self.thread_history.as_ref() else {
             return;
         };
-        let entry_type = turn_type.spec(&self.gates).write.entry;
+        let entry_type = turn_type.spec().write.entry;
         let content = self.last_turn_text();
         hist.lock().unwrap_or_else(|e| e.into_inner()).append(
             self.thread_id.clone(),
@@ -943,9 +979,9 @@ impl<'h> Agent<'h> {
     /// current type's `TransitionRule` set through `transitions::resolve`
     /// with the Advisor's forced transition as `advisor_override`, and either
     /// shifts (applying the typed-log write + emitting
-    /// `FlowProgress::TurnTypeEntered`) or pushes a soft `Blocked`/`Illegal`
-    /// user message and stays. Cheap no-op outside Flow mode or when no shift
-    /// was requested and no advisor override fires.
+    /// `FlowProgress::TurnTypeEntered`) or pushes a soft `Illegal` user
+    /// message and stays. Cheap no-op outside Flow mode or when no shift was
+    /// requested and no advisor override fires.
     async fn apply_shift_if_requested(&mut self) -> Result<(), AgentError> {
         if !matches!(self.mode, AgentMode::Flow(_)) {
             return Ok(());
@@ -955,7 +991,7 @@ impl<'h> Agent<'h> {
         if shift.is_none() && advisor_override.is_none() {
             return Ok(());
         }
-        let rules = self.turn_type.spec(&self.gates).transitions;
+        let rules = self.turn_type.spec().transitions;
         let proposal = shift.as_ref().map(|s| {
             let crate::types::ToolOutput::ShiftTurnType { target, rationale } = s else {
                 unreachable!("last_shift_request returns only ShiftTurnType");
@@ -999,18 +1035,6 @@ impl<'h> Agent<'h> {
                 self.commit_turn_write(from);
                 self.advance_turn_type(target, action);
             }
-            super::transitions::ResolvedTransition::Blocked { reason } => {
-                let target = shift
-                    .map(|s| match s {
-                        crate::types::ToolOutput::ShiftTurnType { target, .. } => target,
-                        _ => unreachable!(),
-                    })
-                    .unwrap_or(self.turn_type);
-                self.history.push(Message::user(format!(
-                    "Shift to {} blocked: {reason}",
-                    target.as_str()
-                )));
-            }
             super::transitions::ResolvedTransition::Illegal { proposed } => {
                 self.history.push(Message::user(format!(
                     "Illegal shift from {} to {}; staying.",
@@ -1023,7 +1047,9 @@ impl<'h> Agent<'h> {
     }
 
     /// Flow mode only: mutate `turn_type`, advance the `ThreadManager` (if
-    /// attached), and emit `FlowProgress::TurnTypeEntered`. This is the single
+    /// attached), emit `FlowProgress::TurnTypeEntered`, and (for narrow types)
+    /// push a stage brief so the model knows what the new type does, what to
+    /// read from the typed log, and where it may shift next. This is the single
     /// place `turn_type` changes after `Agent::run` seeds it to `General`.
     fn advance_turn_type(
         &mut self,
@@ -1042,6 +1068,115 @@ impl<'h> Agent<'h> {
                 turn_type: target,
             });
         }
+        if target != crate::agent::turn_type::TurnType::General
+            && let Some(brief) = self.stage_brief(target)
+        {
+            self.history.push(Message::synthetic(brief));
+        }
+    }
+
+    /// Render the stage brief for a narrow `target` type from its `TurnTypeSpec`:
+    /// the write commitment (with the JSON Schema inlined when the type has
+    /// one), the resolved core-read entries inlined from the typed log, and the
+    /// legal next shifts (flagging objective gates). Returns `None` only when
+    /// no `ThreadHistory` is attached (Build/Plan); an attached-but-empty log
+    /// still yields a brief, just without inlined reads.
+    fn stage_brief(&self, target: crate::agent::turn_type::TurnType) -> Option<String> {
+        let hist = self.thread_history.as_ref()?;
+        let spec = target.spec();
+        let mut out = String::new();
+        out.push_str(&format!(
+            "You are now in the `{}` turn type of Flow workstream `{}`.\n\n",
+            target.as_str(),
+            self.thread_id
+        ));
+        out.push_str("Begin this turn's work now. Do not just acknowledge the shift; produce or gather the artifact this turn type is responsible for, then either shift to the next type that the work needs, or back to `general` if the immediate question is answered.\n\n");
+        out.push_str("## Write\n");
+        out.push_str(&format!(
+            "Commit one `{}` entry as your final reply this turn (prose or markdown, not JSON)",
+            spec.write.entry.as_str()
+        ));
+        if let Some(guidance) = spec.write.guidance {
+            out.push_str(". ");
+            out.push_str(guidance);
+        } else {
+            out.push('.');
+        }
+        out.push('\n');
+
+        let parent_id = self.parent_thread_id();
+        let root_id = hist
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .root_thread_id()
+            .clone();
+        let mut inlined = false;
+        for read in &spec.read.core {
+            let scope_id = match read.level {
+                crate::agent::turn_type::ThreadLevel::Own => Some(self.thread_id.clone()),
+                crate::agent::turn_type::ThreadLevel::Parent => parent_id.clone(),
+                crate::agent::turn_type::ThreadLevel::Root => Some(root_id.clone()),
+            };
+            let Some(scope) = scope_id else {
+                continue;
+            };
+            let entry = hist
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .projection(read.entry, &scope)
+                .cloned();
+            if let Some(entry) = entry {
+                if !inlined {
+                    out.push_str("\n## Context (from the typed log)\n");
+                    inlined = true;
+                }
+                out.push_str(&format!(
+                    "### {} ({} @ {})\n{}\n\n",
+                    read.entry.as_str(),
+                    match read.level {
+                        crate::agent::turn_type::ThreadLevel::Own => "this thread",
+                        crate::agent::turn_type::ThreadLevel::Parent => "parent thread",
+                        crate::agent::turn_type::ThreadLevel::Root => "root thread",
+                    },
+                    scope,
+                    entry.content.trim()
+                ));
+            }
+        }
+        if inlined {
+            out.push_str("Fetch more with `flow_search` or `read path=\"flow://<path>\"`.\n");
+        }
+
+        if !spec.transitions.is_empty() {
+            out.push_str("\n## Legal next shifts\n");
+            out.push_str(
+                "Pick the one the work needs. Returning to `general` is always fine when the \
+                 narrow role has done its job; you are not forced down a fixed pipeline.\n",
+            );
+            for rule in &spec.transitions {
+                out.push_str(&format!(
+                    "- `{}`{}\n",
+                    rule.target.as_str(),
+                    match rule.action {
+                        crate::agent::turn_type::ThreadAction::Spawn => " (spawn child thread)",
+                        crate::agent::turn_type::ThreadAction::Exit => " (exit this thread)",
+                        crate::agent::turn_type::ThreadAction::Advance => "",
+                    },
+                ));
+            }
+        }
+        Some(out)
+    }
+
+    /// The parent thread id for the current thread, from the `ThreadManager`.
+    /// `None` for the root thread (it has no parent) or when no manager is
+    /// attached.
+    fn parent_thread_id(&self) -> Option<crate::agent::typed_log::ThreadId> {
+        let mgr = self.thread_manager.as_ref()?;
+        mgr.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.thread_id)
+            .and_then(|t| t.parent.clone())
     }
 
     async fn run_goal_judge(
@@ -1340,6 +1475,10 @@ impl<'h> Agent<'h> {
             session_id: self.session_id.as_ref().map(|s| s.as_str().to_string()),
             flow_search,
             host_question_routing: self.host_question_routing,
+            flow_thread_manager: self.thread_manager.clone(),
+            flow_thread_id: Some(self.thread_id.clone()),
+            flow_thread_history: self.thread_history.clone(),
+            flow_progress_tx: self.flow_progress_tx.clone(),
         }
     }
 
@@ -1761,7 +1900,6 @@ mod tests {
             flow_thread_history: None,
             flow_thread_manager: None,
             flow_advisor: None,
-            flow_gates: None,
             flow_progress_tx: None,
         }
     }
@@ -2279,7 +2417,6 @@ mod tests {
             flow_thread_history: Some(state.thread_history),
             flow_thread_manager: Some(state.thread_manager),
             flow_advisor: Some(state.advisor),
-            flow_gates: None,
             flow_progress_tx: Some(progress_tx),
         }
     }
@@ -2303,8 +2440,12 @@ mod tests {
         let mut history = History::new(Vec::new());
         let (run_params, event_rx) = make_run_params(&mut history);
         let mut params = flow_agent_params(store, ptx);
+        // Turn 1 (General): shift to scout. Turn 2 (Scout): bare EndTurn —
+        // with ShiftOut this hands control back to general. Turn 3 (General):
+        // EndTurn ends the run.
         params.provider = Arc::new(MockProvider::new(vec![
             shift_tool_call("t1", "scout", "need a codebase map"),
+            text_response(StopReason::EndTurn),
             text_response(StopReason::EndTurn),
         ]));
         let agent = Agent::new(params, run_params);
@@ -2356,10 +2497,54 @@ mod tests {
         );
     }
 
+    /// A narrow turn that ends with EndTurn (no tool calls, no shift) emits
+    /// `TurnOutcome::ShiftOut`: the loop commits the turn's write, shifts back
+    /// to `general`, and resumes. The run does not end at the narrow EndTurn;
+    /// it ends only when `general` subsequently ends. Here Scout ends with a
+    /// bare EndTurn; the run must continue into a General turn.
+    #[tokio::test]
+    async fn flow_narrow_endturn_shifts_out_to_general() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store, ptx);
+        params.provider = Arc::new(MockProvider::new(vec![
+            // Turn 1 (General): shift to scout.
+            shift_tool_call("t1", "scout", "map it"),
+            // Turn 2 (Scout): bare EndTurn -> ShiftOut hands control to general.
+            text_response(StopReason::EndTurn),
+            // Turn 3 (General): EndTurn ends the run.
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        let progress: Vec<_> = prx.try_iter().collect();
+        // Scout was entered, then general was re-entered via ShiftOut.
+        let entered: Vec<_> = progress
+            .iter()
+            .filter_map(|p| match p {
+                crate::agent::flow_loop::FlowProgress::TurnTypeEntered { turn_type, .. } => {
+                    Some(*turn_type)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            entered
+                == vec![
+                    crate::agent::turn_type::TurnType::Scout,
+                    crate::agent::turn_type::TurnType::General,
+                ],
+            "ShiftOut should re-enter general after the Scout EndTurn: {entered:?}"
+        );
+    }
+
     /// A scripted Flow run where the model shifts to a type not in the
     /// current type's `transitions` gets an `Illegal` message and stays.
-    /// General's transitions include Scout/Plan/etc. but not, e.g., Review
-    /// directly — Review is a per-chunk type.
+    /// Scout declares only `tpm` and `general`; shifting Scout to `execute`
+    /// is illegal.
     #[tokio::test]
     async fn flow_illegal_shift_pushes_message_and_stays() {
         let (_tmp, store) = tmp_flow_store();
@@ -2367,19 +2552,29 @@ mod tests {
         let mut history = History::new(Vec::new());
         let (run_params, _event_rx) = make_run_params(&mut history);
         let mut params = flow_agent_params(store, ptx);
-        // Review is not in General's declared transition set.
         params.provider = Arc::new(MockProvider::new(vec![
-            shift_tool_call("t1", "review", "skip ahead"),
+            // Turn 1 (General): shift to scout (legal).
+            shift_tool_call("t1", "scout", "map it"),
+            // Turn 2 (Scout): try to skip straight to execute — illegal from
+            // scout, so the shift is rejected and the scout turn continues.
+            shift_tool_call("t2", "execute", "skip ahead"),
+            // Turn 3 (Scout): bare EndTurn -> ShiftOut to general.
             text_response(StopReason::EndTurn),
+            // Turn 4 (General): EndTurn ends the run.
             text_response(StopReason::EndTurn),
         ]));
         let agent = Agent::new(params, run_params);
         let _ = agent.run(flow_input()).await;
 
         // The illegal-shift message should be in the chat history.
-        assert!(history.as_slice().iter().any(|m| {
-            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("Illegal shift")))
-        }), "expected an Illegal shift message in history");
+        assert!(
+            history.as_slice().iter().any(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("Illegal shift")))
+            }),
+            "expected an Illegal shift message in history"
+        );
     }
 
     /// The `Tpm -> Plan` goal-approval gate emits `FlowProgress::GoalReady`,
@@ -2455,6 +2650,212 @@ mod tests {
         );
     }
 
+    /// Resuming after the goal-approval gate via `with_flow_resume(_, Plan)`
+    /// re-enters the agent as `plan`: it emits `TurnTypeEntered(Plan)` (so the
+    /// host's stage display updates from `tpm` to `plan`) and leaves the agent
+    /// in `plan` for the next turn. Without the resume stage the agent restarts
+    /// in `general` and the model often skips writing a plan.
+    #[tokio::test]
+    async fn flow_resume_after_gate_enters_plan() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store.clone(), ptx);
+        // First run: General shifts to Tpm; Tpm writes the goal and shifts to
+        // Plan, tripping the gate (GoalReady + AwaitingGoalApproval).
+        params.provider = Arc::new(MockProvider::new(vec![
+            shift_tool_call("t1", "tpm", "shape the goal"),
+            StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "# Goal\n\nShip login with SSO.".into(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "t2".into(),
+                            name: "shift".into(),
+                            input: serde_json::json!({
+                                "target": "plan",
+                                "rationale": "goal ready",
+                            }),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                usage: TokenUsage::default(),
+                stop_reason: Some(StopReason::ToolUse),
+            },
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+        // Drain the gate run's progress; Plan must NOT have been entered yet.
+        let gate_progress: Vec<_> = prx.try_iter().collect();
+        assert!(
+            !gate_progress.iter().any(|p| matches!(
+                p,
+                crate::agent::flow_loop::FlowProgress::TurnTypeEntered {
+                    turn_type: crate::agent::turn_type::TurnType::Plan,
+                    ..
+                }
+            )),
+            "gate must not enter Plan: {gate_progress:?}"
+        );
+
+        // Resume run: re-open the typed log and re-enter as Plan.
+        let (ptx2, prx2) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let (run_params2, _event_rx2) = make_run_params(&mut history);
+        let mut params2 = flow_agent_params(store, ptx2);
+        params2.provider = Arc::new(MockProvider::new(vec![
+            // Plan turn writes the plan doc and ends (no shift).
+            StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "# Plan\n\n1. Add SSO flow.".into(),
+                    }],
+                    ..Default::default()
+                },
+                usage: TokenUsage::default(),
+                stop_reason: Some(StopReason::EndTurn),
+            },
+            text_response(StopReason::EndTurn),
+        ]));
+        let resume_input = flow_input().with_flow_resume(
+            crate::FLOW_APPROVE_ANSWER.into(),
+            crate::agent::turn_type::TurnType::Plan,
+        );
+        let agent2 = Agent::new(params2, run_params2);
+        let _ = agent2.run(resume_input).await;
+
+        let resume_progress: Vec<_> = prx2.try_iter().collect();
+        assert!(
+            resume_progress.iter().any(|p| matches!(
+                p,
+                crate::agent::flow_loop::FlowProgress::TurnTypeEntered {
+                    turn_type: crate::agent::turn_type::TurnType::Plan,
+                    ..
+                }
+            )),
+            "resume must emit TurnTypeEntered(Plan): {resume_progress:?}"
+        );
+    }
+
+    /// A shift into a narrow type pushes a synthetic stage brief naming the
+    /// type, its write commitment, and its legal next shifts. Verifies the
+    /// brief is data-driven from the `TurnTypeSpec` and lands in chat history.
+    #[tokio::test]
+    async fn flow_shift_into_narrow_type_pushes_stage_brief() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, _prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store, ptx);
+        // Turn 1 (General): shift to scout. Turn 2 (Scout): bare EndTurn —
+        // with ShiftOut this hands control back to general. Turn 3 (General):
+        // EndTurn ends the run.
+        params.provider = Arc::new(MockProvider::new(vec![
+            shift_tool_call("t1", "scout", "need a codebase map"),
+            text_response(StopReason::EndTurn),
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        let brief = history.as_slice().iter().rev().find_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text }
+                    if text.starts_with("You are now in the `scout` turn type") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        });
+        let brief = brief.expect("expected a scout stage brief in history");
+        assert!(
+            brief.contains("codebase_context"),
+            "brief should name the write entry: {brief}"
+        );
+        assert!(
+            brief.contains("`tpm`"),
+            "brief should list the legal next shift to tpm: {brief}"
+        );
+    }
+
+    /// The stage brief inlines persisted core-read entries so the new type
+    /// starts with its obvious context rather than re-querying. TPM reads
+    /// `codebase_context` at `Own`; after a Scout turn commits one, the TPM
+    /// brief should surface that committed entry.
+    #[tokio::test]
+    async fn flow_stage_brief_inlines_core_reads() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, _prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store, ptx);
+        let scout_findings = "the codebase has 3 crates keyed off craft-agent";
+        params.provider = Arc::new(MockProvider::new(vec![
+            // Turn 1 (General): shift into Scout.
+            shift_tool_call("t1", "scout", "map it"),
+            // Turn 2 (Scout): emit findings, then shift to Tpm. The boundary
+            // after this turn commits the scout write (CodebaseContext) and
+            // advances to Tpm, pushing the Tpm brief.
+            StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: scout_findings.into(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "t2".into(),
+                            name: "shift".into(),
+                            input: serde_json::json!({
+                                "target": "tpm",
+                                "rationale": "shape the goal",
+                            }),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                usage: TokenUsage::default(),
+                stop_reason: Some(StopReason::ToolUse),
+            },
+            // Turn 3 (Tpm): bare EndTurn — with ShiftOut this hands control
+            // back to general. Turn 4 (General): EndTurn ends the run.
+            text_response(StopReason::EndTurn),
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        let tpm_brief = history.as_slice().iter().rev().find_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text }
+                    if text.starts_with("You are now in the `tpm` turn type") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        });
+        let tpm_brief = tpm_brief.expect("expected a tpm stage brief");
+        assert!(
+            tpm_brief.contains(scout_findings),
+            "tpm brief should inline the scout's committed codebase_context: {tpm_brief}"
+        );
+        assert!(
+            tpm_brief.contains("Acceptance criteria"),
+            "tpm brief should surface the goal-doc guidance: {tpm_brief}"
+        );
+        assert!(
+            tpm_brief.contains("Context (from the typed log)"),
+            "tpm brief should render a context section: {tpm_brief}"
+        );
+    }
+
     /// `parse_shift_output` round-trips the wire shape produced by
     /// `ToolOutput::ShiftTurnType::as_display_text`.
     #[test]
@@ -2523,5 +2924,23 @@ mod tests {
         assert!(parse_shift_output("not json").is_none());
         assert!(parse_shift_output("{}").is_none());
         assert!(parse_shift_output(r#"{"shift":{"target":"unknown","rationale":""}}"#).is_none());
+    }
+
+    /// A Flow-mode Agent's `tool_context` carries the live thread manager,
+    /// thread id, typed log, and progress channel so the `task` tool can
+    /// register child threads (Item 2).
+    #[tokio::test]
+    async fn flow_tool_context_exposes_thread_handles() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, _prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let params = flow_agent_params(store, ptx);
+        let agent = Agent::new(params, run_params);
+        let ctx = agent.tool_context();
+        assert!(ctx.flow_thread_manager.is_some());
+        assert!(ctx.flow_thread_id.is_some());
+        assert!(ctx.flow_thread_history.is_some());
+        assert!(ctx.flow_progress_tx.is_some());
     }
 }

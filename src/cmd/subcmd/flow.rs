@@ -181,7 +181,6 @@ async fn run_flow(
             flow_thread_history: Some(state.thread_history),
             flow_thread_manager: Some(state.thread_manager),
             flow_advisor: Some(state.advisor),
-            flow_gates: None,
             flow_progress_tx: Some(state.progress_tx),
         },
         AgentRunParams {

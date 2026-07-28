@@ -30,7 +30,7 @@ mod validation;
 pub(crate) mod vcc;
 pub(crate) mod vcc_recall;
 
-mod threads;
+pub(crate) mod threads;
 
 mod embed_types;
 pub use embed_types::EmbedRequest;

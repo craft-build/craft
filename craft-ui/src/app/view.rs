@@ -466,7 +466,7 @@ impl App {
                 .snapshot
                 .stage
                 .map(|s| s.as_str())
-                .unwrap_or("idle");
+                .unwrap_or("general");
             spans.push(Span::styled(stage, t.active));
             let total = self.flow_panel.total_threads;
             if total > 0 {

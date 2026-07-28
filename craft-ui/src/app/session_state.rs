@@ -71,7 +71,12 @@ impl SessionState {
 
         let flow = FlowState {
             workstream_id: session.meta.flow_workstream_id.clone().unwrap_or_default(),
-            stage: session.meta.flow_stage.as_deref().and_then(TurnType::parse),
+            stage: session
+                .meta
+                .flow_stage
+                .as_deref()
+                .and_then(TurnType::parse)
+                .or(Some(TurnType::General)),
         };
         let flow = if mode == Mode::Flow && flow.workstream_id.is_empty() {
             FlowState {

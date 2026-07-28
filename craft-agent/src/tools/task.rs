@@ -27,6 +27,18 @@ use crate::template;
 use crate::tools::{ToolAudience, ToolRegistry};
 use crate::{Agent, AgentInput, AgentMode, AgentParams, AgentRunParams};
 
+/// Flow-mode context for a `task`-spawned child agent: the child's `ThreadId`
+/// and the shared handles it inherits from the parent. `None` in Build/Plan,
+/// where `task` is the ordinary subagent with no thread registration.
+struct FlowChild {
+    workstream: String,
+    child_thread_id: crate::agent::typed_log::ThreadId,
+    parent_id: crate::agent::typed_log::ThreadId,
+    thread_history: Option<Arc<std::sync::Mutex<crate::agent::typed_log::ThreadHistory>>>,
+    thread_manager: Option<Arc<std::sync::Mutex<crate::agent::threads::ThreadManager>>>,
+    progress_tx: Option<flume::Sender<crate::FlowProgress>>,
+}
+
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct Task {
     #[param(description = "Short (3-5 words) description of the task")]
@@ -249,6 +261,48 @@ impl Task {
         let mut validated: Option<Value> = None;
         let mut last_text = String::new();
 
+        // Flow mode: register a child Thread for this subagent under the parent
+        // and emit ThreadSpawn. The child agent shares the parent's typed log,
+        // thread manager, and progress channel; it runs its own shift-enabled
+        // loop against the child ThreadId. No chunks, no DAG.
+        let flow_child =
+            if let (AgentMode::Flow(workstream), Some(parent_id), Some(mgr), Some(progress_tx)) = (
+                &ctx.mode,
+                ctx.flow_thread_id.as_ref(),
+                ctx.flow_thread_manager.as_ref(),
+                ctx.flow_progress_tx.as_ref(),
+            ) {
+                let child_id = ctx
+                    .tool_use_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{parent_id}-task-{}", start.elapsed().as_nanos()));
+                let (child_thread_id, turn_type) = {
+                    let mut m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+                    let id = m.spawn(parent_id, agent::turn_type::TurnType::Req, &child_id);
+                    (id, agent::turn_type::TurnType::Req)
+                };
+                let _ = progress_tx.send(crate::FlowProgress::ThreadSpawn {
+                    thread_id: child_thread_id.to_string(),
+                    parent_id: parent_id.to_string(),
+                    turn_type,
+                });
+                Some(FlowChild {
+                    workstream: workstream.clone(),
+                    child_thread_id,
+                    parent_id: parent_id.clone(),
+                    thread_history: ctx.flow_thread_history.clone(),
+                    thread_manager: ctx.flow_thread_manager.clone(),
+                    progress_tx: ctx.flow_progress_tx.clone(),
+                })
+            } else {
+                None
+            };
+        if flow_child.is_some() {
+            let original = std::mem::take(&mut prompt_text);
+            prompt_text.push_str(FLOW_SUBTASK_PREAMBLE);
+            prompt_text.push_str(&original);
+        }
+
         let max_attempts = if output_schema.is_some() {
             MAX_SCHEMA_RETRIES + 1
         } else {
@@ -264,7 +318,10 @@ impl Task {
             };
             let input = AgentInput {
                 message,
-                mode: AgentMode::Build,
+                mode: flow_child
+                    .as_ref()
+                    .map(|c| AgentMode::Flow(c.workstream.clone()))
+                    .unwrap_or(AgentMode::Build),
                 thinking: ctx.opts.thinking,
                 fast: ctx.opts.fast,
                 ..Default::default()
@@ -288,11 +345,10 @@ impl Task {
                     findings_store: None,
                     fs: Arc::new(crate::tools::LocalFs),
                     doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
-                    flow_thread_history: None,
-                    flow_thread_manager: None,
+                    flow_thread_history: flow_child.as_ref().and_then(|c| c.thread_history.clone()),
+                    flow_thread_manager: flow_child.as_ref().and_then(|c| c.thread_manager.clone()),
                     flow_advisor: None,
-                    flow_gates: None,
-                    flow_progress_tx: None,
+                    flow_progress_tx: flow_child.as_ref().and_then(|c| c.progress_tx.clone()),
                 },
                 AgentRunParams {
                     history: &mut history,
@@ -307,6 +363,11 @@ impl Task {
             .with_user_response_rx(Arc::clone(&answer_rx))
             .with_cancel(child_cancel.clone())
             .with_mcp(ctx.mcp.clone());
+            let agent = if let Some(ref child) = flow_child {
+                agent.with_flow_thread_id(child.child_thread_id.clone())
+            } else {
+                agent
+            };
 
             run_isolated(agent, input, worktree.as_ref())
                 .await
@@ -343,6 +404,21 @@ impl Task {
         if let Some(ref id) = ctx.tool_use_id {
             ctx.subagent_cancels.remove(id);
         }
+        // Flow mode: close the child Thread and emit ThreadExit so the host's
+        // status line reflects the child completing.
+        if let Some(child) = flow_child {
+            if let Some(mgr) = child.thread_manager.as_ref() {
+                mgr.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .exit(&child.child_thread_id);
+            }
+            if let Some(tx) = child.progress_tx.as_ref() {
+                let _ = tx.send(crate::FlowProgress::ThreadExit {
+                    thread_id: child.child_thread_id.to_string(),
+                    returning_to: child.parent_id.to_string(),
+                });
+            }
+        }
         drop(worktree);
         info!(description = %self.description, duration_ms, "subagent completed");
 
@@ -371,6 +447,11 @@ const SCHEMA_INSTRUCTION_HEAD: &str = "\n\nYou MUST end your final reply with a 
 const SCHEMA_INSTRUCTION_TAIL: &str = "\nReturn ONLY that JSON object as your final message.";
 const RETRY_PREAMBLE: &str =
     "Your previous response was not valid JSON matching the required schema.";
+
+/// Prepended to a `task`-spawned child's prompt when the parent runs in Flow
+/// mode. The child is a per-chunk thread (started at `req`), and without this
+/// it has no signal to use the `shift` tool or knowledge of the chunk cycle.
+const FLOW_SUBTASK_PREAMBLE: &str = "\n\nYou are a Flow child thread on this workstream, started at the `req` turn type. Drive the chunk through its cycle with the `shift` tool:\n\n- `req` — write the spec for this chunk, then `shift` to `execute`.\n- `execute` — implement the chunk. The Execute -> Review transition requires the diff to compile (an objective gate runs), so ensure `cargo check` passes before you `shift` to `review`.\n- `review` — check the implementation against the spec. If you find P0 or P1 issues, `shift` back to `execute`. Otherwise `shift` to `qa`.\n- `qa` — run builds and tests. The QA -> Report transition requires tests to pass (an objective gate runs). Fix failures (shifting back to `execute` if needed) before you `shift` to `report`.\n- `report` — write the chunk's outcome summary and stop; the report transition exits this child thread.\n\nCall `shift` with a `target` and a short `rationale`. Read prior entries (the plan, this chunk's requirement, review findings) from the typed log with `flow_search` or `read path=\"flow://...\"` rather than re-deriving them. Keep your work scoped to this chunk.\n\nYour task:\n";
 
 /// Extract the last JSON object/array from the model's text. Tolerates leading
 /// prose and markdown fences. Returns `Err` with a short reason when no JSON can

@@ -135,6 +135,11 @@ impl App {
         if self.state.flow.workstream_id.is_empty() {
             self.state.flow.workstream_id = new_workstream_id();
         }
+        // Flow runs start General-in-root-thread; reflect that in the status
+        // line immediately rather than showing "idle" until the first shift.
+        if self.state.flow.stage.is_none() {
+            self.state.flow.stage = Some(TurnType::General);
+        }
         self.state.mode = Mode::Flow;
     }
 

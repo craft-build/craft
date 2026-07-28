@@ -52,7 +52,6 @@ Rust workspace, key crates in root dir:
 - craft-tool-macro: Derive macro for tool schemas used by craft-agent
 - craft-acp: Agent Client Protocol server (exposes craft as an ACP-compatible agent to external clients like editors)
 - craft-desktop: Desktop GUI built on Tauri and the Agent Client Protocol
-- craft-flow: Flow mode, a multi-stage pipeline (Scout, TPM, Plan, Req, Execute, Review, QA, Integrator, Verifier) that persists per-workstream documents and pauses for goal approval before execution. Stage agents reuse the standard subagent path
 - craft-repomap: Repository map generator (tree-sitter tag extraction, ranking graph, token-budgeted rendering with caching)
 - craft-docgen: Bin that generates the user docs in site/docs/src from the workspace metadata (commands, config, keybindings, providers, tools)
 - craft-highlight: Thin wrapper around syntect/two-face for syntax highlighting
@@ -61,6 +60,8 @@ Rust workspace, key crates in root dir:
 Built-in lua plugins in ./plugins: index (compact tree-sitter skeleton of a source file), bash, glob, grep, question, skill, memory, webfetch, websearch, todo_write, view_image.
 
 The bin entry point lives in src/main.rs (clap dispatch into src/cmd/ subcommands). Top-level src modules: cli, print, sdk_mode, setup, update. Subcommands under src/cmd/ (desktop, headless, migrate, tui) and src/cmd/subcmd/ (acp, doctor, flow, recipe, review, run, term, wiki). HTTP is done with reqwest. Async channels use flume.
+
+Flow mode (a multi-stage pipeline: Scout, TPM, Plan, Req, Execute, Review, QA, Integrator, Verifier, driven by the model's `shift` calls) is not a separate crate. The `flow` subcommand driver lives in `src/cmd/subcmd/flow.rs`, the pipeline loop and turn-type state machine in `craft-agent/src/agent/flow_loop.rs`, and per-workstream document persistence in `craft-storage/src/flow.rs` (`FlowStore`). Flow mode reuses the standard `Agent::run` path with a mutable turn type and a typed log, pausing for goal approval before execution.
 
 ## Docs
 

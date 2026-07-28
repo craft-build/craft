@@ -17,19 +17,6 @@ pub const SYSTEM_SMALL_PROMPT: &str = include_str!("prompts/system_small.md");
 pub const PLAN_PROMPT: &str = include_str!("prompts/plan.md");
 pub const FLOW_PROMPT: &str = include_str!("prompts/flow.md");
 
-/// Per-stage Flow subagent prompts. Shipped as files under `prompts/flow/` so
-/// they are editable and overridable (`.craft/flow/<stage>.md`), and shared by
-/// the CLI (`craft flow`) and the TUI Flow path through `craft_flow::templates`.
-pub const FLOW_STAGE_SCOUT: &str = include_str!("prompts/flow/scout.md");
-pub const FLOW_STAGE_TPM: &str = include_str!("prompts/flow/tpm.md");
-pub const FLOW_STAGE_PLAN: &str = include_str!("prompts/flow/plan.md");
-pub const FLOW_STAGE_REQ: &str = include_str!("prompts/flow/req.md");
-pub const FLOW_STAGE_EXECUTE: &str = include_str!("prompts/flow/execute.md");
-pub const FLOW_STAGE_REVIEW: &str = include_str!("prompts/flow/review.md");
-pub const FLOW_STAGE_QA: &str = include_str!("prompts/flow/qa.md");
-pub const FLOW_STAGE_INTEGRATOR: &str = include_str!("prompts/flow/integrator.md");
-pub const FLOW_STAGE_VERIFIER: &str = include_str!("prompts/flow/verifier.md");
-
 /// Substitute `{workstream_id}` into [`FLOW_PROMPT`] for the given mode. Returns
 /// `None` outside Flow mode. Shared by `build_system_prompt` (the root agent)
 /// and `run_subagent` (stage subagents) so both receive identical Flow context,
@@ -40,6 +27,7 @@ pub fn flow_section(mode: &crate::AgentMode) -> Option<String> {
     let vars = crate::template::Vars::new().set("{workstream_id}", workstream.to_string());
     Some(vars.apply(FLOW_PROMPT).into_owned())
 }
+
 pub const RESEARCH_PROMPT: &str = include_str!("prompts/research.md");
 pub const GENERAL_PROMPT: &str = include_str!("prompts/general.md");
 pub const COMPACTION_SYSTEM: &str = include_str!("prompts/compaction.md");

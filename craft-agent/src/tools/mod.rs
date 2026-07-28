@@ -303,6 +303,21 @@ pub struct ToolContext {
     /// `question` entry would shadow the host-routed path and the call would
     /// block on a form nobody can answer.
     pub host_question_routing: bool,
+    /// Flow mode only: the shared thread-tree manager. The `task` tool uses it
+    /// to register a child `Thread` for each Flow-mode subagent. `None` outside
+    /// Flow mode, so `task` is the ordinary Build/Plan subagent.
+    pub flow_thread_manager: Option<Arc<std::sync::Mutex<crate::agent::threads::ThreadManager>>>,
+    /// Flow mode only: the parent thread's id. The `task` tool uses it to
+    /// spawn the child under the right parent.
+    pub flow_thread_id: Option<crate::agent::typed_log::ThreadId>,
+    /// Flow mode only: the shared typed log. The `task` tool passes it to the
+    /// child agent so the child appends to the workstream log under its own
+    /// `ThreadId`.
+    pub flow_thread_history: Option<Arc<std::sync::Mutex<crate::agent::typed_log::ThreadHistory>>>,
+    /// Flow mode only: progress channel. The `task` tool emits
+    /// `ThreadSpawn`/`ThreadExit` so the host's status line reflects live
+    /// child threads.
+    pub flow_progress_tx: Option<flume::Sender<crate::agent::flow_loop::FlowProgress>>,
 }
 
 impl ToolContext {
@@ -845,6 +860,10 @@ pub(crate) fn interpreter_ctx(
         registry,
         flow_search: None,
         host_question_routing: false,
+        flow_thread_manager: None,
+        flow_thread_id: None,
+        flow_thread_history: None,
+        flow_progress_tx: None,
     }
 }
 
@@ -905,6 +924,10 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
         session_id: None,
         flow_search: env.flow_search.clone(),
+        flow_thread_manager: None,
+        flow_thread_id: None,
+        flow_thread_history: None,
+        flow_progress_tx: None,
         registry: Arc::clone(ToolRegistry::native_arc()),
         host_question_routing: false,
     }

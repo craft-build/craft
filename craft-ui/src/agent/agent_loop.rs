@@ -12,6 +12,7 @@ use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History,
     Instructions, McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
+    TurnType,
 };
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
@@ -282,7 +283,6 @@ impl AgentLoop {
                 flow_thread_history: None,
                 flow_thread_manager: None,
                 flow_advisor: None,
-                flow_gates: None,
                 flow_progress_tx: None,
             },
             AgentRunParams {
@@ -431,7 +431,6 @@ impl AgentLoop {
                     flow_thread_history: Some(state.thread_history),
                     flow_thread_manager: Some(state.thread_manager),
                     flow_advisor: Some(state.advisor),
-                    flow_gates: None,
                     flow_progress_tx: Some(self.flow_progress_tx.clone()),
                 },
                 AgentRunParams {
@@ -496,10 +495,13 @@ impl AgentLoop {
                         return result;
                     }
                     Ok(answer_text) => {
-                        // Approve/revise: re-enter with the answer text as the
-                        // resume message. The agent re-derives the next shift
-                        // from the persisted goal.
-                        input = input.with_resume_message(answer_text);
+                        // Approve/revise: re-enter as `plan` (the gate's
+                        // target) with the answer text as the resume message.
+                        // Seeding `plan` instead of `general` keeps the
+                        // pipeline on track: the stage brief tells the model
+                        // to write the plan, and `TurnTypeEntered(plan)`
+                        // updates the host's stage display.
+                        input = input.with_flow_resume(answer_text, TurnType::Plan);
                         continue;
                     }
                     Err(_) => {
@@ -522,8 +524,14 @@ impl AgentLoop {
         event_tx: &EventSender,
     ) -> Result<(), AgentError> {
         let _ = flow_progress_tx.send(craft_agent::FlowProgress::Cancelled);
-        let _ = event_tx.send(AgentEvent::Error {
-            message: "flow run cancelled".into(),
+        // Emit a clean `Done { Cancelled }` rather than `Error`. A user
+        // initiated the cancel, so the chat should settle to idle, not a
+        // lingering error status. `FlowProgress::Cancelled` already flashed
+        // the cancel message.
+        let _ = event_tx.send(AgentEvent::Done {
+            usage: TokenUsage::default(),
+            num_turns: 0,
+            stop_reason: Some(StopReason::Cancelled),
         });
         Ok(())
     }

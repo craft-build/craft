@@ -1,30 +1,22 @@
 //! Turn types: the four-property behavior profile for one atomic turn.
 //!
 //! A [`TurnType`] is fully specified by what it reads, what it writes, what it
-//! can do, and what can run after it (design §1). Phase 1 populates only
-//! [`TurnType::General`]; the ten narrow variants exist as enum members but
-//! [`TurnType::spec`] hands back a stub "not yet enabled in Flow mode" spec for
-//! them. Phase 2 fills the narrow specs (read/write/tools/role/transitions)
-//! from the migrated schemas and the `prompts/flow/*.md` templates.
+//! can do, and what can run after it (design §1). [`TurnType::spec`] returns
+//! the read policy, write policy (with JSON Schema), tool filter, model role,
+//! and declared transitions for each variant.
 //!
 //! Build and Plan modes both resolve to [`TurnType::General`] and behave
-//! exactly as before (design §0): General's turn is the existing
-//! `Agent::turn` body, unchanged. Flow mode in Phase 1 also runs
-//! General-in-root-thread; the pipeline is gone and returns in Phase 2 as one
-//! shape the turn-typed loop happens to produce.
-
-use std::sync::Arc;
+//! exactly as before (design §0): General's turn is the existing `Agent::turn`
+//! body, unchanged. Flow mode starts General-in-root-thread; the pipeline
+//! shape emerges from the model's `shift` choices, applied at turn boundaries
+//! through `transitions::resolve`.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use craft_config::model_roles::ModelRole;
 
 use super::typed_log::EntryType;
 use crate::tools::ToolFilter;
-
-pub mod schema;
-pub mod templates;
 
 /// The eleven turn types (design §8.1). `General` is the broad-read,
 /// unrestricted-transition type; the rest are the narrow pipeline shapes.
@@ -82,25 +74,23 @@ impl TurnType {
         })
     }
 
-    /// Resolve the four-property spec for this turn type. `gates` supplies the
-    /// injectable objective gates (the `GateFn` seam, plan Risks: "gates are
-    /// injectable; tests inject stubs"); production passes real cargo-backed
-    /// gates, tests pass stubs. [`General`] ignores `gates` (it has no
-    /// objective-gated edges).
-    pub fn spec(self, gates: &GateSet) -> TurnTypeSpec {
+    /// Resolve the four-property spec for this turn type. Transitions are
+    /// all self-report: each turn type decides when it is done and what to
+    /// hand off to. There are no host-side objective gates — a Review or QA
+    /// turn runs its own checks (compile, tests, lint) via tools and reports
+    /// the result itself, since the right check depends on the project's
+    /// language and toolchain.
+    pub fn spec(self) -> TurnTypeSpec {
         match self {
             TurnType::General => TurnTypeSpec {
                 read: ReadPolicy::full(),
                 write: WritePolicy::verbatim(),
                 tools: ToolFilter::All,
                 role: ModelRole::Default,
-                // General is the entry point. It declares self-report edges to
-                // the root-level pipeline stages so the model can shift into
-                // them as the task demands (Scout is the canonical first
-                // shift; the others support resume / direct entry). The
-                // per-chunk types (Req/Execute/Review/Qa/Report) are not
-                // reachable from General — they live under spawned child
-                // threads (the `task` tool integration, plan §6).
+                // General is the entry point and the catch-all owner. It can
+                // shift into any working type as the task demands. Root owner
+                // and subtasks alike reach the working types from here; there
+                // is no separate "per-chunk" reachability rule.
                 transitions: vec![
                     TransitionRule {
                         target: TurnType::Scout,
@@ -114,6 +104,31 @@ impl TurnType {
                     },
                     TransitionRule {
                         target: TurnType::Plan,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Req,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Execute,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Review,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Qa,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Report,
                         action: ThreadAction::Advance,
                         gate: Gate::SelfReport,
                     },
@@ -139,15 +154,29 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::CodebaseContext,
-                    schema: None,
+                    guidance: Some(
+                        "A codebase map: the files, symbols, and conventions the \
+                         request touches. Prose or bullet points.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowScout,
-                transitions: vec![TransitionRule {
-                    target: TurnType::Tpm,
-                    action: ThreadAction::Advance,
-                    gate: Gate::SelfReport,
-                }],
+                // Scout hands off to tpm when a goal needs shaping, or returns
+                // to general when the investigation answered the immediate
+                // question. Either is a normal exit from scout; the model
+                // picks based on what it found.
+                transitions: vec![
+                    TransitionRule {
+                        target: TurnType::Tpm,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                ],
             },
             TurnType::Tpm => TurnTypeSpec {
                 read: ReadPolicy {
@@ -169,7 +198,12 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::Goal,
-                    schema: Some(schema::goal_doc()),
+                    guidance: Some(
+                        "A goal doc in prose with three sections: `## Goal` \
+                         (one-sentence restatement), `## Scope` (what is in \
+                         and out), and `## Acceptance criteria` (a checklist \
+                         the verifier will check against).",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowTpm,
@@ -181,6 +215,13 @@ impl TurnType {
                     },
                     TransitionRule {
                         target: TurnType::Plan,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    // Tpm may also bow out: if the request is small enough
+                    // that a goal doc is overkill, hand back to general.
+                    TransitionRule {
+                        target: TurnType::General,
                         action: ThreadAction::Advance,
                         gate: Gate::SelfReport,
                     },
@@ -202,18 +243,34 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::Plan,
-                    schema: Some(schema::plan_doc()),
+                    guidance: Some(
+                        "A plan in prose: how you will meet the goal. Cover the \
+                         approach, the steps in order, the files or areas each \
+                         step touches, and any risks. The plan is for whoever \
+                         does the work next (you in a later type, or subtasks \
+                         you spawn with the `task` tool for parallel pieces).",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowPlan,
                 transitions: vec![
                     TransitionRule {
-                        target: TurnType::Req,
-                        action: ThreadAction::Spawn,
+                        target: TurnType::Execute,
+                        action: ThreadAction::Advance,
                         gate: Gate::SelfReport,
                     },
                     TransitionRule {
                         target: TurnType::Integrator,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Verifier,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
                         action: ThreadAction::Advance,
                         gate: Gate::SelfReport,
                     },
@@ -223,30 +280,41 @@ impl TurnType {
                 read: ReadPolicy {
                     core: vec![CoreRead {
                         entry: EntryType::Plan,
-                        level: ThreadLevel::Parent,
+                        level: ThreadLevel::Own,
                     }],
                     query_scope: vec![
                         QueryScope {
                             entry: EntryType::CodebaseContext,
-                            level: ThreadLevel::Parent,
+                            level: ThreadLevel::Own,
                         },
                         QueryScope {
                             entry: EntryType::ResearchNotes,
-                            level: ThreadLevel::Parent,
+                            level: ThreadLevel::Own,
                         },
                     ],
                 },
                 write: WritePolicy {
                     entry: EntryType::Requirement,
-                    schema: Some(schema::requirement_doc()),
+                    guidance: Some(
+                        "A precise spec for the piece of work you are about to \
+                         do: what needs to be built or changed, the constraints, \
+                         and how to tell it is done.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowReq,
-                transitions: vec![TransitionRule {
-                    target: TurnType::Execute,
-                    action: ThreadAction::Advance,
-                    gate: Gate::SelfReport,
-                }],
+                transitions: vec![
+                    TransitionRule {
+                        target: TurnType::Execute,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                ],
             },
             TurnType::Execute => TurnTypeSpec {
                 read: ReadPolicy {
@@ -264,7 +332,11 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::Diff,
-                    schema: None,
+                    guidance: Some(
+                        "Make the code changes. The committed entry is a short \
+                         prose summary of what you changed and why; the actual \
+                         diff lives in the working tree.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowExecute,
@@ -277,7 +349,17 @@ impl TurnType {
                     TransitionRule {
                         target: TurnType::Review,
                         action: ThreadAction::Advance,
-                        gate: Gate::Objective(Arc::clone(&gates.compile)),
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Qa,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
                     },
                 ],
             },
@@ -297,7 +379,12 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::ReviewFindings,
-                    schema: Some(schema::review_report()),
+                    guidance: Some(
+                        "Review the implementation against the spec. Write an \
+                         overall result (passed, failed, or needs review) and \
+                         a list of findings. P0 or P1 findings mean the work \
+                         should go back to execute.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowReview,
@@ -309,6 +396,11 @@ impl TurnType {
                     },
                     TransitionRule {
                         target: TurnType::Qa,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
                         action: ThreadAction::Advance,
                         gate: Gate::SelfReport,
                     },
@@ -330,7 +422,11 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::QaReport,
-                    schema: Some(schema::qa_report()),
+                    guidance: Some(
+                        "Run a quality pass: builds and tests. Write an overall \
+                         result (passed or failed), what you ran, and any \
+                         failures. Tests must pass before you shift to report.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowQa,
@@ -343,7 +439,17 @@ impl TurnType {
                     TransitionRule {
                         target: TurnType::Report,
                         action: ThreadAction::Advance,
-                        gate: Gate::Objective(Arc::clone(&gates.test)),
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::Execute,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
                     },
                 ],
             },
@@ -367,25 +473,36 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::Report,
-                    schema: None,
+                    guidance: Some(
+                        "A short outcome summary: what was done and its final \
+                         status. This is the wrap-up for a unit of work before \
+                         control returns to the owner.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowQa,
-                transitions: vec![TransitionRule {
-                    target: TurnType::Report,
-                    action: ThreadAction::Exit,
-                    gate: Gate::SelfReport,
-                }],
+                transitions: vec![
+                    TransitionRule {
+                        target: TurnType::Report,
+                        action: ThreadAction::Exit,
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
+                ],
             },
             TurnType::Integrator => TurnTypeSpec {
                 read: ReadPolicy {
                     core: vec![
                         CoreRead {
-                            entry: EntryType::Report,
-                            level: ThreadLevel::Parent,
+                            entry: EntryType::Plan,
+                            level: ThreadLevel::Own,
                         },
                         CoreRead {
-                            entry: EntryType::Plan,
+                            entry: EntryType::Diff,
                             level: ThreadLevel::Own,
                         },
                     ],
@@ -393,7 +510,11 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::IntegrationCheckpoint,
-                    schema: Some(schema::integration_checkpoint()),
+                    guidance: Some(
+                        "An integration checkpoint in prose: confirm the merged \
+                         work fits together (integrated or failed), note any \
+                         conflicts, and how the pieces combine.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowIntegrator,
@@ -406,7 +527,12 @@ impl TurnType {
                     TransitionRule {
                         target: TurnType::Verifier,
                         action: ThreadAction::Advance,
-                        gate: Gate::Objective(Arc::clone(&gates.drift)),
+                        gate: Gate::SelfReport,
+                    },
+                    TransitionRule {
+                        target: TurnType::General,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
                     },
                 ],
             },
@@ -426,7 +552,12 @@ impl TurnType {
                 },
                 write: WritePolicy {
                     entry: EntryType::VerificationReport,
-                    schema: Some(schema::verification_report()),
+                    guidance: Some(
+                        "A verification report in prose: an overall verdict \
+                         (ship or block), whether the goal was met, each \
+                         acceptance criterion checked (met or unmet, with a \
+                         short finding), and a summary.",
+                    ),
                 },
                 tools: ToolFilter::All,
                 role: ModelRole::FlowVerifier,
@@ -441,61 +572,13 @@ impl TurnType {
                         action: ThreadAction::Exit,
                         gate: Gate::SelfReport,
                     },
+                    TransitionRule {
+                        target: TurnType::General,
+                        action: ThreadAction::Advance,
+                        gate: Gate::SelfReport,
+                    },
                 ],
             },
-        }
-    }
-}
-
-/// Injectable objective gates (plan Risks: "gates are injectable (the `GateFn`
-/// seam), tests inject stubs"). Each gate is `Ok(())` to pass, `Err(reason)` to
-/// block the self-proposed transition. Production fills these with
-/// cargo-backed checks; tests inject stubs so the loop is fully exercisable
-/// without a live toolchain.
-#[derive(Clone)]
-pub struct GateSet {
-    /// Execute -> Review: the diff compiles. Default runs `cargo check`.
-    pub compile: GateFn,
-    /// QA -> Report: tests pass. Default runs `cargo nextest`/`cargo test`.
-    pub test: GateFn,
-    /// Integrator -> Verifier: no drift across merged chunks. Default runs the
-    /// post-merge build/test gate (migrated from `craft_flow::default_post_merge_gate`).
-    pub drift: GateFn,
-}
-
-impl GateSet {
-    /// Production gates backed by cargo. Each fails closed on a missing
-    /// toolchain.
-    pub fn cargo() -> Self {
-        Self {
-            compile: Arc::new(|| {
-                let out = std::process::Command::new("cargo")
-                    .args(["check", "--all-features", "--workspace"])
-                    .output()
-                    .map_err(|e| format!("compile gate failed to run: {e}"))?;
-                if out.status.success() {
-                    Ok(())
-                } else {
-                    Err("compile gate failed: `cargo check` did not pass".to_string())
-                }
-            }),
-            test: Arc::new(|| {
-                let test = std::process::Command::new("cargo")
-                    .args(["nextest", "run", "--all-features", "--workspace"])
-                    .output()
-                    .or_else(|_| {
-                        std::process::Command::new("cargo")
-                            .args(["test", "--all-features", "--workspace"])
-                            .output()
-                    })
-                    .map_err(|e| format!("test gate failed to run: {e}"))?;
-                if test.status.success() {
-                    Ok(())
-                } else {
-                    Err("test gate failed: tests did not pass".to_string())
-                }
-            }),
-            drift: Arc::new(super::transitions::default_post_merge_gate),
         }
     }
 }
@@ -550,9 +633,11 @@ impl ReadPolicy {
 #[derive(Debug, Clone)]
 pub struct WritePolicy {
     pub entry: EntryType,
-    /// Optional JSON Schema validating the committed entry; migrated from the
-    /// former `craft_flow::schema` shapes in Phase 2.
-    pub schema: Option<Value>,
+    /// Short prose describing what the committed entry should contain. The
+    /// stage brief surfaces this so the model knows what to write; the entry
+    /// itself is the assistant's verbatim final text (prose/markdown), never a
+    /// JSON blob.
+    pub guidance: Option<&'static str>,
 }
 
 impl WritePolicy {
@@ -560,7 +645,7 @@ impl WritePolicy {
     pub fn verbatim() -> Self {
         Self {
             entry: EntryType::GeneralTurn,
-            schema: None,
+            guidance: None,
         }
     }
 }
@@ -575,23 +660,18 @@ pub enum ThreadAction {
     Spawn,
 }
 
-/// Injectable objective gate (mirrors the former `PostMergeGateFn` seam in
-/// `craft_flow::FlowParams`). `Ok(())` passes; `Err(reason)` blocks the
-/// self-proposed transition (design §2).
-pub type GateFn = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
-
-/// Whether a transition's proposal is honored. Objective checks run where
-/// they exist (Execute->Review's diff-compiles, QA->Report's tests-pass);
-/// self-report is the fallback where nothing objective is available (design
-/// §2, §10).
-#[derive(Clone)]
+/// A transition's proposal policy. All transitions are self-report: the
+/// turn decides when it is done and what to hand off to. Review and QA run
+/// their own checks (compile, tests, lint) via tools and report the result;
+/// the host never blocks a shift on a hard-wired command, since the right
+/// check depends on the project's language and toolchain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
-    Objective(GateFn),
     SelfReport,
 }
 
-/// One declared legal next step: a target type, a thread action, and the gate
-/// that decides whether the turn's proposal is honored (design §2).
+/// One declared legal next step: a target type and the thread action the
+/// shift takes.
 #[derive(Clone)]
 pub struct TransitionRule {
     pub target: TurnType,
@@ -669,37 +749,28 @@ mod tests {
         assert!(TurnType::parse("").is_none());
     }
 
-    fn stub_gates() -> GateSet {
-        GateSet {
-            compile: super::super::transitions::always_pass(),
-            test: super::super::transitions::always_pass(),
-            drift: super::super::transitions::always_pass(),
-        }
-    }
-
     #[test]
     fn general_spec_reads_full_and_writes_verbatim() {
-        let spec = TurnType::General.spec(&stub_gates());
+        let spec = TurnType::General.spec();
         assert!(spec.read.core.is_empty());
         assert!(spec.read.query_scope.is_empty());
         assert_eq!(spec.write.entry, EntryType::GeneralTurn);
-        assert!(spec.write.schema.is_none());
+        assert!(spec.write.guidance.is_none());
         assert!(matches!(spec.tools, ToolFilter::All));
         assert_eq!(spec.role, ModelRole::Default);
     }
 
     #[test]
     fn narrow_specs_declare_their_transitions_and_writes() {
-        let gates = stub_gates();
-        assert_eq!(TurnType::Execute.spec(&gates).write.entry, EntryType::Diff);
-        assert_eq!(TurnType::Qa.spec(&gates).write.entry, EntryType::QaReport);
-        assert_eq!(TurnType::Report.spec(&gates).write.entry, EntryType::Report);
+        assert_eq!(TurnType::Execute.spec().write.entry, EntryType::Diff);
+        assert_eq!(TurnType::Qa.spec().write.entry, EntryType::QaReport);
+        assert_eq!(TurnType::Report.spec().write.entry, EntryType::Report);
         assert_eq!(
-            TurnType::Integrator.spec(&gates).write.entry,
+            TurnType::Integrator.spec().write.entry,
             EntryType::IntegrationCheckpoint
         );
         assert_eq!(
-            TurnType::Verifier.spec(&gates).write.entry,
+            TurnType::Verifier.spec().write.entry,
             EntryType::VerificationReport
         );
         // Each narrow type declares at least one transition.
@@ -716,47 +787,36 @@ mod tests {
             TurnType::Verifier,
         ] {
             assert!(
-                !t.spec(&gates).transitions.is_empty(),
+                !t.spec().transitions.is_empty(),
                 "{t:?} should declare transitions"
             );
         }
     }
 
     #[test]
-    fn execute_to_review_uses_compile_gate() {
-        let gates = GateSet {
-            compile: super::super::transitions::always_fail("no compile"),
-            test: super::super::transitions::always_pass(),
-            drift: super::super::transitions::always_pass(),
-        };
-        let spec = TurnType::Execute.spec(&gates);
-        let review_rule = spec
-            .transitions
-            .iter()
-            .find(|r| r.target == TurnType::Review)
-            .expect("Execute declares -> Review");
-        match &review_rule.gate {
-            Gate::Objective(g) => assert!(g().is_err(), "compile gate should fail"),
-            Gate::SelfReport => panic!("Execute->Review must be objective"),
-        }
-    }
-
-    #[test]
-    fn qa_to_report_uses_test_gate() {
-        let gates = GateSet {
-            compile: super::super::transitions::always_pass(),
-            test: super::super::transitions::always_fail("tests fail"),
-            drift: super::super::transitions::always_pass(),
-        };
-        let spec = TurnType::Qa.spec(&gates);
-        let report_rule = spec
-            .transitions
-            .iter()
-            .find(|r| r.target == TurnType::Report)
-            .expect("Qa declares -> Report");
-        match &report_rule.gate {
-            Gate::Objective(g) => assert!(g().is_err(), "test gate should fail"),
-            Gate::SelfReport => panic!("Qa->Report must be objective"),
+    fn all_transitions_are_self_report() {
+        // No host-side objective gates: Review and QA run their own checks via
+        // tools. Every declared transition is self-report.
+        for t in [
+            TurnType::General,
+            TurnType::Scout,
+            TurnType::Tpm,
+            TurnType::Plan,
+            TurnType::Req,
+            TurnType::Execute,
+            TurnType::Review,
+            TurnType::Qa,
+            TurnType::Report,
+            TurnType::Integrator,
+            TurnType::Verifier,
+        ] {
+            for rule in &t.spec().transitions {
+                assert!(
+                    matches!(rule.gate, Gate::SelfReport),
+                    "{t:?} -> {} must be self-report",
+                    rule.target.as_str()
+                );
+            }
         }
     }
 

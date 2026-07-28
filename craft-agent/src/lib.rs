@@ -110,16 +110,27 @@ pub struct AgentInput {
     /// Flow mode only: resume a previously-failed run for this workstream
     /// instead of starting fresh. Ignored outside Flow mode.
     pub flow_resume: bool,
+    /// Flow mode only: when resuming after the goal-approval gate, the turn
+    /// type to re-enter as (the gate's target). `None` means re-enter
+    /// `general` and let the model re-derive. Ignored outside Flow mode.
+    pub flow_resume_stage: Option<crate::agent::turn_type::TurnType>,
 }
 
 impl AgentInput {
-    /// Return a copy of this input re-targeted at a new message. Used by the
-    /// Flow goal-approval resume loop to re-enter the agent with the user's
-    /// approve/revise answer text. Carries `flow_resume = true` so the agent
-    /// treats the re-entry as a continuation of the workstream.
-    pub fn with_resume_message(mut self, message: String) -> Self {
+    /// Return a copy of this input re-targeted at a new message, resuming the
+    /// Flow workstream. Used by the goal-approval resume loop: the user's
+    /// approve/revise answer becomes the resume message, `flow_resume` marks
+    /// it a continuation, and `resume_stage` is the turn type to re-enter as
+    /// (the gate's target, so the agent picks up the pipeline there instead of
+    /// restarting in `general`).
+    pub fn with_flow_resume(
+        mut self,
+        message: String,
+        resume_stage: crate::agent::turn_type::TurnType,
+    ) -> Self {
         self.message = message;
         self.flow_resume = true;
+        self.flow_resume_stage = Some(resume_stage);
         self
     }
 }

@@ -149,7 +149,6 @@ impl Review {
                 flow_thread_history: None,
                 flow_thread_manager: None,
                 flow_advisor: None,
-                flow_gates: None,
                 flow_progress_tx: None,
             },
             AgentRunParams {

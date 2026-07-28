@@ -224,7 +224,6 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     flow_thread_history: None,
                     flow_thread_manager: None,
                     flow_advisor: None,
-                    flow_gates: None,
                     flow_progress_tx: None,
                 },
                 AgentRunParams {
@@ -506,7 +505,6 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         flow_thread_history,
                         flow_thread_manager,
                         flow_advisor,
-                        flow_gates: None,
                         flow_progress_tx,
                     },
                     AgentRunParams {

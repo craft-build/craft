@@ -13,7 +13,6 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
-use serde_json::Value;
 
 const TITLE: &str = " Flow goal ";
 const WIDTH_PERCENT: u16 = 80;
@@ -145,14 +144,7 @@ impl FlowGoalPrompt {
             .saturating_sub((border_chrome + H_PAD * 2) as u32) as u16;
 
         let mut lines: Vec<Line> = Vec::new();
-        match render_goal_doc(&self.goal_doc, &theme) {
-            Some(parsed) => lines.extend(parsed),
-            None => {
-                for raw in self.goal_doc.lines() {
-                    lines.push(Line::from(Span::styled(raw.to_string(), theme.foreground)));
-                }
-            }
-        }
+        lines.extend(render_goal_doc(&self.goal_doc, &theme));
         if self.state == PromptState::Editing {
             lines.push(Line::default());
             lines.push(self.revision_line(&theme));
@@ -218,144 +210,22 @@ impl FlowGoalPrompt {
     }
 }
 
-const LABEL_GOAL: &str = "Goal";
-const LABEL_SCOPE: &str = "Scope";
-const LABEL_OUT_OF_SCOPE: &str = "Out of scope";
-const LABEL_ACCEPTANCE: &str = "Acceptance criteria";
-
-#[derive(Debug)]
-enum GoalSection {
-    Text {
-        label: &'static str,
-        value: String,
-    },
-    List {
-        label: &'static str,
-        numbered: bool,
-        items: Vec<String>,
-    },
-}
-
-fn string_array(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect()
+/// Render the goal doc prose into styled lines. The goal doc is markdown
+/// (typically `## Goal`, `## Scope`, `## Acceptance criteria` sections);
+/// headings are bolded and everything else is shown as plain foreground text.
+fn render_goal_doc(raw: &str, theme: &theme::Theme) -> Vec<Line<'static>> {
+    raw.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("# ") {
+                Line::from(Span::styled(rest.to_string(), theme.bold))
+            } else if trimmed.starts_with("##") {
+                Line::from(Span::styled(trimmed.to_string(), theme.bold))
+            } else {
+                Line::from(Span::styled(line.to_string(), theme.foreground))
+            }
         })
-        .unwrap_or_default()
-}
-
-/// Parse the goal doc JSON into ordered sections. Returns `None` if the input
-/// is not valid JSON, is not an object, or yields no sections, so the caller
-/// can fall back to showing the raw text.
-fn parse_goal_doc(raw: &str) -> Option<Vec<GoalSection>> {
-    let value: Value = serde_json::from_str(raw).ok()?;
-    let obj = value.as_object()?;
-
-    let mut sections: Vec<GoalSection> = Vec::new();
-    if let Some(goal) = obj.get("goal").and_then(Value::as_str) {
-        sections.push(GoalSection::Text {
-            label: LABEL_GOAL,
-            value: goal.to_string(),
-        });
-    }
-    if let Some(scope) = obj.get("scope").and_then(Value::as_str) {
-        sections.push(GoalSection::Text {
-            label: LABEL_SCOPE,
-            value: scope.to_string(),
-        });
-    }
-    let out_of_scope = string_array(obj.get("out_of_scope").unwrap_or(&Value::Null));
-    if !out_of_scope.is_empty() {
-        sections.push(GoalSection::List {
-            label: LABEL_OUT_OF_SCOPE,
-            numbered: false,
-            items: out_of_scope,
-        });
-    }
-    let criteria = string_array(obj.get("acceptance_criteria").unwrap_or(&Value::Null));
-    if !criteria.is_empty() {
-        sections.push(GoalSection::List {
-            label: LABEL_ACCEPTANCE,
-            numbered: true,
-            items: criteria,
-        });
-    }
-
-    if sections.is_empty() {
-        None
-    } else {
-        Some(sections)
-    }
-}
-
-fn labeled_text(label: &str, value: &str, theme: &theme::Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label}: "), theme.bold),
-        Span::styled(value.to_string(), theme.foreground),
-    ])
-}
-
-fn labeled_heading(label: &str, theme: &theme::Theme) -> Line<'static> {
-    Line::from(Span::styled(label.to_string(), theme.bold))
-}
-
-fn bulleted(value: &str, theme: &theme::Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("  • ", theme.list_marker),
-        Span::styled(value.to_string(), theme.foreground),
-    ])
-}
-
-fn numbered_item(idx: usize, value: &str, theme: &theme::Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("  {idx}. "), theme.list_marker),
-        Span::styled(value.to_string(), theme.foreground),
-    ])
-}
-
-fn blank() -> Line<'static> {
-    Line::default()
-}
-
-/// Render parsed goal sections into styled lines, with blank separators between
-/// sections.
-fn render_goal_sections(sections: &[GoalSection], theme: &theme::Theme) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, section) in sections.iter().enumerate() {
-        if i > 0 {
-            lines.push(blank());
-        }
-        match section {
-            GoalSection::Text { label, value } => {
-                lines.push(labeled_text(label, value, theme));
-            }
-            GoalSection::List {
-                label,
-                numbered,
-                items,
-            } => {
-                lines.push(labeled_heading(label, theme));
-                for (j, item) in items.iter().enumerate() {
-                    if *numbered {
-                        lines.push(numbered_item(j + 1, item, theme));
-                    } else {
-                        lines.push(bulleted(item, theme));
-                    }
-                }
-            }
-        }
-    }
-    lines
-}
-
-/// Parse and render the goal doc JSON into labeled, styled lines. Returns
-/// `None` when the input is not parseable so the caller falls back to raw text.
-fn render_goal_doc(raw: &str, theme: &theme::Theme) -> Option<Vec<Line<'static>>> {
-    Some(render_goal_sections(&parse_goal_doc(raw)?, theme))
+        .collect()
 }
 
 impl Overlay for FlowGoalPrompt {
@@ -514,76 +384,9 @@ mod tests {
     }
 
     #[test]
-    fn render_goal_doc_parses_full_object() {
-        let raw = serde_json::json!({
-            "goal": "ship feature x",
-            "scope": "backend only",
-            "out_of_scope": ["frontend", "docs"],
-            "acceptance_criteria": ["tests pass", "qa pass"],
-        })
-        .to_string();
-        let sections = parse_goal_doc(&raw).expect("should parse");
-        assert_eq!(sections.len(), 4);
-
-        match &sections[0] {
-            GoalSection::Text { label, value } => {
-                assert_eq!(*label, "Goal");
-                assert_eq!(value, "ship feature x");
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        match &sections[1] {
-            GoalSection::Text { label, value } => {
-                assert_eq!(*label, "Scope");
-                assert_eq!(value, "backend only");
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        match &sections[2] {
-            GoalSection::List {
-                label,
-                numbered,
-                items,
-            } => {
-                assert_eq!(*label, "Out of scope");
-                assert!(!*numbered);
-                assert_eq!(items, &["frontend".to_string(), "docs".to_string()]);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        match &sections[3] {
-            GoalSection::List {
-                label,
-                numbered,
-                items,
-            } => {
-                assert_eq!(*label, "Acceptance criteria");
-                assert!(*numbered);
-                assert_eq!(items, &["tests pass".to_string(), "qa pass".to_string()]);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn render_goal_doc_none_for_invalid_json() {
-        assert!(parse_goal_doc("not json").is_none());
-    }
-
-    #[test]
-    fn render_goal_doc_none_for_empty_object() {
-        assert!(parse_goal_doc("{}").is_none());
-    }
-
-    #[test]
-    fn render_goal_doc_skips_empty_arrays() {
-        let raw = serde_json::json!({
-            "goal": "g",
-            "out_of_scope": [],
-            "acceptance_criteria": [],
-        })
-        .to_string();
-        let sections = parse_goal_doc(&raw).expect("should parse");
-        assert_eq!(sections.len(), 1);
+    fn render_goal_doc_returns_one_line_per_input_line() {
+        let t = theme::current();
+        let lines = render_goal_doc("## Goal\nship it\n## Scope\nbackend", &t);
+        assert_eq!(lines.len(), 4);
     }
 }

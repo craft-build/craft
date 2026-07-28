@@ -21,7 +21,7 @@ use craft_agent::{
     ToolStartEvent,
 };
 use craft_config::{ToolKey, ToolOutputLines, UiConfig};
-use craft_providers::{ContentBlock, Message, Role, TokenUsage};
+use craft_providers::{ContentBlock, Message, Role, StopReason, TokenUsage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -34,6 +34,7 @@ pub enum ChatEventResult {
     Continue,
     Done {
         usage: TokenUsage,
+        stop_reason: Option<StopReason>,
     },
     QueueItemConsumed {
         text: String,
@@ -140,10 +141,12 @@ impl Chat {
                 return ChatEventResult::QueueItemConsumed { text, image_count };
             }
             AgentEvent::Retry { .. } => unreachable!("handled before handle_event"),
-            AgentEvent::Done { usage, .. } => {
+            AgentEvent::Done {
+                usage, stop_reason, ..
+            } => {
                 self.messages_panel.flush();
                 self.token_usage += usage;
-                return ChatEventResult::Done { usage };
+                return ChatEventResult::Done { usage, stop_reason };
             }
             AgentEvent::Error { message } => {
                 self.messages_panel.flush();
