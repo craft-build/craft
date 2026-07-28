@@ -1246,6 +1246,29 @@ impl<'h> Agent<'h> {
     }
 
     fn tool_context(&self) -> ToolContext {
+        let flow_search = if let Some(handle) = self.flow_search.clone() {
+            Some(handle)
+        } else if let Some(hist) = self.thread_history.clone() {
+            let (project_id, workstream_id, root) = {
+                let h = hist.lock().unwrap_or_else(|e| e.into_inner());
+                (
+                    h.project_id().to_string(),
+                    h.root_thread_id().as_str().to_string(),
+                    h.root_thread_id().clone(),
+                )
+            };
+            Some(Arc::new(
+                crate::tools::flow_search_backend::HistorySearchBackend::new(
+                    hist,
+                    project_id,
+                    workstream_id,
+                    root,
+                ),
+            )
+                as Arc<dyn crate::tools::flow_search::FlowSearchBackend>)
+        } else {
+            None
+        };
         ToolContext {
             provider: Arc::clone(&self.provider),
             model: Arc::clone(&self.model),
@@ -1277,7 +1300,7 @@ impl<'h> Agent<'h> {
             snapshot_store: Arc::clone(&self.snapshot_store),
             pending_edits: Arc::clone(&self.pending_edits),
             session_id: self.session_id.as_ref().map(|s| s.as_str().to_string()),
-            flow_search: self.flow_search.clone(),
+            flow_search,
             host_question_routing: self.host_question_routing,
         }
     }
@@ -2338,6 +2361,50 @@ mod tests {
             }
             other => panic!("expected ShiftTurnType, got {other:?}"),
         }
+    }
+
+    /// A Flow-mode Agent auto-wires a `flow_search` backend against its
+    /// `ThreadHistory` so a resuming agent can read its own past entries
+    /// (plan §7). Pre-populate the typed log with a Goal, build the agent,
+    /// and confirm `tool_context().flow_search` returns the goal for a
+    /// "goal" query. Outside Flow mode the handle is `None`.
+    #[tokio::test]
+    async fn flow_search_returns_persisted_entries_after_resume() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, _prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        // Seed the typed log with a Goal entry against the root thread before
+        // building the agent, simulating a resume.
+        {
+            let hist = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::agent::typed_log::ThreadHistory::open(
+                    Arc::clone(&store),
+                    "test-project",
+                    "test-workstream",
+                ),
+            ));
+            hist.lock().unwrap().append(
+                crate::agent::typed_log::ThreadId::new("test-workstream"),
+                crate::agent::typed_log::EntryType::Goal,
+                "ship the login flow with these acceptance criteria",
+            );
+        }
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let params = flow_agent_params(store, ptx);
+        let agent = Agent::new(params, run_params);
+        let ctx = agent.tool_context();
+        let backend = ctx
+            .flow_search
+            .as_ref()
+            .expect("flow_search auto-wired in Flow mode");
+        let hits = backend
+            .search("test-project", "test-workstream", "login goal", 5)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.path.starts_with("goal:")),
+            "expected a goal hit, got: {hits:?}"
+        );
     }
 
     #[test]

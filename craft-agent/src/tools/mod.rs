@@ -20,6 +20,7 @@ mod edit;
 mod edit_lines;
 mod file_tracker;
 pub mod flow_search;
+pub(crate) mod flow_search_backend;
 pub mod fs_backend;
 mod fuzzy_replace;
 pub mod grep;
