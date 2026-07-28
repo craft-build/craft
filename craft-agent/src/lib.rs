@@ -96,7 +96,7 @@ pub struct McpPromptRef {
     pub arguments: HashMap<String, String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AgentInput {
     pub message: String,
     pub mode: AgentMode,
@@ -110,4 +110,16 @@ pub struct AgentInput {
     /// Flow mode only: resume a previously-failed run for this workstream
     /// instead of starting fresh. Ignored outside Flow mode.
     pub flow_resume: bool,
+}
+
+impl AgentInput {
+    /// Return a copy of this input re-targeted at a new message. Used by the
+    /// Flow goal-approval resume loop to re-enter the agent with the user's
+    /// approve/revise answer text. Carries `flow_resume = true` so the agent
+    /// treats the re-entry as a continuation of the workstream.
+    pub fn with_resume_message(mut self, message: String) -> Self {
+        self.message = message;
+        self.flow_resume = true;
+        self
+    }
 }

@@ -170,6 +170,10 @@ pub struct App {
     /// affordance: submitting in Flow mode while this is set re-enters the
     /// pipeline with `flow_resume = true` instead of starting fresh.
     pub(super) flow_failed: bool,
+    /// Set by `handle_flow_progress` on `GoalReady` so the agent loop's
+    /// `do_flow_run` can break out and re-prompt for goal approval. Shared
+    /// with the `AgentLoop`.
+    pub(super) goal_ready_flag: Arc<std::sync::atomic::AtomicBool>,
     pub(super) status_bar: StatusBar,
     pub status: Status,
     pub(crate) state: session_state::SessionState,
@@ -292,6 +296,7 @@ impl App {
             flow_goal_prompt: FlowGoalPrompt::new(),
             flow_awaiting_approval: false,
             flow_failed: false,
+            goal_ready_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             status_bar: StatusBar::new(ui_config.flash_duration()),
             status: Status::Idle,
             state,
@@ -407,6 +412,8 @@ impl App {
             }
             craft_agent::FlowProgress::GoalReady { goal_doc } => {
                 self.flow_awaiting_approval = true;
+                self.goal_ready_flag
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 self.flow_goal_prompt.open(goal_doc);
             }
             craft_agent::FlowProgress::Done { .. } => {

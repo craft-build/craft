@@ -56,6 +56,7 @@ pub(crate) struct AgentHandles {
     pub(crate) btw_system: Arc<ArcSwap<String>>,
     pub(crate) flow_progress_rx: flume::Receiver<craft_agent::FlowProgress>,
     pub(crate) repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) goal_ready_flag: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -110,6 +111,7 @@ impl AgentHandles {
         app.queue.set_shared(self.queue.clone());
         app.btw_system = Some(Arc::clone(&self.btw_system));
         app.repomap_enabled = Arc::clone(&self.repomap_enabled);
+        app.goal_ready_flag = Arc::clone(&self.goal_ready_flag);
 
         let restore_tx =
             craft_agent::EventSender::new(self.agent_tx.clone(), crate::app::RESTORE_RUN_ID);
@@ -275,6 +277,7 @@ fn spawn_agent_internal(
     );
 
     let (flow_progress_tx, flow_progress_rx) = flume::unbounded::<craft_agent::FlowProgress>();
+    let goal_ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let agent_loop = AgentLoop::new(
         Arc::clone(model_slot),
@@ -298,6 +301,7 @@ fn spawn_agent_internal(
         flow_store,
         flow_progress_tx,
         Arc::clone(&repomap_enabled),
+        Arc::clone(&goal_ready_flag),
     );
 
     let task = tokio::spawn(agent_loop.run());
@@ -325,6 +329,7 @@ fn spawn_agent_internal(
         btw_system,
         flow_progress_rx,
         repomap_enabled,
+        goal_ready_flag,
         task,
     }
 }

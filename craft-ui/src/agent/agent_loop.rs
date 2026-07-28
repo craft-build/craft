@@ -56,6 +56,10 @@ pub(super) struct AgentLoop {
     flow_store: Arc<FlowStore>,
     flow_progress_tx: flume::Sender<craft_agent::FlowProgress>,
     repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the App (via `handle_flow_progress`) when `GoalReady` fires so
+    /// `do_flow_run` can break out of `agent.run`, re-prompt for approval, and
+    /// resume on approve/revise.
+    goal_ready_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentLoop {
@@ -82,6 +86,7 @@ impl AgentLoop {
         flow_store: Arc<FlowStore>,
         flow_progress_tx: flume::Sender<craft_agent::FlowProgress>,
         repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
+        goal_ready_flag: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             model_slot,
@@ -112,6 +117,7 @@ impl AgentLoop {
             flow_store,
             flow_progress_tx,
             repomap_enabled,
+            goal_ready_flag,
         }
     }
 
@@ -338,9 +344,19 @@ impl AgentLoop {
     /// re-prompts on `answer_rx` and re-enters with the approval text. The
     /// agent reads its persisted typed log on resume to re-derive the goal
     /// and the next shift (plan §7).
+    /// Drive Flow mode through the normal `Agent::run` path, looping across
+    /// the goal-approval gate. Each iteration builds an `Agent` with the
+    /// per-workstream typed log, thread manager, advisor, and progress channel
+    /// attached, then runs it to completion. When the `Tpm -> Plan` gate fires
+    /// (`FlowProgress::GoalReady`), the agent ends the run with
+    /// `AwaitingGoalApproval` and the App sets `goal_ready_flag`; this loop
+    /// then awaits the user's approve/revise/cancel answer (routed through
+    /// `answer_rx` by the goal overlay) and resumes on approve/revise or
+    /// cancels on cancel. The agent reads its persisted typed log on each
+    /// resume to re-derive the goal and the next shift (plan §7).
     async fn do_flow_run(
         &mut self,
-        input: AgentInput,
+        mut input: AgentInput,
         event_tx: EventSender,
         run_id: u64,
     ) -> Result<(), AgentError> {
@@ -363,103 +379,142 @@ impl AgentLoop {
             self.clear_cancel_trigger(run_id);
             return result;
         }
-        let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
-        let slot = self.model_slot.load();
-        let compact = self
-            .config
-            .small_model
-            .should_activate(slot.model.context_window)
-            && self.config.small_model.compact_prompt;
-        let system = agent::build_system_prompt(
-            &self.vars,
-            &input.mode,
-            &self.instructions.text,
-            &prompt_slots,
-            &slot.model,
-            compact,
-        );
-        let (state, _progress_rx, _state_cancel_trigger) = craft_agent::FlowRunState::split(
-            Arc::clone(&self.flow_store),
-            project_id,
-            workstream_id,
-        );
-        let thread_history = state.thread_history;
-        let thread_manager = state.thread_manager;
-        let flow_advisor = state.advisor;
 
-        while self.answer_rx.lock().await.try_recv().is_ok() {}
+        // Reset any stale goal-ready signal from a prior run.
+        self.goal_ready_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        let agent = Agent::new(
-            AgentParams {
-                provider: Arc::clone(&slot.provider),
-                model: slot.model.clone(),
-                config: self.config.clone(),
-                tool_output_lines: self.tool_output_lines,
-                permissions: Arc::clone(&self.permissions),
-                session_id: self.session_id.clone(),
-                timeouts: self.timeouts,
-                file_tracker: Arc::clone(&self.file_tracker),
-                prompt_slots: std::sync::Arc::new(prompt_slots),
-                subagent_cancels: Arc::clone(&self.subagent_cancels),
-                registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
-                compression: self.compression.clone(),
-                findings_store: Some(Arc::clone(&self.findings_store)),
-                fs: Arc::new(craft_agent::tools::LocalFs),
-                doom: Arc::clone(&self.doom),
-                flow_thread_history: Some(thread_history),
-                flow_thread_manager: Some(thread_manager),
-                flow_advisor: Some(flow_advisor),
-                flow_gates: None,
-                flow_progress_tx: Some(self.flow_progress_tx.clone()),
-            },
-            AgentRunParams {
-                history: &mut self.history,
-                system,
-                event_tx: event_tx.clone(),
-                tools: self.tools.clone(),
-                promoted: self.promoted.clone(),
-                tool_build: Some(craft_agent::tools::ToolBuild {
-                    vars: self.vars.clone(),
-                    excluded: Vec::new(),
-                    mcp: self.mcp_handle.clone(),
-                }),
-                hooks: Some(craft_lua::LuaHooks::new(self.lua_handle.clone())
-                    as Arc<dyn craft_agent::Hooks>),
-            },
-        )
-        .with_loaded_instructions(self.instructions.loaded.clone())
-        .with_user_response_rx(Arc::clone(&self.answer_rx))
-        .with_cancel(cancel_token.clone())
-        .with_mcp(self.mcp_handle.clone())
-        .with_repo_map(
-            self.repomap_enabled
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .then(craft_repomap::RepoMap::try_from_cwd)
-                .flatten()
-                .map(|rm| rm.with_max_tokens(self.config.repomap.max_tokens)),
-        );
+        loop {
+            let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
+            let slot = self.model_slot.load();
+            let compact = self
+                .config
+                .small_model
+                .should_activate(slot.model.context_window)
+                && self.config.small_model.compact_prompt;
+            let system = agent::build_system_prompt(
+                &self.vars,
+                &input.mode,
+                &self.instructions.text,
+                &prompt_slots,
+                &slot.model,
+                compact,
+            );
+            // Re-open the typed log each iteration: it reloads the persisted
+            // log from disk, so a resume after the goal gate re-derives the
+            // goal and the next shift from the prior Tpm write.
+            let (state, _progress_rx, _state_cancel_trigger) = craft_agent::FlowRunState::split(
+                Arc::clone(&self.flow_store),
+                project_id.clone(),
+                workstream_id.clone(),
+            );
 
-        let result = match tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => Self::cancel_flow(&self.flow_progress_tx, &event_tx),
-            r = agent.run(input) => match r {
-                Ok(()) => Ok(()),
-                Err(AgentError::Cancelled) => {
-                    Self::cancel_flow(&self.flow_progress_tx, &event_tx)
+            while self.answer_rx.lock().await.try_recv().is_ok() {}
+
+            let agent = Agent::new(
+                AgentParams {
+                    provider: Arc::clone(&slot.provider),
+                    model: slot.model.clone(),
+                    config: self.config.clone(),
+                    tool_output_lines: self.tool_output_lines,
+                    permissions: Arc::clone(&self.permissions),
+                    session_id: self.session_id.clone(),
+                    timeouts: self.timeouts,
+                    file_tracker: Arc::clone(&self.file_tracker),
+                    prompt_slots: std::sync::Arc::new(prompt_slots),
+                    subagent_cancels: Arc::clone(&self.subagent_cancels),
+                    registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
+                    compression: self.compression.clone(),
+                    findings_store: Some(Arc::clone(&self.findings_store)),
+                    fs: Arc::new(craft_agent::tools::LocalFs),
+                    doom: Arc::clone(&self.doom),
+                    flow_thread_history: Some(state.thread_history),
+                    flow_thread_manager: Some(state.thread_manager),
+                    flow_advisor: Some(state.advisor),
+                    flow_gates: None,
+                    flow_progress_tx: Some(self.flow_progress_tx.clone()),
+                },
+                AgentRunParams {
+                    history: &mut self.history,
+                    system,
+                    event_tx: event_tx.clone(),
+                    tools: self.tools.clone(),
+                    promoted: self.promoted.clone(),
+                    tool_build: Some(craft_agent::tools::ToolBuild {
+                        vars: self.vars.clone(),
+                        excluded: Vec::new(),
+                        mcp: self.mcp_handle.clone(),
+                    }),
+                    hooks: Some(craft_lua::LuaHooks::new(self.lua_handle.clone())
+                        as Arc<dyn craft_agent::Hooks>),
+                },
+            )
+            .with_loaded_instructions(self.instructions.loaded.clone())
+            .with_user_response_rx(Arc::clone(&self.answer_rx))
+            .with_cancel(cancel_token.clone())
+            .with_mcp(self.mcp_handle.clone())
+            .with_repo_map(
+                self.repomap_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .then(craft_repomap::RepoMap::try_from_cwd)
+                    .flatten()
+                    .map(|rm| rm.with_max_tokens(self.config.repomap.max_tokens)),
+            );
+
+            let cancelled = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => true,
+                r = agent.run(input.clone()) => match r {
+                    Ok(()) => false,
+                    Err(AgentError::Cancelled) => true,
+                    Err(e) => {
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: e.user_message(),
+                        });
+                        self.clear_cancel_trigger(run_id);
+                        return Ok(());
+                    }
+                },
+            };
+
+            if cancelled {
+                let result = Self::cancel_flow(&self.flow_progress_tx, &event_tx);
+                self.clear_cancel_trigger(run_id);
+                return result;
+            }
+
+            // Goal gate: if GoalReady fired, await the user's answer and loop.
+            if self
+                .goal_ready_flag
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                let answer = self.answer_rx.lock().await.recv_async().await;
+                match answer {
+                    Ok(a) if a == craft_agent::FLOW_CANCEL_ANSWER => {
+                        let result = Self::cancel_flow(&self.flow_progress_tx, &event_tx);
+                        self.clear_cancel_trigger(run_id);
+                        return result;
+                    }
+                    Ok(answer_text) => {
+                        // Approve/revise: re-enter with the answer text as the
+                        // resume message. The agent re-derives the next shift
+                        // from the persisted goal.
+                        input = input.with_resume_message(answer_text);
+                        continue;
+                    }
+                    Err(_) => {
+                        // Channel closed without an answer — treat as cancel.
+                        let result = Self::cancel_flow(&self.flow_progress_tx, &event_tx);
+                        self.clear_cancel_trigger(run_id);
+                        return result;
+                    }
                 }
-                Err(e) => {
-                    let _ = event_tx.send(AgentEvent::Error {
-                        message: e.user_message(),
-                    });
-                    Ok(())
-                }
-            },
-        } {
-            Ok(()) => Ok(()),
-            Err(e) => Err(e),
-        };
-        self.clear_cancel_trigger(run_id);
-        result
+            }
+
+            // No goal gate: run completed normally.
+            self.clear_cancel_trigger(run_id);
+            return Ok(());
+        }
     }
 
     fn cancel_flow(

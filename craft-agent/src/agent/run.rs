@@ -179,6 +179,11 @@ pub struct Agent<'h> {
     gates: super::turn_type::GateSet,
     thread_id: super::typed_log::ThreadId,
     flow_progress_tx: Option<flume::Sender<super::flow_loop::FlowProgress>>,
+    /// Flow mode only: set by the `Tpm -> Plan` goal-approval gate. When set,
+    /// the terminal `Done` arm of `run_loop` emits this stop reason instead of
+    /// the natural one, so the host can re-prompt for goal approval. Cleared
+    /// after the run ends.
+    pending_approval_stop: Option<StopReason>,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -275,6 +280,7 @@ impl<'h> Agent<'h> {
                 .unwrap_or_else(super::turn_type::GateSet::cargo),
             thread_id: super::typed_log::ThreadId::new(""),
             flow_progress_tx: params.flow_progress_tx,
+            pending_approval_stop: None,
         }
     }
 
@@ -504,6 +510,13 @@ impl<'h> Agent<'h> {
                     // turn and run it through `transitions::resolve`. No-op
                     // (and cheap) in Build/Plan and when no shift was made.
                     self.apply_shift_if_requested().await?;
+                    // Goal-approval gate fired on `Tpm -> Plan`: end the run
+                    // now so the host can re-prompt, before another turn runs.
+                    if let Some(stop) = self.pending_approval_stop.take() {
+                        self.snapshot.commit();
+                        self.emit_done(Some(stop))?;
+                        return Ok(());
+                    }
                 }
                 TurnOutcome::Done(stop_reason) => {
                     self.snapshot.commit();
@@ -512,6 +525,9 @@ impl<'h> Agent<'h> {
                     if matches!(self.mode, AgentMode::Flow(_)) {
                         self.commit_turn_write(self.turn_type);
                     }
+                    // Goal-approval gate: the `Tpm -> Plan` shift set this;
+                    // override the natural stop reason so the host re-prompts.
+                    let stop_reason = self.pending_approval_stop.take().or(stop_reason);
                     self.emit_done(stop_reason)?;
                     return Ok(());
                 }
@@ -855,20 +871,26 @@ impl<'h> Agent<'h> {
             return;
         };
         let entry_type = turn_type.spec(&self.gates).write.entry;
-        let content = self
-            .history
+        let content = self.last_turn_text();
+        hist.lock().unwrap_or_else(|e| e.into_inner()).append(
+            self.thread_id.clone(),
+            entry_type,
+            content,
+        );
+    }
+
+    /// The just-completed turn's final assistant text (verbatim). Used for the
+    /// typed-log write and to extract the goal doc at the `Tpm -> Plan` gate.
+    /// Empty when no assistant text was produced.
+    fn last_turn_text(&self) -> String {
+        self.history
             .as_slice()
             .iter()
             .rev()
             .find(|m| matches!(m.role, Role::Assistant))
             .and_then(|m| m.first_text_content())
             .unwrap_or("")
-            .to_string();
-        hist.lock().unwrap_or_else(|e| e.into_inner()).append(
-            self.thread_id.clone(),
-            entry_type,
-            content,
-        );
+            .to_string()
     }
 
     /// Flow mode only: run the between-turn `FlowAdvisor` (the tree watcher
@@ -958,6 +980,22 @@ impl<'h> Agent<'h> {
         match resolved {
             super::transitions::ResolvedTransition::Accepted { target, action } => {
                 let from = self.turn_type;
+                // Goal-approval gate (plan §7): the `Tpm -> Plan` transition
+                // ends the run with `AwaitingGoalApproval` after emitting the
+                // goal doc. The host re-prompts; on resume the agent re-derives
+                // the shift from the persisted goal. `General -> Plan` (skipped
+                // Tpm) does not pause.
+                if from == crate::agent::turn_type::TurnType::Tpm
+                    && target == crate::agent::turn_type::TurnType::Plan
+                {
+                    let goal_doc = self.last_turn_text();
+                    self.commit_turn_write(from);
+                    if let Some(tx) = self.flow_progress_tx.as_ref() {
+                        let _ = tx.send(super::flow_loop::FlowProgress::GoalReady { goal_doc });
+                    }
+                    self.pending_approval_stop = Some(StopReason::AwaitingGoalApproval);
+                    return Ok(());
+                }
                 self.commit_turn_write(from);
                 self.advance_turn_type(target, action);
             }
@@ -2342,6 +2380,79 @@ mod tests {
         assert!(history.as_slice().iter().any(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("Illegal shift")))
         }), "expected an Illegal shift message in history");
+    }
+
+    /// The `Tpm -> Plan` goal-approval gate emits `FlowProgress::GoalReady`,
+    /// ends the run with `StopReason::AwaitingGoalApproval`, and leaves the
+    /// thread on `Tpm` (the shift to Plan must NOT advance). Plan §7.
+    #[tokio::test]
+    async fn flow_tpm_to_plan_emits_goal_ready_and_awaits_approval() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, event_rx) = make_run_params(&mut history);
+        // Seed: the agent is already in Tpm (we shift Tpm in the first turn,
+        // then the second turn is the Tpm goal text + shift to Plan).
+        let mut params = flow_agent_params(store, ptx);
+        params.provider = Arc::new(MockProvider::new(vec![
+            shift_tool_call("t1", "tpm", "shape the goal"),
+            // Tpm turn: emit the goal text, then shift to Plan.
+            StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "# Goal\n\nShip login with SSO.".into(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "t2".into(),
+                            name: "shift".into(),
+                            input: serde_json::json!({
+                                "target": "plan",
+                                "rationale": "goal ready",
+                            }),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                usage: TokenUsage::default(),
+                stop_reason: Some(StopReason::ToolUse),
+            },
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        let progress: Vec<_> = prx.try_iter().collect();
+        assert!(
+            progress
+                .iter()
+                .any(|p| matches!(p, crate::agent::flow_loop::FlowProgress::GoalReady { .. })),
+            "expected GoalReady in progress: {progress:?}"
+        );
+        let events = drain_events(&event_rx);
+        let awaiting = events.iter().any(|e| {
+            matches!(
+                e.event,
+                AgentEvent::Done {
+                    stop_reason: Some(StopReason::AwaitingGoalApproval),
+                    ..
+                }
+            )
+        });
+        assert!(awaiting, "expected Done(AwaitingGoalApproval)");
+        // The shift to Plan must NOT have advanced: no TurnTypeEntered(Plan)
+        // should have been emitted (the gate ends the run before the shift).
+        assert!(
+            !progress.iter().any(|p| matches!(
+                p,
+                crate::agent::flow_loop::FlowProgress::TurnTypeEntered {
+                    turn_type: crate::agent::turn_type::TurnType::Plan,
+                    ..
+                }
+            )),
+            "turn_type must stay Tpm at the gate, but Plan was entered"
+        );
     }
 
     /// `parse_shift_output` round-trips the wire shape produced by
