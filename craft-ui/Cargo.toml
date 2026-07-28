@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 craft-agent = { workspace = true }
 craft-config = { workspace = true }
-craft-flow = { workspace = true }
 craft-highlight = { workspace = true }
 craft-markdown = { workspace = true }
 craft-providers = { workspace = true }

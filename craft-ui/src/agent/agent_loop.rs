@@ -7,13 +7,12 @@ use craft_agent::mcp::config::McpServerStatus;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::template;
 use craft_agent::template::Vars;
-use craft_agent::tools::{FileReadTracker, FlowRunnerEnv};
+use craft_agent::tools::FileReadTracker;
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History,
     Instructions, McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
 };
-use craft_flow::{ApprovalPayload, FlowOutcome, FlowParams, FlowProgress, TaskStageRunner};
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
 use craft_storage::flow::FlowStore;
@@ -51,8 +50,11 @@ pub(super) struct AgentLoop {
     compression: craft_config::CompressionConfig,
     doom: SharedDoomTracker,
     subagent_cancels: Arc<CancelMap<String>>,
+    /// Phase 2 persists the typed log through this store; Phase 1 keeps it
+    /// wired so the shell is ready without a cascade of signature changes.
+    #[allow(dead_code)]
     flow_store: Arc<FlowStore>,
-    flow_progress_tx: flume::Sender<FlowProgress>,
+    flow_progress_tx: flume::Sender<craft_agent::FlowProgress>,
     repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -78,7 +80,7 @@ impl AgentLoop {
         compression: craft_config::CompressionConfig,
         subagent_cancels: Arc<CancelMap<String>>,
         flow_store: Arc<FlowStore>,
-        flow_progress_tx: flume::Sender<FlowProgress>,
+        flow_progress_tx: flume::Sender<craft_agent::FlowProgress>,
         repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
@@ -271,6 +273,11 @@ impl AgentLoop {
                 findings_store: Some(Arc::clone(&self.findings_store)),
                 fs: Arc::new(craft_agent::tools::LocalFs),
                 doom: Arc::clone(&self.doom),
+                flow_thread_history: None,
+                flow_thread_manager: None,
+                flow_advisor: None,
+                flow_gates: None,
+                flow_progress_tx: None,
             },
             AgentRunParams {
                 history: &mut self.history,
@@ -322,21 +329,21 @@ impl AgentLoop {
         result
     }
 
-    /// Drive the Flow pipeline (`craft_flow::run`) instead of a single agent
-    /// turn. Stage subagents are launched by `TaskStageRunner` against the live
-    /// provider/model, and each stage's document persists to the `FlowStore` so
-    /// resume works and nothing leaks to scratch paths. The goal-approval gate
-    /// blocks on the user's answer (the same channel the `question` tool uses),
-    /// then resumes with an `ApprovalPayload`. Progress events flow to the TUI
-    /// through `flow_progress_tx` so the FlowPanel reflects live state.
+    /// Drive Flow mode through the normal `Agent::run` path. Each prompt
+    /// builds an `Agent` with the per-workstream typed log, thread manager,
+    /// no-op advisor, and progress channel attached, then runs one
+    /// `agent.run(input)` to completion. `FlowProgress` events flow to the
+    /// TUI's FlowPanel through `flow_progress_tx`. The goal-approval gate is
+    /// a terminal `Done { stop_reason: AwaitingGoalApproval }`; the TUI
+    /// re-prompts on `answer_rx` and re-enters with the approval text. The
+    /// agent reads its persisted typed log on resume to re-derive the goal
+    /// and the next shift (plan §7).
     async fn do_flow_run(
         &mut self,
         input: AgentInput,
         event_tx: EventSender,
         run_id: u64,
     ) -> Result<(), AgentError> {
-        let resume = input.flow_resume;
-        let slot = self.model_slot.load();
         let workstream_id = input
             .mode
             .flow_workstream()
@@ -345,146 +352,121 @@ impl AgentLoop {
                 tool: "flow".into(),
                 message: "flow mode without a workstream id".into(),
             })?;
-        let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
         let cwd = self.vars.apply("{cwd}").into_owned();
-        let project_id = craft_flow::project_id(std::path::Path::new(&cwd));
-        // Build the embedder once for the whole run: it feeds both the
-        // pipeline's reindex step (`params.embedder`) and the `flow_search`
-        // backend injected into each stage subagent's ToolContext.
-        let embedder: Arc<dyn craft_flow::search::Embedder> = Arc::new(
-            craft_flow::search::OnnxEmbedder::new(craft_agent::EmbeddingService::new()),
-        );
-        let flow_search: craft_agent::tools::flow_search::FlowSearchHandle =
-            Some(Arc::new(craft_flow::search::FlowSearchBackendImpl::new(
-                Arc::clone(&self.flow_store),
-                Arc::clone(&embedder),
-                &project_id,
-                &workstream_id,
-            )));
-        let env = Arc::new(FlowRunnerEnv {
-            provider: Arc::clone(&slot.provider),
-            model: Arc::new(slot.model.clone()),
-            config: self.config.clone(),
-            permissions: Arc::clone(&self.permissions),
-            timeouts: self.timeouts,
-            compression: self.compression.clone(),
-            prompt_slots: Arc::new(prompt_slots),
-            event_tx: event_tx.clone(),
-            flow_search,
-        });
+        let project_id = craft_storage::flow::project_id(std::path::Path::new(&cwd));
 
         let (cancel_trigger, cancel_token) = CancelToken::new();
         self.set_cancel_trigger(run_id, cancel_trigger);
 
-        let mut approval: Option<ApprovalPayload> = None;
-        let result = loop {
-            if cancel_token.is_cancelled() {
-                break Self::cancel_flow(&self.flow_progress_tx, &event_tx);
-            }
-            let mut params = FlowParams::new(
-                project_id.clone(),
-                workstream_id.clone(),
-                input.message.clone(),
-                self.config.flow.clone(),
-                Arc::clone(&self.flow_store),
-            );
-            params.approval = approval.take();
-            params.runner = Some(Arc::new(TaskStageRunner::new(
-                Arc::clone(&env),
-                workstream_id.clone(),
-            )));
-            params.progress = Some(self.flow_progress_tx.clone());
-            params.embedder = Some(Arc::clone(&embedder));
-            params.resume = resume;
+        if cancel_token.is_cancelled() {
+            let result = Self::cancel_flow(&self.flow_progress_tx, &event_tx);
+            self.clear_cancel_trigger(run_id);
+            return result;
+        }
+        let prompt_slots = self.lua_handle.collect_prompt_slots_async().await;
+        let slot = self.model_slot.load();
+        let compact = self
+            .config
+            .small_model
+            .should_activate(slot.model.context_window)
+            && self.config.small_model.compact_prompt;
+        let system = agent::build_system_prompt(
+            &self.vars,
+            &input.mode,
+            &self.instructions.text,
+            &prompt_slots,
+            &slot.model,
+            compact,
+        );
+        let (state, _progress_rx, _state_cancel_trigger) = craft_agent::FlowRunState::split(
+            Arc::clone(&self.flow_store),
+            project_id,
+            workstream_id,
+        );
+        let thread_history = state.thread_history;
+        let thread_manager = state.thread_manager;
+        let flow_advisor = state.advisor;
 
-            let outcome = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => FlowOutcome::Cancelled,
-                o = craft_flow::run(params) => o,
-            };
-            match outcome {
-                FlowOutcome::Cancelled => {
-                    break Self::cancel_flow(&self.flow_progress_tx, &event_tx);
+        while self.answer_rx.lock().await.try_recv().is_ok() {}
+
+        let agent = Agent::new(
+            AgentParams {
+                provider: Arc::clone(&slot.provider),
+                model: slot.model.clone(),
+                config: self.config.clone(),
+                tool_output_lines: self.tool_output_lines,
+                permissions: Arc::clone(&self.permissions),
+                session_id: self.session_id.clone(),
+                timeouts: self.timeouts,
+                file_tracker: Arc::clone(&self.file_tracker),
+                prompt_slots: std::sync::Arc::new(prompt_slots),
+                subagent_cancels: Arc::clone(&self.subagent_cancels),
+                registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
+                compression: self.compression.clone(),
+                findings_store: Some(Arc::clone(&self.findings_store)),
+                fs: Arc::new(craft_agent::tools::LocalFs),
+                doom: Arc::clone(&self.doom),
+                flow_thread_history: Some(thread_history),
+                flow_thread_manager: Some(thread_manager),
+                flow_advisor: Some(flow_advisor),
+                flow_gates: None,
+                flow_progress_tx: Some(self.flow_progress_tx.clone()),
+            },
+            AgentRunParams {
+                history: &mut self.history,
+                system,
+                event_tx: event_tx.clone(),
+                tools: self.tools.clone(),
+                promoted: self.promoted.clone(),
+                tool_build: Some(craft_agent::tools::ToolBuild {
+                    vars: self.vars.clone(),
+                    excluded: Vec::new(),
+                    mcp: self.mcp_handle.clone(),
+                }),
+                hooks: Some(craft_lua::LuaHooks::new(self.lua_handle.clone())
+                    as Arc<dyn craft_agent::Hooks>),
+            },
+        )
+        .with_loaded_instructions(self.instructions.loaded.clone())
+        .with_user_response_rx(Arc::clone(&self.answer_rx))
+        .with_cancel(cancel_token.clone())
+        .with_mcp(self.mcp_handle.clone())
+        .with_repo_map(
+            self.repomap_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(craft_repomap::RepoMap::try_from_cwd)
+                .flatten()
+                .map(|rm| rm.with_max_tokens(self.config.repomap.max_tokens)),
+        );
+
+        let result = match tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => Self::cancel_flow(&self.flow_progress_tx, &event_tx),
+            r = agent.run(input) => match r {
+                Ok(()) => Ok(()),
+                Err(AgentError::Cancelled) => {
+                    Self::cancel_flow(&self.flow_progress_tx, &event_tx)
                 }
-                FlowOutcome::AwaitingGoalApproval { goal_doc } => {
-                    let _ = event_tx.send(AgentEvent::TextDelta {
-                        text: format!("## Flow goal\n\n{goal_doc}"),
-                    });
-                    let _ = self.flow_progress_tx.send(FlowProgress::GoalReady {
-                        goal_doc: goal_doc.clone(),
-                    });
-                    while self.answer_rx.lock().await.try_recv().is_ok() {}
-                    let answer = self.answer_rx.lock().await.recv_async().await.ok();
-                    approval = match answer.as_deref() {
-                        Some(t) if t == craft_flow::FLOW_APPROVE_ANSWER => {
-                            Some(ApprovalPayload::Approved)
-                        }
-                        Some(c) if c == craft_flow::FLOW_CANCEL_ANSWER => {
-                            let _ = event_tx.send(AgentEvent::TextDelta {
-                                text: "Flow run cancelled at the goal-approval gate.".into(),
-                            });
-                            let _ = event_tx.send(AgentEvent::Done {
-                                usage: TokenUsage::default(),
-                                num_turns: 0,
-                                stop_reason: Some(StopReason::EndTurn),
-                            });
-                            break Ok(());
-                        }
-                        Some(rev) => Some(ApprovalPayload::Revised(rev.to_owned())),
-                        None => {
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: "flow approval channel closed".into(),
-                            });
-                            break Ok(());
-                        }
-                    };
-                }
-                FlowOutcome::Done {
-                    verification_report,
-                } => {
-                    let _ = event_tx.send(AgentEvent::TextDelta {
-                        text: verification_report,
-                    });
-                    let _ = event_tx.send(AgentEvent::Done {
-                        usage: TokenUsage::default(),
-                        num_turns: 0,
-                        stop_reason: Some(StopReason::EndTurn),
-                    });
-                    break Ok(());
-                }
-                FlowOutcome::NeedsReview {
-                    verification_report,
-                } => {
-                    let _ = event_tx.send(AgentEvent::TextDelta {
-                        text: format!("## Flow verification needs review\n\n{verification_report}"),
-                    });
-                    let _ = event_tx.send(AgentEvent::Done {
-                        usage: TokenUsage::default(),
-                        num_turns: 0,
-                        stop_reason: Some(StopReason::EndTurn),
-                    });
-                    break Ok(());
-                }
-                FlowOutcome::Failed { stage, reason } => {
+                Err(e) => {
                     let _ = event_tx.send(AgentEvent::Error {
-                        message: format!("flow {stage:?} failed: {reason}"),
+                        message: e.user_message(),
                     });
-                    break Ok(());
+                    Ok(())
                 }
-            }
+            },
+        } {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e),
         };
         self.clear_cancel_trigger(run_id);
         result
     }
 
-    /// Emit the cancellation signal for the flow panel and the chat, returning
-    /// the terminal `Ok(())` so the agent loop treats cancellation as a clean
-    /// stop rather than an error.
     fn cancel_flow(
-        flow_progress_tx: &flume::Sender<FlowProgress>,
+        flow_progress_tx: &flume::Sender<craft_agent::FlowProgress>,
         event_tx: &EventSender,
     ) -> Result<(), AgentError> {
-        let _ = flow_progress_tx.send(FlowProgress::Cancelled);
+        let _ = flow_progress_tx.send(craft_agent::FlowProgress::Cancelled);
         let _ = event_tx.send(AgentEvent::Error {
             message: "flow run cancelled".into(),
         });

@@ -3642,21 +3642,21 @@ fn flow_panel_dismiss_key_hides_panel() {
 #[test]
 fn sync_flow_snapshot_reflects_state() {
     let mut app = flow_app();
-    app.state.flow.stage = Some(craft_flow::Stage::Execute);
+    app.state.flow.stage = Some(craft_agent::TurnType::Execute);
     app.state
         .flow
-        .set_chunk_status("chunk-1", craft_flow::ChunkStatus::Running);
+        .set_chunk_status("chunk-1", craft_agent::ThreadStatus::Running);
     app.sync_flow_snapshot();
 
     assert_eq!(
         app.flow_panel.snapshot.stage,
-        Some(craft_flow::Stage::Execute)
+        Some(craft_agent::TurnType::Execute)
     );
     assert_eq!(
         app.flow_panel.snapshot.chunks.get("chunk-1"),
         Some(&crate::components::flow_panel::FlowSnapshotChunk {
             title: String::new(),
-            status: craft_flow::ChunkStatus::Running,
+            status: craft_agent::ThreadStatus::Running,
             stage: None,
             ..Default::default()
         })
@@ -3666,10 +3666,10 @@ fn sync_flow_snapshot_reflects_state() {
 #[test]
 fn flow_state_persists_through_sync_session() {
     let mut app = flow_app();
-    app.state.flow.stage = Some(craft_flow::Stage::Review);
+    app.state.flow.stage = Some(craft_agent::TurnType::Review);
     app.state
         .flow
-        .set_chunk_status("c1", craft_flow::ChunkStatus::NeedsReview);
+        .set_chunk_status("c1", craft_agent::ThreadStatus::NeedsReview);
 
     app.state.sync_session(&None, &app.permissions.clone());
     assert_eq!(app.state.session.meta.flow_stage.as_deref(), Some("review"));
@@ -3683,14 +3683,14 @@ fn flow_chunk_title_forwarded_to_panel_snapshot() {
     app.state.flow.set_chunk(
         "c1",
         "Add auth",
-        craft_flow::ChunkStatus::Queued,
+        craft_agent::ThreadStatus::Queued,
         None,
         0,
         &[],
     );
     app.state
         .flow
-        .set_chunk("c1", "", craft_flow::ChunkStatus::Done, None, 0, &[]);
+        .set_chunk("c1", "", craft_agent::ThreadStatus::Done, None, 0, &[]);
     app.sync_flow_snapshot();
     let row = app
         .flow_panel
@@ -3699,33 +3699,33 @@ fn flow_chunk_title_forwarded_to_panel_snapshot() {
         .get("c1")
         .expect("chunk present");
     assert_eq!(row.title, "Add auth");
-    assert_eq!(row.status, craft_flow::ChunkStatus::Done);
+    assert_eq!(row.status, craft_agent::ThreadStatus::Done);
 }
 
 #[test]
 fn handle_flow_progress_chunk_carries_title() {
     let mut app = flow_app();
-    app.handle_flow_progress(craft_flow::FlowProgress::Chunk {
+    app.handle_flow_progress(craft_agent::FlowProgress::Chunk {
         id: "c1".into(),
         title: "Add auth".into(),
-        status: craft_flow::ChunkStatus::Queued,
+        status: craft_agent::ThreadStatus::Queued,
         stage: None,
         depends_on: Vec::new(),
         order: 0,
     });
-    app.handle_flow_progress(craft_flow::FlowProgress::Chunk {
+    app.handle_flow_progress(craft_agent::FlowProgress::Chunk {
         id: "c1".into(),
         title: String::new(),
-        status: craft_flow::ChunkStatus::Running,
-        stage: Some(craft_flow::Stage::Execute),
+        status: craft_agent::ThreadStatus::Running,
+        stage: Some(craft_agent::TurnType::Execute),
         depends_on: Vec::new(),
         order: 0,
     });
     app.sync_flow_snapshot();
     let row = app.flow_panel.snapshot.chunks.get("c1").unwrap();
     assert_eq!(row.title, "Add auth");
-    assert_eq!(row.status, craft_flow::ChunkStatus::Running);
-    assert_eq!(row.stage, Some(craft_flow::Stage::Execute));
+    assert_eq!(row.status, craft_agent::ThreadStatus::Running);
+    assert_eq!(row.stage, Some(craft_agent::TurnType::Execute));
 }
 
 #[test]
@@ -3735,20 +3735,20 @@ fn flow_failed_then_submit_dispatches_resume_run() {
     app.state.flow.set_chunk(
         "c1",
         "Add auth",
-        craft_flow::ChunkStatus::Running,
-        Some(craft_flow::Stage::Execute),
+        craft_agent::ThreadStatus::Running,
+        Some(craft_agent::TurnType::Execute),
         0,
         &[],
     );
-    app.handle_flow_progress(craft_flow::FlowProgress::Failed {
-        stage: craft_flow::Stage::Review,
+    app.handle_flow_progress(craft_agent::FlowProgress::Failed {
+        stage: craft_agent::TurnType::Review,
         reason: "blocking findings".into(),
     });
     assert!(app.flow_failed, "flow_failed should be set after a failure");
     // Still-running chunk gets finalized to Blocked on failure.
     assert_eq!(
         app.state.flow.chunks.get("c1").unwrap().status,
-        craft_flow::ChunkStatus::Blocked
+        craft_agent::ThreadStatus::Blocked
     );
 
     // Submitting in Flow mode while flow_failed dispatches a resume run.
@@ -3781,17 +3781,17 @@ fn flow_done_does_not_finalize_running_chunks_to_blocked() {
     app.state.flow.set_chunk(
         "c1",
         "Add auth",
-        craft_flow::ChunkStatus::Running,
-        Some(craft_flow::Stage::Execute),
+        craft_agent::ThreadStatus::Running,
+        Some(craft_agent::TurnType::Execute),
         0,
         &[],
     );
-    app.handle_flow_progress(craft_flow::FlowProgress::Done {
+    app.handle_flow_progress(craft_agent::FlowProgress::Done {
         verdict: "{\"goal_met\":true}".into(),
     });
     assert_eq!(
         app.state.flow.chunks.get("c1").unwrap().status,
-        craft_flow::ChunkStatus::Running,
+        craft_agent::ThreadStatus::Running,
         "Done must not clobber a still-Running chunk to Blocked"
     );
     assert!(!app.flow_failed);

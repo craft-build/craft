@@ -1584,7 +1584,6 @@ dependencies = [
  "craft-acp",
  "craft-agent",
  "craft-config",
- "craft-flow",
  "craft-lua",
  "craft-providers",
  "craft-storage",
@@ -1616,7 +1615,6 @@ dependencies = [
  "color-eyre",
  "craft-agent",
  "craft-config",
- "craft-flow",
  "craft-lua",
  "craft-providers",
  "craft-repomap",
@@ -1785,26 +1783,6 @@ dependencies = [
  "strum 0.28.0",
  "test-case",
  "tokio",
-]
-
-[[package]]
-name = "craft-flow"
-version = "0.10.2"
-dependencies = [
- "craft-agent",
- "craft-config",
- "craft-providers",
- "craft-storage",
- "craft-tool-macro",
- "flume",
- "futures",
- "serde",
- "serde_json",
- "tempfile",
- "test-case",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2034,7 +2012,6 @@ dependencies = [
  "color-eyre",
  "craft-agent",
  "craft-config",
- "craft-flow",
  "craft-highlight",
  "craft-lua",
  "craft-markdown",

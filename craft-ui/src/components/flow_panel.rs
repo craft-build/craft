@@ -5,7 +5,7 @@ use crate::components::hint_line;
 use crate::components::keybindings::{ActionId, KeybindingResolver, key};
 use crate::theme;
 
-use craft_flow::{ChunkStatus, Stage};
+use craft_agent::{ThreadStatus, TurnType};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -29,8 +29,8 @@ const CHROME_LINES: u16 = 5;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FlowSnapshotChunk {
     pub title: String,
-    pub status: ChunkStatus,
-    pub stage: Option<Stage>,
+    pub status: ThreadStatus,
+    pub stage: Option<TurnType>,
     pub order: usize,
     pub depends_on: Vec<String>,
 }
@@ -41,7 +41,7 @@ pub struct FlowSnapshotChunk {
 #[derive(Debug, Clone, Default)]
 pub struct FlowSnapshot {
     pub workstream_id: String,
-    pub stage: Option<Stage>,
+    pub stage: Option<TurnType>,
     pub chunks: BTreeMap<String, FlowSnapshotChunk>,
     /// Max concurrent chunks from config. `> 1` makes the graph render a
     /// fan-out/fan-in parallel section after Plan; `1` renders a linear chain.
@@ -249,7 +249,7 @@ impl FlowPanel {
                 if !chunk.title.is_empty() && chunk.title != *id {
                     spans.push(Span::styled(format!("  {id}"), t.tool_dim));
                 }
-                if chunk.status == ChunkStatus::Running
+                if chunk.status == ThreadStatus::Running
                     && let Some(stage) = chunk.stage
                 {
                     spans.push(Span::styled(format!("  [{}]", stage.as_str()), t.tool_dim));
@@ -265,13 +265,13 @@ impl FlowPanel {
     }
 }
 
-fn status_style(status: ChunkStatus, t: &theme::Theme) -> (&'static str, Style) {
+fn status_style(status: ThreadStatus, t: &theme::Theme) -> (&'static str, Style) {
     match status {
-        ChunkStatus::Queued => ("·", t.tool_dim),
-        ChunkStatus::Running => ("▸", t.active),
-        ChunkStatus::NeedsReview => ("?", Style::new().fg(t.mode_plan)),
-        ChunkStatus::Blocked => ("✗", Style::new().fg(t.mode_bash)),
-        ChunkStatus::Done => ("✓", t.active),
+        ThreadStatus::Queued => ("·", t.tool_dim),
+        ThreadStatus::Running => ("▸", t.active),
+        ThreadStatus::NeedsReview => ("?", Style::new().fg(t.mode_plan)),
+        ThreadStatus::Blocked => ("✗", Style::new().fg(t.mode_bash)),
+        ThreadStatus::Done => ("✓", t.active),
     }
 }
 
@@ -289,8 +289,8 @@ mod tests {
             "chunk-1".into(),
             FlowSnapshotChunk {
                 title: "Add auth".into(),
-                status: ChunkStatus::Running,
-                stage: Some(Stage::Execute),
+                status: ThreadStatus::Running,
+                stage: Some(TurnType::Execute),
                 ..Default::default()
             },
         );
@@ -298,14 +298,14 @@ mod tests {
             "chunk-2".into(),
             FlowSnapshotChunk {
                 title: String::new(),
-                status: ChunkStatus::Done,
+                status: ThreadStatus::Done,
                 stage: None,
                 ..Default::default()
             },
         );
         p.snapshot = FlowSnapshot {
             workstream_id: "abc123".into(),
-            stage: Some(Stage::Execute),
+            stage: Some(TurnType::Execute),
             chunks,
             ..Default::default()
         };
@@ -352,7 +352,7 @@ mod tests {
                 String::from("c"),
                 FlowSnapshotChunk {
                     title: String::new(),
-                    status: ChunkStatus::Queued,
+                    status: ThreadStatus::Queued,
                     stage: None,
                     ..Default::default()
                 },
@@ -365,7 +365,7 @@ mod tests {
             "c2".into(),
             FlowSnapshotChunk {
                 title: String::new(),
-                status: ChunkStatus::Queued,
+                status: ThreadStatus::Queued,
                 stage: None,
                 ..Default::default()
             },
@@ -402,23 +402,23 @@ mod tests {
     #[test]
     fn status_glyph_round_trips() {
         for s in [
-            ChunkStatus::Queued,
-            ChunkStatus::Running,
-            ChunkStatus::NeedsReview,
-            ChunkStatus::Blocked,
-            ChunkStatus::Done,
+            ThreadStatus::Queued,
+            ThreadStatus::Running,
+            ThreadStatus::NeedsReview,
+            ThreadStatus::Blocked,
+            ThreadStatus::Done,
         ] {
-            assert_eq!(ChunkStatus::parse(&status_name(s)), Some(s));
+            assert_eq!(ThreadStatus::parse(&status_name(s)), Some(s));
         }
     }
 
-    fn status_name(s: ChunkStatus) -> String {
+    fn status_name(s: ThreadStatus) -> String {
         match s {
-            ChunkStatus::Queued => "queued",
-            ChunkStatus::Running => "running",
-            ChunkStatus::NeedsReview => "needs_review",
-            ChunkStatus::Blocked => "blocked",
-            ChunkStatus::Done => "done",
+            ThreadStatus::Queued => "queued",
+            ThreadStatus::Running => "running",
+            ThreadStatus::NeedsReview => "needs_review",
+            ThreadStatus::Blocked => "blocked",
+            ThreadStatus::Done => "done",
         }
         .into()
     }

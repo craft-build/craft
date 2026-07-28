@@ -24,6 +24,7 @@ use crate::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
     Envelope, EventSender, ImageSource, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
 };
+use craft_storage::flow::{FlowStore, project_id as flow_project_id};
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
 
@@ -96,6 +97,10 @@ pub struct HeadlessParams {
     pub mcp_handle: Option<McpHandle>,
     pub initial_wd: PathBuf,
     pub fast: bool,
+    /// Agent mode for this headless run. `Build` for the ordinary `craft run`
+    /// path; `Flow(workstream_id)` for `craft flow` (Phase 1: Flow mode runs a
+    /// General turn, same as Build, until the turn-typed loop lands in Phase 2).
+    pub mode: AgentMode,
 }
 
 pub struct HeadlessHandle {
@@ -141,7 +146,7 @@ fn setup(
 
 pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let working_dir = params.initial_wd.to_string_lossy().into_owned();
-    let mode = AgentMode::Build;
+    let mode = params.mode;
     let AgentSetup {
         vars,
         instructions,
@@ -216,6 +221,11 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     findings_store: Some(crate::FindingsStore::new_shared()),
                     fs: Arc::new(crate::tools::LocalFs),
                     doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
+                    flow_thread_history: None,
+                    flow_thread_manager: None,
+                    flow_advisor: None,
+                    flow_gates: None,
+                    flow_progress_tx: None,
                 },
                 AgentRunParams {
                     history: &mut history,
@@ -422,6 +432,60 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
 
                 while answer_rx.lock().await.try_recv().is_ok() {}
 
+                // Flow mode attaches the typed log, thread manager, advisor,
+                // and a progress-event forwarder so `Agent::run_loop` can emit
+                // `FlowProgress` events and apply `shift` requests at turn
+                // boundaries. Build/Plan leave these `None` and behave exactly
+                // as before. Flow mode otherwise drives the normal
+                // `Agent::run` path; the approval gate is just a terminal
+                // `Done { stop_reason: AwaitingGoalApproval }`.
+                let mut flow_thread_history = None;
+                let mut flow_thread_manager = None;
+                let mut flow_advisor: Option<
+                    Arc<dyn crate::agent::flow_loop::FlowAdvisor + Send + Sync>,
+                > = None;
+                let mut flow_progress_tx = None;
+                let mut flow_forwarder: Option<tokio::task::JoinHandle<()>> = None;
+                if let AgentMode::Flow(workstream_id) = &input.mode {
+                    let workstream_id = workstream_id.clone();
+                    let flow_store = match store
+                        .as_ref()
+                        .and_then(|s| FlowStore::new(&s.dir).ok())
+                        .map(Arc::new)
+                    {
+                        Some(fs) => fs,
+                        None => {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: "flow state directory unavailable; cannot run flow".into(),
+                            });
+                            run_id += 1;
+                            continue;
+                        }
+                    };
+                    let project_id = flow_project_id(std::path::Path::new(&working_dir));
+                    let (state, progress_rx, _cancel_trigger) =
+                        crate::agent::flow_loop::FlowRunState::split(
+                            flow_store,
+                            project_id,
+                            workstream_id,
+                        );
+                    let fwd_tx = raw_tx.clone();
+                    let fwd_run_id = run_id;
+                    flow_forwarder = Some(tokio::spawn(async move {
+                        while let Ok(p) = progress_rx.recv_async().await {
+                            let _ = EventSender::new(fwd_tx.clone(), fwd_run_id).send(
+                                AgentEvent::FlowProgress {
+                                    progress: Box::new(p),
+                                },
+                            );
+                        }
+                    }));
+                    flow_thread_history = Some(state.thread_history);
+                    flow_thread_manager = Some(state.thread_manager);
+                    flow_advisor = Some(state.advisor);
+                    flow_progress_tx = Some(state.progress_tx);
+                }
+
                 let agent = Agent::new(
                     AgentParams {
                         provider: Arc::clone(&provider),
@@ -439,6 +503,11 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         findings_store: Some(crate::FindingsStore::new_shared()),
                         fs: Arc::clone(&params.fs),
                         doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
+                        flow_thread_history,
+                        flow_thread_manager,
+                        flow_advisor,
+                        flow_gates: None,
+                        flow_progress_tx,
                     },
                     AgentRunParams {
                         history: &mut history,
@@ -469,6 +538,9 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
 
                 let result = agent.run(input).await;
                 cancel_task.abort();
+                if let Some(handle) = flow_forwarder {
+                    handle.abort();
+                }
 
                 if let Err(e) = result {
                     let _ = error_tx.send(error_event(e));

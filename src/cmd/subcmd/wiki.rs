@@ -50,6 +50,7 @@ async fn init(model_spec: Option<String>) -> Result<()> {
         max_turns: None,
         allowed_tools: vec![],
         stream: true,
+        mode: craft_agent::AgentMode::Build,
     })
     .await?;
     headless::print_outcome(&outcome, OutputFormat::Text);

@@ -15,7 +15,7 @@ use crate::agent::QueuedMessage;
 use crate::components::Status;
 use crate::theme;
 use craft_agent::{AgentInput, AgentMode};
-use craft_flow::{ChunkStatus, Stage};
+use craft_agent::{ThreadStatus, TurnType};
 use craft_storage::StateDir;
 use craft_storage::plans;
 use ratatui::style::{Color, Modifier, Style};
@@ -23,13 +23,13 @@ use ratatui::style::{Color, Modifier, Style};
 use super::App;
 
 /// A single chunk tracked by the Flow panel, mirroring the relevant slice of
-/// `craft_flow::Chunk`. Kept minimal (id/title/status) since the panel only
-/// renders these. Iteration counts live in craft-flow's persisted documents.
+/// a `FlowProgress::Chunk` event. Kept minimal (id/title/status) since the
+/// panel only renders these. Iteration counts live in the persisted typed log.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FlowChunkState {
     pub title: String,
-    pub status: ChunkStatus,
-    pub stage: Option<Stage>,
+    pub status: ThreadStatus,
+    pub stage: Option<TurnType>,
     /// Chunk's position in the plan array. Preserves plan order so the panel
     /// renders chunks in the order the plan agent intended (not alphabetical).
     pub order: usize,
@@ -43,7 +43,7 @@ pub(crate) struct FlowChunkState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FlowState {
     pub workstream_id: String,
-    pub stage: Option<Stage>,
+    pub stage: Option<TurnType>,
     pub chunks: BTreeMap<String, FlowChunkState>,
 }
 
@@ -53,8 +53,8 @@ impl FlowState {
     #[allow(dead_code)]
     pub(crate) fn sync_from(
         &mut self,
-        stage: Option<Stage>,
-        chunks: impl IntoIterator<Item = (String, String, ChunkStatus)>,
+        stage: Option<TurnType>,
+        chunks: impl IntoIterator<Item = (String, String, ThreadStatus)>,
     ) {
         self.stage = stage;
         self.chunks = chunks
@@ -75,7 +75,7 @@ impl FlowState {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn set_chunk_status(&mut self, chunk_id: &str, status: ChunkStatus) {
+    pub(crate) fn set_chunk_status(&mut self, chunk_id: &str, status: ThreadStatus) {
         self.chunks
             .entry(chunk_id.to_string())
             .or_insert_with(|| FlowChunkState {
@@ -98,8 +98,8 @@ impl FlowState {
         &mut self,
         chunk_id: &str,
         title: &str,
-        status: ChunkStatus,
-        stage: Option<Stage>,
+        status: ThreadStatus,
+        stage: Option<TurnType>,
         order: usize,
         depends_on: &[String],
     ) {
@@ -144,8 +144,8 @@ impl FlowState {
     /// status and last pipeline stage.
     pub(crate) fn finalize_non_terminal(&mut self) {
         for c in self.chunks.values_mut() {
-            if !matches!(c.status, ChunkStatus::Done | ChunkStatus::Blocked) {
-                c.status = ChunkStatus::Blocked;
+            if !matches!(c.status, ThreadStatus::Done | ThreadStatus::Blocked) {
+                c.status = ThreadStatus::Blocked;
             }
         }
     }
@@ -340,19 +340,19 @@ impl App {
 mod tests {
     use super::*;
 
-    fn chunk(id: &str, status: ChunkStatus) -> (String, FlowChunkState) {
+    fn chunk(id: &str, status: ThreadStatus) -> (String, FlowChunkState) {
         (
             id.into(),
             FlowChunkState {
                 title: id.into(),
                 status,
-                stage: Some(Stage::Execute),
+                stage: Some(TurnType::Execute),
                 ..Default::default()
             },
         )
     }
 
-    fn flow_with_chunks(chunks: Vec<(&str, ChunkStatus)>) -> FlowState {
+    fn flow_with_chunks(chunks: Vec<(&str, ThreadStatus)>) -> FlowState {
         let mut flow = FlowState::default();
         for (id, status) in chunks {
             flow.chunks.insert(id.into(), chunk(id, status).1);
@@ -363,40 +363,40 @@ mod tests {
     #[test]
     fn finalize_non_terminal_marks_running_and_queued_blocked() {
         let mut flow = flow_with_chunks(vec![
-            ("done", ChunkStatus::Done),
-            ("running", ChunkStatus::Running),
-            ("queued", ChunkStatus::Queued),
-            ("blocked", ChunkStatus::Blocked),
+            ("done", ThreadStatus::Done),
+            ("running", ThreadStatus::Running),
+            ("queued", ThreadStatus::Queued),
+            ("blocked", ThreadStatus::Blocked),
         ]);
         flow.finalize_non_terminal();
-        assert_eq!(flow.chunks.get("done").unwrap().status, ChunkStatus::Done);
+        assert_eq!(flow.chunks.get("done").unwrap().status, ThreadStatus::Done);
         assert_eq!(
             flow.chunks.get("running").unwrap().status,
-            ChunkStatus::Blocked
+            ThreadStatus::Blocked
         );
         assert_eq!(
             flow.chunks.get("queued").unwrap().status,
-            ChunkStatus::Blocked
+            ThreadStatus::Blocked
         );
         assert_eq!(
             flow.chunks.get("blocked").unwrap().status,
-            ChunkStatus::Blocked
+            ThreadStatus::Blocked
         );
     }
 
     #[test]
     fn finalize_non_terminal_preserves_last_stage() {
-        let mut flow = flow_with_chunks(vec![("running", ChunkStatus::Running)]);
+        let mut flow = flow_with_chunks(vec![("running", ThreadStatus::Running)]);
         flow.finalize_non_terminal();
         let c = flow.chunks.get("running").unwrap();
-        assert_eq!(c.status, ChunkStatus::Blocked);
-        assert_eq!(c.stage, Some(Stage::Execute));
+        assert_eq!(c.status, ThreadStatus::Blocked);
+        assert_eq!(c.stage, Some(TurnType::Execute));
     }
 
     #[test]
     fn clear_chunks_resets_stage_and_map() {
-        let mut flow = flow_with_chunks(vec![("a", ChunkStatus::Done)]);
-        flow.stage = Some(Stage::Plan);
+        let mut flow = flow_with_chunks(vec![("a", ThreadStatus::Done)]);
+        flow.stage = Some(TurnType::Plan);
         flow.clear_chunks();
         assert!(flow.chunks.is_empty());
         assert_eq!(flow.stage, None);

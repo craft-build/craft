@@ -39,6 +39,9 @@ pub struct HeadlessOptions {
     pub allowed_tools: Vec<String>,
     /// Stream assistant text and tool activity to the terminal as it happens.
     pub stream: bool,
+    /// Agent mode for this run. `Build` for `craft run`; `Flow(workstream_id)`
+    /// for `craft flow` (Phase 1: Flow runs a General turn, same as Build).
+    pub mode: craft_agent::AgentMode,
 }
 
 pub struct HeadlessOutcome {
@@ -139,6 +142,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         mcp_handle,
         initial_wd: cwd.clone(),
         fast,
+        mode: opts.mode,
     });
 
     let outcome = drain(

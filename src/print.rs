@@ -179,6 +179,7 @@ pub async fn run(
         mcp_handle,
         initial_wd: cwd,
         fast,
+        mode: craft_agent::AgentMode::Build,
     });
 
     let HeadlessHandle {
@@ -248,7 +249,8 @@ pub async fn run(
             | AgentEvent::AdvisorNote { .. }
             | AgentEvent::ModelEscalation { .. }
             | AgentEvent::StagnationDetected { .. }
-            | AgentEvent::PromptProgress { .. } => {}
+            | AgentEvent::PromptProgress { .. }
+            | AgentEvent::FlowProgress { .. } => {}
             AgentEvent::Retry {
                 attempt,
                 message,

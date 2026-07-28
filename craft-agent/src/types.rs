@@ -9,6 +9,8 @@ use craft_providers::{
 };
 use flume::Sender;
 
+use crate::TurnType;
+use crate::agent::flow_loop::FlowProgress;
 use crate::compression;
 use craft_tool_macro::ArgEnum;
 use serde::{Deserialize, Serialize};
@@ -189,6 +191,14 @@ pub enum ToolOutput {
     Image {
         caption: String,
         source: ImageSource,
+    },
+    /// Sentinel emitted by the `shift` tool (Flow mode only). Parsed back at
+    /// the turn boundary by `Agent::last_shift_request` and run through
+    /// `transitions::resolve`. Carries the requested next turn type and a
+    /// free-text rationale recorded in the typed log.
+    ShiftTurnType {
+        target: TurnType,
+        rationale: String,
     },
 }
 
@@ -386,6 +396,13 @@ impl ToolOutput {
                 out
             }
             Self::Image { caption, .. } => caption.clone(),
+            Self::ShiftTurnType { target, rationale } => {
+                format!(
+                    "{{\"shift\":{{\"target\":\"{}\",\"rationale\":{}}}}}",
+                    target.as_str(),
+                    serde_json::to_string(rationale).unwrap_or_else(|_| "\"\"".to_string())
+                )
+            }
         }
     }
 }
@@ -650,6 +667,13 @@ pub enum AgentEvent {
     },
     StagnationDetected {
         similarity: f32,
+    },
+    /// Flow mode turn-typed loop progress (turn-type entered, thread
+    /// spawn/exit, chunk status, goal-ready gate, terminal verdict). Carried
+    /// over the event channel so ACP/the TUI can render the live thread tree;
+    /// not part of the chat transcript.
+    FlowProgress {
+        progress: Box<FlowProgress>,
     },
 }
 

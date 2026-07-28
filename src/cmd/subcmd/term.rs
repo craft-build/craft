@@ -130,6 +130,7 @@ async fn run_query(
         max_turns: None,
         allowed_tools: vec![],
         stream: matches!(output_format, OutputFormat::Text),
+        mode: craft_agent::AgentMode::Build,
     })
     .await?;
     headless::print_outcome(&outcome, output_format);

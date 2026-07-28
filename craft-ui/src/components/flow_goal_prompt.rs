@@ -32,7 +32,7 @@ enum PromptState {
 }
 
 /// The user's response to the goal-approval gate. The app maps this to the
-/// magic strings `craft_flow` resumes on (`FLOW_APPROVE_ANSWER`,
+/// magic strings the flow loop resumes on (`FLOW_APPROVE_ANSWER`,
 /// `FLOW_CANCEL_ANSWER`, or the revised goal text).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowGoalAnswer {

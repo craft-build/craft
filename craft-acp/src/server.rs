@@ -863,7 +863,7 @@ fn handle_prompt(
     srv: &mut Server,
     raw: &Value,
     id: &RequestId,
-    params: &AcpParams,
+    _params: &AcpParams,
 ) -> Result<(), AcpError> {
     let req: PromptRequest = parse_params(raw)?;
     let session = srv.session.as_mut().ok_or_else(no_session)?;
@@ -892,12 +892,6 @@ fn handle_prompt(
         }
     }
 
-    if let AgentMode::Flow(workstream_id) = &session.current_mode {
-        let workstream_id = workstream_id.clone();
-        spawn_flow_prompt(srv, params, workstream_id, message, id.clone());
-        return Ok(());
-    }
-
     let input = AgentInput {
         message,
         mode: session.current_mode.clone(),
@@ -915,66 +909,6 @@ fn handle_prompt(
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
     Ok(())
-}
-
-/// Flow mode bypasses `InteractiveHandle::input_tx` (see `crate::flow`'s module
-/// doc): it drives `craft_flow::run` directly against this session's live
-/// provider/permissions, streaming progress as `SessionUpdate::Plan` and
-/// `ToolCall`/`ToolCallUpdate`s, and resolves this `session/prompt` request
-/// itself once the workstream reaches a terminal outcome. Note `session/cancel`
-/// does not yet interrupt an in-flight Flow run.
-fn spawn_flow_prompt(
-    srv: &mut Server,
-    params: &AcpParams,
-    workstream_id: String,
-    request: String,
-    id: RequestId,
-) {
-    let session = srv.session.as_ref().expect("caller holds session.as_mut()");
-    let model = Model::from_spec(&session.current_model).unwrap_or_else(|_| params.model.clone());
-    let drive_params = crate::flow::FlowDriveParams {
-        session_id: session.handle.session_id.to_string(),
-        workstream_id,
-        project_id: craft_flow::project_id(&session.cwd),
-        request,
-        model,
-        config: params.config.clone(),
-        permissions: Arc::clone(&session.handle.permissions),
-        timeouts: params.timeouts,
-        compression: craft_config::CompressionConfig::default(),
-        prompt_slots: Arc::clone(&params.prompt_slots),
-        flow_store: Arc::clone(&params.flow_store),
-        raw_event_tx: session.handle.raw_event_tx.clone(),
-    };
-    *session
-        .pending_prompt
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
-
-    let pending_prompt = Arc::clone(&session.pending_prompt);
-    let out_tx = srv.out_tx.clone();
-    let pending_requests = Arc::clone(&srv.pending_requests);
-    let next_request_id = Arc::clone(&srv.next_request_id);
-    tokio::spawn(async move {
-        let stop_reason = crate::flow::drive(
-            drive_params,
-            out_tx.clone(),
-            pending_requests,
-            next_request_id,
-        )
-        .await;
-        if let Some(pending_id) = pending_prompt
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            let resp = PromptResponse::new(stop_reason);
-            send(
-                &out_tx,
-                Response::new(pending_id, Ok(AgentResponse::PromptResponse(resp))),
-            );
-        }
-    });
 }
 
 fn apply_mode(srv: &mut Server, mode_str: &str) -> Result<(), AcpError> {
@@ -1434,6 +1368,12 @@ fn start_event_pump(
                         )),
                     );
                     continue;
+                }
+                AgentEvent::FlowProgress { progress } => {
+                    match translate::flow_progress(&progress) {
+                        Some(u) => u,
+                        None => continue,
+                    }
                 }
                 _ => continue,
             };

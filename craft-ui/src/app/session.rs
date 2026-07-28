@@ -129,7 +129,7 @@ impl App {
         self.close_all_overlays();
         if self.flow_awaiting_approval {
             self.flow_awaiting_approval = false;
-            self.send_answer(craft_flow::FLOW_CANCEL_ANSWER.to_owned());
+            self.send_answer(craft_agent::FLOW_CANCEL_ANSWER.to_owned());
         }
         self.pending_input = PendingInput::None;
         self.status_bar.clear_flash();

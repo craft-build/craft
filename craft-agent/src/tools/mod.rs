@@ -39,6 +39,7 @@ mod resolve;
 mod review;
 pub mod safety;
 pub mod schema;
+mod shift;
 mod styleguide;
 pub mod subagent;
 mod task;
@@ -724,6 +725,7 @@ register_tools! {
     move_file::MoveFile,
     wiki::WikiRead,
     wiki::WikiAppend,
+    shift::Shift,
 }
 
 /// Native tools that require the embedding model. `flow_search` is always
@@ -735,6 +737,30 @@ pub(crate) fn feature_gated_native_tools() -> Vec<std::sync::Arc<dyn Tool>> {
 /// Stable names of feature-gated native tools, for the audience-matrix lock test
 /// and any caller that needs to know what `feature_gated_native_tools` contributes.
 pub const FLOW_SEARCH_TOOL_NAME: &str = "flow_search";
+
+/// The `shift` tool is Flow-mode-only. It is registered in `register_tools!`
+/// alongside every other native tool (so `definitions()` includes it), then
+/// stripped from the JSON sent to the provider when the run is not in Flow
+/// mode. Stripping at the JSON seam keeps Build/Plan byte-identical to the
+/// pre-shift-tool behavior (the plan's Phase 1 invariant) without adding a
+/// mode parameter to `build_active_tools`.
+pub const SHIFT_TOOL_NAME: &str = "shift";
+
+/// Remove the `shift` tool from a tools-definition JSON array. Used outside
+/// Flow mode so the model never sees (and therefore cannot call) `shift` in
+/// Build/Plan. No-op for non-array values and for arrays that do not contain
+/// `shift`.
+pub fn strip_flow_only_tools(tools: &Value) -> Value {
+    let Some(arr) = tools.as_array() else {
+        return tools.clone();
+    };
+    let filtered: Vec<Value> = arr
+        .iter()
+        .filter(|v| v.get("name").and_then(Value::as_str) != Some(SHIFT_TOOL_NAME))
+        .cloned()
+        .collect();
+    Value::Array(filtered)
+}
 
 pub fn all_builtin_tool_names() -> Vec<&'static str> {
     NATIVE_TOOL_NAMES

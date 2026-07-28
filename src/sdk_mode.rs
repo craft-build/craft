@@ -1024,7 +1024,8 @@ impl EventPump {
             | AgentEvent::AdvisorNote { .. }
             | AgentEvent::ModelEscalation { .. }
             | AgentEvent::QuestionRequest { .. }
-            | AgentEvent::StagnationDetected { .. } => {}
+            | AgentEvent::StagnationDetected { .. }
+            | AgentEvent::FlowProgress { .. } => {}
         }
         Ok(())
     }

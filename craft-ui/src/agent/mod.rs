@@ -54,7 +54,7 @@ pub(crate) struct AgentHandles {
     pub(crate) queue: QueueSender,
     pub(crate) timeouts: craft_providers::Timeouts,
     pub(crate) btw_system: Arc<ArcSwap<String>>,
-    pub(crate) flow_progress_rx: flume::Receiver<craft_flow::FlowProgress>,
+    pub(crate) flow_progress_rx: flume::Receiver<craft_agent::FlowProgress>,
     pub(crate) repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -274,7 +274,7 @@ fn spawn_agent_internal(
         Arc::clone(&subagent_cancels),
     );
 
-    let (flow_progress_tx, flow_progress_rx) = flume::unbounded::<craft_flow::FlowProgress>();
+    let (flow_progress_tx, flow_progress_rx) = flume::unbounded::<craft_agent::FlowProgress>();
 
     let agent_loop = AgentLoop::new(
         Arc::clone(model_slot),

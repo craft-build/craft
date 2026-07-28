@@ -10,7 +10,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use craft_flow::{ChunkStatus, Stage};
+use craft_agent::{ThreadStatus, TurnType};
 use ratatui::style::Color;
 
 use crate::components::flow_panel::{FlowSnapshot, FlowSnapshotChunk};
@@ -282,7 +282,7 @@ fn build_mermaid(snapshot: &FlowSnapshot, colors: &GraphColors) -> String {
     out.push_str("flowchart TD\n");
 
     let current_stage = snapshot.stage;
-    for stage in [Stage::Scout, Stage::Tpm, Stage::Plan] {
+    for stage in [TurnType::Scout, TurnType::Tpm, TurnType::Plan] {
         node_rounded(
             &mut out,
             stage_id(stage),
@@ -291,8 +291,8 @@ fn build_mermaid(snapshot: &FlowSnapshot, colors: &GraphColors) -> String {
             colors,
         );
     }
-    edge(&mut out, stage_id(Stage::Scout), stage_id(Stage::Tpm));
-    edge(&mut out, stage_id(Stage::Tpm), stage_id(Stage::Plan));
+    edge(&mut out, stage_id(TurnType::Scout), stage_id(TurnType::Tpm));
+    edge(&mut out, stage_id(TurnType::Tpm), stage_id(TurnType::Plan));
 
     if snapshot.chunks.is_empty() {
         return out;
@@ -318,7 +318,7 @@ fn build_mermaid(snapshot: &FlowSnapshot, colors: &GraphColors) -> String {
         for (id, chunk) in &chunks {
             let sid = sanitize_id(id);
             if chunk.depends_on.is_empty() {
-                edge(&mut out, stage_id(Stage::Plan), &sid);
+                edge(&mut out, stage_id(TurnType::Plan), &sid);
             } else {
                 for dep in &chunk.depends_on {
                     edge(&mut out, &sanitize_id(dep), &sid);
@@ -332,21 +332,21 @@ fn build_mermaid(snapshot: &FlowSnapshot, colors: &GraphColors) -> String {
             .collect();
         for (id, _) in &chunks {
             if !all_deps.contains(id.as_str()) {
-                edge(&mut out, &sanitize_id(id), stage_id(Stage::Integrator));
+                edge(&mut out, &sanitize_id(id), stage_id(TurnType::Integrator));
             }
         }
     } else {
         // No explicit deps: chain in plan order.
-        let mut prev: &str = stage_id(Stage::Plan);
+        let mut prev: &str = stage_id(TurnType::Plan);
         for (id, _) in &chunks {
             let sid = sanitize_id(id);
             edge(&mut out, prev, &sid);
             prev = sid.leak();
         }
-        edge(&mut out, prev, stage_id(Stage::Integrator));
+        edge(&mut out, prev, stage_id(TurnType::Integrator));
     }
 
-    for stage in [Stage::Integrator, Stage::Verifier] {
+    for stage in [TurnType::Integrator, TurnType::Verifier] {
         node_rounded(
             &mut out,
             stage_id(stage),
@@ -357,27 +357,29 @@ fn build_mermaid(snapshot: &FlowSnapshot, colors: &GraphColors) -> String {
     }
     edge(
         &mut out,
-        stage_id(Stage::Integrator),
-        stage_id(Stage::Verifier),
+        stage_id(TurnType::Integrator),
+        stage_id(TurnType::Verifier),
     );
     out
 }
 
-fn stage_id(stage: Stage) -> &'static str {
+fn stage_id(stage: TurnType) -> &'static str {
     match stage {
-        Stage::Scout => "stage_scout",
-        Stage::Tpm => "stage_tpm",
-        Stage::Plan => "stage_plan",
-        Stage::Req => "stage_req",
-        Stage::Execute => "stage_execute",
-        Stage::Review => "stage_review",
-        Stage::Qa => "stage_qa",
-        Stage::Integrator => "stage_integrator",
-        Stage::Verifier => "stage_verifier",
+        TurnType::General => "stage_general",
+        TurnType::Scout => "stage_scout",
+        TurnType::Tpm => "stage_tpm",
+        TurnType::Plan => "stage_plan",
+        TurnType::Req => "stage_req",
+        TurnType::Execute => "stage_execute",
+        TurnType::Review => "stage_review",
+        TurnType::Qa => "stage_qa",
+        TurnType::Report => "stage_report",
+        TurnType::Integrator => "stage_integrator",
+        TurnType::Verifier => "stage_verifier",
     }
 }
 
-fn stage_fill(stage: Stage, current: Option<Stage>, colors: &GraphColors) -> &str {
+fn stage_fill(stage: TurnType, current: Option<TurnType>, colors: &GraphColors) -> &str {
     match current {
         Some(c) if c == stage => &colors.node_active,
         Some(c) if stage_is_past(stage, c) => &colors.node_done,
@@ -385,29 +387,31 @@ fn stage_fill(stage: Stage, current: Option<Stage>, colors: &GraphColors) -> &st
     }
 }
 
-fn stage_is_past(stage: Stage, current: Stage) -> bool {
+fn stage_is_past(stage: TurnType, current: TurnType) -> bool {
     stage_order(stage) < stage_order(current)
 }
 
-fn stage_order(stage: Stage) -> u8 {
+fn stage_order(stage: TurnType) -> u8 {
     match stage {
-        Stage::Scout => 0,
-        Stage::Tpm => 1,
-        Stage::Plan => 2,
-        Stage::Req => 3,
-        Stage::Execute => 4,
-        Stage::Review => 5,
-        Stage::Qa => 6,
-        Stage::Integrator => 7,
-        Stage::Verifier => 8,
+        TurnType::General => 0,
+        TurnType::Scout => 1,
+        TurnType::Tpm => 2,
+        TurnType::Plan => 3,
+        TurnType::Req => 4,
+        TurnType::Execute => 5,
+        TurnType::Review => 6,
+        TurnType::Qa => 7,
+        TurnType::Report => 8,
+        TurnType::Integrator => 9,
+        TurnType::Verifier => 10,
     }
 }
 
 fn chunk_fill<'a>(chunk: &FlowSnapshotChunk, colors: &'a GraphColors) -> &'a str {
     match chunk.status {
-        ChunkStatus::Done => &colors.node_done,
-        ChunkStatus::Blocked => &colors.node_blocked,
-        ChunkStatus::Running => &colors.node_active,
+        ThreadStatus::Done => &colors.node_done,
+        ThreadStatus::Blocked => &colors.node_blocked,
+        ThreadStatus::Running => &colors.node_active,
         _ => &colors.node_default,
     }
 }
@@ -419,7 +423,7 @@ fn chunk_label(chunk: &FlowSnapshotChunk, id: &str) -> String {
         &chunk.title
     };
     let mut label = title.replace('"', "'");
-    if chunk.status == ChunkStatus::Running
+    if chunk.status == ThreadStatus::Running
         && let Some(stage) = chunk.stage
     {
         label.push_str(&format!("\\n{}", stage.as_str()));
@@ -451,7 +455,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn chunk(title: &str, status: ChunkStatus) -> FlowSnapshotChunk {
+    fn chunk(title: &str, status: ThreadStatus) -> FlowSnapshotChunk {
         FlowSnapshotChunk {
             title: title.into(),
             status,
@@ -460,7 +464,10 @@ mod tests {
         }
     }
 
-    fn snapshot(stage: Option<Stage>, chunks: BTreeMap<String, FlowSnapshotChunk>) -> FlowSnapshot {
+    fn snapshot(
+        stage: Option<TurnType>,
+        chunks: BTreeMap<String, FlowSnapshotChunk>,
+    ) -> FlowSnapshot {
         FlowSnapshot {
             workstream_id: "ws".into(),
             stage,
@@ -483,7 +490,7 @@ mod tests {
 
     #[test]
     fn pre_plan_only_before_chunks() {
-        let s = snapshot(Some(Stage::Scout), BTreeMap::new());
+        let s = snapshot(Some(TurnType::Scout), BTreeMap::new());
         let m = build_mermaid(&s, &test_colors());
         assert!(m.contains("stage_scout"));
         assert!(m.contains("stage_tpm"));
@@ -495,9 +502,9 @@ mod tests {
     fn linear_chain_when_no_deps() {
         // Chunks with no depends_on chain in plan order.
         let mut chunks = BTreeMap::new();
-        chunks.insert("c1".into(), chunk("First", ChunkStatus::Done));
-        chunks.insert("c2".into(), chunk("Second", ChunkStatus::Running));
-        let s = snapshot(Some(Stage::Execute), chunks);
+        chunks.insert("c1".into(), chunk("First", ThreadStatus::Done));
+        chunks.insert("c2".into(), chunk("Second", ThreadStatus::Running));
+        let s = snapshot(Some(TurnType::Execute), chunks);
         let m = build_mermaid(&s, &test_colors());
         assert!(m.contains("stage_plan --> c1"));
         assert!(m.contains("c1 --> c2"));
@@ -508,22 +515,22 @@ mod tests {
     fn dag_renders_dependency_edges() {
         // A -> B, A -> C, [B+C] -> D
         let mut chunks = BTreeMap::new();
-        let mut a = chunk("A", ChunkStatus::Done);
+        let mut a = chunk("A", ThreadStatus::Done);
         a.order = 0;
-        let mut b = chunk("B", ChunkStatus::Running);
+        let mut b = chunk("B", ThreadStatus::Running);
         b.order = 1;
         b.depends_on = vec!["a".into()];
-        let mut c = chunk("C", ChunkStatus::Running);
+        let mut c = chunk("C", ThreadStatus::Running);
         c.order = 2;
         c.depends_on = vec!["a".into()];
-        let mut d = chunk("D", ChunkStatus::Queued);
+        let mut d = chunk("D", ThreadStatus::Queued);
         d.order = 3;
         d.depends_on = vec!["b".into(), "c".into()];
         chunks.insert("a".into(), a);
         chunks.insert("b".into(), b);
         chunks.insert("c".into(), c);
         chunks.insert("d".into(), d);
-        let s = snapshot(Some(Stage::Execute), chunks);
+        let s = snapshot(Some(TurnType::Execute), chunks);
         let m = build_mermaid(&s, &test_colors());
         // A has no deps -> edges from Plan.
         assert!(m.contains("stage_plan --> a"));
@@ -543,7 +550,7 @@ mod tests {
     #[test]
     fn active_stage_gets_active_fill() {
         let c = test_colors();
-        let s = snapshot(Some(Stage::Tpm), BTreeMap::new());
+        let s = snapshot(Some(TurnType::Tpm), BTreeMap::new());
         let m = build_mermaid(&s, &c);
         assert!(m.contains(&format!("style stage_tpm fill:{}", c.node_active)));
         assert!(m.contains(&format!("style stage_scout fill:{}", c.node_done)));
@@ -554,8 +561,8 @@ mod tests {
     fn done_chunk_gets_done_fill() {
         let c = test_colors();
         let mut chunks = BTreeMap::new();
-        chunks.insert("c1".into(), chunk("First", ChunkStatus::Done));
-        let s = snapshot(Some(Stage::Execute), chunks);
+        chunks.insert("c1".into(), chunk("First", ThreadStatus::Done));
+        let s = snapshot(Some(TurnType::Execute), chunks);
         let m = build_mermaid(&s, &c);
         assert!(m.contains(&format!("style c1 fill:{}", c.node_done)));
     }
@@ -588,12 +595,12 @@ mod tests {
             "c1".into(),
             FlowSnapshotChunk {
                 title: "Core object format".into(),
-                status: ChunkStatus::Running,
-                stage: Some(Stage::Execute),
+                status: ThreadStatus::Running,
+                stage: Some(TurnType::Execute),
                 ..Default::default()
             },
         );
-        let s = snapshot(Some(Stage::Execute), chunks);
+        let s = snapshot(Some(TurnType::Execute), chunks);
         let source = build_mermaid(&s, &c);
         let png = render_png(&source, (400, 300), &c);
         match &png {
@@ -616,16 +623,16 @@ mod tests {
                 FlowSnapshotChunk {
                     title: format!("Chunk number {i}"),
                     status: if i == 1 {
-                        ChunkStatus::Running
+                        ThreadStatus::Running
                     } else {
-                        ChunkStatus::Queued
+                        ThreadStatus::Queued
                     },
                     stage: None,
                     ..Default::default()
                 },
             );
         }
-        let s = snapshot(Some(Stage::Execute), chunks);
+        let s = snapshot(Some(TurnType::Execute), chunks);
         let source = build_mermaid(&s, &c);
         let png = render_png(&source, (800, 600), &c).expect("render should succeed");
         let img = image::load_from_memory(&png).expect("png should decode");

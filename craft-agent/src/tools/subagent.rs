@@ -242,6 +242,11 @@ pub async fn run_subagent(
                 fs: Arc::new(crate::tools::LocalFs),
                 doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
                 registry: Arc::clone(crate::tools::ToolRegistry::native_arc()),
+                flow_thread_history: None,
+                flow_thread_manager: None,
+                flow_advisor: None,
+                flow_gates: None,
+                flow_progress_tx: None,
             },
             AgentRunParams {
                 history: &mut history,

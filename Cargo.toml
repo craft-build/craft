@@ -19,7 +19,6 @@ path = "src/main.rs"
 craft-ui = { workspace = true }
 craft-agent = { workspace = true }
 craft-acp = { workspace = true }
-craft-flow = { workspace = true }
 craft-config = { workspace = true }
 craft-providers = { workspace = true, features = ["bedrock"] }
 craft-storage = { workspace = true }
@@ -53,7 +52,6 @@ members = [
   "craft-agent",
   "craft-config",
   "craft-docgen",
-  "craft-flow",
   "craft-highlight",
   "craft-interpreter",
   "craft-lua",
@@ -81,7 +79,6 @@ rust-version = "1.89"
 craft-acp = { path = "craft-acp" }
 craft-agent = { path = "craft-agent" }
 craft-config = { path = "craft-config" }
-craft-flow = { path = "craft-flow" }
 craft-interpreter = { path = "craft-interpreter" }
 craft-providers = { path = "craft-providers" }
 craft-storage = { path = "craft-storage" }

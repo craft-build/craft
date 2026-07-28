@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 craft-agent = { workspace = true }
 craft-config = { workspace = true }
-craft-flow = { workspace = true }
 craft-lua = { workspace = true }
 craft-providers = { workspace = true }
 craft-repomap = { workspace = true }

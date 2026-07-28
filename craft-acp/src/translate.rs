@@ -3,6 +3,7 @@ use agent_client_protocol_schema::{
     ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind,
 };
+use craft_agent::FlowProgress;
 use craft_agent::tools::ToolRegistry;
 use craft_agent::types::{BatchProgressEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
 use craft_providers::{ContentBlock as MsgBlock, ImageMediaType, Message, Role as MsgRole};
@@ -63,6 +64,62 @@ pub fn thinking_delta(text: &str) -> SessionUpdate {
     SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
         text.to_string(),
     ))))
+}
+
+/// Render a Flow mode progress event as a thought breadcrumb for ACP clients.
+/// Returns `None` for terminal events (`GoalReady`/`Done`/`NeedsReview`/
+/// `Failed`/`Cancelled`) because the headless Flow driver already surfaces
+/// those as agent messages / done / error events, so a duplicate thought
+/// would be noise. Structural events (turn-type entered, thread spawn/exit,
+/// chunk status) carry the live thread-tree signal that has no other channel.
+pub fn flow_progress(progress: &FlowProgress) -> Option<SessionUpdate> {
+    let text = match progress {
+        FlowProgress::TurnTypeEntered {
+            thread_id,
+            turn_type,
+        } => format!(
+            "flow ▸ entered {} in thread {thread_id}",
+            turn_type.as_str()
+        ),
+        FlowProgress::ThreadSpawn {
+            thread_id,
+            parent_id,
+            turn_type,
+        } => format!(
+            "flow ▸ spawned {} thread {thread_id} under {parent_id}",
+            turn_type.as_str()
+        ),
+        FlowProgress::ThreadExit {
+            thread_id,
+            returning_to,
+        } => format!("flow ▸ thread {thread_id} done -> {returning_to}"),
+        FlowProgress::Chunk {
+            id,
+            title,
+            status,
+            stage,
+            ..
+        } => format!(
+            "flow ▸ chunk {id}: {title} [{status:?}{}]",
+            stage
+                .map(|s| format!(", {}", s.as_str()))
+                .unwrap_or_default()
+        ),
+        FlowProgress::AdvisorNote {
+            thread_id,
+            addressed_to,
+            severity,
+            message,
+        } => format!(
+            "flow ▸ advisor {severity:?} for thread {thread_id} -> {addressed_to}: {message}"
+        ),
+        FlowProgress::GoalReady { .. }
+        | FlowProgress::Done { .. }
+        | FlowProgress::NeedsReview { .. }
+        | FlowProgress::Failed { .. }
+        | FlowProgress::Cancelled => return None,
+    };
+    Some(thinking_delta(&text))
 }
 
 pub fn user_message_chunk(text: &str) -> SessionUpdate {
@@ -662,5 +719,70 @@ mod tests {
     #[test_case("nonexistent_plugin_tool", ToolKind::Other ; "unknown_tool_is_other")]
     fn tool_kind_from_registry_or_fallback(name: &str, expected: ToolKind) {
         assert_eq!(tool_kind(name), expected);
+    }
+
+    #[test]
+    fn flow_progress_renders_structural_events_as_thoughts() {
+        let entered = FlowProgress::TurnTypeEntered {
+            thread_id: "root".into(),
+            turn_type: craft_agent::TurnType::Scout,
+        };
+        let json = serde_json::to_value(flow_progress(&entered).unwrap()).unwrap();
+        assert_eq!(json["sessionUpdate"], "agent_thought_chunk");
+        let text = json["content"]["text"].as_str().unwrap();
+        assert!(text.contains("entered scout"), "got {text}");
+
+        let spawn = FlowProgress::ThreadSpawn {
+            thread_id: "c1".into(),
+            parent_id: "root".into(),
+            turn_type: craft_agent::TurnType::Req,
+        };
+        let json = serde_json::to_value(flow_progress(&spawn).unwrap()).unwrap();
+        assert!(
+            json["content"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("spawned req")
+        );
+    }
+
+    #[test]
+    fn flow_progress_drops_terminal_events_to_avoid_duplication() {
+        assert!(
+            flow_progress(&FlowProgress::GoalReady {
+                goal_doc: "g".into()
+            })
+            .is_none()
+        );
+        assert!(
+            flow_progress(&FlowProgress::Done {
+                verdict: "v".into()
+            })
+            .is_none()
+        );
+        assert!(flow_progress(&FlowProgress::NeedsReview { report: "r".into() }).is_none());
+        assert!(
+            flow_progress(&FlowProgress::Failed {
+                stage: craft_agent::TurnType::Plan,
+                reason: "x".into(),
+            })
+            .is_none()
+        );
+        assert!(flow_progress(&FlowProgress::Cancelled).is_none());
+    }
+
+    #[test]
+    fn flow_progress_renders_advisor_note_as_thought() {
+        let note = FlowProgress::AdvisorNote {
+            thread_id: "c2".into(),
+            addressed_to: "root".into(),
+            severity: craft_agent::AdvisorSeverity::Blocker,
+            message: "stale child: upstream changed".into(),
+        };
+        let json = serde_json::to_value(flow_progress(&note).unwrap()).unwrap();
+        assert_eq!(json["sessionUpdate"], "agent_thought_chunk");
+        let text = json["content"]["text"].as_str().unwrap();
+        assert!(text.contains("advisor"), "got {text}");
+        assert!(text.contains("stale child"), "got {text}");
     }
 }

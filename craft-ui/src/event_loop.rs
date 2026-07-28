@@ -318,7 +318,7 @@ enum Wake {
     /// `None` = global channel (model-fetch discovery), routed to the focused
     /// session. `Some(i)` = per-runtime `warn_rx`, routed to the owning session.
     Warn(Option<usize>, String),
-    Flow(usize, craft_flow::FlowProgress),
+    Flow(usize, craft_agent::FlowProgress),
     Action(usize, Action),
 }
 

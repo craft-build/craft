@@ -73,6 +73,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "memory",
             "skill",
             "flow_search",
+            "shift",
             "wiki_read",
             "wiki_append",
         ],

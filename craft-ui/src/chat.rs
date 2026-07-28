@@ -216,6 +216,7 @@ impl Chat {
                         cache,
                     }));
             }
+            AgentEvent::FlowProgress { .. } => {}
         }
         ChatEventResult::Continue
     }

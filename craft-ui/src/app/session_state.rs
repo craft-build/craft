@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use craft_agent::permissions::PermissionManager;
+use craft_agent::{ThreadStatus, TurnType};
 use craft_config::Effect;
-use craft_flow::{ChunkStatus, Stage};
 use craft_providers::{Message, Model, ThinkingConfig, TokenUsage};
 use craft_storage::StateDir;
 use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
@@ -14,15 +14,15 @@ use crate::AppSession;
 
 use super::mode::{FlowChunkState, FlowState, Mode, PlanState};
 
-/// String form of a `ChunkStatus` for persistence, matching craft-flow's
+/// String form of a `ThreadStatus` for persistence, matching craft-flow's
 /// `rename_all = "snake_case"` serde variant names.
-fn chunk_status_str(status: ChunkStatus) -> String {
+fn chunk_status_str(status: ThreadStatus) -> String {
     match status {
-        ChunkStatus::Queued => "queued",
-        ChunkStatus::Running => "running",
-        ChunkStatus::NeedsReview => "needs_review",
-        ChunkStatus::Blocked => "blocked",
-        ChunkStatus::Done => "done",
+        ThreadStatus::Queued => "queued",
+        ThreadStatus::Running => "running",
+        ThreadStatus::NeedsReview => "needs_review",
+        ThreadStatus::Blocked => "blocked",
+        ThreadStatus::Done => "done",
     }
     .to_string()
 }
@@ -84,7 +84,7 @@ impl SessionState {
 
         let flow = FlowState {
             workstream_id: session.meta.flow_workstream_id.clone().unwrap_or_default(),
-            stage: session.meta.flow_stage.as_deref().and_then(Stage::parse),
+            stage: session.meta.flow_stage.as_deref().and_then(TurnType::parse),
             chunks: session
                 .meta
                 .flow_chunks
@@ -94,7 +94,7 @@ impl SessionState {
                         id.clone(),
                         FlowChunkState {
                             title: c.title.clone(),
-                            status: ChunkStatus::parse(&c.status).unwrap_or_default(),
+                            status: ThreadStatus::parse(&c.status).unwrap_or_default(),
                             stage: None,
                             ..Default::default()
                         },

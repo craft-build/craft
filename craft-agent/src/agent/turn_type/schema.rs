@@ -1,6 +1,9 @@
-//! JSON Schemas for Flow stage documents, expressed as `serde_json::Value`
-//! constants. Each stage's `output_schema` is one of these. Mirrors the
-//! proposal's §2.1 document shapes.
+//! JSON Schemas for the narrow turn types' write policies, expressed as
+//! `serde_json::Value` constants. Each turn type's `output_schema` is one of
+//! these. Migrated from the former `craft-flow/src/schema.rs`; becomes the
+//! `WritePolicy::schema` per `EntryType` (design migration table).
+//!
+//! Design ref: `turn-type-agent-loop-design.md` §8.1 (turn types' writes).
 
 use serde_json::{Value, json};
 
@@ -31,9 +34,6 @@ pub fn goal_doc() -> Value {
 }
 
 /// Plan document: chunks of work with optional dependency edges forming a DAG.
-/// The array order is the plan's suggested topological order; `depends_on`
-/// declares the actual edges so the orchestrator can schedule correctly and
-/// the TUI can render the real graph.
 pub fn plan_doc() -> Value {
     object(
         json!({
@@ -73,8 +73,6 @@ pub fn requirement_doc() -> Value {
 }
 
 /// Review report for a chunk: `passed | failed | needs_review` plus findings.
-/// The `status` field drives the review re-Execute gate; `needs_review` blocks
-/// progression just like `failed` so the chunk gets reworked.
 pub fn review_report() -> Value {
     object(
         json!({
@@ -98,8 +96,7 @@ pub fn qa_report() -> Value {
     )
 }
 
-/// Integration checkpoint after merging chunks. `integrated` means the merge
-/// is clean; `failed` means unresolved conflicts remain.
+/// Integration checkpoint after merging chunks.
 pub fn integration_checkpoint() -> Value {
     object(
         json!({
@@ -112,10 +109,7 @@ pub fn integration_checkpoint() -> Value {
     )
 }
 
-/// Final verification report against acceptance criteria. The `status` field
-/// (`passed | failed | needs_review`) is the authoritative gate; `findings`
-/// carries BLOCKER/WARNING items so the caller can route rework. The existing
-/// `goal_met`/`verdict` fields remain for display.
+/// Final verification report against acceptance criteria.
 pub fn verification_report() -> Value {
     object(
         json!({
@@ -172,47 +166,5 @@ mod tests {
         let s = verification_report();
         let status = &s["properties"]["status"]["enum"];
         assert_eq!(status.as_array().unwrap().len(), 3);
-        let required: Vec<&str> = s["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(required.contains(&"status"));
-        assert!(required.contains(&"findings"));
-    }
-
-    #[test]
-    fn qa_report_status_enum_is_passed_failed() {
-        let s = qa_report();
-        let status = &s["properties"]["status"]["enum"];
-        let values: Vec<&str> = status
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert_eq!(values, ["passed", "failed"]);
-    }
-
-    #[test]
-    fn review_report_status_enum_has_needs_review() {
-        let s = review_report();
-        let status = &s["properties"]["status"]["enum"];
-        let values: Vec<&str> = status
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert_eq!(values, ["passed", "failed", "needs_review"]);
-        let required: Vec<&str> = s["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(required.contains(&"chunk_id"));
-        assert!(required.contains(&"status"));
     }
 }

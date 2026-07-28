@@ -84,6 +84,20 @@ pub struct AgentParams {
     pub findings_store: Option<super::findings_store::SharedFindingsStore>,
     pub fs: Arc<dyn crate::tools::FsBackend>,
     pub doom: SharedDoomTracker,
+    /// Flow mode only: the per-workstream typed log. `None` in Build/Plan.
+    pub flow_thread_history: Option<Arc<std::sync::Mutex<super::typed_log::ThreadHistory>>>,
+    /// Flow mode only: the thread-tree manager. `None` in Build/Plan.
+    pub flow_thread_manager: Option<Arc<std::sync::Mutex<super::threads::ThreadManager>>>,
+    /// Flow mode only: the between-turn tree-watching advisor with override
+    /// power. `None` in Build/Plan and when the advisor is disabled.
+    pub flow_advisor: Option<Arc<dyn super::flow_loop::FlowAdvisor + Send + Sync>>,
+    /// Flow mode only: the objective gates. Defaults to `GateSet::cargo()` in
+    /// `Agent::new` when `None` (production); tests inject stubs. Build/Plan
+    /// never consult this.
+    pub flow_gates: Option<super::turn_type::GateSet>,
+    /// Flow mode only: channel for emitting `FlowProgress` events from inside
+    /// `run_loop`/`turn`. `None` in Build/Plan.
+    pub flow_progress_tx: Option<flume::Sender<super::flow_loop::FlowProgress>>,
 }
 
 pub struct AgentRunParams<'h> {
@@ -104,6 +118,7 @@ pub struct Agent<'h> {
     event_tx: EventSender,
     tools: Value,
     mode: AgentMode,
+    turn_type: crate::agent::turn_type::TurnType,
     user_response_rx: Option<Arc<tokio::sync::Mutex<flume::Receiver<String>>>>,
     interrupt_source: Option<Arc<dyn InterruptSource>>,
     cancel: CancelToken,
@@ -158,6 +173,12 @@ pub struct Agent<'h> {
     host_question_routing: bool,
     token_estimation_multiplier: f64,
     repo_map: Option<craft_repomap::RepoMap>,
+    thread_history: Option<Arc<std::sync::Mutex<super::typed_log::ThreadHistory>>>,
+    thread_manager: Option<Arc<std::sync::Mutex<super::threads::ThreadManager>>>,
+    flow_advisor: Option<Arc<dyn super::flow_loop::FlowAdvisor + Send + Sync>>,
+    gates: super::turn_type::GateSet,
+    thread_id: super::typed_log::ThreadId,
+    flow_progress_tx: Option<flume::Sender<super::flow_loop::FlowProgress>>,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -189,6 +210,7 @@ impl<'h> Agent<'h> {
             event_tx: run.event_tx,
             tools: run.tools,
             mode: AgentMode::default(),
+            turn_type: crate::agent::turn_type::TurnType::General,
             user_response_rx: None,
             interrupt_source: None,
             cancel: CancelToken::none(),
@@ -245,6 +267,14 @@ impl<'h> Agent<'h> {
             host_question_routing: false,
             token_estimation_multiplier: 1.0,
             repo_map: None,
+            thread_history: params.flow_thread_history,
+            thread_manager: params.flow_thread_manager,
+            flow_advisor: params.flow_advisor,
+            gates: params
+                .flow_gates
+                .unwrap_or_else(super::turn_type::GateSet::cargo),
+            thread_id: super::typed_log::ThreadId::new(""),
+            flow_progress_tx: params.flow_progress_tx,
         }
     }
 
@@ -356,6 +386,32 @@ impl<'h> Agent<'h> {
         let msg = Message::user_with_images(input.message.clone(), input.images);
         self.history.push(msg);
         self.mode = input.mode;
+        // Phase 1: every mode (Build/Plan/Flow) resolves to General, so
+        // behavior is byte-identical to the pre-turn-type loop. Phase 2 routes
+        // Flow mode through the turn-typed loop and sets narrow turn types.
+        self.turn_type = crate::agent::turn_type::TurnType::General;
+        // The `shift` tool is Flow-mode-only; strip it from the toolset in
+        // Build/Plan so the model cannot call it (keeps Build/Plan
+        // byte-identical to the pre-shift-tool behavior).
+        if !matches!(self.mode, AgentMode::Flow(_)) {
+            self.tools = crate::tools::strip_flow_only_tools(&self.tools);
+        } else {
+            // Flow mode: set the current thread id to the root thread (the
+            // workstream id) so typed-log appends and ThreadManager calls
+            // target the root. Spawned subtasks (the existing `task` tool)
+            // would reset this within their own `run_loop`; for the first cut
+            // only the root loop shifts.
+            if let Some(mgr) = self.thread_manager.as_ref() {
+                let root = mgr.lock().unwrap_or_else(|e| e.into_inner()).root.clone();
+                self.thread_id = root;
+            } else if let Some(hist) = self.thread_history.as_ref() {
+                self.thread_id = hist
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .root_thread_id()
+                    .clone();
+            }
+        }
         self.goal = input.goal;
         self.goal_criteria = input.goal_criteria.clone();
         self.opts = RequestOptions {
@@ -396,6 +452,23 @@ impl<'h> Agent<'h> {
                 self.emit_done(None)?;
                 return Ok(());
             }
+            // Turn-type dispatch seed (design §1, plan Phase 1). Phase 1 only
+            // enables General, so this resolves the General spec and runs
+            // today's `turn()` body unchanged. The Flow shift path consults
+            // the same spec's `.transitions` at the turn boundary (see
+            // `apply_shift_if_requested`).
+            let _spec = self.turn_type.spec(&self.gates);
+            // Flow mode only: honor a cancel request as a turn boundary.
+            // Build/Plan surface cancellation through `turn()`'s existing
+            // `self.cancel.is_cancelled()` check (returns `AgentError::Cancelled`).
+            if matches!(self.mode, AgentMode::Flow(_)) && self.cancel.is_cancelled() {
+                if let Some(tx) = self.flow_progress_tx.as_ref() {
+                    let _ = tx.send(super::flow_loop::FlowProgress::Cancelled);
+                }
+                self.snapshot.commit();
+                self.emit_done(Some(StopReason::Cancelled))?;
+                return Ok(());
+            }
             let (should_grace, should_hard_stop) = {
                 let d = self.doom.lock().unwrap_or_else(|e| e.into_inner());
                 (d.should_grace(), d.should_hard_stop())
@@ -426,10 +499,19 @@ impl<'h> Agent<'h> {
                 );
             }
             match self.turn().await? {
-                TurnOutcome::Continue => {}
+                TurnOutcome::Continue => {
+                    // Flow mode only: drain the last `shift` request from this
+                    // turn and run it through `transitions::resolve`. No-op
+                    // (and cheap) in Build/Plan and when no shift was made.
+                    self.apply_shift_if_requested().await?;
+                }
                 TurnOutcome::Done(stop_reason) => {
                     self.snapshot.commit();
                     self.run_advisor().await;
+                    // Flow mode: commit the final turn's write before exiting.
+                    if matches!(self.mode, AgentMode::Flow(_)) {
+                        self.commit_turn_write(self.turn_type);
+                    }
                     self.emit_done(stop_reason)?;
                     return Ok(());
                 }
@@ -461,6 +543,9 @@ impl<'h> Agent<'h> {
                 &self.dynamic,
                 &self.promoted,
             );
+            if !matches!(self.mode, AgentMode::Flow(_)) {
+                self.tools = crate::tools::strip_flow_only_tools(&self.tools);
+            }
         }
 
         let intent = self.build_intent().await;
@@ -722,6 +807,202 @@ impl<'h> Agent<'h> {
             }
             Ok(None) => {}
             Err(e) => warn!(error = %e, "advisor review failed"),
+        }
+    }
+
+    /// Flow mode only: scan the most recent assistant turn in the chat history
+    /// for the last `shift` tool call and recover the requested target +
+    /// rationale from the matching `ToolResult`. Returns `None` outside Flow
+    /// mode, when no `shift` call was made, or when the result cannot be
+    /// parsed (the orchestrator-equivalent of "no shift this turn, stay
+    /// cheap"). Implements Option A of plan §5.
+    fn last_shift_request(&self) -> Option<crate::types::ToolOutput> {
+        if !matches!(self.mode, AgentMode::Flow(_)) {
+            return None;
+        }
+        let assistant = self
+            .history
+            .as_slice()
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::Assistant) && m.has_tool_calls())?;
+        let mut shift_ids: Vec<&str> = assistant
+            .tool_uses()
+            .filter(|(_, name, _)| *name == crate::tools::SHIFT_TOOL_NAME)
+            .map(|(id, _, _)| id)
+            .collect();
+        let last_id = shift_ids.pop()?;
+        let result_text = self.history.as_slice().iter().rev().find_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == last_id => Some(content.as_str()),
+                _ => None,
+            })
+        })?;
+        parse_shift_output(result_text)
+    }
+
+    /// Flow mode only: commit one distilled typed-log entry for the turn that
+    /// just completed. Mapping is `TurnType::spec().write.entry`; content is
+    /// the assistant's final text for the turn (verbatim — plan §4a; a real
+    /// distillation pass is a later refinement). No-op outside Flow mode or
+    /// when no `ThreadHistory` is attached.
+    fn commit_turn_write(&mut self, turn_type: crate::agent::turn_type::TurnType) {
+        let Some(hist) = self.thread_history.as_ref() else {
+            return;
+        };
+        let entry_type = turn_type.spec(&self.gates).write.entry;
+        let content = self
+            .history
+            .as_slice()
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::Assistant))
+            .and_then(|m| m.first_text_content())
+            .unwrap_or("")
+            .to_string();
+        hist.lock().unwrap_or_else(|e| e.into_inner()).append(
+            self.thread_id.clone(),
+            entry_type,
+            content,
+        );
+    }
+
+    /// Flow mode only: run the between-turn `FlowAdvisor` (the tree watcher
+    /// with override power, distinct from the cheaper per-turn `advisor::review`).
+    /// Returns the Advisor's forced transition expressed as a `TurnProposal`
+    /// (target always `General`, plan §12) to feed into `resolve` as
+    /// `advisor_override`. Records any addressed note in the typed log and
+    /// emits `FlowProgress::AdvisorNote`. `None` when there is no advisor, no
+    /// override, or outside Flow mode.
+    async fn run_flow_advisor(&mut self) -> Option<super::transitions::TurnProposal> {
+        if !matches!(self.mode, AgentMode::Flow(_)) {
+            return None;
+        }
+        let advisor = self.flow_advisor.clone()?;
+        let hist = self.thread_history.clone()?;
+        let mgr_snapshot = self
+            .thread_manager
+            .as_ref()?
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let thread_id = self.thread_id.clone();
+        let turn_type = self.turn_type;
+        let forced = advisor
+            .review(hist, mgr_snapshot, thread_id.clone(), turn_type)
+            .await;
+        let forced = forced?;
+        let note = super::flow_loop::record_advisor_note(
+            self.thread_history.as_ref().unwrap(),
+            &thread_id,
+            &forced,
+        );
+        if let Some(tx) = self.flow_progress_tx.as_ref() {
+            let _ = tx.send(super::flow_loop::FlowProgress::AdvisorNote {
+                thread_id: thread_id.to_string(),
+                addressed_to: thread_id.to_string(),
+                severity: forced.severity,
+                message: note,
+            });
+        }
+        Some(super::transitions::TurnProposal::self_report(
+            crate::agent::turn_type::TurnType::General,
+            crate::agent::turn_type::ThreadAction::Advance,
+            forced.note,
+        ))
+    }
+
+    /// Flow mode only: the turn-boundary shift logic (plan §3, §11). Drains
+    /// the last `shift` request from the just-completed turn, runs the
+    /// current type's `TransitionRule` set through `transitions::resolve`
+    /// with the Advisor's forced transition as `advisor_override`, and either
+    /// shifts (applying the typed-log write + emitting
+    /// `FlowProgress::TurnTypeEntered`) or pushes a soft `Blocked`/`Illegal`
+    /// user message and stays. Cheap no-op outside Flow mode or when no shift
+    /// was requested and no advisor override fires.
+    async fn apply_shift_if_requested(&mut self) -> Result<(), AgentError> {
+        if !matches!(self.mode, AgentMode::Flow(_)) {
+            return Ok(());
+        }
+        let shift = self.last_shift_request();
+        let advisor_override = self.run_flow_advisor().await;
+        if shift.is_none() && advisor_override.is_none() {
+            return Ok(());
+        }
+        let rules = self.turn_type.spec(&self.gates).transitions;
+        let proposal = shift.as_ref().map(|s| {
+            let crate::types::ToolOutput::ShiftTurnType { target, rationale } = s else {
+                unreachable!("last_shift_request returns only ShiftTurnType");
+            };
+            super::transitions::TurnProposal::self_report(
+                *target,
+                crate::agent::turn_type::ThreadAction::Advance,
+                rationale.clone(),
+            )
+        });
+        let resolved = super::transitions::resolve(
+            &rules,
+            proposal
+                .as_ref()
+                .unwrap_or(&super::transitions::TurnProposal::self_report(
+                    self.turn_type,
+                    crate::agent::turn_type::ThreadAction::Advance,
+                    String::new(),
+                )),
+            advisor_override.as_ref(),
+        );
+        match resolved {
+            super::transitions::ResolvedTransition::Accepted { target, action } => {
+                let from = self.turn_type;
+                self.commit_turn_write(from);
+                self.advance_turn_type(target, action);
+            }
+            super::transitions::ResolvedTransition::Blocked { reason } => {
+                let target = shift
+                    .map(|s| match s {
+                        crate::types::ToolOutput::ShiftTurnType { target, .. } => target,
+                        _ => unreachable!(),
+                    })
+                    .unwrap_or(self.turn_type);
+                self.history.push(Message::user(format!(
+                    "Shift to {} blocked: {reason}",
+                    target.as_str()
+                )));
+            }
+            super::transitions::ResolvedTransition::Illegal { proposed } => {
+                self.history.push(Message::user(format!(
+                    "Illegal shift from {} to {}; staying.",
+                    self.turn_type.as_str(),
+                    proposed.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Flow mode only: mutate `turn_type`, advance the `ThreadManager` (if
+    /// attached), and emit `FlowProgress::TurnTypeEntered`. This is the single
+    /// place `turn_type` changes after `Agent::run` seeds it to `General`.
+    fn advance_turn_type(
+        &mut self,
+        target: crate::agent::turn_type::TurnType,
+        _action: crate::agent::turn_type::ThreadAction,
+    ) {
+        if let Some(mgr) = self.thread_manager.as_ref() {
+            mgr.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .advance(&self.thread_id, target);
+        }
+        self.turn_type = target;
+        if let Some(tx) = self.flow_progress_tx.as_ref() {
+            let _ = tx.send(super::flow_loop::FlowProgress::TurnTypeEntered {
+                thread_id: self.thread_id.to_string(),
+                turn_type: target,
+            });
         }
     }
 
@@ -1274,6 +1555,24 @@ fn strip_trailing_grace_prompt(history: &mut History) {
     }
 }
 
+/// Parse a `shift` tool's `ToolResult` content text back into the
+/// `ShiftTurnType` sentinel. The wire shape is produced by
+/// `ToolOutput::ShiftTurnType::as_display_text`:
+/// `{"shift":{"target":"scout","rationale":"..."}}`. Returns `None` on any
+/// parse failure (the boundary logic then treats it as "no shift").
+fn parse_shift_output(text: &str) -> Option<crate::types::ToolOutput> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let shift = value.get("shift")?;
+    let target_str = shift.get("target")?.as_str()?;
+    let target = crate::agent::turn_type::TurnType::parse(target_str)?;
+    let rationale = shift
+        .get("rationale")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some(crate::types::ToolOutput::ShiftTurnType { target, rationale })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1398,6 +1697,11 @@ mod tests {
             findings_store: None,
             fs: Arc::new(crate::tools::LocalFs),
             doom: Arc::new(std::sync::Mutex::new(crate::agent::doom::DoomTracker::new())),
+            flow_thread_history: None,
+            flow_thread_manager: None,
+            flow_advisor: None,
+            flow_gates: None,
+            flow_progress_tx: None,
         }
     }
 
@@ -1846,5 +2150,200 @@ mod tests {
             agent.token_estimation_multiplier, 5.0,
             "multiplier should be capped at MAX_TOKEN_ESTIMATION_MULTIPLIER"
         );
+    }
+
+    // ---- Flow mode shift tests (plan §13) ----
+
+    fn shift_tool_call(tool_id: &str, target: &str, rationale: &str) -> StreamResponse {
+        StreamResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: format!("shifting to {target}"),
+                    },
+                    ContentBlock::ToolUse {
+                        id: tool_id.into(),
+                        name: "shift".into(),
+                        input: serde_json::json!({
+                            "target": target,
+                            "rationale": rationale,
+                        }),
+                    },
+                ],
+                ..Default::default()
+            },
+            usage: TokenUsage::default(),
+            stop_reason: Some(StopReason::ToolUse),
+        }
+    }
+
+    fn tmp_flow_store() -> (tempfile::TempDir, Arc<craft_storage::flow::FlowStore>) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(craft_storage::flow::FlowStore::from_root(
+            tmp.path().to_path_buf(),
+        ));
+        (tmp, store)
+    }
+
+    fn flow_agent_params(
+        store: Arc<craft_storage::flow::FlowStore>,
+        progress_tx: flume::Sender<crate::agent::flow_loop::FlowProgress>,
+    ) -> AgentParams {
+        let (state, _progress_rx, _cancel_trigger) =
+            crate::agent::flow_loop::FlowRunState::split(store, "test-project", "test-workstream");
+        AgentParams {
+            provider: Arc::new(MockProvider::new(vec![])),
+            model: default_model(),
+            config: AgentConfig::default(),
+            tool_output_lines: ToolOutputLines::default(),
+            permissions: Arc::new(PermissionManager::new(
+                craft_config::PermissionsConfig {
+                    default: craft_config::DefaultEffect::Allow,
+                    rules: vec![],
+                    ..Default::default()
+                },
+                std::path::PathBuf::from("/tmp"),
+            )),
+            session_id: None,
+            timeouts: craft_providers::Timeouts::default(),
+            file_tracker: FileReadTracker::fresh(),
+            prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
+            subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
+            registry: Arc::new(crate::tools::ToolRegistry::with_natives()),
+            compression: craft_config::CompressionConfig::default(),
+            findings_store: None,
+            fs: Arc::new(crate::tools::LocalFs),
+            doom: Arc::new(std::sync::Mutex::new(crate::agent::doom::DoomTracker::new())),
+            flow_thread_history: Some(state.thread_history),
+            flow_thread_manager: Some(state.thread_manager),
+            flow_advisor: Some(state.advisor),
+            flow_gates: None,
+            flow_progress_tx: Some(progress_tx),
+        }
+    }
+
+    fn flow_input() -> AgentInput {
+        AgentInput {
+            message: "please flow".into(),
+            mode: AgentMode::Flow("test-workstream".into()),
+            ..Default::default()
+        }
+    }
+
+    /// A scripted Flow run that emits a `shift` to `Scout` shifts, emits
+    /// `FlowProgress::TurnTypeEntered { turn_type: Scout }`, and continues.
+    /// This is the test that proves the architecture works end-to-end
+    /// without an orchestrator (plan §13, acceptance criterion 6).
+    #[tokio::test]
+    async fn flow_shift_to_scout_emits_turn_type_entered() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store, ptx);
+        params.provider = Arc::new(MockProvider::new(vec![
+            shift_tool_call("t1", "scout", "need a codebase map"),
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        let events = drain_events(&event_rx);
+        let progress: Vec<_> = prx.try_iter().collect();
+        // The shift to Scout was accepted and emitted TurnTypeEntered.
+        assert!(
+            progress.iter().any(|p| matches!(
+                p,
+                crate::agent::flow_loop::FlowProgress::TurnTypeEntered {
+                    turn_type: crate::agent::turn_type::TurnType::Scout,
+                    ..
+                }
+            )),
+            "expected TurnTypeEntered(Scout) in progress: {progress:?}"
+        );
+        // The run terminated cleanly.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, AgentEvent::Done { .. }))
+        );
+    }
+
+    /// A scripted Flow run with no shift stays `General` (no TurnTypeEntered).
+    #[tokio::test]
+    async fn flow_no_shift_stays_general() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store, ptx);
+        params.provider = Arc::new(MockProvider::new(vec![
+            text_response(StopReason::EndTurn),
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        let progress: Vec<_> = prx.try_iter().collect();
+        assert!(
+            !progress.iter().any(|p| matches!(
+                p,
+                crate::agent::flow_loop::FlowProgress::TurnTypeEntered { .. }
+            )),
+            "no shift should produce no TurnTypeEntered: {progress:?}"
+        );
+    }
+
+    /// A scripted Flow run where the model shifts to a type not in the
+    /// current type's `transitions` gets an `Illegal` message and stays.
+    /// General's transitions include Scout/Plan/etc. but not, e.g., Review
+    /// directly — Review is a per-chunk type.
+    #[tokio::test]
+    async fn flow_illegal_shift_pushes_message_and_stays() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, _prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store, ptx);
+        // Review is not in General's declared transition set.
+        params.provider = Arc::new(MockProvider::new(vec![
+            shift_tool_call("t1", "review", "skip ahead"),
+            text_response(StopReason::EndTurn),
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        // The illegal-shift message should be in the chat history.
+        assert!(history.as_slice().iter().any(|m| {
+            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("Illegal shift")))
+        }), "expected an Illegal shift message in history");
+    }
+
+    /// `parse_shift_output` round-trips the wire shape produced by
+    /// `ToolOutput::ShiftTurnType::as_display_text`.
+    #[test]
+    fn parse_shift_output_round_trips() {
+        let original = crate::types::ToolOutput::ShiftTurnType {
+            target: crate::agent::turn_type::TurnType::Plan,
+            rationale: "goal approved".into(),
+        };
+        let text = original.as_display_text();
+        let parsed = parse_shift_output(&text).expect("parse");
+        match parsed {
+            crate::types::ToolOutput::ShiftTurnType { target, rationale } => {
+                assert_eq!(target, crate::agent::turn_type::TurnType::Plan);
+                assert_eq!(rationale, "goal approved");
+            }
+            other => panic!("expected ShiftTurnType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_shift_output_returns_none_on_garbage() {
+        assert!(parse_shift_output("not json").is_none());
+        assert!(parse_shift_output("{}").is_none());
+        assert!(parse_shift_output(r#"{"shift":{"target":"unknown","rationale":""}}"#).is_none());
     }
 }

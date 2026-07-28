@@ -168,6 +168,7 @@ pub(crate) async fn execute_recipe(
         max_turns: recipe.max_turns.or(opts.max_turns),
         allowed_tools: opts.allowed_tools,
         stream: !opts.quiet && matches!(opts.output_format, OutputFormat::Text),
+        mode: craft_agent::AgentMode::Build,
     })
     .await?;
     headless::print_outcome(&outcome, opts.output_format);

@@ -1,5 +1,11 @@
-//! `craft flow` subcommand: runs the Flow multi-stage pipeline headlessly,
-//! or prunes old workstream directories (`craft flow gc`).
+//! `craft flow` subcommand. Drives Flow mode headlessly through the normal
+//! `Agent::run` path (Flow mode is Build mode with a mutable `turn_type` and
+//! a typed log; the pipeline shape emerges from the model's `shift` calls).
+//! Each run opens (or resumes) the per-workstream `ThreadHistory`, attaches it
+//! plus a `ThreadManager`, the no-op advisor, and a progress channel to the
+//! `Agent`, and translates the terminal `AgentEvent::Done` stop reason into a
+//! `FlowOutcome` for printing. Also prunes old workstream directories
+//! (`craft flow gc`).
 
 use std::env;
 use std::io::{self, Read};
@@ -9,13 +15,14 @@ use std::time::Duration;
 use color_eyre::Result;
 use color_eyre::eyre::{Context, bail};
 
+use craft_agent::agent::flow_loop::{self, FlowOutcome, FlowRunState};
 use craft_agent::permissions::PermissionManager;
-use craft_agent::tools::FlowRunnerEnv;
+use craft_agent::{
+    Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope, FindingsStore,
+    History, ToolOutputLines,
+};
 use craft_config::{load_env_files, load_permissions};
-use craft_flow::{ApprovalPayload, FlowOutcome, FlowParams, TaskStageRunner};
-use craft_lua::PluginHost;
 use craft_providers::StopReason;
-use craft_providers::provider;
 use craft_storage::StateDir;
 use craft_storage::flow::FlowStore;
 
@@ -23,35 +30,31 @@ use crate::cli::FlowAction;
 use crate::print::OutputFormat;
 use crate::setup;
 
-/// Stop-reason strings emitted in `--print --output-format json` output for
-/// outcomes that don't map to a real provider [`StopReason`]. The
-/// `awaiting_goal_approval` gate pause uses the typed
-/// `StopReason::AwaitingGoalApproval` variant; `done` and `error` are
-/// Flow-local terminal states with no provider analogue.
+/// Stop-reason strings for outcomes with no provider analogue.
 const STOP_DONE: &str = "done";
 const STOP_ERROR: &str = "error";
 const STOP_CANCELLED: &str = "cancelled";
 const STOP_NEEDS_REVIEW: &str = "needs_review";
+const STOP_AWAITING: &str = "awaiting_goal_approval";
 const APPROVED_TOKEN: &str = "approved";
 
 pub async fn run(action: FlowAction) -> Result<()> {
     match action {
         FlowAction::Run {
             request,
-            print,
+            print: _print,
             output_format,
             session,
             payload,
             retry,
-        } => run_pipeline(request, print, output_format, session, payload, retry).await,
+        } => run_flow(request, output_format, session, payload, retry).await,
         FlowAction::Gc { older_than } => gc(older_than),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_pipeline(
+async fn run_flow(
     request: Option<String>,
-    print: bool,
     output_format: OutputFormat,
     session: Option<String>,
     payload: Option<String>,
@@ -63,7 +66,7 @@ async fn run_pipeline(
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let plugin_host = PluginHost::new(
+    let plugin_host = craft_lua::PluginHost::new(
         Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
         None,
     )
@@ -81,10 +84,8 @@ async fn run_pipeline(
     setup::install_panic_log_hook();
 
     let model = setup::resolve_model(None, &config.provider, &storage).await?;
-    let project_id = craft_flow::project_id(&cwd);
+    let project_id = craft_storage::flow::project_id(&cwd);
     let store = Arc::new(FlowStore::new(&storage).context("init flow store")?);
-    // Resume re-uses the persisted workstream id; a fresh run mints one.
-    // --retry requires a session id (we need to know which workstream to resume).
     if retry && session.is_none() {
         bail!("--retry requires -s <session-id> to identify the workstream to resume");
     }
@@ -102,74 +103,191 @@ async fn run_pipeline(
         }
     };
 
-    let approval = payload.map(|p| {
+    // Resume: an approval/revision payload turns the prompt into the user's
+    // decision text. The agent reads its persisted typed log to re-derive the
+    // goal and the next shift (plan §7: the approval gate is an ordinary turn
+    // boundary; resume re-enters at General and the model re-derives).
+    let message = if let Some(p) = payload {
         if p.trim().eq_ignore_ascii_case(APPROVED_TOKEN) {
-            ApprovalPayload::Approved
+            APPROVED_TOKEN.to_string()
         } else {
-            ApprovalPayload::Revised(p)
+            p
         }
-    });
+    } else {
+        request
+    };
 
-    let mut params = FlowParams::new(
-        project_id.clone(),
-        workstream_id.clone(),
-        request,
-        config.agent.flow.clone(),
-        Arc::clone(&store),
-    );
-    params.approval = approval;
-    params.resume = retry;
-    // Live stage runner: launches each stage as a real subagent via Agent::run
-    // (model-role resolution, worktree isolation, output-schema validation),
-    // closing the gap where the pipeline previously only ran under the
-    // deterministic provider-free DefaultRunner. The event channel surfaces
-    // stage subagent events for `--print --output-format stream-json` consumers.
     let prompt_slots = plugin_host.event_handle().collect_prompt_slots();
     let timeouts = craft_providers::Timeouts {
         connect: config.provider.connect_timeout,
         low_speed: config.provider.low_speed_timeout,
         stream: config.provider.stream_timeout,
     };
-    let (event_tx, _event_rx) = flume::unbounded::<craft_agent::Envelope>();
+    let (event_tx, event_rx) = flume::unbounded::<Envelope>();
     let provider = {
         let mut model_for_provider = model.clone();
         Arc::from(
-            provider::from_model(&mut model_for_provider, timeouts)
+            craft_providers::provider::from_model(&mut model_for_provider, timeouts)
                 .await
                 .context("init flow provider")?,
         )
     };
-    let embedder: Arc<dyn craft_flow::search::Embedder> = Arc::new(
-        craft_flow::search::OnnxEmbedder::new(craft_agent::EmbeddingService::new()),
-    );
-    params.embedder = Some(Arc::clone(&embedder));
-    let flow_search: craft_agent::tools::flow_search::FlowSearchHandle =
-        Some(Arc::new(craft_flow::search::FlowSearchBackendImpl::new(
-            Arc::clone(&store),
-            embedder,
-            &project_id,
-            &workstream_id,
-        )));
-    let env = Arc::new(FlowRunnerEnv {
-        provider,
-        model: Arc::new(model.clone()),
-        config: config.agent.clone(),
-        permissions: Arc::new(PermissionManager::new(load_permissions(&cwd), cwd.clone())),
-        timeouts,
-        compression: config.compression.clone(),
-        prompt_slots: Arc::new(prompt_slots),
-        event_tx: craft_agent::EventSender::new(event_tx, 0),
-        flow_search,
-    });
-    params.runner = Some(Arc::new(TaskStageRunner::new(env, workstream_id)));
-    let outcome = craft_flow::run(params).await;
+    let (state, progress_rx, _cancel_trigger) =
+        FlowRunState::split(Arc::clone(&store), project_id, workstream_id.clone());
 
-    if print || matches!(output_format, OutputFormat::Json | OutputFormat::StreamJson) {
-        print_outcome(&outcome, &model.id, output_format);
-    } else {
-        print_outcome_text(&outcome);
-    }
+    let tool_build = craft_agent::tools::ToolBuild {
+        vars: craft_agent::template::env_vars(),
+        excluded: Vec::new(),
+        mcp: None,
+    };
+    let dynamic = craft_agent::tools::DynamicContext::from_config(&config.agent);
+    let tools = craft_agent::tools::build_active_tools(
+        &tool_build,
+        &model,
+        &config.agent,
+        &dynamic,
+        &craft_agent::tools::PromotedTools::new(),
+    );
+    let instructions = craft_agent::agent::load_instruction_text(&cwd.to_string_lossy());
+    let system = craft_agent::template::env_vars()
+        .apply(&craft_agent::agent::build_system_prompt(
+            &craft_agent::template::env_vars(),
+            &AgentMode::Flow(workstream_id.clone()),
+            &instructions,
+            &Arc::new(prompt_slots),
+            &model,
+            false,
+        ))
+        .into_owned();
+
+    let mut history = History::new(Vec::new());
+    let agent = Agent::new(
+        AgentParams {
+            provider,
+            model: model.clone(),
+            config: config.agent.clone(),
+            tool_output_lines: ToolOutputLines::default(),
+            permissions: Arc::new(PermissionManager::new(load_permissions(&cwd), cwd.clone())),
+            session_id: None,
+            timeouts,
+            file_tracker: Arc::new(craft_agent::tools::FileReadTracker::new()),
+            prompt_slots: Arc::new(plugin_host.event_handle().collect_prompt_slots()),
+            subagent_cancels: Arc::new(craft_agent::cancel::CancelMap::new()),
+            registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
+            compression: config.compression.clone(),
+            findings_store: Some(Arc::clone(&FindingsStore::new_shared())),
+            fs: Arc::new(craft_agent::tools::LocalFs),
+            doom: Arc::new(std::sync::Mutex::new(craft_agent::DoomTracker::new())),
+            flow_thread_history: Some(state.thread_history),
+            flow_thread_manager: Some(state.thread_manager),
+            flow_advisor: Some(state.advisor),
+            flow_gates: None,
+            flow_progress_tx: Some(state.progress_tx),
+        },
+        AgentRunParams {
+            history: &mut history,
+            system,
+            event_tx: craft_agent::EventSender::new(event_tx, 0),
+            tools,
+            promoted: craft_agent::tools::PromotedTools::new(),
+            tool_build: Some(tool_build),
+            hooks: None,
+        },
+    );
+
+    let input = AgentInput {
+        message,
+        mode: AgentMode::Flow(workstream_id),
+        ..Default::default()
+    };
+
+    // Run the agent while concurrently draining the event + progress streams
+    // so channels stay clear and we can derive the terminal `FlowOutcome`.
+    // The agent owns `history` for the duration of the run; we collect events
+    // from the same `event_tx` it emits onto.
+    let outcome = tokio::select! {
+        biased;
+        o = collect_outcome(event_rx, progress_rx) => o,
+        r = agent.run(input) => match r {
+            Ok(()) => FlowOutcome::Done { verification_report: String::new() },
+            Err(e) => FlowOutcome::Failed {
+                stage: craft_agent::TurnType::General,
+                reason: e.user_message(),
+            },
+        },
+    };
+    print_outcome(&outcome, &model.id, output_format);
     Ok(())
+}
+
+/// Drain the agent's event stream + Flow progress stream until the terminal
+/// `AgentEvent::Done` arrives, then derive the `FlowOutcome` from its stop
+/// reason. Text emitted along the way is concatenated as the outcome's text
+/// body (goal doc, verification report, etc.).
+async fn collect_outcome(
+    event_rx: flume::Receiver<Envelope>,
+    progress_rx: flume::Receiver<flow_loop::FlowProgress>,
+) -> FlowOutcome {
+    let mut text = String::new();
+    let mut terminal: Option<StopReason> = None;
+    let mut error: Option<String> = None;
+    loop {
+        tokio::select! {
+            biased;
+            recv = event_rx.recv_async() => {
+                let Ok(envelope) = recv else { break; };
+                match envelope.event {
+                    AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
+                    AgentEvent::Done { stop_reason, .. } => {
+                        terminal = stop_reason;
+                        break;
+                    }
+                    AgentEvent::Error { message } => {
+                        error = Some(message);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            recv = progress_rx.recv_async() => {
+                let Ok(p) = recv else { continue; };
+                match p {
+                    flow_loop::FlowProgress::GoalReady { goal_doc } => {
+                        text = goal_doc;
+                    }
+                    flow_loop::FlowProgress::Done { verdict } => {
+                        text = verdict;
+                    }
+                    flow_loop::FlowProgress::NeedsReview { report } => {
+                        text = report;
+                    }
+                    flow_loop::FlowProgress::Failed { stage, reason } => {
+                        return FlowOutcome::Failed { stage, reason };
+                    }
+                    flow_loop::FlowProgress::Cancelled => {
+                        return FlowOutcome::Cancelled;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    match (terminal, error) {
+        (Some(StopReason::AwaitingGoalApproval), _) => {
+            FlowOutcome::AwaitingGoalApproval { goal_doc: text }
+        }
+        (Some(StopReason::Cancelled), _) => FlowOutcome::Cancelled,
+        (Some(_), _) => FlowOutcome::Done {
+            verification_report: text,
+        },
+        (None, Some(msg)) => FlowOutcome::Failed {
+            stage: craft_agent::TurnType::General,
+            reason: msg,
+        },
+        (None, None) => FlowOutcome::Done {
+            verification_report: text,
+        },
+    }
 }
 
 fn gc(older_than: String) -> Result<()> {
@@ -211,25 +329,6 @@ fn new_workstream_id() -> String {
     craft_storage::id::CraftId::generate().to_string()
 }
 
-fn outcome_stop_reason(outcome: &FlowOutcome) -> StopReasonOrStr {
-    match outcome {
-        FlowOutcome::AwaitingGoalApproval { .. } => {
-            StopReasonOrStr::Typed(StopReason::AwaitingGoalApproval)
-        }
-        FlowOutcome::Done { .. } => StopReasonOrStr::Str(STOP_DONE),
-        FlowOutcome::Failed { .. } => StopReasonOrStr::Str(STOP_ERROR),
-        FlowOutcome::NeedsReview { .. } => StopReasonOrStr::Str(STOP_NEEDS_REVIEW),
-        FlowOutcome::Cancelled => StopReasonOrStr::Str(STOP_CANCELLED),
-    }
-}
-
-/// The approval gate maps to a typed [`StopReason`]; the terminal `done` and
-/// `error` outcomes have no provider analogue and stay as plain strings.
-enum StopReasonOrStr {
-    Typed(StopReason),
-    Str(&'static str),
-}
-
 fn outcome_text(outcome: &FlowOutcome) -> String {
     match outcome {
         FlowOutcome::AwaitingGoalApproval { goal_doc } => goal_doc.clone(),
@@ -237,7 +336,7 @@ fn outcome_text(outcome: &FlowOutcome) -> String {
             verification_report,
         } => verification_report.clone(),
         FlowOutcome::Failed { stage, reason } => {
-            format!("Flow failed at stage '{}': {reason}", stage.as_str())
+            format!("Flow failed at turn '{}': {reason}", stage.as_str())
         }
         FlowOutcome::NeedsReview {
             verification_report,
@@ -245,6 +344,16 @@ fn outcome_text(outcome: &FlowOutcome) -> String {
             format!("Flow verification needs review:\n{verification_report}")
         }
         FlowOutcome::Cancelled => "Flow run cancelled.".to_string(),
+    }
+}
+
+fn outcome_stop(outcome: &FlowOutcome) -> &'static str {
+    match outcome {
+        FlowOutcome::AwaitingGoalApproval { .. } => STOP_AWAITING,
+        FlowOutcome::Done { .. } => STOP_DONE,
+        FlowOutcome::Failed { .. } => STOP_ERROR,
+        FlowOutcome::NeedsReview { .. } => STOP_NEEDS_REVIEW,
+        FlowOutcome::Cancelled => STOP_CANCELLED,
     }
 }
 
@@ -260,39 +369,18 @@ fn print_outcome(outcome: &FlowOutcome, model_id: &str, format: OutputFormat) {
             }
         }
         OutputFormat::Json | OutputFormat::StreamJson => {
-            let json = outcome_json(outcome, model_id);
+            let json = serde_json::json!({
+                "subtype": if is_error { "error" } else { "success" },
+                "is_error": is_error,
+                "result": result,
+                "stop_reason": outcome_stop(outcome),
+                "model": model_id,
+            });
             println!("{}", serde_json::to_string(&json).unwrap_or_default());
         }
     }
 }
 
-/// Build the JSON object emitted for `--output-format json`. Extracted from
-/// [`print_outcome`] so the stop-reason serialization is unit-testable without
-/// capturing stdout.
-fn outcome_json(outcome: &FlowOutcome, model_id: &str) -> serde_json::Value {
-    let is_error = matches!(outcome, FlowOutcome::Failed { .. } | FlowOutcome::Cancelled);
-    let result = outcome_text(outcome);
-    let stop_reason = match outcome_stop_reason(outcome) {
-        StopReasonOrStr::Typed(sr) => serde_json::to_value(sr).unwrap_or_default(),
-        StopReasonOrStr::Str(s) => serde_json::Value::from(s),
-    };
-    serde_json::json!({
-        "subtype": if is_error { "error" } else { "success" },
-        "is_error": is_error,
-        "result": result,
-        "stop_reason": stop_reason,
-        "model": model_id,
-    })
-}
-
-fn print_outcome_text(outcome: &FlowOutcome) {
-    let text = outcome_text(outcome);
-    if matches!(outcome, FlowOutcome::Failed { .. } | FlowOutcome::Cancelled) {
-        eprintln!("{text}");
-    } else {
-        println!("{text}");
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,64 +401,26 @@ mod tests {
     }
 
     #[test]
-    fn new_workstream_id_is_hex() {
+    fn new_workstream_id_is_base58_craft_id() {
         let id = new_workstream_id();
-        // uuid v4 string with hyphens, e.g. "550e8400-e29b-41d4-a716-446655440000".
-        assert_eq!(id.len(), 36);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+        assert!(!id.is_empty());
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]
-    fn approval_gate_json_emits_typed_stop_reason() {
-        let outcome = FlowOutcome::AwaitingGoalApproval {
-            goal_doc: "goal: ship it".to_string(),
+    fn done_outcome_stop_is_done() {
+        let o = FlowOutcome::Done {
+            verification_report: "{}".into(),
         };
-        let json = outcome_json(&outcome, "test-model");
-        assert_eq!(
-            json["stop_reason"],
-            serde_json::json!("awaiting_goal_approval")
-        );
-        assert_eq!(json["is_error"], serde_json::json!(false));
-        assert_eq!(json["result"], serde_json::json!("goal: ship it"));
+        assert_eq!(outcome_stop(&o), STOP_DONE);
     }
 
     #[test]
-    fn done_outcome_json_emits_done_stop_reason() {
-        let outcome = FlowOutcome::Done {
-            verification_report: "{\"goal_met\":true}".to_string(),
+    fn failed_outcome_stop_is_error() {
+        let o = FlowOutcome::Failed {
+            stage: craft_agent::TurnType::Plan,
+            reason: "no chunks".into(),
         };
-        let json = outcome_json(&outcome, "m");
-        assert_eq!(json["stop_reason"], serde_json::json!("done"));
-    }
-
-    #[test]
-    fn failed_outcome_json_emits_error_stop_reason() {
-        let outcome = FlowOutcome::Failed {
-            stage: craft_flow::Stage::Plan,
-            reason: "no chunks".to_string(),
-        };
-        let json = outcome_json(&outcome, "m");
-        assert_eq!(json["stop_reason"], serde_json::json!("error"));
-        assert_eq!(json["is_error"], serde_json::json!(true));
-    }
-
-    #[test]
-    fn cancelled_outcome_json_emits_cancelled_stop_reason() {
-        let outcome = FlowOutcome::Cancelled;
-        let json = outcome_json(&outcome, "m");
-        assert_eq!(json["stop_reason"], serde_json::json!("cancelled"));
-        assert_eq!(json["is_error"], serde_json::json!(true));
-        assert_eq!(json["result"], serde_json::json!("Flow run cancelled."));
-    }
-
-    #[test]
-    fn needs_review_outcome_json_emits_needs_review_stop_reason() {
-        let outcome = FlowOutcome::NeedsReview {
-            verification_report: r#"{"status":"needs_review"}"#.to_string(),
-        };
-        let json = outcome_json(&outcome, "m");
-        assert_eq!(json["stop_reason"], serde_json::json!("needs_review"));
-        assert_eq!(json["is_error"], serde_json::json!(false));
-        assert!(json["result"].as_str().unwrap().contains("needs review"));
+        assert_eq!(outcome_stop(&o), STOP_ERROR);
     }
 }

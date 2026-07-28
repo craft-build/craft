@@ -24,6 +24,33 @@ const WORKSTREAM_STATE_FILE: &str = "workstream.json";
 pub const SEMANTIC_INDEX_MIN_DOCS: usize = 8;
 const INDEX_FILE_NAME: &str = "index.json";
 
+/// Project id: lowercase basename of `cwd` plus the fnv1a-64 hash of the full
+/// path, mirroring the Lua `memory_helpers.project_id` so the Flow and memory
+/// namespaces share a per-project key. Migrated from the former `craft-flow`
+/// crate so the Flow namespace path `<project>/flow/<workstream>/` stays
+/// stable without a second storage crate.
+pub fn project_id(cwd: &std::path::Path) -> String {
+    let basename = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| "root".to_string());
+    let path_str = cwd.to_string_lossy();
+    format!("{basename}-{}", fnv1a_64(path_str.as_bytes()))
+}
+
+/// FNV-1a 64-bit as a 16-hex-char string, matching `memory_helpers.fnv1a_64`'s
+/// `%08x%08x` output exactly.
+fn fnv1a_64(data: &[u8]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for &b in data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FlowError {
     #[error(transparent)]
@@ -600,5 +627,26 @@ mod tests {
             Err(FlowError::DocTooLarge { .. }) => {}
             other => panic!("expected DocTooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fnv1a_64_empty_is_offset_basis() {
+        // FNV-1a 64-bit of the empty input is the offset basis.
+        assert_eq!(fnv1a_64(b""), "cbf29ce484222325");
+    }
+
+    #[test]
+    fn fnv1a_64_is_16_hex_chars() {
+        let h = fnv1a_64(b"hello");
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn project_id_is_basename_dash_hash() {
+        let id = project_id(std::path::Path::new("/Users/me/my-project"));
+        assert!(id.starts_with("my-project-"), "got {id}");
+        let hash = &id["my-project-".len()..];
+        assert_eq!(hash.len(), 16);
     }
 }

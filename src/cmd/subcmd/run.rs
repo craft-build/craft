@@ -37,6 +37,7 @@ pub async fn run(args: RunCommand) -> Result<()> {
         max_turns: args.max_turns,
         allowed_tools: args.allowed_tools,
         stream: !args.quiet && matches!(args.output_format, OutputFormat::Text),
+        mode: craft_agent::AgentMode::Build,
     })
     .await?;
     headless::print_outcome(&outcome, args.output_format);

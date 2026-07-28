@@ -311,7 +311,8 @@ impl HighlightRequest {
             | ToolOutput::Batch { .. }
             | ToolOutput::Findings(_)
             | ToolOutput::ReviewResult { .. }
-            | ToolOutput::Image { .. } => None,
+            | ToolOutput::Image { .. }
+            | ToolOutput::ShiftTurnType { .. } => None,
         });
         if input.is_none() && output.is_none() {
             return None;

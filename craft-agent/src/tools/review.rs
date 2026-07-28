@@ -146,6 +146,11 @@ impl Review {
                 findings_store: None,
                 fs: Arc::new(crate::tools::LocalFs),
                 doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
+                flow_thread_history: None,
+                flow_thread_manager: None,
+                flow_advisor: None,
+                flow_gates: None,
+                flow_progress_tx: None,
             },
             AgentRunParams {
                 history: &mut history,

@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 47 built-in tools. This is the full reference.
+Craft ships with 48 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -438,6 +438,15 @@ Search the current Flow workstream's persisted documents (goal, plan, requiremen
 |-----------|------|----------|---------|-------------|
 | `k` | integer | no | 5, max 20 | Maximum results to return |
 | `query` | string | yes |  | Natural-language query describing what you need |
+
+### `shift` *(native)*
+
+Shift the Flow run into a different turn type (Flow mode only). The shift is applied at the next turn boundary after running through the current type's declared transition rules: it may be accepted, blocked (an objective gate failed), or rejected as illegal (the current type does not declare that target). Use this to enter narrow stages like `scout`, `tpm`, `plan`, `req`, `execute`, `review`, `qa`, `report`, `integrator`, `verifier`, or to return to `general`. The pipeline shape emerges from your shift choices, so only shift when the task genuinely needs a narrow stage.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `rationale` | string | yes | Why this shift is warranted (one or two sentences). Recorded in the typed log. |
+| `target` | string | yes | The turn type to shift into: scout, tpm, plan, req, execute, review, qa, report, integrator, verifier, general |
 
 ### `wiki_read` *(native)*
 

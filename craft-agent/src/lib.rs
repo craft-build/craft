@@ -13,12 +13,15 @@ pub use mcp::{McpCommand, McpHandle, McpPromptArg, McpPromptInfo, McpSnapshot, M
 pub(crate) mod task_set;
 pub use agent::EmbedRequest;
 pub use agent::EmbeddingService;
+pub use agent::advisor::AdvisorSeverity;
+pub use agent::flow_loop::{FlowAdvisor, FlowRunState, ForcedTransition, NoopFlowAdvisor};
 pub use agent::{
     Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
     LoadedInstructions, RecoveryAction, RecoveryFailureKind, SharedDoomTracker,
-    SharedFindingsStore, SharedMessages, StoredFinding, action_for, classify,
-    classify_subagent_error, find_subdirectory_instructions, is_instruction_file,
+    SharedFindingsStore, SharedMessages, StoredFinding, ThreadStatus, TurnType, action_for,
+    classify, classify_subagent_error, find_subdirectory_instructions, is_instruction_file,
 };
+pub use agent::{ApprovalPayload, FLOW_APPROVE_ANSWER, FLOW_CANCEL_ANSWER, FlowProgress};
 pub use cancel::{CancelMap, CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
 pub mod checks;

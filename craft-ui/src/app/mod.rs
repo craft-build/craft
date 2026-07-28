@@ -135,7 +135,7 @@ pub enum Msg {
     Mouse(MouseEvent),
     Scroll { column: u16, row: u16, delta: i32 },
     Agent(Box<Envelope>),
-    FlowProgress(craft_flow::FlowProgress),
+    FlowProgress(craft_agent::FlowProgress),
 }
 
 pub struct App {
@@ -233,13 +233,13 @@ macro_rules! define_overlays {
 
 /// True for per-chunk pipeline stages (Req/Execute/Review/Qa) that carry a
 /// chunk id in their `flow_stage_id`, as opposed to top-level stages.
-fn is_chunk_stage(stage: craft_flow::Stage) -> bool {
+fn is_chunk_stage(stage: craft_agent::TurnType) -> bool {
     matches!(
         stage,
-        craft_flow::Stage::Req
-            | craft_flow::Stage::Execute
-            | craft_flow::Stage::Review
-            | craft_flow::Stage::Qa
+        craft_agent::TurnType::Req
+            | craft_agent::TurnType::Execute
+            | craft_agent::TurnType::Review
+            | craft_agent::TurnType::Qa
     )
 }
 
@@ -428,7 +428,7 @@ impl App {
                         .flow
                         .chunks
                         .iter()
-                        .find(|(_, c)| c.status == craft_flow::ChunkStatus::Running)
+                        .find(|(_, c)| c.status == craft_agent::ThreadStatus::Running)
                         .map(|(id, _)| id.clone())
                 })?;
                 let sub_stage = self
@@ -437,7 +437,7 @@ impl App {
                     .chunks
                     .get(&chunk_id)
                     .and_then(|c| c.stage)
-                    .unwrap_or(craft_flow::Stage::Req);
+                    .unwrap_or(craft_agent::TurnType::Req);
                 vec![format!(
                     "flow:{workstream}:{}:{chunk_id}",
                     sub_stage.as_str()
@@ -502,7 +502,7 @@ impl App {
     /// Update a single chunk's status in the active workstream, surfaced from
     /// craft-flow stage events. No-op outside Flow mode.
     #[allow(dead_code)]
-    pub(crate) fn update_flow_chunk(&mut self, chunk_id: &str, status: craft_flow::ChunkStatus) {
+    pub(crate) fn update_flow_chunk(&mut self, chunk_id: &str, status: craft_agent::ThreadStatus) {
         if self.state.mode != Mode::Flow {
             return;
         }
@@ -513,8 +513,8 @@ impl App {
     #[allow(dead_code)]
     pub(crate) fn sync_flow_state(
         &mut self,
-        stage: Option<craft_flow::Stage>,
-        chunks: impl IntoIterator<Item = (String, String, craft_flow::ChunkStatus)>,
+        stage: Option<craft_agent::TurnType>,
+        chunks: impl IntoIterator<Item = (String, String, craft_agent::ThreadStatus)>,
     ) {
         if self.state.mode != Mode::Flow {
             return;
@@ -525,19 +525,43 @@ impl App {
     /// Apply a `FlowProgress` event from the pipeline to the live `FlowState`
     /// (so the FlowPanel reflects stage/chunk transitions) or open the
     /// goal-approval overlay at the gate. No-op outside Flow mode.
-    fn handle_flow_progress(&mut self, p: craft_flow::FlowProgress) -> Vec<Action> {
+    fn handle_flow_progress(&mut self, p: craft_agent::FlowProgress) -> Vec<Action> {
         if self.state.mode != Mode::Flow {
             return vec![];
         }
         match p {
-            craft_flow::FlowProgress::Stage(stage) => {
-                if stage == craft_flow::Stage::Scout {
+            craft_agent::FlowProgress::TurnTypeEntered { turn_type, .. } => {
+                if turn_type == craft_agent::TurnType::Scout {
                     self.state.flow.clear_chunks();
                 }
-                self.state.flow.stage = Some(stage);
+                self.state.flow.stage = Some(turn_type);
                 self.flow_failed = false;
             }
-            craft_flow::FlowProgress::Chunk {
+            craft_agent::FlowProgress::ThreadSpawn {
+                thread_id,
+                turn_type,
+                ..
+            } => {
+                self.state.flow.set_chunk(
+                    &thread_id,
+                    "",
+                    craft_agent::ThreadStatus::Running,
+                    Some(turn_type),
+                    0,
+                    &[],
+                );
+            }
+            craft_agent::FlowProgress::ThreadExit { thread_id, .. } => {
+                self.state.flow.set_chunk(
+                    &thread_id,
+                    "",
+                    craft_agent::ThreadStatus::Done,
+                    None,
+                    0,
+                    &[],
+                );
+            }
+            craft_agent::FlowProgress::Chunk {
                 id,
                 title,
                 status,
@@ -549,34 +573,40 @@ impl App {
                     .flow
                     .set_chunk(&id, &title, status, stage, order, &depends_on);
             }
-            craft_flow::FlowProgress::GoalReady { goal_doc } => {
+            craft_agent::FlowProgress::GoalReady { goal_doc } => {
                 self.flow_awaiting_approval = true;
                 self.flow_goal_prompt.open(goal_doc);
             }
-            craft_flow::FlowProgress::Done { .. } => {
-                // On success every chunk should already be Done (each chunk
-                // emits its own Done after QA passes). Do NOT finalize here:
-                // forcing still-running chunks to Blocked on a successful run
-                // would mask a real missed-transition bug. Finalize only runs
-                // on Failed/Cancelled below.
+            craft_agent::FlowProgress::Done { .. } => {
                 self.flow_failed = false;
                 self.flash("Flow run complete.".into());
             }
-            craft_flow::FlowProgress::NeedsReview { .. } => {
+            craft_agent::FlowProgress::NeedsReview { .. } => {
                 self.flow_failed = false;
                 self.flash("Flow verification needs review.".into());
             }
-            craft_flow::FlowProgress::Failed { stage, reason } => {
+            craft_agent::FlowProgress::Failed { stage, reason } => {
                 self.state.flow.finalize_non_terminal();
                 self.flow_failed = true;
                 self.status = Status::error(format!(
-                    "flow {stage:?} failed: {reason} (press Enter to retry)"
+                    "flow {} failed: {reason} (press Enter to retry)",
+                    stage.as_str()
                 ));
             }
-            craft_flow::FlowProgress::Cancelled => {
+            craft_agent::FlowProgress::Cancelled => {
                 self.state.flow.finalize_non_terminal();
                 self.flow_failed = false;
                 self.status = Status::error("flow run cancelled".into());
+            }
+            craft_agent::FlowProgress::AdvisorNote {
+                severity, message, ..
+            } => {
+                let label = match severity {
+                    craft_agent::AdvisorSeverity::Blocker => "Advisor blocker",
+                    craft_agent::AdvisorSeverity::Concern => "Advisor concern",
+                    craft_agent::AdvisorSeverity::Nit => "Advisor nit",
+                };
+                self.flash(format!("{label}: {message}"));
             }
         }
         vec![]
@@ -804,8 +834,8 @@ impl App {
         if self.flow_goal_prompt.is_open() {
             if let Some(answer) = self.flow_goal_prompt.handle_key(key) {
                 let encoded = match answer {
-                    FlowGoalAnswer::Approve => craft_flow::FLOW_APPROVE_ANSWER.to_owned(),
-                    FlowGoalAnswer::Cancel => craft_flow::FLOW_CANCEL_ANSWER.to_owned(),
+                    FlowGoalAnswer::Approve => craft_agent::FLOW_APPROVE_ANSWER.to_owned(),
+                    FlowGoalAnswer::Cancel => craft_agent::FLOW_CANCEL_ANSWER.to_owned(),
                     FlowGoalAnswer::Revise(text) => text,
                 };
                 self.flow_goal_prompt.close();
@@ -1246,8 +1276,8 @@ impl App {
                 self.flow_awaiting_approval = false;
                 self.flow_goal_prompt.close();
                 let answer = match text.as_str() {
-                    "cancel" => craft_flow::FLOW_CANCEL_ANSWER.to_owned(),
-                    "approved" => craft_flow::FLOW_APPROVE_ANSWER.to_owned(),
+                    "cancel" => craft_agent::FLOW_CANCEL_ANSWER.to_owned(),
+                    "approved" => craft_agent::FLOW_APPROVE_ANSWER.to_owned(),
                     other => other.to_owned(),
                 };
                 self.send_answer(answer);
@@ -1307,7 +1337,7 @@ impl App {
         self.pending_input = PendingInput::None;
         if awaiting_flow {
             self.flow_awaiting_approval = false;
-            self.send_answer(craft_flow::FLOW_CANCEL_ANSWER.to_owned());
+            self.send_answer(craft_agent::FLOW_CANCEL_ANSWER.to_owned());
         }
         self.finish_subagents(DisplayRole::Error, CANCELLED_TEXT);
         self.subagent_answers.clear();
