@@ -7,10 +7,15 @@ const INFINITE_LOOP_MSG: &str = "split: separator matched an empty string (infin
 /// list. Mirrors Neovim's `vim.split`, so code using it can be copied
 /// between Neovim and craft. {sep} is a Lua pattern unless `plain` is
 /// set; an empty {sep} splits into single characters.
-fn split(lua: &Lua, s: mlua::String, sep: mlua::String, opts: Option<Value>) -> LuaResult<Table> {
+fn split(
+    lua: &Lua,
+    s: mlua::LuaString,
+    sep: mlua::LuaString,
+    opts: Option<Value>,
+) -> LuaResult<Table> {
     let (plain, trimempty) = parse_opts(opts)?;
     let bytes = s.as_bytes();
-    let mut parts: Vec<mlua::String> = Vec::new();
+    let mut parts: Vec<mlua::LuaString> = Vec::new();
 
     if sep.as_bytes().is_empty() {
         for i in 0..bytes.len() {
@@ -58,7 +63,7 @@ pub(crate) fn register(craft: &Table, lua: &Lua) -> LuaResult<()> {
     craft.set(
         "split",
         lua.create_function(
-            |lua, (s, sep, opts): (mlua::String, mlua::String, Option<Value>)| {
+            |lua, (s, sep, opts): (mlua::LuaString, mlua::LuaString, Option<Value>)| {
                 split(lua, s, sep, opts)
             },
         )?,

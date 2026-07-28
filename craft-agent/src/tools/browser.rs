@@ -639,7 +639,7 @@ impl Browser {
                 }
                 "html" => {
                     let html = if let Some(sel) = selector {
-                        let el = page.locator(sel).await;
+                        let el = page.locator(sel);
                         el.evaluate::<_, String>("el => el.outerHTML", None::<String>)
                             .await
                             .map_err(|e| format!("failed to read element html: {e}"))
@@ -652,7 +652,7 @@ impl Browser {
                 }
                 "markdown" => {
                     let html = if let Some(sel) = selector {
-                        let el = page.locator(sel).await;
+                        let el = page.locator(sel);
                         el.evaluate::<_, String>("el => el.outerHTML", None::<String>)
                             .await
                             .map_err(|e| format!("failed to read element html: {e}"))?
@@ -747,7 +747,7 @@ impl Browser {
         let page = s.page(self.tab)?;
         drop(s);
         let text = tokio::time::timeout(CAPTURE_TIMEOUT, async {
-            let locator = page.locator(sel).await;
+            let locator = page.locator(sel);
             locator.click(None).await.map_err(|e| click_err(sel, e))?;
             if !wait.is_zero() {
                 tokio::time::sleep(wait).await;
@@ -774,7 +774,7 @@ impl Browser {
         let page = s.page(self.tab)?;
         drop(s);
         tokio::time::timeout(CAPTURE_TIMEOUT, async {
-            let locator = page.locator(sel).await;
+            let locator = page.locator(sel);
             if clear {
                 let _ = locator.clear(None).await;
             }
@@ -818,7 +818,7 @@ impl Browser {
         let mut filled = 0usize;
         tokio::time::timeout(CAPTURE_TIMEOUT, async {
             for f in fields {
-                let locator = page.locator(&f.selector).await;
+                let locator = page.locator(&f.selector);
                 match f.field_type.as_deref().unwrap_or("text") {
                     "select" => {
                         locator
@@ -849,7 +849,6 @@ impl Browser {
                     "fill_form with submit=true requires 'submit_selector'".to_string()
                 })?;
                 page.locator(sel)
-                    .await
                     .click(None)
                     .await
                     .map_err(|e| format!("failed to click submit `{sel}`: {e}"))?;
@@ -921,7 +920,6 @@ impl Browser {
         if let Some(sel) = &self.selector {
             tokio::time::timeout(CAPTURE_TIMEOUT, async {
                 page.locator(sel)
-                    .await
                     .scroll_into_view_if_needed()
                     .await
                     .map_err(|e| format!("failed to scroll to `{sel}`: {e}"))
@@ -957,7 +955,7 @@ impl Browser {
         let amt = self.amount.unwrap_or(DEFAULT_SCROLL_AMOUNT);
         let dy = if dir == "up" { -amt } else { amt };
         page.mouse()
-            .wheel(0, dy as i32)
+            .wheel(0.0, dy as f64)
             .await
             .map_err(|e| format!("scroll failed: {e}"))?;
         Ok(ToolOutput::Markdown("Scrolled.".into()))
@@ -980,7 +978,7 @@ impl Browser {
                 .timeout(timeout as f64)
                 .build();
             tokio::time::timeout(CAPTURE_TIMEOUT, async {
-                page.locator(sel).await.wait_for(Some(opts)).await
+                page.locator(sel).wait_for(Some(opts)).await
             })
             .await
             .map_err(|_| "wait timed out")?
@@ -1012,7 +1010,6 @@ impl Browser {
         let page = s.page(self.tab)?;
         drop(s);
         page.locator(sel)
-            .await
             .select_option(value, None)
             .await
             .map_err(|e| format!("failed to select `{value}` in `{sel}`: {e}"))?;
@@ -1057,7 +1054,7 @@ fn click_err(sel: &str, e: PwError) -> String {
 
 async fn capture_element(page: &Page, sel: &str) -> Result<ToolOutput, String> {
     let png = tokio::time::timeout(CAPTURE_TIMEOUT, async {
-        page.locator(sel).await.screenshot(None).await
+        page.locator(sel).screenshot(None).await
     })
     .await
     .map_err(|_| "element screenshot timed out")?
@@ -1119,7 +1116,7 @@ async fn page_summary(page: &Page) -> Result<String, String> {
 async fn read_inner_text(page: &Page, selector: Option<&str>) -> Result<String, String> {
     let raw = match selector {
         Some(sel) => {
-            let locator = page.locator(sel).await;
+            let locator = page.locator(sel);
             locator
                 .inner_text()
                 .await

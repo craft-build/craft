@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-28
+
+### Added
+
+- **flow**: goal-approval gate at the Tpm to Plan transition, with a TUI resume loop (`a3f2335fc`)
+- **flow**: `flow_search` tool for semantic recall of prior-stage workstream documents, backed by thread history (`df9d32217`)
+- **flow**: task tool registers child Threads when running in Flow mode (`2b42c6477`)
+- **ui**: craft brand theme and redesigned idle splash (`958b839ff`)
+
+### Changed
+
+- **flow**: migrate Flow mode to a turn-type shifting pipeline, removing the chunk/DAG machinery and reworking the Flow-mode UI (`2a12cb291`, `cffccff7f`)
+- **desktop**: migrate craft-desktop visuals to the new brand prototype (`769357c94`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`event-listener` 5.4.2, `htmd` 0.5.5, `schemars` 1.2.2, `toml_parser` 1.1.3, `tray-icon` 0.24.2)
+
 ## [0.10.2] - 2026-07-26
 
 ### Added
@@ -1445,7 +1460,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/craft-build/craft/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/craft-build/craft/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/craft-build/craft/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/craft-build/craft/compare/v0.9.5...v0.10.0

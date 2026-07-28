@@ -22,7 +22,10 @@ use craft_agent::tools::{
 };
 use craft_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
 use include_dir::Dir;
-use mlua::{Chunk, ChunkMode, Compiler, Function, Lua, RegistryKey, Table, Value as LuaValue, ffi};
+use mlua::{
+    Function, Lua, RegistryKey, Table, Value as LuaValue, chunk::Chunk, chunk::ChunkMode,
+    chunk::Compiler, ffi,
+};
 use serde_json::Value;
 
 use craft_config::RawConfig;
