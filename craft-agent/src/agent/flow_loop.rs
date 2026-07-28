@@ -8,8 +8,8 @@
 //! `transitions::resolve` against the current type's declared `TransitionRule`
 //! set (with the Advisor's forced transition as the override), and shifts,
 //! blocks, or rejects. The typed log commits one distilled entry per turn.
-//! The pipeline shape (Scout, Plan, chunks, Integrator, Verifier) emerges
-//! from the model's shift choices, not from a driver.
+//! The pipeline shape (Scout, TPM, Plan, Integrator, Verifier) emerges from
+//! the model's shift choices, not from a driver.
 //!
 //! There is no orchestrator here. The host (CLI `craft flow`, TUI
 //! `do_flow_run`, ACP `headless::spawn_interactive`) drives Flow mode through
@@ -60,7 +60,7 @@ pub enum FlowProgress {
         turn_type: TurnType,
     },
     /// A new child thread was spawned under `parent_id`. Emitted by the
-    /// `task` tool's Flow integration (follow-on; not yet wired).
+    /// `task` tool's Flow integration when it registers a child `Thread`.
     ThreadSpawn {
         thread_id: String,
         parent_id: String,
@@ -70,16 +70,6 @@ pub enum FlowProgress {
     ThreadExit {
         thread_id: String,
         returning_to: String,
-    },
-    /// A chunk's status changed (queued / running / done). Emitted by the
-    /// `task` tool's Flow integration (follow-on).
-    Chunk {
-        id: String,
-        title: String,
-        status: super::turn_type::ThreadStatus,
-        stage: Option<TurnType>,
-        depends_on: Vec<String>,
-        order: usize,
     },
     /// The TPM turn produced a goal doc and is awaiting host approval. The
     /// host re-prompts; on resume the agent re-derives the next shift from the
@@ -167,7 +157,7 @@ impl FlowAdvisor for NoopFlowAdvisor {
 /// addressed-note exception channel, design §7). Returns the formatted note
 /// text so the caller can emit a `FlowProgress::AdvisorNote` with the same
 /// string. Shared between `Agent::run_flow_advisor` (root) and any future
-/// per-chunk advisor wiring.
+/// per-thread advisor wiring.
 pub(crate) fn record_advisor_note(
     history: &Arc<std::sync::Mutex<ThreadHistory>>,
     thread_id: &ThreadId,

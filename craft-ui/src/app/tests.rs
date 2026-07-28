@@ -3600,66 +3600,99 @@ fn flow_app() -> App {
     app
 }
 
+/// Flatten a ratatui `Line` into an owned string of its span content for
+/// substring assertions in tests.
+fn render_spans(line: &ratatui::text::Line<'_>) -> String {
+    line.spans.iter().flat_map(|s| s.content.chars()).collect()
+}
+
 #[test]
-fn ctrl_t_toggles_flow_panel_in_flow_mode() {
+fn flow_status_line_reports_stage_and_thread_counts() {
     let mut app = flow_app();
-    assert!(!app.flow_panel.is_visible());
+    // No threads yet: `flow · <stage>`.
+    app.state.flow.stage = Some(craft_agent::TurnType::Plan);
+    app.sync_flow_snapshot();
+    let line = app
+        .flow_status_line()
+        .expect("flow status line in flow mode");
+    let rendered = render_spans(&line);
+    assert!(rendered.contains("flow"), "got: {rendered}");
+    assert!(rendered.contains("plan"), "got: {rendered}");
 
-    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
-    assert!(app.flow_panel.is_visible());
+    // Three spawns, one exit -> `2/3`.
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadSpawn {
+        thread_id: "c1".into(),
+        parent_id: "ws".into(),
+        turn_type: craft_agent::TurnType::Req,
+    });
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadSpawn {
+        thread_id: "c2".into(),
+        parent_id: "ws".into(),
+        turn_type: craft_agent::TurnType::Req,
+    });
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadSpawn {
+        thread_id: "c3".into(),
+        parent_id: "ws".into(),
+        turn_type: craft_agent::TurnType::Req,
+    });
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadExit {
+        thread_id: "c1".into(),
+        returning_to: "ws".into(),
+    });
+    let rendered = render_spans(&app.flow_status_line().unwrap());
+    assert!(rendered.contains("2/3"), "got: {rendered}");
 
-    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
-    assert!(!app.flow_panel.is_visible());
+    // Build mode -> None.
+    app.state.mode = Mode::Build;
+    assert!(app.flow_status_line().is_none());
+}
+
+#[test]
+fn flow_status_line_shows_awaiting_goal_at_gate() {
+    let mut app = flow_app();
+    app.handle_flow_progress(craft_agent::FlowProgress::GoalReady {
+        goal_doc: "do the thing".into(),
+    });
+    let rendered = render_spans(&app.flow_status_line().unwrap());
+    assert!(rendered.contains("awaiting goal"), "got: {rendered}");
+}
+
+#[test]
+fn flow_status_line_is_none_in_build_mode() {
+    let app = test_app();
+    assert!(app.flow_status_line().is_none());
+}
+
+#[test]
+fn reset_session_clears_flow_status() {
+    let mut app = flow_app();
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadSpawn {
+        thread_id: "c1".into(),
+        parent_id: "ws".into(),
+        turn_type: craft_agent::TurnType::Req,
+    });
+    assert_eq!(app.flow_panel.total_threads, 1);
+    app.reset_session();
+    assert_eq!(app.flow_panel.total_threads, 0);
+    assert_eq!(app.flow_panel.live_threads, 0);
 }
 
 #[test]
 fn ctrl_t_falls_through_to_floats_in_build_mode() {
     let mut app = test_app();
     app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
-    assert!(!app.flow_panel.is_visible());
+    // No panel to toggle anymore; just shouldn't crash or change flow state.
+    assert_eq!(app.state.mode, Mode::Build);
 }
 
 #[test]
-fn reset_session_closes_flow_panel() {
-    let mut app = flow_app();
-    app.flow_panel.toggle();
-    assert!(app.flow_panel.is_visible());
-
-    app.reset_session();
-    assert!(!app.flow_panel.is_visible());
-}
-
-#[test]
-fn flow_panel_dismiss_key_hides_panel() {
-    let mut app = flow_app();
-    app.flow_panel.toggle();
-    assert!(app.flow_panel.is_visible());
-
-    app.update(Msg::Key(key(KeyCode::Esc)));
-    assert!(!app.flow_panel.is_visible());
-}
-
-#[test]
-fn sync_flow_snapshot_reflects_state() {
+fn sync_flow_snapshot_reflects_stage() {
     let mut app = flow_app();
     app.state.flow.stage = Some(craft_agent::TurnType::Execute);
-    app.state
-        .flow
-        .set_chunk_status("chunk-1", craft_agent::ThreadStatus::Running);
     app.sync_flow_snapshot();
-
     assert_eq!(
         app.flow_panel.snapshot.stage,
         Some(craft_agent::TurnType::Execute)
-    );
-    assert_eq!(
-        app.flow_panel.snapshot.chunks.get("chunk-1"),
-        Some(&crate::components::flow_panel::FlowSnapshotChunk {
-            title: String::new(),
-            status: craft_agent::ThreadStatus::Running,
-            stage: None,
-            ..Default::default()
-        })
     );
 }
 
@@ -3667,89 +3700,41 @@ fn sync_flow_snapshot_reflects_state() {
 fn flow_state_persists_through_sync_session() {
     let mut app = flow_app();
     app.state.flow.stage = Some(craft_agent::TurnType::Review);
-    app.state
-        .flow
-        .set_chunk_status("c1", craft_agent::ThreadStatus::NeedsReview);
-
     app.state.sync_session(&None, &app.permissions.clone());
     assert_eq!(app.state.session.meta.flow_stage.as_deref(), Some("review"));
-    let chunk = app.state.session.meta.flow_chunks.get("c1").unwrap();
-    assert_eq!(chunk.status, "needs_review");
 }
 
 #[test]
-fn flow_chunk_title_forwarded_to_panel_snapshot() {
+fn handle_flow_progress_thread_spawn_exit_updates_counts() {
     let mut app = flow_app();
-    app.state.flow.set_chunk(
-        "c1",
-        "Add auth",
-        craft_agent::ThreadStatus::Queued,
-        None,
-        0,
-        &[],
-    );
-    app.state
-        .flow
-        .set_chunk("c1", "", craft_agent::ThreadStatus::Done, None, 0, &[]);
-    app.sync_flow_snapshot();
-    let row = app
-        .flow_panel
-        .snapshot
-        .chunks
-        .get("c1")
-        .expect("chunk present");
-    assert_eq!(row.title, "Add auth");
-    assert_eq!(row.status, craft_agent::ThreadStatus::Done);
-}
-
-#[test]
-fn handle_flow_progress_chunk_carries_title() {
-    let mut app = flow_app();
-    app.handle_flow_progress(craft_agent::FlowProgress::Chunk {
-        id: "c1".into(),
-        title: "Add auth".into(),
-        status: craft_agent::ThreadStatus::Queued,
-        stage: None,
-        depends_on: Vec::new(),
-        order: 0,
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadSpawn {
+        thread_id: "c1".into(),
+        parent_id: "ws".into(),
+        turn_type: craft_agent::TurnType::Req,
     });
-    app.handle_flow_progress(craft_agent::FlowProgress::Chunk {
-        id: "c1".into(),
-        title: String::new(),
-        status: craft_agent::ThreadStatus::Running,
-        stage: Some(craft_agent::TurnType::Execute),
-        depends_on: Vec::new(),
-        order: 0,
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadSpawn {
+        thread_id: "c2".into(),
+        parent_id: "ws".into(),
+        turn_type: craft_agent::TurnType::Req,
     });
-    app.sync_flow_snapshot();
-    let row = app.flow_panel.snapshot.chunks.get("c1").unwrap();
-    assert_eq!(row.title, "Add auth");
-    assert_eq!(row.status, craft_agent::ThreadStatus::Running);
-    assert_eq!(row.stage, Some(craft_agent::TurnType::Execute));
+    assert_eq!(app.flow_panel.live_threads, 2);
+    assert_eq!(app.flow_panel.total_threads, 2);
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadExit {
+        thread_id: "c1".into(),
+        returning_to: "ws".into(),
+    });
+    assert_eq!(app.flow_panel.live_threads, 1);
+    assert_eq!(app.flow_panel.total_threads, 2);
 }
 
 #[test]
 fn flow_failed_then_submit_dispatches_resume_run() {
     let mut app = flow_app();
-    // A chunk stuck Running, then the pipeline reports failure.
-    app.state.flow.set_chunk(
-        "c1",
-        "Add auth",
-        craft_agent::ThreadStatus::Running,
-        Some(craft_agent::TurnType::Execute),
-        0,
-        &[],
-    );
     app.handle_flow_progress(craft_agent::FlowProgress::Failed {
         stage: craft_agent::TurnType::Review,
         reason: "blocking findings".into(),
     });
     assert!(app.flow_failed, "flow_failed should be set after a failure");
-    // Still-running chunk gets finalized to Blocked on failure.
-    assert_eq!(
-        app.state.flow.chunks.get("c1").unwrap().status,
-        craft_agent::ThreadStatus::Blocked
-    );
 
     // Submitting in Flow mode while flow_failed dispatches a resume run.
     let actions = app.handle_submit(Submission {
@@ -3774,26 +3759,18 @@ fn flow_failed_then_submit_dispatches_resume_run() {
 }
 
 #[test]
-fn flow_done_does_not_finalize_running_chunks_to_blocked() {
+fn flow_done_clears_live_thread_counts() {
     let mut app = flow_app();
-    // A chunk still marked Running when Done arrives (a missed transition).
-    // Done must NOT force it to Blocked; that would mask the bug.
-    app.state.flow.set_chunk(
-        "c1",
-        "Add auth",
-        craft_agent::ThreadStatus::Running,
-        Some(craft_agent::TurnType::Execute),
-        0,
-        &[],
-    );
+    app.handle_flow_progress(craft_agent::FlowProgress::ThreadSpawn {
+        thread_id: "c1".into(),
+        parent_id: "ws".into(),
+        turn_type: craft_agent::TurnType::Req,
+    });
+    assert_eq!(app.flow_panel.live_threads, 1);
     app.handle_flow_progress(craft_agent::FlowProgress::Done {
         verdict: "{\"goal_met\":true}".into(),
     });
-    assert_eq!(
-        app.state.flow.chunks.get("c1").unwrap().status,
-        craft_agent::ThreadStatus::Running,
-        "Done must not clobber a still-Running chunk to Blocked"
-    );
+    assert_eq!(app.flow_panel.live_threads, 0);
     assert!(!app.flow_failed);
 }
 

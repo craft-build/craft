@@ -8,7 +8,7 @@
 //! Legacy `.json` files are loaded transparently and converted to `.jsonl` on next save.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -122,21 +122,8 @@ pub struct SessionMeta {
     pub flow_workstream_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_stage: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub flow_chunks: BTreeMap<String, StoredFlowChunk>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub context_window_overrides: HashMap<String, u32>,
-}
-
-/// Persisted per-chunk state for Flow mode; mirrors `craft_flow::Chunk`'s
-/// render-relevant fields. Stage iteration counts are not tracked here (they
-/// live in craft-flow's documents), keeping the session record small.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredFlowChunk {
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

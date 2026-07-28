@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use craft_agent::TurnType;
 use craft_agent::permissions::PermissionManager;
-use craft_agent::{ThreadStatus, TurnType};
 use craft_config::Effect;
 use craft_providers::{Message, Model, ThinkingConfig, TokenUsage};
 use craft_storage::StateDir;
@@ -12,20 +12,7 @@ use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
 
 use crate::AppSession;
 
-use super::mode::{FlowChunkState, FlowState, Mode, PlanState};
-
-/// String form of a `ThreadStatus` for persistence, matching craft-flow's
-/// `rename_all = "snake_case"` serde variant names.
-fn chunk_status_str(status: ThreadStatus) -> String {
-    match status {
-        ThreadStatus::Queued => "queued",
-        ThreadStatus::Running => "running",
-        ThreadStatus::NeedsReview => "needs_review",
-        ThreadStatus::Blocked => "blocked",
-        ThreadStatus::Done => "done",
-    }
-    .to_string()
-}
+use super::mode::{FlowState, Mode, PlanState};
 
 pub(crate) struct SessionState {
     pub session: AppSession,
@@ -85,22 +72,6 @@ impl SessionState {
         let flow = FlowState {
             workstream_id: session.meta.flow_workstream_id.clone().unwrap_or_default(),
             stage: session.meta.flow_stage.as_deref().and_then(TurnType::parse),
-            chunks: session
-                .meta
-                .flow_chunks
-                .iter()
-                .map(|(id, c)| {
-                    (
-                        id.clone(),
-                        FlowChunkState {
-                            title: c.title.clone(),
-                            status: ThreadStatus::parse(&c.status).unwrap_or_default(),
-                            stage: None,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
         };
         let flow = if mode == Mode::Flow && flow.workstream_id.is_empty() {
             FlowState {
@@ -155,20 +126,6 @@ impl SessionState {
             && !self.flow.workstream_id.is_empty())
         .then(|| self.flow.workstream_id.clone());
         self.session.meta.flow_stage = self.flow.stage.map(|s| s.as_str().to_string());
-        self.session.meta.flow_chunks = self
-            .flow
-            .chunks
-            .iter()
-            .map(|(id, c)| {
-                (
-                    id.clone(),
-                    craft_storage::sessions::StoredFlowChunk {
-                        title: c.title.clone(),
-                        status: chunk_status_str(c.status),
-                    },
-                )
-            })
-            .collect();
         self.session.meta.session_rules = rules_to_stored(&permissions.session_rules_snapshot());
         self.session.meta.thinking = Some(self.thinking.into());
         self.session.meta.fast = self.fast;

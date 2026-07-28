@@ -261,7 +261,6 @@ impl SpawnCx {
             self.config.repomap.enabled,
             self.watch_enabled,
         );
-        app.flow_parallel_chunks = self.config.flow.parallel_chunks;
         handles.apply_to_app(&mut app);
         app.propagate_lua_handles();
         if resumed {

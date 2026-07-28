@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Generate a fresh opaque workstream id (16 hex chars from 8 random bytes).
@@ -14,141 +13,23 @@ pub(super) fn new_workstream_id() -> String {
 use crate::agent::QueuedMessage;
 use crate::components::Status;
 use crate::theme;
+use craft_agent::TurnType;
 use craft_agent::{AgentInput, AgentMode};
-use craft_agent::{ThreadStatus, TurnType};
 use craft_storage::StateDir;
 use craft_storage::plans;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::App;
 
-/// A single chunk tracked by the Flow panel, mirroring the relevant slice of
-/// a `FlowProgress::Chunk` event. Kept minimal (id/title/status) since the
-/// panel only renders these. Iteration counts live in the persisted typed log.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct FlowChunkState {
-    pub title: String,
-    pub status: ThreadStatus,
-    pub stage: Option<TurnType>,
-    /// Chunk's position in the plan array. Preserves plan order so the panel
-    /// renders chunks in the order the plan agent intended (not alphabetical).
-    pub order: usize,
-    /// Ids of chunks this chunk depends on (plan DAG edges). Drives the graph.
-    pub depends_on: Vec<String>,
-}
-
-/// Flow mode needs a workstream id; `FlowState` is the persisted workstream
-/// carried in `SessionMeta`. The TUI mode holds the id separately so the
-/// `Mode` enum stays `Copy`.
+/// Flow mode's persisted workstream state carried in `SessionMeta`. The TUI
+/// `Mode` holds the id separately so the `Mode` enum stays `Copy`. Only the
+/// workstream id and the current stage survive the de-chunking rework: thread
+/// counts shown in the status line are derived live from the `ThreadManager`
+/// tree on each render, never persisted as chunk maps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FlowState {
     pub workstream_id: String,
     pub stage: Option<TurnType>,
-    pub chunks: BTreeMap<String, FlowChunkState>,
-}
-
-impl FlowState {
-    /// Replace chunk state from a craft-flow workstream snapshot. Called when
-    /// the agent pushes a Flow stage/chunk update.
-    #[allow(dead_code)]
-    pub(crate) fn sync_from(
-        &mut self,
-        stage: Option<TurnType>,
-        chunks: impl IntoIterator<Item = (String, String, ThreadStatus)>,
-    ) {
-        self.stage = stage;
-        self.chunks = chunks
-            .into_iter()
-            .map(|(id, title, status)| {
-                (
-                    id,
-                    FlowChunkState {
-                        title,
-                        status,
-                        stage: None,
-                        order: 0,
-                        depends_on: Vec::new(),
-                    },
-                )
-            })
-            .collect();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn set_chunk_status(&mut self, chunk_id: &str, status: ThreadStatus) {
-        self.chunks
-            .entry(chunk_id.to_string())
-            .or_insert_with(|| FlowChunkState {
-                title: String::new(),
-                status,
-                stage: None,
-                order: 0,
-                depends_on: Vec::new(),
-            })
-            .status = status;
-    }
-
-    /// Update a chunk's title, status, per-chunk pipeline stage, plan order,
-    /// and dependencies from a `FlowProgress::Chunk` event. Title, stage, order,
-    /// and depends_on are only overwritten when the event carries meaningful
-    /// values (non-empty title, Some stage, non-zero order, non-empty deps), so
-    /// later status-only updates (e.g. Done, Running transitions from
-    /// `emit_chunk`) never clobber data learned at the Queued event.
-    pub(crate) fn set_chunk(
-        &mut self,
-        chunk_id: &str,
-        title: &str,
-        status: ThreadStatus,
-        stage: Option<TurnType>,
-        order: usize,
-        depends_on: &[String],
-    ) {
-        let entry = self
-            .chunks
-            .entry(chunk_id.to_string())
-            .or_insert_with(|| FlowChunkState {
-                title: String::new(),
-                status,
-                stage: None,
-                order,
-                depends_on: depends_on.to_vec(),
-            });
-        entry.status = status;
-        if !title.is_empty() {
-            entry.title = title.to_string();
-        }
-        if stage.is_some() {
-            entry.stage = stage;
-        }
-        // Order 0 / empty deps come from transitional events (Running/Done/
-        // Blocked/emit_chunk) that don't carry DAG metadata — don't clobber
-        // the values learned at the Queued event.
-        if order != 0 {
-            entry.order = order;
-        }
-        if !depends_on.is_empty() {
-            entry.depends_on = depends_on.to_vec();
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn clear_chunks(&mut self) {
-        self.stage = None;
-        self.chunks.clear();
-    }
-
-    /// Mark every chunk not already in a terminal state (Done/Blocked) as
-    /// Blocked. Called when the flow run reaches a terminal outcome (Done /
-    /// Failed / Cancelled) so the panel never freezes mid-run showing a chunk
-    /// stuck in Running/Queued. Idempotent: chunks already terminal keep their
-    /// status and last pipeline stage.
-    pub(crate) fn finalize_non_terminal(&mut self) {
-        for c in self.chunks.values_mut() {
-            if !matches!(c.status, ThreadStatus::Done | ThreadStatus::Blocked) {
-                c.status = ThreadStatus::Blocked;
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,72 +214,5 @@ impl App {
         } else {
             Style::new().fg(self.effective_mode_color())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn chunk(id: &str, status: ThreadStatus) -> (String, FlowChunkState) {
-        (
-            id.into(),
-            FlowChunkState {
-                title: id.into(),
-                status,
-                stage: Some(TurnType::Execute),
-                ..Default::default()
-            },
-        )
-    }
-
-    fn flow_with_chunks(chunks: Vec<(&str, ThreadStatus)>) -> FlowState {
-        let mut flow = FlowState::default();
-        for (id, status) in chunks {
-            flow.chunks.insert(id.into(), chunk(id, status).1);
-        }
-        flow
-    }
-
-    #[test]
-    fn finalize_non_terminal_marks_running_and_queued_blocked() {
-        let mut flow = flow_with_chunks(vec![
-            ("done", ThreadStatus::Done),
-            ("running", ThreadStatus::Running),
-            ("queued", ThreadStatus::Queued),
-            ("blocked", ThreadStatus::Blocked),
-        ]);
-        flow.finalize_non_terminal();
-        assert_eq!(flow.chunks.get("done").unwrap().status, ThreadStatus::Done);
-        assert_eq!(
-            flow.chunks.get("running").unwrap().status,
-            ThreadStatus::Blocked
-        );
-        assert_eq!(
-            flow.chunks.get("queued").unwrap().status,
-            ThreadStatus::Blocked
-        );
-        assert_eq!(
-            flow.chunks.get("blocked").unwrap().status,
-            ThreadStatus::Blocked
-        );
-    }
-
-    #[test]
-    fn finalize_non_terminal_preserves_last_stage() {
-        let mut flow = flow_with_chunks(vec![("running", ThreadStatus::Running)]);
-        flow.finalize_non_terminal();
-        let c = flow.chunks.get("running").unwrap();
-        assert_eq!(c.status, ThreadStatus::Blocked);
-        assert_eq!(c.stage, Some(TurnType::Execute));
-    }
-
-    #[test]
-    fn clear_chunks_resets_stage_and_map() {
-        let mut flow = flow_with_chunks(vec![("a", ThreadStatus::Done)]);
-        flow.stage = Some(TurnType::Plan);
-        flow.clear_chunks();
-        assert!(flow.chunks.is_empty());
-        assert_eq!(flow.stage, None);
     }
 }

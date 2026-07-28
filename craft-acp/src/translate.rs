@@ -70,8 +70,8 @@ pub fn thinking_delta(text: &str) -> SessionUpdate {
 /// Returns `None` for terminal events (`GoalReady`/`Done`/`NeedsReview`/
 /// `Failed`/`Cancelled`) because the headless Flow driver already surfaces
 /// those as agent messages / done / error events, so a duplicate thought
-/// would be noise. Structural events (turn-type entered, thread spawn/exit,
-/// chunk status) carry the live thread-tree signal that has no other channel.
+/// would be noise. Structural events (turn-type entered, thread spawn/exit)
+/// carry the live thread-tree signal that has no other channel.
 pub fn flow_progress(progress: &FlowProgress) -> Option<SessionUpdate> {
     let text = match progress {
         FlowProgress::TurnTypeEntered {
@@ -93,18 +93,6 @@ pub fn flow_progress(progress: &FlowProgress) -> Option<SessionUpdate> {
             thread_id,
             returning_to,
         } => format!("flow ▸ thread {thread_id} done -> {returning_to}"),
-        FlowProgress::Chunk {
-            id,
-            title,
-            status,
-            stage,
-            ..
-        } => format!(
-            "flow ▸ chunk {id}: {title} [{status:?}{}]",
-            stage
-                .map(|s| format!(", {}", s.as_str()))
-                .unwrap_or_default()
-        ),
         FlowProgress::AdvisorNote {
             thread_id,
             addressed_to,

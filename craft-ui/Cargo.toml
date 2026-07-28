@@ -14,10 +14,6 @@ craft-repomap = { workspace = true }
 craft-storage = { workspace = true }
 ratatui = { workspace = true }
 ratatui-image = { workspace = true }
-mermaid-rs-renderer = { workspace = true }
-usvg = { workspace = true }
-resvg = { workspace = true }
-tiny-skia = { workspace = true }
 crossterm = { workspace = true }
 color-eyre = { workspace = true }
 tracing = { workspace = true }

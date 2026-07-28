@@ -217,9 +217,6 @@ impl App {
         self.run_id += 1;
         self.recoverable_queue.clear();
         self.status = Status::Streaming;
-        if self.state.mode == super::Mode::Flow {
-            self.flow_panel.show_if_not_dismissed();
-        }
         self.lua_event_handle
             .fire_autocmd("TurnStart", serde_json::json!({}));
         self.main_chat().show_user_message(display);
