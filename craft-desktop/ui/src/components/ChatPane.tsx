@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { modeLabel, terminalBg, type Tokens } from "../theme";
+import { brandGradient, modeLabel, terminalBg, type Tokens } from "../theme";
 import { useAppDispatch } from "../state/store";
 import { cancelPrompt, craftCommandRoute, listCommands, resolvePermission, resolveQuestion, sendPrompt, setConfigOption, setMode } from "../lib/acp";
 import type { ChatItem, ContentBlock, QuestionSpec, TabState, ToolCallContent } from "../types";
 import { Markdown, stripAnchors, langFromPath } from "./Markdown";
 import { DiffView } from "./DiffView";
 import { CommandPalette, type PaletteItem } from "./CommandPalette";
+import { StatusPill, type PillState } from "./StatusPill";
 
 const TOOL_ICON: Record<string, string> = {
   read: "◎",
@@ -20,11 +21,11 @@ const TOOL_ICON: Record<string, string> = {
   other: "●",
 };
 
-const STATUS_GLYPH: Record<string, string> = {
-  pending: "…",
-  in_progress: "…",
-  completed: "✓",
-  failed: "✗",
+const STATUS_PILL_STATE: Record<string, PillState> = {
+  pending: "waiting",
+  in_progress: "running",
+  completed: "done",
+  failed: "failed",
 };
 
 function formatTokens(n: number): string {
@@ -36,13 +37,13 @@ function formatTokens(n: number): string {
 function ContextUsage({ used, size, t }: { used: number; size: number; t: Tokens }) {
   if (size <= 0) return null;
   const pct = Math.min(1, used / size);
-  const barColor = pct > 0.95 ? t.danger : pct > 0.8 ? t.warning : t.accent;
+  const barColor = pct > 0.95 ? t.danger : pct > 0.8 ? t.warning : brandGradient(t);
   return (
     <>
       <span style={{ fontSize: 11, color: t.textFaint, whiteSpace: "nowrap" }}>
         {formatTokens(used)} / {formatTokens(size)} tokens
       </span>
-      <div style={{ flex: 1, height: 4, background: t.border, maxWidth: 220 }}>
+      <div style={{ flex: 1, height: 4, background: t.border, borderRadius: "var(--radius-xs)", maxWidth: 220, overflow: "hidden" }}>
         <div style={{ width: `${pct * 100}%`, height: "100%", background: barColor }} />
       </div>
     </>
@@ -198,7 +199,7 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
               border: "none",
               outline: "none",
               color: t.text,
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-mono)",
               fontSize: 12.5,
               lineHeight: 1.5,
               maxHeight: 120,
@@ -207,13 +208,15 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
           />
           <div
             onClick={tab.pending ? stop : send}
+            className={tab.pending ? undefined : "cd-btn-primary"}
             style={{
               flex: "none",
               padding: "8px 13px",
               fontSize: 11,
               fontWeight: 600,
               cursor: "pointer",
-              background: tab.pending ? t.bgInset : t.accent,
+              borderRadius: "var(--radius-sm)",
+              background: tab.pending ? t.bgInset : brandGradient(t),
               color: tab.pending ? t.textFaint : t.accentText,
             }}
           >
@@ -237,7 +240,7 @@ function ChatItemView({ item, t, tab, streaming }: { item: ChatItem; t: Tokens; 
   if (item.kind === "user") {
     return (
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <div style={{ maxWidth: "70%", padding: "10px 13px", background: t.bgInset, border: `1px solid ${t.border}`, fontSize: 12.5, lineHeight: 1.55, color: t.text, whiteSpace: "pre-wrap" }}>
+        <div style={{ maxWidth: "70%", padding: "10px 13px", background: t.bgInset, border: `1px solid ${t.border}`, borderRadius: "var(--radius-md)", fontSize: 12.5, lineHeight: 1.55, color: t.text, whiteSpace: "pre-wrap" }}>
           {item.text}
         </div>
       </div>
@@ -257,7 +260,7 @@ function ChatItemView({ item, t, tab, streaming }: { item: ChatItem; t: Tokens; 
 
   if (item.kind === "thinking") {
     return (
-      <div style={{ fontSize: 12, color: t.textFaint, lineHeight: 1.5, animation: "pulse 1.4s ease-in-out infinite" }}>
+      <div style={{ fontSize: 12, color: t.textFaint, lineHeight: 1.5 }}>
         {item.text ? item.text : "craft is thinking…"}
       </div>
     );
@@ -305,7 +308,7 @@ function ToolCallRow({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", maxWidth: "82%" }}>
-      <div style={{ fontSize: 10, letterSpacing: 0.5, color: t.textFaint, padding: "0 0 4px 20px" }}>
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 0.5, color: t.textFaint, padding: "0 0 4px 20px" }}>
         {item.toolKind.toUpperCase()}
       </div>
       <div
@@ -333,16 +336,7 @@ function ToolCallRow({
           </>
         )}
         {hasOutput && <span style={{ fontSize: 10, color: t.textFaint, flex: "none" }}>{expanded ? "▾" : "▸"}</span>}
-        <span
-          style={{
-            fontSize: 11,
-            color: t.success,
-            flex: "none",
-            animation: item.status === "in_progress" ? "pulse 1.4s ease-in-out infinite" : undefined,
-          }}
-        >
-          {STATUS_GLYPH[item.status] ?? ""}
-        </span>
+        <StatusPill state={STATUS_PILL_STATE[item.status] ?? "waiting"} t={t} />
       </div>
       {expanded && hasOutput && (
         <div
@@ -403,23 +397,23 @@ function PermissionCard({
         <span style={{ fontSize: 11, color: t.warning }}>&#9888;</span>
         <span style={{ fontSize: 11.5, color: t.text, fontWeight: 600 }}>Permission requested</span>
       </div>
-      <div style={{ fontSize: 12, padding: "8px 10px", background: t.bg, color: t.text, overflow: "auto", whiteSpace: "pre-wrap" }}>
+      <div style={{ fontSize: 12, padding: "8px 10px", background: t.bg, color: t.text, borderRadius: "var(--radius-sm)", overflow: "auto", whiteSpace: "pre-wrap" }}>
         {item.title}
       </div>
       {!item.resolved ? (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {rejectOnce && (
-            <div onClick={() => choose(rejectOnce.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: t.bg, color: t.textDim, border: `1px solid ${t.border}` }}>
+            <div onClick={() => choose(rejectOnce.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: t.bg, color: t.textDim, border: `1px solid ${t.border}`, borderRadius: "var(--radius-sm)" }}>
               Deny
             </div>
           )}
           {allowOnce && (
-            <div onClick={() => choose(allowOnce.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: t.accent, color: t.accentText, fontWeight: 600 }}>
+            <div onClick={() => choose(allowOnce.optionId)} className="cd-btn-primary" style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: brandGradient(t), color: t.accentText, fontWeight: 600, borderRadius: "var(--radius-sm)" }}>
               Allow once
             </div>
           )}
           {others.map((o) => (
-            <div key={o.optionId} onClick={() => choose(o.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: "transparent", color: t.textFaint, border: `1px solid ${t.border}` }}>
+            <div key={o.optionId} onClick={() => choose(o.optionId)} style={{ padding: "7px 13px", fontSize: 11, cursor: "pointer", background: "transparent", color: t.textFaint, border: `1px solid ${t.border}`, borderRadius: "var(--radius-sm)" }}>
               {o.name}
             </div>
           ))}
@@ -512,14 +506,17 @@ function QuestionCard({
                 value={customText[qi] ?? ""}
                 onChange={(e) => setCustomText((p) => ({ ...p, [qi]: e.target.value }))}
                 placeholder="Type your answer"
+                className="cd-input"
                 style={{
                   fontSize: 12,
                   padding: "6px 9px",
                   border: `1px solid ${t.border}`,
+                  borderRadius: "var(--radius-sm)",
                   background: t.bg,
                   color: t.text,
                   outline: "none",
-                }}
+                  ["--ring-color" as string]: t.accent,
+                } as React.CSSProperties}
               />
             ) : (
               q.options.length > 0 && (
@@ -569,14 +566,16 @@ function QuestionCard({
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <div
             onClick={() => submit(false)}
+            className={canSubmit ? "cd-btn-primary" : undefined}
             style={{
               padding: "8px 14px",
               fontSize: 11.5,
               cursor: canSubmit ? "pointer" : "default",
-              background: canSubmit ? t.accent : t.accentDim,
+              background: canSubmit ? brandGradient(t) : t.accentDim,
               color: t.accentText,
               fontWeight: 600,
               opacity: canSubmit ? 1 : 0.5,
+              borderRadius: "var(--radius-sm)",
             }}
           >
             Submit
@@ -590,6 +589,7 @@ function QuestionCard({
               background: "transparent",
               color: t.textDim,
               border: `1px solid ${t.border}`,
+              borderRadius: "var(--radius-sm)",
             }}
           >
             Dismiss

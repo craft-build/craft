@@ -40,12 +40,12 @@ export function DiffView({ oldText, newText, t }: { oldText: string; newText: st
   return (
     <pre
       style={{
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: "var(--font-mono)",
         fontSize: 11.5,
         lineHeight: 1.5,
         background: t.bgInset,
         border: `1px solid ${t.border}`,
-        borderRadius: 7,
+        borderRadius: "var(--radius-md)",
         padding: "10px 12px",
         margin: "6px 0 0",
         overflow: "auto",

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import type { Tokens } from "../theme";
+import { brandGradientSoft, type Tokens } from "../theme";
 import type { CommandDescriptor, CustomCommandDescriptor, ListCommandsResponse } from "../lib/acp";
 
 export interface PaletteItem {
@@ -145,10 +145,12 @@ export function CommandPalette({
         maxWidth: 420,
         background: t.bgInset,
         border: `1px solid ${t.border}`,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+        borderRadius: "var(--radius-md)",
+        boxShadow: "var(--shadow-lg)",
         zIndex: 50,
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: "var(--font-body)",
         fontSize: 12,
+        overflow: "hidden",
       }}
     >
       {matches.map((item, idx) => (
@@ -162,13 +164,14 @@ export function CommandPalette({
             flexDirection: "column",
             gap: 1,
             cursor: "pointer",
-            background: idx === activeIdx ? t.accentDim2 : "transparent",
+            borderRadius: "var(--radius-xs)",
+            background: idx === activeIdx ? brandGradientSoft(t) : "transparent",
             borderLeft:
               idx === activeIdx ? `2px solid ${t.accent}` : "2px solid transparent",
           }}
         >
           <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-            <span style={{ color: idx === activeIdx ? t.accent : t.text, fontWeight: 600 }}>
+            <span style={{ fontFamily: "var(--font-mono)", color: idx === activeIdx ? t.accent : t.text, fontWeight: 600 }}>
               {item.name}
             </span>
             <span style={{ fontSize: 9, color: t.textFaint, textTransform: "uppercase" }}>

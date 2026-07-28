@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { modeColor, modeLabel, type Tokens, type ThemeName } from "../theme";
+import { brandGradient, modeColor, modeColorWash, modeLabel, type Tokens, type ThemeName } from "../theme";
 import { useAppDispatch, useAppState, type AppState } from "../state/store";
 import { closeTab, listSessions, listThemes, loadSession, setConfigOption, setMode, setTheme } from "../lib/acp";
 import type { TabState } from "../types";
@@ -228,7 +228,8 @@ function Sidebar({
               width: 260,
               background: t.bgElevated,
               border: `1px solid ${t.border}`,
-              boxShadow: "0 12px 28px rgba(0,0,0,0.45)",
+              borderRadius: "var(--radius-md)",
+              boxShadow: "var(--shadow-lg)",
               padding: 6,
               zIndex: 40,
             }}
@@ -264,7 +265,8 @@ function Sidebar({
               width: 240,
               background: t.bgElevated,
               border: `1px solid ${t.border}`,
-              boxShadow: "0 12px 28px rgba(0,0,0,0.45)",
+              borderRadius: "var(--radius-md)",
+              boxShadow: "var(--shadow-lg)",
               padding: 10,
               zIndex: 40,
               display: "flex",
@@ -287,6 +289,7 @@ function Sidebar({
               padding: "11px 12px",
               background: tab.tabId === active.tabId ? t.bgInset : "transparent",
               border: `1px solid ${tab.tabId === active.tabId ? t.border : "transparent"}`,
+              borderRadius: "var(--radius-sm)",
               cursor: "pointer",
               display: "flex",
               flexDirection: "column",
@@ -373,9 +376,9 @@ function Sidebar({
         })}
       </div>
 
-      <div style={{ padding: "14px 16px", borderTop: `1px solid ${t.border}`, flex: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ padding: "17px 16px 14px", borderTop: `1px solid ${t.border}`, flex: "none", display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ fontSize: 10, letterSpacing: 0.5, color: t.textFaint }}>AGENT</div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex" }}>
           {MODE_ORDER.map((m) => (
             <div
               key={m}
@@ -386,9 +389,9 @@ function Sidebar({
                 padding: "7px 0",
                 fontSize: 11,
                 cursor: "pointer",
-                background: active.mode === m ? t.accentDim : "transparent",
-                color: active.mode === m ? t.accent : t.textFaint,
-                border: `1px solid ${active.mode === m ? t.accent : t.border}`,
+                background: active.mode === m ? modeColorWash(m, t) : "transparent",
+                color: active.mode === m ? modeColor(m, t) : t.textFaint,
+                border: `1px solid ${active.mode === m ? modeColor(m, t) : t.border}`,
               }}
             >
               {modeLabel(m)}
@@ -424,6 +427,7 @@ function SidebarIcon({
         alignItems: "center",
         justifyContent: "center",
         cursor: "pointer",
+        borderRadius: "var(--radius-xs)",
         color: active ? t.accent : t.textDim,
         background: active ? t.accentDim : "transparent",
         fontSize: 12,
@@ -525,6 +529,7 @@ function ModelPicker({
           background: t.bgInset,
           cursor: "pointer",
           border: `1px solid ${t.border}`,
+          borderRadius: "var(--radius-sm)",
         }}
       >
         <span style={{ fontSize: 11 }}>
@@ -541,7 +546,8 @@ function ModelPicker({
             width: dropdownWidth,
             background: t.bgElevated,
             border: `1px solid ${t.border}`,
-            boxShadow: "0 12px 28px rgba(0,0,0,0.45)",
+            borderRadius: "var(--radius-md)",
+            boxShadow: "var(--shadow-lg)",
             zIndex: 40,
             display: "flex",
             flexDirection: "column",
@@ -642,6 +648,7 @@ function YoloToggle({ active, t }: { active: TabState; t: Tokens }) {
         background: isYolo ? t.warningDim : "transparent",
         color: isYolo ? t.warning : t.textFaint,
         border: `1px solid ${isYolo ? t.warning : t.border}`,
+        borderRadius: "var(--radius-sm)",
       }}
     >
       <span style={{ fontSize: 11 }}>&#9889;</span>
@@ -702,6 +709,7 @@ function ThemePicker({ currentName }: { currentName: string }) {
                 fontSize: 12,
                 color: t.text,
                 background: selected ? t.accentDim : "transparent",
+                borderRadius: "var(--radius-xs)",
                 fontWeight: selected ? 600 : 400,
               }}
             >
@@ -711,6 +719,7 @@ function ThemePicker({ currentName }: { currentName: string }) {
                   height: 12,
                   borderRadius: "50%",
                   flex: "none",
+                  background: selected ? brandGradient(t) : "transparent",
                   border: `1px solid ${t.border}`,
                 }}
               />

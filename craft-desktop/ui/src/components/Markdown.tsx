@@ -99,6 +99,12 @@ export function Markdown({ md, t, streaming }: { md: string; t: Tokens; streamin
 
   const components = useMemo(
     () => ({
+      h1: headingComponent("h1", "var(--text-lg)", t),
+      h2: headingComponent("h2", "var(--text-md)", t),
+      h3: headingComponent("h3", "var(--text-base)", t),
+      h4: headingComponent("h4", "var(--text-base)", t),
+      h5: headingComponent("h5", "var(--text-base)", t),
+      h6: headingComponent("h6", "var(--text-base)", t),
       a({ href, children }: { href?: string; children?: ReactNode[] }) {
         return (
           <a href={href} style={{ color: t.accent, textDecoration: "none" }}>
@@ -139,12 +145,12 @@ export function Markdown({ md, t, streaming }: { md: string; t: Tokens; streamin
         return (
           <pre
             style={{
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-mono)",
               fontSize: 11.5,
               lineHeight: 1.5,
               background: t.bgInset,
               border: `1px solid ${t.border}`,
-              borderRadius: 7,
+              borderRadius: "var(--radius-md)",
               padding: "10px 12px",
               margin: "6px 0",
               overflow: "auto",
@@ -177,6 +183,28 @@ export function Markdown({ md, t, streaming }: { md: string; t: Tokens; streamin
   );
 }
 
+type HeadingTag = "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+
+function headingComponent(tag: HeadingTag, fontSize: string, t: Tokens) {
+  return function Heading({ children }: { children?: ReactNode[] }) {
+    const Tag = tag;
+    return (
+      <Tag
+        style={{
+          fontFamily: "var(--font-display)",
+          fontWeight: "var(--weight-semibold)",
+          letterSpacing: "var(--tracking-tight)",
+          fontSize,
+          color: t.text,
+          margin: "10px 0 4px",
+        }}
+      >
+        {children}
+      </Tag>
+    );
+  };
+}
+
 function extractText(node: ReactNode | ReactNode[] | undefined): string {
   if (node == null || node === false) return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -189,11 +217,11 @@ function extractText(node: ReactNode | ReactNode[] | undefined): string {
 
 function inlineCodeStyle(t: Tokens): React.CSSProperties {
   return {
-    fontFamily: "'JetBrains Mono', monospace",
+    fontFamily: "var(--font-mono)",
     fontSize: "0.88em",
     background: t.bgInset,
     padding: "1px 5px",
-    borderRadius: 4,
+    borderRadius: "var(--radius-xs)",
     border: `1px solid ${t.border}`,
   };
 }
@@ -244,12 +272,12 @@ const CodeBlock = ({
     return (
       <pre
         style={{
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-mono)",
           fontSize: 11.5,
           lineHeight: 1.5,
           background: bg,
           border: `1px solid ${t.border}`,
-          borderRadius: 7,
+          borderRadius: "var(--radius-md)",
           padding: "10px 12px",
           margin: "6px 0",
           overflow: "auto",
@@ -264,12 +292,12 @@ const CodeBlock = ({
   return (
     <pre
       style={{
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: "var(--font-mono)",
         fontSize: 11.5,
         lineHeight: 1.5,
         background: bg,
         border: `1px solid ${t.border}`,
-        borderRadius: 7,
+        borderRadius: "var(--radius-md)",
         padding: "10px 12px",
         margin: "6px 0",
         overflow: "auto",

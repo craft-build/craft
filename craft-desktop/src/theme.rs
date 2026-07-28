@@ -296,11 +296,14 @@ pub struct ThemeTokens {
     pub accent: String,
     pub accent_dim: String,
     pub accent_dim2: String,
+    pub accent_secondary: String,
+    pub accent_tertiary: String,
     pub accent_text: String,
     pub success: String,
     pub danger: String,
     pub warning: String,
     pub warning_dim: String,
+    pub info: String,
     pub mode_colors: ModeColors,
     pub syntax_theme: Value,
 }
@@ -565,6 +568,35 @@ pub fn parse_theme(name: &str, label: &str, toml_str: &str) -> Result<ThemeToken
     )
     .unwrap_or(lerp_rgb(fg, bg, 0.2));
 
+    // Empty scope list is deliberate: these back the brand gradient, which
+    // should degrade to a flat `accent` for the 29 themes that don't define
+    // it rather than pick up an unrelated, unpredictable scope color.
+    let accent_secondary = derived_color(
+        &palette,
+        &ui,
+        &full_table,
+        &raw_palette,
+        "accent_secondary",
+        &[],
+    )
+    .unwrap_or(accent);
+    let accent_tertiary = derived_color(
+        &palette,
+        &ui,
+        &full_table,
+        &raw_palette,
+        "accent_tertiary",
+        &[],
+    )
+    .unwrap_or(accent);
+
+    // Unlike the pair above, this one intentionally uses the "info" scope
+    // fallback (an LSP-diagnostic scope most Helix themes already define),
+    // so non-craft themes get their own sensible info color instead of a
+    // flat degrade — matching how success/danger/warning are derived below.
+    let info = derived_color(&palette, &ui, &full_table, &raw_palette, "info", &["info"])
+        .unwrap_or(accent);
+
     let accent_text = if (relative_luminance(accent) - relative_luminance(bg)).abs()
         > (relative_luminance(accent) - relative_luminance(fg)).abs()
     {
@@ -650,11 +682,14 @@ pub fn parse_theme(name: &str, label: &str, toml_str: &str) -> Result<ThemeToken
         accent: hex_string(accent),
         accent_dim: hex_with_alpha(accent, 0.16),
         accent_dim2: hex_with_alpha(accent, 0.22),
+        accent_secondary: hex_string(accent_secondary),
+        accent_tertiary: hex_string(accent_tertiary),
         accent_text: hex_string(accent_text),
         success: hex_string(success),
         danger: hex_string(danger),
         warning: hex_string(warning),
         warning_dim: hex_with_alpha(warning, 0.15),
+        info: hex_string(info),
         mode_colors: ModeColors {
             build: hex_string(mode_build),
             plan: hex_string(mode_plan),
@@ -803,6 +838,15 @@ mod tests {
             obj.contains_key("warningDim"),
             "missing camelCase warningDim"
         );
+        assert!(
+            obj.contains_key("accentSecondary"),
+            "missing camelCase accentSecondary"
+        );
+        assert!(
+            obj.contains_key("accentTertiary"),
+            "missing camelCase accentTertiary"
+        );
+        assert!(obj.contains_key("info"), "missing info field");
         assert!(
             obj.contains_key("modeColors"),
             "missing camelCase modeColors"

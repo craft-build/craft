@@ -111,7 +111,8 @@ amber          = "#f0a93e"
 red            = "#f0455f"
 mode_build     = "#6fa8ff"
 mode_plan      = "#a875f5"
-mode_bash      = "#22d3ee"
+# flow-mode accent (magenta, matches --magenta-500 in the brand design system)
+mode_bash      = "#e13fea"
 
 [ui]
 layer01           = { bg = "#0f1424" }
@@ -150,6 +151,8 @@ item_selected     = { fg = "background", bg = "blue" }
 item              = { fg = "fog_200" }
 item_desc         = { fg = "comment" }
 accent            = { fg = "blue" }
+accent_secondary  = { fg = "violet" }
+accent_tertiary   = { fg = "magenta" }
 panel_border      = { fg = "border" }
 panel_title       = { fg = "foreground", modifiers = ["bold"] }
 cursor            = { fg = "background", bg = "foreground" }

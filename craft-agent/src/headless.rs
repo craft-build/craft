@@ -452,6 +452,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 )
                 .with_loaded_instructions(instructions.loaded.clone())
                 .with_user_response_rx(Arc::clone(&answer_rx))
+                .with_host_question_routing(true)
                 .with_cancel(cancel)
                 .with_mcp(params.mcp_handle.clone());
 

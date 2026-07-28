@@ -294,6 +294,13 @@ pub struct ToolContext {
     /// Semantic-search backend for Flow mode. `Some` when running under a
     /// Flow stage; `None` everywhere else, so the `flow_search` tool errors cleanly.
     pub flow_search: flow_search::FlowSearchHandle,
+    /// True when the host drives the `question` tool over the event channel
+    /// (headless/ACP/desktop). The TUI leaves this false so its Lua question
+    /// form handles the tool instead. Without this flag the ACP path shares
+    /// the global native `ToolRegistry` with the plugin host, so the Lua
+    /// `question` entry would shadow the host-routed path and the call would
+    /// block on a form nobody can answer.
+    pub host_question_routing: bool,
 }
 
 impl ToolContext {
@@ -810,6 +817,7 @@ pub(crate) fn interpreter_ctx(
         session_id: None,
         registry,
         flow_search: None,
+        host_question_routing: false,
     }
 }
 
@@ -871,6 +879,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         session_id: None,
         flow_search: env.flow_search.clone(),
         registry: Arc::clone(ToolRegistry::native_arc()),
+        host_question_routing: false,
     }
 }
 

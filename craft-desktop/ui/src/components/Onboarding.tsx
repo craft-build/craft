@@ -3,7 +3,9 @@ import { homeDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../state/store";
 import { setMode as setSessionMode, startSession } from "../lib/acp";
+import { brandGradient, brandGradientSoft, modeColor, modeColorWash } from "../theme";
 import type { SshTarget, TabState } from "../types";
+import foxMark from "../assets/mark-fox.png";
 
 const MODES = ["build", "plan", "flow"] as const;
 const MODE_LABELS: Record<string, string> = { build: "Build", plan: "Plan", flow: "Flow" };
@@ -85,7 +87,7 @@ export function Onboarding() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "#161616",
+          background: "#060911",
         }}
       />
     );
@@ -98,23 +100,9 @@ export function Onboarding() {
     >
       <div style={{ width: 460, display: "flex", flexDirection: "column", gap: 28 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div
-            style={{
-              width: 36,
-              height: 36,
-              background: t.accent,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: t.accentText,
-              fontWeight: 700,
-              fontSize: 19,
-            }}
-          >
-            C
-          </div>
+          <img src={foxMark} alt="" style={{ width: 34, height: 34, objectFit: "contain", flex: "none" }} />
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: -0.2 }}>Craft Desktop</div>
+            <div style={{ fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 600, letterSpacing: -0.2 }}>Craft Desktop</div>
             <div style={{ fontSize: 11, color: t.textFaint, letterSpacing: 0.4 }}>OPEN-SOURCE AGENTIC IDE</div>
           </div>
         </div>
@@ -137,9 +125,10 @@ export function Onboarding() {
                   padding: "9px 0",
                   fontSize: 12,
                   cursor: "pointer",
-                  background: transport === tr ? t.accentDim : t.bgInset,
-                  color: transport === tr ? t.accent : t.textDim,
-                  border: `1px solid ${transport === tr ? t.accent : t.border}`,
+                  borderRadius: "var(--radius-sm)",
+                  background: transport === tr ? brandGradientSoft(t) : t.bgInset,
+                  color: transport === tr ? t.accentSecondary : t.textDim,
+                  border: `1px solid ${transport === tr ? t.accentSecondary : t.border}`,
                   fontWeight: 500,
                 }}
               >
@@ -161,6 +150,7 @@ export function Onboarding() {
                 padding: "11px 13px",
                 background: t.bgInset,
                 border: `1px solid ${t.border}`,
+                borderRadius: "var(--radius-sm)",
                 cursor: "pointer",
               }}
             >
@@ -178,16 +168,19 @@ export function Onboarding() {
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
                 placeholder="user@host"
+                className="cd-input"
                 style={{
                   padding: "11px 13px",
                   background: t.bgInset,
                   border: `1px solid ${t.border}`,
+                  borderRadius: "var(--radius-sm)",
                   fontSize: 13,
                   color: t.text,
                   outline: "none",
                   width: "100%",
                   boxSizing: "border-box",
-                }}
+                  ["--ring-color" as string]: t.accent,
+                } as React.CSSProperties}
               />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -196,16 +189,19 @@ export function Onboarding() {
                 value={remoteCwd}
                 onChange={(e) => setRemoteCwd(e.target.value)}
                 placeholder="/home/user/project"
+                className="cd-input"
                 style={{
                   padding: "11px 13px",
                   background: t.bgInset,
                   border: `1px solid ${remoteCwd && !remoteCwd.startsWith("/") ? t.danger : t.border}`,
+                  borderRadius: "var(--radius-sm)",
                   fontSize: 13,
                   color: t.text,
                   outline: "none",
                   width: "100%",
                   boxSizing: "border-box",
-                }}
+                  ["--ring-color" as string]: t.accent,
+                } as React.CSSProperties}
               />
               {remoteCwd && !remoteCwd.startsWith("/") && (
                 <div style={{ fontSize: 11, color: t.danger }}>Remote path must start with /</div>
@@ -217,16 +213,19 @@ export function Onboarding() {
                 value={remoteCraft}
                 onChange={(e) => setRemoteCraft(e.target.value)}
                 placeholder="craft"
+                className="cd-input"
                 style={{
                   padding: "11px 13px",
                   background: t.bgInset,
                   border: `1px solid ${t.border}`,
+                  borderRadius: "var(--radius-sm)",
                   fontSize: 13,
                   color: t.text,
                   outline: "none",
                   width: "100%",
                   boxSizing: "border-box",
-                }}
+                  ["--ring-color" as string]: t.accent,
+                } as React.CSSProperties}
               />
               <div style={{ fontSize: 10.5, color: t.textFaint, lineHeight: 1.5 }}>
                 Leave blank to use craft on the remote PATH. Requires key-based (non-interactive) auth and the host key already accepted.
@@ -248,9 +247,10 @@ export function Onboarding() {
                   padding: "9px 0",
                   fontSize: 12,
                   cursor: "pointer",
-                  background: mode === m ? t.accentDim : t.bgInset,
-                  color: mode === m ? t.accent : t.textDim,
-                  border: `1px solid ${mode === m ? t.accent : t.border}`,
+                  borderRadius: "var(--radius-sm)",
+                  background: mode === m ? modeColorWash(m, t) : t.bgInset,
+                  color: mode === m ? modeColor(m, t) : t.textDim,
+                  border: `1px solid ${mode === m ? modeColor(m, t) : t.border}`,
                   fontWeight: 500,
                 }}
               >
@@ -271,6 +271,7 @@ export function Onboarding() {
               padding: "11px 13px",
               background: t.bgInset,
               border: `1px solid ${yolo ? t.warning : t.border}`,
+              borderRadius: "var(--radius-sm)",
               cursor: "pointer",
             }}
           >
@@ -285,7 +286,7 @@ export function Onboarding() {
               style={{
                 width: 32,
                 height: 18,
-                borderRadius: 9,
+                borderRadius: "var(--radius-pill)",
                 background: yolo ? t.warning : t.bg,
                 border: `1px solid ${yolo ? t.warning : t.border}`,
                 position: "relative",
@@ -311,10 +312,12 @@ export function Onboarding() {
 
         <div
           onClick={start}
+          className={starting ? undefined : "cd-btn-primary"}
           style={{
             marginTop: 6,
             padding: "13px 0",
-            background: starting ? t.bgInset : t.accent,
+            borderRadius: "var(--radius-sm)",
+            background: starting ? t.bgInset : brandGradient(t),
             color: starting ? t.textFaint : t.accentText,
             textAlign: "center",
             fontSize: 13.5,

@@ -41,7 +41,7 @@ export function PlanGraph({ tab, t }: { tab: TabState; t: Tokens }) {
               <div
                 style={{
                   padding: "13px 15px",
-                  borderRadius: 9,
+                  borderRadius: "var(--radius-md)",
                   background: t.bgInset,
                   border: `1px solid ${stage.status === "in_progress" ? t.accent : t.border}`,
                   display: "flex",

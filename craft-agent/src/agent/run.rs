@@ -155,6 +155,7 @@ pub struct Agent<'h> {
     advisor_state: Option<super::advisor::AdvisorState>,
     ttsr: Option<Arc<super::ttsr::TtsrManager>>,
     flow_search: crate::tools::flow_search::FlowSearchHandle,
+    host_question_routing: bool,
     token_estimation_multiplier: f64,
     repo_map: Option<craft_repomap::RepoMap>,
 }
@@ -241,6 +242,7 @@ impl<'h> Agent<'h> {
             advisor_state,
             ttsr,
             flow_search: None,
+            host_question_routing: false,
             token_estimation_multiplier: 1.0,
             repo_map: None,
         }
@@ -265,6 +267,14 @@ impl<'h> Agent<'h> {
         rx: Arc<tokio::sync::Mutex<flume::Receiver<String>>>,
     ) -> Self {
         self.user_response_rx = Some(rx);
+        self
+    }
+
+    /// Route `question` tool calls to the host over the event channel instead
+    /// of the registry entry. Set by the headless/ACP/desktop path, where the
+    /// Lua question form can't run. The TUI leaves this off so its form wins.
+    pub fn with_host_question_routing(mut self, enabled: bool) -> Self {
+        self.host_question_routing = enabled;
         self
     }
 
@@ -987,6 +997,7 @@ impl<'h> Agent<'h> {
             pending_edits: Arc::clone(&self.pending_edits),
             session_id: self.session_id.as_ref().map(|s| s.as_str().to_string()),
             flow_search: self.flow_search.clone(),
+            host_question_routing: self.host_question_routing,
         }
     }
 

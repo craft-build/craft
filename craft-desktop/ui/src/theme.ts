@@ -29,11 +29,14 @@ export interface Tokens {
   accent: string;
   accentDim: string;
   accentDim2: string;
+  accentSecondary: string;
+  accentTertiary: string;
   accentText: string;
   success: string;
   danger: string;
   warning: string;
   warningDim: string;
+  info: string;
   modeColors: ModeColors;
   syntaxTheme: ShikiTheme;
 }
@@ -61,6 +64,26 @@ export function modeColor(mode: string, t: Tokens): string {
 // backend emits, so we shade further rather than adding a new server token.
 export function terminalBg(t: Tokens): string {
   return `color-mix(in oklch, ${t.bg} 90%, black)`;
+}
+
+// Brand gradient (blue -> violet -> magenta) for primary buttons, switches,
+// and progress fills. `accentSecondary`/`accentTertiary` fall back to flat
+// `accent` for themes that don't define them, so this degrades to a solid
+// color rather than picking up unrelated hues on non-craft themes.
+export function brandGradient(t: Tokens): string {
+  return `linear-gradient(135deg, ${t.accent} 0%, ${t.accentSecondary} 55%, ${t.accentTertiary} 100%)`;
+}
+
+// Soft (16%-alpha) wash version of brandGradient, used for selected/active
+// row backgrounds (command palette, pill selectors).
+export function brandGradientSoft(t: Tokens): string {
+  const wash = (c: string) => `color-mix(in oklch, ${c} 16%, transparent)`;
+  return `linear-gradient(135deg, ${wash(t.accent)} 0%, ${wash(t.accentSecondary)} 55%, ${wash(t.accentTertiary)} 100%)`;
+}
+
+// 16%-alpha wash of a mode's color, used for the AGENT mode pill buttons.
+export function modeColorWash(mode: string, t: Tokens): string {
+  return `color-mix(in oklch, ${modeColor(mode, t)} 16%, transparent)`;
 }
 
 export function modeLabel(mode: string): string {

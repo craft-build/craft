@@ -50,8 +50,8 @@ export default function App() {
         style={{
           width: "100vw",
           height: "100vh",
-          background: "#161616",
-          fontFamily: "'JetBrains Mono', ui-monospace, Menlo, monospace",
+          background: "#060911",
+          fontFamily: "var(--font-body)",
         }}
       />
     );
@@ -63,7 +63,7 @@ export default function App() {
         width: "100vw",
         height: "100vh",
         overflow: "hidden",
-        fontFamily: "'JetBrains Mono', ui-monospace, Menlo, monospace",
+        fontFamily: "var(--font-body)",
         display: "flex",
         flexDirection: "column",
         position: "relative",
