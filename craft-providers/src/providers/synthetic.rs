@@ -37,22 +37,6 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
 pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
         ModelEntry {
-            prefixes: &["hf:MiniMaxAI/MiniMax-M3"],
-            tier: ModelTier::Medium,
-            family: ModelFamily::Synthetic,
-            default: true,
-            pricing: ModelPricing {
-                input: 0.60,
-                output: 1.20,
-                cache_write: 0.00,
-                cache_read: 0.00,
-                fast: None,
-            },
-            max_output_tokens: 131072,
-            context_window: 512_000,
-            supports_vision: false,
-        },
-        ModelEntry {
             prefixes: &["syn:small:vision", "hf:Qwen/Qwen3.6-27B"],
             tier: ModelTier::Weak,
             family: ModelFamily::Synthetic,
@@ -69,7 +53,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             supports_vision: true,
         },
         ModelEntry {
-            prefixes: &["syn:large:vision", "hf:moonshotai/Kimi-K2.6"],
+            prefixes: &["syn:large:vision", "hf:moonshotai/Kimi-K3"],
             tier: ModelTier::Strong,
             family: ModelFamily::Synthetic,
             default: true,
@@ -81,7 +65,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
                 fast: None,
             },
             max_output_tokens: 131072,
-            context_window: 256_000,
+            context_window: 512_000,
             supports_vision: true,
         },
         ModelEntry {
