@@ -7,6 +7,7 @@ use std::time::Duration;
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table, Value};
 
 use crate::api::fs::expand_tilde;
+use crate::api::util::command::{UiAction, err_pair, ui_roundtrip, ui_send};
 use crate::plugin_permissions::{
     Permission::{Env, Run},
     PluginPermissions,
@@ -213,7 +214,11 @@ impl Drop for JobStore {
     }
 }
 
-pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult<Table> {
+pub(crate) fn create_fn_table(
+    lua: &Lua,
+    perms: &PluginPermissions,
+    tx: Option<flume::Sender<UiAction>>,
+) -> LuaResult<Table> {
     let t = lua.create_table()?;
     let perms = perms.clone();
 
@@ -369,6 +374,46 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
         })?,
     )?;
 
+    let win_tx = tx.clone();
+    t.set(
+        "winsaveview",
+        lua.create_async_function(move |lua, ()| {
+            let win_tx = win_tx.clone();
+            async move {
+                let view = match ui_roundtrip(win_tx.as_ref(), |reply_tx| UiAction::WinSaveView {
+                    reply_tx,
+                })
+                .await
+                {
+                    Ok(view) => view,
+                    Err(e) => return Ok(err_pair(e)),
+                };
+                let table = lua.create_table()?;
+                table.set("topline", i64::from(view.scroll_top) + 1)?;
+                table.set("line_count", view.line_count)?;
+                table.set("height", view.height)?;
+                table.set("auto_scroll", view.auto_scroll)?;
+                Ok((Value::Table(table), None))
+            }
+        })?,
+    )?;
+
+    let rest_tx = tx;
+    t.set(
+        "winrestview",
+        lua.create_async_function(move |_, view: Table| {
+            let rest_tx = rest_tx.clone();
+            async move {
+                let topline = view.get::<Option<i64>>("topline")?.unwrap_or(1);
+                let scroll_top = topline.saturating_sub(1).clamp(0, i64::from(u16::MAX)) as u16;
+                match ui_send(rest_tx.as_ref(), UiAction::WinRestView { scroll_top }) {
+                    Ok(()) => Ok((Value::Boolean(true), None)),
+                    Err(e) => Ok(err_pair(e)),
+                }
+            }
+        })?,
+    )?;
+
     Ok(t)
 }
 
@@ -399,7 +444,9 @@ pub(crate) fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> Lua
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::util::command::{NO_UI_ERR, WinView};
     use crate::terminal_backend::TerminalSpec;
+    use test_case::test_case;
 
     fn make_store() -> JobStore {
         JobStore::new()
@@ -589,5 +636,85 @@ mod tests {
             got_kill,
             "dropping the store must kill the job, not orphan it"
         );
+    }
+
+    fn lua_with_view(tx: Option<flume::Sender<UiAction>>) -> Lua {
+        let lua = Lua::new();
+        let t = create_fn_table(&lua, &PluginPermissions::trusted(), tx).unwrap();
+        lua.globals().set("f", t).unwrap();
+        lua
+    }
+
+    #[tokio::test]
+    async fn winsaveview_without_ui_returns_error_pair() {
+        let lua = lua_with_view(None);
+        let (val, err): (Value, Option<String>) = lua
+            .load("return f.winsaveview()")
+            .eval_async()
+            .await
+            .unwrap();
+        assert!(val.is_nil());
+        assert_eq!(err.as_deref(), Some(NO_UI_ERR));
+    }
+
+    #[tokio::test]
+    async fn winrestview_without_ui_returns_error_pair() {
+        let lua = lua_with_view(None);
+        let (val, err): (Value, Option<String>) = lua
+            .load("return f.winrestview({ topline = 3 })")
+            .eval_async()
+            .await
+            .unwrap();
+        assert!(val.is_nil());
+        assert_eq!(err.as_deref(), Some(NO_UI_ERR));
+    }
+
+    #[tokio::test]
+    async fn winsaveview_reports_the_viewport_one_based() {
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = lua_with_view(Some(tx));
+        tokio::spawn(async move {
+            let UiAction::WinSaveView { reply_tx } = rx.recv_async().await.unwrap() else {
+                panic!("expected winsaveview request");
+            };
+            reply_tx
+                .send(WinView {
+                    scroll_top: 6,
+                    line_count: 100,
+                    height: 24,
+                    auto_scroll: false,
+                })
+                .unwrap();
+        });
+        let (view, err): (Table, Option<String>) = lua
+            .load("return f.winsaveview()")
+            .eval_async()
+            .await
+            .unwrap();
+        assert_eq!(err, None);
+        assert_eq!(view.get::<u16>("topline").unwrap(), 7);
+        assert_eq!(view.get::<u16>("line_count").unwrap(), 100);
+        assert_eq!(view.get::<u16>("height").unwrap(), 24);
+        assert!(!view.get::<bool>("auto_scroll").unwrap());
+    }
+
+    #[test_case("{ topline = 12 }", 11 ; "explicit_topline")]
+    #[test_case("{}", 0 ; "missing_topline_defaults_to_first_line")]
+    #[test_case("{ topline = -5 }", 0 ; "below_range_clamps_to_first_line")]
+    #[tokio::test]
+    async fn winrestview_forwards_zero_based_scroll_top(arg: &'static str, expected: u16) {
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = lua_with_view(Some(tx));
+        let (ok, err): (bool, Option<String>) = lua
+            .load(format!("return f.winrestview({arg})"))
+            .eval_async()
+            .await
+            .unwrap();
+        assert!(ok);
+        assert_eq!(err, None);
+        let UiAction::WinRestView { scroll_top } = rx.recv_async().await.unwrap() else {
+            panic!("expected winrestview request");
+        };
+        assert_eq!(scroll_top, expected);
     }
 }

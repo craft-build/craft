@@ -21,6 +21,7 @@ use craft_agent::{
     ToolStartEvent,
 };
 use craft_config::{ToolKey, ToolOutputLines, UiConfig};
+use craft_lua::WinView;
 use craft_providers::{ContentBlock, Message, Role, StopReason, TokenUsage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -228,8 +229,16 @@ impl Chat {
         self.messages_panel.scroll(delta);
     }
 
+    pub fn set_scroll_top(&mut self, top: u16) {
+        self.messages_panel.set_scroll_top(top);
+    }
+
     pub fn half_page(&self) -> i32 {
         self.messages_panel.half_page()
+    }
+
+    pub fn win_view(&self) -> WinView {
+        self.messages_panel.win_view()
     }
 
     pub fn auto_scroll(&self) -> bool {

@@ -61,7 +61,7 @@ use craft_agent::{
     SubagentInfo,
 };
 use craft_config::UiConfig;
-use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader};
+use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
 use craft_providers::{Message, Model, StopReason, ThinkingConfig, add_cost};
 use craft_storage::StateDir;
 use craft_storage::input_history::InputHistory;
@@ -485,6 +485,14 @@ impl App {
 
     fn active_chat(&mut self) -> &mut Chat {
         &mut self.chats[self.active_chat]
+    }
+
+    pub(crate) fn win_view(&self) -> WinView {
+        self.chats[self.active_chat].win_view()
+    }
+
+    pub(crate) fn set_scroll_top(&mut self, top: u16) {
+        self.active_chat().set_scroll_top(top);
     }
 
     fn clear_selection_unless_pending_copy(&mut self) {

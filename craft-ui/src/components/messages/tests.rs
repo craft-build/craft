@@ -685,6 +685,26 @@ fn scroll_clamps_to_max_scroll() {
     assert_eq!(panel.scroll_top, max);
 }
 
+#[test]
+fn win_view_clamps_a_restored_offset_past_the_end() {
+    const LINES: u16 = 15;
+    const HEIGHT: u16 = 10;
+
+    let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
+    panel
+        .streaming_text
+        .set_buffer(&"a\n".repeat(LINES as usize));
+    render(&mut panel, 80, HEIGHT);
+
+    panel.restore_scroll(u16::MAX, true);
+
+    let view = panel.win_view();
+    assert_eq!(view.scroll_top, panel.max_scroll());
+    assert_eq!(view.line_count, LINES);
+    assert_eq!(view.height, HEIGHT);
+    assert!(view.auto_scroll);
+}
+
 #[test_case("b1__0",          Some(("b1", 0))   ; "simple")]
 #[test_case("b1__2",          Some(("b1", 2))   ; "higher_index")]
 #[test_case("a__b__1",        Some(("a__b", 1)) ; "nested_separators")]

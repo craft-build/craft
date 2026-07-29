@@ -26,7 +26,7 @@ use crate::selection::Selection;
 use crate::splash::{ColorTransition, Splash};
 use crate::theme;
 use craft_config::{ToolOutputLines, UiConfig};
-use craft_lua::{EventHandle, RestoreItem};
+use craft_lua::{EventHandle, RestoreItem, WinView};
 use serde_json::Value;
 
 use std::collections::{HashMap, HashSet};
@@ -720,7 +720,12 @@ impl MessagesPanel {
     }
 
     pub fn scroll(&mut self, delta: i32) {
-        self.scroll_top = apply_scroll_delta(self.scroll_top, delta).min(self.max_scroll());
+        self.set_scroll_top(apply_scroll_delta(self.scroll_top, delta));
+    }
+
+    /// Always unpins; the next `view` re-pins if this lands on the bottom line.
+    pub fn set_scroll_top(&mut self, top: u16) {
+        self.scroll_top = top.min(self.max_scroll());
         self.auto_scroll = false;
     }
 
@@ -729,8 +734,7 @@ impl MessagesPanel {
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.scroll_top = 0;
-        self.auto_scroll = false;
+        self.set_scroll_top(0);
     }
 
     pub fn enable_auto_scroll(&mut self) {
@@ -747,8 +751,7 @@ impl MessagesPanel {
             .map(|s| s.height(width) as u32)
             .sum::<u32>()
             .min(u16::MAX as u32) as u16;
-        self.scroll_top = offset.min(self.max_scroll());
-        self.auto_scroll = false;
+        self.set_scroll_top(offset);
     }
 
     pub fn restore_scroll(&mut self, scroll_top: u16, auto_scroll: bool) {
@@ -1047,6 +1050,18 @@ impl MessagesPanel {
 
     pub fn scroll_top(&self) -> u16 {
         self.scroll_top
+    }
+
+    /// Backs `craft.fn.winsaveview`. The clamp earns its keep: a pinned or
+    /// restored `scroll_top` can sit past the end until the next `view`
+    /// resolves it against the current line count.
+    pub fn win_view(&self) -> WinView {
+        WinView {
+            scroll_top: self.scroll_top.min(self.max_scroll()),
+            line_count: self.last_total_lines,
+            height: self.viewport_height,
+            auto_scroll: self.auto_scroll,
+        }
     }
 
     pub fn segment_heights(&self) -> Vec<u16> {

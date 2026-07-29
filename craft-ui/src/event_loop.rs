@@ -796,6 +796,12 @@ impl<'t> EventLoop<'t> {
             UiAction::Session { req, reply_tx } => {
                 self.handle_session_request(req, reply_tx);
             }
+            UiAction::WinSaveView { reply_tx } => {
+                let _ = reply_tx.send(self.focused_app().win_view());
+            }
+            UiAction::WinRestView { scroll_top } => {
+                self.focused_app().set_scroll_top(scroll_top);
+            }
         }
     }
 

@@ -2,35 +2,20 @@
 //! event loop, which owns the live session runtimes and the session store;
 //! the loop answers `list` from a background task so slow scans never block.
 
-use mlua::{Lua, Result as LuaResult, Table, Value};
+use mlua::{Lua, Result as LuaResult, Table};
 
-use crate::api::util::command::{SessionReply, SessionRequest, UiAction};
+use crate::api::util::command::{Pair, SessionRequest, UiAction, err_pair, ui_roundtrip};
 use crate::api::util::convert::json_to_lua;
-
-const NO_UI_ERR: &str = "no interactive UI attached";
-
-type Pair = (Value, Option<String>);
-
-fn err_pair(err: impl ToString) -> Pair {
-    (Value::Nil, Some(err.to_string()))
-}
 
 async fn roundtrip(
     lua: Lua,
     tx: Option<flume::Sender<UiAction>>,
     req: SessionRequest,
 ) -> LuaResult<Pair> {
-    let Some(tx) = tx else {
-        return Ok(err_pair(NO_UI_ERR));
-    };
-    let (reply_tx, reply_rx) = flume::bounded::<SessionReply>(1);
-    if tx.try_send(UiAction::Session { req, reply_tx }).is_err() {
-        return Ok(err_pair(NO_UI_ERR));
-    }
-    match reply_rx.recv_async().await {
+    match ui_roundtrip(tx.as_ref(), |reply_tx| UiAction::Session { req, reply_tx }).await {
         Ok(Ok(value)) => Ok((json_to_lua(&lua, &value)?, None)),
         Ok(Err(e)) => Ok(err_pair(e)),
-        Err(_) => Ok(err_pair("ui event loop dropped the request")),
+        Err(e) => Ok(err_pair(e)),
     }
 }
 
@@ -152,6 +137,8 @@ pub(crate) fn create_session_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::util::command::NO_UI_ERR;
+    use mlua::Value;
     use serde_json::json;
 
     fn lua_with_session(tx: Option<flume::Sender<UiAction>>) -> Lua {

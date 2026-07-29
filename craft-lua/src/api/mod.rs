@@ -65,9 +65,9 @@ pub(crate) fn create_craft_global(
     )?;
     craft.set(
         "ui",
-        ui::create_ui_table(lua, ui_action_tx, Arc::clone(&plugin))?,
+        ui::create_ui_table(lua, ui_action_tx.clone(), Arc::clone(&plugin))?,
     )?;
-    craft.set("fn", r#fn::create_fn_table(lua, permissions)?)?;
+    craft.set("fn", r#fn::create_fn_table(lua, permissions, ui_action_tx)?)?;
     split::register(&craft, lua)?;
     craft.set("async", r#async::create_async_table(lua)?)?;
     craft.set(
