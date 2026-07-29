@@ -136,6 +136,7 @@ impl App {
         self.task_picker_original = None;
         self.last_esc = None;
         self.plan_form.reset();
+        self.flow_goal_form.reset();
         self.flow_panel.reset();
         self.restoring = Arc::new(std::sync::atomic::AtomicBool::new(false));
     }

@@ -3680,6 +3680,84 @@ fn flow_status_line_shows_awaiting_goal_at_gate() {
     assert!(rendered.contains("awaiting goal"), "got: {rendered}");
 }
 
+fn flow_app_at_gate() -> (App, flume::Receiver<String>) {
+    let mut app = flow_app();
+    let (tx, rx) = flume::unbounded();
+    app.answer_tx = Some(tx);
+    app.handle_flow_progress(craft_agent::FlowProgress::GoalReady {
+        goal_doc: "do the thing".into(),
+    });
+    (app, rx)
+}
+
+#[test]
+fn goal_ready_shows_form() {
+    let (app, _rx) = flow_app_at_gate();
+    assert!(app.flow_goal_form.is_visible());
+    assert!(app.flow_goal_form_active());
+    assert!(app.flow_goal_form.height() > 0);
+}
+
+#[test]
+fn enter_on_approve_sends_approve_sentinel() {
+    let (mut app, rx) = flow_app_at_gate();
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(rx.try_recv().unwrap(), craft_agent::FLOW_APPROVE_ANSWER);
+    assert!(!app.flow_awaiting_approval);
+    assert!(!app.flow_goal_form.is_visible());
+    assert_eq!(app.main_chat().last_message_text(), "approved");
+}
+
+#[test]
+fn enter_on_cancel_sends_cancel_sentinel() {
+    let (mut app, rx) = flow_app_at_gate();
+    app.update(Msg::Key(key(KeyCode::Down)));
+    app.update(Msg::Key(key(KeyCode::Down)));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(rx.try_recv().unwrap(), craft_agent::FLOW_CANCEL_ANSWER);
+    assert!(!app.flow_awaiting_approval);
+    assert_eq!(app.main_chat().last_message_text(), "cancel");
+}
+
+#[test]
+fn tab_out_of_flow_mode_deactivates_form() {
+    let (mut app, _rx) = flow_app_at_gate();
+    app.update(Msg::Key(key(KeyCode::Tab)));
+    assert_ne!(app.state.mode, Mode::Flow);
+    assert!(!app.flow_goal_form_active());
+    // Still awaiting: typed revision routes even outside Flow mode.
+    assert!(app.flow_awaiting_approval);
+}
+
+#[test]
+fn refine_hides_form_then_typed_submit_routes_revision() {
+    let (mut app, rx) = flow_app_at_gate();
+    app.update(Msg::Key(key(KeyCode::Down)));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert!(!app.flow_goal_form.is_visible());
+    assert!(app.flow_awaiting_approval);
+
+    app.handle_submit(Submission {
+        text: "also cover refresh tokens".into(),
+        images: vec![],
+    });
+    assert_eq!(rx.try_recv().unwrap(), "also cover refresh tokens");
+    assert!(!app.flow_awaiting_approval);
+}
+
+#[test]
+fn dismissed_form_shows_hint_and_ctrl_t_reopens() {
+    let (mut app, _rx) = flow_app_at_gate();
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.flow_goal_form.is_visible());
+    assert!(app.flow_awaiting_approval);
+    let hint = app.flow_goal_form.hint_line().expect("reopen hint");
+    assert!(render_spans(&hint).contains("awaiting goal"));
+
+    app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
+    assert!(app.flow_goal_form.is_visible());
+}
+
 #[test]
 fn flow_status_line_is_none_in_build_mode() {
     let app = test_app();

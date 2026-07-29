@@ -29,7 +29,7 @@ use crate::clipboard::ClipboardState;
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
-use crate::components::flow_goal_prompt::{FlowGoalAnswer, FlowGoalPrompt};
+use crate::components::flow_goal_form::{FlowGoalForm, FlowGoalFormAction};
 use crate::components::flow_panel::{FlowPanel, FlowSnapshot};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
@@ -160,7 +160,7 @@ pub struct App {
     pub(super) permission_prompt: PermissionPrompt,
     pub(super) plan_form: PlanForm,
     pub(super) flow_panel: FlowPanel,
-    pub(super) flow_goal_prompt: FlowGoalPrompt,
+    pub(super) flow_goal_form: FlowGoalForm,
     /// True while the flow pipeline is paused at the goal-approval gate. The
     /// next submit is routed to the agent's answer channel (as the approval
     /// payload) instead of starting a new agent turn.
@@ -293,7 +293,7 @@ impl App {
             permission_prompt: PermissionPrompt::new(),
             plan_form: PlanForm::new(),
             flow_panel: FlowPanel::new(),
-            flow_goal_prompt: FlowGoalPrompt::new(),
+            flow_goal_form: FlowGoalForm::new(),
             flow_awaiting_approval: false,
             flow_failed: false,
             goal_ready_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -343,6 +343,7 @@ impl App {
         app.login_picker.set_keybindings(app.keybindings.clone());
         app.mcp_picker.set_keybindings(app.keybindings.clone());
         app.plan_form.set_keybindings(app.keybindings.clone());
+        app.flow_goal_form.set_keybindings(app.keybindings.clone());
         app
     }
 
@@ -380,6 +381,12 @@ impl App {
         self.state.mode == Mode::Plan && self.plan_form.is_visible()
     }
 
+    fn flow_goal_form_active(&self) -> bool {
+        self.state.mode == Mode::Flow
+            && self.flow_awaiting_approval
+            && self.flow_goal_form.is_visible()
+    }
+
     /// Push the current `FlowState` (workstream id + stage) into the panel's
     /// render snapshot. Called each frame before rendering so the status line
     /// always reflects live state without holding a borrow into `SessionState`.
@@ -403,7 +410,7 @@ impl App {
 
     /// Apply a `FlowProgress` event from the pipeline to the live `FlowState`
     /// (so the status line reflects the current stage and thread counts) or
-    /// open the goal-approval overlay at the gate. No-op outside Flow mode.
+    /// show the goal-approval form at the gate. No-op outside Flow mode.
     fn handle_flow_progress(&mut self, p: craft_agent::FlowProgress) -> Vec<Action> {
         if self.state.mode != Mode::Flow {
             return vec![];
@@ -420,11 +427,11 @@ impl App {
             craft_agent::FlowProgress::ThreadExit { .. } => {
                 self.flow_panel.live_threads = self.flow_panel.live_threads.saturating_sub(1);
             }
-            craft_agent::FlowProgress::GoalReady { goal_doc } => {
+            craft_agent::FlowProgress::GoalReady { .. } => {
                 self.flow_awaiting_approval = true;
                 self.goal_ready_flag
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                self.flow_goal_prompt.open(goal_doc);
+                self.flow_goal_form.show();
             }
             craft_agent::FlowProgress::Done { .. } => {
                 self.flow_failed = false;
@@ -690,20 +697,6 @@ impl App {
     /// Returns `Some` when an overlay is open (consuming the key),
     /// `None` when no overlay is active and input should continue.
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
-        if self.flow_goal_prompt.is_open() {
-            if let Some(answer) = self.flow_goal_prompt.handle_key(key) {
-                let encoded = match answer {
-                    FlowGoalAnswer::Approve => craft_agent::FLOW_APPROVE_ANSWER.to_owned(),
-                    FlowGoalAnswer::Cancel => craft_agent::FLOW_CANCEL_ANSWER.to_owned(),
-                    FlowGoalAnswer::Revise(text) => text,
-                };
-                self.flow_goal_prompt.close();
-                self.flow_awaiting_approval = false;
-                self.send_answer(encoded);
-            }
-            return Some(vec![]);
-        }
-
         if self.permission_prompt.is_open() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
                 let subagent_id = self.permission_prompt.subagent_id().map(str::to_owned);
@@ -733,6 +726,14 @@ impl App {
             let action = self.plan_form.handle_key(key);
             if action != PlanFormAction::Passthrough {
                 return Some(self.handle_plan_form_action(action));
+            }
+        }
+
+        // flow_goal_form is non-modal: Passthrough falls through likewise
+        if self.flow_goal_form_active() {
+            let action = self.flow_goal_form.handle_key(key);
+            if action != FlowGoalFormAction::Passthrough {
+                return Some(self.handle_flow_goal_form_action(action));
             }
         }
 
@@ -993,6 +994,8 @@ impl App {
             } else if self.keybindings.matches(ActionId::PlanToggle, key) {
                 if self.state.mode == Mode::Plan {
                     self.plan_form.toggle();
+                } else if self.flow_awaiting_approval && self.state.mode == Mode::Flow {
+                    self.flow_goal_form.toggle();
                 } else {
                     self.float_mgr.toggle_panel_visibility();
                 }
@@ -1103,7 +1106,7 @@ impl App {
                 let text = sub.text.trim().to_owned();
                 self.main_chat().show_user_message(text.clone());
                 self.flow_awaiting_approval = false;
-                self.flow_goal_prompt.close();
+                self.flow_goal_form.reset();
                 let answer = match text.as_str() {
                     "cancel" => craft_agent::FLOW_CANCEL_ANSWER.to_owned(),
                     "approved" => craft_agent::FLOW_APPROVE_ANSWER.to_owned(),
@@ -1163,6 +1166,7 @@ impl App {
         self.retry_info = None;
         let awaiting_flow = self.flow_awaiting_approval;
         self.close_all_overlays();
+        self.flow_goal_form.reset();
         self.pending_input = PendingInput::None;
         if awaiting_flow {
             self.flow_awaiting_approval = false;
@@ -2040,7 +2044,6 @@ impl App {
         login_picker,
         mcp_picker,
         permission_prompt,
-        flow_goal_prompt,
     );
 
     pub fn any_overlay_open(&self) -> bool {
@@ -2105,10 +2108,7 @@ impl App {
     }
 
     fn route_text_paste(&mut self, text: &str) {
-        if self.plan_form_active() {
-            return;
-        }
-        if self.flow_goal_prompt.handle_paste(text) {
+        if self.plan_form_active() || self.flow_goal_form_active() {
             return;
         }
         if self.permission_prompt.handle_paste(text) {
@@ -2146,6 +2146,37 @@ impl App {
         if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text) {
             self.command_palette.sync(&val);
         }
+    }
+
+    fn handle_flow_goal_form_action(&mut self, action: FlowGoalFormAction) -> Vec<Action> {
+        match action {
+            FlowGoalFormAction::Consumed | FlowGoalFormAction::Passthrough => vec![],
+            FlowGoalFormAction::Hide => {
+                self.flow_goal_form.hide();
+                vec![]
+            }
+            FlowGoalFormAction::Approve => {
+                self.resolve_goal_gate(
+                    craft_agent::FLOW_APPROVE_ANSWER,
+                    craft_agent::FLOW_APPROVE_ANSWER,
+                );
+                vec![]
+            }
+            FlowGoalFormAction::Cancel => {
+                self.resolve_goal_gate("cancel", craft_agent::FLOW_CANCEL_ANSWER);
+                vec![]
+            }
+        }
+    }
+
+    /// Answer the goal-approval gate from the form: echo the decision in the
+    /// transcript, unblock the agent loop, and reset the gate state. `echo` is
+    /// the display text; `answer` is the wire payload the flow loop resumes on.
+    fn resolve_goal_gate(&mut self, echo: &str, answer: &str) {
+        self.main_chat().show_user_message(echo.to_owned());
+        self.flow_awaiting_approval = false;
+        self.flow_goal_form.reset();
+        self.send_answer(answer.to_owned());
     }
 
     fn handle_plan_form_action(&mut self, action: PlanFormAction) -> Vec<Action> {

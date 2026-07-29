@@ -351,8 +351,9 @@ impl AgentLoop {
     /// (`FlowProgress::GoalReady`), the agent ends the run with
     /// `AwaitingGoalApproval` and the App sets `goal_ready_flag`; this loop
     /// then awaits the user's approve/revise/cancel answer (routed through
-    /// `answer_rx` by the goal overlay) and resumes on approve/revise or
-    /// cancels on cancel. The agent reads its persisted typed log on each
+    /// `answer_rx` by the goal-approval form or a typed reply) and resumes on
+    /// approve/revise or cancels on cancel. The agent reads its persisted
+    /// typed log on each
     /// resume to re-derive the goal and the next shift (plan §7).
     async fn do_flow_run(
         &mut self,

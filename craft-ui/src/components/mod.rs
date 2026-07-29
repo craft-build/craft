@@ -2,7 +2,7 @@ pub(crate) mod btw_modal;
 pub(crate) mod code_view;
 pub mod command;
 pub(crate) mod file_picker;
-pub(crate) mod flow_goal_prompt;
+pub(crate) mod flow_goal_form;
 pub(crate) mod flow_panel;
 pub(crate) mod form;
 pub(crate) mod help_modal;

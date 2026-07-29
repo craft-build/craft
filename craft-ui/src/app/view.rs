@@ -38,7 +38,9 @@ impl App {
         self.status_bar.clear_expired_hint();
 
         self.sync_flow_snapshot();
-        let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
+        let form_visible = self.permission_prompt.is_open()
+            || self.plan_form_active()
+            || self.flow_goal_form_active();
         let layout = self.compute_layout(frame, form_visible);
         let render_chat = self.resolve_render_chat();
 
@@ -81,12 +83,14 @@ impl App {
         } else if below_active {
             0
         } else if form_visible {
-            let plan_h = if self.plan_form_active() {
+            let form_h = if self.plan_form_active() {
                 self.plan_form.height()
+            } else if self.flow_goal_form_active() {
+                self.flow_goal_form.height()
             } else {
                 0
             };
-            plan_h.min(max_bottom)
+            form_h.min(max_bottom)
         } else if self.is_main_chat() {
             let panel_h: u16 = self
                 .float_mgr
@@ -225,6 +229,8 @@ impl App {
             frame.render_widget(sep, sep_area);
         } else if self.plan_form_active() {
             self.plan_form.view(frame, layout.bottom_area);
+        } else if self.flow_goal_form_active() {
+            self.flow_goal_form.view(frame, layout.bottom_area);
         } else if layout.bottom_area.height > 0 {
             let queue_entries = self.queue.panel_entries();
             queue_panel::view(frame, layout.queue_area, &queue_entries, self.queue.focus());
@@ -242,6 +248,7 @@ impl App {
             let panel_hint = (self.state.mode == Mode::Plan)
                 .then(|| self.plan_form.hint_line())
                 .flatten()
+                .or_else(|| self.flow_goal_form.hint_line())
                 .or_else(|| self.flow_status_line())
                 .or_else(|| self.lua_hint_line());
             self.input_box.view(
@@ -302,10 +309,6 @@ impl App {
 
     fn render_top_modals(&mut self, frame: &mut Frame, mut overlay_rect: Rect) -> Rect {
         let full = frame.area();
-        let r = self.flow_goal_prompt.view(frame, full);
-        if r.width > 0 {
-            overlay_rect = r;
-        }
         let r = self.btw_modal.view(frame, full);
         if r.width > 0 {
             overlay_rect = r;
@@ -396,7 +399,10 @@ impl App {
 
         self.zones.push_overlay(layout.status_area);
 
-        if self.permission_prompt.is_open() || self.plan_form_active() {
+        if self.permission_prompt.is_open()
+            || self.plan_form_active()
+            || self.flow_goal_form_active()
+        {
             self.zones.push_overlay(layout.bottom_area);
         }
 
@@ -498,7 +504,7 @@ impl App {
     #[cfg(test)]
     pub(super) fn active_keybind_contexts(&self) -> Vec<KeybindContext> {
         let mut contexts = vec![KeybindContext::General];
-        if self.plan_form_active() {
+        if self.plan_form_active() || self.flow_goal_form_active() {
             contexts.push(KeybindContext::FormInput);
         } else if self.queue.focus().is_some() {
             contexts.push(KeybindContext::QueueFocus);
@@ -527,7 +533,9 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn layout_geometry(&self, area: Rect) -> (Rect, Rect, Rect, Rect, SplitLayout) {
-        let form_visible = self.permission_prompt.is_open() || self.plan_form_active();
+        let form_visible = self.permission_prompt.is_open()
+            || self.plan_form_active()
+            || self.flow_goal_form_active();
         let layout = self.compute_layout_raw(area, form_visible);
         (
             layout.msg_area,
