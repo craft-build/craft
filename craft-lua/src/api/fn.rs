@@ -207,6 +207,12 @@ impl JobStore {
     }
 }
 
+impl Drop for JobStore {
+    fn drop(&mut self) {
+        self.kill_all();
+    }
+}
+
 pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult<Table> {
     let t = lua.create_table()?;
     let perms = perms.clone();
@@ -539,6 +545,49 @@ mod tests {
         assert!(
             buf.is_empty(),
             "drained receiver yields no events via drain_events"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_the_store_kills_its_jobs() {
+        let mut store = make_store();
+        let id = store.next_id();
+        let handle = store
+            .backend()
+            .start(TerminalSpec {
+                cmd: "sleep 30".into(),
+                cwd: None,
+                env: None,
+                sandbox: None,
+            })
+            .await
+            .expect("job started");
+        store.register(id, handle, None, None, None, false);
+        assert!(
+            store.has_alive_jobs(),
+            "job should be alive before the drop"
+        );
+        let rx = store.take_receiver(id).expect("receiver present");
+
+        drop(store);
+
+        let mut got_kill = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(JobEvent::Exit(_)) => {
+                    got_kill = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(flume::RecvTimeoutError::Timeout) => continue,
+                Err(flume::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(
+            got_kill,
+            "dropping the store must kill the job, not orphan it"
         );
     }
 }
