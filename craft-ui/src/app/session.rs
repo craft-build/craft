@@ -233,8 +233,9 @@ impl App {
 
     pub(super) fn reset_session(&mut self) -> Vec<Action> {
         self.reset_ui_chrome();
+        let ended = self.state.session.id.clone();
         self.lua_event_handle
-            .fire_autocmd("SessionReset", serde_json::json!({}));
+            .fire_autocmd("SessionReset", serde_json::json!({ "session_id": ended }));
         self.state.token_usage = TokenUsage::default();
         self.state.cost = None;
         self.state.context_size = 0;
@@ -243,8 +244,10 @@ impl App {
             self.enter_plan();
         }
         self.state.session = AppSession::new(&self.state.session.model, &self.state.session.cwd);
-        self.lua_event_handle
-            .fire_autocmd("SessionStart", serde_json::json!({}));
+        self.lua_event_handle.fire_autocmd(
+            "SessionStart",
+            serde_json::json!({ "session_id": self.state.session.id }),
+        );
         vec![Action::NewSession]
     }
 
