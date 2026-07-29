@@ -1,7 +1,7 @@
-use agent_client_protocol_schema::{
-    Content, ContentBlock, ContentChunk, Diff, ImageContent, SessionUpdate, TextContent, ToolCall,
-    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind,
+use agent_client_protocol_schema::v1::{
+    Content, ContentBlock, ContentChunk, Diff, ImageContent, SessionUpdate, StopReason,
+    TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use craft_agent::FlowProgress;
 use craft_agent::tools::ToolRegistry;
@@ -238,27 +238,15 @@ pub fn tool_done(event: &ToolDoneEvent) -> SessionUpdate {
     ))
 }
 
-pub fn map_stop_reason(
-    sr: Option<craft_providers::StopReason>,
-) -> agent_client_protocol_schema::StopReason {
+pub fn map_stop_reason(sr: Option<craft_providers::StopReason>) -> StopReason {
     match sr {
-        Some(craft_providers::StopReason::EndTurn) | None => {
-            agent_client_protocol_schema::StopReason::EndTurn
-        }
-        Some(craft_providers::StopReason::MaxTokens) => {
-            agent_client_protocol_schema::StopReason::MaxTokens
-        }
-        Some(craft_providers::StopReason::ToolUse) => {
-            agent_client_protocol_schema::StopReason::EndTurn
-        }
-        Some(craft_providers::StopReason::Cancelled) => {
-            agent_client_protocol_schema::StopReason::Cancelled
-        }
+        Some(craft_providers::StopReason::EndTurn) | None => StopReason::EndTurn,
+        Some(craft_providers::StopReason::MaxTokens) => StopReason::MaxTokens,
+        Some(craft_providers::StopReason::ToolUse) => StopReason::EndTurn,
+        Some(craft_providers::StopReason::Cancelled) => StopReason::Cancelled,
         // The approval gate is a Craft-only pause; ACP has no equivalent, so
         // surface it as EndTurn (the ACP session simply ends from its view).
-        Some(craft_providers::StopReason::AwaitingGoalApproval) => {
-            agent_client_protocol_schema::StopReason::EndTurn
-        }
+        Some(craft_providers::StopReason::AwaitingGoalApproval) => StopReason::EndTurn,
     }
 }
 
@@ -470,10 +458,7 @@ mod tests {
     fn stop_reason_without_acp_equivalent_maps_to_end_turn(
         sr: Option<craft_providers::StopReason>,
     ) {
-        assert_eq!(
-            map_stop_reason(sr),
-            agent_client_protocol_schema::StopReason::EndTurn
-        );
+        assert_eq!(map_stop_reason(sr), StopReason::EndTurn);
     }
 
     fn assistant(content: Vec<MsgBlock>) -> Message {

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use agent_client_protocol_schema::{
+use agent_client_protocol_schema::v1::{
     EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
 };
 use craft_agent::mcp::config::{ServerConfig, Transport};

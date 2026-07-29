@@ -4,18 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol_schema::{
-    AgentNotification, AgentRequest, AgentResponse, CloseSessionRequest, CloseSessionResponse,
-    ConfigOptionUpdate, ContentBlock, CreateTerminalRequest, CreateTerminalResponse,
-    CurrentModeUpdate, EmbeddedResourceResource, EnvVariable, Error as AcpError, ImageContent,
-    InitializeRequest, JsonRpcMessage, KillTerminalRequest, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest, Notification,
-    PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
+use agent_client_protocol_schema::v1::{
+    AgentNotification, AgentRequest, AgentResponse, ClientCapabilities, CloseSessionRequest,
+    CloseSessionResponse, ConfigOptionUpdate, ContentBlock, CreateTerminalRequest,
+    CreateTerminalResponse, CurrentModeUpdate, EmbeddedResourceResource, EnvVariable,
+    Error as AcpError, ImageContent, InitializeRequest, JsonRpcMessage, KillTerminalRequest,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, NewSessionRequest,
+    Notification, PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, Request, RequestId, RequestPermissionRequest,
-    RequestPermissionResponse, Response, ResumeSessionRequest, SessionId,
+    RequestPermissionResponse, Response, ResumeSessionRequest, SessionConfigOptionValue, SessionId,
     SessionInfo as AcpSessionInfo, SessionInfoUpdate, SessionModeId, SessionNotification,
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    SetSessionModeRequest, SetSessionModeResponse, TerminalId, TerminalOutputRequest,
+    SetSessionModeRequest, SetSessionModeResponse, StopReason, TerminalId, TerminalOutputRequest,
     TerminalOutputResponse, TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     UsageUpdate, WriteTextFileRequest, WriteTextFileResponse,
 };
@@ -68,7 +68,7 @@ impl ClientCaps {
         }
     }
 
-    fn apply(&self, caps: &agent_client_protocol_schema::ClientCapabilities) {
+    fn apply(&self, caps: &ClientCapabilities) {
         self.fs_read
             .store(caps.fs.read_text_file, Ordering::Relaxed);
         self.fs_write
@@ -825,7 +825,7 @@ fn install_session(
 
 fn resolve_pending_cancelled(out_tx: &Sender<Value>, pending: PendingPrompt) {
     if let Some(id) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        let resp = PromptResponse::new(agent_client_protocol_schema::StopReason::Cancelled);
+        let resp = PromptResponse::new(StopReason::Cancelled);
         send(
             out_tx,
             Response::new(id, Ok(AgentResponse::PromptResponse(resp))),
@@ -939,6 +939,15 @@ fn handle_set_mode(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpEr
     ))
 }
 
+fn config_value_str(req: &SetSessionConfigOptionRequest) -> Result<&str, AcpError> {
+    match &req.value {
+        SessionConfigOptionValue::ValueId { value } => Ok(&value.0),
+        _ => {
+            Err(AcpError::invalid_params().data(json_str("expected a select config option value")))
+        }
+    }
+}
+
 fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpError> {
     let req: SetSessionConfigOptionRequest = parse_params(raw)?;
     let config_id = req.config_id.0.as_ref();
@@ -956,7 +965,7 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         return Err(AcpError::invalid_params().data(json_str(&detail)));
     }
 
-    let spec = req.value.0.to_string();
+    let spec = config_value_str(&req)?.to_string();
     let model =
         Model::from_spec(&spec).map_err(|e| AcpError::invalid_params().data(json_str(&e)))?;
 
@@ -1000,7 +1009,7 @@ fn handle_set_mode_config(
     srv: &mut Server,
     req: &SetSessionConfigOptionRequest,
 ) -> Result<AgentResponse, AcpError> {
-    let mode_str = req.value.0.to_string();
+    let mode_str = config_value_str(req)?.to_string();
     apply_mode(srv, &mode_str)?;
 
     let current_model = srv
@@ -1026,7 +1035,7 @@ fn handle_set_yolo_config(
     srv: &mut Server,
     req: &SetSessionConfigOptionRequest,
 ) -> Result<AgentResponse, AcpError> {
-    let want = req.value.0.as_ref() == "true";
+    let want = config_value_str(req)? == "true";
     let (current_model, mode_id) = {
         let session = srv.session.as_mut().ok_or_else(no_session)?;
         if want != session.handle.permissions.is_yolo() {

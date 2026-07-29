@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use agent_client_protocol_schema::Error as AcpError;
+use agent_client_protocol_schema::v1::Error as AcpError;
 use craft_agent::AgentInput;
 use craft_agent::command::{self, CommandScope};
 use serde::{Deserialize, Serialize};
@@ -489,7 +489,8 @@ fn send_prompt_input(
             .data(json!("a prompt is already in progress for this session")));
     }
 
-    let sid = agent_client_protocol_schema::SessionId::from(session.handle.session_id.to_string());
+    let sid =
+        agent_client_protocol_schema::v1::SessionId::from(session.handle.session_id.to_string());
     server::session_update(out_tx, &sid, translate::user_message_chunk(&text));
 
     let input = AgentInput {

@@ -1,9 +1,10 @@
-use agent_client_protocol_schema::{
+use agent_client_protocol_schema::ProtocolVersion;
+use agent_client_protocol_schema::v1::{
     AgentCapabilities, Implementation, InitializeResponse, LoadSessionResponse, McpCapabilities,
-    NewSessionResponse, PromptCapabilities, ProtocolVersion, ResumeSessionResponse,
-    SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionListCapabilities, SessionMode,
-    SessionModeId, SessionModeState, SessionResumeCapabilities,
+    NewSessionResponse, PromptCapabilities, ResumeSessionResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionListCapabilities, SessionMode, SessionModeId,
+    SessionModeState, SessionResumeCapabilities,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
