@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-29
+
+### Added
+
+- **providers**: bump kimi to k3 with proper ctx limit (`0a25a609f`)
+- **lua**: scroll from Lua with winsaveview and winrestview (`3bd34489c`)
+- **lua**: tell a tool which session called it (`bfa027eb0`)
+
+### Changed
+
+- **acp**: migrate agent-client-protocol-schema from 0.13 to 1.6 (`58e7489fb`)
+- **ui**: replace flow goal-approval modal with a selector form (`1d02c2396`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`displaydoc` 0.2.7, `tao-macros` 0.1.4, `toml` 1.1.4)
+
+### Fixed
+
+- **lua**: replace deprecated mlua::String alias in base64 tests (`39cd27a54`)
+- **providers**: apply ModelScope compatibility fixes (`527d7a804`)
+- **lua**: kill jobs when the JobStore drops, not just the scope (`308ce2232`)
+- **ui**: name the ended session in SessionReset (`4a5e42a88`)
+- **desktop**: kill ACP server children on app exit (`2c9537647`)
+
 ## [0.11.0] - 2026-07-28
 
 ### Added
@@ -1460,7 +1482,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/craft-build/craft/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/craft-build/craft/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/craft-build/craft/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/craft-build/craft/compare/v0.10.0...v0.10.1
