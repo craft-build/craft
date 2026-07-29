@@ -124,6 +124,72 @@ async fn register_echo_tool() {
     assert_eq!(out, "hello");
 }
 
+const SESSION_PLUGIN: &str = r#"
+craft.api.register_tool({
+    name = "whoami",
+    description = "reports the calling session",
+    schema = { type = "object", properties = {}, additionalProperties = false },
+    audiences = { "main" },
+    handler = function(_, ctx)
+        local id, err = ctx:session_id()
+        if err then
+            return "err:" .. err
+        end
+        return "id:" .. tostring(id)
+    end,
+})
+"#;
+
+async fn exec_with_ctx(
+    reg: &ToolRegistry,
+    name: &str,
+    input: serde_json::Value,
+    ctx: &craft_agent::tools::ToolContext,
+) -> Result<String, String> {
+    let entry = reg
+        .get(name)
+        .unwrap_or_else(|| panic!("tool {name} not registered"));
+    let inv = entry.tool.parse(&input).expect("parse failed");
+    inv.execute(ctx).await.output.map(|out| match out {
+        craft_agent::ToolOutput::Plain(s) => s,
+        other => panic!("unexpected output: {other:?}"),
+    })
+}
+
+const SESSION_ID: &str = "01965087-4c71-7f00-8000-000000000000";
+
+/// A handler learns who called it without asking `craft.session.current()`,
+/// which answers with whoever is focused.
+#[tokio::test]
+async fn handler_reads_the_calling_session() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_source("session_plugin", SESSION_PLUGIN).unwrap();
+
+    let mut ctx = craft_agent::tools::test_support::stub_ctx(&craft_agent::AgentMode::Build);
+    ctx.session_id = Some(SESSION_ID.to_string());
+
+    let out = exec_with_ctx(&reg, "whoami", serde_json::json!({}), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(out, format!("id:{SESSION_ID}"));
+}
+
+#[tokio::test]
+async fn handler_without_a_session_gets_nil_and_no_error() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_source("session_plugin", SESSION_PLUGIN).unwrap();
+
+    let ctx = craft_agent::tools::test_support::stub_ctx(&craft_agent::AgentMode::Build);
+    assert_eq!(
+        exec_with_ctx(&reg, "whoami", serde_json::json!({}), &ctx)
+            .await
+            .unwrap(),
+        "id:nil"
+    );
+}
+
 #[test]
 fn unload_round_trip() {
     let reg = fresh_registry();

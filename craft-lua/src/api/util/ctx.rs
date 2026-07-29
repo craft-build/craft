@@ -32,6 +32,7 @@ pub(crate) struct LuaCtx {
     pub(crate) finish_tx: Option<flume::Sender<ToolCallReply>>,
     pub(crate) file_tracker: Arc<FileReadTracker>,
     pub(crate) loaded_instructions: LoadedInstructions,
+    pub(crate) session_id: Option<String>,
 }
 
 impl UserData for LuaCtx {
@@ -113,6 +114,21 @@ impl UserData for LuaCtx {
 
         methods.add_method("is_instruction_file", |_, _, name: String| {
             Ok(craft_agent::is_instruction_file(&name))
+        });
+
+        // The session that called this tool, which under concurrent
+        // sessions is not always the focused one `craft.session.current()`
+        // reports. Nil without an error when the run has no session, as in
+        // the `craft index` one-shot.
+        methods.add_method("session_id", |lua, this, ()| {
+            let pair: (LuaValue, Option<String>) = match &this.session_id {
+                Some(id) => {
+                    let s = lua.create_string(id)?;
+                    (LuaValue::String(s), None)
+                }
+                None => (LuaValue::Nil, None),
+            };
+            Ok(pair)
         });
 
         methods.add_method_mut("finish", |_lua, this, val: LuaValue| {

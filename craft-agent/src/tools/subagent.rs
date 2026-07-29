@@ -121,7 +121,11 @@ pub async fn run_subagent(
 
     let tools = build_tools(audience, ctx, &vars, &model);
 
-    let session_id = SessionRef::generate();
+    let session_id = ctx
+        .session_id
+        .as_ref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(SessionRef::generate);
     let (sub_tx, sub_rx) = flume::unbounded::<crate::Envelope>();
     let sub_event_tx = EventSender::new(sub_tx, ctx.event_tx.run_id());
     let parent_tx = ctx.event_tx.clone();

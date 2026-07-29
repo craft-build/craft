@@ -291,6 +291,9 @@ pub struct ToolContext {
     pub promoted: crate::tools::dynamic::PromotedTools,
     pub dynamic: crate::tools::dynamic::DynamicContext,
     pub hooks: Option<Arc<dyn crate::Hooks>>,
+    /// The session this run belongs to. A subagent inherits its parent's,
+    /// so a tool can always tell which conversation it is serving. `None`
+    /// when there is no session at all, like the `craft index` one-shot.
     pub session_id: Option<String>,
     pub registry: Arc<ToolRegistry>,
     /// Semantic-search backend for Flow mode. `Some` when running under a
