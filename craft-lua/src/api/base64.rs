@@ -57,7 +57,7 @@ mod tests {
         let bytes = [0u8, 159, 146, 150];
         let encoded: String = encode.call(lua.create_string(bytes).unwrap()).unwrap();
         assert_eq!(encoded, "AJ+Slg==");
-        let decoded: mlua::String = decode.call(encoded).unwrap();
+        let decoded: mlua::LuaString = decode.call(encoded).unwrap();
         assert_eq!(&*decoded.as_bytes(), &bytes);
     }
 
@@ -66,6 +66,6 @@ mod tests {
         let lua = Lua::new();
         let t = create_base64_table(&lua).unwrap();
         let decode: mlua::Function = t.get("decode").unwrap();
-        assert!(decode.call::<mlua::String>("!!!not base64!!!").is_err());
+        assert!(decode.call::<mlua::LuaString>("!!!not base64!!!").is_err());
     }
 }
