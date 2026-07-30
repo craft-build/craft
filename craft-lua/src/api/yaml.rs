@@ -1,6 +1,6 @@
 use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table, Value};
 
-use super::util::convert::err_pair;
+use super::util::pair::{pair, try_pair};
 
 pub(crate) fn create_yaml_table(lua: &Lua) -> LuaResult<Table> {
     let yaml = lua.create_table()?;
@@ -8,24 +8,16 @@ pub(crate) fn create_yaml_table(lua: &Lua) -> LuaResult<Table> {
     yaml.set(
         "encode",
         lua.create_function(|lua, value: Value| {
-            let serde_val: serde_yaml::Value = match lua.from_value(value) {
-                Ok(v) => v,
-                Err(e) => return err_pair(lua, e),
-            };
-            match serde_yaml::to_string(&serde_val) {
-                Ok(s) => Ok((Value::String(lua.create_string(&s)?), Value::Nil)),
-                Err(e) => err_pair(lua, e),
-            }
+            let serde_val: serde_yaml::Value = try_pair!(lua.from_value(value));
+            Ok(pair(serde_yaml::to_string(&serde_val)))
         })?,
     )?;
 
     yaml.set(
         "decode",
         lua.create_function(|lua, s: String| {
-            match serde_yaml::from_str::<serde_yaml::Value>(&s) {
-                Ok(v) => Ok((lua.to_value(&v)?, Value::Nil)),
-                Err(e) => err_pair(lua, e),
-            }
+            let value = try_pair!(serde_yaml::from_str::<serde_yaml::Value>(&s));
+            Ok((Some(lua.to_value(&value)?), None))
         })?,
     )?;
 

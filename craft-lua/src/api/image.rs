@@ -10,6 +10,7 @@ use image::{DynamicImage, ImageFormat, ImageReader};
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value as LuaValue};
 
 use super::base64::bytes_arg;
+use super::util::pair::try_pair;
 
 /// Decode-bomb guard: a tiny file can declare huge dimensions and balloon
 /// into gigabytes of RGBA. Host-fixed so no plugin can disable it; 50MP
@@ -104,16 +105,12 @@ pub(crate) fn create_image_table(lua: &Lua) -> LuaResult<Table> {
         "probe",
         lua.create_function(|lua, val: LuaValue| {
             let bytes = bytes_arg(&val, "image.probe")?;
-            match probe_bytes(&bytes) {
-                Ok((format, width, height)) => {
-                    let info = lua.create_table()?;
-                    info.set("format", format_name(format))?;
-                    info.set("width", width)?;
-                    info.set("height", height)?;
-                    Ok((LuaValue::Table(info), LuaValue::Nil))
-                }
-                Err(e) => Ok((LuaValue::Nil, LuaValue::String(lua.create_string(e)?))),
-            }
+            let (format, width, height) = try_pair!(probe_bytes(&bytes));
+            let info = lua.create_table()?;
+            info.set("format", format_name(format))?;
+            info.set("width", width)?;
+            info.set("height", height)?;
+            Ok((Some(info), None))
         })?,
     )?;
 
@@ -121,17 +118,13 @@ pub(crate) fn create_image_table(lua: &Lua) -> LuaResult<Table> {
         "decode",
         lua.create_async_function(|lua, val: LuaValue| async move {
             let bytes = bytes_arg(&val, "image.decode")?;
-            match tokio::task::spawn_blocking(move || decode_bytes(&bytes)).await {
-                Ok(Ok(img)) => Ok((
-                    LuaValue::UserData(lua.create_userdata(LuaImage(Arc::new(img)))?),
-                    LuaValue::Nil,
-                )),
-                Ok(Err(e)) => Ok((LuaValue::Nil, LuaValue::String(lua.create_string(e)?))),
-                Err(e) => Ok((
-                    LuaValue::Nil,
-                    LuaValue::String(lua.create_string(format!("decode: {e}"))?),
-                )),
-            }
+            let img = try_pair!(
+                tokio::task::spawn_blocking(move || decode_bytes(&bytes))
+                    .await
+                    .map_err(|e| format!("decode: {e}"))
+            );
+            let img = try_pair!(img);
+            Ok((Some(lua.create_userdata(LuaImage(Arc::new(img)))?), None))
         })?,
     )?;
 

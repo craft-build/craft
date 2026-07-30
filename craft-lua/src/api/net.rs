@@ -1,9 +1,10 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use mlua::{Lua, Result as LuaResult, Table, Value};
+use mlua::{Lua, Result as LuaResult, Table};
 use reqwest::Client;
 
+use crate::api::util::pair::try_pair;
 use crate::plugin_permissions::{Permission::Net, PluginPermissions};
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
@@ -47,20 +48,13 @@ pub(crate) fn create_net_table(lua: &Lua, perms: &PluginPermissions) -> LuaResul
                 if !perms.is_allowed(Net) {
                     return Err(crate::plugin_permissions::denied_error(Net));
                 }
-                let params = match extract_request_params(&url, opts.as_ref()) {
-                    Ok(p) => p,
-                    Err(e) => return Ok((Value::Nil, Value::String(lua.create_string(&e)?))),
-                };
-                match do_request(params).await {
-                    Ok(resp) => {
-                        let tbl = lua.create_table()?;
-                        tbl.set("body", resp.body)?;
-                        tbl.set("status", resp.status)?;
-                        tbl.set("content_type", resp.content_type)?;
-                        Ok((Value::Table(tbl), Value::Nil))
-                    }
-                    Err(e) => Ok((Value::Nil, Value::String(lua.create_string(&e)?))),
-                }
+                let params = try_pair!(extract_request_params(&url, opts.as_ref()));
+                let resp = try_pair!(do_request(params).await);
+                let tbl = lua.create_table()?;
+                tbl.set("body", resp.body)?;
+                tbl.set("status", resp.status)?;
+                tbl.set("content_type", resp.content_type)?;
+                Ok((Some(tbl), None))
             }
         })?,
     )?;

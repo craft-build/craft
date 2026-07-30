@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use craft_agent::SharedBuf;
-use mlua::{RegistryKey, Value};
+use mlua::RegistryKey;
 
 pub(crate) const DEFAULT_ZINDEX: u16 = 50;
 pub(crate) const DEFAULT_ORDER: u16 = 50;
@@ -432,14 +432,6 @@ pub enum UiAction {
     WinRestView {
         scroll_top: u16,
     },
-}
-
-/// Lua's `(value, err)` convention: a failed UI call answers with nil and a
-/// message instead of raising.
-pub(crate) type Pair = (Value, Option<String>);
-
-pub(crate) fn err_pair(err: impl ToString) -> Pair {
-    (Value::Nil, Some(err.to_string()))
 }
 
 /// Hand an action to the UI event loop. A full or closed channel means the

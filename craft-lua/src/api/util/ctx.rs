@@ -9,6 +9,7 @@ use craft_config::{AgentConfig, ToolOutputLines};
 use mlua::{LuaSerdeExt, MultiValue, UserData, UserDataMethods, Value as LuaValue};
 
 use crate::api::tool::ToolCallReply;
+use crate::api::util::pair::Pair;
 use crate::runtime::active_task;
 
 const DEADLINE_ALREADY_SET_MSG: &str = "ctx:set_deadline() already called";
@@ -120,14 +121,12 @@ impl UserData for LuaCtx {
         // sessions is not always the focused one `craft.session.current()`
         // reports. Nil without an error when the run has no session, as in
         // the `craft index` one-shot.
-        methods.add_method("session_id", |lua, this, ()| {
-            let pair: (LuaValue, Option<String>) = match &this.session_id {
-                Some(id) => {
-                    let s = lua.create_string(id)?;
-                    (LuaValue::String(s), None)
-                }
-                None => (LuaValue::Nil, None),
-            };
+        methods.add_method("session_id", |_, this, ()| {
+            let pair: Pair<String> = this
+                .session_id
+                .as_ref()
+                .map(|id| (Some(id.clone()), None))
+                .unwrap_or((None, None));
             Ok(pair)
         });
 

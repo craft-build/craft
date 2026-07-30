@@ -4,19 +4,19 @@
 
 use mlua::{Lua, Result as LuaResult, Table};
 
-use crate::api::util::command::{Pair, SessionRequest, UiAction, err_pair, ui_roundtrip};
+use crate::api::util::command::{SessionRequest, UiAction, ui_roundtrip};
 use crate::api::util::convert::json_to_lua;
+use crate::api::util::pair::{Pair, try_pair};
 
 async fn roundtrip(
     lua: Lua,
     tx: Option<flume::Sender<UiAction>>,
     req: SessionRequest,
-) -> LuaResult<Pair> {
-    match ui_roundtrip(tx.as_ref(), |reply_tx| UiAction::Session { req, reply_tx }).await {
-        Ok(Ok(value)) => Ok((json_to_lua(&lua, &value)?, None)),
-        Ok(Err(e)) => Ok(err_pair(e)),
-        Err(e) => Ok(err_pair(e)),
-    }
+) -> LuaResult<Pair<mlua::Value>> {
+    let reply =
+        try_pair!(ui_roundtrip(tx.as_ref(), |reply_tx| UiAction::Session { req, reply_tx }).await);
+    let value = try_pair!(reply);
+    Ok((Some(json_to_lua(&lua, &value)?), None))
 }
 
 pub(crate) fn create_session_table(

@@ -6,30 +6,24 @@ pub(crate) mod tree;
 
 use mlua::{AnyUserData, Lua, Result as LuaResult, Table};
 
+use crate::api::util::pair::{Pair, err_pair};
 use crate::language::Language;
 use language_tree::LuaLanguageTree;
 use node::LuaNode;
+
+fn parse_impl(lua: &Lua, source: String, lang_name: String) -> LuaResult<Pair<AnyUserData>> {
+    let Some(lang) = Language::from_name(&lang_name) else {
+        return Ok(err_pair(format!("no language registered: {lang_name}")));
+    };
+    let tree = LuaLanguageTree::new(source.into(), lang_name.into(), lang);
+    Ok((Some(lua.create_userdata(tree)?), None))
+}
 
 pub(crate) fn create_treesitter_table(lua: &Lua) -> LuaResult<Table> {
     let t = lua.create_table()?;
 
     let get_parser = lua.create_function(move |lua, (source, lang_name): (String, String)| {
-        let Some(lang) = Language::from_name(&lang_name) else {
-            return Ok((
-                mlua::Value::Nil,
-                mlua::Value::String(
-                    lua.create_string(format!("no language registered: {lang_name}"))?,
-                ),
-            ));
-        };
-        Ok((
-            mlua::Value::UserData(lua.create_userdata(LuaLanguageTree::new(
-                source.into(),
-                lang_name.into(),
-                lang,
-            ))?),
-            mlua::Value::Nil,
-        ))
+        parse_impl(lua, source, lang_name)
     })?;
 
     t.set("get_parser", get_parser.clone())?;

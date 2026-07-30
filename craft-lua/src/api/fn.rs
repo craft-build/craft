@@ -7,7 +7,8 @@ use std::time::Duration;
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table, Value};
 
 use crate::api::fs::expand_tilde;
-use crate::api::util::command::{UiAction, err_pair, ui_roundtrip, ui_send};
+use crate::api::util::command::{UiAction, ui_roundtrip, ui_send};
+use crate::api::util::pair::try_pair;
 use crate::plugin_permissions::{
     Permission::{Env, Run},
     PluginPermissions,
@@ -380,20 +381,18 @@ pub(crate) fn create_fn_table(
         lua.create_async_function(move |lua, ()| {
             let win_tx = win_tx.clone();
             async move {
-                let view = match ui_roundtrip(win_tx.as_ref(), |reply_tx| UiAction::WinSaveView {
-                    reply_tx,
-                })
-                .await
-                {
-                    Ok(view) => view,
-                    Err(e) => return Ok(err_pair(e)),
-                };
+                let view = try_pair!(
+                    ui_roundtrip(win_tx.as_ref(), |reply_tx| UiAction::WinSaveView {
+                        reply_tx,
+                    })
+                    .await
+                );
                 let table = lua.create_table()?;
                 table.set("topline", i64::from(view.scroll_top) + 1)?;
                 table.set("line_count", view.line_count)?;
                 table.set("height", view.height)?;
                 table.set("auto_scroll", view.auto_scroll)?;
-                Ok((Value::Table(table), None))
+                Ok((Some(table), None))
             }
         })?,
     )?;
@@ -406,10 +405,11 @@ pub(crate) fn create_fn_table(
             async move {
                 let topline = view.get::<Option<i64>>("topline")?.unwrap_or(1);
                 let scroll_top = topline.saturating_sub(1).clamp(0, i64::from(u16::MAX)) as u16;
-                match ui_send(rest_tx.as_ref(), UiAction::WinRestView { scroll_top }) {
-                    Ok(()) => Ok((Value::Boolean(true), None)),
-                    Err(e) => Ok(err_pair(e)),
-                }
+                try_pair!(ui_send(
+                    rest_tx.as_ref(),
+                    UiAction::WinRestView { scroll_top }
+                ));
+                Ok((Some(true), None))
             }
         })?,
     )?;
@@ -671,6 +671,10 @@ mod tests {
 
     #[tokio::test]
     async fn winsaveview_reports_the_viewport_one_based() {
+        const SCROLL_TOP: u16 = 6;
+        const LINE_COUNT: u16 = 100;
+        const HEIGHT: u16 = 24;
+
         let (tx, rx) = flume::unbounded::<UiAction>();
         let lua = lua_with_view(Some(tx));
         tokio::spawn(async move {
@@ -679,9 +683,9 @@ mod tests {
             };
             reply_tx
                 .send(WinView {
-                    scroll_top: 6,
-                    line_count: 100,
-                    height: 24,
+                    scroll_top: SCROLL_TOP,
+                    line_count: LINE_COUNT,
+                    height: HEIGHT,
                     auto_scroll: false,
                 })
                 .unwrap();
@@ -692,9 +696,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(err, None);
-        assert_eq!(view.get::<u16>("topline").unwrap(), 7);
-        assert_eq!(view.get::<u16>("line_count").unwrap(), 100);
-        assert_eq!(view.get::<u16>("height").unwrap(), 24);
+        assert_eq!(view.get::<u16>("topline").unwrap(), SCROLL_TOP + 1);
+        assert_eq!(view.get::<u16>("line_count").unwrap(), LINE_COUNT);
+        assert_eq!(view.get::<u16>("height").unwrap(), HEIGHT);
         assert!(!view.get::<bool>("auto_scroll").unwrap());
     }
 

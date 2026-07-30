@@ -1,6 +1,7 @@
 use mlua::{Lua, LuaSerdeExt, Result as LuaResult, Table, Value};
 
-use super::util::convert::{err_pair, json_to_lua};
+use super::util::convert::json_to_lua;
+use super::util::pair::{pair, try_pair};
 
 pub(crate) fn create_json_table(lua: &Lua) -> LuaResult<Table> {
     let json = lua.create_table()?;
@@ -8,24 +9,16 @@ pub(crate) fn create_json_table(lua: &Lua) -> LuaResult<Table> {
     json.set(
         "encode",
         lua.create_function(|lua, value: Value| {
-            let serde_val: serde_json::Value = match lua.from_value(value) {
-                Ok(v) => v,
-                Err(e) => return err_pair(lua, e),
-            };
-            match serde_json::to_string(&serde_val) {
-                Ok(s) => Ok((Value::String(lua.create_string(&s)?), Value::Nil)),
-                Err(e) => err_pair(lua, e),
-            }
+            let serde_val: serde_json::Value = try_pair!(lua.from_value(value));
+            Ok(pair(serde_json::to_string(&serde_val)))
         })?,
     )?;
 
     json.set(
         "decode",
         lua.create_function(|lua, s: String| {
-            match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(v) => Ok((json_to_lua(lua, &v)?, Value::Nil)),
-                Err(e) => err_pair(lua, e),
-            }
+            let value = try_pair!(serde_json::from_str::<serde_json::Value>(&s));
+            Ok((Some(json_to_lua(lua, &value)?), None))
         })?,
     )?;
 
