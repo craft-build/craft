@@ -36,12 +36,12 @@ pub struct Read {
         alias = "file_path"
     )]
     path: String,
-    #[param(description = "Line number to start from (1-indexed)")]
-    offset: Option<usize>,
+    #[param(description = "Line number to start from (1-indexed). Use 1 for the first line.")]
+    offset: usize,
     #[param(
-        description = "Max number of lines to read. Omitting the limit reads up to 2000 lines."
+        description = "Max number of lines to read. Use 0 to read until end of file (capped at 2000 lines)."
     )]
-    limit: Option<usize>,
+    limit: usize,
 }
 
 fn to_instruction_blocks(found: Vec<(String, String)>) -> Option<Vec<InstructionBlock>> {
@@ -80,8 +80,12 @@ impl Read {
         let raw = ctx.fs.read_text_file(p).await?;
         let max_output_lines = ctx.config.max_output_lines;
         let max_line_bytes = ctx.config.max_line_bytes;
-        let start = self.offset.unwrap_or(1).saturating_sub(1);
-        let limit = self.limit.unwrap_or(max_output_lines);
+        let start = self.offset.saturating_sub(1);
+        let limit = if self.limit == 0 {
+            max_output_lines
+        } else {
+            self.limit.min(max_output_lines)
+        };
 
         let total_lines = raw.lines().count();
         let prefix: String = if start == 0 {
@@ -179,15 +183,11 @@ impl Read {
 
     pub fn start_header(&self) -> String {
         let mut s = relative_path(&self.path);
-        let start = self.offset.unwrap_or(1);
-        match (self.offset.is_some(), self.limit) {
-            (_, Some(l)) => {
-                let _ = write!(s, ":{start}-{}", start + l - 1);
-            }
-            (true, None) => {
-                let _ = write!(s, ":{start}");
-            }
-            _ => {}
+        let start = self.offset;
+        if self.limit > 0 {
+            let _ = write!(s, ":{start}-{}", start + self.limit - 1);
+        } else {
+            let _ = write!(s, ":{start}");
         }
         s
     }
@@ -211,11 +211,11 @@ mod tests {
 
     use super::*;
 
-    #[test_case(None,      None,      "/a/b.rs"       ; "path_only")]
-    #[test_case(Some(10),  None,      "/a/b.rs:10"    ; "offset_only")]
-    #[test_case(None,      Some(25),  "/a/b.rs:1-25"  ; "limit_only")]
-    #[test_case(Some(50),  Some(51),  "/a/b.rs:50-100" ; "offset_and_limit")]
-    fn start_header_cases(offset: Option<usize>, limit: Option<usize>, expected: &str) {
+    #[test_case(1,  0,  "/a/b.rs:1"     ; "limit_zero_shows_offset_only")]
+    #[test_case(10, 0,  "/a/b.rs:10"    ; "offset_only_limit_zero")]
+    #[test_case(1,  25, "/a/b.rs:1-25"  ; "offset_one_with_limit")]
+    #[test_case(50, 51, "/a/b.rs:50-100" ; "offset_and_limit")]
+    fn start_header_cases(offset: usize, limit: usize, expected: &str) {
         let r = Read {
             path: "/a/b.rs".into(),
             offset,
@@ -270,13 +270,28 @@ mod tests {
     }
 
     const EXPECTED_INTEGER: &str = "expected integer";
+    const MISSING_OFFSET_ERR: &str = "invalid parameter 'offset': required";
+    const MISSING_LIMIT_ERR: &str = "invalid parameter 'limit': required";
 
     #[test]
     fn parse_input_bad_coercion_returns_error() {
-        let err = Read::parse_input(&json!({"path": "x", "limit": "not_a_number"})).unwrap_err();
+        let err = Read::parse_input(&json!({"path": "x", "offset": 1, "limit": "not_a_number"}))
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("limit"), "should mention field: {msg}");
         assert!(msg.contains(EXPECTED_INTEGER), "should mention type: {msg}");
+    }
+
+    #[test]
+    fn missing_offset_fails_parse() {
+        let err = Read::parse_input(&json!({"path": "/tmp/foo.txt", "limit": 10})).unwrap_err();
+        assert!(err.to_string().contains(MISSING_OFFSET_ERR), "got: {err}");
+    }
+
+    #[test]
+    fn missing_limit_fails_parse() {
+        let err = Read::parse_input(&json!({"path": "/tmp/foo.txt", "offset": 1})).unwrap_err();
+        assert!(err.to_string().contains(MISSING_LIMIT_ERR), "got: {err}");
     }
 
     #[test_case("test.png",  ImageMediaType::Png  ; "png")]

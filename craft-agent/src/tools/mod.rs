@@ -1167,7 +1167,7 @@ mod tests {
         let path = path.to_string_lossy().to_string();
         let ctx = stub_ctx(&AgentMode::Build);
 
-        let r = read::Read::parse_input(&json!({"path": path})).unwrap();
+        let r = read::Read::parse_input(&json!({"path": path, "offset": 1, "limit": 0})).unwrap();
         let full = r.execute(&ctx).await.unwrap().as_text().to_string();
         assert!(full.contains("1: line1"));
         assert!(full.contains("10: line10"));

@@ -48,7 +48,7 @@ struct InterpreterEnv {
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct CodeExecution {
     #[param(
-        description = "Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file')`. Use `await asyncio.gather(...)` for concurrency."
+        description = "Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. Use `await asyncio.gather(...)` for concurrency."
     )]
     code: String,
     #[param(description = "Script execution timeout in seconds (default 30)")]
@@ -59,7 +59,7 @@ impl CodeExecution {
     pub const NAME: &str = "code_execution";
     pub const DESCRIPTION: &str = include_str!("code_execution.md");
     pub const EXAMPLES: Option<&str> = Some(
-        r##"[{"code": "files = (await glob(pattern='**/*.rs')).strip().split('\\n')\nresults = await asyncio.gather(*[read(path=f) for f in files if f.strip()])\nfor f, c in zip(files, results):\n    if 'fn main' in c: print(f)"},
+        r##"[{"code": "files = (await glob(pattern='**/*.rs')).strip().split('\\n')\nresults = await asyncio.gather(*[read(path=f, offset=1, limit=0) for f in files if f.strip()])\nfor f, c in zip(files, results):\n    if 'fn main' in c: print(f)"},
             {"code": "result = await grep(pattern='TODO', include='*.rs')\nprint(f\"{len(result.strip().splitlines())} TODOs found\")"},
             {"code": "content = await webfetch(url='https://example.com/docs')\nfor line in content.splitlines():\n    if 'auth' in line.lower(): print(line)"}]"##,
     );
@@ -367,7 +367,9 @@ mod tests {
 
         let ctx = stub_ctx(&AgentMode::Build);
         let ci = CodeExecution {
-            code: format!("result = await read(path='{path_str}')\nprint(result)"),
+            code: format!(
+                "result = await read(path='{path_str}', offset=1, limit=0)\nprint(result)"
+            ),
             timeout: None,
         };
         let output = ci.execute(&ctx).await.unwrap().as_text();

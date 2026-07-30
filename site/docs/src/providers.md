@@ -215,11 +215,10 @@ OpenRouter aggregates models from many providers behind a single API. Craft asks
 |------|--------|-------------------------------|---------|
 | Weak | syn:small:vision, hf:Qwen/Qwen3.6-27B | $0.45 / $3.60 | 256K ctx / 131K out |
 | Weak | **syn:small:text, hf:zai-org/GLM-4.7-Flash** (default) | $0.10 / $0.50 | 200K ctx / 131K out |
-| Medium | **hf:MiniMaxAI/MiniMax-M3** (default) | $0.60 / $1.20 | 512K ctx / 131K out |
-| Strong | **syn:large:vision, hf:moonshotai/Kimi-K2.6** (default) | $0.95 / $4.00 | 256K ctx / 131K out |
+| Strong | **syn:large:vision, hf:moonshotai/Kimi-K3** (default) | $0.95 / $4.00 | 512K ctx / 131K out |
 | Strong | syn:large:text, hf:zai-org/GLM-5.2 | $1.40 / $4.40 | 512K ctx / 131K out |
 
-Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), syn:large:vision (strong), syn:small:text (weak)
+Defaults: syn:large:vision (strong), syn:small:text (weak)
 
 ### TensorX
 

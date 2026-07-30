@@ -49,8 +49,8 @@ Read a file or directory. Returns contents with line numbers (1-indexed).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `limit` | integer | no | Max number of lines to read. Omitting the limit reads up to 2000 lines. |
-| `offset` | integer | no | Line number to start from (1-indexed) |
+| `limit` | integer | yes | Max number of lines to read. Use 0 to read until end of file (capped at 2000 lines). |
+| `offset` | integer | yes | Line number to start from (1-indexed). Use 1 for the first line. |
 | `path` | string | yes |  |
 
 ### `write` *(native)*
@@ -276,7 +276,7 @@ Execute Python code in a sandboxed interpreter with tools as callable functions.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `code` | string | yes |  | Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file')`. Use `await asyncio.gather(...)` for concurrency. |
+| `code` | string | yes |  | Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. Use `await asyncio.gather(...)` for concurrency. |
 | `timeout` | integer | no | 30 | Script execution timeout in seconds |
 
 ### `question` *(lua plugin)*
@@ -441,7 +441,7 @@ Search the current Flow workstream's persisted documents (goal, plan, requiremen
 
 ### `shift` *(native)*
 
-Shift the Flow run into a different turn type (Flow mode only). The shift is applied at the next turn boundary after running through the current type's declared transition rules: it may be accepted, blocked (an objective gate failed), or rejected as illegal (the current type does not declare that target). Use this to enter narrow stages like `scout`, `tpm`, `plan`, `req`, `execute`, `review`, `qa`, `report`, `integrator`, `verifier`, or to return to `general`. The pipeline shape emerges from your shift choices, so only shift when the task genuinely needs a narrow stage.
+Shift the Flow run into a different turn type (Flow mode only). The shift is applied at the next turn boundary after running through the current type's declared transition rules: it is accepted, or rejected as illegal (the current type does not declare that target). Use this to enter narrow stages like `scout`, `tpm`, `plan`, `req`, `execute`, `review`, `qa`, `report`, `integrator`, `verifier`, or to return to `general`. The user chose Flow mode to get the pipeline, so default to shifting: `scout` then `tpm` for any task that edits code, and `plan` after the goal is approved. Reserve `general` for tasks that write no code.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
