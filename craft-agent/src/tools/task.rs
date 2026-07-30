@@ -207,11 +207,16 @@ impl Task {
         });
 
         let (child_trigger, child_cancel) = ctx.cancel.child();
-        if let Some(ref id) = ctx.tool_use_id {
-            ctx.subagent_cancels.insert(id.clone(), child_trigger);
-        } else {
-            drop(child_trigger);
-        }
+        let cancel_slot = match ctx.tool_use_id.as_ref() {
+            Some(id) => Some((
+                id.clone(),
+                ctx.subagent_cancels.insert(id.clone(), child_trigger),
+            )),
+            None => {
+                drop(child_trigger);
+                None
+            }
+        };
 
         let ctx_mode = self.context_mode.as_deref().unwrap_or("none");
         let seeded: Vec<craft_providers::Message> = match ctx_mode {
@@ -405,8 +410,8 @@ impl Task {
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        if let Some(ref id) = ctx.tool_use_id {
-            ctx.subagent_cancels.remove(id);
+        if let Some((id, slot)) = cancel_slot {
+            ctx.subagent_cancels.retire(&id, slot);
         }
         // Flow mode: close the child Thread and emit ThreadExit so the host's
         // status line reflects the child completing.

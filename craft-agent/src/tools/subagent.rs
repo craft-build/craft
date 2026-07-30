@@ -160,11 +160,18 @@ pub async fn run_subagent(
     });
 
     let (child_trigger, child_cancel) = ctx.cancel.child();
-    let _hold_trigger: Option<crate::cancel::CancelTrigger> = if let Some(id) = &ctx.tool_use_id {
-        ctx.subagent_cancels.insert(id.clone(), child_trigger);
-        None
-    } else {
-        Some(child_trigger)
+    let (cancel_slot, _hold_trigger): (
+        Option<(String, crate::cancel::CancelSlot)>,
+        Option<crate::cancel::CancelTrigger>,
+    ) = match ctx.tool_use_id.as_ref() {
+        Some(id) => (
+            Some((
+                id.clone(),
+                ctx.subagent_cancels.insert(id.clone(), child_trigger),
+            )),
+            None,
+        ),
+        None => (None, Some(child_trigger)),
     };
 
     let worktree = match req.isolation {
@@ -298,8 +305,8 @@ pub async fn run_subagent(
         }
     }
 
-    if let Some(id) = &ctx.tool_use_id {
-        ctx.subagent_cancels.remove(id);
+    if let Some((id, slot)) = cancel_slot {
+        ctx.subagent_cancels.retire(&id, slot);
     }
     drop(worktree);
 

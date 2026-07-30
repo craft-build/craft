@@ -22,7 +22,7 @@ pub use agent::{
     classify, classify_subagent_error, find_subdirectory_instructions, is_instruction_file,
 };
 pub use agent::{ApprovalPayload, FLOW_APPROVE_ANSWER, FLOW_CANCEL_ANSWER, FlowProgress};
-pub use cancel::{CancelMap, CancelToken, CancelTrigger};
+pub use cancel::{CancelMap, CancelSlot, CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
 pub mod checks;
 pub mod command;
