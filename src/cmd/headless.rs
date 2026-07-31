@@ -261,7 +261,7 @@ async fn drain(
         let mut session =
             Session::<Message, TokenUsage, craft_agent::ToolOutput>::new(model_id, "");
         session.id = session_id;
-        session.messages = session_messages;
+        session.replace_messages(session_messages);
         session.token_usage = outcome.usage;
         session.update_title_if_default();
         let _ = session.save(storage);

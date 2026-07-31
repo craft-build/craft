@@ -48,7 +48,9 @@ pub use flow_loop::{
     ApprovalPayload, FLOW_APPROVE_ANSWER, FLOW_CANCEL_ANSWER, FlowOutcome, FlowProgress,
     FlowRunState,
 };
-pub use history::{History, SharedMessages};
+pub use history::{
+    History, HistorySnapshot, SharedMessages, UNAVAILABLE_RESULT, close_dangling_tool_calls,
+};
 pub use instructions::{
     Instructions, LoadedInstructions, build_system_prompt, find_subdirectory_instructions,
     is_instruction_file, load_instruction_text, load_instructions,

@@ -16,10 +16,11 @@ pub use agent::EmbeddingService;
 pub use agent::advisor::AdvisorSeverity;
 pub use agent::flow_loop::{FlowAdvisor, FlowRunState, ForcedTransition, NoopFlowAdvisor};
 pub use agent::{
-    Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, Instructions,
-    LoadedInstructions, RecoveryAction, RecoveryFailureKind, SharedDoomTracker,
-    SharedFindingsStore, SharedMessages, StoredFinding, ThreadStatus, TurnType, action_for,
-    classify, classify_subagent_error, find_subdirectory_instructions, is_instruction_file,
+    Agent, AgentParams, AgentRunParams, DoomTracker, FindingsStore, History, HistorySnapshot,
+    Instructions, LoadedInstructions, RecoveryAction, RecoveryFailureKind, SharedDoomTracker,
+    SharedFindingsStore, SharedMessages, StoredFinding, ThreadStatus, TurnType, UNAVAILABLE_RESULT,
+    action_for, classify, classify_subagent_error, close_dangling_tool_calls,
+    find_subdirectory_instructions, is_instruction_file,
 };
 pub use agent::{ApprovalPayload, FLOW_APPROVE_ANSWER, FLOW_CANCEL_ANSWER, FlowProgress};
 pub use cancel::{CancelMap, CancelSlot, CancelToken, CancelTrigger};

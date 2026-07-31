@@ -171,7 +171,9 @@ impl App {
     /// queue, so pushing earlier would fill a queue that is about to die.
     pub(crate) fn flush_restored_queue(&mut self) {
         self.recoverable_queue.clear();
-        for text in std::mem::take(&mut self.state.session.meta.queued_messages) {
+        // Read, not taken: the live queue is what the next checkpoint mirrors
+        // back into the session, so emptying it here changes nothing on disk.
+        for text in self.state.session.meta.queued_messages.clone() {
             self.queue_and_notify(QueuedMessage {
                 text,
                 images: Vec::new(),

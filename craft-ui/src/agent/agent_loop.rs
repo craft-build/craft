@@ -11,8 +11,8 @@ use craft_agent::tools::FileReadTracker;
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History,
-    Instructions, McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, ToolOutputLines,
-    TurnType,
+    Instructions, McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, SharedMessages,
+    ToolOutputLines, TurnType,
 };
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
@@ -70,7 +70,7 @@ impl AgentLoop {
         config: AgentConfig,
         tool_output_lines: ToolOutputLines,
         initial_history: Vec<Message>,
-        shared_history: Arc<ArcSwap<Vec<Message>>>,
+        shared_history: SharedMessages,
         mcp_handle: Option<McpHandle>,
         permissions: Arc<PermissionManager>,
         agent_tx: flume::Sender<Envelope>,

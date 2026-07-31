@@ -2,20 +2,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use craft_agent::TurnType;
 use craft_agent::permissions::PermissionManager;
 use craft_config::Effect;
-use craft_providers::{Message, Model, ThinkingConfig, TokenUsage};
+use craft_providers::{Model, ThinkingConfig, TokenUsage};
 use craft_storage::StateDir;
-use craft_storage::sessions::{StoredEffect, StoredMode, StoredRule};
+use craft_storage::sessions::{SessionMeta, StoredEffect, StoredMode, StoredRule};
 
 use crate::AppSession;
 
 use super::mode::{FlowState, Mode, PlanState};
 
 pub(crate) struct SessionState {
-    pub session: AppSession,
+    /// Shared with the writer thread, so a checkpoint is just a refcount bump.
+    pub session: Arc<AppSession>,
     pub model: Model,
     pub token_usage: TokenUsage,
     pub cost: Option<f64>,
@@ -101,7 +101,7 @@ impl SessionState {
                 .filter(|_| model.supports_thinking())
                 .unwrap_or_default(),
             fast,
-            session,
+            session: Arc::new(session),
             model,
             token_usage,
             cost,
@@ -114,29 +114,33 @@ impl SessionState {
         }
     }
 
-    pub fn sync_session(
-        &mut self,
-        shared_history: &Option<Arc<ArcSwap<Vec<Message>>>>,
-        permissions: &Arc<PermissionManager>,
-    ) {
-        if let Some(history) = shared_history {
-            self.session.messages = Vec::clone(&history.load());
+    pub fn session_mut(&mut self) -> &mut AppSession {
+        Arc::make_mut(&mut self.session)
+    }
+
+    /// Everything the session mirrors from live state, built field by field so
+    /// a new `SessionMeta` field forces a decision here. Called every frame,
+    /// so it stays cheap: an idle UI has an empty draft, queue and rule list,
+    /// and an empty `Vec` does not allocate.
+    pub fn build_meta(&self, permissions: &PermissionManager) -> SessionMeta {
+        SessionMeta {
+            schema_version: self.session.meta.schema_version,
+            mode: Some(self.mode.into()),
+            plan_path: self.plan.path().map(|p| p.to_string_lossy().into_owned()),
+            plan_written: self.plan.is_ready(),
+            session_rules: rules_to_stored(&permissions.session_rules_snapshot()),
+            context_size: self.context_size,
+            input_draft: None,
+            queued_messages: Vec::new(),
+            thinking: Some(self.thinking.into()),
+            fast: self.fast,
+            goal: self.session.meta.goal.clone(),
+            goal_criteria: self.session.meta.goal_criteria.clone(),
+            flow_workstream_id: (self.mode == Mode::Flow && !self.flow.workstream_id.is_empty())
+                .then(|| self.flow.workstream_id.clone()),
+            flow_stage: self.flow.stage.map(|s| s.as_str().to_string()),
+            context_window_overrides: self.context_window_overrides.clone(),
         }
-        self.session.token_usage = self.token_usage;
-        self.session.meta.context_size = self.context_size;
-        self.session.meta.mode = Some(self.mode.into());
-        self.session.meta.plan_path = self.plan.path().map(|p| p.to_string_lossy().into_owned());
-        self.session.meta.plan_written = self.plan.is_ready();
-        self.session.meta.flow_workstream_id = (self.mode == Mode::Flow
-            && !self.flow.workstream_id.is_empty())
-        .then(|| self.flow.workstream_id.clone());
-        self.session.meta.flow_stage = self.flow.stage.map(|s| s.as_str().to_string());
-        self.session.meta.session_rules = rules_to_stored(&permissions.session_rules_snapshot());
-        self.session.meta.thinking = Some(self.thinking.into());
-        self.session.meta.fast = self.fast;
-        self.session.meta.context_window_overrides = self.context_window_overrides.clone();
-        self.session.updated_at = craft_storage::now_epoch();
-        self.session.update_title_if_default();
     }
 
     pub fn update_model(&mut self, model: &Model) {
@@ -146,7 +150,7 @@ impl SessionState {
         if !model.supports_fast() {
             self.fast = false;
         }
-        self.session.model = model.spec();
+        self.session_mut().set_model(model.spec());
         self.model = model.clone();
     }
 }
@@ -331,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_session_writes_back_context_window_overrides() {
+    fn build_meta_writes_back_context_window_overrides() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = StateDir::from_path(tmp.path().to_path_buf());
         let session = AppSession::new("test-model", "/tmp");
@@ -339,13 +343,11 @@ mod tests {
         state
             .context_window_overrides
             .insert("test-model".into(), 180_000);
-        state.sync_session(
-            &None,
-            &Arc::new(PermissionManager::new(
-                craft_config::PermissionsConfig::default(),
-                std::path::PathBuf::from("/tmp"),
-            )),
+        let permissions = PermissionManager::new(
+            craft_config::PermissionsConfig::default(),
+            std::path::PathBuf::from("/tmp"),
         );
+        state.session_mut().meta = state.build_meta(&permissions);
         assert_eq!(
             state
                 .session

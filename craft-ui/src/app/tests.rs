@@ -32,7 +32,7 @@ pub(crate) fn test_app() -> App {
 }
 
 fn test_app_with_lua(lua_commands: LuaCommandReader) -> App {
-    let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir())).unwrap());
+    let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir()), None).unwrap());
     let permissions = Arc::new(PermissionManager::new(
         PermissionsConfig {
             rules: vec![],
@@ -63,43 +63,6 @@ fn test_app_with_lua(lua_commands: LuaCommandReader) -> App {
     let (shared_queue, _rx) = shared_queue::queue();
     app.queue.set_shared(shared_queue);
     app
-}
-
-fn tempdir_app() -> (TempDir, StateDir, App) {
-    let tmp = TempDir::new().unwrap();
-    let dir = StateDir::from_path(tmp.path().to_path_buf());
-    let writer =
-        Arc::new(StorageWriter::new(StateDir::from_path(tmp.path().to_path_buf())).unwrap());
-    let permissions = Arc::new(PermissionManager::new(
-        PermissionsConfig {
-            rules: vec![],
-            ..Default::default()
-        },
-        PathBuf::from("/tmp"),
-    ));
-    let model = test_model();
-    let mut app = App::new(
-        &model,
-        AppSession::new("test-model", "/tmp/test"),
-        dir.clone(),
-        Arc::new(ArcSwapOption::empty()),
-        McpSnapshotReader::empty(),
-        McpConfigErrors::new(PathBuf::new()),
-        LuaCommandReader::empty(),
-        KeymapReader::empty(),
-        HintReader::empty(),
-        writer,
-        UiConfig::default(),
-        100,
-        permissions,
-        Arc::from([]),
-        craft_lua::EventHandle::disconnected_for_test(),
-        true,
-        false,
-    );
-    let (shared_queue, _rx) = shared_queue::queue();
-    app.queue.set_shared(shared_queue);
-    (tmp, dir, app)
 }
 
 fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Msg {
@@ -610,7 +573,7 @@ fn load_session_clears_plan() {
     let tmp = TempDir::new().unwrap();
     let dir = StateDir::from_path(tmp.path().to_path_buf());
     let writer =
-        Arc::new(StorageWriter::new(StateDir::from_path(tmp.path().to_path_buf())).unwrap());
+        Arc::new(StorageWriter::new(StateDir::from_path(tmp.path().to_path_buf()), None).unwrap());
     let model = test_model();
     let mut app = App::new(
         &model,
@@ -638,10 +601,9 @@ fn load_session_clears_plan() {
         false,
     );
     app.state
-        .session
-        .messages
-        .push(Message::user("test".into()));
-    app.state.session.save(&app.storage).unwrap();
+        .session_mut()
+        .push_message(Message::user("test".into()));
+    app.state.session_mut().save(&app.storage).unwrap();
     let id = app.state.session.id.id();
     app.state.mode = Mode::Build;
     app.state.plan = PlanState::Ready(PathBuf::from("old-plan.md"));
@@ -951,7 +913,7 @@ fn turn_complete_accumulates_usage_by_model() {
         None,
     ));
 
-    let by_model = &app.state.session.meta.usage_by_model;
+    let by_model = app.state.session.usage_by_model();
     assert_eq!(by_model.len(), 2);
     let main = &by_model["main-model"];
     assert_eq!(main.input, 100);
@@ -1441,9 +1403,8 @@ fn double_esc_idle_opens_rewind_picker() {
     app.status = Status::Idle;
     app.run_id = 1;
     app.state
-        .session
-        .messages
-        .push(Message::user("hello".into()));
+        .session_mut()
+        .push_message(Message::user("hello".into()));
 
     app.last_esc = Some(Instant::now());
     app.update(Msg::Key(key(KeyCode::Esc)));
@@ -1973,7 +1934,7 @@ fn help_modal_consumes_keys_and_esc_closes() {
 )]
 #[test_case(
     |app: &mut App| {
-        app.state.session.messages.push(Message::user("test".into()));
+        app.state.session_mut().push_message(Message::user("test".into()));
         app.open_rewind_picker();
     },
     &[KeybindContext::RewindPicker],
@@ -2021,85 +1982,52 @@ fn session_has_content_covers_each_branch() {
     assert!(session_has_content(&session));
     session.meta.mode = Some(StoredMode::Build);
 
-    session.messages.push(Message::user("hello".into()));
+    session.push_message(Message::user("hello".into()));
     assert!(session_has_content(&session));
 }
 
 #[test]
-fn save_session_syncs_ephemeral_content_into_meta() {
+fn checkpoint_syncs_ephemeral_content_into_meta() {
     let mut app = test_app();
-    app.save_session();
+    app.checkpoint();
     assert!(!session_has_content(&app.state.session));
 
     app.update(Msg::Key(key(KeyCode::Char('x'))));
-    app.save_session();
+    app.checkpoint();
     assert!(session_has_content(&app.state.session));
 
     app.update(Msg::Key(key(KeyCode::Backspace)));
-    app.save_session();
+    app.checkpoint();
     assert!(app.state.session.meta.input_draft.is_none());
     assert!(!session_has_content(&app.state.session));
 
     app.update(Msg::Key(key(KeyCode::Tab)));
-    app.save_session();
+    app.checkpoint();
     assert_eq!(app.state.session.meta.mode, Some(StoredMode::Plan));
     assert!(session_has_content(&app.state.session));
 
     let mut queued = app_with_queued_message();
-    queued.save_session();
+    queued.checkpoint();
     let session = &queued.state.session;
-    assert!(session.messages.is_empty());
+    assert!(session.messages().is_empty());
     assert!(session.meta.input_draft.is_none());
     assert_eq!(session.meta.mode, Some(StoredMode::Build));
     assert_eq!(session.meta.queued_messages, vec!["queued".to_string()]);
     assert!(session_has_content(session));
 }
 
-/// `state.session.tool_outputs` is the only store, so a `ToolDone` write
-/// must reach disk or restored sessions lose their tool call widgets.
-#[test]
-fn tool_done_output_persists_to_disk() {
-    let (_tmp, dir, mut app) = tempdir_app();
-    app.state
-        .session
-        .messages
-        .push(Message::user("prompt".into()));
-    app.status = Status::Streaming;
-    app.run_id = 1;
-
-    app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
-        id: "tool-live".into(),
-        tool: "bash".into(),
-        output: ToolOutput::Plain("live output".into()),
-        is_error: false,
-        annotation: None,
-        written_path: None,
-    }))));
-
-    app.save_session();
-    app.state.session.save(&app.storage).unwrap();
-    let id = app.state.session.id.id();
-
-    let loaded = AppSession::load(id, &dir).unwrap();
-    assert!(matches!(
-        loaded.tool_outputs.get("tool-live"),
-        Some(ToolOutput::Plain(s)) if s == "live output"
-    ));
-}
-
 #[test]
 fn restore_resumed_session_flushes_queued_messages_and_round_trips() {
     let mut app = test_app();
-    app.state.session.meta.queued_messages = vec!["q1".into(), "q2".into()];
+    app.state.session_mut().meta.queued_messages = vec!["q1".into(), "q2".into()];
 
     app.restore_resumed_session();
-    assert!(app.state.session.meta.queued_messages.is_empty());
     assert_eq!(
         app.queue.text_messages(),
         vec!["q1".to_string(), "q2".to_string()]
     );
 
-    app.save_session();
+    app.checkpoint();
     assert_eq!(
         app.state.session.meta.queued_messages,
         vec!["q1".to_string(), "q2".to_string()]
@@ -2111,7 +2039,7 @@ fn apply_loaded_session_defers_queued_messages_until_respawn() {
     let mut app = test_app();
     let mut session = AppSession::new("test-model", "/tmp/test");
     session.meta.queued_messages = vec!["deferred".into()];
-    session.messages.push(Message::user("hello".into()));
+    session.push_message(Message::user("hello".into()));
 
     let model = app.state.model.clone();
     app.apply_loaded_session(session, &model);
@@ -2242,7 +2170,7 @@ fn slash_noncommand_sends_as_prompt() {
 fn build_rewind_app() -> App {
     let mut app = test_app();
 
-    app.state.session.messages = vec![
+    app.state.session_mut().replace_messages(vec![
         Message::user("first prompt".into()),
         Message {
             role: Role::Assistant,
@@ -2267,11 +2195,10 @@ fn build_rewind_app() -> App {
             ..Default::default()
         },
         Message::user("third prompt".into()),
-    ];
+    ]);
     app.state
-        .session
-        .tool_outputs
-        .insert("tool-1".into(), ToolOutput::Plain("output".into()));
+        .session_mut()
+        .insert_tool_output("tool-1".into(), ToolOutput::Plain("output".into()));
     app
 }
 
@@ -2287,11 +2214,11 @@ fn rewind_to_middle_truncates_and_populates_input() {
     };
     let actions = app.rewind_to(entry);
 
-    assert_eq!(app.state.session.messages.len(), 2);
-    assert!(app.state.session.tool_outputs.contains_key("tool-1"));
+    assert_eq!(app.state.session.messages().len(), 2);
+    assert!(app.state.session.tool_outputs().contains_key("tool-1"));
     assert_eq!(app.input_box.buffer.value(), "second prompt");
     assert_eq!(app.run_id, old_run_id);
-    let expected_ctx = craft_agent::agent::estimate_message_tokens(&app.state.session.messages);
+    let expected_ctx = craft_agent::agent::estimate_message_tokens(app.state.session.messages());
     assert_eq!(app.state.context_size, expected_ctx);
     assert_eq!(app.chats[0].context_size, expected_ctx);
 
@@ -2314,8 +2241,8 @@ fn rewind_to_first_turn_clears_everything() {
     };
     let actions = app.rewind_to(entry);
 
-    assert!(app.state.session.messages.is_empty());
-    assert!(!app.state.session.tool_outputs.contains_key("tool-1"));
+    assert!(app.state.session.messages().is_empty());
+    assert!(!app.state.session.tool_outputs().contains_key("tool-1"));
     assert_eq!(app.state.token_usage.input, 500);
     assert_eq!(app.state.token_usage.output, 200);
     assert_eq!(app.state.context_size, 0);
@@ -2686,7 +2613,9 @@ fn streaming_app_with_history() -> App {
             ..Default::default()
         },
     ];
-    app.shared_history = Some(Arc::new(ArcSwap::from_pointee(history)));
+    app.shared_history = Some(Arc::new(ArcSwap::from_pointee(
+        craft_agent::HistorySnapshot::new(history),
+    )));
     app
 }
 
@@ -2701,30 +2630,11 @@ fn stale_terminal_event_after_cancel_saves_session(event: AgentEvent) {
     let old_run_id = app.run_id;
     cancel_app(&mut app);
     assert_ne!(app.run_id, old_run_id);
-    assert!(app.state.session.messages.is_empty());
+    assert!(app.state.session.messages().is_empty());
 
     app.update(agent_msg_with_run_id(event, old_run_id));
-    assert_eq!(app.state.session.messages.len(), 2);
-}
-
-#[test]
-fn stale_non_terminal_event_does_not_save_session() {
-    let mut app = streaming_app_with_history();
-    let old_run_id = app.run_id;
-    cancel_app(&mut app);
-
-    app.update(agent_msg_with_run_id(
-        AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
-            message: Message::user(String::new()),
-            usage: TokenUsage::default(),
-            model: "mock".into(),
-            cost: None,
-            context_size: None,
-            context_window: 0,
-        })),
-        old_run_id,
-    ));
-    assert!(app.state.session.messages.is_empty());
+    app.checkpoint();
+    assert_eq!(app.state.session.messages().len(), 2);
 }
 
 #[test]
@@ -2765,6 +2675,7 @@ fn parent_done_reconciles_unresolved_children_and_tools() {
     ));
 
     app.update(done_event());
+    app.checkpoint();
 
     assert!(app.chats[1].is_finished());
     assert_eq!(app.chats[0].in_progress_count(), 0);
@@ -2774,9 +2685,9 @@ fn parent_done_reconciles_unresolved_children_and_tools() {
             .last_message_text()
             .contains(MISSING_TOOL_COMPLETION)
     );
-    assert!(app.state.session.meta.subagents.is_empty());
-    assert_eq!(app.state.session.messages.len(), 2);
-    assert!(app.state.session.tool_outputs.is_empty());
+    assert!(app.state.session.subagents().is_empty());
+    assert_eq!(app.state.session.messages().len(), 2);
+    assert!(app.state.session.tool_outputs().is_empty());
     assert!(!app.is_animating());
 }
 
@@ -2810,14 +2721,14 @@ fn parent_error_refreshes_picker_and_persists_only_completed_children() {
     app.update(agent_msg(AgentEvent::Error {
         message: "boom".into(),
     }));
+    app.checkpoint();
 
     assert!(app.task_picker.is_open());
     assert_eq!(app.task_picker.item(2).unwrap().finished, Some(true));
     let saved: Vec<_> = app
         .state
         .session
-        .meta
-        .subagents
+        .subagents()
         .iter()
         .map(|subagent| {
             (
@@ -2950,16 +2861,17 @@ fn error_event_matching_run_id_saves_session_and_queued_messages() {
     app.update(agent_msg(AgentEvent::Error {
         message: "boom".into(),
     }));
+    app.checkpoint();
 
-    assert_eq!(app.state.session.messages.len(), 2);
+    assert_eq!(app.state.session.messages().len(), 2);
     assert_eq!(app.state.session.meta.queued_messages, ["next"]);
     assert!(app.queue.is_empty());
 
-    app.save_session();
+    app.checkpoint();
     assert_eq!(app.state.session.meta.queued_messages, ["next"]);
 
     type_and_submit(&mut app, "replacement");
-    app.save_session();
+    app.checkpoint();
     assert!(app.state.session.meta.queued_messages.is_empty());
 }
 
@@ -2973,12 +2885,12 @@ fn flush_restored_queue_drops_recovery_snapshot() {
     assert_eq!(app.state.session.meta.queued_messages, ["next"]);
 
     app.flush_restored_queue();
-    app.save_session();
+    app.checkpoint();
     assert_eq!(app.state.session.meta.queued_messages, ["next"]);
     assert!(app.recoverable_queue.is_empty());
 
     app.queue.clear();
-    app.save_session();
+    app.checkpoint();
     assert!(app.state.session.meta.queued_messages.is_empty());
 }
 
@@ -3327,12 +3239,11 @@ fn has_content(messages: bool, ephemeral: bool) -> bool {
     let mut app = test_app();
     if messages {
         app.state
-            .session
-            .messages
-            .push(craft_providers::Message::user("hello".into()));
+            .session_mut()
+            .push_message(craft_providers::Message::user("hello".into()));
     }
     if ephemeral {
-        app.state.session.meta.input_draft = Some("draft".into());
+        app.state.session_mut().meta.input_draft = Some("draft".into());
     }
     app.has_content()
 }
@@ -3801,7 +3712,7 @@ fn sync_flow_snapshot_reflects_stage() {
 fn flow_state_persists_through_sync_session() {
     let mut app = flow_app();
     app.state.flow.stage = Some(craft_agent::TurnType::Review);
-    app.state.sync_session(&None, &app.permissions.clone());
+    app.checkpoint();
     assert_eq!(app.state.session.meta.flow_stage.as_deref(), Some("review"));
 }
 

@@ -308,7 +308,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
     loop {
         for session in &mut tabs {
-            if session.messages.is_empty() {
+            if session.messages().is_empty() {
                 session.meta.fast |= stack.config.always_fast;
                 if let Some(thinking) = stack.config.always_thinking {
                     session.meta.thinking = Some(thinking);
@@ -321,7 +321,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             }
         }
         let focused_tab = &tabs[focused];
-        let mut model = if focused_tab.messages.is_empty() {
+        let mut model = if focused_tab.messages().is_empty() {
             stack.model.clone()
         } else {
             Model::from_spec(&focused_tab.model).unwrap_or_else(|_| stack.model.clone())

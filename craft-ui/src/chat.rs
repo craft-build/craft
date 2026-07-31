@@ -453,7 +453,7 @@ impl Chat {
 
 pub fn history_to_display(
     messages: &[Message],
-    tool_outputs: &HashMap<String, ToolOutput>,
+    tool_outputs: &HashMap<String, Arc<ToolOutput>>,
     tool_output_lines: &ToolOutputLines,
 ) -> (Vec<DisplayMessage>, Vec<craft_lua::RestoreItem>) {
     let registry = RenderHintsRegistry::new();
@@ -495,7 +495,7 @@ pub fn history_to_display(
                                     (s, Some(&**text))
                                 })
                                 .unwrap_or((ToolStatus::Success, None));
-                            let stored = tool_outputs.get(id).cloned();
+                            let stored = tool_outputs.get(id).map(Arc::as_ref).cloned();
                             let (text, truncated_lines, tool_output, mut annotation) =
                                 build_loaded_tool(
                                     static_name,
@@ -694,7 +694,7 @@ mod tests {
         }
     }
 
-    fn empty_outputs() -> HashMap<String, ToolOutput> {
+    fn empty_outputs() -> HashMap<String, Arc<ToolOutput>> {
         HashMap::new()
     }
 
@@ -923,7 +923,7 @@ mod tests {
         for (tool_name, input_json, output) in variants {
             let discriminant = std::mem::discriminant(&output);
             let msgs = tool_use_pair(tool_name, input_json, "ok", false);
-            let outputs = HashMap::from([("t1".into(), output)]);
+            let outputs = HashMap::from([("t1".into(), Arc::new(output))]);
             let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default()).0;
             assert_eq!(
                 std::mem::discriminant(display[0].tool_output.as_deref().unwrap()),
@@ -946,7 +946,7 @@ mod tests {
             "wrote 12 bytes",
             false,
         );
-        let outputs = HashMap::from([("t1".into(), write_output)]);
+        let outputs = HashMap::from([("t1".into(), Arc::new(write_output))]);
         let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default()).0;
         assert!(display[0].annotation.is_some());
     }
@@ -996,7 +996,7 @@ mod tests {
             no_compress: false,
         };
         let msgs = tool_use_pair("batch", serde_json::json!({"tool_calls": []}), "", false);
-        let outputs = HashMap::from([("t1".into(), batch_output)]);
+        let outputs = HashMap::from([("t1".into(), Arc::new(batch_output))]);
         let display = history_to_display(&msgs, &outputs, &ToolOutputLines::default()).0;
         let ToolOutput::Batch { entries, .. } = display[0].tool_output.as_deref().unwrap() else {
             panic!("expected Batch output");
