@@ -184,6 +184,8 @@ An always-on lightweight reviewer that reads the transcript delta each turn and 
 | `enabled` | bool | `false` | Enable the turn-by-turn advisor reviewer |
 | `model` | string | `none` | `provider/model_id` spec for the advisor. When unset, the `advisor` role from `model_roles.toml` is used, falling back to the active model |
 | `dedup_size` | usize | `16` | Maximum advisor notes kept in the dedup FIFO |
+| `auto_act` | string | `concern` | Minimum severity (`off`, `nit`, `concern`, `blocker`) that triggers an automatic follow-up turn. At or above this severity the note is pushed into the agent context and the run continues; `off` keeps the advisor display-only |
+| `max_act_turns` | u32 | `2` | Maximum advisor-driven follow-up turns a single run may take before stopping and displaying the note |
 
 ### `agent.flow`
 

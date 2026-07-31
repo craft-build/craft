@@ -299,6 +299,16 @@ fn write_nested_agent_sections(out: &mut String) {
         "| `dedup_size` | usize | `16` | Maximum advisor notes kept in the dedup FIFO |"
     )
     .unwrap();
+    writeln!(
+        out,
+        "| `auto_act` | string | `concern` | Minimum severity (`off`, `nit`, `concern`, `blocker`) that triggers an automatic follow-up turn. At or above this severity the note is pushed into the agent context and the run continues; `off` keeps the advisor display-only |"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| `max_act_turns` | u32 | `2` | Maximum advisor-driven follow-up turns a single run may take before stopping and displaying the note |"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     write_section(out, "[agent.flow]", FlowConfig::FIELDS);

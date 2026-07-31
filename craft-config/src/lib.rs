@@ -1170,6 +1170,7 @@ const DEFAULT_FORMAT_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.50;
 const DEFAULT_CONTEXT_WINDOW_THRESHOLD: u32 = 32_000;
 const DEFAULT_ADVISOR_DEDUP_SIZE: usize = 16;
+const DEFAULT_ADVISOR_MAX_ACT_TURNS: u32 = 2;
 const DEFAULT_FLOW_MAX_REVIEW_ITERATIONS: u32 = 3;
 const DEFAULT_FLOW_MAX_QA_ITERATIONS: u32 = 2;
 const DEFAULT_FLOW_PARALLEL_CHUNKS: u32 = 1;
@@ -1393,10 +1394,39 @@ pub struct AdvisorConfig {
     /// Maximum advisor notes kept in the dedup FIFO.
     #[serde(default = "default_advisor_dedup_size")]
     pub dedup_size: usize,
+    /// Minimum severity that triggers an automatic follow-up turn instead of
+    /// stopping for the user. Notes at or above this severity are pushed into
+    /// the agent's own context and the run continues. `off` keeps the advisor
+    /// display-only.
+    #[serde(default = "default_advisor_auto_act")]
+    pub auto_act: AdvisorAutoAct,
+    /// Maximum advisor-driven follow-up turns a single run may take. Once
+    /// exhausted the run stops and displays the note as usual.
+    #[serde(default = "default_advisor_max_act_turns")]
+    pub max_act_turns: u32,
 }
 
 fn default_advisor_dedup_size() -> usize {
     DEFAULT_ADVISOR_DEDUP_SIZE
+}
+
+fn default_advisor_auto_act() -> AdvisorAutoAct {
+    AdvisorAutoAct::Concern
+}
+
+fn default_advisor_max_act_turns() -> u32 {
+    DEFAULT_ADVISOR_MAX_ACT_TURNS
+}
+
+/// Advisor auto-act severity threshold. Declaration order doubles as the
+/// severity ranking: `Off < Nit < Concern < Blocker`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdvisorAutoAct {
+    Off,
+    Nit,
+    Concern,
+    Blocker,
 }
 
 /// Flow mode configuration. Off by default; when enabled, the agent can run
@@ -1453,6 +1483,8 @@ impl Default for AdvisorConfig {
             enabled: false,
             model: None,
             dedup_size: default_advisor_dedup_size(),
+            auto_act: default_advisor_auto_act(),
+            max_act_turns: default_advisor_max_act_turns(),
         }
     }
 }

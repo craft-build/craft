@@ -69,6 +69,23 @@ impl AdvisorSeverity {
     }
 }
 
+/// Map an advisor severity to the auto-act threshold it satisfies. Mirrors the
+/// declaration order of `AdvisorAutoAct` (`Off < Nit < Concern < Blocker`).
+fn severity_to_act(severity: AdvisorSeverity) -> craft_config::AdvisorAutoAct {
+    match severity {
+        AdvisorSeverity::Nit => craft_config::AdvisorAutoAct::Nit,
+        AdvisorSeverity::Concern => craft_config::AdvisorAutoAct::Concern,
+        AdvisorSeverity::Blocker => craft_config::AdvisorAutoAct::Blocker,
+    }
+}
+
+/// Whether a note of `severity` should trigger an automatic follow-up turn,
+/// given the configured `threshold`. `Off` never acts; a threshold acts on
+/// notes at or above its own severity.
+pub fn should_act(severity: AdvisorSeverity, threshold: craft_config::AdvisorAutoAct) -> bool {
+    threshold != craft_config::AdvisorAutoAct::Off && severity_to_act(severity) >= threshold
+}
+
 #[derive(Debug, Clone)]
 pub struct AdvisorNote {
     pub severity: AdvisorSeverity,
@@ -301,6 +318,7 @@ fn parse_severity(line: &str) -> Option<(AdvisorSeverity, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use craft_config::AdvisorAutoAct;
     use test_case::test_case;
 
     fn cfg(dedup: usize) -> AdvisorConfig {
@@ -308,6 +326,8 @@ mod tests {
             enabled: true,
             model: None,
             dedup_size: dedup,
+            auto_act: craft_config::AdvisorAutoAct::Concern,
+            max_act_turns: 2,
         }
     }
 
@@ -428,5 +448,40 @@ mod tests {
         assert_eq!(AdvisorSeverity::Blocker.as_str(), "blocker");
         assert_eq!(AdvisorSeverity::Concern.as_str(), "concern");
         assert_eq!(AdvisorSeverity::Nit.as_str(), "nit");
+    }
+
+    #[test_case(AdvisorSeverity::Nit, craft_config::AdvisorAutoAct::Off, false ; "off_never_acts")]
+    #[test_case(AdvisorSeverity::Blocker, craft_config::AdvisorAutoAct::Off, false ; "off_ignores_blocker")]
+    #[test_case(AdvisorSeverity::Nit, craft_config::AdvisorAutoAct::Nit, true ; "nit_acts_on_nit")]
+    #[test_case(AdvisorSeverity::Concern, craft_config::AdvisorAutoAct::Nit, true ; "nit_acts_on_concern")]
+    #[test_case(AdvisorSeverity::Blocker, craft_config::AdvisorAutoAct::Nit, true ; "nit_acts_on_blocker")]
+    #[test_case(AdvisorSeverity::Nit, craft_config::AdvisorAutoAct::Concern, false ; "concern_skips_nit")]
+    #[test_case(AdvisorSeverity::Concern, craft_config::AdvisorAutoAct::Concern, true ; "concern_acts_on_concern")]
+    #[test_case(AdvisorSeverity::Blocker, craft_config::AdvisorAutoAct::Concern, true ; "concern_acts_on_blocker")]
+    #[test_case(AdvisorSeverity::Concern, craft_config::AdvisorAutoAct::Blocker, false ; "blocker_skips_concern")]
+    #[test_case(AdvisorSeverity::Blocker, craft_config::AdvisorAutoAct::Blocker, true ; "blocker_acts_on_blocker")]
+    fn should_act_thresholds(
+        severity: AdvisorSeverity,
+        threshold: craft_config::AdvisorAutoAct,
+        expected: bool,
+    ) {
+        assert_eq!(should_act(severity, threshold), expected);
+    }
+
+    #[test_case("concern", Some(AdvisorAutoAct::Concern) ; "parses_concern")]
+    #[test_case("off", Some(AdvisorAutoAct::Off) ; "parses_off")]
+    #[test_case("blocker", Some(AdvisorAutoAct::Blocker) ; "parses_blocker")]
+    #[test_case("nit", Some(AdvisorAutoAct::Nit) ; "parses_nit")]
+    #[test_case("bogus", None ; "rejects_unknown")]
+    #[test_case("BLOCKER", None ; "rejects_uppercase")]
+    fn advisor_auto_act_serde(input: &str, expected: Option<AdvisorAutoAct>) {
+        let parsed: Result<AdvisorAutoAct, _> = serde_json::from_str(&format!("\"{input}\""));
+        let ok = parsed.ok();
+        assert_eq!(ok, expected);
+        if let Some(v) = ok {
+            let s = serde_json::to_string(&v).unwrap();
+            let back: AdvisorAutoAct = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, v);
+        }
     }
 }

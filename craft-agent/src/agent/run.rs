@@ -43,6 +43,7 @@ const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 const MANDATORY_RECENT_MESSAGES: usize = 6;
 const STAGNATION_WINDOW_SIZE: usize = 5;
 const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
+const ADVISOR_FOLLOWUP_PROMPT: &str = "<advisor-note>\nA lightweight advisor reviewed your last turn and flagged a {severity}:\n{note}\n\nAddress this concern before finishing. Do not simply acknowledge it; make the change or explain concretely why it does not apply.\n</advisor-note>";
 
 pub async fn resolve_compaction_model(
     provider: &Arc<dyn Provider>,
@@ -165,6 +166,7 @@ pub struct Agent<'h> {
     goal: Option<String>,
     goal_criteria: Vec<String>,
     judge_continuations: u8,
+    advisor_continuations: u32,
     snapshot_store: Arc<crate::tools::safety::SnapshotStore>,
     pending_edits: Arc<crate::tools::ast_edit::PendingEditStore>,
     fallback_chain: Vec<craft_providers::roles::ChainHop>,
@@ -263,6 +265,7 @@ impl<'h> Agent<'h> {
             goal: None,
             goal_criteria: Vec::new(),
             judge_continuations: 0,
+            advisor_continuations: 0,
             snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
             pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
             fallback_chain: Vec::new(),
@@ -539,7 +542,20 @@ impl<'h> Agent<'h> {
                 }
                 TurnOutcome::Done(stop_reason) => {
                     self.snapshot.commit();
-                    self.run_advisor().await;
+                    let note = self.run_advisor().await;
+                    match advisor_turn_action(
+                        note,
+                        &self.config.advisor,
+                        self.pending_approval_stop.is_some(),
+                        self.advisor_continuations,
+                    ) {
+                        AdvisorTurnAction::Continue(note) => {
+                            self.advisor_continuations += 1;
+                            self.history.push(advisor_followup_message(&note));
+                            continue;
+                        }
+                        AdvisorTurnAction::Stop => {}
+                    }
                     // Flow mode: commit the final turn's write before exiting.
                     if matches!(self.mode, AgentMode::Flow(_)) {
                         self.commit_turn_write(self.turn_type);
@@ -836,10 +852,8 @@ impl<'h> Agent<'h> {
         }
     }
 
-    async fn run_advisor(&mut self) {
-        let Some(state) = self.advisor_state.as_mut() else {
-            return;
-        };
+    async fn run_advisor(&mut self) -> Option<super::advisor::AdvisorNote> {
+        let state = self.advisor_state.as_mut()?;
         let result = super::advisor::review(
             state,
             self.history.as_slice(),
@@ -854,11 +868,15 @@ impl<'h> Agent<'h> {
             Ok(Some(note)) => {
                 let _ = self.event_tx.send(AgentEvent::AdvisorNote {
                     severity: note.severity.as_str().to_string(),
-                    message: note.message,
+                    message: note.message.clone(),
                 });
+                Some(note)
             }
-            Ok(None) => {}
-            Err(e) => warn!(error = %e, "advisor review failed"),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(error = %e, "advisor review failed");
+                None
+            }
         }
     }
 
@@ -1773,6 +1791,48 @@ fn parse_shift_output(text: &str) -> Option<crate::types::ToolOutput> {
     Some(crate::types::ToolOutput::ShiftTurnType { target, rationale })
 }
 
+/// What the run should do with an advisor note at a natural stop.
+enum AdvisorTurnAction {
+    /// Inject the note and run a follow-up turn.
+    Continue(super::advisor::AdvisorNote),
+    /// Stop the run: no note, below the act threshold, budget exhausted, or a
+    /// goal-approval gate is pending.
+    Stop,
+}
+
+/// Decide whether an actionable advisor note drives a follow-up turn. Pure so
+/// the branch logic (severity threshold, budget, approval gate) is testable
+/// without a live provider.
+fn advisor_turn_action(
+    note: Option<super::advisor::AdvisorNote>,
+    cfg: &craft_config::AdvisorConfig,
+    pending_approval: bool,
+    continuations: u32,
+) -> AdvisorTurnAction {
+    let Some(note) = note else {
+        return AdvisorTurnAction::Stop;
+    };
+    if pending_approval
+        || continuations >= cfg.max_act_turns
+        || !super::advisor::should_act(note.severity, cfg.auto_act)
+    {
+        return AdvisorTurnAction::Stop;
+    }
+    AdvisorTurnAction::Continue(note)
+}
+
+/// Build the synthetic user message that hands an actionable advisor note to the
+/// agent so its next turn sees it. `display_text` is empty, matching the
+/// compaction-continuation precedent, so the note is hidden from the chat view
+/// (the visible flag still comes from `AgentEvent::AdvisorNote`).
+fn advisor_followup_message(note: &super::advisor::AdvisorNote) -> Message {
+    Message::synthetic(
+        ADVISOR_FOLLOWUP_PROMPT
+            .replace("{severity}", note.severity.as_str())
+            .replace("{note}", &note.message),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1788,6 +1848,7 @@ mod tests {
     use test_case::test_case;
 
     use super::*;
+    use crate::AdvisorSeverity;
     use crate::Envelope;
     use crate::permissions::PermissionManager;
 
@@ -2942,5 +3003,80 @@ mod tests {
         assert!(ctx.flow_thread_id.is_some());
         assert!(ctx.flow_thread_history.is_some());
         assert!(ctx.flow_progress_tx.is_some());
+    }
+
+    fn advisor_note(
+        severity: AdvisorSeverity,
+        message: &str,
+    ) -> super::super::advisor::AdvisorNote {
+        super::super::advisor::AdvisorNote {
+            severity,
+            message: message.into(),
+        }
+    }
+
+    fn advisor_cfg(
+        auto_act: craft_config::AdvisorAutoAct,
+        max_act_turns: u32,
+    ) -> craft_config::AdvisorConfig {
+        craft_config::AdvisorConfig {
+            enabled: true,
+            model: None,
+            dedup_size: 16,
+            auto_act,
+            max_act_turns,
+        }
+    }
+
+    #[test_case(None,        craft_config::AdvisorAutoAct::Concern, 2, 0, false, false ; "no_note_stops")]
+    #[test_case(Some(AdvisorSeverity::Blocker), craft_config::AdvisorAutoAct::Off, 2, 0, false, false ; "off_threshold_stops")]
+    #[test_case(Some(AdvisorSeverity::Nit), craft_config::AdvisorAutoAct::Concern, 2, 0, false, false ; "below_threshold_stops")]
+    #[test_case(Some(AdvisorSeverity::Blocker), craft_config::AdvisorAutoAct::Concern, 2, 0, false, true  ; "blocker_above_concern_continues")]
+    #[test_case(Some(AdvisorSeverity::Concern), craft_config::AdvisorAutoAct::Concern, 2, 0, false, true  ; "concern_at_threshold_continues")]
+    #[test_case(Some(AdvisorSeverity::Blocker), craft_config::AdvisorAutoAct::Concern, 0, 0, false, false ; "zero_budget_stops")]
+    #[test_case(Some(AdvisorSeverity::Blocker), craft_config::AdvisorAutoAct::Concern, 2, 2, false, false ; "exhausted_budget_stops")]
+    #[test_case(Some(AdvisorSeverity::Blocker), craft_config::AdvisorAutoAct::Concern, 2, 1, false, true  ; "budget_remaining_continues")]
+    #[test_case(Some(AdvisorSeverity::Blocker), craft_config::AdvisorAutoAct::Concern, 2, 0, true,  false ; "pending_approval_stops")]
+    fn advisor_turn_action_decision(
+        note: Option<AdvisorSeverity>,
+        auto_act: craft_config::AdvisorAutoAct,
+        max_act_turns: u32,
+        continuations: u32,
+        pending_approval: bool,
+        expect_continue: bool,
+    ) {
+        let note = note.map(|s| advisor_note(s, "real bug"));
+        let cfg = advisor_cfg(auto_act, max_act_turns);
+        let action = advisor_turn_action(note, &cfg, pending_approval, continuations);
+        assert_eq!(
+            matches!(action, AdvisorTurnAction::Continue(_)),
+            expect_continue,
+            "continuation mismatch"
+        );
+    }
+
+    #[test]
+    fn advisor_turn_action_continues_with_note() {
+        let note = advisor_note(AdvisorSeverity::Blocker, "leaks secret");
+        let cfg = advisor_cfg(craft_config::AdvisorAutoAct::Concern, 2);
+        let action = advisor_turn_action(Some(note), &cfg, false, 0);
+        let AdvisorTurnAction::Continue(returned) = action else {
+            panic!("expected Continue");
+        };
+        assert_eq!(returned.severity, AdvisorSeverity::Blocker);
+        assert_eq!(returned.message, "leaks secret");
+    }
+
+    #[test]
+    fn advisor_followup_message_carries_note_and_is_hidden() {
+        let note = advisor_note(AdvisorSeverity::Concern, "missing error handling");
+        let msg = advisor_followup_message(&note);
+        assert!(matches!(msg.role, Role::User));
+        let text = msg.first_text_content().unwrap();
+        assert!(text.contains("<advisor-note>"));
+        assert!(text.contains("concern"));
+        assert!(text.contains("missing error handling"));
+        // Empty display_text hides the synthetic injection from the chat view.
+        assert_eq!(msg.display_text.as_deref(), Some(""));
     }
 }
