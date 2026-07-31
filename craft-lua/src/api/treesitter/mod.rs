@@ -33,8 +33,9 @@ pub(crate) fn create_treesitter_table(lua: &Lua) -> LuaResult<Table> {
         "get_node_text",
         lua.create_function(|_, (node_ud, source): (AnyUserData, String)| {
             let lua_node = node_ud.borrow::<LuaNode>()?;
-            let start = lua_node.node.start_byte();
-            let end = lua_node.node.end_byte();
+            let ts = lua_node.ts_node()?;
+            let start = ts.start_byte();
+            let end = ts.end_byte();
             if end > source.len() {
                 return Err(mlua::Error::runtime("node range exceeds source length"));
             }
@@ -46,8 +47,9 @@ pub(crate) fn create_treesitter_table(lua: &Lua) -> LuaResult<Table> {
         "get_node_range",
         lua.create_function(|_, node_ud: AnyUserData| {
             let n = node_ud.borrow::<LuaNode>()?;
-            let sp = n.node.start_position();
-            let ep = n.node.end_position();
+            let ts = n.ts_node()?;
+            let sp = ts.start_position();
+            let ep = ts.end_position();
             Ok((
                 sp.row as i64,
                 sp.column as i64,
@@ -61,15 +63,16 @@ pub(crate) fn create_treesitter_table(lua: &Lua) -> LuaResult<Table> {
         "get_range",
         lua.create_function(|lua, (node_ud,): (AnyUserData,)| {
             let n = node_ud.borrow::<LuaNode>()?;
-            let sp = n.node.start_position();
-            let ep = n.node.end_position();
+            let ts = n.ts_node()?;
+            let sp = ts.start_position();
+            let ep = ts.end_position();
             let tbl = lua.create_table()?;
             tbl.set(1, sp.row as i64)?;
             tbl.set(2, sp.column as i64)?;
-            tbl.set(3, n.node.start_byte() as i64)?;
+            tbl.set(3, ts.start_byte() as i64)?;
             tbl.set(4, ep.row as i64)?;
             tbl.set(5, ep.column as i64)?;
-            tbl.set(6, n.node.end_byte() as i64)?;
+            tbl.set(6, ts.end_byte() as i64)?;
             Ok(tbl)
         })?,
     )?;
@@ -79,9 +82,10 @@ pub(crate) fn create_treesitter_table(lua: &Lua) -> LuaResult<Table> {
         lua.create_function(|_, (dest, source): (AnyUserData, AnyUserData)| {
             let dest = dest.borrow::<LuaNode>()?;
             let source = source.borrow::<LuaNode>()?;
-            let mut current = Some(source.node);
+            let dest_node = dest.ts_node()?;
+            let mut current = Some(source.ts_node()?);
             while let Some(node) = current {
-                if node.id() == dest.node.id() {
+                if node.id() == dest_node.id() {
                     return Ok(true);
                 }
                 current = node.parent();
@@ -94,8 +98,9 @@ pub(crate) fn create_treesitter_table(lua: &Lua) -> LuaResult<Table> {
         "is_in_node_range",
         lua.create_function(|_, (node_ud, line, col): (AnyUserData, usize, usize)| {
             let n = node_ud.borrow::<LuaNode>()?;
-            let sp = n.node.start_position();
-            let ep = n.node.end_position();
+            let ts = n.ts_node()?;
+            let sp = ts.start_position();
+            let ep = ts.end_position();
             let in_range = (line > sp.row || (line == sp.row && col >= sp.column))
                 && (line < ep.row || (line == ep.row && col < ep.column));
             Ok(in_range)
@@ -106,12 +111,13 @@ pub(crate) fn create_treesitter_table(lua: &Lua) -> LuaResult<Table> {
         "node_contains",
         lua.create_function(|_, (node_ud, range): (AnyUserData, Table)| {
             let n = node_ud.borrow::<LuaNode>()?;
+            let ts = n.ts_node()?;
             let sr: usize = range.get(1)?;
             let sc: usize = range.get(2)?;
             let er: usize = range.get(3)?;
             let ec: usize = range.get(4)?;
-            let sp = n.node.start_position();
-            let ep = n.node.end_position();
+            let sp = ts.start_position();
+            let ep = ts.end_position();
             let contains = (sr > sp.row || (sr == sp.row && sc >= sp.column))
                 && (er < ep.row || (er == ep.row && ec <= ep.column));
             Ok(contains)

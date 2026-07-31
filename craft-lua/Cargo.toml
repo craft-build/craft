@@ -27,6 +27,7 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 event-listener = { workspace = true }
 flume = { workspace = true }
+pin-project-lite = { workspace = true }
 tree-sitter = { workspace = true }
 unicode-width = { workspace = true }
 regex = { workspace = true }
@@ -73,7 +74,7 @@ tree-sitter-zsh = { workspace = true }
 tree-sitter-yaml = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
+rustix = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }

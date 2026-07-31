@@ -39,6 +39,8 @@ reqwest = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 libc = { workspace = true }
+pin-project-lite = { workspace = true }
+rustix = { workspace = true }
 open = { workspace = true }
 jiff = { workspace = true }
 get-size2 = "=0.10.1"
@@ -141,6 +143,8 @@ arc-swap = "1"
 bitflags = "2"
 event-listener = "5"
 libc = "0.2"
+pin-project-lite = "0.2"
+rustix = { version = "1", default-features = false, features = ["process"] }
 nucleo = "0.5"
 nucleo-matcher = "0.3"
 open = "5"
