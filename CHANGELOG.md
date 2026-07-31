@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-07-31
+
+### Added
+
+- **agent**: advisor auto-acts on actionable notes (Blocker/Concern by default) at a run's natural stop, injecting the note and continuing with a follow-up turn (`dfd259a1`)
+
+### Changed
+
+- **read**: `offset` and `limit` are now required parameters (`796fdd66`)
+- **lua**: consolidated the `(value, err)` pair into a single home across the API (`48a07615`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`http` 1.5.0, `hybrid-array` 0.4.14, `macro_rules_attribute` 0.2.3, `rustls` 0.23.43, `tokio-macros` 2.7.2)
+
+### Fixed
+
+- **agent**: a second subagent no longer cancels the first (`4c6b4d79`)
+- **ui**: sessions persist every frame instead of once per turn, so a crash no longer loses a whole turn or the input draft (`ed6fd7f4`)
+
 ## [0.11.1] - 2026-07-29
 
 ### Added
@@ -1482,7 +1499,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/craft-build/craft/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/craft-build/craft/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/craft-build/craft/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/craft-build/craft/compare/v0.10.1...v0.10.2
