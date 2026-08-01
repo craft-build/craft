@@ -6,7 +6,7 @@
 //! escapes don't survive tmux/screen DCS passthrough) falls back to
 //! unicode halfblocks so *something* always renders.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
 use ratatui::layout::Size;
@@ -20,6 +20,25 @@ use craft_agent::ImageSource;
 /// consume the whole scrollback.
 const MAX_IMAGE_ROWS: u16 = 30;
 
+/// The single probed `Picker`. `Picker::from_query_stdio` sends kitty/DA/DSR
+/// queries and reads the replies straight from stdin, so it must run before
+/// the input reader thread starts; calling it again later (on `/new`, which
+/// rebuilds the chat panel) races the reader and leaks the `Gi=31;OK`
+/// graphics reply into the input bar. The protocol and font size never change
+/// for the life of the process, so probe once and clone.
+static PICKER: OnceLock<Picker> = OnceLock::new();
+
+fn shared_picker() -> Picker {
+    PICKER
+        .get_or_init(|| {
+            if crate::terminal::is_muxed() {
+                return Picker::halfblocks();
+            }
+            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+        })
+        .clone()
+}
+
 /// Resolved once at startup; cheaply cloneable for sharing across renders.
 #[derive(Clone)]
 pub(crate) struct ImagePicker {
@@ -29,13 +48,9 @@ pub(crate) struct ImagePicker {
 impl ImagePicker {
     /// Query the terminal for its graphics protocol and font size.
     pub(crate) fn new() -> Self {
-        if crate::terminal::is_muxed() {
-            return Self {
-                picker: Picker::halfblocks(),
-            };
+        Self {
+            picker: shared_picker(),
         }
-        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-        Self { picker }
     }
 
     /// Build a renderable image state from a base64-encoded `ImageSource`,
