@@ -65,7 +65,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
                 cache_read: 0.31,
                 fast: None,
             },
-            max_output_tokens: 65_536,
+            max_output_tokens: Some(65_536),
             context_window: 1_048_576,
             supports_vision: true,
         },
@@ -81,7 +81,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
                 cache_read: 0.04,
                 fast: None,
             },
-            max_output_tokens: 65_536,
+            max_output_tokens: Some(65_536),
             context_window: 1_048_576,
             supports_vision: true,
         },
@@ -97,7 +97,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
                 cache_read: 0.01,
                 fast: None,
             },
-            max_output_tokens: 65_536,
+            max_output_tokens: Some(65_536),
             context_window: 1_048_576,
             supports_vision: true,
         },
@@ -859,8 +859,8 @@ mod tests {
         assert!(!models.is_empty());
         for entry in models {
             assert!(!entry.prefixes.is_empty());
-            assert!(entry.max_output_tokens > 0);
-            assert!(entry.context_window >= entry.max_output_tokens);
+            assert!(entry.max_output_tokens.is_some_and(|t| t > 0));
+            assert!(entry.context_window >= entry.max_output_tokens.unwrap());
         }
     }
 
