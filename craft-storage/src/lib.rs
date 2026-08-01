@@ -20,15 +20,28 @@ use std::fs;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::ptr::null;
 #[cfg(windows)]
 use std::thread;
 #[cfg(windows)]
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
+};
 
 use paths::state_dir;
+
+#[cfg(windows)]
+const RENAME_ATTEMPTS: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct StateDir(PathBuf);
@@ -72,6 +85,9 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StorageError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = NamedTempFile::new_in(parent)?;
     tmp.write_all(data)?;
+    if let Ok(metadata) = fs::metadata(path) {
+        fs::set_permissions(tmp.path(), metadata.permissions())?;
+    }
     tmp.as_file().sync_data()?;
     let (_, tmp_path) = tmp.into_parts();
     retry_rename(&tmp_path, path).map_err(|e| {
@@ -104,8 +120,8 @@ pub(crate) fn atomic_write_permissions(
 fn retry_rename(src: &Path, dest: &Path) -> std::io::Result<()> {
     let mut a: u64 = 0;
     let mut b: u64 = 1;
-    for _ in 0..20 {
-        match fs::rename(src, dest) {
+    for _ in 0..RENAME_ATTEMPTS {
+        match replace_file(src, dest) {
             Ok(()) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 thread::sleep(Duration::from_millis(b));
@@ -116,12 +132,59 @@ fn retry_rename(src: &Path, dest: &Path) -> std::io::Result<()> {
             Err(e) => return Err(e),
         }
     }
+    replace_file(src, dest)
+}
+
+#[cfg(windows)]
+fn replace_file(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let src = src
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let dest = dest
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+
+    // SAFETY: Both paths are valid, null-terminated UTF-16 strings, and all
+    // optional pointer arguments are null.
+    if unsafe { ReplaceFileW(dest.as_ptr(), src.as_ptr(), null(), 0, null(), null()) } != 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    if !matches!(
+        error.raw_os_error(),
+        Some(code) if code == ERROR_FILE_NOT_FOUND as i32 || code == ERROR_PATH_NOT_FOUND as i32
+    ) {
+        return Err(error);
+    }
+
+    // SAFETY: Both paths are valid, null-terminated UTF-16 strings.
+    if unsafe {
+        MoveFileExW(
+            src.as_ptr(),
+            dest.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } != 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(src: &Path, dest: &Path) -> std::io::Result<()> {
     fs::rename(src, dest)
 }
 
 #[cfg(not(windows))]
 fn retry_rename(src: &Path, dest: &Path) -> std::io::Result<()> {
-    fs::rename(src, dest)
+    replace_file(src, dest)
 }
 
 fn now_since_epoch() -> std::time::Duration {
@@ -136,4 +199,63 @@ pub fn now_epoch() -> u64 {
 
 pub fn now_millis() -> u64 {
     now_since_epoch().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ORIGINAL: &[u8] = b"original";
+    const REPLACEMENT: &[u8] = b"replacement";
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        fs::write(&path, ORIGINAL).unwrap();
+
+        atomic_write(&path, REPLACEMENT).unwrap();
+
+        assert_eq!(fs::read(path).unwrap(), REPLACEMENT);
+    }
+
+    #[test]
+    fn atomic_write_permissions_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        fs::write(&path, ORIGINAL).unwrap();
+
+        atomic_write_permissions(&path, REPLACEMENT, 0o600).unwrap();
+
+        assert_eq!(fs::read(path).unwrap(), REPLACEMENT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_destination_permissions() {
+        const MODE: u32 = 0o640;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state");
+        fs::write(&path, ORIGINAL).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(MODE)).unwrap();
+
+        atomic_write(&path, REPLACEMENT).unwrap();
+
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            MODE
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_cleans_up_temp_after_replacement_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+
+        assert!(atomic_write(&destination, REPLACEMENT).is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 }
