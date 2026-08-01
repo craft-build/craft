@@ -72,6 +72,10 @@ tree-sitter-perl = { workspace = true }
 tree-sitter-svelte-next = { workspace = true }
 tree-sitter-zsh = { workspace = true }
 tree-sitter-yaml = { workspace = true }
+tree-sitter-containerfile = { workspace = true }
+tree-sitter-hcl = { workspace = true }
+tree-sitter-json = { workspace = true }
+tree-sitter-make = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }
