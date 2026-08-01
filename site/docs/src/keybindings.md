@@ -20,7 +20,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | Key | Action |
 |-----|--------|
 | `Enter` | Submit prompt |
-| `\+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
+| `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
 | `Tab` | Toggle mode |
 | `/command` | Open command palette |
 | `Ctrl+W` | Delete word backward |

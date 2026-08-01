@@ -59,10 +59,12 @@ local function find_project_ancestors()
     return {}
   end
   local dirs = { cwd }
+  if craft.fs.metadata(craft.fs.joinpath(cwd, ".git")) then
+    return dirs
+  end
   for _, parent in ipairs(craft.fs.parents(cwd)) do
     dirs[#dirs + 1] = parent
-    local git = craft.fs.joinpath(parent, ".git")
-    if craft.fs.metadata(git) then
+    if craft.fs.metadata(craft.fs.joinpath(parent, ".git")) then
       break
     end
   end

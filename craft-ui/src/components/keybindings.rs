@@ -471,7 +471,10 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         action_id: None,
-        label: KeyLabel::MacMulti(&["\\+Enter", "Ctrl+J", "Alt+Enter"], &["⇧↵", "⌃J", "⌥↵"]),
+        label: KeyLabel::MacMulti(
+            &["Shift+Enter", "Ctrl+Enter", "Ctrl+J", "Alt+Enter"],
+            &["⇧↵", "⌃↵", "⌃J", "⌥↵"],
+        ),
         description: "Newline",
         context: KeybindContext::Editing,
         platform: Platform::All,
