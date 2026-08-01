@@ -1351,13 +1351,10 @@ where
         }
     }
 
+    /// A change under an existing id is not expressible as an append, so it
+    /// voids the cursors; a new id is a pure append.
     pub fn set_subagent_messages(&mut self, id: String, msgs: Vec<M>) {
-        let shrank = self
-            .subagent_messages
-            .get(&id)
-            .is_some_and(|old| msgs.len() < old.len());
-        self.subagent_messages.insert(id, Arc::new(msgs));
-        if shrank {
+        if self.subagent_messages.insert(id, Arc::new(msgs)).is_some() {
             self.rewrite();
         } else {
             self.touch();
@@ -1672,6 +1669,27 @@ mod tests {
     }
 
     #[test]
+    fn replacing_subagent_messages_diverges_the_log() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.set_subagent_messages("sub-1".into(), vec![user_message("old")]);
+        let mut log = SessionLog::rewrite(dir, &session).unwrap();
+
+        session.set_subagent_messages("sub-1".into(), vec![user_message("new")]);
+        let err = log.append(&session).unwrap_err();
+        assert!(matches!(err, SessionError::LogDiverged { .. }));
+
+        let mut log = SessionLog::rewrite(dir, &session).unwrap();
+        session.push_message(user_message("after"));
+        log.append(&session).unwrap();
+
+        let loaded = TestSession::load_from(session.id.id(), dir).unwrap();
+        assert_eq!(loaded.subagent_messages()["sub-1"].len(), 1);
+        assert_eq!(loaded.subagent_messages()["sub-1"][0], user_message("new"));
+    }
+
+    #[test]
     fn roundtrip_jsonl_incremental() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
@@ -1689,6 +1707,7 @@ mod tests {
         let mut sub1 = session.subagent_messages().get("sub-1").unwrap().to_vec();
         sub1.push(assistant_message("sub-reply"));
         session.set_subagent_messages("sub-1".into(), sub1);
+        let mut log = SessionLog::rewrite(dir, &session).unwrap();
         session.set_subagent_messages("sub-2".into(), vec![user_message("sub-2-prompt")]);
         log.append(&session).unwrap();
 
