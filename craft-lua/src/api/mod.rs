@@ -5,6 +5,7 @@ pub(crate) mod env;
 pub(crate) mod r#fn;
 pub(crate) mod fs;
 pub(crate) mod hooks;
+pub(crate) mod id;
 pub(crate) mod image;
 pub(crate) mod json;
 pub(crate) mod keymap;
@@ -50,6 +51,7 @@ pub(crate) fn create_craft_global(
     craft.set("api", api)?;
     craft.set("env", env::create_env_table(lua, permissions)?)?;
     craft.set("fs", fs::create_fs_table(lua, permissions)?)?;
+    craft.set("id", id::create_id_table(lua)?)?;
     craft.set("log", log::create_log_table(lua, Arc::clone(&plugin))?)?;
     craft.set("treesitter", treesitter::create_treesitter_table(lua)?)?;
     craft.set("uv", uv::create_uv_table(lua, permissions)?)?;

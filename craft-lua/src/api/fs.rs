@@ -386,6 +386,26 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
 
     let p = perms.clone();
     t.set(
+        "atomic_write",
+        lua.create_async_function(move |_lua, (path, content): (String, String)| {
+            let p = p.clone();
+            async move {
+                if !p.is_allowed(FsWrite) {
+                    return Err(crate::plugin_permissions::denied_error(FsWrite));
+                }
+                let abs = make_absolute(&path)?;
+                let result = tokio::task::spawn_blocking(move || {
+                    craft_storage::atomic_write(&abs, content.as_bytes())
+                })
+                .await
+                .map_err(|e| mlua::Error::runtime(format!("join error: {e}")))?;
+                Ok(pair(result.map(|()| true)))
+            }
+        })?,
+    )?;
+
+    let p = perms.clone();
+    t.set(
         "rm",
         lua.create_async_function(move |_lua, (path, opts): (String, Option<Table>)| {
             let p = p.clone();
@@ -617,6 +637,9 @@ mod tests {
     use super::*;
     use mlua::Lua;
     use tempfile::TempDir;
+
+    const FIRST_CONTENT: &str = "first";
+    const REPLACEMENT_CONTENT: &str = "replacement";
 
     #[tokio::test]
     async fn read_file_ok() {
@@ -906,6 +929,70 @@ mod tests {
             matches!(err, mlua::Value::String(_)),
             "should return error string"
         );
+    }
+
+    #[tokio::test]
+    async fn atomic_write_creates_and_replaces_file() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("state.json");
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let atomic_write: mlua::Function = tbl.get("atomic_write").unwrap();
+
+        for content in [FIRST_CONTENT, REPLACEMENT_CONTENT] {
+            let (ok, err): (mlua::Value, mlua::Value) = atomic_write
+                .call_async((file.to_str().unwrap(), content))
+                .await
+                .unwrap();
+            assert!(matches!(ok, mlua::Value::Boolean(true)), "should succeed");
+            assert!(matches!(err, mlua::Value::Nil), "no error expected");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_write_returns_error_when_parent_is_missing() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("missing/state.json");
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let atomic_write: mlua::Function = tbl.get("atomic_write").unwrap();
+
+        let (ok, err): (mlua::Value, mlua::Value) = atomic_write
+            .call_async((file.to_str().unwrap(), FIRST_CONTENT))
+            .await
+            .unwrap();
+        assert!(matches!(ok, mlua::Value::Nil), "should fail");
+        assert!(
+            matches!(err, mlua::Value::String(_)),
+            "should return error string"
+        );
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    async fn atomic_write_requires_fs_write_permission() {
+        const FS_WRITE_PERMISSION: &str = "fs_write";
+
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("state.json");
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::denied()).unwrap();
+        let atomic_write: mlua::Function = tbl.get("atomic_write").unwrap();
+
+        let error = atomic_write
+            .call_async::<(mlua::Value, mlua::Value)>((file.to_str().unwrap(), FIRST_CONTENT))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains(FS_WRITE_PERMISSION),
+            "error should mention {FS_WRITE_PERMISSION}: {error}"
+        );
+        assert!(!file.exists());
     }
 
     #[tokio::test]
