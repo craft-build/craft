@@ -212,6 +212,18 @@ impl App {
         self.start_run(input, display)
     }
 
+    pub(crate) fn start_mailbox_run(
+        &mut self,
+        preamble: Vec<craft_providers::Message>,
+    ) -> Vec<Action> {
+        let mut input = self.build_agent_input(&QueuedMessage {
+            text: String::new(),
+            images: Vec::new(),
+        });
+        input.preamble = preamble;
+        self.start_run(input, String::new())
+    }
+
     /// The one place a fresh run starts: every path that emits
     /// `Action::SendMessage` must go through here so `run_id` bumps exactly
     /// once per run.
@@ -221,7 +233,9 @@ impl App {
         self.status = Status::Streaming;
         self.lua_event_handle
             .fire_autocmd("TurnStart", serde_json::json!({}));
-        self.main_chat().show_user_message(display);
+        if !display.is_empty() {
+            self.main_chat().show_user_message(display);
+        }
         vec![Action::SendMessage(Box::new(input))]
     }
 }

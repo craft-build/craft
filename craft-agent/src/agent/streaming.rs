@@ -218,6 +218,7 @@ mod tests {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Text { text: "ok".into() }],
                     display_text: None,
+                    ..Default::default()
                 },
                 usage: craft_providers::TokenUsage::default(),
                 stop_reason: Some(StopReason::EndTurn),

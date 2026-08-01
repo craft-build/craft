@@ -169,6 +169,7 @@ async fn run_flow(
             tool_output_lines: ToolOutputLines::default(),
             permissions: Arc::new(PermissionManager::new(load_permissions(&cwd), cwd.clone())),
             session_id: None,
+            mailbox: None,
             timeouts,
             file_tracker: Arc::new(craft_agent::tools::FileReadTracker::new()),
             prompt_slots: Arc::new(plugin_host.event_handle().collect_prompt_slots()),

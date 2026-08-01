@@ -29,7 +29,7 @@ use crate::permissions::PermissionManager;
 use crate::tools::{Deadline, FileReadTracker, ToolContext};
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, EventSender, ExtractedCommand,
-    InterruptSource, TurnCompleteEvent,
+    InterruptSource, SessionMailbox, TurnCompleteEvent,
 };
 use craft_config::ToolOutputLines;
 use craft_storage::id::SessionRef;
@@ -81,6 +81,7 @@ pub struct AgentParams {
     pub tool_output_lines: ToolOutputLines,
     pub permissions: Arc<PermissionManager>,
     pub session_id: Option<SessionRef>,
+    pub mailbox: Option<SessionMailbox>,
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
@@ -141,6 +142,7 @@ pub struct Agent<'h> {
     permissions: Arc<PermissionManager>,
     opts: RequestOptions,
     session_id: Option<SessionRef>,
+    mailbox: Option<SessionMailbox>,
     timeouts: craft_providers::Timeouts,
     file_tracker: Arc<FileReadTracker>,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
@@ -235,6 +237,7 @@ impl<'h> Agent<'h> {
             post_tool_empty_retried: false,
             opts: RequestOptions::default(),
             session_id: params.session_id,
+            mailbox: params.mailbox,
             file_tracker: params.file_tracker,
             prompt_slots: params.prompt_slots,
             subagent_cancels: params.subagent_cancels,
@@ -391,16 +394,26 @@ impl<'h> Agent<'h> {
         }
     }
 
-    pub async fn run(mut self, input: AgentInput) -> Result<(), AgentError> {
+    pub async fn run(mut self, mut input: AgentInput) -> Result<(), AgentError> {
         strip_trailing_grace_prompt(self.history);
         self.doom
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .reset_for_new_user_input();
         self.rollback_len = self.history.len();
-        let msg = Message::user_with_images(input.message.clone(), input.images);
-        self.history.push(msg);
-        self.mode = input.mode;
+        let message = input.message.clone();
+        let images = input.images.clone();
+        let mode = input.mode.clone();
+        let preamble = std::mem::take(&mut input.preamble);
+        let thinking = input.thinking;
+        let fast = input.fast;
+        let workflow_mode = mode.clone();
+        self.push_input_context(preamble);
+        if !message.trim().is_empty() || !images.is_empty() {
+            self.history
+                .push(Message::user_with_images(message.clone(), images));
+        }
+        self.mode = mode;
         // Phase 1: every mode (Build/Plan/Flow) resolves to General, so
         // behavior is byte-identical to the pre-turn-type loop. Phase 2 routes
         // Flow mode through the turn-typed loop and sets narrow turn types.
@@ -442,15 +455,12 @@ impl<'h> Agent<'h> {
         }
         self.goal = input.goal;
         self.goal_criteria = input.goal_criteria.clone();
-        self.opts = RequestOptions {
-            thinking: input.thinking,
-            fast: input.fast,
-        };
+        self.opts = RequestOptions { thinking, fast };
 
         info!(
             model = %self.model.id,
-            mode = ?self.mode,
-            message_len = input.message.len(),
+            mode = ?workflow_mode,
+            message_len = message.len(),
             "agent run started"
         );
 
@@ -470,6 +480,17 @@ impl<'h> Agent<'h> {
         }
 
         result
+    }
+
+    fn push_input_context(&mut self, preamble: Vec<Message>) {
+        for message in preamble {
+            self.history.push(message);
+        }
+        if let Some(mailbox) = &self.mailbox {
+            for message in mailbox.drain() {
+                self.history.push(message);
+            }
+        }
     }
 
     async fn run_loop(&mut self) -> Result<(), AgentError> {
@@ -1696,9 +1717,7 @@ impl<'h> Agent<'h> {
                     text: input.message.clone(),
                     image_count: input.images.len(),
                 })?;
-                for msg in std::mem::take(&mut input.preamble) {
-                    self.history.push(msg);
-                }
+                self.push_input_context(std::mem::take(&mut input.preamble));
                 self.mode = input.mode.clone();
                 let display = input.message.clone();
                 let wrapped = format!(
@@ -1949,6 +1968,7 @@ mod tests {
                 std::path::PathBuf::from("/tmp"),
             )),
             session_id: None,
+            mailbox: None,
             timeouts: craft_providers::Timeouts::default(),
             file_tracker: FileReadTracker::fresh(),
             prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
@@ -1987,6 +2007,74 @@ mod tests {
             mode: AgentMode::Build,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn run_ingests_preamble_then_mailbox_then_user_message() {
+        let id = craft_storage::id::CraftId::generate();
+        let mailbox = SessionMailbox::register(id);
+        SessionMailbox::notify(id, "mailbox".into(), false).unwrap();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
+        params.mailbox = Some(mailbox);
+        let agent = Agent::new(params, run_params);
+        let mut input = default_input();
+        input.preamble = vec![Message::observation("preamble".into())];
+
+        agent.run(input).await.unwrap();
+
+        assert_eq!(history.as_slice()[0].user_text(), Some("preamble"));
+        assert_eq!(history.as_slice()[1].user_text(), Some("mailbox"));
+        assert_eq!(history.as_slice()[2].user_text(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn queued_input_drains_preamble_and_mailbox() {
+        let id = craft_storage::id::CraftId::generate();
+        let mailbox = SessionMailbox::register(id);
+        SessionMailbox::notify(id, "mailbox".into(), false).unwrap();
+        let mut input = default_input();
+        input.preamble = vec![Message::observation("preamble".into())];
+        let source = MockInterruptSource::new(vec![ExtractedCommand::Interrupt(input, 0)]);
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.mailbox = Some(mailbox);
+        let mut agent = Agent::new(params, run_params).with_interrupt_source(source);
+
+        assert!(agent.handle_queued_command().await.unwrap());
+
+        let text = history
+            .as_slice()
+            .iter()
+            .map(Message::user_text)
+            .collect::<Vec<_>>();
+        assert_eq!(text, [Some("preamble"), Some("mailbox"), Some("hello")]);
+        assert!(history.as_slice()[0].is_observation());
+        assert!(history.as_slice()[1].is_observation());
+    }
+
+    #[tokio::test]
+    async fn wake_only_run_does_not_insert_an_empty_user_turn() {
+        let id = craft_storage::id::CraftId::generate();
+        let mailbox = SessionMailbox::register(id);
+        SessionMailbox::notify(id, "failed".into(), true).unwrap();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
+        params.mailbox = Some(mailbox);
+        let agent = Agent::new(params, run_params);
+        let mut input = default_input();
+        input.message.clear();
+
+        agent.run(input).await.unwrap();
+
+        assert_eq!(history.as_slice().len(), 2);
+        assert!(history.as_slice()[0].is_observation());
+        assert!(matches!(history.as_slice()[1].role, Role::Assistant));
     }
 
     fn drain_events(rx: &flume::Receiver<Envelope>) -> Vec<Envelope> {
@@ -2466,6 +2554,7 @@ mod tests {
                 std::path::PathBuf::from("/tmp"),
             )),
             session_id: None,
+            mailbox: None,
             timeouts: craft_providers::Timeouts::default(),
             file_tracker: FileReadTracker::fresh(),
             prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),

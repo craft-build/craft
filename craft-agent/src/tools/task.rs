@@ -345,6 +345,7 @@ impl Task {
                     tool_output_lines: ToolOutputLines::default(),
                     permissions: Arc::clone(&ctx.permissions),
                     session_id: Some(session_id.clone()),
+                    mailbox: None,
                     timeouts: ctx.timeouts,
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::clone(&ctx.prompt_slots),

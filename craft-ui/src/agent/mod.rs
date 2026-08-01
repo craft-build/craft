@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
     AgentConfig, CancelMap, CancelToken, Envelope, HistorySnapshot, McpCommand, McpConfigErrors,
-    McpHandle, McpSnapshotReader, SharedMessages, ToolOutputLines,
+    McpHandle, McpSnapshotReader, SessionMailbox, SharedMessages, ToolOutputLines,
 };
 use craft_lua::EventHandle;
 use craft_storage::id::SessionRef;
@@ -57,6 +57,7 @@ pub(crate) struct AgentHandles {
     pub(crate) flow_progress_rx: flume::Receiver<craft_agent::FlowProgress>,
     pub(crate) repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) goal_ready_flag: Arc<std::sync::atomic::AtomicBool>,
+    mailbox: Option<SessionMailbox>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -120,6 +121,13 @@ impl AgentHandles {
 
     pub(crate) fn send_cancel_all(&self) {
         let _ = self.cmd_tx.try_send(AgentCommand::CancelAll);
+    }
+
+    pub(crate) fn claim_mailbox_wake(&self) -> Vec<Message> {
+        self.mailbox
+            .as_ref()
+            .map(SessionMailbox::claim_wake)
+            .unwrap_or_default()
     }
 
     /// True if the agent task has exited (cleanly or panicked). Used by the
@@ -271,6 +279,9 @@ fn spawn_agent_internal(
 
     let btw_system: Arc<ArcSwap<String>> = Arc::new(ArcSwap::from_pointee(String::new()));
     let repomap_enabled = Arc::new(std::sync::atomic::AtomicBool::new(config.repomap.enabled));
+    let mailbox = session_id
+        .as_ref()
+        .map(|session_id| SessionMailbox::register(session_id.id()));
 
     spawn_command_router(
         cmd_rx,
@@ -295,6 +306,7 @@ fn spawn_agent_internal(
         cancel_map,
         init_cancel,
         session_id,
+        mailbox.clone(),
         timeouts,
         lua_handle,
         Arc::clone(&btw_system),
@@ -332,6 +344,7 @@ fn spawn_agent_internal(
         flow_progress_rx,
         repomap_enabled,
         goal_ready_flag,
+        mailbox,
         task,
     }
 }

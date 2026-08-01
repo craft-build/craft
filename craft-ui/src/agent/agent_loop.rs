@@ -11,8 +11,8 @@ use craft_agent::tools::FileReadTracker;
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History,
-    Instructions, McpCommand, PromptRole, SharedDoomTracker, SharedFindingsStore, SharedMessages,
-    ToolOutputLines, TurnType,
+    Instructions, McpCommand, PromptRole, SessionMailbox, SharedDoomTracker, SharedFindingsStore,
+    SharedMessages, ToolOutputLines, TurnType,
 };
 use craft_lua::EventHandle;
 use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
@@ -45,6 +45,7 @@ pub(super) struct AgentLoop {
     answer_rx: Arc<tokio::sync::Mutex<flume::Receiver<String>>>,
     queue: Arc<QueueReceiver>,
     session_id: Option<SessionRef>,
+    mailbox: Option<SessionMailbox>,
     timeouts: craft_providers::Timeouts,
     lua_handle: EventHandle,
     btw_system: Arc<ArcSwap<String>>,
@@ -79,6 +80,7 @@ impl AgentLoop {
         cancel_map: Arc<RunCancelMap>,
         init_cancel: CancelToken,
         session_id: Option<SessionRef>,
+        mailbox: Option<SessionMailbox>,
         timeouts: craft_providers::Timeouts,
         lua_handle: EventHandle,
         btw_system: Arc<ArcSwap<String>>,
@@ -109,6 +111,7 @@ impl AgentLoop {
             answer_rx: Arc::new(tokio::sync::Mutex::new(answer_rx)),
             queue,
             session_id,
+            mailbox,
             timeouts,
             lua_handle,
             btw_system,
@@ -271,6 +274,7 @@ impl AgentLoop {
                 tool_output_lines: self.tool_output_lines,
                 permissions: Arc::clone(&self.permissions),
                 session_id: self.session_id.clone(),
+                mailbox: self.mailbox.clone(),
                 timeouts: self.timeouts,
                 file_tracker: Arc::clone(&self.file_tracker),
                 prompt_slots: std::sync::Arc::new(prompt_slots),
@@ -420,6 +424,7 @@ impl AgentLoop {
                     tool_output_lines: self.tool_output_lines,
                     permissions: Arc::clone(&self.permissions),
                     session_id: self.session_id.clone(),
+                    mailbox: self.mailbox.clone(),
                     timeouts: self.timeouts,
                     file_tracker: Arc::clone(&self.file_tracker),
                     prompt_slots: std::sync::Arc::new(prompt_slots),

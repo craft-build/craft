@@ -1480,6 +1480,7 @@ mod tests {
                     text: "done".into(),
                 }],
                 display_text: None,
+                ..Default::default()
             },
         ];
         let mut session: Session<Message, TokenUsage, ToolOutput> =

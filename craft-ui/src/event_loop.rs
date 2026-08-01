@@ -146,6 +146,22 @@ impl SessionStatus {
     }
 }
 
+fn claim_idle_wake(
+    status: SessionStatus,
+    claim: impl FnOnce() -> Vec<Message>,
+) -> Option<Vec<Message>> {
+    if status != SessionStatus::Idle {
+        return None;
+    }
+    let preamble = claim();
+    (!preamble.is_empty()).then_some(preamble)
+}
+
+fn prepend_preamble(preamble: &mut Vec<Message>, mut leading: Vec<Message>) {
+    leading.append(preamble);
+    *preamble = leading;
+}
+
 fn parse_session_id(id: &str) -> Result<CraftId, String> {
     id.parse().map_err(|e: CraftIdParseError| e.to_string())
 }
@@ -781,6 +797,7 @@ impl<'t> EventLoop<'t> {
 
         self.emit_focus_change();
         self.emit_status_changes();
+        self.start_mailbox_runs();
         Ok(())
     }
 
@@ -866,6 +883,25 @@ impl<'t> EventLoop<'t> {
                     "focused": i == self.focused,
                 }),
             );
+        }
+    }
+
+    fn start_mailbox_runs(&mut self) {
+        let ready: Vec<_> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, runtime)| {
+                claim_idle_wake(SessionStatus::of(&runtime.app), || {
+                    runtime.handles.claim_mailbox_wake()
+                })
+                .map(|preamble| (index, preamble))
+            })
+            .collect();
+
+        for (index, preamble) in ready {
+            let actions = self.sessions[index].app.start_mailbox_run(preamble);
+            self.dispatch(index, actions);
         }
     }
 
@@ -1173,7 +1209,7 @@ impl<'t> EventLoop<'t> {
             Action::SendMessage(input) => {
                 let rt = &mut self.sessions[idx];
                 let mut input = *input;
-                input.preamble = rt.app.shell.drain_results();
+                prepend_preamble(&mut input.preamble, rt.app.shell.drain_results());
                 let run_id = rt.app.run_id;
                 rt.handles.queue.push(QueueItem::Message {
                     text: input.message.clone(),
@@ -1542,4 +1578,52 @@ fn reserve_tokens_for(config: &AgentConfig, model: &Model) -> u32 {
         return reserve;
     }
     config.resolve_compaction_buffer(model.context_window)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    const OBSERVATION: &str = "failed";
+
+    #[test]
+    fn idle_wake_claims_a_non_empty_preamble() {
+        let preamble = claim_idle_wake(SessionStatus::Idle, || {
+            vec![Message::observation(OBSERVATION.into())]
+        })
+        .unwrap();
+
+        assert_eq!(preamble.len(), 1);
+        assert_eq!(preamble[0].user_text(), Some(OBSERVATION));
+    }
+
+    #[test]
+    fn idle_without_messages_and_non_idle_sessions_do_not_start() {
+        assert!(claim_idle_wake(SessionStatus::Idle, Vec::new).is_none());
+
+        for status in [SessionStatus::Working, SessionStatus::NeedsInput] {
+            let called = Cell::new(false);
+            let preamble = claim_idle_wake(status, || {
+                called.set(true);
+                vec![Message::observation(OBSERVATION.into())]
+            });
+
+            assert!(preamble.is_none());
+            assert!(!called.get());
+        }
+    }
+
+    #[test]
+    fn wake_arriving_while_working_runs_when_idle() {
+        let id = craft_storage::id::CraftId::generate();
+        let mailbox = craft_agent::SessionMailbox::register(id);
+        craft_agent::SessionMailbox::notify(id, OBSERVATION.into(), true).unwrap();
+
+        assert!(claim_idle_wake(SessionStatus::Working, || mailbox.claim_wake()).is_none());
+        let preamble = claim_idle_wake(SessionStatus::Idle, || mailbox.claim_wake()).unwrap();
+        assert_eq!(preamble.len(), 1);
+        assert!(preamble[0].is_observation());
+    }
 }

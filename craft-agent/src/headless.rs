@@ -212,6 +212,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                         working_dir_path,
                     )),
                     session_id: Some(session_ref_clone.clone()),
+                    mailbox: None,
                     timeouts: params.timeouts,
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::new(params.prompt_slots),
@@ -493,6 +494,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         tool_output_lines: ToolOutputLines::default(),
                         permissions: Arc::clone(&permissions),
                         session_id: Some(session_ref_clone.clone()),
+                        mailbox: None,
                         timeouts: params.timeouts,
                         file_tracker: Arc::clone(&file_tracker),
                         prompt_slots: Arc::clone(&params.prompt_slots),
@@ -630,6 +632,23 @@ mod tests {
         let loaded = load(&tmp);
         assert_eq!(loaded.messages().len(), 1);
         assert_eq!(loaded.title, generate_title(&messages));
+    }
+
+    #[test]
+    fn record_turn_persists_observations() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = store_in(&tmp);
+        store.record_turn(
+            &[
+                Message::user("fix the login bug".into()),
+                Message::observation("build failed".into()),
+            ],
+            MODEL_SPEC.into(),
+        );
+
+        let loaded = load(&tmp);
+        assert_eq!(loaded.messages().len(), 2);
+        assert!(loaded.messages()[1].is_observation());
     }
 
     #[test]

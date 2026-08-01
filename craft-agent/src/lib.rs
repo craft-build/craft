@@ -6,6 +6,7 @@ pub mod cancel;
 pub mod child_guard;
 pub use child_guard::ChildGuard;
 pub mod headless;
+pub mod mailbox;
 pub mod mcp;
 pub use mcp::config::{McpConfigError, McpConfigErrors, McpServerInfo, McpServerStatus};
 pub use mcp::protocol::PromptRole;
@@ -25,6 +26,7 @@ pub use agent::{
 pub use agent::{ApprovalPayload, FLOW_APPROVE_ANSWER, FLOW_CANCEL_ANSWER, FlowProgress};
 pub use cancel::{CancelMap, CancelSlot, CancelToken, CancelTrigger};
 pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
+pub use mailbox::{MailboxError, SessionMailbox};
 pub mod checks;
 pub mod command;
 pub mod compression;

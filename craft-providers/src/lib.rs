@@ -22,6 +22,6 @@ pub use providers::opencode::{
 };
 pub use types::{
     ContentBlock, Effort, EffortDialect, IMAGE_OMITTED_NOTE, ImageMediaType, ImageSource, Message,
-    ProviderEvent, ProviderUsage, RequestOptions, Role, StopReason, StreamResponse, ThinkingConfig,
-    UsageLimit, adapt_images_for_model, dialect,
+    MessageKind, ProviderEvent, ProviderUsage, RequestOptions, Role, StopReason, StreamResponse,
+    ThinkingConfig, UsageLimit, adapt_images_for_model, dialect,
 };

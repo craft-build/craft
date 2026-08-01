@@ -1,12 +1,17 @@
-//! `craft.session`: host session primitives. Every call round-trips to the UI
-//! event loop, which owns the live session runtimes and the session store;
-//! the loop answers `list` from a background task so slow scans never block.
+//! `craft.session`: host session primitives. Session management round-trips to
+//! the UI event loop, which owns live runtimes and storage. `notify` posts
+//! directly to the agent mailbox so synchronous callbacks can use it.
 
+use craft_agent::SessionMailbox;
+use craft_storage::id::CraftId;
 use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::api::util::command::{SessionRequest, UiAction, ui_roundtrip};
 use crate::api::util::convert::json_to_lua;
-use crate::api::util::pair::{Pair, try_pair};
+use crate::api::util::pair::{Pair, err_pair, try_pair};
+
+const BLANK_NOTIFY_ERR: &str = "text must not be blank";
+const SESSION_REQUIRED_ERR: &str = "session is required";
 
 async fn roundtrip(
     lua: Lua,
@@ -115,6 +120,30 @@ pub(crate) fn create_session_table(
     )?;
 
     t.set(
+        "notify",
+        lua.create_function(move |_, (text, opts): (String, Option<Table>)| {
+            if text.trim().is_empty() {
+                return Ok(err_pair::<bool>(BLANK_NOTIFY_ERR));
+            }
+            let Some(opts) = opts else {
+                return Ok(err_pair::<bool>(SESSION_REQUIRED_ERR));
+            };
+            let Some(raw_id): Option<String> = opts.get("session")? else {
+                return Ok(err_pair::<bool>(SESSION_REQUIRED_ERR));
+            };
+            let session_id: CraftId = match raw_id.parse() {
+                Ok(id) => id,
+                Err(error) => return Ok(err_pair::<bool>(error)),
+            };
+            let wake: bool = opts.get("wake").unwrap_or(false);
+            match SessionMailbox::notify(session_id, text, wake) {
+                Ok(()) => Ok((Some(true), None)),
+                Err(error) => Ok(err_pair::<bool>(error)),
+            }
+        })?,
+    )?;
+
+    t.set(
         "set_title",
         lua.create_async_function({
             let tx = tx.clone();
@@ -217,6 +246,85 @@ mod tests {
         checker.join().unwrap();
         assert_eq!(err, None);
         assert_eq!(val, "queued");
+    }
+
+    #[tokio::test]
+    async fn notify_is_synchronous_and_queues_an_observation() {
+        let id = CraftId::generate();
+        let mailbox = SessionMailbox::register(id);
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = lua_with_session(Some(tx));
+        lua.globals().set("session_id", id.to_string()).unwrap();
+
+        let (value, error): (bool, Option<String>) = lua
+            .load("return session.notify('built', { session = session_id })")
+            .eval_async()
+            .await
+            .unwrap();
+
+        assert!(value);
+        assert_eq!(error, None);
+        let messages = mailbox.drain();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_observation());
+        assert_eq!(messages[0].user_text(), Some("built"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn waking_notify_sets_the_mailbox_wake_flag() {
+        let id = CraftId::generate();
+        let mailbox = SessionMailbox::register(id);
+        let lua = lua_with_session(None);
+        lua.globals().set("session_id", id.to_string()).unwrap();
+
+        let (value, error): (bool, Option<String>) = lua
+            .load("return session.notify('failed', { session = session_id, wake = true })")
+            .eval_async()
+            .await
+            .unwrap();
+
+        assert!(value);
+        assert_eq!(error, None);
+        assert_eq!(mailbox.claim_wake().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn notify_rejects_missing_and_non_live_sessions() {
+        let lua = lua_with_session(None);
+        let (_, missing): (Value, Option<String>) = lua
+            .load("return session.notify('built')")
+            .eval_async()
+            .await
+            .unwrap();
+        assert_eq!(missing.as_deref(), Some(SESSION_REQUIRED_ERR));
+
+        let id = CraftId::generate();
+        lua.globals().set("session_id", id.to_string()).unwrap();
+        let (_, not_live): (Value, Option<String>) = lua
+            .load("return session.notify('built', { session = session_id })")
+            .eval_async()
+            .await
+            .unwrap();
+        assert_eq!(not_live, Some(format!("session not live: {id}")));
+    }
+
+    #[tokio::test]
+    async fn notify_rejects_blank_text_and_invalid_session_ids() {
+        let lua = lua_with_session(None);
+        let (_, blank): (Value, Option<String>) = lua
+            .load("return session.notify(' ', { session = 'invalid' })")
+            .eval_async()
+            .await
+            .unwrap();
+        assert_eq!(blank.as_deref(), Some(BLANK_NOTIFY_ERR));
+
+        let (_, invalid): (Value, Option<String>) = lua
+            .load("return session.notify('built', { session = 'invalid' })")
+            .eval_async()
+            .await
+            .unwrap();
+        assert!(invalid.is_some_and(|error| error.contains("invalid base58")));
     }
 
     #[tokio::test]

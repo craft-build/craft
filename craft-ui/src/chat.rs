@@ -461,6 +461,9 @@ pub fn history_to_display(
     let mut display = Vec::new();
     let mut restore_items: Vec<craft_lua::RestoreItem> = Vec::new();
     for msg in messages {
+        if msg.is_observation() {
+            continue;
+        }
         match msg.role {
             Role::User => {
                 if let Some(text) = msg.user_text() {
@@ -626,7 +629,7 @@ fn build_loaded_tool(
 fn build_tool_results_map(messages: &[Message]) -> HashMap<&str, (bool, &str)> {
     let mut map = HashMap::new();
     for msg in messages {
-        if !matches!(msg.role, Role::User) {
+        if !matches!(msg.role, Role::User) || msg.is_observation() {
             continue;
         }
         for block in &msg.content {
@@ -1017,6 +1020,24 @@ mod tests {
         let display = history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default()).0;
         assert!(display[0].tool_output.is_none());
         assert!(display[0].text.contains("fn main"));
+    }
+
+    #[test]
+    fn history_hides_observations_but_keeps_the_reply() {
+        let msgs = vec![
+            Message::observation("build failed".into()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "I will fix it".into(),
+                }],
+                ..Default::default()
+            },
+        ];
+        let display = history_to_display(&msgs, &empty_outputs(), &ToolOutputLines::default()).0;
+        assert_eq!(display.len(), 1);
+        assert_eq!(display[0].role, DisplayRole::Assistant);
+        assert_eq!(display[0].text, "I will fix it");
     }
 
     #[test]
