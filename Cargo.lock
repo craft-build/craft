@@ -2002,7 +2002,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tracing",
  "uuid",
- "windows-sys 0.61.2",
  "yaml_serde",
 ]
 

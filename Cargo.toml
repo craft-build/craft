@@ -116,7 +116,6 @@ filetime = "0.2"
 test-case = "3"
 ignore = "0.4"
 memchr = "2"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 strum = { version = "0.28", features = ["derive"] }
 htmd = "0.5"
 tempfile = "3"
