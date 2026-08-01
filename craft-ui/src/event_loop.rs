@@ -295,6 +295,7 @@ pub(crate) struct EventLoop<'t> {
     terminal: &'t mut ratatui::DefaultTerminal,
     sessions: Vec<SessionRuntime>,
     focused: usize,
+    last_focused: Option<CraftId>,
     ctx: SpawnCx,
     input: InputReader,
     /// One consumer task for the shared embed channel; embeds are stateless
@@ -583,6 +584,7 @@ impl<'t> EventLoop<'t> {
             terminal,
             sessions: runtimes,
             focused,
+            last_focused: None,
             ctx,
             input: InputReader::spawn(),
             _embed_rx: embed_rx_owned,
@@ -777,6 +779,7 @@ impl<'t> EventLoop<'t> {
         }
         drop(slot_model);
 
+        self.emit_focus_change();
         self.emit_status_changes();
         Ok(())
     }
@@ -829,6 +832,21 @@ impl<'t> EventLoop<'t> {
                 -1
             }
         }
+    }
+
+    fn emit_focus_change(&mut self) {
+        let id = self.sessions[self.focused].id();
+        if self.last_focused == Some(id) {
+            return;
+        }
+        let mut data = json!({ "session_id": id });
+        if let Some(previous) = self.last_focused {
+            data["previous_session_id"] = json!(previous);
+        }
+        self.last_focused = Some(id);
+        self.ctx
+            .lua_event_handle
+            .fire_autocmd("SessionFocusChanged", data);
     }
 
     fn emit_status_changes(&mut self) {
