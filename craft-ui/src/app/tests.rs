@@ -2200,11 +2200,7 @@ fn build_rewind_app() -> App {
                 ContentBlock::Text {
                     text: "response 1".into(),
                 },
-                ContentBlock::ToolUse {
-                    id: "tool-1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({}),
-                },
+                ContentBlock::tool_use("tool-1", "bash", serde_json::json!({})),
             ],
             ..Default::default()
         },

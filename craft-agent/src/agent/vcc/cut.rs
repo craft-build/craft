@@ -138,11 +138,7 @@ mod tests {
     fn assistant_tool(id: &str) -> Message {
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: id.into(),
-                name: "bash".into(),
-                input: serde_json::json!({}),
-            }],
+            content: vec![ContentBlock::tool_use(id, "bash", serde_json::json!({}))],
             ..Default::default()
         }
     }

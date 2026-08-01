@@ -314,7 +314,9 @@ fn replay_assistant(msg: &Message, updates: &mut Vec<SessionUpdate>) {
         match block {
             MsgBlock::Text { text } => updates.push(text_delta(text)),
             MsgBlock::Thinking { thinking, .. } => updates.push(thinking_delta(thinking)),
-            MsgBlock::ToolUse { id, name, input } => {
+            MsgBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 updates.push(replay_tool_call(id, name, input));
             }
             _ => {}
@@ -492,11 +494,7 @@ mod tests {
                 MsgBlock::Text {
                     text: "let me check".into(),
                 },
-                MsgBlock::ToolUse {
-                    id: "tu-1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "ls"}),
-                },
+                MsgBlock::tool_use("tu-1", "bash", serde_json::json!({"command": "ls"})),
             ]),
             Message {
                 role: MsgRole::User,
@@ -585,6 +583,7 @@ mod tests {
                     "old_string": "fn old() {}",
                     "new_string": "fn new() {}"
                 }),
+                thought_signature: None,
             }]),
             Message {
                 role: MsgRole::User,
@@ -620,6 +619,7 @@ mod tests {
                         {"old_string": "c", "new_string": "d"}
                     ]
                 }),
+                thought_signature: None,
             }]),
             Message {
                 role: MsgRole::User,
@@ -643,11 +643,11 @@ mod tests {
     #[test]
     fn replay_non_edit_tool_still_uses_text() {
         let messages = vec![
-            assistant(vec![MsgBlock::ToolUse {
-                id: "tu-bash".into(),
-                name: "bash".into(),
-                input: serde_json::json!({"command": "echo hi"}),
-            }]),
+            assistant(vec![MsgBlock::tool_use(
+                "tu-bash",
+                "bash",
+                serde_json::json!({"command": "echo hi"}),
+            )]),
             Message {
                 role: MsgRole::User,
                 content: vec![MsgBlock::ToolResult {

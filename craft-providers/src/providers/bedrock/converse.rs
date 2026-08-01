@@ -53,7 +53,9 @@ pub(crate) fn to_aws_messages(messages: &[Message]) -> Result<Vec<AwsMessage>, A
 fn to_aws_block(block: &CraftBlock) -> Result<ContentBlock, AgentError> {
     Ok(match block {
         CraftBlock::Text { text } => ContentBlock::Text(text.clone()),
-        CraftBlock::ToolUse { id, name, input } => ContentBlock::ToolUse(
+        CraftBlock::ToolUse {
+            id, name, input, ..
+        } => ContentBlock::ToolUse(
             ToolUseBlock::builder()
                 .tool_use_id(id)
                 .name(name)
@@ -266,11 +268,7 @@ mod tests {
         let input = json!({"command": "ls"});
         let msgs = vec![Message {
             role: Role::Assistant,
-            content: vec![CraftBlock::ToolUse {
-                id: "tu_1".into(),
-                name: "bash".into(),
-                input: input.clone(),
-            }],
+            content: vec![CraftBlock::tool_use("tu_1", "bash", input.clone())],
             ..Default::default()
         }];
         let aws = to_aws_messages(&msgs).unwrap();

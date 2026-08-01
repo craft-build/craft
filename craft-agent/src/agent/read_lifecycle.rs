@@ -368,11 +368,11 @@ mod tests {
     fn tool_use_msg(id: &str, name: &str, input: serde_json::Value) -> Message {
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: id.to_owned(),
-                name: name.to_owned(),
+            content: vec![ContentBlock::tool_use(
+                id.to_owned(),
+                name.to_owned(),
                 input,
-            }],
+            )],
             ..Default::default()
         }
     }

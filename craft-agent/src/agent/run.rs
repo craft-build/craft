@@ -2121,11 +2121,11 @@ mod tests {
         StreamResponse {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: tool_id.into(),
-                    name: tool_name.into(),
-                    input: serde_json::json!({"pattern": "*.nonexistent_test_xyz", "path": "/tmp"}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    tool_id,
+                    tool_name,
+                    serde_json::json!({"pattern": "*.nonexistent_test_xyz", "path": "/tmp"}),
+                )],
                 ..Default::default()
             },
             usage: TokenUsage::default(),
@@ -2372,11 +2372,11 @@ mod tests {
             msgs.push(Message::user(format!("do task {i}")));
             msgs.push(Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: format!("t{i}"),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": format!("echo step{i}")}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    format!("t{i}"),
+                    "bash",
+                    serde_json::json!({"command": format!("echo step{i}")}),
+                )],
                 ..Default::default()
             });
             msgs.push(Message {
@@ -2517,6 +2517,7 @@ mod tests {
                             "target": target,
                             "rationale": rationale,
                         }),
+                        thought_signature: None,
                     },
                 ],
                 ..Default::default()
@@ -2756,6 +2757,7 @@ mod tests {
                                 "target": "plan",
                                 "rationale": "goal ready",
                             }),
+                            thought_signature: None,
                         },
                     ],
                     ..Default::default()
@@ -2830,6 +2832,7 @@ mod tests {
                                 "target": "plan",
                                 "rationale": "goal ready",
                             }),
+                            thought_signature: None,
                         },
                     ],
                     ..Default::default()
@@ -2966,6 +2969,7 @@ mod tests {
                                 "target": "tpm",
                                 "rationale": "shape the goal",
                             }),
+                            thought_signature: None,
                         },
                     ],
                     ..Default::default()

@@ -116,6 +116,7 @@ pub(crate) async fn process_event(
                     id,
                     name,
                     input: Value::Null,
+                    thought_signature: None,
                 };
                 return Ok(());
             }
@@ -456,7 +457,9 @@ mod tests {
         let (resp, emitted) = drive_with_events_collected(events).await;
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
         match &resp.message.content[0] {
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "tu_1");
                 assert_eq!(name, "bash");
                 assert_eq!(input["cmd"], "ls");

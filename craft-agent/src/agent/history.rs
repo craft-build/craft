@@ -286,11 +286,7 @@ mod tests {
             role: Role::Assistant,
             content: ids
                 .iter()
-                .map(|id| ContentBlock::ToolUse {
-                    id: id.to_string(),
-                    name: "read".into(),
-                    input: serde_json::json!({}),
-                })
+                .map(|id| ContentBlock::tool_use(*id, "read", serde_json::json!({})))
                 .collect(),
             ..Default::default()
         }
@@ -394,16 +390,8 @@ mod tests {
                     ContentBlock::Text {
                         text: "let me check".into(),
                     },
-                    ContentBlock::ToolUse {
-                        id: "t1".into(),
-                        name: "read".into(),
-                        input: serde_json::json!({"path": "/tmp"}),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t2".into(),
-                        name: "glob".into(),
-                        input: serde_json::json!({"pattern": "*.rs"}),
-                    },
+                    ContentBlock::tool_use("t1", "read", serde_json::json!({"path": "/tmp"})),
+                    ContentBlock::tool_use("t2", "glob", serde_json::json!({"pattern": "*.rs"})),
                 ],
                 ..Default::default()
             },

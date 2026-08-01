@@ -752,11 +752,7 @@ mod tests {
     fn tool_use(id: &str) -> Message {
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: id.into(),
-                name: "bash".into(),
-                input: serde_json::json!({}),
-            }],
+            content: vec![ContentBlock::tool_use(id, "bash", serde_json::json!({}))],
             ..Default::default()
         }
     }
@@ -1083,11 +1079,11 @@ mod tests {
             Message::user("do it".into()),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "cat huge_file"}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": "cat huge_file"}),
+                )],
                 ..Default::default()
             },
             Message {
@@ -1138,11 +1134,11 @@ mod tests {
             Message::user("do it".into()),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "cat file"}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": "cat file"}),
+                )],
                 ..Default::default()
             },
             Message {
@@ -1189,11 +1185,11 @@ mod tests {
             Message::user("do it".into()),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "build"}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": "build"}),
+                )],
                 ..Default::default()
             },
             Message {
@@ -1385,11 +1381,7 @@ mod tests {
         let mut messages = vec![
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({}),
-                }],
+                content: vec![ContentBlock::tool_use("t1", "bash", serde_json::json!({}))],
                 ..Default::default()
             },
             Message {
@@ -1417,11 +1409,7 @@ mod tests {
         let mut messages = vec![
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({}),
-                }],
+                content: vec![ContentBlock::tool_use("t1", "bash", serde_json::json!({}))],
                 ..Default::default()
             },
             Message::user("no tool result".into()),
@@ -1476,11 +1464,7 @@ mod tests {
             },
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({}),
-                }],
+                content: vec![ContentBlock::tool_use("t1", "bash", serde_json::json!({}))],
                 ..Default::default()
             },
             Message {
@@ -1643,11 +1627,11 @@ mod tests {
             Message::user("do it".into()),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "cat huge"}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": "cat huge"}),
+                )],
                 ..Default::default()
             },
             Message {
@@ -1685,11 +1669,11 @@ mod tests {
             msgs.push(Message::user(format!("do task {i}")));
             msgs.push(Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: format!("t{i}"),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": format!("echo step{i}")}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    format!("t{i}"),
+                    "bash",
+                    serde_json::json!({"command": format!("echo step{i}")}),
+                )],
                 ..Default::default()
             });
             msgs.push(Message {

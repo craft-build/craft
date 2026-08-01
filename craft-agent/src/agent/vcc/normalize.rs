@@ -250,11 +250,11 @@ mod tests {
             Message::user("run it".into()),
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "git commit -m 'fix'"}),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    "t1",
+                    "bash",
+                    serde_json::json!({"command": "git commit -m 'fix'"}),
+                )],
                 ..Default::default()
             },
             Message {
