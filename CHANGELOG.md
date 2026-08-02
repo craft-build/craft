@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-08-02
+
+### Added
+
+- **providers**: add opencode-go provider and rename Opencode to Opencode Zen (`cb9f61c0`)
+- **task**: optional `model` input pins an exact model for a subagent, overriding `model_tier`/`model_role` (`33623329`)
+- **agent**: bounded session mailbox (`39a63905`)
+- **ui**: emit session focus changes (`8167e23a`)
+- **lua**: durable plugin primitives (`d387d94b`)
+- **lua**: Containerfile, HCL, JSON, and Make language support (`7a115d33`)
+
+### Changed
+
+- **lua**: remove unsafe from `ScopedFuture`, job control, and treesitter nodes (`afdb4b26`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`clap` 4.6.5, `clap_builder` 4.6.5, `ipnet` 2.12.1)
+
+### Fixed
+
+- **providers/google**: coalesce streaming deltas and give tool calls unique ids (`ddb2ab16`)
+- **providers/google**: preserve `thought_signature` and Struct-shape tool results (`d8ee507c`)
+- **storage**: preserve replaced subagent histories (`a88a53b7`)
+- **storage,lua**: address atomic write review feedback (`86a84d69`)
+- **storage**: make atomic replacement portable (`1abc8e8e`)
+- **providers**: don't send `max_output_tokens` if disabled by the provider (`3159cc40`)
+- **ui**: correct the Newline keybind label and stop the skill walk at the cwd `.git` (`770719ad`)
+- **ui**: stop `Gi=31;OK` leaking into the input bar on `/new` (`2dbf8501`)
+- **ui**: show last-turn usage on task rows instead of a sum over turns (`3a8682e4`)
+
 ## [0.11.2] - 2026-07-31
 
 ### Added
@@ -1499,7 +1527,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/craft-build/craft/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/craft-build/craft/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/craft-build/craft/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/craft-build/craft/compare/v0.10.2...v0.11.0
