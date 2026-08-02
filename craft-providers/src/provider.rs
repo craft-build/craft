@@ -64,7 +64,7 @@ impl ProviderKind {
             Self::OpenRouter => "OpenRouter",
             Self::Synthetic => "Synthetic",
             Self::TensorX => "TensorX",
-            Self::Opencode => "Opencode",
+            Self::Opencode => "Opencode Zen",
             Self::Bedrock => "Bedrock",
         }
     }
@@ -320,6 +320,9 @@ pub async fn provider_for_slug(
 ) -> Result<Box<dyn Provider>, AgentError> {
     if let Ok(kind) = ProviderKind::from_str(slug) {
         return kind.create(timeouts).await;
+    }
+    if crate::providers::opencode::is_catalog_family_slug(slug) {
+        return crate::providers::opencode::create_for_slug(slug, timeouts);
     }
     if dynamic::display_name(slug).is_some() {
         dynamic::create(slug, timeouts).await

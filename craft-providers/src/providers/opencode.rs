@@ -20,6 +20,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
+use crate::manifest::ManifestRegistry;
 use crate::model::{Model, ModelInfo, ModelPricing};
 use crate::provider::Provider;
 use crate::providers::anthropic::shared;
@@ -29,6 +30,12 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, 
 use super::{ResolvedAuth, http_client};
 
 const BLOCKED_PROVIDER_IN_CATALOG: &[&str] = &["zai", "zai-coding-plan", "github-copilot"];
+
+/// Catalog-backed opencode-family slugs. These are built-in manifests without a
+/// `ProviderKind`, surfaced through the models.dev catalog, so they must be
+/// exempt from the "skip slugs owned by a builtin provider" filter in
+/// `CatalogData::from_index`.
+pub(crate) const OPENCODE_FAMILY_SLUGS: &[&str] = &["opencode", "opencode-go"];
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const CATALOG_CACHE_FILE: &str = "models-dev-catalog.json";
@@ -157,7 +164,7 @@ impl ProviderData {
     pub fn build_auth(&self, state_dir: &StateDir) -> Authentication {
         let api_key = match self.resolve_api_key(state_dir) {
             Some(key) => key,
-            None if self.slug == "opencode" => {
+            None if OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str()) => {
                 return Authentication::OpenCodeFreeKey(ResolvedAuth {
                     base_url: self.base_url.clone(),
                     headers: self.auth_headers("public"),
@@ -183,7 +190,7 @@ impl ProviderData {
         override_auth: Option<&Arc<Mutex<ResolvedAuth>>>,
         state_dir: &StateDir,
     ) -> Option<ResolvedAuth> {
-        if self.slug == "opencode"
+        if OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str())
             && let Some(auth) = override_auth
         {
             return Some(auth.lock().unwrap().clone());
@@ -288,7 +295,9 @@ impl CatalogData {
                 continue;
             };
 
-            if builtin_provider(&provider_id).is_some() {
+            if builtin_provider(&provider_id).is_some()
+                && !OPENCODE_FAMILY_SLUGS.contains(&provider_id.as_str())
+            {
                 debug!(
                     provider = &provider_id,
                     "skipping providers supported by built-in providers"
@@ -395,6 +404,22 @@ impl CatalogData {
         models
     }
 
+    /// Models surfaced for a given opencode-family slug. The bare `opencode`
+    /// slug is the meta-provider that addresses every catalog sub-provider, so
+    /// it lists everything; any other family slug (e.g. `opencode-go`) lists
+    /// only its own catalog entry.
+    fn models_for_slug(&self, slug: &str) -> Vec<ModelInfo> {
+        if slug == "opencode" {
+            return self.all_models();
+        }
+        let Some(data) = self.providers.get(slug) else {
+            return Vec::new();
+        };
+        let mut models = data.available_models(&self.state_dir, self.enable_free_models);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+
     fn all_providers(&self) -> Vec<ProviderData> {
         let mut providers: Vec<ProviderData> = self.providers.values().cloned().collect();
         providers.sort_by_key(|p| p.display_name.to_lowercase());
@@ -412,6 +437,7 @@ static CATALOG_CHAT_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
 };
 
 pub struct Opencode {
+    slug: &'static str,
     client: Client,
     chat_compat: OpenAiCompatProvider,
     auth: Option<Arc<Mutex<ResolvedAuth>>>,
@@ -427,10 +453,12 @@ fn init_catalog_if_needed() -> &'static Mutex<CatalogData> {
 
 impl Opencode {
     fn new_impl(
+        slug: &'static str,
         timeouts: super::Timeouts,
         auth: Option<Arc<Mutex<ResolvedAuth>>>,
     ) -> Result<Self, AgentError> {
         Ok(Self {
+            slug,
             client: http_client(timeouts)?,
             chat_compat: OpenAiCompatProvider::new(&CATALOG_CHAT_CONFIG, timeouts)?,
             auth,
@@ -440,14 +468,14 @@ impl Opencode {
     }
 
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        Self::new_impl(timeouts, None)
+        Self::new_impl("opencode", timeouts, None)
     }
 
     pub(crate) fn with_auth(
         auth: Arc<Mutex<ResolvedAuth>>,
         timeouts: super::Timeouts,
     ) -> Result<Self, AgentError> {
-        Self::new_impl(timeouts, Some(auth))
+        Self::new_impl("opencode", timeouts, Some(auth))
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -483,7 +511,10 @@ impl Opencode {
 
     async fn do_list_models(&self) -> Result<Vec<ModelInfo>, AgentError> {
         self.ensure_catalog_populated().await.ok();
-        Ok(init_catalog_if_needed().lock().unwrap().all_models())
+        Ok(init_catalog_if_needed()
+            .lock()
+            .unwrap()
+            .models_for_slug(self.slug))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -594,7 +625,7 @@ impl Provider for Opencode {
 
         self.ensure_catalog_populated().await.ok();
         let model_id = &model_for_stream.id;
-        let (sub_provider, actual_id) = model_id.split_once('/').unwrap_or(("opencode", model_id));
+        let (sub_provider, actual_id) = model_id.split_once('/').unwrap_or((self.slug, model_id));
 
         let (meta, api_format, auth) = self.lookup(sub_provider, actual_id).await?;
 
@@ -670,6 +701,29 @@ pub fn catalog_providers_if_available() -> Option<Vec<ProviderData>> {
 pub fn catalog_provider(provider_id: &str) -> Option<ProviderData> {
     let guard = init_catalog_if_needed().lock().ok()?;
     guard.providers.get(provider_id).cloned()
+}
+
+/// True for opencode-family slugs that resolve to the catalog-backed `Opencode`
+/// provider but have no `ProviderKind`. `opencode` itself keeps routing through
+/// `ProviderKind::Opencode`; this covers catalog-backed manifests like
+/// `opencode-go`.
+pub fn is_catalog_family_slug(slug: &str) -> bool {
+    slug != "opencode"
+        && OPENCODE_FAMILY_SLUGS.contains(&slug)
+        && ManifestRegistry::get(slug).is_some()
+}
+
+/// Construct the catalog-backed `Opencode` provider for an opencode-family
+/// slug. `opencode` itself still routes through `ProviderKind::Opencode`; this
+/// covers the remaining catalog-backed manifests (e.g. `opencode-go`).
+pub fn create_for_slug(
+    slug: &str,
+    timeouts: super::Timeouts,
+) -> Result<Box<dyn Provider>, AgentError> {
+    let manifest = ManifestRegistry::get(slug).ok_or_else(|| AgentError::Config {
+        message: format!("unknown opencode-family slug '{slug}'"),
+    })?;
+    Opencode::new_impl(manifest.slug, timeouts, None).map(|p| Box::new(p) as Box<dyn Provider>)
 }
 
 // --- Catalog helpers ---
@@ -1676,5 +1730,103 @@ mod tests {
         );
         assert_eq!(result[0].id, "opencode/free-model");
         assert_eq!(result[0].pricing.as_ref().unwrap().input, 0.0);
+    }
+
+    #[test]
+    fn is_catalog_family_slug_recognizes_opencode_go_only() {
+        assert!(!is_catalog_family_slug("opencode"));
+        assert!(is_catalog_family_slug("opencode-go"));
+        assert!(!is_catalog_family_slug("anthropic"));
+        assert!(!is_catalog_family_slug("opencode-zoom"));
+    }
+
+    #[test]
+    fn opencode_go_build_auth_uses_public_fallback() {
+        let (_tmp, state_dir) = temp_state_dir();
+        let provider = CatalogProvider {
+            name: "Opencode Go".into(),
+            env: vec!["OPENCODE_API_KEY".into()],
+            npm: "@ai-sdk/openai-compatible".into(),
+            api: Some("https://opencode.ai/zen/go/v1".into()),
+            models: HashMap::new(),
+        };
+        let provider_data = ProviderData::new(
+            "opencode-go".into(),
+            &provider,
+            EndpointType::ChatCompletions,
+            HashMap::new(),
+        );
+        match provider_data.build_auth(&state_dir) {
+            Authentication::OpenCodeFreeKey(resolved) => {
+                assert_eq!(resolved.headers[0].0, "authorization");
+                assert_eq!(resolved.headers[0].1, "Bearer public");
+            }
+            _ => panic!("expected OpenCodeFreeKey, got a different variant"),
+        }
+    }
+
+    #[test]
+    fn models_for_slug_scopes_opencode_go_to_own_entry() {
+        let (_tmp, state_dir) = temp_state_dir();
+        let zen = CatalogProvider {
+            name: "OpenCode Zen".into(),
+            env: vec!["OPENCODE_API_KEY".into()],
+            npm: "@ai-sdk/openai-compatible".into(),
+            api: Some("https://opencode.ai/zen/v1".into()),
+            models: HashMap::from([(
+                "zen-model".into(),
+                CatalogModel {
+                    limit: Some(CatalogLimits {
+                        context: Some(128_000),
+                        input: None,
+                        output: Some(64_000),
+                    }),
+                    cost: Some(CatalogCost {
+                        input: Some(0.0),
+                        output: Some(0.0),
+                        cache_read: None,
+                        cache_write: None,
+                    }),
+                    provider: None,
+                },
+            )]),
+        };
+        let go = CatalogProvider {
+            name: "OpenCode Go".into(),
+            env: vec!["OPENCODE_API_KEY".into()],
+            npm: "@ai-sdk/openai-compatible".into(),
+            api: Some("https://opencode.ai/zen/go/v1".into()),
+            models: HashMap::from([(
+                "go-model".into(),
+                CatalogModel {
+                    limit: Some(CatalogLimits {
+                        context: Some(128_000),
+                        input: None,
+                        output: Some(64_000),
+                    }),
+                    cost: Some(CatalogCost {
+                        input: Some(0.0),
+                        output: Some(0.0),
+                        cache_read: None,
+                        cache_write: None,
+                    }),
+                    provider: None,
+                },
+            )]),
+        };
+        let providers: CatalogIndex =
+            HashMap::from([("opencode".into(), zen), ("opencode-go".into(), go)]);
+        let data = CatalogData::from_index(providers, true, &state_dir);
+
+        let all = data.models_for_slug("opencode");
+        assert_eq!(
+            all.len(),
+            2,
+            "opencode meta-provider lists every sub-provider"
+        );
+
+        let go_only = data.models_for_slug("opencode-go");
+        assert_eq!(go_only.len(), 1);
+        assert_eq!(go_only[0].id, "opencode-go/go-model");
     }
 }

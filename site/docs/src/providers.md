@@ -228,7 +228,7 @@ Defaults: syn:large:vision (strong), syn:small:text (weak)
 
 Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.
 
-### Opencode
+### Opencode Zen
 
 - **Env var**: `OPENCODE_API_KEY`
 - **API**: `https://opencode.ai/zen/v1`
@@ -252,6 +252,14 @@ The default is `false`.
 - **Features**: AWS SDK auth (SSO/IMDS/profiles/env), ConverseStream, inference-profile discovery
 
 Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak.
+
+### Opencode Go
+
+- **Env var**: `OPENCODE_API_KEY`
+- **API**: `https://opencode.ai/zen/go/v1`
+- **Features**: Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Go API
+
+No hardcoded model catalog. Use any model ID supported by this provider. An API key is required.
 
 ## Model Identifiers
 

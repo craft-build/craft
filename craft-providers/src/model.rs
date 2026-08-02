@@ -545,6 +545,15 @@ mod tests {
         assert_eq!(model.spec(), spec);
     }
 
+    #[test]
+    fn opencode_go_from_spec_parses_model_id() {
+        let spec = "opencode-go/glm-5";
+        let model = Model::from_spec(spec).unwrap();
+        assert_eq!(model.provider, Arc::<str>::from("opencode-go"));
+        assert_eq!(model.id, "glm-5");
+        assert_eq!(model.spec(), spec);
+    }
+
     const TIERS: [ModelTier; 4] = [
         ModelTier::Weak,
         ModelTier::Medium,

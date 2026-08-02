@@ -139,12 +139,23 @@ const TENSORX: ProviderManifest = ProviderManifest {
 
 const OPENCODE: ProviderManifest = ProviderManifest {
     slug: "opencode",
-    display_name: "Opencode",
+    display_name: "Opencode Zen",
     family: ModelFamily::Generic,
     supports_thinking: true,
     accepts_arbitrary_models: true,
     fallback_max_output: Some(128_000),
     fallback_context_window: 256_000,
+    models: &[],
+};
+
+const OPENCODE_GO: ProviderManifest = ProviderManifest {
+    slug: "opencode-go",
+    display_name: "Opencode Go",
+    family: ModelFamily::Generic,
+    supports_thinking: false,
+    accepts_arbitrary_models: true,
+    fallback_max_output: Some(64_000),
+    fallback_context_window: 128_000,
     models: &[],
 };
 
@@ -160,8 +171,20 @@ const BEDROCK: ProviderManifest = ProviderManifest {
 };
 
 const BUILTINS: &[ProviderManifest] = &[
-    ANTHROPIC, OPENAI, GOOGLE, COPILOT, OLLAMA, LLAMA_CPP, MISTRAL, OPENROUTER, SYNTHETIC,
-    DEEPSEEK, TENSORX, OPENCODE, BEDROCK,
+    ANTHROPIC,
+    OPENAI,
+    GOOGLE,
+    COPILOT,
+    OLLAMA,
+    LLAMA_CPP,
+    MISTRAL,
+    OPENROUTER,
+    SYNTHETIC,
+    DEEPSEEK,
+    TENSORX,
+    OPENCODE,
+    OPENCODE_GO,
+    BEDROCK,
 ];
 
 pub struct ManifestRegistry;
@@ -203,10 +226,11 @@ mod tests {
     use strum::IntoEnumIterator;
 
     #[test]
-    fn every_builtin_manifest_matches_provider_kind_for_mirrored_fields() {
+    fn every_builtin_manifest_with_provider_kind_matches_kind_fields() {
         for manifest in BUILTINS {
-            let kind = ProviderKind::from_str(manifest.slug)
-                .unwrap_or_else(|_| panic!("manifest slug {} has no ProviderKind", manifest.slug));
+            let Some(kind) = ProviderKind::from_str(manifest.slug).ok() else {
+                continue;
+            };
             assert_eq!(kind.to_string(), manifest.slug, "{}", manifest.slug);
             assert_eq!(
                 manifest.display_name,
@@ -243,15 +267,21 @@ mod tests {
     }
 
     #[test]
-    fn builtin_count_matches_provider_kind_count() {
+    fn builtin_count_covers_provider_kind_variants() {
         let kind_count = ProviderKind::iter().count();
-        assert_eq!(
-            BUILTINS.len(),
-            kind_count,
+        assert!(
+            BUILTINS.len() >= kind_count,
             "BUILTINS has {} manifests but ProviderKind has {} variants",
             BUILTINS.len(),
             kind_count,
         );
+        for kind in ProviderKind::iter() {
+            assert!(
+                ManifestRegistry::get(&kind.to_string()).is_some(),
+                "ProviderKind variant {:?} has no manifest",
+                kind,
+            );
+        }
     }
 
     #[test]
