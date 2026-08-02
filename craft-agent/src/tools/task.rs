@@ -54,9 +54,13 @@ pub struct Task {
     )]
     model_tier: Option<String>,
     #[param(
-        description = "Model role (optional, mutually exclusive with model_tier). When set, resolves the subagent's model from model_roles.toml by role name (e.g. \"scout\", \"advisor\"). Unset roles fall back to the current model. Cannot be combined with model_tier."
+        description = "Model role (optional, mutually exclusive with model_tier and model). When set, resolves the subagent's model from model_roles.toml by role name (e.g. \"scout\", \"advisor\"). Unset roles fall back to the current model. Cannot be combined with model_tier or model."
     )]
     model_role: Option<String>,
+    #[param(
+        description = "Exact model spec (optional, mutually exclusive with model_tier and model_role), e.g. \"anthropic/claude-opus-4-8\". You tell craft the model; craft will not guess. Overrides model_tier and model_role."
+    )]
+    model: Option<String>,
     #[param(
         description = "Parent context to pass to the subagent:\n- \"none\" (default): fresh, no parent history.\n- \"summary\": last few parent messages for context.\n- \"full\": full parent conversation history."
     )]
@@ -69,6 +73,79 @@ pub struct Task {
         description = "Isolation mode for a general subagent:\n- \"none\" (default): run in the current working tree.\n- \"worktree\": run inside a fresh linked git worktree so file mutations do not touch the parent tree (sibling subagents cannot clobber each other). Requires a git repo; falls back to none otherwise."
     )]
     isolation: Option<String>,
+}
+
+const MODEL_EXCLUSIVE_ERR: &str =
+    "model, model_tier, and model_role are mutually exclusive; set at most one";
+
+/// Reject any combination of `model`, `model_tier`, and `model_role` other
+/// than zero or one of them. `model` wins when set; the resolution order is
+/// enforced by `resolve_task_model`.
+fn validate_model_selection(
+    model: &Option<String>,
+    model_tier: &Option<String>,
+    model_role: &Option<String>,
+) -> Result<(), String> {
+    let set = [model.is_some(), model_tier.is_some(), model_role.is_some()]
+        .iter()
+        .filter(|&&s| s)
+        .count();
+    if set > 1 {
+        return Err(MODEL_EXCLUSIVE_ERR.to_string());
+    }
+    Ok(())
+}
+
+/// Resolve the subagent's model and provider from the mutually-exclusive
+/// `model` (exact spec), `model_tier`, or `model_role` inputs. `model` wins
+/// when set; otherwise tier (capped at the parent's tier) or role apply; the
+/// fallback is the parent model. Returns the resolved model and its provider.
+async fn resolve_task_model(
+    model: &Option<String>,
+    model_tier: &Option<String>,
+    model_role: &Option<String>,
+    ctx: &ToolContext,
+) -> Result<(Model, Arc<dyn provider::Provider>), String> {
+    if let Some(spec) = model {
+        let mut resolved = Model::from_spec(spec).map_err(|e| e.to_string())?;
+        let resolved_provider = provider::from_model(&mut resolved, ctx.timeouts)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok((resolved, Arc::from(resolved_provider)));
+    }
+    if let Some(role_str) = model_role {
+        let role: craft_config::model_roles::ModelRole = role_str.parse().map_err(|e: String| e)?;
+        let resolved = craft_providers::roles::resolve_role(
+            role,
+            Model::clone(&ctx.model),
+            Arc::clone(&ctx.provider),
+            ctx.timeouts,
+        )
+        .await;
+        return Ok((resolved.primary.model, resolved.primary.provider));
+    }
+    if let Some(tier_str) = model_tier {
+        let requested: ModelTier = tier_str.parse().map_err(|e: ModelError| e.to_string())?;
+        let effective = requested.min(ctx.model.tier);
+        if effective != ctx.model.tier {
+            let mut resolved_model = {
+                let slug = &ctx.model.provider;
+                let map = model_registry::model_registry()
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                map.spec_for_tier(slug, effective)
+                    .or_else(|| map.spec_for_tier_any(effective))
+                    .and_then(|spec| Model::from_spec(&spec).ok())
+                    .or_else(|| Model::from_tier_dynamic(slug, effective).ok())
+                    .ok_or_else(|| format!("no model available for tier {effective}"))?
+            };
+            let resolved_provider = provider::from_model(&mut resolved_model, ctx.timeouts)
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok((resolved_model, Arc::from(resolved_provider)));
+        }
+    }
+    Ok((Model::clone(&ctx.model), Arc::clone(&ctx.provider)))
 }
 
 impl Task {
@@ -90,50 +167,10 @@ impl Task {
             other => return Err(format!("unknown subagent type: {other}")),
         };
 
-        if self.model_tier.is_some() && self.model_role.is_some() {
-            return Err(
-                "model_tier and model_role are mutually exclusive; set only one".to_string(),
-            );
-        }
+        validate_model_selection(&self.model, &self.model_tier, &self.model_role)?;
 
-        let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref role_str) =
-            self.model_role
-        {
-            let role: craft_config::model_roles::ModelRole =
-                role_str.parse().map_err(|e: String| e)?;
-            let resolved = craft_providers::roles::resolve_role(
-                role,
-                Model::clone(&ctx.model),
-                Arc::clone(&ctx.provider),
-                ctx.timeouts,
-            )
-            .await;
-            (resolved.primary.model, resolved.primary.provider)
-        } else if let Some(ref tier_str) = self.model_tier {
-            let requested: ModelTier = tier_str.parse().map_err(|e: ModelError| e.to_string())?;
-            let effective = requested.min(ctx.model.tier);
-            if effective == ctx.model.tier {
-                (Model::clone(&ctx.model), Arc::clone(&ctx.provider))
-            } else {
-                let mut resolved_model = {
-                    let slug = &ctx.model.provider;
-                    let map = model_registry::model_registry()
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner());
-                    map.spec_for_tier(slug, effective)
-                        .or_else(|| map.spec_for_tier_any(effective))
-                        .and_then(|spec| Model::from_spec(&spec).ok())
-                        .or_else(|| Model::from_tier_dynamic(slug, effective).ok())
-                        .ok_or_else(|| format!("no model available for tier {effective}"))?
-                };
-                let resolved_provider = provider::from_model(&mut resolved_model, ctx.timeouts)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                (resolved_model, Arc::from(resolved_provider))
-            }
-        } else {
-            (Model::clone(&ctx.model), Arc::clone(&ctx.provider))
-        };
+        let (model, provider): (Model, Arc<dyn provider::Provider>) =
+            resolve_task_model(&self.model, &self.model_tier, &self.model_role, ctx).await?;
 
         info!(
             description = %self.description,
@@ -663,5 +700,42 @@ mod tests {
                 "audience drift for '{name}': expected {want:?}, got {got:?}"
             );
         }
+    }
+
+    #[test_case(&Some("anthropic/claude-opus-4-8".into()), &None, &None ; "model_only")]
+    #[test_case(&None, &Some("weak".into()), &None ; "tier_only")]
+    #[test_case(&None, &None, &Some("scout".into()) ; "role_only")]
+    #[test_case(&None, &None, &None ; "none")]
+    fn validate_model_selection_accepts_zero_or_one(
+        model: &Option<String>,
+        model_tier: &Option<String>,
+        model_role: &Option<String>,
+    ) {
+        assert_eq!(
+            validate_model_selection(model, model_tier, model_role),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_model_selection_rejects_model_with_tier() {
+        let err = validate_model_selection(
+            &Some("anthropic/claude-opus-4-8".into()),
+            &Some("weak".into()),
+            &None,
+        )
+        .unwrap_err();
+        assert_eq!(err, MODEL_EXCLUSIVE_ERR);
+    }
+
+    #[test]
+    fn validate_model_selection_rejects_all_three() {
+        let err = validate_model_selection(
+            &Some("anthropic/claude-opus-4-8".into()),
+            &Some("weak".into()),
+            &Some("scout".into()),
+        )
+        .unwrap_err();
+        assert_eq!(err, MODEL_EXCLUSIVE_ERR);
     }
 }

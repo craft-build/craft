@@ -12,4 +12,6 @@ Notes:
 
 Optional `output_schema`: pass a JSON Schema (object) describing the structured object the subagent must return. When set, the subagent is instructed to end with a JSON object matching the schema; that object is validated and returned to you as structured JSON (not prose). On a validation mismatch the subagent is re-prompted once, then a clean error is surfaced. Use this when you need machine-readable results you can reference by key instead of re-reading prose.
 
+Optional `model`: an exact model spec like `"anthropic/claude-opus-4-8"`. You tell craft the model; craft will not guess. Mutually exclusive with `model_tier` and `model_role`, and takes precedence over both. Use it only when you need a specific model the tier/role resolution would not pick.
+
 Optional `isolation`: set to `"worktree"` for a general subagent to run inside a fresh linked git worktree, so its file mutations never touch the parent tree and sibling subagents cannot clobber each other. Requires a git repo; otherwise falls back to the parent cwd.
