@@ -12,7 +12,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::io::StreamReader;
 use tracing::warn;
 
-use craft_storage::id::SessionRef;
+use craft_storage::id::{CraftId, SessionRef};
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::Provider;
@@ -523,6 +523,43 @@ struct ModelInfo {
     supported_generation_methods: Vec<String>,
 }
 
+/// Append `text` to the last block when it is already a `Text`, else push a new
+/// `Text` block. Gemini streams a single assistant message as many small text
+/// parts across SSE chunks; coalescing keeps them as one content block so
+/// session restore renders one block instead of one per delta.
+fn push_or_extend_text(blocks: &mut Vec<ContentBlock>, text: String) {
+    if let Some(ContentBlock::Text { text: prev }) = blocks.last_mut() {
+        prev.push_str(&text);
+    } else {
+        blocks.push(ContentBlock::Text { text });
+    }
+}
+
+/// Same as `push_or_extend_text` for thinking parts. The `thoughtSignature`
+/// arrives on the final thinking delta, so a later signature overwrites an
+/// earlier one; a `Some` on an earlier delta is preserved if the last is None.
+fn push_or_extend_thinking(
+    blocks: &mut Vec<ContentBlock>,
+    text: String,
+    signature: Option<String>,
+) {
+    if let Some(ContentBlock::Thinking {
+        thinking: prev,
+        signature: prev_sig,
+    }) = blocks.last_mut()
+    {
+        prev.push_str(&text);
+        if signature.is_some() {
+            *prev_sig = signature;
+        }
+    } else {
+        blocks.push(ContentBlock::Thinking {
+            thinking: text,
+            signature,
+        });
+    }
+}
+
 async fn parse_sse(
     reader: impl futures::io::AsyncBufRead + Unpin,
     event_tx: &Sender<ProviderEvent>,
@@ -573,9 +610,9 @@ async fn parse_sse(
                 continue;
             };
 
-            for (i, part) in parts.into_iter().enumerate() {
+            for part in parts {
                 if let Some(func_call) = part.function_call {
-                    let id = format!("call_{}_{}", func_call.name, i);
+                    let id = format!("call_{}_{}", func_call.name, CraftId::generate());
                     let input = func_call.args.unwrap_or_default();
                     let thought_signature = func_call.thought_signature.or(part.thought_signature);
                     event_tx
@@ -598,16 +635,13 @@ async fn parse_sse(
                                 .send_async(ProviderEvent::ThinkingDelta { text: text.clone() })
                                 .await?;
                         }
-                        content_blocks.push(ContentBlock::Thinking {
-                            thinking: text,
-                            signature: part.thought_signature,
-                        });
+                        push_or_extend_thinking(&mut content_blocks, text, part.thought_signature);
                     } else if !text.is_empty() {
                         // TODO: preserve part.thought_signature if ContentBlock::Text adds signature support.
                         event_tx
                             .send_async(ProviderEvent::TextDelta { text: text.clone() })
                             .await?;
-                        content_blocks.push(ContentBlock::Text { text });
+                        push_or_extend_text(&mut content_blocks, text);
                     }
                 }
             }
@@ -1009,6 +1043,83 @@ mod tests {
             &result.message.content[0],
             ContentBlock::ToolUse { name, .. } if name == "bash"
         ));
+    }
+
+    #[tokio::test]
+    async fn parse_sse_coalesces_text_deltas_into_one_block() {
+        let event = |text: &str| {
+            format!(
+                "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"{}\"}}]}}}}]}}\n\n",
+                text
+            )
+        };
+        let mut data = String::new();
+        data.push_str(&event("Hello, "));
+        data.push_str(&event("world."));
+        let data = Box::leak(data.into_boxed_str());
+        let (tx, _rx) = flume::unbounded();
+        let result = parse_sse(mock_sse(data.as_bytes()), &tx, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.message.content.len(),
+            1,
+            "expected one coalesced text block"
+        );
+        assert!(matches!(
+            &result.message.content[0],
+            ContentBlock::Text { text } if text == "Hello, world."
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_sse_coalesces_thinking_deltas_keeps_last_signature() {
+        let event = |text: &str, sig: Option<&str>| match sig {
+            Some(s) => format!(
+                "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"{}\",\"thought\":true,\"thoughtSignature\":\"{}\"}}]}}}}]}}\n\n",
+                text, s
+            ),
+            None => format!(
+                "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"{}\",\"thought\":true}}]}}}}]}}\n\n",
+                text
+            ),
+        };
+        let mut data = String::new();
+        data.push_str(&event("reasoning... ", None));
+        data.push_str(&event("more.", Some("sig-final")));
+        let data = Box::leak(data.into_boxed_str());
+        let (tx, _rx) = flume::unbounded();
+        let result = parse_sse(mock_sse(data.as_bytes()), &tx, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(result.message.content.len(), 1);
+        assert!(matches!(
+            &result.message.content[0],
+            ContentBlock::Thinking { thinking, signature }
+                if thinking == "reasoning... more." && signature.as_deref() == Some("sig-final")
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_sse_parallel_same_name_tool_calls_get_unique_ids() {
+        let part = r#"{"functionCall":{"name":"bash","args":{"cmd":"ls"}}}"#;
+        let payload = format!(r#"{{"candidates":[{{"content":{{"parts":[{part},{part}]}}}}]}}"#,);
+        let data = Box::leak(format!("data: {payload}\n\n").into_boxed_str());
+        let (tx, _rx) = flume::unbounded();
+        let result = parse_sse(mock_sse(data.as_bytes()), &tx, Duration::from_secs(30))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = result
+            .message
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2, "expected two tool calls");
+        assert_ne!(ids[0], ids[1], "ids must be unique for parallel calls");
     }
 
     #[tokio::test]
