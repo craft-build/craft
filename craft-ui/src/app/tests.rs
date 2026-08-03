@@ -3708,6 +3708,24 @@ fn reset_session_clears_flow_status() {
 }
 
 #[test]
+fn reset_session_regenerates_flow_workstream_id() {
+    let mut app = flow_app();
+    let before = app.state.flow.workstream_id.clone();
+    assert!(!before.is_empty());
+    app.reset_session();
+    assert!(!app.state.flow.workstream_id.is_empty());
+    assert_ne!(app.state.flow.workstream_id, before);
+}
+
+#[test]
+fn reset_session_clears_flow_workstream_id_in_build_mode() {
+    let mut app = flow_app();
+    app.state.mode = Mode::Build;
+    app.reset_session();
+    assert!(app.state.flow.workstream_id.is_empty());
+}
+
+#[test]
 fn ctrl_t_falls_through_to_floats_in_build_mode() {
     let mut app = test_app();
     app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));

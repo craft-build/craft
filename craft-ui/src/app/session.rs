@@ -317,6 +317,14 @@ impl App {
         self.state.cost = None;
         self.state.context_size = 0;
         self.state.plan = PlanState::None;
+        self.state.flow = if self.state.mode == Mode::Flow {
+            super::mode::FlowState {
+                workstream_id: super::mode::new_workstream_id(),
+                stage: Some(craft_agent::TurnType::General),
+            }
+        } else {
+            super::mode::FlowState::default()
+        };
         if self.state.mode == Mode::Plan {
             self.enter_plan();
         }
