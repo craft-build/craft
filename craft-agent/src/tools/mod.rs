@@ -765,17 +765,29 @@ pub const FLOW_SEARCH_TOOL_NAME: &str = "flow_search";
 /// mode parameter to `build_active_tools`.
 pub const SHIFT_TOOL_NAME: &str = "shift";
 
-/// Remove the `shift` tool from a tools-definition JSON array. Used outside
-/// Flow mode so the model never sees (and therefore cannot call) `shift` in
-/// Build/Plan. No-op for non-array values and for arrays that do not contain
-/// `shift`.
+/// The native tools that only make sense inside Flow mode: `shift` (the turn
+/// pipeline) and `flow_search` (queries the per-workstream semantic index).
+/// Both are registered unconditionally so `definitions()` includes them, then
+/// stripped from the JSON sent to the provider when the run is not in Flow
+/// mode. Stripping at the JSON seam keeps Build/Plan free of Flow concepts
+/// (the plan's Phase 1 invariant) without adding a mode parameter to
+/// `build_active_tools`. Leaving `flow_search` advertised in Build/Plan leaks
+/// Flow language into the tool list and makes the model act as a hybrid.
+pub const FLOW_ONLY_TOOL_NAMES: &[&str] = &[SHIFT_TOOL_NAME, FLOW_SEARCH_TOOL_NAME];
+
+/// Remove the Flow-only tools (`shift`, `flow_search`) from a tools-definition
+/// JSON array. Used outside Flow mode so the model never sees (and therefore
+/// cannot call) them in Build/Plan. No-op for non-array values and for arrays
+/// that contain neither.
 pub fn strip_flow_only_tools(tools: &Value) -> Value {
     let Some(arr) = tools.as_array() else {
         return tools.clone();
     };
     let filtered: Vec<Value> = arr
         .iter()
-        .filter(|v| v.get("name").and_then(Value::as_str) != Some(SHIFT_TOOL_NAME))
+        .filter(|v| {
+            !FLOW_ONLY_TOOL_NAMES.contains(&v.get("name").and_then(Value::as_str).unwrap_or(""))
+        })
         .cloned()
         .collect();
     Value::Array(filtered)
@@ -1080,6 +1092,39 @@ mod tests {
         assert!(
             filter.matches(READ_TOOL_NAME),
             "unrelated tools stay enabled"
+        );
+    }
+
+    #[test_case(SHIFT_TOOL_NAME     ; "strips_shift")]
+    #[test_case(FLOW_SEARCH_TOOL_NAME ; "strips_flow_search")]
+    fn strip_flow_only_tools_removes_flow_tools(name: &str) {
+        let tools = json!([
+            { "name": READ_TOOL_NAME },
+            { "name": SHIFT_TOOL_NAME },
+            { "name": FLOW_SEARCH_TOOL_NAME },
+        ]);
+        let out = strip_flow_only_tools(&tools);
+        let names: Vec<&str> = out
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            !names.contains(&name),
+            "flow-only tool `{name}` should be stripped: {names:?}"
+        );
+        assert!(
+            names.contains(&READ_TOOL_NAME),
+            "non-flow tools must remain: {names:?}"
+        );
+    }
+
+    #[test]
+    fn strip_flow_only_tools_passes_through_non_array() {
+        assert_eq!(
+            strip_flow_only_tools(&json!("not an array")),
+            json!("not an array")
         );
     }
 
