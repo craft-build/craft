@@ -38,6 +38,12 @@ const MAX_REAUTH_ATTEMPTS: u32 = 2;
 const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
 const HOOK_BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACE_CALL_PROMPT: &str = "Your recent actions look like a doom-loop (repeated calls, errors, or stagnation). Summarize your progress so far and tell the user what still needs to be done. Do NOT call any tools.";
+/// Pushed after a Flow narrow turn ends without a shift (`ShiftOut`). The
+/// narrow turn's final reply is an assistant message, so without this the next
+/// request would trail an assistant message, which providers like Anthropic
+/// reject as assistant prefill ("the conversation must end with a user
+/// message"). The note also tells the model control is back in `general`.
+const SHIFT_OUT_TO_GENERAL_PROMPT: &str = "Control returns to `general`. Re-derive the next step from the typed log: shift into the next narrow turn type the work needs, or end the run if the goal is met.";
 const DEFAULT_SMALL_MODEL_RATIO: f64 = 0.60;
 const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 const MANDATORY_RECENT_MESSAGES: usize = 6;
@@ -596,6 +602,11 @@ impl<'h> Agent<'h> {
                         crate::agent::turn_type::TurnType::General,
                         crate::agent::turn_type::ThreadAction::Advance,
                     );
+                    // The narrow turn ended on an assistant message and
+                    // `advance_turn_type` adds no brief for `general`, so push
+                    // a user message to keep the next request provider-valid.
+                    self.history
+                        .push(Message::synthetic(SHIFT_OUT_TO_GENERAL_PROMPT.into()));
                 }
                 TurnOutcome::Overflow => {
                     info!("context overflow detected, attempting auto-compact and retry");
@@ -2689,6 +2700,54 @@ mod tests {
                     crate::agent::turn_type::TurnType::General,
                 ],
             "ShiftOut should re-enter general after the Scout EndTurn: {entered:?}"
+        );
+    }
+
+    /// Regression: after a narrow turn ends with a bare EndTurn (`ShiftOut`),
+    /// the chat history handed to the next API request must end with a user
+    /// message. The narrow turn's final reply is an assistant message, so
+    /// without a trailing user message Anthropic rejects the next request as
+    /// assistant prefill ("the conversation must end with a user message").
+    #[tokio::test]
+    async fn flow_shift_out_leaves_trailing_user_message() {
+        let (_tmp, store) = tmp_flow_store();
+        let (ptx, _prx) = flume::unbounded::<crate::agent::flow_loop::FlowProgress>();
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = flow_agent_params(store, ptx);
+        params.provider = Arc::new(MockProvider::new(vec![
+            shift_tool_call("t1", "scout", "map it"),
+            text_response(StopReason::EndTurn),
+            text_response(StopReason::EndTurn),
+        ]));
+        let agent = Agent::new(params, run_params);
+        let _ = agent.run(flow_input()).await;
+
+        let msgs = history.as_slice();
+        // The ShiftOut hand-back pushes a synthetic user message immediately
+        // after the Scout turn's assistant reply, so the next request ends on
+        // a user message instead of trailing an assistant one (Anthropic
+        // rejects the latter as assistant prefill).
+        let hand_back = msgs
+            .iter()
+            .enumerate()
+            .find(|(_, m)| {
+                m.first_text_content()
+                    .is_some_and(|t| t == SHIFT_OUT_TO_GENERAL_PROMPT)
+            })
+            .map(|(i, _)| i);
+        let Some(idx) = hand_back else {
+            panic!("expected the ShiftOut hand-back message: {msgs:?}");
+        };
+        assert!(
+            idx > 0 && matches!(msgs[idx - 1].role, Role::Assistant),
+            "the message before the hand-back must be the scout assistant reply: {:?}",
+            msgs.get(idx - 1)
+        );
+        assert!(
+            matches!(msgs[idx].role, Role::User),
+            "the hand-back message must be user-role: {:?}",
+            msgs[idx]
         );
     }
 
