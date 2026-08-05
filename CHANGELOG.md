@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-08-05
+
+### Fixed
+
+- **agent**: strip `flow_search` from the tool list outside Flow mode (`bd4eeb2f`)
+- **agent**: end ShiftOut turn on a user message in Flow mode (`f804a392`)
+- **ui**: regenerate flow workstream id on `/new` (`6e2a7e75`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`aho-corasick` 1.1.5, `data-encoding` 2.11.1, `globset` 0.4.20, `ignore` 0.4.33, `lru` 0.18.2, `minijinja` 2.22.0, `regex-automata` 0.4.18, `similar` 3.1.2)
+
 ## [0.11.3] - 2026-08-02
 
 ### Added
@@ -1527,7 +1539,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/craft-build/craft/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/craft-build/craft/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/craft-build/craft/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/craft-build/craft/compare/v0.11.0...v0.11.1
