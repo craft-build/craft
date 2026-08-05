@@ -1327,7 +1327,7 @@ mod tests {
         let real_str = real.to_str().unwrap().to_string();
 
         let hooks = RecordingHooks::with_decision(HookDecision::Transform {
-            input: serde_json::json!({"path": real_str}),
+            input: serde_json::json!({"path": real_str, "offset": 1, "limit": 0}),
         });
         let ctx = stub_ctx_with_hooks(&AgentMode::Build, hooks);
         ctx.file_tracker.record_read(Path::new(&real_str));
@@ -1372,7 +1372,7 @@ mod tests {
             None,
             "t1".into(),
             crate::tools::READ_TOOL_NAME,
-            &serde_json::json!({"path": path_str}),
+            &serde_json::json!({"path": path_str, "offset": 1, "limit": 0}),
             &ctx,
             Emit::Silent,
         )
@@ -1411,7 +1411,7 @@ mod tests {
             None,
             "t1".into(),
             crate::tools::READ_TOOL_NAME,
-            &serde_json::json!({"path": path_str}),
+            &serde_json::json!({"path": path_str, "offset": 1, "limit": 0}),
             &ctx,
             Emit::Silent,
         )

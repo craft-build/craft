@@ -420,8 +420,8 @@ mod tests {
 
         let (entries, text) = run_batch(json!({
             "tool_calls": [
-                {"tool": "read", "parameters": {"path": f.to_str().unwrap()}},
-                {"tool": "read", "parameters": {"path": "/nonexistent/path.txt"}}
+                {"tool": "read", "parameters": {"path": f.to_str().unwrap(), "offset": 1, "limit": 0}},
+                {"tool": "read", "parameters": {"path": "/nonexistent/path.txt", "offset": 1, "limit": 0}}
             ]
         }))
         .await;
@@ -473,7 +473,7 @@ mod tests {
         execute_batch(
             &ctx,
             json!({
-                "tool_calls": [{"tool": "read", "parameters": {"path": f.to_str().unwrap()}}]
+                "tool_calls": [{"tool": "read", "parameters": {"path": f.to_str().unwrap(), "offset": 1, "limit": 0}}]
             }),
         )
         .await;
