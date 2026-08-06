@@ -110,6 +110,10 @@ pub struct ProviderData {
     pub models: HashMap<String, CatalogMeta>,
 }
 
+fn is_free_model(meta: &CatalogMeta) -> bool {
+    meta.input_price == 0.0 && meta.output_price == 0.0
+}
+
 impl ProviderData {
     fn new(
         slug: String,
@@ -208,7 +212,7 @@ impl ProviderData {
             .models
             .iter()
             .filter_map(|(model_id, meta)| {
-                let is_free = meta.input_price == 0.0 && meta.output_price == 0.0;
+                let is_free = is_free_model(meta);
                 if is_free && !enable_free_models {
                     return None;
                 }
@@ -1051,6 +1055,67 @@ mod tests {
             _ => panic!("expected KeyBased"),
         }
         unsafe { std::env::remove_var("CRAFT_TEST_AUTH_KEY") };
+    }
+
+    fn opencode_go_provider_data(env_key: &str) -> ProviderData {
+        let provider = CatalogProvider {
+            name: "Opencode Go".into(),
+            env: vec![env_key.into()],
+            npm: "@ai-sdk/openai-compatible".into(),
+            api: Some("https://opencode.ai/zen/go/v1".into()),
+            models: HashMap::new(),
+        };
+        let models = HashMap::from([
+            (
+                "paid-model".to_string(),
+                CatalogMeta {
+                    context: 128_000,
+                    output: 64_000,
+                    input_price: 1.0,
+                    output_price: 2.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+            ),
+            (
+                "free-model".to_string(),
+                CatalogMeta {
+                    context: 128_000,
+                    output: 64_000,
+                    input_price: 0.0,
+                    output_price: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+            ),
+        ]);
+        ProviderData::new(
+            "opencode-go".into(),
+            &provider,
+            EndpointType::ChatCompletions,
+            models,
+        )
+    }
+
+    #[test]
+    fn catalog_provider_available_models_free_fallback_hides_paid_models() {
+        let (_tmp, state_dir) = temp_state_dir();
+        let data = opencode_go_provider_data("CRAFT_TEST_OPENCODE_GO_UNSET_KEY_91472");
+        let models = data.available_models(&state_dir, true);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opencode-go/free-model"]);
+    }
+
+    #[test]
+    fn catalog_provider_available_models_with_key_shows_all() {
+        let (_tmp, state_dir) = temp_state_dir();
+        unsafe { std::env::set_var("CRAFT_TEST_OPENCODE_GO_KEY_41827", "real-key") };
+        let data = opencode_go_provider_data("CRAFT_TEST_OPENCODE_GO_KEY_41827");
+        let models = data.available_models(&state_dir, true);
+        let mut ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["opencode-go/free-model", "opencode-go/paid-model"]);
+        unsafe { std::env::remove_var("CRAFT_TEST_OPENCODE_GO_KEY_41827") };
     }
 
     #[test]
