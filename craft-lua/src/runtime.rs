@@ -32,7 +32,7 @@ use craft_config::RawConfig;
 
 use crate::api::autocmd::AutocmdStore;
 use crate::api::create_craft_global;
-use crate::api::r#fn::{JobMeta, JobStore, deliver_job_event};
+use crate::api::r#fn::{JobMeta, JobStore, deliver_job_event, kill_plugin_jobs};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
@@ -1271,6 +1271,9 @@ impl LuaRuntime {
     }
 
     fn drop_plugin_keys(&mut self, name: &str) {
+        if let Some(bg) = self.lua.app_data_mut::<RefCell<BgJobMap>>() {
+            kill_plugin_jobs(&self.lua, &mut bg.borrow_mut(), name);
+        }
         if let Some(mut store) = self.lua.app_data_mut::<PluginOptionSpecs>() {
             store.remove(name);
         }
@@ -3104,7 +3107,15 @@ mod tests {
                     .unwrap();
                 let mut cell = lock_cell(scope.handle());
                 let id = cell.jobs.next_id();
-                cell.jobs.register(id, handle, None, None, None, false);
+                cell.jobs.register(
+                    id,
+                    handle,
+                    Arc::from(DISPATCH_TEST_PLUGIN),
+                    None,
+                    None,
+                    None,
+                    false,
+                );
             });
             let (_finish_tx, finish_rx) = flume::bounded(1);
 

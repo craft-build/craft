@@ -949,6 +949,119 @@ async fn jobstop_kills_running_job() {
 }
 
 #[tokio::test]
+async fn background_job_outlives_its_starting_tool() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let src = format!(
+        r#"
+local output = "pending"
+local exit_code = "pending"
+craft.api.register_tool({{
+    name = "start_background_job",
+    description = "starts a background job",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        craft.fn.jobstart("sleep 0.1; printf plugin-output; exit 7", {{
+            background = true,
+            on_stdout = function(_, line) output = line end,
+            on_exit = function(_, code) exit_code = tostring(code) end,
+        }})
+        return "started"
+    end,
+}})
+craft.api.register_tool({{
+    name = "background_job_state",
+    description = "reports background job callbacks",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        return output .. "/" .. exit_code
+    end,
+}})
+"#
+    );
+    host.load_source("background_job", &src).unwrap();
+    assert_eq!(
+        exec_tool(&reg, "start_background_job", serde_json::json!({}))
+            .await
+            .unwrap(),
+        "started"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let state = exec_tool(&reg, "background_job_state", serde_json::json!({}))
+            .await
+            .unwrap();
+        if state == "plugin-output/7" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background callbacks did not run: {state}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unloading_plugin_kills_its_background_jobs() {
+    use rustix::process::{Pid, test_kill_process_group};
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_path = dir.path().join("job.pid");
+    let src = format!(
+        r#"craft.api.register_tool({{
+            name = "start_leak",
+            description = "starts a background job that writes its pid",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function()
+                craft.fn.jobstart("printf %s $$ > '{}'; exec sleep 30", {{
+                    background = true,
+                }})
+                return "ok"
+            end,
+        }})"#,
+        pid_path.display()
+    );
+    host.load_source("leak", &src).unwrap();
+    exec_tool(&reg, "start_leak", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !pid_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background job did not publish its process id"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let pid = std::fs::read_to_string(&pid_path)
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    let pid = Pid::from_raw(pid).unwrap();
+    assert!(test_kill_process_group(pid).is_ok());
+
+    host.unload("leak").unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while test_kill_process_group(pid).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background process group survived unload"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[tokio::test]
 async fn vm_recovers_after_async_job_tool() {
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();

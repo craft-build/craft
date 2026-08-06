@@ -50,11 +50,18 @@ fn build_sandbox_profile(lua: &Lua, cwd: Option<&Path>) -> Option<craft_sandbox:
 pub(crate) struct JobMeta {
     pub(crate) alive: bool,
     pub(crate) background: bool,
+    plugin: Arc<str>,
     on_stdout: Option<RegistryKey>,
     on_stderr: Option<RegistryKey>,
     on_exit: Option<RegistryKey>,
     pub(crate) event_rx: Option<flume::Receiver<JobEvent>>,
     kill: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl JobMeta {
+    fn owned_by(&self, plugin: &str) -> bool {
+        self.plugin.as_ref() == plugin
+    }
 }
 
 pub(crate) struct JobStore {
@@ -87,10 +94,12 @@ impl JobStore {
         Arc::clone(&self.backend)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn register(
         &mut self,
         id: u32,
         handle: TerminalHandle,
+        plugin: Arc<str>,
         on_stdout: Option<RegistryKey>,
         on_stderr: Option<RegistryKey>,
         on_exit: Option<RegistryKey>,
@@ -101,6 +110,7 @@ impl JobStore {
             JobMeta {
                 alive: true,
                 background,
+                plugin,
                 on_stdout,
                 on_stderr,
                 on_exit,
@@ -127,9 +137,13 @@ impl JobStore {
         }
     }
 
-    pub fn take_receiver(&mut self, job_id: u32) -> Option<flume::Receiver<JobEvent>> {
+    pub fn take_receiver(
+        &mut self,
+        job_id: u32,
+        plugin: &str,
+    ) -> Option<flume::Receiver<JobEvent>> {
         let meta = self.jobs.get_mut(&job_id)?;
-        meta.event_rx.take()
+        meta.owned_by(plugin).then(|| meta.event_rx.take())?
     }
 
     pub fn drain_events(&self, buf: &mut Vec<(u32, JobEvent)>) {
@@ -143,19 +157,25 @@ impl JobStore {
         }
     }
 
-    pub fn mark_dead(&mut self, job_id: u32) {
-        if let Some(meta) = self.jobs.get_mut(&job_id) {
-            meta.alive = false;
-        }
+    /// Removes a finished job and frees its callback registry values.
+    /// Called from [`deliver_job_event`] on `Exit` so a callback that
+    /// raises still leaves the job cleaned up.
+    pub fn finish(&mut self, lua: &Lua, job_id: u32) {
+        self.remove(lua, job_id);
     }
 
-    pub fn kill(&mut self, job_id: u32) {
+    pub fn kill(&mut self, job_id: u32, plugin: &str) {
         if let Some(meta) = self.jobs.get_mut(&job_id)
+            && meta.owned_by(plugin)
             && meta.alive
             && let Some(kill) = meta.kill.take()
         {
             kill();
         }
+    }
+
+    fn remove(&mut self, lua: &Lua, job_id: u32) {
+        remove_job_from(lua, &mut self.jobs, job_id);
     }
 
     pub fn kill_all(&mut self) {
@@ -215,8 +235,39 @@ impl Drop for JobStore {
     }
 }
 
+/// Kills and removes a single job from a raw job map, freeing its
+/// callback registry values. Shared by [`JobStore::remove`] and the
+/// plugin-unload cleanup over the global background map.
+pub(crate) fn remove_job_from(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>, job_id: u32) {
+    if let Some(mut meta) = jobs.remove(&job_id) {
+        if let Some(kill) = meta.kill.take() {
+            kill();
+        }
+        for key in [meta.on_stdout, meta.on_stderr, meta.on_exit]
+            .into_iter()
+            .flatten()
+        {
+            lua.remove_registry_value(key).ok();
+        }
+    }
+}
+
+/// Kills every background job owned by {plugin} in a raw job map. Used
+/// on plugin unload against the persistent [`BgJobMap`] (see
+/// `runtime`), where there is no live [`TaskScope`] to drain through.
+pub(crate) fn kill_plugin_jobs(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>, plugin: &str) {
+    let ids: Vec<u32> = jobs
+        .iter()
+        .filter_map(|(&id, m)| (m.background && m.owned_by(plugin)).then_some(id))
+        .collect();
+    for id in ids {
+        remove_job_from(lua, jobs, id);
+    }
+}
+
 pub(crate) fn create_fn_table(
     lua: &Lua,
+    plugin: Arc<str>,
     perms: &PluginPermissions,
     tx: Option<flume::Sender<UiAction>>,
 ) -> LuaResult<Table> {
@@ -224,10 +275,12 @@ pub(crate) fn create_fn_table(
     let perms = perms.clone();
 
     let p = perms.clone();
+    let owner = plugin.clone();
     t.set(
         "jobstart",
         lua.create_async_function(move |lua, (cmd, opts): (String, Option<Table>)| {
             let p = p.clone();
+            let owner = owner.clone();
             async move {
                 if !p.is_allowed(Run) {
                     return Err(crate::plugin_permissions::denied_error(Run));
@@ -294,7 +347,7 @@ pub(crate) fn create_fn_table(
                 };
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
-                    store.register(id, handle, on_stdout, on_stderr, on_exit, background);
+                    store.register(id, handle, owner, on_stdout, on_stderr, on_exit, background);
                 });
                 Ok(id)
             }
@@ -302,27 +355,30 @@ pub(crate) fn create_fn_table(
     )?;
 
     let p = perms.clone();
+    let owner = plugin.clone();
     t.set(
         "jobstop",
         lua.create_function(move |lua, job_id: u32| {
             if !p.is_allowed(Run) {
                 return Err(crate::plugin_permissions::denied_error(Run));
             }
-            with_task_jobs(lua, |store| store.kill(job_id));
+            with_task_jobs(lua, |store| store.kill(job_id, &owner));
             Ok(())
         })?,
     )?;
 
     let p = perms.clone();
+    let owner = plugin.clone();
     t.set(
         "jobwait",
         lua.create_async_function(move |lua, (job_id, timeout_ms): (u32, Option<u64>)| {
             let p = p.clone();
+            let owner = owner.clone();
             async move {
                 if !p.is_allowed(Run) {
                     return Err(crate::plugin_permissions::denied_error(Run));
                 }
-                let rx = with_task_jobs(&lua, |store| store.take_receiver(job_id))
+                let rx = with_task_jobs(&lua, |store| store.take_receiver(job_id, &owner))
                     .ok_or_else(|| mlua::Error::runtime("unknown job id or already waited"))?;
 
                 let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
@@ -417,15 +473,19 @@ pub(crate) fn create_fn_table(
     Ok(t)
 }
 
-/// Fire the job's Lua callback for {event} (if any) and mark the job
-/// dead on exit. Shared by `jobwait` and the async dispatch loop so
-/// both deliver events identically.
+/// Fire the job's Lua callback for {event} (if any), finishing the job
+/// on exit before invoking a callback that may raise. Shared by
+/// `jobwait` and the async dispatch loop so both deliver events
+/// identically.
 pub(crate) fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> LuaResult<()> {
     let callback = with_task_jobs(lua, |store| {
         store
             .callback_key(job_id, event)
             .and_then(|key| lua.registry_value::<Function>(key).ok())
     });
+    if let JobEvent::Exit(_) = event {
+        with_task_jobs(lua, |store| store.finish(lua, job_id));
+    }
     if let Some(callback) = callback {
         let arg: Value = match event {
             JobEvent::Stdout(line) | JobEvent::Stderr(line) => {
@@ -434,9 +494,6 @@ pub(crate) fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> Lua
             JobEvent::Exit(code) => Value::Integer(*code as i64),
         };
         callback.call::<()>((job_id, arg))?;
-    }
-    if let JobEvent::Exit(_) = event {
-        with_task_jobs(lua, |store| store.mark_dead(job_id));
     }
     Ok(())
 }
@@ -452,6 +509,12 @@ mod tests {
         JobStore::new()
     }
 
+    const TEST_PLUGIN: &str = "test-plugin";
+
+    fn owner() -> Arc<str> {
+        Arc::from(TEST_PLUGIN)
+    }
+
     async fn start_echo(store: &mut JobStore) -> u32 {
         let backend = store.backend();
         let id = store.next_id();
@@ -464,7 +527,7 @@ mod tests {
             })
             .await
             .unwrap();
-        store.register(id, handle, None, None, None, false);
+        store.register(id, handle, owner(), None, None, None, false);
         id
     }
 
@@ -483,26 +546,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn has_alive_jobs_tracks_state() {
+    async fn finishing_a_job_removes_it() {
+        let lua = Lua::new();
         let mut store = make_store();
         assert!(!store.has_alive_jobs());
 
         let id = start_echo(&mut store).await;
         assert!(store.has_alive_jobs());
 
-        store.mark_dead(id);
+        store.finish(&lua, id);
         assert!(!store.has_alive_jobs());
     }
 
     #[tokio::test]
     async fn noop_on_nonexistent_or_dead_jobs() {
         let mut store = make_store();
-        store.mark_dead(999);
-        store.kill(999);
+        store.kill(999, TEST_PLUGIN);
 
         let id = start_echo(&mut store).await;
-        store.mark_dead(id);
-        store.kill(id);
+        store.kill(id, TEST_PLUGIN);
 
         assert!(store.callback_key(999, &JobEvent::Exit(0)).is_none());
     }
@@ -510,14 +572,38 @@ mod tests {
     #[tokio::test]
     async fn take_receiver_lifecycle() {
         let mut store = make_store();
-        assert!(store.take_receiver(999).is_none());
+        assert!(store.take_receiver(999, TEST_PLUGIN).is_none());
 
         let id = start_echo(&mut store).await;
-        assert!(store.take_receiver(id).is_some());
         assert!(
-            store.take_receiver(id).is_none(),
+            store.take_receiver(id, "other-plugin").is_none(),
+            "another plugin must not access the job"
+        );
+        assert!(store.take_receiver(id, TEST_PLUGIN).is_some());
+        assert!(
+            store.take_receiver(id, TEST_PLUGIN).is_none(),
             "second take should fail (receiver already moved)"
         );
+    }
+
+    #[tokio::test]
+    async fn plugin_owner_can_be_accessed_only_by_its_plugin() {
+        let mut store = make_store();
+        let backend = store.backend();
+        let id = store.next_id();
+        let handle = backend
+            .start(TerminalSpec {
+                cmd: "echo hello".into(),
+                cwd: None,
+                env: None,
+                sandbox: None,
+            })
+            .await
+            .unwrap();
+        store.register(id, handle, owner(), None, None, None, false);
+
+        assert!(store.take_receiver(id, "other-plugin").is_none());
+        assert!(store.take_receiver(id, TEST_PLUGIN).is_some());
     }
 
     #[tokio::test]
@@ -541,7 +627,7 @@ mod tests {
     async fn take_receiver_delivers_events() {
         let mut store = make_store();
         let id = start_echo(&mut store).await;
-        let rx = store.take_receiver(id).unwrap();
+        let rx = store.take_receiver(id, TEST_PLUGIN).unwrap();
 
         let mut got_exit = false;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -585,7 +671,7 @@ mod tests {
     async fn drain_events_empty_after_take() {
         let mut store = make_store();
         let id = start_echo(&mut store).await;
-        let _rx = store.take_receiver(id).unwrap();
+        let _rx = store.take_receiver(id, TEST_PLUGIN).unwrap();
 
         let mut buf = Vec::new();
         store.drain_events(&mut buf);
@@ -610,12 +696,14 @@ mod tests {
             })
             .await
             .expect("job started");
-        store.register(id, handle, None, None, None, false);
+        store.register(id, handle, owner(), None, None, None, false);
         assert!(
             store.has_alive_jobs(),
             "job should be alive before the drop"
         );
-        let rx = store.take_receiver(id).expect("receiver present");
+        let rx = store
+            .take_receiver(id, TEST_PLUGIN)
+            .expect("receiver present");
 
         drop(store);
 
@@ -640,7 +728,7 @@ mod tests {
 
     fn lua_with_view(tx: Option<flume::Sender<UiAction>>) -> Lua {
         let lua = Lua::new();
-        let t = create_fn_table(&lua, &PluginPermissions::trusted(), tx).unwrap();
+        let t = create_fn_table(&lua, owner(), &PluginPermissions::trusted(), tx).unwrap();
         lua.globals().set("f", t).unwrap();
         lua
     }
