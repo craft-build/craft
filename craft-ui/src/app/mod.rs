@@ -1250,6 +1250,30 @@ impl App {
             return vec![];
         }
 
+        match &envelope.event {
+            AgentEvent::ToolStart(event) => {
+                self.lua_event_handle.fire_autocmd(
+                    "ToolStart",
+                    serde_json::json!({
+                        "session_id": self.state.session.id,
+                        "tool_id": event.id,
+                        "tool": event.tool,
+                    }),
+                );
+            }
+            AgentEvent::ToolDone(event) => {
+                self.lua_event_handle.fire_autocmd(
+                    "ToolDone",
+                    serde_json::json!({
+                        "session_id": self.state.session.id,
+                        "tool_id": event.id,
+                        "tool": event.tool,
+                    }),
+                );
+            }
+            _ => {}
+        }
+
         if let AgentEvent::SubagentHistory {
             tool_use_id,
             messages,
