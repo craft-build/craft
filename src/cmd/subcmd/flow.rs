@@ -193,7 +193,10 @@ async fn run_flow(
             tool_build: Some(tool_build),
             hooks: None,
         },
-    );
+    )
+    .with_recency_source(Some(Arc::new(craft_lua::LuaRecencySource::new(
+        plugin_host.event_handle(),
+    )) as Arc<dyn craft_agent::prompt::RecencySource>));
 
     let input = AgentInput {
         message,

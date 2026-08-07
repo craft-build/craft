@@ -474,9 +474,21 @@ impl EventHandle {
         rx.recv().unwrap_or_default()
     }
 
+    pub fn collect_recency(&self) -> craft_agent::prompt::RecencyFacts {
+        let (tx, rx) = flume::bounded(1);
+        let _ = self.tx.send(Request::CollectRecency { reply: tx });
+        rx.recv().unwrap_or_default()
+    }
+
     pub async fn collect_prompt_slots_async(&self) -> craft_agent::prompt::ResolvedSlots {
         let (tx, rx) = flume::bounded(1);
         let _ = self.tx.send(Request::CollectPromptSlots { reply: tx });
+        rx.recv_async().await.unwrap_or_default()
+    }
+
+    pub async fn collect_recency_async(&self) -> craft_agent::prompt::RecencyFacts {
+        let (tx, rx) = flume::bounded(1);
+        let _ = self.tx.send(Request::CollectRecency { reply: tx });
         rx.recv_async().await.unwrap_or_default()
     }
 
@@ -499,6 +511,28 @@ impl EventHandle {
 
     pub fn run_keybind_callback(&self, id: u64) -> bool {
         self.tx.try_send(Request::RunKeybindCallback { id }).is_ok()
+    }
+}
+
+/// Bridge from the agent's [`craft_agent::prompt::RecencySource`] trait to the
+/// Lua plugin runtime. Held by the agent as `Option<Arc<dyn RecencySource>>`;
+/// each turn the agent calls [`Self::collect`], which round-trips into the Lua
+/// VM thread, evaluates every registered `register_recency_source` callback,
+/// and returns the joined volatile facts. Built fresh per turn, never stored.
+#[derive(Clone)]
+pub struct LuaRecencySource {
+    handle: EventHandle,
+}
+
+impl LuaRecencySource {
+    pub fn new(handle: EventHandle) -> Self {
+        Self { handle }
+    }
+}
+
+impl craft_agent::prompt::RecencySource for LuaRecencySource {
+    fn collect(&self, _ctx: &craft_agent::prompt::RecencyCtx) -> craft_agent::prompt::RecencyFacts {
+        self.handle.collect_recency()
     }
 }
 
@@ -1290,5 +1324,92 @@ mod tests {
             hint_contents(&slots, PromptId::System, Slot::Identity),
             ["Dyn identity".to_string()]
         );
+    }
+
+    #[test]
+    fn register_recency_source_collects_rendered_block() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "git_state",
+            r#"
+            craft.api.register_recency_source({
+                name = "git-status",
+                callback = function() return "git: clean" end,
+            })
+            "#,
+        )
+        .unwrap();
+        let facts = host.event_handle().collect_recency();
+        let rendered = facts.render();
+        assert!(rendered.starts_with("<turn-context>"));
+        assert!(rendered.contains("git: clean"));
+    }
+
+    #[test]
+    fn register_recency_source_requires_name() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source(
+            "no_name",
+            r#"
+            craft.api.register_recency_source({
+                callback = function() return "x" end,
+            })
+            "#,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("'name' is required"));
+    }
+
+    #[test]
+    fn register_recency_source_requires_callback() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let r = host.load_source(
+            "no_cb",
+            r#"
+            craft.api.register_recency_source({ name = "x" })
+            "#,
+        );
+        assert!(r.is_err());
+        assert!(
+            r.unwrap_err()
+                .to_string()
+                .contains("'callback' is required")
+        );
+    }
+
+    #[test]
+    fn recency_source_nil_and_multiple_sources_combine() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        host.load_source(
+            "multi",
+            r#"
+            craft.api.register_recency_source({
+                name = "nil-one",
+                callback = function() return nil end,
+            })
+            craft.api.register_recency_source({
+                name = "real-one",
+                callback = function() return "todos: 3" end,
+            })
+            "#,
+        )
+        .unwrap();
+        let facts = host.event_handle().collect_recency();
+        let rendered = facts.render();
+        assert!(!rendered.contains("nil"));
+        assert!(rendered.contains("todos: 3"));
+    }
+
+    #[test]
+    fn no_recency_sources_registered_is_empty() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+        let facts = host.event_handle().collect_recency();
+        assert!(facts.is_empty());
+        assert_eq!(facts.render(), "");
     }
 }

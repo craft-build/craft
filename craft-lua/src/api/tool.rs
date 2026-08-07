@@ -24,7 +24,10 @@ use crate::api::util::command::{
     CommandEntry, CommandHandlerMap, LuaCommandWriter, publish_command_snapshot,
 };
 use crate::api::util::ctx::LuaCtx;
-use crate::runtime::{HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, Request};
+use crate::runtime::{
+    HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, RecencySourceCallbacks,
+    RecencySourceRegistration, Request,
+};
 
 const TOOL_NAME_MAX: usize = 64;
 const TOOL_HANDLER_RETURN_ERR: &str =
@@ -494,6 +497,36 @@ pub(crate) fn create_api_table(
                 };
                 let mut map = lua
                     .app_data_mut::<PromptHintCallbacks>()
+                    .ok_or_else(|| mlua::Error::runtime("not initialized"))?;
+                map.entry(Arc::clone(&plugin)).or_default().push(reg);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let plugin = Arc::clone(&plugin);
+        t.set(
+            "register_recency_source",
+            lua.create_function(move |lua, spec: Table| {
+                let name: String = spec.get("name").map_err(|_| {
+                    mlua::Error::runtime("register_recency_source: 'name' is required")
+                })?;
+                if name.is_empty() {
+                    return Err(mlua::Error::runtime(
+                        "register_recency_source: 'name' must not be empty",
+                    ));
+                }
+                let func: Function = spec.get("callback").map_err(|_| {
+                    mlua::Error::runtime("register_recency_source: 'callback' is required")
+                })?;
+                let callback = lua.create_registry_value(func)?;
+                let reg = RecencySourceRegistration {
+                    name: Arc::from(name),
+                    callback,
+                };
+                let mut map = lua
+                    .app_data_mut::<RecencySourceCallbacks>()
                     .ok_or_else(|| mlua::Error::runtime("not initialized"))?;
                 map.entry(Arc::clone(&plugin)).or_default().push(reg);
                 Ok(())

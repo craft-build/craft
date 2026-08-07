@@ -20,6 +20,7 @@ Project settings override global ones. See [Configuration](./configuration.md).
 | `register_tool({ ... })` | A tool the model can call. Takes `name`, `kind`, `description`, `schema`, and a handler |
 | `register_command({ ... })` | A slash command shown in the palette. Takes `name`, `description`, optional `nargs`, and a handler |
 | `register_prompt_hint({ ... })` | Extra context injected into the prompt based on a trigger |
+| `register_recency_source({ ... })` | A per-turn volatile fact (e.g. live repo state) appended to the latest user message at request time. Takes `name` and a `callback` returning a string or nil; rebuilt every turn and never persisted |
 | `register_options({ ... })` | Declare the options your plugin accepts under `plugins.<name>` in `craft.setup`. Returns the user's values merged with your defaults |
 | `set_prompt({ ... })` | Override a singleton prompt slot (`identity` or `tone`). Takes `slot`, `content` (string or callback), and optional `prompt` |
 

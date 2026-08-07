@@ -113,6 +113,15 @@ pub(crate) struct PromptHintRegistration {
 
 pub(crate) type PromptHintCallbacks = BTreeMap<Arc<str>, Vec<PromptHintRegistration>>;
 
+/// A registered per-turn recency source. `name` identifies the source for logs;
+/// `callback` is invoked once per turn and must return a string, nil, or fail.
+pub(crate) struct RecencySourceRegistration {
+    pub(crate) name: Arc<str>,
+    pub(crate) callback: RegistryKey,
+}
+
+pub(crate) type RecencySourceCallbacks = BTreeMap<Arc<str>, Vec<RecencySourceRegistration>>;
+
 /// Load and clear requests drain in-flight tools first so we never
 /// mutate a plugin environment while a tool call is still running.
 pub enum Request {
@@ -165,6 +174,9 @@ pub enum Request {
     },
     CollectPromptSlots {
         reply: flume::Sender<craft_agent::prompt::ResolvedSlots>,
+    },
+    CollectRecency {
+        reply: flume::Sender<craft_agent::prompt::RecencyFacts>,
     },
     CollectPluginOptions {
         reply: flume::Sender<PluginOptionSpecs>,
@@ -1217,6 +1229,7 @@ impl LuaRuntime {
         lua.set_app_data(SpawnQueue::default());
         lua.set_app_data(command_writer);
         lua.set_app_data(PromptHintCallbacks::default());
+        lua.set_app_data(RecencySourceCallbacks::default());
         lua.set_app_data(PluginOptionSpecs::default());
         lua.set_app_data(HintStore::new());
         lua.set_app_data(crate::api::hooks::HookHandlerMap::new());
@@ -1324,6 +1337,15 @@ impl LuaRuntime {
                     && let Err(e) = self.lua.remove_registry_value(key)
                 {
                     tracing::warn!(plugin = name, error = %e, "failed to drop prompt hint callback key");
+                }
+            }
+        }
+        if let Some(mut sources) = self.lua.app_data_mut::<RecencySourceCallbacks>()
+            && let Some(regs) = sources.remove(name)
+        {
+            for reg in regs {
+                if let Err(e) = self.lua.remove_registry_value(reg.callback) {
+                    tracing::warn!(plugin = name, error = %e, "failed to drop recency source callback key");
                 }
             }
         }
@@ -1435,6 +1457,51 @@ impl LuaRuntime {
         }
 
         slots
+    }
+
+    /// Drain every registered recency source, evaluate each callback once,
+    /// and collect the non-empty string results into a fresh
+    /// [`craft_agent::prompt::RecencyFacts`]. Built from scratch every turn
+    /// and never persisted.
+    async fn collect_recency(&self) -> craft_agent::prompt::RecencyFacts {
+        let items: Vec<(Arc<str>, Arc<str>, Function)> = {
+            let Some(map) = self.lua.app_data_ref::<RecencySourceCallbacks>() else {
+                return craft_agent::prompt::RecencyFacts::new();
+            };
+            map.iter()
+                .flat_map(|(plugin, regs)| {
+                    regs.iter().filter_map(|reg| {
+                        let func = self.lua.registry_value::<Function>(&reg.callback).ok()?;
+                        Some((Arc::clone(plugin), Arc::clone(&reg.name), func))
+                    })
+                })
+                .collect()
+        };
+
+        let mut facts = craft_agent::prompt::RecencyFacts::new();
+        for (plugin, name, func) in items {
+            let result: mlua::Result<LuaValue> = run_detached(&self.lua, async {
+                let thread = self.lua.create_thread(func)?;
+                thread.into_async::<LuaValue>(())?.await
+            })
+            .await;
+            match result {
+                Ok(LuaValue::String(s)) => facts.push(s.to_string_lossy().to_string()),
+                Ok(LuaValue::Nil) => {}
+                Ok(_) => tracing::warn!(
+                    plugin = %plugin,
+                    source = %name,
+                    "recency source returned non-string"
+                ),
+                Err(e) => tracing::warn!(
+                    plugin = %plugin,
+                    source = %name,
+                    error = %e,
+                    "recency source callback failed"
+                ),
+            }
+        }
+        facts
     }
 
     fn drain_pending(&self) -> Vec<PendingTool> {
@@ -2327,6 +2394,10 @@ pub fn spawn(
                         Request::CollectPromptSlots { reply } => {
                             let slots = rt.collect_prompt_slots().await;
                             let _ = reply.send(slots);
+                        }
+                        Request::CollectRecency { reply } => {
+                            let facts = rt.collect_recency().await;
+                            let _ = reply.send(facts);
                         }
                         Request::CollectPluginOptions { reply } => {
                             let _ = reply.send(collect_plugin_options(&rt.lua));

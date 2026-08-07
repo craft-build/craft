@@ -520,11 +520,13 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
 
 #[cfg(test)]
 mod tests {
+    use crate::{ContentBlock, Message, Role};
+    use serde_json::Value;
     use test_case::test_case;
 
     use super::{
-        LONG_CONTEXT_SUFFIX, LONG_CONTEXT_WINDOW, has_native_1m, long_context_window,
-        strip_long_context,
+        LONG_CONTEXT_SUFFIX, LONG_CONTEXT_WINDOW, build_wire_messages, has_native_1m,
+        long_context_window, strip_long_context,
     };
 
     #[test_case("claude-opus-4-8-1m", "claude-opus-4-8" ; "strips_suffix")]
@@ -566,5 +568,78 @@ mod tests {
     #[test_case("claude-haiku-4-5", 200_000 ; "base_model")]
     fn long_context_window_for_native_1m(model_id: &str, expected: u32) {
         assert_eq!(long_context_window(model_id).unwrap_or(200_000), expected);
+    }
+
+    /// Two requests that differ only in the recency tail of the final user
+    /// message must share an identical cached prefix. Every message before the
+    /// last is byte-identical; the last message differs only in its appended
+    /// tail block, and that tail block carries the ephemeral cache breakpoint
+    /// so it is the uncached suffix. See `docs/feature-primacy-recency-slotting.md`.
+    #[test]
+    fn recency_tail_keeps_cached_prefix_stable() {
+        let base = vec![
+            Message::user("hello".into()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "hi there".into(),
+                }],
+                ..Default::default()
+            },
+            Message::user("do the thing".into()),
+        ];
+
+        let with_tail_a = {
+            let mut m = base.clone();
+            m.last_mut().unwrap().content.push(ContentBlock::Text {
+                text: "<turn-context>\n\nstate: A".into(),
+            });
+            m
+        };
+        let with_tail_b = {
+            let mut m = base.clone();
+            m.last_mut().unwrap().content.push(ContentBlock::Text {
+                text: "<turn-context>\n\nstate: B".into(),
+            });
+            m
+        };
+
+        let wire_a = build_wire_messages(&with_tail_a);
+        let wire_b = build_wire_messages(&with_tail_b);
+        let json_a: Vec<Value> = wire_a
+            .iter()
+            .map(|w| serde_json::to_value(w).unwrap())
+            .collect();
+        let json_b: Vec<Value> = wire_b
+            .iter()
+            .map(|w| serde_json::to_value(w).unwrap())
+            .collect();
+
+        assert_eq!(json_a.len(), json_b.len());
+        // Every message before the last is identical between the two requests.
+        for (a, b) in json_a[..json_a.len() - 1]
+            .iter()
+            .zip(json_b[..json_b.len() - 1].iter())
+        {
+            assert_eq!(a, b, "cached prefix message differs between requests");
+        }
+
+        // The final message differs only in the tail block's text.
+        let last_a = json_a.last().unwrap();
+        let last_b = json_b.last().unwrap();
+        let blocks_a = last_a["content"].as_array().unwrap();
+        let blocks_b = last_b["content"].as_array().unwrap();
+        assert_eq!(blocks_a.len(), blocks_b.len());
+        for (a, b) in blocks_a[..blocks_a.len() - 1]
+            .iter()
+            .zip(blocks_b[..blocks_b.len() - 1].iter())
+        {
+            assert_eq!(a, b);
+        }
+
+        // The ephemeral breakpoint lands on the final (tail) block, so the
+        // recency tail is the uncached suffix and the prefix stays cached.
+        let tail_block = blocks_a.last().unwrap();
+        assert_eq!(tail_block["cache_control"]["type"], "ephemeral");
     }
 }

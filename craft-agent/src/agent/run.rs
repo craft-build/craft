@@ -195,6 +195,7 @@ pub struct Agent<'h> {
     /// the natural one, so the host can re-prompt for goal approval. Cleared
     /// after the run ends.
     pending_approval_stop: Option<StopReason>,
+    recency_source: Option<Arc<dyn crate::prompt::RecencySource>>,
 }
 
 const MAX_JUDGE_CONTINUATIONS: u8 = 5;
@@ -291,6 +292,7 @@ impl<'h> Agent<'h> {
             thread_id: super::typed_log::ThreadId::new(""),
             flow_progress_tx: params.flow_progress_tx,
             pending_approval_stop: None,
+            recency_source: None,
         }
     }
 
@@ -364,6 +366,31 @@ impl<'h> Agent<'h> {
     pub fn with_repo_map(mut self, repo_map: Option<craft_repomap::RepoMap>) -> Self {
         self.repo_map = repo_map;
         self
+    }
+
+    /// Provide a per-turn volatile-facts source. When set, the agent rebuilds a
+    /// [`crate::prompt::RecencyFacts`] every turn and appends its rendered tail
+    /// to the latest user message at request-build time. `None` (the default)
+    /// leaves provider requests byte-identical to today.
+    pub fn with_recency_source(
+        mut self,
+        source: Option<Arc<dyn crate::prompt::RecencySource>>,
+    ) -> Self {
+        self.recency_source = source;
+        self
+    }
+
+    /// Collect volatile facts for this turn and, if any, return a copy of
+    /// `messages` with the rendered tail appended to the last user message.
+    /// Returns `None` when there is no source or nothing to inject, leaving
+    /// the request byte-identical to today. `self.history` is never touched:
+    /// the recency tail is a request-time decoration only.
+    fn attach_recency_tail(&self, messages: &[Message]) -> Option<Vec<Message>> {
+        let source = self.recency_source.as_ref()?;
+        let facts = source.collect(&crate::prompt::RecencyCtx {
+            turn: self.num_turns,
+        });
+        append_recency_tail(messages, &facts)
     }
 
     async fn build_intent(&self) -> Option<Vec<f32>> {
@@ -710,6 +737,9 @@ impl<'h> Agent<'h> {
         } else {
             base_messages
         };
+
+        let recency_messages = self.attach_recency_tail(messages);
+        let messages = recency_messages.as_deref().unwrap_or(messages);
 
         let response = match stream_with_retry(
             &*self.provider,
@@ -1801,6 +1831,28 @@ impl<'h> Agent<'h> {
 }
 
 const CHARS_PER_TOKEN: usize = 4;
+
+/// Append the rendered recency tail to the last user message in `messages`.
+/// Returns `None` when `facts` is empty or there is no user message to attach
+/// to, leaving the request unchanged. Prior messages and the system prompt are
+/// never modified.
+fn append_recency_tail(
+    messages: &[Message],
+    facts: &crate::prompt::RecencyFacts,
+) -> Option<Vec<Message>> {
+    if facts.is_empty() {
+        return None;
+    }
+    let tail = facts.render();
+    let last_user = messages
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User))?;
+    let mut out = messages.to_vec();
+    out[last_user]
+        .content
+        .push(ContentBlock::Text { text: tail });
+    Some(out)
+}
 
 pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
     if messages.is_empty() {
@@ -3306,5 +3358,60 @@ mod tests {
         let agent = Agent::new(params, run_params);
         // No user message in history yet.
         assert!(agent.memory_extraction_ctx().is_none());
+    }
+
+    #[test]
+    fn append_recency_tail_empty_is_noop() {
+        let messages = vec![
+            Message::user("hello".into()),
+            Message::observation("obs".into()),
+        ];
+        let facts = crate::prompt::RecencyFacts::new();
+        assert!(append_recency_tail(&messages, &facts).is_none());
+    }
+
+    #[test]
+    fn append_recency_tail_lands_only_on_last_user_message() {
+        let messages = vec![
+            Message::user("first".into()),
+            Message::observation("middle".into()),
+            Message::user("latest".into()),
+        ];
+        let mut facts = crate::prompt::RecencyFacts::new();
+        facts.push("fresh state".into());
+
+        let out = append_recency_tail(&messages, &facts).expect("non-empty facts attach");
+        assert_eq!(out.len(), messages.len());
+
+        // First user message untouched.
+        assert_eq!(out[0].content.len(), 1);
+        // Observation (non-user) untouched.
+        assert_eq!(out[1].content.len(), 1);
+        // Last user message gained exactly one tail block.
+        assert_eq!(out[2].content.len(), 2);
+        let ContentBlock::Text { text: tail } = &out[2].content[1] else {
+            panic!("expected text tail block");
+        };
+        assert!(tail.starts_with("<turn-context>"));
+        assert!(tail.contains("fresh state"));
+
+        // Original slice is unchanged: the tail is not persisted.
+        assert_eq!(messages[2].content.len(), 1);
+    }
+
+    #[test]
+    fn append_recency_tail_no_user_role_message_is_noop() {
+        // Observations travel as user-role messages, so a truly user-less
+        // history is one with only assistant messages.
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "assistant reply".into(),
+            }],
+            ..Default::default()
+        }];
+        let mut facts = crate::prompt::RecencyFacts::new();
+        facts.push("x".into());
+        assert!(append_recency_tail(&messages, &facts).is_none());
     }
 }

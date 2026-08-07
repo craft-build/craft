@@ -16,7 +16,7 @@ pub use api::util::command::{
     WinCommand, WinEvent, WinView,
 };
 pub use error::PluginError;
-pub use loader::{EventHandle, PluginHost};
+pub use loader::{EventHandle, LuaRecencySource, PluginHost};
 pub use plugin_permissions::{Permission, PluginPermissions, denied_error};
 pub use runtime::{KILL_GRACE, RestoreItem, SharedSandboxConfig};
 pub use terminal_backend::{

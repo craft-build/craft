@@ -225,6 +225,67 @@ pub fn assemble_raw(template: &str, slots: &ResolvedSlots, instructions: &str) -
     out.replace(INSTRUCTIONS_MARKER, instructions)
 }
 
+const RECENCY_HEADER: &str = "<turn-context>";
+
+/// A small, per-turn bundle of volatile facts rendered onto the latest user
+/// message at request-build time. Unlike [`Slot`] content it never enters the
+/// system prompt (which would break prompt-cache stability) and is never
+/// persisted to [`History`](crate::agent::history::History); it is rebuilt from
+/// scratch every turn and discarded after the request. This is the recency
+/// channel described in `docs/feature-primacy-recency-slotting.md`.
+#[derive(Debug, Clone, Default)]
+pub struct RecencyFacts {
+    blocks: Vec<String>,
+}
+
+impl RecencyFacts {
+    pub fn new() -> Self {
+        Self { blocks: Vec::new() }
+    }
+
+    pub fn push(&mut self, block: String) {
+        if !block.is_empty() {
+            self.blocks.push(block);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Render the blocks under a single header. Returns an empty string when
+    /// there is nothing to inject, so an empty [`RecencyFacts`] is a no-op for
+    /// the request builder.
+    pub fn render(&self) -> String {
+        if self.blocks.is_empty() {
+            return String::new();
+        }
+        let mut out = String::with_capacity(64);
+        out.push_str(RECENCY_HEADER);
+        out.push_str("\n\n");
+        out.push_str(&self.blocks.join("\n\n"));
+        out
+    }
+}
+
+/// Handed to a [`RecencySource`] each turn. Carries the minimal signal a
+/// volatile source needs today; extend it only when a real source requires
+/// more, keeping the per-turn surface small.
+#[derive(Debug, Clone, Copy)]
+pub struct RecencyCtx {
+    pub turn: u32,
+}
+
+/// Extension point for per-turn volatile facts. The host (e.g. the Lua plugin
+/// runtime) supplies one concrete implementation; the agent holds it as
+/// `Option<Arc<dyn RecencySource>>` and consults it once per turn, mirroring
+/// how [`InterruptSource`](crate::InterruptSource) and other host-side
+/// concerns are injected. Kept in `craft-agent` (not `craft-lua`) so the
+/// agent never depends on the plugin layer.
+pub trait RecencySource: Send + Sync {
+    fn collect(&self, ctx: &RecencyCtx) -> RecencyFacts;
+}
+
 fn fill_marker(template: &str, marker: &str, content: &str) -> String {
     if content.is_empty() {
         return template
@@ -508,5 +569,30 @@ mod tests {
         let out = assemble(PromptId::System, &s, "");
         assert!(out.contains("Never assume a library is available"));
         assert!(out.contains("- Extra rule"));
+    }
+
+    #[test]
+    fn recency_facts_empty_renders_nothing() {
+        let facts = RecencyFacts::new();
+        assert!(facts.is_empty());
+        assert_eq!(facts.render(), "");
+    }
+
+    #[test]
+    fn recency_facts_push_empty_block_is_ignored() {
+        let mut facts = RecencyFacts::new();
+        facts.push(String::new());
+        assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn recency_facts_renders_header_and_joined_blocks() {
+        let mut facts = RecencyFacts::new();
+        facts.push("state: clean".into());
+        facts.push("todo: 3 items".into());
+        let rendered = facts.render();
+        assert!(rendered.starts_with("<turn-context>\n\n"));
+        assert!(rendered.contains("state: clean\n\ntodo: 3 items"));
+        assert!(!facts.is_empty());
     }
 }

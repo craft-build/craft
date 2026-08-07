@@ -315,7 +315,11 @@ impl AgentLoop {
                 .then(craft_repomap::RepoMap::try_from_cwd)
                 .flatten()
                 .map(|rm| rm.with_max_tokens(self.config.repomap.max_tokens)),
-        );
+        )
+        .with_recency_source(Some(Arc::new(craft_lua::LuaRecencySource::new(
+            self.lua_handle.clone(),
+        ))
+            as Arc<dyn craft_agent::prompt::RecencySource>));
 
         let agent = {
             let role = craft_providers::roles::resolve_role(
@@ -464,7 +468,11 @@ impl AgentLoop {
                     .then(craft_repomap::RepoMap::try_from_cwd)
                     .flatten()
                     .map(|rm| rm.with_max_tokens(self.config.repomap.max_tokens)),
-            );
+            )
+            .with_recency_source(Some(Arc::new(craft_lua::LuaRecencySource::new(
+                self.lua_handle.clone(),
+            ))
+                as Arc<dyn craft_agent::prompt::RecencySource>));
 
             let cancelled = tokio::select! {
                 biased;
