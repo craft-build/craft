@@ -37,6 +37,7 @@ pub enum ModelRole {
     FlowQa,
     FlowIntegrator,
     FlowVerifier,
+    MemoryExtractor,
 }
 
 impl ModelRole {
@@ -52,6 +53,7 @@ impl ModelRole {
         ModelRole::FlowQa,
         ModelRole::FlowIntegrator,
         ModelRole::FlowVerifier,
+        ModelRole::MemoryExtractor,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -67,6 +69,7 @@ impl ModelRole {
             ModelRole::FlowQa => "qa",
             ModelRole::FlowIntegrator => "integrator",
             ModelRole::FlowVerifier => "verifier",
+            ModelRole::MemoryExtractor => "memory_extractor",
         }
     }
 }
@@ -86,8 +89,9 @@ impl std::str::FromStr for ModelRole {
             "qa" => Ok(ModelRole::FlowQa),
             "integrator" => Ok(ModelRole::FlowIntegrator),
             "verifier" => Ok(ModelRole::FlowVerifier),
+            "memory_extractor" => Ok(ModelRole::MemoryExtractor),
             other => Err(format!(
-                "unknown model role '{other}'; expected one of default, advisor, scout, tpm, plan, req, execute, review, qa, integrator, verifier"
+                "unknown model role '{other}'; expected one of default, advisor, scout, tpm, plan, req, execute, review, qa, integrator, verifier, memory_extractor"
             )),
         }
     }
@@ -185,6 +189,7 @@ mod tests {
     #[test_case(ModelRole::Advisor, "advisor")]
     #[test_case(ModelRole::FlowScout, "scout")]
     #[test_case(ModelRole::FlowVerifier, "verifier")]
+    #[test_case(ModelRole::MemoryExtractor, "memory_extractor")]
     fn role_roundtrips_str(role: ModelRole, s: &str) {
         assert_eq!(role.as_str(), s);
     }

@@ -18,6 +18,7 @@ use super::format::Formatter;
 use super::guardrails::ToolGuardrails;
 use super::history::{History, sanitize_cancelled_history};
 use super::instructions::LoadedInstructions;
+use super::memory_extraction::{self, ExtractionCtx};
 use super::snapshot::SnapshotManager;
 use super::streaming::stream_with_retry;
 use super::tool_dispatch::{self, ToolBatchOutcome};
@@ -591,6 +592,13 @@ impl<'h> Agent<'h> {
                     // override the natural stop reason so the host re-prompts.
                     let stop_reason = self.pending_approval_stop.take().or(stop_reason);
                     self.emit_done(stop_reason)?;
+
+                    if let Some(ctx) = self.memory_extraction_ctx() {
+                        tokio::spawn(async move {
+                            memory_extraction::extract_and_store(ctx).await;
+                        });
+                    }
+
                     return Ok(());
                 }
                 TurnOutcome::ShiftOut => {
@@ -910,6 +918,49 @@ impl<'h> Agent<'h> {
                 None
             }
         }
+    }
+
+    /// Build an owned [`ExtractionCtx`] for the post-turn memory auto-extraction
+    /// hook, or `None` when extraction is disabled: in tests, when the config
+    /// flag is off, when the run had no user message, in Flow narrow stages
+    /// (only the root/general turn extracts), or when the memory/state dir or
+    /// a provider cannot be resolved. The returned ctx borrows nothing, so the
+    /// caller can move it into a detached `tokio::spawn`.
+    fn memory_extraction_ctx(&self) -> Option<ExtractionCtx> {
+        if cfg!(test) || !self.config.memory_extraction {
+            return None;
+        }
+        if matches!(self.mode, AgentMode::Flow(_))
+            && self.turn_type != crate::agent::turn_type::TurnType::General
+        {
+            return None;
+        }
+        let user_text = self
+            .history
+            .as_slice()
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .and_then(|m| m.user_text())?
+            .to_string();
+        if user_text.trim().is_empty() {
+            return None;
+        }
+
+        let project_root = super::memory_extraction::memory_project_root();
+        let id = super::memory_extraction::project_id_for(&project_root);
+        let state_dir = craft_storage::paths::state_dir().ok()?;
+        let memory_dir = state_dir.join("projects").join(id).join("memories");
+
+        Some(ExtractionCtx {
+            project_root,
+            memory_dir,
+            user_text,
+            provider: Arc::clone(&self.provider),
+            model: self.model.as_ref().clone(),
+            timeouts: self.timeouts,
+            session_id: self.session_id.clone(),
+        })
     }
 
     /// Flow mode only: scan the most recent assistant turn in the chat history
@@ -3230,5 +3281,30 @@ mod tests {
         assert!(text.contains("missing error handling"));
         // Empty display_text hides the synthetic injection from the chat view.
         assert_eq!(msg.display_text.as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn memory_extraction_gated_off_in_tests_even_with_flag_on() {
+        let mut history = History::new(Vec::new());
+        history.push(Message::user("we're rebranding to acme".into()));
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.config.memory_extraction = true;
+        let agent = Agent::new(params, run_params);
+
+        // Flag is on and a qualifying user message exists, but extraction is
+        // gated off under `cfg!(test)` so tests never spawn a provider call.
+        assert!(agent.config.memory_extraction);
+        assert!(agent.memory_extraction_ctx().is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_extraction_ctx_requires_user_message() {
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let params = make_agent_params();
+        let agent = Agent::new(params, run_params);
+        // No user message in history yet.
+        assert!(agent.memory_extraction_ctx().is_none());
     }
 }

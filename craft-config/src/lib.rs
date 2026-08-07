@@ -1575,6 +1575,9 @@ pub struct AgentConfig {
 
     #[config(skip, default = "RepoMapConfig::default()")]
     pub repomap: RepoMapConfig,
+
+    #[config(skip, default = "true")]
+    pub memory_extraction: bool,
 }
 
 impl AgentConfig {
@@ -1626,6 +1629,7 @@ impl AgentConfig {
             max_turns: None,
             judge_model: file.judge_model,
             repomap: RepoMapConfig::default(),
+            memory_extraction: true,
         }
     }
 

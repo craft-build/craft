@@ -14,6 +14,7 @@ mod history;
 mod inplace_edit;
 mod instructions;
 mod judge;
+pub(crate) mod memory_extraction;
 mod read_lifecycle;
 pub(crate) mod recovery;
 pub(crate) mod retrieve;
