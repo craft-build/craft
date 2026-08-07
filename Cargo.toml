@@ -94,7 +94,7 @@ craft-repomap = { path = "craft-repomap" }
 craft-sandbox = { path = "craft-sandbox" }
 playwright-rs = { version = "0.15", default-features = false, features = ["macros", "aws-lc", "rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1", default-features = false, features = ["v4", "v7", "std"] }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }

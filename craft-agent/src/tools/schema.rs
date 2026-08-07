@@ -1281,4 +1281,31 @@ mod tests {
         assert_eq!(result, json!({"type": "object", "properties": {}}));
         assert!(result.get("additionalProperties").is_none());
     }
+
+    // LLMs commit to tool arguments left-to-right, so the wire order of a
+    // schema's `properties` keys is part of the prompt. `serde_json`'s
+    // `preserve_order` feature (workspace-wide) keeps insertion order; these
+    // tests pin the wire order of the sensitive Rust tools so a serde upgrade
+    // or accidental re-alphabetization cannot silently change it. Lua/MCP
+    // tools (bash, todo_write, memory) arrive via `try_from_json`, whose
+    // iteration now also preserves author order; their order is intentionally
+    // not pinned here.
+    fn assert_property_order(schema_json: &Value, props: &[&str]) {
+        let properties = schema_json["properties"]
+            .as_object()
+            .expect("tool schema has a properties object");
+        let order: Vec<&str> = properties.keys().map(String::as_str).collect();
+        assert_eq!(
+            order, props,
+            "properties not in autoregressive order: {schema_json}"
+        );
+    }
+
+    #[test_case(crate::tools::edit::Edit::schema(), &["path", "old_string", "new_string", "replace_all", "occurrence"] ; "edit_locate_before_replace")]
+    #[test_case(crate::tools::write::Write::schema(), &["path", "content"] ; "write_locate_before_payload")]
+    #[test_case(crate::tools::multiedit::MultiEdit::schema(), &["path", "edits"] ; "multiedit_locate_before_payload")]
+    #[test_case(crate::tools::apply_patch::ApplyPatch::schema(), &["patch_text"] ; "apply_patch_single_payload")]
+    fn native_tool_properties_preserve_declaration_order(schema: Value, props: &[&str]) {
+        assert_property_order(&schema, props);
+    }
 }
