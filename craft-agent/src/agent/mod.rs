@@ -1,6 +1,6 @@
 pub mod advisor;
 mod cache;
-mod compaction;
+pub(crate) mod compaction;
 pub(crate) mod compression_store;
 mod dedup;
 mod doom;
@@ -28,10 +28,9 @@ mod ttsr;
 pub mod turn_type;
 pub mod typed_log;
 mod validation;
-pub(crate) mod vcc;
-pub(crate) mod vcc_recall;
 
 pub(crate) mod threads;
+pub(crate) use compaction::{vcc, vcc_recall};
 
 mod embed_types;
 pub use embed_types::EmbedRequest;

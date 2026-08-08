@@ -13,7 +13,7 @@ use tracing::info;
 const CACHE_READ_DISCOUNT: f32 = 0.90;
 const CACHE_WRITE_PENALTY: f32 = 0.25;
 
-pub(super) struct PrefixCacheTracker {
+pub(crate) struct PrefixCacheTracker {
     /// Number of messages confirmed to be in the provider's KV cache.
     frozen_count: usize,
 }
