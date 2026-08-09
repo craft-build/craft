@@ -7,9 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-09
+
+### Added
+
+- **agent**: per-turn recency prompt channel (`083086e6`)
+- **agent**: post-turn memory auto-extraction (`c1112414`)
+- **agent**: preserve tool schema property order for autoregressive generation (`92ebf974`)
+- **lua**: scope background jobs to their plugin (`f69ee448`)
+- **lua**: emit tool lifecycle events (`9b4c102e`)
+- **agent**: resilience fault-injection harness over the provider seam (`63de112d`)
+
+### Changed
+
+- **agent**: split compaction module into domain submodules (`ef18a28a`)
+- **agent**: split `run.rs` god object into `agent_loop/` subtypes (`094a5e82`)
+- **docs**: remove out of date documentation (`72ba6354`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`ast-grep-core` 0.45.1, `async-trait` 0.1.92, `aws-lc-rs` 1.18.0, `aws-lc-sys` 0.44.0, `base64` 0.23.1, `clap` 4.6.6, `clap_builder` 4.6.6, `clap_complete` 4.6.9, `cookie` 0.18.2, `find-msvc-tools` 0.1.10, `minijinja` 2.23.0, `open` 5.4.1, `portable-atomic` 1.15.0, `serde_with` 3.22.0, `thiserror` 2.0.20, `tree-sitter` 0.26.12, `tree-sitter-scala` 0.26.2, `two-face` 0.5.2+bat-0.26.1, `ureq` 3.4.0, `wasm-bindgen` 0.2.127, `zerocopy` 0.8.56, `zune-core` 0.5.3)
+
 ### Fixed
 
-- **providers**: emit the OpenAI-standard `name` field on tool result messages so strict backends (e.g. Kimi K3 via Synthetic) can resolve tool results without relying solely on call order, fixing `400 tool messages need a resolvable tool name` errors
+- **providers**: emit the OpenAI-standard `name` field on tool result messages so strict backends (e.g. Kimi K3 via Synthetic) can resolve tool results without relying solely on call order, fixing `400 tool messages need a resolvable tool name` errors (`d7c907ab`)
+- **providers**: hide paid opencode models when not authenticated (`6f569ab2`)
 
 ## [0.11.4] - 2026-08-05
 
@@ -1543,7 +1562,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/craft-build/craft/compare/v0.11.4...v0.12.0
 [0.11.4]: https://github.com/craft-build/craft/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/craft-build/craft/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/craft-build/craft/compare/v0.11.1...v0.11.2
