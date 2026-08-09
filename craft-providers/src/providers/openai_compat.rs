@@ -252,6 +252,15 @@ impl OpenAiCompatProvider {
 pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
     let mut out = vec![json!({"role": "system", "content": system})];
 
+    let tool_names: std::collections::HashMap<&str, &str> = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+
     for msg in messages {
         match msg.role {
             Role::User => {
@@ -274,11 +283,15 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                             images,
                             ..
                         } => {
-                            tool_results.push(json!({
+                            let mut tool_msg = json!({
                                 "role": "tool",
                                 "tool_call_id": tool_use_id,
                                 "content": content,
-                            }));
+                            });
+                            if let Some(name) = tool_names.get(tool_use_id.as_str()) {
+                                tool_msg["name"] = Value::String((*name).to_string());
+                            }
+                            tool_results.push(tool_msg);
                             if !images.is_empty() {
                                 let mut parts = Vec::with_capacity(images.len() + 1);
                                 parts.push(json!({
@@ -1142,6 +1155,7 @@ data: [DONE]\n";
         let tool_msg = &wire[2];
         assert_eq!(tool_msg["role"], "tool");
         assert_eq!(tool_msg["tool_call_id"], "tc_img");
+        assert_eq!(tool_msg["name"], "browser_screenshot");
         assert_eq!(tool_msg["content"], "screenshot of https://example.com");
 
         let user_img_msg = &wire[3];
@@ -1162,5 +1176,54 @@ data: [DONE]\n";
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
+    }
+
+    #[test]
+    fn convert_messages_tool_result_carries_name_field() {
+        let messages = vec![
+            Message::user("run two tools".to_string()),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::tool_use("tc_a", "bash", json!({"command": "ls"})),
+                    ContentBlock::tool_use("tc_b", "read", json!({"path": "x"})),
+                ],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tc_b".to_string(),
+                        content: "x contents".to_string(),
+                        images: Vec::new(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tc_a".to_string(),
+                        content: "dir listing".to_string(),
+                        images: Vec::new(),
+                        is_error: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+
+        let wire = convert_messages(&messages, "");
+
+        let tool_msgs: Vec<&Value> = wire.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tool_msgs.len(), 2);
+
+        // Each tool message carries a resolvable name, so strict backends (e.g.
+        // Kimi K3) can resolve the tool even though the results arrive out of
+        // order relative to the assistant's parallel tool calls.
+        assert_eq!(tool_msgs[0]["tool_call_id"], "tc_b");
+        assert_eq!(tool_msgs[0]["name"], "read");
+        assert_eq!(tool_msgs[0]["content"], "x contents");
+
+        assert_eq!(tool_msgs[1]["tool_call_id"], "tc_a");
+        assert_eq!(tool_msgs[1]["name"], "bash");
+        assert_eq!(tool_msgs[1]["content"], "dir listing");
     }
 }

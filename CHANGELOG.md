@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **providers**: emit the OpenAI-standard `name` field on tool result messages so strict backends (e.g. Kimi K3 via Synthetic) can resolve tool results without relying solely on call order, fixing `400 tool messages need a resolvable tool name` errors
+
 ## [0.11.4] - 2026-08-05
 
 ### Fixed
