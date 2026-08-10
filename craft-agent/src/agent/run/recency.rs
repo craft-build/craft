@@ -67,6 +67,8 @@ impl<'h> Agent<'h> {
             self.compaction.cache_tracker.frozen_count(),
             &|idx| self.history.message_token_estimate(&self.io.model, idx),
         );
+        let selected =
+            crate::agent::semantic::expand_tool_pairs(self.history.as_slice(), &selected);
         if selected.len() < self.history.len() {
             info!(
                 total = self.history.len(),

@@ -283,15 +283,20 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                             images,
                             ..
                         } => {
-                            let mut tool_msg = json!({
+                            // Drop results whose tool_use is absent from the
+                            // outgoing messages (e.g. dropped by context
+                            // curation). Strict backends reject these as
+                            // unresolvable tool messages (400: tool_call_id not
+                            // found / need a resolvable tool name).
+                            let Some(name) = tool_names.get(tool_use_id.as_str()) else {
+                                continue;
+                            };
+                            tool_results.push(json!({
                                 "role": "tool",
                                 "tool_call_id": tool_use_id,
                                 "content": content,
-                            });
-                            if let Some(name) = tool_names.get(tool_use_id.as_str()) {
-                                tool_msg["name"] = Value::String((*name).to_string());
-                            }
-                            tool_results.push(tool_msg);
+                                "name": *name,
+                            }));
                             if !images.is_empty() {
                                 let mut parts = Vec::with_capacity(images.len() + 1);
                                 parts.push(json!({
@@ -1225,5 +1230,54 @@ data: [DONE]\n";
         assert_eq!(tool_msgs[1]["tool_call_id"], "tc_a");
         assert_eq!(tool_msgs[1]["name"], "bash");
         assert_eq!(tool_msgs[1]["content"], "dir listing");
+    }
+
+    #[test]
+    fn convert_messages_drops_orphan_tool_results() {
+        // Curation can drop an assistant tool_use while keeping its later
+        // tool_result. The result then has no resolvable tool_call and no name,
+        // which strict backends reject with 400. convert_messages must omit it.
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::tool_use(
+                    "tc_keep",
+                    "read",
+                    json!({"path": "a"}),
+                )],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tc_keep".to_string(),
+                        content: "a contents".to_string(),
+                        images: Vec::new(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tc_orphan".to_string(),
+                        content: "orphaned result".to_string(),
+                        images: Vec::new(),
+                        is_error: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+
+        let wire = convert_messages(&messages, "");
+
+        let tool_msgs: Vec<&Value> = wire.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert_eq!(tool_msgs[0]["tool_call_id"], "tc_keep");
+        assert_eq!(tool_msgs[0]["name"], "read");
+        assert!(!wire.iter().any(|m| {
+            m["tool_call_id"] == "tc_orphan"
+                || m.get("content")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains("orphaned result"))
+        }));
     }
 }

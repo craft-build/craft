@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **agent**: keep tool-use and tool-result rounds together during semantic context curation, and drop orphaned tool results at the OpenAI-compatible provider boundary, fixing `400 tool_call_id not found` / `tool messages need a resolvable tool name` errors on strict backends (e.g. Kimi K3 via Synthetic, Moonshot direct) that halted inference until the session was cleared
+
 ## [0.12.0] - 2026-08-09
 
 ### Added

@@ -1,5 +1,6 @@
 use craft_providers::{ContentBlock, Message};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
@@ -316,6 +317,72 @@ pub fn select_messages(
     selected
 }
 
+/// Force-include every message sharing a tool-use id with a selected message.
+///
+/// `select_messages` scores messages independently, so it can keep a tool
+/// result (high-relevance content) while dropping the assistant `tool_use`
+/// that produced it, or the reverse. Strict OpenAI-compatible backends reject
+/// a tool result whose `tool_call_id` matches no preceding `tool_call`
+/// (400: tool_call_id not found / need a resolvable tool name), and reject a
+/// `tool_call` with no result. Group messages by shared tool-use id and pull
+/// in the whole group whenever any member is selected, so tool rounds survive
+/// curation intact.
+pub fn expand_tool_pairs(messages: &[Message], selected: &[usize]) -> Vec<usize> {
+    let n = messages.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    let find = |parent: &mut [usize], mut x: usize| -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    };
+
+    let mut id_owner: HashMap<&str, usize> = HashMap::new();
+    for (i, msg) in messages.iter().enumerate() {
+        for block in &msg.content {
+            let id = match block {
+                ContentBlock::ToolUse { id, .. } => id.as_str(),
+                ContentBlock::ToolResult { tool_use_id, .. } => tool_use_id.as_str(),
+                _ => continue,
+            };
+            match id_owner.get(id) {
+                Some(&j) => {
+                    let (r_i, r_j) = (find(&mut parent, i), find(&mut parent, j));
+                    if r_i != r_j {
+                        parent[r_i] = r_j;
+                    }
+                }
+                None => {
+                    id_owner.insert(id, i);
+                }
+            }
+        }
+    }
+
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        groups.entry(find(&mut parent, i)).or_default().push(i);
+    }
+
+    let mut out: Vec<usize> = Vec::with_capacity(selected.len());
+    let mut seen: HashSet<usize> = HashSet::new();
+    for &i in selected {
+        if seen.insert(i) {
+            out.push(i);
+        }
+        if let Some(members) = groups.get(&find(&mut parent, i)) {
+            for &j in members {
+                if seen.insert(j) {
+                    out.push(j);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 pub fn detect_stagnation(recent_embeddings: &[Vec<f32>], threshold: f32) -> bool {
     if recent_embeddings.len() < 3 {
         return false;
@@ -559,6 +626,49 @@ mod tests {
         assert!(selected.contains(&1));
         assert!(selected.contains(&6));
         assert!(selected.contains(&7));
+    }
+
+    #[test]
+    fn expand_tool_pairs_keeps_round_together() {
+        // assistant tool_use at 1, result at 2; only the result is selected.
+        // Expansion must pull in the tool_use so the round stays intact.
+        use craft_providers::Role;
+        let messages = vec![
+            Message::user("go".to_string()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::tool_use(
+                    "t1",
+                    "read",
+                    serde_json::json!({"path": "x"}),
+                )],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    content: "x".to_string(),
+                    images: Vec::new(),
+                    is_error: false,
+                }],
+                ..Default::default()
+            },
+        ];
+        let selected = expand_tool_pairs(&messages, &[2]);
+        assert!(selected.contains(&1));
+        assert!(selected.contains(&2));
+    }
+
+    #[test]
+    fn expand_tool_pairs_noop_without_tool_blocks() {
+        let messages = vec![
+            Message::user("a".to_string()),
+            Message::user("b".to_string()),
+            Message::user("c".to_string()),
+        ];
+        let selected = expand_tool_pairs(&messages, &[0, 2]);
+        assert_eq!(selected, vec![0, 2]);
     }
 
     #[test]
