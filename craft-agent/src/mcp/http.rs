@@ -545,6 +545,7 @@ mod tests {
             client_secret: None,
             client_secret_expires_at: None,
             redirect_uri: None,
+            token_endpoint: None,
         }
     }
 
