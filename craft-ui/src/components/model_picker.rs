@@ -104,6 +104,8 @@ pub struct ModelPicker {
     current_spec: String,
     last_spec_count: usize,
     dirty: bool,
+    /// User-moved entry to restore on refresh: `(tab_title, spec)`.
+    anchor: Option<(String, String)>,
     tabs: Vec<Tab>,
     active_tab: usize,
 }
@@ -124,6 +126,7 @@ impl ModelPicker {
             current_spec: String::new(),
             last_spec_count: 0,
             dirty: false,
+            anchor: None,
             tabs: Vec::new(),
             active_tab: 0,
         }
@@ -136,14 +139,11 @@ impl ModelPicker {
 
     pub fn open(&mut self, current_spec: &str) {
         self.current_spec = current_spec.to_owned();
+        self.anchor = None;
+        self.dirty = false;
         self.tabs = self.load_entries();
-        self.active_tab = self
-            .tabs
-            .iter()
-            .position(|t| t.entries.iter().any(|e| e.spec == self.current_spec))
-            .unwrap_or(0);
         self.picker.open(self.active_entries(), TITLE);
-        self.select_current_model();
+        self.preselect_current_model();
     }
 
     fn try_refresh(&mut self) {
@@ -158,11 +158,24 @@ impl ModelPicker {
         drop(guard);
         self.dirty = false;
         self.tabs = self.load_entries();
-        if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len().saturating_sub(1);
-        }
+        let (tab, spec) = match self.anchor.clone() {
+            Some((tab_title, spec)) => (
+                self.tabs
+                    .iter()
+                    .position(|t| t.title == tab_title && t.entries.iter().any(|e| e.spec == spec))
+                    .or_else(|| {
+                        self.tabs
+                            .iter()
+                            .position(|t| t.entries.iter().any(|e| e.spec == spec))
+                    })
+                    .unwrap_or(0),
+                spec,
+            ),
+            None => (self.locate_current_model_tab(), self.current_spec.clone()),
+        };
+        self.active_tab = tab;
         self.picker.replace_items(self.active_entries());
-        self.select_current_model();
+        self.picker.select_item_by(|e| e.spec == spec);
     }
 
     fn active_entries(&self) -> Vec<ModelEntry> {
@@ -172,13 +185,24 @@ impl ModelPicker {
             .unwrap_or_default()
     }
 
-    fn select_current_model(&mut self) {
-        let idx = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|t| t.entries.iter().position(|e| e.spec == self.current_spec))
-            .unwrap_or(0);
-        self.picker.select(idx);
+    fn preselect_current_model(&mut self) {
+        self.active_tab = self.locate_current_model_tab();
+        self.picker.replace_items(self.active_entries());
+        self.picker.select_item_by(|e| e.spec == self.current_spec);
+    }
+
+    fn locate_current_model_tab(&self) -> usize {
+        self.tabs
+            .iter()
+            .position(|t| {
+                t.title != RECENT_SECTION && t.entries.iter().any(|e| e.spec == self.current_spec)
+            })
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .position(|t| t.entries.iter().any(|e| e.spec == self.current_spec))
+            })
+            .unwrap_or(0)
     }
 
     fn load_entries(&mut self) -> Vec<Tab> {
@@ -256,10 +280,14 @@ impl ModelPicker {
     }
 
     pub fn handle_paste(&mut self, text: &str) -> bool {
-        self.picker.handle_paste(text)
+        self.track_anchor(|p| p.picker.handle_paste(text))
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        self.track_anchor(|p| p.handle_key_inner(key))
+    }
+
+    fn handle_key_inner(&mut self, key: KeyEvent) -> ModelPickerAction {
         if self.tabs.len() > 1 {
             match key.code {
                 KeyCode::Tab => {
@@ -278,10 +306,11 @@ impl ModelPicker {
         {
             let spec = entry.spec.clone();
             self.dirty = true;
-            if entry.override_tiers.contains(&tier) {
-                return ModelPickerAction::UnassignTier(spec, tier);
-            }
-            return ModelPickerAction::AssignTier(spec, tier);
+            return if entry.override_tiers.contains(&tier) {
+                ModelPickerAction::UnassignTier(spec, tier)
+            } else {
+                ModelPickerAction::AssignTier(spec, tier)
+            };
         }
         match self.picker.handle_key(key) {
             PickerAction::Consumed => ModelPickerAction::Consumed,
@@ -289,6 +318,27 @@ impl ModelPicker {
             PickerAction::Close => ModelPickerAction::Close,
             PickerAction::Toggle(..) => ModelPickerAction::Consumed,
         }
+    }
+
+    fn track_anchor<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let before_tab = self.active_tab;
+        let before_idx = self.picker.selected_index();
+        let result = f(self);
+        let after_tab = self.active_tab;
+        let after_idx = self.picker.selected_index();
+        if before_tab != after_tab || before_idx != after_idx {
+            self.anchor = self.current_anchor();
+        }
+        result
+    }
+
+    fn current_anchor(&self) -> Option<(String, String)> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let entry = self.picker.selected_item()?;
+        tab.entries
+            .iter()
+            .any(|e| e.spec == entry.spec)
+            .then(|| (tab.title.clone(), entry.spec.clone()))
     }
 
     fn switch_tab(&mut self, delta: i32) {
@@ -299,7 +349,10 @@ impl ModelPicker {
         self.active_tab = ((self.active_tab as i32 + delta).rem_euclid(len)) as usize;
         self.picker.clear_search();
         self.picker.replace_items(self.active_entries());
-        self.select_current_model();
+        self.picker.select_item_by(|e| e.spec == self.current_spec);
+        if let Some(anchor) = self.current_anchor() {
+            self.anchor = Some(anchor);
+        }
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
@@ -548,7 +601,12 @@ mod tests {
         let action = p.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(action, ModelPickerAction::Select(ref s) if s == "zai/glm-5"),
-            "current model should be preselected within Recent",
+            "current model should be preselected in its provider tab",
+        );
+        assert_eq!(
+            p.tabs[p.active_tab].title,
+            zai_display_name(&p),
+            "selection should land on the provider tab, not the Recent copy",
         );
     }
 
@@ -732,5 +790,157 @@ mod tests {
         let action = p.handle_key(key(KeyCode::Tab));
         assert!(matches!(action, ModelPickerAction::Consumed));
         assert_eq!(p.active_tab, initial_tab);
+    }
+
+    #[test]
+    fn reopen_preselects_current_model_in_provider_tab() {
+        let models = test_models();
+        let mut p = ModelPicker::new(models);
+        p.set_recents(vec![
+            "zai/glm-5".into(),
+            "anthropic/claude-sonnet-4-20250514".into(),
+        ]);
+        p.open("anthropic/claude-sonnet-4-20250514");
+        assert_eq!(
+            p.tabs[p.active_tab].title, "Anthropic",
+            "open should land on the provider tab, not the Recent copy",
+        );
+
+        p.open("zai/glm-5");
+        assert_eq!(p.tabs[p.active_tab].title, "Z.AI");
+        let entry = p.picker.selected_item().expect("selection on reopen");
+        assert_eq!(entry.spec, "zai/glm-5");
+    }
+
+    #[test]
+    fn refresh_keeps_selection_on_provider_entry() {
+        let models = Arc::new(ArcSwapOption::empty());
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "zai/glm-5".into(),
+        ])));
+        let mut p = ModelPicker::new(models.clone());
+        p.set_recents(vec![
+            "zai/glm-5".into(),
+            "anthropic/claude-sonnet-4-20250514".into(),
+        ]);
+        p.open("zai/glm-5");
+        assert_eq!(p.tabs[p.active_tab].title, "Z.AI");
+        p.handle_key(key(KeyCode::Char('!')));
+
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "anthropic/claude-opus-4-6-20260101".into(),
+            "zai/glm-5".into(),
+        ])));
+        p.try_refresh();
+
+        let entry = p.picker.selected_item().expect("selection after refresh");
+        assert_eq!(entry.spec, "zai/glm-5");
+        assert_eq!(
+            p.tabs[p.active_tab].title, "Z.AI",
+            "selection should stay on the provider tab, not jump to Recent",
+        );
+    }
+
+    #[test]
+    fn refresh_after_collapse_anchors_to_provider_tab() {
+        let models = Arc::new(ArcSwapOption::empty());
+        let mut p = ModelPicker::new(models.clone());
+        p.set_recents(vec![
+            "zai/glm-5".into(),
+            "anthropic/claude-sonnet-4-20250514".into(),
+        ]);
+        p.open("anthropic/claude-sonnet-4-20250514");
+
+        models.store(None);
+        p.try_refresh();
+        let entry = p.picker.selected_item().expect("selection during collapse");
+        assert_eq!(entry.spec, "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(p.tabs[p.active_tab].title, "Recent");
+
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "anthropic/claude-opus-4-6-20260101".into(),
+            "zai/glm-5".into(),
+        ])));
+        p.try_refresh();
+
+        let entry = p.picker.selected_item().expect("selection after arrival");
+        assert_eq!(entry.spec, "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(
+            p.tabs[p.active_tab].title, "Anthropic",
+            "cursor should migrate to the provider tab once it arrives",
+        );
+    }
+
+    #[test]
+    fn refresh_preserves_navigation_to_recent_tab() {
+        let models = Arc::new(ArcSwapOption::empty());
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "zai/glm-5".into(),
+        ])));
+        let mut p = ModelPicker::new(models.clone());
+        p.set_recents(vec![
+            "zai/glm-5".into(),
+            "anthropic/claude-sonnet-4-20250514".into(),
+        ]);
+        p.open("anthropic/claude-sonnet-4-20250514");
+
+        p.handle_key(key(KeyCode::BackTab));
+        assert_eq!(p.tabs[p.active_tab].title, "Recent");
+
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "anthropic/claude-opus-4-6-20260101".into(),
+            "zai/glm-5".into(),
+        ])));
+        p.try_refresh();
+
+        let entry = p.picker.selected_item().expect("selection after refresh");
+        assert_eq!(
+            p.tabs[p.active_tab].title, "Recent",
+            "user navigation to the Recent tab should survive refresh",
+        );
+        assert!(
+            p.tabs[p.active_tab]
+                .entries
+                .iter()
+                .any(|e| e.spec == entry.spec),
+            "selected entry must belong to the active tab",
+        );
+    }
+
+    #[test]
+    fn refresh_preserves_selection_with_active_search() {
+        let models = Arc::new(ArcSwapOption::empty());
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "zai/glm-5".into(),
+        ])));
+        let mut p = ModelPicker::new(models.clone());
+        p.set_recents(vec![
+            "zai/glm-5".into(),
+            "anthropic/claude-sonnet-4-20250514".into(),
+        ]);
+        p.open("zai/glm-5");
+        assert_eq!(p.tabs[p.active_tab].title, "Z.AI");
+        p.handle_key(key(KeyCode::Char('g')));
+        p.handle_key(key(KeyCode::Char('l')));
+        p.handle_key(key(KeyCode::Char('m')));
+
+        models.store(None);
+        p.try_refresh();
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "anthropic/claude-opus-4-6-20260101".into(),
+            "zai/glm-5".into(),
+        ])));
+        p.try_refresh();
+
+        let entry = p.picker.selected_item().expect("selection after refresh");
+        assert_eq!(entry.spec, "zai/glm-5");
+        assert_eq!(p.tabs[p.active_tab].title, "Z.AI");
     }
 }

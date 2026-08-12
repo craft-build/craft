@@ -11,11 +11,11 @@ Commands run in <cwd> by default.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `background` | boolean | no |  | Run in background, return task_id for later polling |
-| `command` | string | yes |  | The bash command to execute |
-| `description` | string | no |  | Short description (3-5 words) of what the command does |
-| `timeout` | integer | no | 120 | Timeout in seconds |
 | `workdir` | string | no | cwd | Working directory |
+| `timeout` | integer | no | 120 | Timeout in seconds |
+| `command` | string | yes |  | The bash command to execute |
+| `background` | boolean | no |  | Run in background, return task_id for later polling |
+| `description` | string | no |  | Short description (3-5 words) of what the command does |
 
 ### `bash_kill` *(lua plugin)*
 
@@ -31,9 +31,9 @@ Wait for a pattern (substring or Lua pattern) in a background bash task's output
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `pattern` | string | no |  | Substring or Lua pattern to wait for in task output |
-| `task_id` | string | yes |  | The task_id returned by bash |
 | `timeout` | integer | no | 60 | Max seconds to wait |
+| `task_id` | string | yes |  | The task_id returned by bash |
+| `pattern` | string | no |  | Substring or Lua pattern to wait for in task output |
 
 ### `bash_status` *(lua plugin)*
 
@@ -49,9 +49,9 @@ Read a file or directory. Returns contents with line numbers (1-indexed).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `limit` | integer | yes | Max number of lines to read. Use 0 to read until end of file (capped at 2000 lines). |
-| `offset` | integer | yes | Line number to start from (1-indexed). Use 1 for the first line. |
 | `path` | string | yes |  |
+| `offset` | integer | yes | Line number to start from (1-indexed). Use 1 for the first line. |
+| `limit` | integer | yes | Max number of lines to read. Use 0 to read until end of file (capped at 2000 lines). |
 
 ### `write` *(native)*
 
@@ -59,8 +59,8 @@ Write content to a file, replacing existing content.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `content` | string | yes | The complete file content to write |
 | `path` | string | yes |  |
+| `content` | string | yes | The complete file content to write |
 
 ### `edit` *(native)*
 
@@ -68,11 +68,11 @@ Replace an exact string match in a file.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `new_string` | string | yes |  | Replacement string |
-| `occurrence` | integer | no |  | When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error. |
-| `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |
 | `path` | string | yes |  |  |
+| `old_string` | string | yes |  | Exact string to find (must match uniquely unless replace_all is true) |
+| `new_string` | string | yes |  | Replacement string |
 | `replace_all` | boolean | no | false | Replace all occurrences |
+| `occurrence` | integer | no |  | When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error. |
 
 ### `edit_lines` *(native, opt-in)*
 
@@ -80,10 +80,10 @@ Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `end` | integer | yes | Last line, inclusive |
-| `new_string` | string | yes | Replacement text. Empty deletes the range. |
 | `path` | string | yes |  |
 | `start` | integer | yes | First line (1-indexed) |
+| `end` | integer | yes | Last line, inclusive |
+| `new_string` | string | yes | Replacement text. Empty deletes the range. |
 
 ### `insert_lines` *(native, opt-in)*
 
@@ -91,9 +91,9 @@ Insert lines before a given line number. Lines at `line` and below shift down. E
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `path` | string | yes |  |
 | `line` | integer | yes | Line number to insert before (1-indexed). Use 1 to insert at the top. |
 | `new_string` | string | yes | Text to insert |
-| `path` | string | yes |  |
 
 ### `multiedit` *(native)*
 
@@ -102,8 +102,8 @@ Prefer this over edit when making multiple changes to the same file.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `edits` | array | yes | Array of edit operations to apply sequentially |
 | `path` | string | yes |  |
+| `edits` | array | yes | Array of edit operations to apply sequentially |
 
 ### `apply_patch` *(native)*
 
@@ -128,8 +128,8 @@ Move/rename a file or directory and update import references across the project.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `destination` | string | yes | Destination path |
 | `source` | string | yes | Source file or directory path |
+| `destination` | string | yes | Destination path |
 
 ### `glob` *(lua plugin)*
 
@@ -137,8 +137,8 @@ Find files by glob pattern.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `path` | string | no | cwd | Directory to search in |
 | `pattern` | string | yes |  | Glob pattern (e.g. **/*.rs, src/**/*.ts) |
+| `path` | string | no | cwd | Directory to search in |
 
 ### `grep` *(lua plugin)*
 
@@ -146,12 +146,12 @@ Search file contents using regex.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `context_after` | integer | no |  | Context lines after match |
-| `context_before` | integer | no |  | Context lines before match |
 | `include` | string | no |  | File glob filter (e.g. *.c) |
-| `limit` | integer | no |  | Max match groups to return |
 | `path` | string | no | cwd | Directory to search in |
 | `pattern` | string | yes |  | Regex pattern |
+| `context_after` | integer | no |  | Context lines after match |
+| `limit` | integer | no |  | Max match groups to return |
+| `context_before` | integer | no |  | Context lines before match |
 
 ### `outline` *(native)*
 
@@ -159,8 +159,8 @@ Return a structural outline of a file or directory.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `files` | boolean | no | When path is a directory, return a flat file table instead of nested symbols |
 | `path` | string | yes |  |
+| `files` | boolean | no | When path is a directory, return a flat file table instead of nested symbols |
 
 ### `view_image` *(lua plugin)*
 
@@ -178,11 +178,11 @@ Zoom into a specific symbol or line range in a file.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `context_lines` | integer | no | 3 | Lines of context around the symbol body |
-| `end_line` | integer | no |  | End line (1-indexed) for line-range mode |
 | `path` | string | yes |  |  |
-| `start_line` | integer | no |  | Start line (1-indexed) for line-range mode |
 | `symbol` | string | no |  | Symbol name to zoom into (function, struct, class, heading, etc.) |
+| `start_line` | integer | no |  | Start line (1-indexed) for line-range mode |
+| `end_line` | integer | no |  | End line (1-indexed) for line-range mode |
+| `context_lines` | integer | no | 3 | Lines of context around the symbol body |
 
 ### `ast_grep` *(native)*
 
@@ -190,12 +190,12 @@ Search and replace code using AST patterns. More precise than regex for code.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `apply` | boolean | no | dry-run, show diffs only | Apply replacement |
-| `globs` | array | no |  | Glob patterns to include (e.g. ["*.rs", "src/**"]) |
-| `lang` | string | yes |  | Language: rust, typescript, tsx, python, go |
-| `path` | string | no | cwd | Directory or file to search |
 | `pattern` | string | yes |  | AST pattern with $VAR and $$$BODY metavariables |
 | `rewrite` | string | no |  | Replacement pattern (omitting = search-only mode). Uses $VAR refs from pattern. |
+| `lang` | string | yes |  | Language: rust, typescript, tsx, python, go |
+| `path` | string | no | cwd | Directory or file to search |
+| `globs` | array | no |  | Glob patterns to include (e.g. ["*.rs", "src/**"]) |
+| `apply` | boolean | no | dry-run, show diffs only | Apply replacement |
 
 ### `ast_edit` *(native)*
 
@@ -203,11 +203,11 @@ Propose a structural AST rewrite, then commit or discard it with `resolve`. Safe
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `globs` | array | no |  | Glob patterns to include (e.g. ["*.rs", "src/**"]) |
-| `lang` | string | yes |  | Language: rust, typescript, tsx, python, go |
-| `path` | string | no | cwd | Directory or file to search |
 | `pattern` | string | yes |  | AST pattern with $VAR and $$$BODY metavariables |
 | `rewrite` | string | yes |  | Replacement pattern, using $VAR refs from the pattern |
+| `lang` | string | yes |  | Language: rust, typescript, tsx, python, go |
+| `path` | string | no | cwd | Directory or file to search |
+| `globs` | array | no |  | Glob patterns to include (e.g. ["*.rs", "src/**"]) |
 
 ### `resolve` *(native)*
 
@@ -215,8 +215,8 @@ Commit or discard a pending `ast_edit` proposal by its `edit_id`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `action` | string | yes | "apply" to commit the staged edit, or "discard" to drop it |
 | `edit_id` | string | yes | edit_id returned by a prior ast_edit call |
+| `action` | string | yes | "apply" to commit the staged edit, or "discard" to drop it |
 
 ### `callgraph` *(native)*
 
@@ -224,10 +224,10 @@ Intra-file call graph analysis. Traces function/method call relationships within
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `depth` | integer | no | 5 | Max depth for call_tree |
 | `op` | string | yes |  | Operation: call_tree, callers, or impact |
 | `path` | string | yes |  | File path |
 | `symbol` | string | yes |  | Symbol name (function/method/struct) |
+| `depth` | integer | no | 5 | Max depth for call_tree |
 
 ### `inspect` *(native)*
 
@@ -235,8 +235,8 @@ Quick project health check. Scans for TODOs, FIXMEs, HACKs, and git status.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `scope` | string | no | cwd | File or directory to scope |
 | `sections` | string | no | all | Sections: todos, git_status, or all |
+| `scope` | string | no | cwd | File or directory to scope |
 
 ### `conflicts` *(native)*
 
@@ -244,9 +244,9 @@ Find and resolve git merge conflicts in the project.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `index` | integer | no |  | Resolve only the Nth conflict (1-indexed) in each file. Omit to resolve all conflicts in scope. |
 | `path` | string | no | cwd | Directory to scan |
 | `resolve` | string | no |  | Resolve conflicts instead of listing. Values: "@theirs" (incoming/their branch), "@ours" (current/our branch), "@base" (remove both sides). Omit to list. |
+| `index` | integer | no |  | Resolve only the Nth conflict (1-indexed) in each file. Omit to resolve all conflicts in scope. |
 
 ## Safety
 
@@ -313,9 +313,9 @@ Search the current session's full history (across compactions) losslessly. Suppo
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `query` | string | no | Search terms or regex pattern (e.g. 'auth\|login', 'fail.*build'). Multi-word queries are OR-ranked by relevance. Omit to browse recent history. |
 | `expand` | array | no | Entry indices to return full untruncated content for. Works alone or alongside a query. |
 | `page` | integer | no | Page number (1-based) for paginated search results. Default: 1. |
-| `query` | string | no | Search terms or regex pattern (e.g. 'auth\|login', 'fail.*build'). Multi-word queries are OR-ranked by relevance. Omit to browse recent history. |
 
 ### `todo_write` *(lua plugin)*
 
@@ -333,8 +333,8 @@ Spawn a code review subagent that reads files, checks against styleguide rules, 
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `focus_files` | array | no | Files to focus on (optional) |
 | `task` | string | yes | What to review (e.g., 'Review the auth module for security issues') |
+| `focus_files` | array | no | Files to focus on (optional) |
 
 ### `report_finding` *(native)*
 
@@ -342,15 +342,15 @@ Report a code review finding with priority, location, and optional rule referenc
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
+| `title` | string | yes | Imperative title, prefixed with priority (e.g. '[P1] Add error handling') |
 | `body` | string | yes | Markdown body: what, why, rule, fix |
+| `priority` | string | yes | Priority: P0, P1, P2, or P3 |
 | `confidence` | number | yes | Confidence 0.0-1.0 |
 | `file_path` | string | yes | Absolute file path |
-| `line_end` | integer | yes | End line number |
 | `line_start` | integer | yes | Start line number |
-| `priority` | string | yes | Priority: P0, P1, P2, or P3 |
+| `line_end` | integer | yes | End line number |
 | `rule_ids` | array | no | Styleguide rule IDs |
 | `suggestion` | string | no | Suggested fix or code snippet |
-| `title` | string | yes | Imperative title, prefixed with priority (e.g. '[P1] Add error handling') |
 
 ### `read_findings` *(native)*
 
@@ -358,9 +358,9 @@ Retrieve detailed code review findings recorded by review subagents during this 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
+| `priority` | string | no |  | Optional priority filter (P0, P1, P2, P3) |
 | `file_path_contains` | string | no |  | Optional substring match against file_path |
 | `limit` | integer | no | 50 | Maximum findings to return |
-| `priority` | string | no |  | Optional priority filter (P0, P1, P2, P3) |
 
 ## Styleguide
 
@@ -378,11 +378,11 @@ Search for styleguide rules by keywords, rule IDs, or tags. Returns matching rul
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `category` | string | no |  | Filter by category (e.g., 'naming'). Omit to search all. |
-| `language` | string | no |  | Filter by language (e.g., 'rust'). Omit to search all. |
-| `limit` | integer | no | 10 | Maximum results |
 | `query` | string | yes |  | Search query — rule ID, keyword, or phrase |
+| `language` | string | no |  | Filter by language (e.g., 'rust'). Omit to search all. |
+| `category` | string | no |  | Filter by category (e.g., 'naming'). Omit to search all. |
 | `tags` | array | no |  | Filter by tags. |
+| `limit` | integer | no | 10 | Maximum results |
 
 ### `styleguide_get` *(native)*
 
@@ -390,10 +390,10 @@ Fetch specific styleguide rules or entire categories. Can fetch by category, rul
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `category` | string | no | Category to fetch (e.g., 'naming'). Required unless using rule_ids or file_path. |
-| `file_path` | string | no | File path to auto-detect language and get minimal context. |
 | `language` | string | yes | Language code (e.g., 'rust', 'general') |
+| `category` | string | no | Category to fetch (e.g., 'naming'). Required unless using rule_ids or file_path. |
 | `rule_ids` | array | no | Specific rule IDs to fetch. |
+| `file_path` | string | no | File path to auto-detect language and get minimal context. |
 
 ## Agent & Knowledge
 
@@ -403,15 +403,15 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `context_mode` | string | no | Parent context to pass to the subagent:<br>- "none" (default): fresh, no parent history.<br>- "summary": last few parent messages for context.<br>- "full": full parent conversation history. |
 | `description` | string | yes | Short (3-5 words) description of the task |
-| `isolation` | string | no | Isolation mode for a general subagent:<br>- "none" (default): run in the current working tree.<br>- "worktree": run inside a fresh linked git worktree so file mutations do not touch the parent tree (sibling subagents cannot clobber each other). Requires a git repo; falls back to none otherwise. |
-| `model` | string | no | Exact model spec (optional, mutually exclusive with model_tier and model_role), e.g. "anthropic/claude-opus-4-8". You tell craft the model; craft will not guess. Overrides model_tier and model_role. |
-| `model_role` | string | no | Model role (optional, mutually exclusive with model_tier and model). When set, resolves the subagent's model from model_roles.toml by role name (e.g. "scout", "advisor"). Unset roles fall back to the current model. Cannot be combined with model_tier or model. |
-| `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
-| `output_schema` | string | no | Optional JSON Schema (object) describing the structured object the subagent must return as its final message. When set, the subagent is told to emit a final JSON object matching the schema; that object is validated and returned to you as structured data instead of prose. On validation failure the subagent is re-prompted (bounded), then a clean error is surfaced. |
 | `prompt` | string | yes | Detailed task prompt for the agent |
 | `subagent_type` | string | no | Subagent type: "research" (read-only, default) or "general" (can modify files) |
+| `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
+| `model_role` | string | no | Model role (optional, mutually exclusive with model_tier and model). When set, resolves the subagent's model from model_roles.toml by role name (e.g. "scout", "advisor"). Unset roles fall back to the current model. Cannot be combined with model_tier or model. |
+| `model` | string | no | Exact model spec (optional, mutually exclusive with model_tier and model_role), e.g. "anthropic/claude-opus-4-8". You tell craft the model; craft will not guess. Overrides model_tier and model_role. |
+| `context_mode` | string | no | Parent context to pass to the subagent:<br>- "none" (default): fresh, no parent history.<br>- "summary": last few parent messages for context.<br>- "full": full parent conversation history. |
+| `output_schema` | string | no | Optional JSON Schema (object) describing the structured object the subagent must return as its final message. When set, the subagent is told to emit a final JSON object matching the schema; that object is validated and returned to you as structured data instead of prose. On validation failure the subagent is re-prompted (bounded), then a clean error is surfaced. |
+| `isolation` | string | no | Isolation mode for a general subagent:<br>- "none" (default): run in the current working tree.<br>- "worktree": run inside a fresh linked git worktree so file mutations do not touch the parent tree (sibling subagents cannot clobber each other). Requires a git repo; falls back to none otherwise. |
 
 ### `memory` *(lua plugin)*
 
@@ -420,8 +420,8 @@ Persistent, project-scoped scratchpad for learnings, patterns, decisions, and go
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `command` | string | yes | Command: view, write, delete |
-| `content` | string | no | File content for 'write' |
 | `path` | string | no | Relative path (e.g. 'architecture.md'). Omit to list all. |
+| `content` | string | no | File content for 'write' |
 
 ### `skill` *(lua plugin)*
 
@@ -437,8 +437,8 @@ Search the current Flow workstream's persisted documents (goal, plan, requiremen
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `k` | integer | no | 5, max 20 | Maximum results to return |
 | `query` | string | yes |  | Natural-language query describing what you need |
+| `k` | integer | no | 5, max 20 | Maximum results to return |
 
 ### `shift` *(native)*
 
@@ -446,8 +446,8 @@ Shift the Flow run into a different turn type (Flow mode only). The shift is app
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `rationale` | string | yes | Why this shift is warranted (one or two sentences). Recorded in the typed log. |
 | `target` | string | yes | The turn type to shift into: scout, tpm, plan, req, execute, review, qa, report, integrator, verifier, general |
+| `rationale` | string | yes | Why this shift is warranted (one or two sentences). Recorded in the typed log. |
 
 ### `wiki_read` *(native)*
 
@@ -463,10 +463,10 @@ Append markdown `body` to a wiki page in the project's local wiki (`.wiki/`), cr
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `body` | string | yes | Markdown body to append |
-| `description` | string | no | One-line description for the page's OKF frontmatter and the index listing. Fills in a missing field only. |
-| `kind` | string | no | OKF `type` for a new page, e.g. Note, Reference, Decision. Ignored if the page already exists. |
 | `page` | string | yes | Slug of the wiki page to append to |
+| `body` | string | yes | Markdown body to append |
+| `kind` | string | no | OKF `type` for a new page, e.g. Note, Reference, Decision. Ignored if the page already exists. |
+| `description` | string | no | One-line description for the page's OKF frontmatter and the index listing. Fills in a missing field only. |
 | `tags` | array | no | Tags for the page's OKF frontmatter. Fills in a missing field only. |
 
 ## Web
@@ -478,29 +478,29 @@ Drives a headless browser (Chromium via Playwright) so you can inspect frontends
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `action` | string | yes |  | Browser action to perform |
-| `amount` | integer | no |  | Scroll amount in pixels (for 'scroll' action, default: 500) |
-| `clear` | boolean | no |  | Clear the field before typing (for 'type' action, default: true) |
-| `direction` | string | no |  | Scroll direction 'up' or 'down' (for 'scroll' action, default: 'down') |
-| `fields` | array | no |  | Form fields to fill (for 'fill_form' action). Array of {selector, value, type?, checked?} objects. |
-| `filter` | string | no | 'all' | Filter for 'interactables': 'all', 'links', 'inputs', 'buttons' |
-| `format` | string | no | 'text' | Content format for 'get_content': 'text', 'html', 'markdown', or 'title' |
-| `full_page` | boolean | no | true, for 'screenshot' action | Full-page screenshot |
-| `height` | integer | no | 720 | Viewport height in pixels |
-| `key` | string | no |  | Key chord to press, e.g. 'Enter', 'Tab', 'Escape', 'ctrl+shift+t' (for 'press' action) |
-| `region` | array | no |  | Screenshot region [x, y, width, height] in CSS pixels (for 'screenshot' action) |
-| `script` | string | no |  | JavaScript to execute in the page context (for 'eval' action) |
+| `url` | string | no |  | Absolute http(s) URL to navigate to. Required for 'open', optional for most others (navigates first if provided). |
 | `selector` | string | no |  | CSS selector of the element to interact with. Used by click, type, select, scroll, screenshot, wait. |
+| `text` | string | no |  | Text to type into the element (for 'type' action) |
+| `key` | string | no |  | Key chord to press, e.g. 'Enter', 'Tab', 'Escape', 'ctrl+shift+t' (for 'press' action) |
+| `fields` | array | no |  | Form fields to fill (for 'fill_form' action). Array of {selector, value, type?, checked?} objects. |
+| `script` | string | no |  | JavaScript to execute in the page context (for 'eval' action) |
+| `format` | string | no | 'text' | Content format for 'get_content': 'text', 'html', 'markdown', or 'title' |
+| `filter` | string | no | 'all' | Filter for 'interactables': 'all', 'links', 'inputs', 'buttons' |
+| `tab` | integer | no | active tab | Tab index to operate on |
+| `width` | integer | no | 1280 | Viewport width in pixels |
+| `height` | integer | no | 720 | Viewport height in pixels |
+| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after navigation |
+| `full_page` | boolean | no | true, for 'screenshot' action | Full-page screenshot |
+| `region` | array | no |  | Screenshot region [x, y, width, height] in CSS pixels (for 'screenshot' action) |
+| `direction` | string | no |  | Scroll direction 'up' or 'down' (for 'scroll' action, default: 'down') |
+| `amount` | integer | no |  | Scroll amount in pixels (for 'scroll' action, default: 500) |
+| `to_top` | boolean | no |  | Scroll to top (true) or bottom (false) of page (for 'scroll' action) |
+| `timeout_ms` | integer | no | 10000 | Timeout in milliseconds for 'wait' action |
+| `visible` | boolean | no |  | Wait for element to be visible, not just present (for 'wait' action, default: true) |
+| `value` | string | no |  | Value to select in a dropdown (for 'select' action) |
+| `clear` | boolean | no |  | Clear the field before typing (for 'type' action, default: true) |
 | `submit` | boolean | no |  | Press Enter after typing (for 'type' action, default: false) |
 | `submit_selector` | string | no |  | Submit button CSS selector (for 'fill_form' when submit=true) |
-| `tab` | integer | no | active tab | Tab index to operate on |
-| `text` | string | no |  | Text to type into the element (for 'type' action) |
-| `timeout_ms` | integer | no | 10000 | Timeout in milliseconds for 'wait' action |
-| `to_top` | boolean | no |  | Scroll to top (true) or bottom (false) of page (for 'scroll' action) |
-| `url` | string | no |  | Absolute http(s) URL to navigate to. Required for 'open', optional for most others (navigates first if provided). |
-| `value` | string | no |  | Value to select in a dropdown (for 'select' action) |
-| `visible` | boolean | no |  | Wait for element to be visible, not just present (for 'wait' action, default: true) |
-| `wait_ms` | integer | no | 1500 | Extra milliseconds to wait after navigation |
-| `width` | integer | no | 1280 | Viewport width in pixels |
 
 ### `webfetch` *(lua plugin)*
 
@@ -508,9 +508,9 @@ Fetch a URL and return its contents.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `format` | string | no |  | Output format: markdown (default), text, or html |
-| `timeout` | integer | no | 30, max 120 | Timeout in seconds |
 | `url` | string | yes |  | URL to fetch (http:// or https://) |
+| `timeout` | integer | no | 30, max 120 | Timeout in seconds |
+| `format` | string | no |  | Output format: markdown (default), text, or html |
 
 ### `websearch` *(lua plugin)*
 
