@@ -1772,6 +1772,7 @@ pub struct ModelPolicy {
     allowed: GlobSet,
     excluded: GlobSet,
     has_allowed_models: bool,
+    has_excluded_models: bool,
 }
 
 impl Default for ModelPolicy {
@@ -1790,6 +1791,7 @@ impl ModelPolicy {
             allowed: Self::compile("allowed_models", allowed_models)?,
             excluded: Self::compile("excluded_models", excluded_models)?,
             has_allowed_models: !allowed_models.is_empty(),
+            has_excluded_models: !excluded_models.is_empty(),
         })
     }
 
@@ -1817,6 +1819,10 @@ impl ModelPolicy {
 
     pub fn allows(&self, spec: &str) -> bool {
         (!self.has_allowed_models || self.allowed.is_match(spec)) && !self.excluded.is_match(spec)
+    }
+
+    pub fn is_restrictive(&self) -> bool {
+        self.has_allowed_models || self.has_excluded_models
     }
 }
 
