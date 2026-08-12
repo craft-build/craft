@@ -372,4 +372,28 @@ mod tests {
         let model = Model::from_spec("opencode/shadow-model").unwrap();
         assert_eq!(model.provider.as_ref(), "opencode");
     }
+
+    // Guards the custom-provider half of the regression that maki's
+    // 7c5d693 fixed: discovery must surface context_window / max_output_tokens
+    // into `model_from_def`, not just fall through to the protocol default.
+    #[test]
+    fn discovered_metadata_flows_into_custom_model_from_def() {
+        let slug = "custom-discovery-metadata-test";
+        let model_id = "vllm-model";
+        let expected_window: u32 = 131_072;
+        let expected_output: u32 = 8_192;
+
+        discovered_cache().write().unwrap().insert(
+            format!("{slug}/{model_id}"),
+            CachedModelInfo {
+                context_window: Some(expected_window),
+                max_output_tokens: Some(expected_output),
+            },
+        );
+
+        let def = openai_def(model_id);
+        let model = model_from_def(&def, ProviderKind::OpenAi, slug, model_id);
+        assert_eq!(model.context_window, expected_window);
+        assert_eq!(model.max_output_tokens, Some(expected_output));
+    }
 }
