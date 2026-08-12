@@ -165,10 +165,10 @@ impl ProviderData {
         }
     }
 
-    pub fn build_auth(&self, state_dir: &StateDir) -> Authentication {
+    pub fn build_auth(&self, state_dir: &StateDir, allow_free_fallback: bool) -> Authentication {
         let api_key = match self.resolve_api_key(state_dir) {
             Some(key) => key,
-            None if OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str()) => {
+            None if allow_free_fallback && OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str()) => {
                 return Authentication::OpenCodeFreeKey(ResolvedAuth {
                     base_url: self.base_url.clone(),
                     headers: self.auth_headers("public"),
@@ -182,8 +182,12 @@ impl ProviderData {
         })
     }
 
-    pub fn resolve_auth(&self, state_dir: &StateDir) -> Option<ResolvedAuth> {
-        match self.build_auth(state_dir) {
+    pub fn resolve_auth(
+        &self,
+        state_dir: &StateDir,
+        allow_free_fallback: bool,
+    ) -> Option<ResolvedAuth> {
+        match self.build_auth(state_dir, allow_free_fallback) {
             Authentication::KeyBased(auth) | Authentication::OpenCodeFreeKey(auth) => Some(auth),
             Authentication::NoAuth => None,
         }
@@ -193,13 +197,14 @@ impl ProviderData {
         &self,
         override_auth: Option<&Arc<Mutex<ResolvedAuth>>>,
         state_dir: &StateDir,
+        allow_free_fallback: bool,
     ) -> Option<ResolvedAuth> {
         if OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str())
             && let Some(auth) = override_auth
         {
             return Some(auth.lock().unwrap().clone());
         }
-        self.resolve_auth(state_dir)
+        self.resolve_auth(state_dir, allow_free_fallback)
     }
 
     pub fn available_models(
@@ -207,7 +212,7 @@ impl ProviderData {
         state_dir: &StateDir,
         enable_free_models: bool,
     ) -> Vec<ModelInfo> {
-        let auth = self.build_auth(state_dir);
+        let auth = self.build_auth(state_dir, enable_free_models);
         let mut models: Vec<ModelInfo> = self
             .models
             .iter()
@@ -394,6 +399,11 @@ impl CatalogData {
             ))
         })?;
         Ok((meta, provider_data))
+    }
+
+    /// Whether the opencode free-model public-token fallback is allowed.
+    fn enable_free_models(&self) -> bool {
+        self.enable_free_models
     }
 
     fn all_models(&self) -> Vec<ModelInfo> {
@@ -602,11 +612,12 @@ impl Opencode {
         let guard = init_catalog_if_needed().lock().unwrap();
         let (meta, provider_data) = guard.lookup(sub_provider, actual_id)?;
         let state_dir = &guard.state_dir;
+        let allow_free_fallback = guard.enable_free_models();
         let auth = provider_data
-            .resolve_auth_with_override(self.auth.as_ref(), state_dir)
+            .resolve_auth_with_override(self.auth.as_ref(), state_dir, allow_free_fallback)
             .ok_or_else(|| {
                 config_error(format!(
-                    "authentication required for provider '{sub_provider}', run `craft auth login {sub_provider}`"
+                    "provider '{sub_provider}' has no API key; run `craft auth login {sub_provider}` or set providers.opencode.enable_free_models = true to use its free models"
                 ))
             })?;
         Ok((meta.clone(), provider_data.api_format, auth))
@@ -1065,7 +1076,7 @@ mod tests {
             HashMap::new(),
         );
         assert!(matches!(
-            provider_data.build_auth(&state_dir),
+            provider_data.build_auth(&state_dir, false),
             Authentication::NoAuth
         ));
     }
@@ -1086,7 +1097,7 @@ mod tests {
             EndpointType::ChatCompletions,
             HashMap::new(),
         );
-        let auth = provider_data.build_auth(&state_dir);
+        let auth = provider_data.build_auth(&state_dir, true);
         match auth {
             Authentication::OpenCodeFreeKey(resolved) => {
                 assert_eq!(resolved.headers[0].0, "authorization");
@@ -1113,7 +1124,7 @@ mod tests {
             EndpointType::ChatCompletions,
             HashMap::new(),
         );
-        let auth = provider_data.build_auth(&state_dir);
+        let auth = provider_data.build_auth(&state_dir, false);
         match auth {
             Authentication::KeyBased(resolved) => {
                 assert_eq!(resolved.headers[0].0, "authorization");
@@ -1202,7 +1213,7 @@ mod tests {
             EndpointType::Messages,
             HashMap::new(),
         );
-        let auth = provider_data.build_auth(&state_dir);
+        let auth = provider_data.build_auth(&state_dir, false);
         match auth {
             Authentication::KeyBased(resolved) => {
                 assert_eq!(resolved.headers[0].0, "x-api-key");
@@ -1308,7 +1319,7 @@ mod tests {
         let opencode = result.providers.get("opencode").unwrap();
         assert_eq!(opencode.models.len(), 2, "all models included");
         assert!(matches!(
-            opencode.build_auth(&state_dir),
+            opencode.build_auth(&state_dir, true),
             Authentication::OpenCodeFreeKey(_)
         ));
     }
@@ -1363,7 +1374,7 @@ mod tests {
         assert!(opencode.models.contains_key("free-model"));
         assert!(opencode.models.contains_key("paid-model"));
         assert!(matches!(
-            opencode.build_auth(&state_dir),
+            opencode.build_auth(&state_dir, false),
             Authentication::KeyBased(_)
         ));
         unsafe { std::env::remove_var("CRAFT_TEST_OPENCODE_ALL_81274") };
@@ -1421,8 +1432,8 @@ mod tests {
         assert!(opencode.models.contains_key("free-model"));
         assert!(opencode.models.contains_key("paid-model"));
         assert!(matches!(
-            opencode.build_auth(&state_dir),
-            Authentication::OpenCodeFreeKey(_)
+            opencode.build_auth(&state_dir, false),
+            Authentication::NoAuth
         ));
         assert_eq!(result.all_models().len(), 0);
     }
@@ -1437,8 +1448,8 @@ mod tests {
         assert!(opencode.models.contains_key("free-model"));
         assert!(opencode.models.contains_key("paid-model"));
         assert!(matches!(
-            opencode.build_auth(&state_dir),
-            Authentication::OpenCodeFreeKey(_)
+            opencode.build_auth(&state_dir, false),
+            Authentication::NoAuth
         ));
         assert_eq!(result.all_models().len(), 0);
     }
@@ -1888,7 +1899,7 @@ mod tests {
             EndpointType::ChatCompletions,
             HashMap::new(),
         );
-        match provider_data.build_auth(&state_dir) {
+        match provider_data.build_auth(&state_dir, true) {
             Authentication::OpenCodeFreeKey(resolved) => {
                 assert_eq!(resolved.headers[0].0, "authorization");
                 assert_eq!(resolved.headers[0].1, "Bearer public");
