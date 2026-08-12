@@ -707,6 +707,22 @@ pub fn catalog_provider(provider_id: &str) -> Option<ProviderData> {
     guard.providers.get(provider_id).cloned()
 }
 
+/// True when the model is an OpenCode-family catalog entry that is free by
+/// the same [`is_free_model`] definition gating `enable_free_models` (zero
+/// input and output price). Never triggers a catalog fetch.
+pub(crate) fn free_model_if_available(slug: &str, model_id: &str) -> bool {
+    OPENCODE_FAMILY_SLUGS.contains(&slug)
+        && CATALOG
+            .get()
+            .and_then(|catalog| catalog.lock().ok())
+            .is_some_and(|guard| {
+                guard
+                    .providers
+                    .get(slug)
+                    .is_some_and(|data| data.models.get(model_id).is_some_and(is_free_model))
+            })
+}
+
 /// True for opencode-family slugs that resolve to the catalog-backed `Opencode`
 /// provider but have no `ProviderKind`. `opencode` itself keeps routing through
 /// `ProviderKind::Opencode`; this covers catalog-backed manifests like
@@ -821,13 +837,64 @@ fn init_catalog_from_cache() -> CatalogData {
 }
 
 #[cfg(test)]
+fn seed_catalog_for_tests(index: CatalogIndex, state_dir: StateDir) {
+    let _ = CATALOG.set(Mutex::new(CatalogData::from_index(
+        index, false, &state_dir,
+    )));
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use test_case::test_case;
 
     fn temp_state_dir() -> (tempfile::TempDir, StateDir) {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = StateDir::from_path(tmp.path().to_path_buf());
         (tmp, state_dir)
+    }
+
+    fn free_catalog_model(input: Option<f64>, output: Option<f64>) -> CatalogModel {
+        CatalogModel {
+            limit: None,
+            cost: Some(CatalogCost {
+                input,
+                output,
+                cache_read: None,
+                cache_write: None,
+            }),
+            provider: None,
+        }
+    }
+
+    #[test_case("free-model", true; "free_opencode_model_is_free")]
+    #[test_case("paid-output-model", false; "free_input_paid_output_is_not_free")]
+    fn model_is_free_uses_catalog_definition(model_id: &str, expected: bool) {
+        let (_tmp, state_dir) = temp_state_dir();
+        let models = HashMap::from([
+            (
+                "free-model".into(),
+                free_catalog_model(Some(0.0), Some(0.0)),
+            ),
+            (
+                "paid-output-model".into(),
+                free_catalog_model(Some(0.0), Some(25.0)),
+            ),
+        ]);
+        let index: CatalogIndex = HashMap::from([(
+            "opencode".into(),
+            CatalogProvider {
+                name: "Opencode".into(),
+                env: vec!["OPENCODE_API_KEY".into()],
+                npm: "@ai-sdk/openai-compatible".into(),
+                api: Some("https://opencode.ai/zen/v1".into()),
+                models,
+            },
+        )]);
+        super::seed_catalog_for_tests(index, state_dir);
+
+        let model = super::Model::from_spec(&format!("opencode/{model_id}")).unwrap();
+        assert_eq!(model.is_free(), expected);
     }
 
     #[test]
