@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
+use craft_config::ClockFormat;
 use craft_providers::{Model, ModelPricing, ProviderUsage, TokenUsage, format_tokens};
 use craft_storage::sessions::StoredTokenUsage;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -44,6 +45,7 @@ pub struct UsageModalContext<'a> {
     pub model: &'a Model,
     pub fast: bool,
     pub quota: Option<&'a UsageFetchState>,
+    pub clock_format: ClockFormat,
 }
 
 pub struct UsageModal {
@@ -160,7 +162,7 @@ fn build_lines(ctx: &UsageModalContext, theme: &crate::theme::Theme) -> Vec<Line
             format!("{PREFIX}{} quota", ctx.model.provider_display_name()),
             theme.keybind_section,
         )));
-        lines.extend(quota_lines(state, theme));
+        lines.extend(quota_lines(state, theme, ctx.clock_format));
     }
 
     if ctx.by_model.is_empty() {
@@ -288,7 +290,11 @@ impl Overlay for UsageModal {
     }
 }
 
-fn quota_lines(state: &UsageFetchState, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
+fn quota_lines(
+    state: &UsageFetchState,
+    theme: &crate::theme::Theme,
+    clock: ClockFormat,
+) -> Vec<Line<'static>> {
     let fg = Style::new().fg(theme.foreground);
     let dim = theme.status_dim;
     match state {
@@ -331,7 +337,7 @@ fn quota_lines(state: &UsageFetchState, theme: &crate::theme::Theme) -> Vec<Line
                 }
                 if let Some(ms) = limit.reset_at {
                     spans.push(Span::styled(
-                        format!("  Resets {}", format_reset(ms, &tz)),
+                        format!("  Resets {}", format_reset(ms, &tz, clock)),
                         dim,
                     ));
                 }
@@ -342,7 +348,7 @@ fn quota_lines(state: &UsageFetchState, theme: &crate::theme::Theme) -> Vec<Line
     }
 }
 
-fn format_reset(epoch_ms: u64, tz: &TimeZone) -> String {
+fn format_reset(epoch_ms: u64, tz: &TimeZone, clock: ClockFormat) -> String {
     let secs = (epoch_ms / 1000) as i64;
     let Ok(ts) = Timestamp::from_second(secs) else {
         return epoch_ms.to_string();
@@ -352,12 +358,13 @@ fn format_reset(epoch_ms: u64, tz: &TimeZone) -> String {
         return relative(delta);
     }
     let zoned = ts.to_zoned(tz.clone());
+    let clock = crate::clock::hm(clock);
     let fmt = if delta < WEEK {
-        "%a %-I:%M %p"
+        format!("%a {clock}")
     } else {
-        "%b %-d, %-I:%M %p"
+        format!("%b %-d, {clock}")
     };
-    zoned.strftime(fmt).to_string()
+    zoned.strftime(&fmt).to_string()
 }
 
 fn relative(seconds: i64) -> String {
@@ -429,7 +436,7 @@ mod tests {
                 },
             ],
         };
-        let lines = quota_lines(&UsageFetchState::Ready(usage), &theme);
+        let lines = quota_lines(&UsageFetchState::Ready(usage), &theme, ClockFormat::Hour24);
         assert_eq!(lines.len(), 3);
         assert!(
             lines[0]
@@ -463,8 +470,12 @@ mod tests {
     #[test]
     fn quota_non_terminal_states_render_single_line() {
         let theme = crate::theme::current();
-        assert_eq!(quota_lines(&UsageFetchState::Loading, &theme).len(), 1);
-        let unsupported = quota_lines(&UsageFetchState::Unsupported, &theme);
+        let clock = ClockFormat::Hour24;
+        assert_eq!(
+            quota_lines(&UsageFetchState::Loading, &theme, clock).len(),
+            1
+        );
+        let unsupported = quota_lines(&UsageFetchState::Unsupported, &theme, clock);
         assert_eq!(unsupported.len(), 1);
         assert!(
             unsupported[0]
@@ -472,7 +483,7 @@ mod tests {
                 .iter()
                 .any(|s| s.content.contains(NO_USAGE_ENDPOINT))
         );
-        let err = quota_lines(&UsageFetchState::Error("nope".into()), &theme);
+        let err = quota_lines(&UsageFetchState::Error("nope".into()), &theme, clock);
         assert_eq!(err.len(), 1);
         assert!(err[0].spans.iter().any(|s| s.content.contains("nope")));
     }

@@ -25,7 +25,7 @@ use crate::render_worker::RenderWorker;
 use crate::selection::Selection;
 use crate::splash::{ColorTransition, Splash};
 use crate::theme;
-use craft_config::{ToolOutputLines, UiConfig};
+use craft_config::{ClockFormat, ToolOutputLines, UiConfig};
 use craft_lua::{EventHandle, RestoreItem, WinView};
 use serde_json::Value;
 
@@ -88,6 +88,7 @@ pub struct MessagesPanel {
     image_picker: crate::image_render::ImagePicker,
     show_thinking: bool,
     thinking_collapsed: bool,
+    clock_format: ClockFormat,
     prompt_progress: Option<PromptProgress>,
 }
 
@@ -134,6 +135,7 @@ impl MessagesPanel {
             image_picker: crate::image_render::ImagePicker::new(),
             show_thinking: ui_config.show_thinking,
             thinking_collapsed: !ui_config.show_thinking,
+            clock_format: ui_config.clock_format,
             prompt_progress: None,
         }
     }
@@ -181,7 +183,7 @@ impl MessagesPanel {
             name: Arc::from(name),
         }));
         let mut msg = DisplayMessage::new(role, String::new());
-        msg.timestamp = Some(format_timestamp_now());
+        msg.timestamp = Some(format_timestamp_now(self.clock_format));
         self.messages.push(msg);
     }
 
@@ -213,7 +215,7 @@ impl MessagesPanel {
         msg.tool_raw_input = event.raw_input;
         msg.annotation = event.annotation;
         msg.render_header = event.render_header;
-        msg.timestamp = Some(format_timestamp_now());
+        msg.timestamp = Some(format_timestamp_now(self.clock_format));
         self.messages.push(msg);
     }
 

@@ -6,7 +6,7 @@ use crate::animation::spinner_frame;
 use crate::theme;
 use code_view::RenderLimits;
 use code_view::SectionFlags;
-use craft_config::ToolOutputLines;
+use craft_config::{ClockFormat, ToolOutputLines};
 
 use std::borrow::Cow;
 use std::fmt::Write;
@@ -333,9 +333,9 @@ impl ToolLines {
     }
 }
 
-pub fn format_timestamp_now() -> String {
+pub fn format_timestamp_now(format: ClockFormat) -> String {
     let zoned = Timestamp::now().to_zoned(TimeZone::system());
-    zoned.strftime("%H:%M:%S").to_string()
+    zoned.strftime(crate::clock::hms(format)).to_string()
 }
 
 pub fn append_right_info(
