@@ -82,6 +82,7 @@ pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_plugins: bool, no_jit: boo
         mcp_config,
         prompt_slots: Arc::new(prompt_slots),
         yolo,
+        model_policy: Arc::new(config.provider.model_policy.clone()),
         plugin_host,
         flow_store,
     })

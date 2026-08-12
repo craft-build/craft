@@ -117,6 +117,7 @@ pub struct EventLoopParams {
     pub mcp_config_errors: McpConfigErrors,
     pub embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
     pub watch_enabled: bool,
+    pub model_policy: Arc<craft_config::ModelPolicy>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -229,6 +230,7 @@ struct SpawnCx {
     embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
     watch_enabled: bool,
     flow_store: Arc<craft_storage::flow::FlowStore>,
+    model_policy: Arc<craft_config::ModelPolicy>,
 }
 
 impl SpawnCx {
@@ -251,6 +253,7 @@ impl SpawnCx {
             self.mcp_handle.clone(),
             self.mcp_config_errors.clone(),
             self.compression.clone(),
+            Arc::clone(&self.model_policy),
             Arc::clone(&self.flow_store),
             // Embeds are focus-scoped and stateless; one shared consumer task
             // drains the single embed_rx (see `EventLoop::new`). Respawns and
@@ -274,6 +277,7 @@ impl SpawnCx {
             Arc::clone(&permissions),
             Arc::clone(&self.custom_commands),
             self.lua_event_handle.clone(),
+            Arc::clone(&self.model_policy),
             self.config.repomap.enabled,
             self.watch_enabled,
         );
@@ -432,7 +436,11 @@ fn merge_batch(
     available.store(Some(Arc::new(merged)));
 }
 
-fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -> BackgroundModels {
+fn spawn_model_fetch(
+    model_slot: &Arc<ArcSwap<ModelSlot>>,
+    timeouts: Timeouts,
+    policy: Arc<craft_config::ModelPolicy>,
+) -> BackgroundModels {
     let available: Arc<ArcSwapOption<Vec<String>>> = Arc::new(ArcSwapOption::empty());
     let bg = Arc::clone(&available);
     let (warn_tx, warn_rx) = flume::unbounded::<String>();
@@ -471,7 +479,12 @@ fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -
                 }));
             });
         });
-        fetch_all_models(|batch| merge_batch(&bg, batch, &warn_tx), Some(done)).await;
+        fetch_all_models(
+            &policy,
+            |batch| merge_batch(&bg, batch, &warn_tx),
+            Some(done),
+        )
+        .await;
     });
     BackgroundModels {
         available,
@@ -511,6 +524,7 @@ impl<'t> EventLoop<'t> {
             mcp_config_errors,
             embed_rx,
             watch_enabled,
+            model_policy,
         } = params;
 
         if let Some(ref name) = ui_config.theme {
@@ -534,7 +548,7 @@ impl<'t> EventLoop<'t> {
             model: model.clone(),
             provider,
         }));
-        let bg = spawn_model_fetch(&model_slot, timeouts);
+        let bg = spawn_model_fetch(&model_slot, timeouts, Arc::clone(&model_policy));
         let flow_store = Arc::new(
             craft_storage::flow::FlowStore::new(&storage).unwrap_or_else(|_| {
                 craft_storage::flow::FlowStore::from_root(storage.path().join("projects"))
@@ -562,6 +576,7 @@ impl<'t> EventLoop<'t> {
             embed_rx,
             watch_enabled,
             flow_store,
+            model_policy,
         };
 
         let mut runtimes: Vec<SessionRuntime> =
@@ -1237,7 +1252,9 @@ impl<'t> EventLoop<'t> {
             Action::LoadSession(loaded) => {
                 let loaded = *loaded;
                 let model_spec = loaded.model_spec.clone();
-                if model_spec != self.ctx.model_slot.load().model.spec() {
+                if model_spec != self.ctx.model_slot.load().model.spec()
+                    && self.ctx.model_policy.allows(&model_spec)
+                {
                     let timeouts = self.ctx.timeouts;
                     let tx = self.sessions[idx].action_tx.clone();
                     tokio::spawn(async move {
@@ -1425,6 +1442,12 @@ impl<'t> EventLoop<'t> {
 
     fn change_model(&mut self, spec: String) {
         let idx = self.focused;
+        if !self.ctx.model_policy.allows(&spec) {
+            self.sessions[idx]
+                .app
+                .flash(format!("Model is not allowed by policy: {spec}"));
+            return;
+        }
         match Model::from_spec(&spec) {
             Ok(mut new_model) => {
                 let model_spec = new_model.spec();
@@ -1452,9 +1475,15 @@ impl<'t> EventLoop<'t> {
     fn refresh_models(&self) {
         let available = Arc::clone(&self.ctx.available_models);
         let warn_tx = self.warn_tx.clone();
+        let policy = Arc::clone(&self.ctx.model_policy);
         available.store(None);
         tokio::spawn(async move {
-            fetch_all_models(|batch| merge_batch(&available, batch, &warn_tx), None).await;
+            fetch_all_models(
+                &policy,
+                |batch| merge_batch(&available, batch, &warn_tx),
+                None,
+            )
+            .await;
         });
     }
 

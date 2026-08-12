@@ -50,6 +50,7 @@ pub(super) struct AgentLoop {
     lua_handle: EventHandle,
     btw_system: Arc<ArcSwap<String>>,
     compression: craft_config::CompressionConfig,
+    model_policy: Arc<craft_config::ModelPolicy>,
     doom: SharedDoomTracker,
     subagent_cancels: Arc<CancelMap<String>>,
     /// Phase 2 persists the typed log through this store; Phase 1 keeps it
@@ -85,6 +86,7 @@ impl AgentLoop {
         lua_handle: EventHandle,
         btw_system: Arc<ArcSwap<String>>,
         compression: craft_config::CompressionConfig,
+        model_policy: Arc<craft_config::ModelPolicy>,
         subagent_cancels: Arc<CancelMap<String>>,
         flow_store: Arc<FlowStore>,
         flow_progress_tx: flume::Sender<craft_agent::FlowProgress>,
@@ -116,6 +118,7 @@ impl AgentLoop {
             lua_handle,
             btw_system,
             compression,
+            model_policy,
             doom: Arc::new(Mutex::new(DoomTracker::new())),
             subagent_cancels,
             flow_store,
@@ -188,8 +191,13 @@ impl AgentLoop {
 
     async fn do_compact(&mut self, event_tx: &EventSender) -> Result<(), AgentError> {
         let slot = self.model_slot.load();
-        let (provider, model) =
-            agent::resolve_compaction_model(&slot.provider, &slot.model, self.timeouts).await;
+        let (provider, model) = agent::resolve_compaction_model(
+            &slot.provider,
+            &slot.model,
+            self.timeouts,
+            &self.model_policy,
+        )
+        .await;
         agent::compact(
             &*provider,
             &model,
@@ -288,6 +296,7 @@ impl AgentLoop {
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
                 registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
                 compression: self.compression.clone(),
+                model_policy: Arc::clone(&self.model_policy),
                 findings_store: Some(Arc::clone(&self.findings_store)),
                 fs: Arc::new(craft_agent::tools::LocalFs),
                 doom: Arc::clone(&self.doom),
@@ -442,6 +451,7 @@ impl AgentLoop {
                     subagent_cancels: Arc::clone(&self.subagent_cancels),
                     registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
                     compression: self.compression.clone(),
+                    model_policy: Arc::clone(&self.model_policy),
                     findings_store: Some(Arc::clone(&self.findings_store)),
                     fs: Arc::new(craft_agent::tools::LocalFs),
                     doom: Arc::clone(&self.doom),

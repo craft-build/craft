@@ -363,6 +363,7 @@ impl<'h> Agent<'h> {
             config: self.config.clone(),
             tool_output_lines: self.tool_state.tool_output_lines,
             permissions: Arc::clone(&self.tool_state.permissions),
+            model_policy: Arc::clone(&self.model_policy),
             timeouts: self.io.timeouts,
             file_tracker: Arc::clone(&self.tool_state.file_tracker),
             prompt_slots: Arc::clone(&self.prompt_slots),

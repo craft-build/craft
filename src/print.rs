@@ -9,6 +9,7 @@
 
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
@@ -17,6 +18,7 @@ use color_eyre::eyre::{Context, eyre};
 use craft_agent::headless::{HeadlessHandle, HeadlessParams};
 use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{AgentConfig, AgentEvent, Envelope, ImageSource, PermissionsConfig};
+use craft_config::ModelPolicy;
 use craft_lua::EventHandle;
 use craft_providers::model::Model;
 use craft_providers::{StopReason, TokenUsage};
@@ -146,6 +148,7 @@ pub async fn run(
     timeouts: craft_providers::Timeouts,
     lua_handle: EventHandle,
     fast: bool,
+    model_policy: Arc<ModelPolicy>,
 ) -> Result<()> {
     let prompt = match prompt_arg {
         Some(p) => p,
@@ -179,6 +182,7 @@ pub async fn run(
         mcp_handle,
         initial_wd: cwd,
         fast,
+        model_policy,
         mode: craft_agent::AgentMode::Build,
     });
 

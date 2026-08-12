@@ -144,6 +144,7 @@ impl Review {
                 subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                 registry: Arc::clone(crate::tools::ToolRegistry::native_arc()),
                 compression: ctx.compression.clone(),
+                model_policy: Arc::clone(&ctx.model_policy),
                 findings_store: None,
                 fs: Arc::new(crate::tools::LocalFs),
                 doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),

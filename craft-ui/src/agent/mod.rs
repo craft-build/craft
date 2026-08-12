@@ -13,6 +13,7 @@ use craft_agent::{
     AgentConfig, CancelMap, CancelToken, Envelope, HistorySnapshot, McpCommand, McpConfigErrors,
     McpHandle, McpSnapshotReader, SessionMailbox, SharedMessages, ToolOutputLines,
 };
+use craft_config::ModelPolicy;
 use craft_lua::EventHandle;
 use craft_storage::id::SessionRef;
 
@@ -57,6 +58,7 @@ pub(crate) struct AgentHandles {
     pub(crate) flow_progress_rx: flume::Receiver<craft_agent::FlowProgress>,
     pub(crate) repomap_enabled: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) goal_ready_flag: Arc<std::sync::atomic::AtomicBool>,
+    model_policy: Arc<ModelPolicy>,
     mailbox: Option<SessionMailbox>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -77,6 +79,7 @@ impl AgentHandles {
         mcp_handle: Option<McpHandle>,
         mcp_config_errors: McpConfigErrors,
         compression: craft_config::CompressionConfig,
+        model_policy: Arc<ModelPolicy>,
         flow_store: std::sync::Arc<craft_storage::flow::FlowStore>,
         embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
     ) -> Self {
@@ -93,6 +96,7 @@ impl AgentHandles {
             timeouts,
             lua_handle,
             compression,
+            model_policy,
             flow_store,
             embed_rx,
         )
@@ -190,6 +194,7 @@ impl AgentHandles {
             self.timeouts,
             lua_handle,
             compression,
+            Arc::clone(&self.model_policy),
             flow_store,
             None,
         );
@@ -262,6 +267,7 @@ fn spawn_agent_internal(
     timeouts: craft_providers::Timeouts,
     lua_handle: EventHandle,
     compression: craft_config::CompressionConfig,
+    model_policy: Arc<ModelPolicy>,
     flow_store: std::sync::Arc<craft_storage::flow::FlowStore>,
     embed_rx: Option<flume::Receiver<craft_agent::EmbedRequest>>,
 ) -> AgentHandles {
@@ -311,6 +317,7 @@ fn spawn_agent_internal(
         lua_handle,
         Arc::clone(&btw_system),
         compression,
+        Arc::clone(&model_policy),
         subagent_cancels,
         flow_store,
         flow_progress_tx,
@@ -344,6 +351,7 @@ fn spawn_agent_internal(
         flow_progress_rx,
         repomap_enabled,
         goal_ready_flag,
+        model_policy,
         mailbox,
         task,
     }
@@ -431,6 +439,7 @@ mod tests {
             None,
             McpConfigErrors::new(PathBuf::new()),
             craft_config::CompressionConfig::default(),
+            Arc::new(ModelPolicy::default()),
             flow_store,
             None,
         );

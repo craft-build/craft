@@ -107,7 +107,8 @@ async fn resolve_task_model(
     ctx: &ToolContext,
 ) -> Result<(Model, Arc<dyn provider::Provider>), String> {
     if let Some(spec) = model {
-        let mut resolved = Model::from_spec(spec).map_err(|e| e.to_string())?;
+        let mut resolved =
+            Model::from_spec_with_policy(spec, &ctx.model_policy).map_err(|e| e.to_string())?;
         let resolved_provider = provider::from_model(&mut resolved, ctx.timeouts)
             .await
             .map_err(|e| e.to_string())?;
@@ -134,9 +135,12 @@ async fn resolve_task_model(
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
                 map.spec_for_tier(slug, effective)
+                    .filter(|spec| ctx.model_policy.allows(spec))
                     .or_else(|| map.spec_for_tier_any(effective))
                     .and_then(|spec| Model::from_spec(&spec).ok())
-                    .or_else(|| Model::from_tier_dynamic(slug, effective).ok())
+                    .or_else(|| {
+                        Model::from_tier_with_policy(slug, effective, &ctx.model_policy).ok()
+                    })
                     .ok_or_else(|| format!("no model available for tier {effective}"))?
             };
             let resolved_provider = provider::from_model(&mut resolved_model, ctx.timeouts)
@@ -389,6 +393,7 @@ impl Task {
                     subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                     registry: Arc::clone(ToolRegistry::native_arc()),
                     compression: ctx.compression.clone(),
+                    model_policy: Arc::clone(&ctx.model_policy),
                     findings_store: None,
                     fs: Arc::new(crate::tools::LocalFs),
                     doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),

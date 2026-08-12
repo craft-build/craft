@@ -547,8 +547,13 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
-pub async fn models() {
+pub async fn models(no_plugins: bool, no_jit: bool) -> Result<()> {
+    let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
+    load_env_files(&cwd);
+    let policy = load_provider_model_policy(no_plugins, no_jit, &cwd)?;
+
     fetch_all_models(
+        &policy,
         |batch| {
             for model in batch.models {
                 println!("{model}");
@@ -560,6 +565,25 @@ pub async fn models() {
         None,
     )
     .await;
+    Ok(())
+}
+
+fn load_provider_model_policy(
+    no_plugins: bool,
+    no_jit: bool,
+    cwd: &Path,
+) -> Result<craft_config::ModelPolicy> {
+    let reg = ToolRegistry::native_arc();
+    let host = PluginHost::with_jit(Arc::clone(reg), None, !no_jit)
+        .context("initialize lua plugin host")?;
+    let raw = host
+        .load_init_files_or_skip(no_plugins, cwd)
+        .context("load init.lua files")?;
+    let config = raw
+        .unwrap_or_default()
+        .into_config(false)
+        .context("invalid config")?;
+    Ok(config.provider.model_policy)
 }
 
 pub fn stats(by_session: bool) -> Result<()> {

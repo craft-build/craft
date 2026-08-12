@@ -176,6 +176,7 @@ async fn run_flow(
             subagent_cancels: Arc::new(craft_agent::cancel::CancelMap::new()),
             registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
             compression: config.compression.clone(),
+            model_policy: Arc::new(config.provider.model_policy.clone()),
             findings_store: Some(Arc::clone(&FindingsStore::new_shared())),
             fs: Arc::new(craft_agent::tools::LocalFs),
             doom: Arc::new(std::sync::Mutex::new(craft_agent::DoomTracker::new())),

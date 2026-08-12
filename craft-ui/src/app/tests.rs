@@ -57,6 +57,7 @@ fn test_app_with_lua(lua_commands: LuaCommandReader) -> App {
         permissions,
         Arc::from([]),
         craft_lua::EventHandle::disconnected_for_test(),
+        Arc::new(craft_config::ModelPolicy::default()),
         true,
         false,
     );
@@ -648,6 +649,7 @@ fn load_session_clears_plan() {
         )),
         Arc::from([]),
         craft_lua::EventHandle::disconnected_for_test(),
+        Arc::new(craft_config::ModelPolicy::default()),
         true,
         false,
     );
@@ -3232,7 +3234,12 @@ fn thinking_restored_from_session_meta() {
     let mut session = AppSession::new("test-model", "/tmp/test");
     session.meta.thinking = Some(StoredThinking::Budget { tokens: 4096 });
 
-    let state = SessionState::from_session(session, &test_model(), &storage);
+    let state = SessionState::from_session(
+        session,
+        &test_model(),
+        &storage,
+        &craft_config::ModelPolicy::default(),
+    );
     assert_eq!(state.thinking, ThinkingConfig::Budget(4096));
 }
 
@@ -3339,7 +3346,12 @@ fn fast_restored_from_session_meta() {
     let mut session = AppSession::new("anthropic/claude-opus-4-8", "/tmp/test");
     session.meta.fast = true;
 
-    let state = SessionState::from_session(session, &test_model(), &storage);
+    let state = SessionState::from_session(
+        session,
+        &test_model(),
+        &storage,
+        &craft_config::ModelPolicy::default(),
+    );
     assert!(state.fast);
 }
 
@@ -3350,7 +3362,12 @@ fn fast_normalized_off_when_restored_onto_ineligible_model() {
     let mut session = AppSession::new("anthropic/claude-sonnet-4-5", "/tmp/test");
     session.meta.fast = true;
 
-    let state = SessionState::from_session(session, &test_model(), &storage);
+    let state = SessionState::from_session(
+        session,
+        &test_model(),
+        &storage,
+        &craft_config::ModelPolicy::default(),
+    );
     assert!(!state.fast);
 }
 

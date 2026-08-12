@@ -267,6 +267,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             timeouts,
             prompt_slots,
             fast,
+            model_policy: Arc::new(stack.config.provider.model_policy.clone()),
         })
         .await
         .context("run SDK mode")?;
@@ -287,6 +288,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             timeouts,
             stack.plugin_host.event_handle(),
             fast,
+            Arc::new(stack.config.provider.model_policy.clone()),
         )
         .await
         .context("run print mode")?;
@@ -321,7 +323,13 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             }
         }
         let focused_tab = &tabs[focused];
-        let mut model = if focused_tab.messages().is_empty() {
+        let mut model = if focused_tab.messages().is_empty()
+            || !stack
+                .config
+                .provider
+                .model_policy
+                .allows(&focused_tab.model)
+        {
             stack.model.clone()
         } else {
             Model::from_spec(&focused_tab.model).unwrap_or_else(|_| stack.model.clone())
@@ -367,6 +375,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             mcp_config_errors,
             embed_rx: stack.embed_rx.take(),
             watch_enabled: stack.config.watch.enabled,
+            model_policy: Arc::new(stack.config.provider.model_policy.clone()),
         };
         let initial_prompt_for_gen = initial_prompt.take();
         let outcome = tokio::task::spawn_blocking(move || {

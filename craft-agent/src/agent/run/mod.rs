@@ -25,7 +25,7 @@ use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, EventSender, InterruptSource,
     SessionMailbox,
 };
-use craft_config::ToolOutputLines;
+use craft_config::{ModelPolicy, ToolOutputLines};
 
 pub(super) mod compaction;
 pub(super) mod doom_state;
@@ -73,6 +73,7 @@ pub struct AgentParams {
     pub subagent_cancels: Arc<CancelMap<String>>,
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub compression: craft_config::CompressionConfig,
+    pub model_policy: Arc<ModelPolicy>,
     pub findings_store: Option<super::findings_store::SharedFindingsStore>,
     pub fs: Arc<dyn crate::tools::FsBackend>,
     pub doom: SharedDoomTracker,
@@ -113,6 +114,7 @@ pub struct Agent<'h> {
     tool_state: AgentTools,
     compaction: AgentCompaction,
     doom: AgentDoom,
+    model_policy: Arc<ModelPolicy>,
     flow: AgentFlow,
     recency: AgentRecency,
 }
@@ -196,6 +198,7 @@ impl<'h> Agent<'h> {
                 ineffective_compaction_count: 0,
                 rollback_len: 0,
             },
+            model_policy: params.model_policy,
             doom: AgentDoom {
                 doom: params.doom,
                 escalation: EscalationTracker::new(Default::default()),

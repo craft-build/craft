@@ -28,7 +28,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             subcmd::outline(&path, cli.no_plugins, cli.no_jit).await?;
         }
         Some(Command::Models) => {
-            subcmd::models().await;
+            subcmd::models(cli.no_plugins, cli.no_jit).await?;
         }
         Some(Command::Completions { shell }) => {
             subcmd::completions(shell)?;

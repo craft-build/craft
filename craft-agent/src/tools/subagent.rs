@@ -250,6 +250,7 @@ pub async fn run_subagent(
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 subagent_cancels: Arc::new(CancelMap::new()),
                 compression: ctx.compression.clone(),
+                model_policy: Arc::clone(&ctx.model_policy),
                 findings_store: None,
                 fs: Arc::new(crate::tools::LocalFs),
                 doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),

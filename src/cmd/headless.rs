@@ -142,6 +142,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         mcp_handle,
         initial_wd: cwd.clone(),
         fast,
+        model_policy: Arc::new(config.provider.model_policy.clone()),
         mode: opts.mode,
     });
 

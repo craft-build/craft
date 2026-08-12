@@ -1743,6 +1743,7 @@ dependencies = [
  "craft-config-macro",
  "craft-storage",
  "dotenvy",
+ "globset",
  "inventory",
  "serde",
  "serde_json",

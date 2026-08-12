@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use craft_config::ModelPolicy;
 use craft_providers::{Message, Model, ModelTier, Role, TokenUsage};
 use tracing::info;
 
@@ -28,12 +29,14 @@ pub async fn resolve_compaction_model(
     provider: &Arc<dyn craft_providers::provider::Provider>,
     model: &Model,
     timeouts: craft_providers::Timeouts,
+    model_policy: &ModelPolicy,
 ) -> (Arc<dyn craft_providers::provider::Provider>, Model) {
     let compact_spec = craft_providers::model_registry::model_registry()
         .read()
         .unwrap()
         .spec_for_tier_any(ModelTier::Compaction);
     if let Some(spec) = compact_spec
+        && model_policy.allows(&spec)
         && let Ok(mut m) = Model::from_spec(&spec)
         && let Ok(p) = craft_providers::provider::from_model(&mut m, timeouts).await
     {
@@ -252,8 +255,13 @@ impl<'h> Agent<'h> {
             self.compaction.token_estimation_multiplier,
         )?;
         if !vcc_ok {
-            let (compact_provider, compact_model) =
-                resolve_compaction_model(&self.io.provider, &self.io.model, self.io.timeouts).await;
+            let (compact_provider, compact_model) = resolve_compaction_model(
+                &self.io.provider,
+                &self.io.model,
+                self.io.timeouts,
+                &self.model_policy,
+            )
+            .await;
             self.total_usage += compaction::compact_history(
                 &*compact_provider,
                 &compact_model,

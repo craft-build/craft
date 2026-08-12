@@ -24,6 +24,7 @@ use crate::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
     Envelope, EventSender, ImageSource, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
 };
+use craft_config::ModelPolicy;
 use craft_storage::flow::{FlowStore, project_id as flow_project_id};
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
@@ -88,6 +89,7 @@ pub struct HeadlessParams {
     pub model: Model,
     pub config: AgentConfig,
     pub compression: craft_config::CompressionConfig,
+    pub model_policy: Arc<ModelPolicy>,
     pub permissions_config: PermissionsConfig,
     pub timeouts: Timeouts,
     pub prompt: String,
@@ -219,6 +221,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     subagent_cancels: Arc::new(CancelMap::new()),
                     registry: Arc::clone(ToolRegistry::native_arc()),
                     compression: params.compression,
+                    model_policy: Arc::clone(&params.model_policy),
                     findings_store: Some(crate::FindingsStore::new_shared()),
                     fs: Arc::new(crate::tools::LocalFs),
                     doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),
@@ -273,6 +276,7 @@ pub struct InteractiveParams {
     pub model: Model,
     pub config: AgentConfig,
     pub compression: craft_config::CompressionConfig,
+    pub model_policy: Arc<ModelPolicy>,
     pub permissions_config: PermissionsConfig,
     pub timeouts: Timeouts,
     pub prompt_slots: Arc<ResolvedSlots>,
@@ -373,7 +377,10 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 let event_tx = EventSender::new(raw_tx.clone(), run_id);
                 let error_tx = event_tx.clone();
 
-                if let Some(mut new_model) = model_rx.try_iter().last()
+                if let Some(mut new_model) = model_rx
+                    .try_iter()
+                    .last()
+                    .filter(|candidate| params.model_policy.allows(&candidate.spec()))
                     && new_model.spec() != model.spec()
                 {
                     match provider::from_model(&mut new_model, params.timeouts).await {
@@ -501,6 +508,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         subagent_cancels: Arc::new(CancelMap::new()),
                         registry: Arc::clone(ToolRegistry::native_arc()),
                         compression: params.compression.clone(),
+                        model_policy: Arc::clone(&params.model_policy),
                         findings_store: Some(crate::FindingsStore::new_shared()),
                         fs: Arc::clone(&params.fs),
                         doom: Arc::new(std::sync::Mutex::new(crate::DoomTracker::new())),

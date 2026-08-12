@@ -202,6 +202,7 @@ pub struct App {
     pub(crate) ui_config: UiConfig,
     pub(crate) keybindings: Arc<KeybindingResolver>,
     pub(crate) permissions: Arc<PermissionManager>,
+    pub(crate) model_policy: Arc<craft_config::ModelPolicy>,
     pub(crate) lua_event_handle: EventHandle,
     pub(super) keymap_reader: KeymapReader,
     pub(super) hint_reader: HintReader,
@@ -245,11 +246,12 @@ impl App {
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[craft_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
+        model_policy: Arc<craft_config::ModelPolicy>,
         repomap_enabled: bool,
         watch_enabled: bool,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
-        let state = SessionState::from_session(session, model, &storage);
+        let state = SessionState::from_session(session, model, &storage, &model_policy);
         let keybindings = {
             let mut warnings = Vec::new();
             let resolver =
@@ -325,6 +327,7 @@ impl App {
             ui_config,
             keybindings,
             permissions,
+            model_policy: Arc::clone(&model_policy),
             lua_event_handle,
             keymap_reader,
             hint_reader,
@@ -338,8 +341,12 @@ impl App {
         app.task_picker.set_keybindings(app.keybindings.clone());
         app.theme_picker.set_keybindings(app.keybindings.clone());
         app.model_picker.set_keybindings(app.keybindings.clone());
-        app.model_picker
-            .set_recents(craft_storage::model::read_recents(&app.storage));
+        app.model_picker.set_recents(
+            craft_storage::model::read_recents(&app.storage)
+                .into_iter()
+                .filter(|spec| model_policy.allows(spec))
+                .collect(),
+        );
         // `/sessions` is now a Lua plugin (plugins/sessions) driving craft.session.*.
         app.rewind_picker.set_keybindings(app.keybindings.clone());
         app.login_picker.set_keybindings(app.keybindings.clone());
@@ -482,7 +489,10 @@ impl App {
     }
 
     pub(crate) fn record_recent_model(&mut self, spec: &str) {
-        let recents = craft_storage::model::push_recent(&self.storage, spec);
+        let recents = craft_storage::model::push_recent(&self.storage, spec)
+            .into_iter()
+            .filter(|spec| self.model_policy.allows(spec))
+            .collect();
         self.model_picker.set_recents(recents);
     }
 

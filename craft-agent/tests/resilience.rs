@@ -350,6 +350,7 @@ fn make_agent_params(model: Model, provider: Arc<dyn Provider>) -> AgentParams {
         subagent_cancels: Arc::new(CancelMap::new()),
         registry: Arc::new(ToolRegistry::with_natives()),
         compression: CompressionConfig::default(),
+        model_policy: Arc::new(craft_config::ModelPolicy::default()),
         findings_store: None,
         fs: Arc::new(LocalFs),
         doom: Arc::new(Mutex::new(DoomTracker::new())),

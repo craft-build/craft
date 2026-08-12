@@ -26,6 +26,7 @@ use craft_agent::mcp::config::{McpConfig, ServerConfig, Transport};
 use craft_agent::tools::{FsBackend, FsFuture, LocalFs};
 use craft_agent::types::{AgentEvent, BatchToolStatus};
 use craft_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
+use craft_config::ModelPolicy;
 use craft_lua::{
     LocalTerminal, TerminalBackend, TerminalEvent, TerminalFuture, TerminalHandle, TerminalSpec,
 };
@@ -370,6 +371,7 @@ type SharedSession = Arc<Mutex<Option<SessionInfo>>>;
 pub(crate) struct Server {
     pub(crate) out_tx: Sender<Value>,
     model_specs: ModelSpecs,
+    model_policy: Arc<ModelPolicy>,
     shared_session: SharedSession,
     pending_requests: PendingRequests,
     question_request_ids: Arc<Mutex<HashSet<i64>>>,
@@ -430,9 +432,11 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
     let bg_specs = Arc::clone(&model_specs);
     let bg_session = Arc::clone(&shared_session);
     let bg_out = out_tx.clone();
+    let bg_policy = Arc::clone(&params.model_policy);
 
     let _bg_fetch = tokio::spawn(async move {
         craft_providers::provider::fetch_all_models(
+            &bg_policy,
             |batch| {
                 if batch.models.is_empty() {
                     return;
@@ -464,6 +468,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
     let mut server = Server {
         out_tx,
         model_specs,
+        model_policy: Arc::clone(&params.model_policy),
         shared_session,
         pending_requests,
         question_request_ids: Arc::new(Mutex::new(HashSet::new())),
@@ -711,6 +716,7 @@ async fn spawn_session(
         model: params.model.clone(),
         config: params.config.clone(),
         compression: craft_config::CompressionConfig::default(),
+        model_policy: Arc::clone(&params.model_policy),
         permissions_config: params.permissions_config.clone(),
         timeouts: params.timeouts,
         prompt_slots: Arc::clone(&params.prompt_slots),
@@ -969,6 +975,9 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
     }
 
     let spec = config_value_str(&req)?.to_string();
+    if !srv.model_policy.allows(&spec) {
+        return Err(AcpError::invalid_params().data(json_str(&"model is not allowed by policy")));
+    }
     let model =
         Model::from_spec(&spec).map_err(|e| AcpError::invalid_params().data(json_str(&e)))?;
 

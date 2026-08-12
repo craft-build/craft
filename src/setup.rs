@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use color_eyre::Result;
-use color_eyre::eyre::Context;
+use color_eyre::eyre::{Context, eyre};
 
 use craft_providers::manifest::ManifestRegistry;
 use craft_providers::model::{Model, ModelTier};
@@ -18,31 +18,47 @@ pub async fn resolve_model(
     provider_config: &craft_config::ProviderConfig,
     storage: &StateDir,
 ) -> Result<Model> {
+    let policy = &provider_config.model_policy;
     if let Some(spec) = explicit {
-        let model = Model::from_spec(spec).context("invalid --model spec")?;
-        return Ok(model);
+        if !policy.allows(spec) {
+            return Err(eyre!(
+                "model {spec:?} is not allowed by provider model policy"
+            ));
+        }
+        return Model::from_spec(spec).context("invalid --model spec");
     }
     if let Some(spec) = read_model(storage) {
-        if let Ok(m) = Model::from_spec(&spec) {
+        if policy.allows(&spec)
+            && let Ok(m) = Model::from_spec(&spec)
+        {
             return Ok(m);
         }
-        tracing::warn!(spec, "saved model no longer valid, falling back to default");
+        tracing::warn!(
+            spec,
+            "saved model unavailable or disallowed, falling back to default"
+        );
     }
     if let Some(spec) = provider_config.default_model.as_deref() {
+        if !policy.allows(spec) {
+            return Err(eyre!(
+                "default model {spec:?} is not allowed by provider model policy"
+            ));
+        }
         return Model::from_spec(spec).context("invalid default_model in config");
     }
-    auto_detect_model().await.ok_or_else(|| {
+    auto_detect_model(policy).await.ok_or_else(|| {
         color_eyre::eyre::eyre!(
             "no provider available - set an API key (e.g. ANTHROPIC_API_KEY), run `craft auth login`, or use -m to specify a model"
         )
     })
 }
 
-async fn auto_detect_model() -> Option<Model> {
+async fn auto_detect_model(policy: &craft_config::ModelPolicy) -> Option<Model> {
     for tier in [ModelTier::Strong, ModelTier::Medium] {
         for &slug in PROVIDER_PRIORITY {
             if provider_available(slug).await
                 && let Ok(model) = Model::from_tier(slug, tier)
+                && policy.allows(&model.spec())
             {
                 return Some(model);
             }
