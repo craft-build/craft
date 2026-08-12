@@ -209,6 +209,12 @@ pub struct Session<M, U, T> {
     /// it changes, every append cursor into the log is void.
     #[serde(skip, default = "next_epoch")]
     epoch: u64,
+    /// Bumped when this session rewrites a collection in place (replaced
+    /// messages, tool outputs or subagent histories). Kept apart from
+    /// `epoch` so `set_history` adopting a producer's snapshot can never
+    /// erase a locally minted void: cursor validity is the pair.
+    #[serde(skip)]
+    rewrites: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,9 +481,10 @@ enum LogRecord<M, U, T> {
 pub struct SessionLog {
     session_id: CraftId,
     file: File,
-    /// The session's `epoch` at the last write. Appending is sound only while
-    /// it stays the same.
+    /// The session's `(epoch, rewrites)` at the last write. Appending is
+    /// sound only while both stay the same.
     saved_epoch: u64,
+    saved_rewrites: u64,
     /// Length of the file after the last write. Anything else means someone
     /// truncated, deleted or wrote it, and an append would corrupt it.
     saved_len: u64,
@@ -634,6 +641,7 @@ impl SessionLog {
             session_id: session.id.id(),
             file,
             saved_epoch: session.epoch,
+            saved_rewrites: session.rewrites,
             saved_len,
             saved_msg_count: session.messages.len(),
             appends: 0,
@@ -657,7 +665,8 @@ impl SessionLog {
     /// `saved_len` the file length and the rest of the cursors its content, and
     /// while appending is still cheaper than starting the file over.
     fn ensure_appendable<M, U, T>(&self, session: &Session<M, U, T>) -> Result<(), SessionError> {
-        let reason = if session.epoch != self.saved_epoch {
+        let reason = if session.epoch != self.saved_epoch || session.rewrites != self.saved_rewrites
+        {
             EPOCH_CHANGED
         } else if self.file.metadata().map_err(StorageError::from)?.len() != self.saved_len {
             FILE_CHANGED_UNDERNEATH
@@ -922,6 +931,7 @@ where
         revision: 0,
         content_revision: 0,
         epoch: next_epoch(),
+        rewrites: 0,
     })
 }
 
@@ -1240,6 +1250,7 @@ where
             revision: 0,
             content_revision: 0,
             epoch: next_epoch(),
+            rewrites: 0,
         }
     }
 
@@ -1280,10 +1291,21 @@ where
         self.revision += 1;
     }
 
-    /// Every append cursor into the log is void from here on.
+    /// Every append cursor into the log is void from here on. Counted in
+    /// `rewrites`, which snapshot adoption never touches, so a same-frame
+    /// `set_history` cannot erase the void before the writer sees it.
     fn rewrite(&mut self) {
-        self.epoch = next_epoch();
+        self.rewrites += 1;
         self.touch();
+    }
+
+    /// [`Self::rewrite`] for local changes to `messages`: they also leave the
+    /// producer's run, so the epoch is minted fresh. Once this state is
+    /// saved, re-adopting a stale run snapshot keeps diverging instead of
+    /// splicing its tail onto a rewound log.
+    fn rewrite_messages(&mut self) {
+        self.epoch = next_epoch();
+        self.rewrite();
     }
 
     pub fn push_message(&mut self, msg: M) {
@@ -1293,7 +1315,7 @@ where
 
     pub fn replace_messages(&mut self, messages: Vec<M>) {
         self.messages = Arc::new(messages);
-        self.rewrite();
+        self.rewrite_messages();
     }
 
     pub fn truncate_messages(&mut self, len: usize) {
@@ -1301,7 +1323,7 @@ where
             return;
         }
         Arc::make_mut(&mut self.messages).truncate(len);
-        self.rewrite();
+        self.rewrite_messages();
     }
 
     /// Adopting a producer's snapshot inherits its run token, so the log's
@@ -1544,16 +1566,17 @@ mod tests {
     use super::ThinkingParseError;
     use super::{
         CWD_INDEX_FILE, DEFAULT_TITLE, MAX_TITLE_LEN, SESSION_VERSION, StoredSubagent,
-        generate_title, json_path, jsonl_path, load_cwd_index, update_cwd_index,
+        generate_title, json_path, jsonl_path, load_cwd_index, next_epoch, update_cwd_index,
         write_full_session,
     };
-    use super::{Session, SessionError, SessionLog, StorageError, TitleSource};
+    use super::{HistorySnapshot, Session, SessionError, SessionLog, StorageError, TitleSource};
     use crate::id::CraftId;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::Path;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use test_case::test_case;
 
@@ -2438,6 +2461,52 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let back: super::SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.context_window_overrides, meta.context_window_overrides);
+    }
+
+    /// The mirror re-adopts the run's snapshot on every checkpoint; that must
+    /// not erase the void minted by a same-frame in-place replacement, or the
+    /// writer appends onto a stale prefix and persists a mixed transcript.
+    #[test]
+    fn snapshot_adoption_does_not_erase_a_local_rewrite() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: Arc<TestSession> = Arc::new(Session::new("m", "/project"));
+        let run = HistorySnapshot {
+            epoch: next_epoch(),
+            messages: Arc::new(vec![user_message("hi")]),
+        };
+        let meta = session.meta.clone();
+        Session::checkpoint(&mut session, Some(&run), meta.clone(), Value::Null);
+        Arc::make_mut(&mut session)
+            .set_subagent_messages("sub-1".into(), vec![user_message("old")]);
+        let mut log = SessionLog::rewrite(dir, &session).unwrap();
+
+        Arc::make_mut(&mut session)
+            .set_subagent_messages("sub-1".into(), vec![user_message("new")]);
+        let advanced = HistorySnapshot {
+            epoch: run.epoch,
+            messages: Arc::new(vec![user_message("hi"), assistant_message("reply")]),
+        };
+        Session::checkpoint(&mut session, Some(&advanced), meta, Value::Null);
+        log.append(&session)
+            .expect_err("append must be refused after a local rewrite");
+
+        SessionLog::rewrite(dir, &session).unwrap();
+        let loaded = TestSession::load_from(session.id.id(), dir).unwrap();
+        assert_eq!(loaded.messages().len(), session.messages().len());
+        assert_eq!(
+            loaded.subagent_messages().get("sub-1").map(|m| m.len()),
+            Some(1)
+        );
+        assert!(
+            loaded.subagent_messages()["sub-1"][0]
+                .get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|c| c.first())
+                .and_then(|b| b.get("text"))
+                .and_then(|t| t.as_str())
+                == Some("new")
+        );
     }
 
     #[test]
