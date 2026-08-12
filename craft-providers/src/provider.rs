@@ -434,15 +434,11 @@ pub async fn fetch_all_models(
         let display_name = manifest.display_name;
         let accepts_arbitrary = manifest.accepts_arbitrary_models;
         let static_models = manifest.models;
-        let tx_slug: std::sync::Arc<str> = std::sync::Arc::from(slug);
         futs.push(Box::pin(async move {
             match provider.list_models_with_info().await {
                 Ok(models) => {
                     if accepts_arbitrary {
-                        crate::model_registry::model_registry()
-                            .write()
-                            .unwrap()
-                            .set_known_models(&tx_slug, models.clone());
+                        crate::model_registry::set_known_models(slug, models.clone());
                     }
                     let mut specs: Vec<String> =
                         models.iter().map(|m| format!("{slug}/{}", m.id)).collect();

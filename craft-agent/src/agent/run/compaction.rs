@@ -31,10 +31,7 @@ pub async fn resolve_compaction_model(
     timeouts: craft_providers::Timeouts,
     model_policy: &ModelPolicy,
 ) -> (Arc<dyn craft_providers::provider::Provider>, Model) {
-    let compact_spec = craft_providers::model_registry::model_registry()
-        .read()
-        .unwrap()
-        .spec_for_tier_any(ModelTier::Compaction);
+    let compact_spec = craft_providers::model_registry::spec_for_tier_any(ModelTier::Compaction);
     if let Some(spec) = compact_spec
         && model_policy.allows(&spec)
         && let Ok(mut m) = Model::from_spec(&spec)

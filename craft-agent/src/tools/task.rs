@@ -131,12 +131,9 @@ async fn resolve_task_model(
         if effective != ctx.model.tier {
             let mut resolved_model = {
                 let slug = &ctx.model.provider;
-                let map = model_registry::model_registry()
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                map.spec_for_tier(slug, effective)
+                model_registry::spec_for_tier(slug, effective)
                     .filter(|spec| ctx.model_policy.allows(spec))
-                    .or_else(|| map.spec_for_tier_any(effective))
+                    .or_else(|| model_registry::spec_for_tier_any(effective))
                     .and_then(|spec| Model::from_spec(&spec).ok())
                     .or_else(|| {
                         Model::from_tier_with_policy(slug, effective, &ctx.model_policy).ok()
