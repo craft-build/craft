@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use self::callback::CallbackServer;
 use self::discovery::parse_www_authenticate;
+use super::config::OauthClientConfig;
 use super::error::McpError;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(600);
@@ -50,6 +51,7 @@ pub async fn authenticate(
     www_authenticate: Option<&str>,
     storage: &StateDir,
     interaction: Interaction,
+    static_client: Option<OauthClientConfig>,
 ) -> Result<McpAuthData, McpError> {
     let wrap = |e: OAuthError| McpError::OAuthFailed {
         server: server_name.into(),
@@ -110,9 +112,17 @@ pub async fn authenticate(
         )));
     }
 
-    let callback = CallbackServer::bind()
-        .await
-        .map_err(|e| wrap(OAuthError::Other(e)))?;
+    let callback = CallbackServer::bind(
+        static_client.as_ref().and_then(|c| c.callback_port),
+        static_client
+            .as_ref()
+            .and_then(|c| c.callback_path.as_deref()),
+        static_client
+            .as_ref()
+            .and_then(|c| c.callback_hostname.as_deref()),
+    )
+    .await
+    .map_err(|e| wrap(OAuthError::Other(e)))?;
     let redirect_uri = callback.redirect_uri();
 
     let existing = tokio::task::spawn_blocking({
@@ -124,7 +134,13 @@ pub async fn authenticate(
     .await
     .map_err(|e| wrap(OAuthError::Other(e.to_string())))?;
 
-    let reg = if let Some(existing) = existing
+    let reg = if let Some(c) = static_client {
+        registration::ClientRegistration {
+            client_id: c.client_id,
+            client_secret: c.client_secret,
+            client_secret_expires_at: None,
+        }
+    } else if let Some(existing) = existing
         && existing.redirect_uri.as_deref() == Some(&redirect_uri)
     {
         registration::ClientRegistration {
@@ -178,7 +194,7 @@ pub async fn authenticate(
                 warn!(server = server_name, error = %e, "failed to open browser");
             }
 
-            eprintln!("Waiting for callback on 127.0.0.1:{}...", callback.port);
+            eprintln!("Waiting for callback on {redirect_uri}...");
             eprintln!("If this machine has no browser, log in on another device and paste");
             eprintln!("the full redirect URL ({redirect_uri}?...) here:");
 

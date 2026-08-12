@@ -34,8 +34,8 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use self::config::{
-    McpConfig, McpConfigErrors, McpServerInfo, McpServerStatus, ServerConfig, Transport,
-    load_config, parse_server, transport_kind,
+    McpConfig, McpConfigErrors, McpServerInfo, McpServerStatus, OauthClientConfig, ServerConfig,
+    Transport, load_config, parse_server, transport_kind,
 };
 use self::error::McpError;
 use self::http::HttpTransport;
@@ -615,7 +615,7 @@ async fn start_server(config: &ServerConfig) -> Result<StartResult, McpError> {
             environment,
             config.timeout,
         )?),
-        Transport::Http { url, headers } => Arc::new(HttpTransport::new(
+        Transport::Http { url, headers, .. } => Arc::new(HttpTransport::new(
             &config.name,
             url,
             headers,
@@ -744,6 +744,10 @@ fn publish(inner: &McpManagerInner, index: &ArcSwap<ToolIndex>, snapshot: &ArcSw
             .config
             .as_ref()
             .and_then(|c| transport_url(&c.transport));
+        let oauth = entry
+            .config
+            .as_ref()
+            .and_then(|c| transport_oauth(&c.transport));
 
         if let Some(ref transport) = entry.transport
             && entry.status != McpServerStatus::Disabled
@@ -784,6 +788,7 @@ fn publish(inner: &McpManagerInner, index: &ArcSwap<ToolIndex>, snapshot: &ArcSw
             status: entry.status.clone(),
             config_path: entry.origin.clone(),
             url,
+            oauth,
         });
     }
 
@@ -803,6 +808,13 @@ fn publish(inner: &McpManagerInner, index: &ArcSwap<ToolIndex>, snapshot: &ArcSw
 fn transport_url(transport: &Transport) -> Option<String> {
     match transport {
         Transport::Http { url, .. } => Some(url.clone()),
+        Transport::Stdio { .. } => None,
+    }
+}
+
+fn transport_oauth(transport: &Transport) -> Option<OauthClientConfig> {
+    match transport {
+        Transport::Http { oauth, .. } => oauth.clone(),
         Transport::Stdio { .. } => None,
     }
 }

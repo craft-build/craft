@@ -79,6 +79,7 @@ fn convert_http(s: &McpServerHttp) -> Result<ServerConfig, String> {
         transport: Transport::Http {
             url: s.url.clone(),
             headers,
+            oauth: None,
         },
     })
 }
@@ -100,6 +101,7 @@ fn convert_sse(s: &McpServerSse) -> Result<ServerConfig, String> {
         transport: Transport::Http {
             url: s.url.clone(),
             headers,
+            oauth: None,
         },
     })
 }
@@ -182,7 +184,7 @@ mod tests {
         let configs = convert_acp_servers(&[server]);
         assert_eq!(configs.len(), 1);
         match &configs[0].transport {
-            Transport::Http { url, headers } => {
+            Transport::Http { url, headers, .. } => {
                 assert_eq!(url, "https://mcp.example.com");
                 assert_eq!(headers["Authorization"], "Bearer tok");
             }
@@ -199,7 +201,7 @@ mod tests {
         let configs = convert_acp_servers(&[server]);
         assert_eq!(configs.len(), 1);
         match &configs[0].transport {
-            Transport::Http { url, headers } => {
+            Transport::Http { url, headers, .. } => {
                 assert_eq!(url, "https://example.com/sse");
                 assert_eq!(headers["X-Custom"], "val");
             }

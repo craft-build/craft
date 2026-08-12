@@ -178,6 +178,7 @@ mod tests {
                     status: McpServerStatus::Running,
                     config_path: PathBuf::from("/home/.config/craft/config.toml"),
                     url: None,
+                    oauth: None,
                 },
                 McpServerInfo {
                     name: "github".into(),
@@ -187,6 +188,7 @@ mod tests {
                     status: McpServerStatus::Disabled,
                     config_path: PathBuf::from("/project/.craft/config.toml"),
                     url: None,
+                    oauth: None,
                 },
             ],
             prompts: vec![],

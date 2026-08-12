@@ -773,12 +773,15 @@ fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {
                         },
                     )
                 }
-                Transport::Http { url, headers } => craft_agent::mcp::config::RawTransport::Http(
-                    craft_agent::mcp::config::RawHttpFields {
-                        url: url.clone(),
-                        headers: headers.clone(),
-                    },
-                ),
+                Transport::Http { url, headers, .. } => {
+                    craft_agent::mcp::config::RawTransport::Http(
+                        craft_agent::mcp::config::RawHttpFields {
+                            url: url.clone(),
+                            headers: headers.clone(),
+                            oauth: None,
+                        },
+                    )
+                }
             },
         };
         merged
