@@ -557,6 +557,20 @@ mod tests {
     }
 
     /// The second call sends `Shutdown` on a sender that is already
+    /// Every name in `craft_config::DEFAULT_BUILTINS` must be a bundled Lua
+    /// plugin. Native tools are builtin via `NATIVE_TOOL_NAMES`, not this list;
+    /// a native name here would make `with_all_builtins` (and docgen) fail at
+    /// runtime. Catches that drift in the test suite instead of via docgen.
+    #[test]
+    fn default_builtins_are_all_bundled_plugins() {
+        for name in craft_config::DEFAULT_BUILTINS {
+            assert!(
+                BUNDLED_PLUGINS.iter().any(|p| p.name == *name),
+                "DEFAULT_BUILTINS entry {name:?} is not a bundled Lua plugin; native tools belong in register_tools!, not DEFAULT_BUILTINS"
+            );
+        }
+    }
+
     /// disconnected; it must swallow that error and keep rejecting work.
     #[test]
     fn begin_shutdown_rejects_later_loads_and_is_idempotent() {

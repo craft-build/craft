@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::agent::{self, LoadedInstructions};
+use crate::agent;
 use crate::{ImageMediaType, ImageSource, InstructionBlock, ToolOutput};
 use base64::Engine;
 use craft_tool_macro::Tool;
@@ -31,10 +31,7 @@ fn image_media_type(path: &Path) -> Option<ImageMediaType> {
 
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct Read {
-    #[param(
-        description = "Absolute path to the file or directory",
-        alias = "file_path"
-    )]
+    #[param(description = "Absolute path to the file", alias = "file_path")]
     path: String,
     #[param(description = "Line number to start from (1-indexed). Use 1 for the first line.")]
     offset: usize,
@@ -70,7 +67,7 @@ impl Read {
         let cwd = std::env::current_dir().ok();
         let p = Path::new(&path);
         if p.is_dir() {
-            return Self::list_dir(&path, cwd.as_deref(), &ctx.loaded_instructions);
+            return Err("error: path is a directory, use the list tool instead".to_string());
         }
 
         if let Some(media_type) = image_media_type(p) {
@@ -145,42 +142,6 @@ impl Read {
         })
     }
 
-    fn list_dir(
-        path: &str,
-        cwd: Option<&Path>,
-        loaded: &LoadedInstructions,
-    ) -> Result<ToolOutput, String> {
-        let entries = fs::read_dir(path).map_err(|e| format!("read error: {e}"))?;
-
-        let mut dirs = Vec::new();
-        let mut files = Vec::new();
-
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                dirs.push(format!("{name}/"));
-            } else {
-                files.push(name);
-            }
-        }
-
-        dirs.sort_unstable();
-        files.sort_unstable();
-        files.retain(|name| !agent::is_instruction_file(name));
-        dirs.append(&mut files);
-        let text = dirs.join("\n");
-
-        let instructions = cwd.and_then(|cwd| {
-            to_instruction_blocks(agent::find_subdirectory_instructions(
-                Path::new(path),
-                cwd,
-                loaded,
-            ))
-        });
-
-        Ok(ToolOutput::ReadDir { text, instructions })
-    }
-
     pub fn start_header(&self) -> String {
         let mut s = relative_path(&self.path);
         let start = self.offset;
@@ -222,51 +183,6 @@ mod tests {
             limit,
         };
         assert_eq!(r.start_header(), expected);
-    }
-
-    #[test]
-    fn list_dir_sorts_dirs_first_and_hides_instruction_files() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let dir_path = dir.path().to_string_lossy().to_string();
-
-        std::fs::write(dir.path().join("b.txt"), "").unwrap();
-        std::fs::write(dir.path().join("a.rs"), "").unwrap();
-        std::fs::create_dir(dir.path().join("zdir")).unwrap();
-        std::fs::create_dir(dir.path().join("adir")).unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "").unwrap();
-
-        let result =
-            Read::list_dir(&dir_path, None, &crate::agent::LoadedInstructions::new()).unwrap();
-        match &result {
-            ToolOutput::ReadDir { text, instructions } => {
-                let entries: Vec<&str> = text.lines().collect();
-                assert_eq!(entries, vec!["adir/", "zdir/", "a.rs", "b.txt"]);
-                assert!(instructions.is_none());
-            }
-            other => panic!("expected ReadDir, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn list_dir_discovers_subdirectory_instructions() {
-        let root = tempfile::TempDir::new().unwrap();
-        let sub = root.path().join("src");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(sub.join("AGENTS.md"), "sub rules").unwrap();
-        std::fs::write(sub.join("lib.rs"), "").unwrap();
-
-        let sub_path = sub.to_string_lossy().to_string();
-        let loaded = crate::agent::LoadedInstructions::new();
-        let result = Read::list_dir(&sub_path, Some(root.path()), &loaded).unwrap();
-        match &result {
-            ToolOutput::ReadDir { instructions, .. } => {
-                let blocks = instructions.as_ref().expect("should have instructions");
-                assert_eq!(blocks.len(), 1);
-                assert!(blocks[0].path.ends_with("AGENTS.md"));
-                assert_eq!(blocks[0].content, "sub rules");
-            }
-            other => panic!("expected ReadDir, got {other:?}"),
-        }
     }
 
     const EXPECTED_INTEGER: &str = "expected integer";

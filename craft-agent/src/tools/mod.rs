@@ -27,6 +27,7 @@ pub mod grep;
 mod inspect;
 mod internal_urls;
 pub(crate) mod interpreter_bridge;
+mod list;
 mod list_tools;
 mod move_file;
 mod multiedit;
@@ -188,6 +189,7 @@ pub const GREP_TOOL_NAME: &str = "grep";
 pub const MULTIEDIT_TOOL_NAME: &str = multiedit::MultiEdit::NAME;
 pub const QUESTION_TOOL_NAME: &str = "question";
 pub const READ_TOOL_NAME: &str = read::Read::NAME;
+pub const LIST_TOOL_NAME: &str = list::List::NAME;
 pub const REVIEW_TOOL_NAME: &str = review::Review::NAME;
 pub const REPORT_FINDING_TOOL_NAME: &str = report_finding::ReportFinding::NAME;
 pub const STYLEGUIDE_LIST_TOOL_NAME: &str = styleguide::StyleguideList::NAME;
@@ -349,6 +351,50 @@ pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
     } else {
         Ok(expanded)
     }
+}
+
+/// Sorted directory listing shared by the `list` tool. Directories first
+/// (with a trailing `/`), then files, instruction files filtered out.
+/// Returns the joined text and any subdirectory instructions.
+pub(crate) fn list_directory(
+    path: &str,
+    cwd: Option<&Path>,
+    loaded: &LoadedInstructions,
+) -> Result<(String, Option<Vec<crate::InstructionBlock>>), String> {
+    let entries = fs::read_dir(path).map_err(|e| format!("read error: {e}"))?;
+
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            dirs.push(format!("{name}/"));
+        } else {
+            files.push(name);
+        }
+    }
+
+    dirs.sort_unstable();
+    files.sort_unstable();
+    files.retain(|name| !crate::agent::is_instruction_file(name));
+    dirs.append(&mut files);
+    let text = dirs.join("\n");
+
+    let instructions = cwd.and_then(|cwd| {
+        let found = crate::agent::find_subdirectory_instructions(Path::new(path), cwd, loaded);
+        if found.is_empty() {
+            return None;
+        }
+        Some(
+            found
+                .into_iter()
+                .map(|(p, content)| crate::InstructionBlock { path: p, content })
+                .collect(),
+        )
+    });
+
+    Ok((text, instructions))
 }
 
 pub fn resolve_search_path(path: Option<&str>) -> Result<String, String> {
@@ -712,6 +758,7 @@ macro_rules! register_tools {
 
 register_tools! {
     read::Read,
+    list::List,
     write::Write,
     edit::Edit,
     edit_lines::EditLines,

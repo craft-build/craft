@@ -18,6 +18,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
             "bash_kill",
             "bash_watch",
             "bash_status",
+            "list",
             "read",
             "write",
             "edit",

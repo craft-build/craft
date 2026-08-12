@@ -1,6 +1,6 @@
 # Tools
 
-Craft ships with 48 built-in tools. This is the full reference.
+Craft ships with 49 built-in tools. This is the full reference.
 
 ## File Operations
 
@@ -43,9 +43,17 @@ Check status and current output of a background bash task.
 |-----------|------|----------|-------------|
 | `task_id` | string | yes | The task_id returned by bash |
 
+### `list` *(native)*
+
+List directory contents. Returns entry names sorted alphabetically, directories first with a trailing `/`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes |  |
+
 ### `read` *(native)*
 
-Read a file or directory. Returns contents with line numbers (1-indexed).
+Read a file. Returns contents with line numbers (1-indexed).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

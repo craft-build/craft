@@ -688,6 +688,7 @@ mod tests {
 
         let mut expected: BTreeMap<&str, ToolAudience> = BTreeMap::from([
             (super::super::READ_TOOL_NAME, all),
+            (super::super::LIST_TOOL_NAME, all),
             (super::super::STYLEGUIDE_LIST_TOOL_NAME, all),
             (super::super::STYLEGUIDE_SEARCH_TOOL_NAME, all),
             (super::super::STYLEGUIDE_GET_TOOL_NAME, all),

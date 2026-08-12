@@ -1,4 +1,4 @@
-Read a file or directory. Returns contents with line numbers (1-indexed).
+Read a file. Returns contents with line numbers (1-indexed).
 
 Internal URL schemes (resolved through this one interface, no extra tools):
 - `skill://<name>`: read a discovered skill body (e.g. `read skill://audit`).
