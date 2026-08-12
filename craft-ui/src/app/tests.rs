@@ -3218,7 +3218,7 @@ fn thinking_explicit_args() {
 #[test]
 fn thinking_unsupported_model_flashes_error() {
     let mut app = test_app();
-    app.state.model.supports_thinking_override = Some(false);
+    app.state.model.thinking_override = Some(craft_providers::ThinkingSupport::No);
 
     app.execute_command(cmd("/thinking"));
     assert_eq!(app.state.thinking, ThinkingConfig::Off);

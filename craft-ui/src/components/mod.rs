@@ -408,7 +408,7 @@ pub(crate) fn test_model() -> craft_providers::Model {
         tier: craft_providers::ModelTier::Medium,
         family: craft_providers::ModelFamily::Claude,
         supports_tool_examples_override: None,
-        supports_thinking_override: None,
+        thinking_override: None,
         supports_vision_override: Some(true),
         pricing: test_pricing(),
         max_output_tokens: Some(8192),

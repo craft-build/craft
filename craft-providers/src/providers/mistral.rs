@@ -5,7 +5,7 @@ use craft_storage::id::SessionRef;
 use flume::Sender;
 use serde_json::{Value, json};
 
-use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
+use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier, ThinkingSupport};
 use crate::provider::Provider;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
@@ -283,7 +283,7 @@ impl Provider for Mistral {
 
 fn adjust_model(model: &mut Model) {
     if model.id.starts_with("ministral-") {
-        model.supports_thinking_override = Some(false);
+        model.thinking_override = Some(ThinkingSupport::No);
     }
 }
 

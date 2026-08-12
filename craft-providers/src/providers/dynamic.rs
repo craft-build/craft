@@ -16,7 +16,7 @@ use strum::IntoEnumIterator;
 use tracing::{debug, warn};
 
 use crate::manifest::ManifestRegistry;
-use crate::model::{Model, ModelPricing, ModelTier};
+use crate::model::{Model, ModelPricing, ModelTier, ThinkingSupport};
 use crate::provider::{BoxFuture, Provider, ProviderKind};
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
@@ -67,6 +67,8 @@ struct ScriptModel {
     supports_tool_examples: Option<bool>,
     #[serde(default)]
     supports_thinking: Option<bool>,
+    #[serde(default)]
+    requires_thinking: bool,
     #[serde(default)]
     supports_vision: Option<bool>,
     #[serde(default = "default_max_output_tokens")]
@@ -590,7 +592,10 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
         tier: script_model.tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
-        supports_thinking_override: script_model.supports_thinking,
+        thinking_override: ThinkingSupport::from_flags(
+            script_model.supports_thinking,
+            script_model.requires_thinking,
+        ),
         supports_vision_override: script_model.supports_vision,
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: Some(script_model.max_output_tokens),
@@ -607,7 +612,10 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
         tier,
         family: meta.base.family(),
         supports_tool_examples_override: script_model.supports_tool_examples,
-        supports_thinking_override: script_model.supports_thinking,
+        thinking_override: ThinkingSupport::from_flags(
+            script_model.supports_thinking,
+            script_model.requires_thinking,
+        ),
         supports_vision_override: script_model.supports_vision,
         pricing: script_model.pricing.clone().unwrap_or_default(),
         max_output_tokens: Some(script_model.max_output_tokens),

@@ -13,7 +13,7 @@ use super::openai::responses;
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{ResolvedAuth, lock_unpoison};
 use crate::manifest::ManifestRegistry;
-use crate::model::{FastPricing, Model, ModelPricing, ModelTier};
+use crate::model::{FastPricing, Model, ModelPricing, ModelTier, ThinkingSupport};
 use crate::provider::{Provider, ProviderKind};
 use crate::providers::Timeouts;
 use crate::types::ThinkingConfig;
@@ -207,9 +207,12 @@ fn model_from_def(def: &ProviderDef, kind: ProviderKind, slug: &str, model_id: &
         .or(cached.as_ref().and_then(|c| c.context_window))
         .unwrap_or_else(|| kind.fallback_context_window());
     let supports_tool_examples_override = declared.and_then(|m| m.supports_tool_examples);
-    let supports_thinking_override = declared
-        .and_then(|m| m.supports_thinking)
-        .or_else(|| ManifestRegistry::get(&kind.to_string()).map(|m| m.supports_thinking));
+    let thinking_override = ThinkingSupport::from_flags(
+        declared
+            .and_then(|m| m.supports_thinking)
+            .or_else(|| ManifestRegistry::get(&kind.to_string()).map(|m| m.supports_thinking)),
+        declared.and_then(|m| m.requires_thinking).unwrap_or(false),
+    );
     let supports_vision_override = declared.and_then(|m| m.supports_vision);
     let pricing = declared
         .filter(|m| m.has_pricing())
@@ -233,7 +236,7 @@ fn model_from_def(def: &ProviderDef, kind: ProviderKind, slug: &str, model_id: &
         tier,
         family: kind.family(),
         supports_tool_examples_override,
-        supports_thinking_override,
+        thinking_override,
         supports_vision_override,
         pricing,
         max_output_tokens,
