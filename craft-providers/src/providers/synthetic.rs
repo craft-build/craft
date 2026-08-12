@@ -28,7 +28,7 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
     protocol: craft_config::providers::Protocol::Openai,
     default_base_url: "https://api.synthetic.new/openai/v1",
     default_api_key_env: "SYNTHETIC_API_KEY",
-    default_model: "synthetic/hf:moonshotai/Kimi-K2.6",
+    default_model: "synthetic/hf:moonshotai/Kimi-K3",
     plans: None,
     login_url: None,
     needs_url: false,
@@ -36,6 +36,22 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
 
 pub(crate) const fn models() -> &'static [ModelEntry] {
     &[
+        ModelEntry {
+            prefixes: &["hf:MiniMaxAI/MiniMax-M3"],
+            tier: ModelTier::Medium,
+            family: ModelFamily::Synthetic,
+            default: true,
+            pricing: ModelPricing {
+                input: 0.60,
+                output: 1.20,
+                cache_read: 0.00,
+                cache_write: 0.00,
+                fast: None,
+            },
+            max_output_tokens: Some(131_072),
+            context_window: 512_000,
+            supports_vision: false,
+        },
         ModelEntry {
             prefixes: &["syn:small:vision", "hf:Qwen/Qwen3.6-27B"],
             tier: ModelTier::Weak,
