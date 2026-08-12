@@ -15,7 +15,7 @@ pub(crate) mod vcc_recall;
 mod test_support;
 
 pub use llm::compact;
-pub(crate) use llm::{CONTINUE_AFTER_COMPACT, MAX_TOKEN_ESTIMATION_MULTIPLIER, compact_history};
+pub(crate) use llm::{MAX_TOKEN_ESTIMATION_MULTIPLIER, compact_history, continue_message};
 pub(crate) use progressive::{CompactContext, progressive_compact};
 pub(crate) use vcc_glue::vcc_compact;
 

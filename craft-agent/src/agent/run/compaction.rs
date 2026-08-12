@@ -3,7 +3,7 @@ use std::sync::Arc;
 use craft_providers::{Message, Model, ModelTier, Role, TokenUsage};
 use tracing::info;
 
-use crate::agent::compaction::{self, CONTINUE_AFTER_COMPACT};
+use crate::agent::compaction::{self, continue_message};
 use crate::agent::history::History;
 use crate::{AgentError, AgentEvent};
 
@@ -261,13 +261,14 @@ impl<'h> Agent<'h> {
                 &self.io.event_tx,
                 &self.io.cancel,
                 self.compaction.last_relevance_scores.as_deref(),
+                &self.config,
             )
             .await?;
         }
         self.compaction.rollback_len = self.history.len();
         self.io.event_tx.send(AgentEvent::CompactionDone)?;
         self.history
-            .push(Message::synthetic(CONTINUE_AFTER_COMPACT.into()));
+            .push(Message::synthetic(continue_message(&self.config)));
         if let Some(state) = self.flow.advisor_state.as_mut() {
             state.reset(&self.config.advisor);
         }
@@ -434,5 +435,28 @@ mod tests {
         );
         assert!(matches!(msgs[0].role, Role::User));
         assert!(matches!(msgs[1].role, Role::Assistant));
+    }
+
+    #[tokio::test]
+    async fn do_compact_appends_post_instructions_to_continue_message() {
+        const POST: &str = "Re-read plan.md";
+        let mut history = History::new(vcc_overflow_history());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider =
+            std::sync::Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
+        params.model = {
+            let mut m = default_model();
+            m.context_window = 1;
+            m
+        };
+        let mut agent = Agent::new(params, run_params);
+        agent.config.post_compaction_instructions = Some(POST.into());
+        agent.do_compact().await.unwrap();
+        drop(agent);
+
+        let last = history.as_slice().last().unwrap();
+        assert!(matches!(&last.content[0],
+            craft_providers::ContentBlock::Text { text } if text.ends_with(POST) && text != POST));
     }
 }

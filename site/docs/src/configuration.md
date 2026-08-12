@@ -139,6 +139,8 @@ Remappable actions:
 | `code_execution_timeout_secs` | u64 | `30` | 5 | Code execution timeout (seconds) |
 | `max_continuation_turns` | u32 | `3` | 1 | Max automatic continuation turns |
 | `compaction_buffer` | u32 \| string | `20%` | - | Context reserved for compaction: token count or percent of the context window (e.g. "20%") |
+| `compaction_instructions` | String | `none` | - | Extra instructions appended to the compaction summary prompt |
+| `post_compaction_instructions` | String | `none` | - | Extra instructions the agent receives after any compaction (e.g. re-read plan.md) |
 | `interpreter_max_memory_mb` | usize | `50` | 10 | Memory limit for code interpreter (MB) |
 | `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |
 

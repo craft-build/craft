@@ -12,9 +12,20 @@ use crate::cancel::CancelToken;
 use crate::prompt;
 use crate::{AgentError, AgentEvent, EventSender, TurnCompleteEvent};
 
-pub(crate) const CONTINUE_AFTER_COMPACT: &str = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed. If the summary contains a todo list, restore it with todo_write and keep it updated. If you learned important project context during this session, consider saving it to memory before it's lost.";
+const CONTINUE_AFTER_COMPACT: &str = "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed. If the summary contains a todo list, restore it with todo_write and keep it updated. If you learned important project context during this session, consider saving it to memory before it's lost.";
 pub(crate) const MAX_TOKEN_ESTIMATION_MULTIPLIER: f64 = 5.0;
 pub(crate) const COMPACT_USER_PROMPT: &str = "What did we do so far?";
+
+fn normalize(text: &Option<String>) -> Option<&str> {
+    text.as_deref().map(str::trim).filter(|t| !t.is_empty())
+}
+
+pub(crate) fn continue_message(config: &craft_config::AgentConfig) -> String {
+    match normalize(&config.post_compaction_instructions) {
+        Some(extra) => format!("{CONTINUE_AFTER_COMPACT}\n\n{extra}"),
+        None => CONTINUE_AFTER_COMPACT.to_string(),
+    }
+}
 
 const TARGETED_TOPICS_COUNT: usize = 10;
 const TARGETED_MIN_SCORE: f32 = 0.5;
@@ -46,6 +57,7 @@ pub(crate) async fn compact_history(
     event_tx: &EventSender,
     cancel: &CancelToken,
     relevance_scores: Option<&[(usize, f32)]>,
+    config: &craft_config::AgentConfig,
 ) -> Result<TokenUsage, AgentError> {
     let compact_start = std::time::Instant::now();
 
@@ -62,7 +74,14 @@ pub(crate) async fn compact_history(
     strip_images(&mut compaction_history);
     strip_thinking(&mut compaction_history);
     strip_old_tool_results(&mut compaction_history);
-    compaction_history.push(build_compaction_user_message(relevance_scores));
+    let mut user_message = build_compaction_user_message(relevance_scores);
+    if let Some(extra) = normalize(&config.compaction_instructions)
+        && let Some(ContentBlock::Text { text }) = user_message.content.iter_mut().next()
+    {
+        text.push_str("\n\nAdditional instructions:\n");
+        text.push_str(extra);
+    }
+    compaction_history.push(user_message);
 
     let empty_tools = serde_json::json!([]);
     let mut overflow_retries = 0;
@@ -141,9 +160,13 @@ pub async fn compact(
     model: &Model,
     history: &mut History,
     event_tx: &EventSender,
+    config: &craft_config::AgentConfig,
 ) -> Result<(), AgentError> {
     let cancel = CancelToken::none();
-    let usage = compact_history(provider, model, history, event_tx, &cancel, None).await?;
+    let usage = compact_history(provider, model, history, event_tx, &cancel, None, config).await?;
+    if let Some(post) = normalize(&config.post_compaction_instructions) {
+        history.push(Message::synthetic(post.to_string()));
+    }
 
     event_tx.send(AgentEvent::Done {
         usage,
@@ -248,6 +271,7 @@ mod tests {
             &model,
             &mut history,
             &EventSender::new(raw_tx, 0),
+            &craft_config::AgentConfig::default(),
         )
         .await
         .unwrap();
@@ -256,6 +280,46 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0].role, Role::User));
         assert!(matches!(msgs[1].role, Role::Assistant));
+    }
+
+    #[tokio::test]
+    async fn compact_applies_custom_instructions() {
+        const EXTRA: &str = "Record anything that belongs in plan.md";
+        const POST: &str = "Re-read plan.md and agent.md";
+
+        let provider = MockProvider::new(vec![Ok(text_response(StopReason::EndTurn))]);
+        let mut history = History::new(vec![Message::user("work".into())]);
+        let (raw_tx, _rx) = flume::unbounded();
+        let config = craft_config::AgentConfig {
+            compaction_instructions: Some(EXTRA.into()),
+            post_compaction_instructions: Some(POST.into()),
+            ..Default::default()
+        };
+
+        compact(
+            &provider,
+            &default_model(),
+            &mut history,
+            &EventSender::new(raw_tx, 0),
+            &config,
+        )
+        .await
+        .unwrap();
+
+        let requests = provider.requests.lock().unwrap();
+        let summary_prompt = requests[0].last().unwrap();
+        assert!(
+            matches!(&summary_prompt.content[0], ContentBlock::Text { text }
+                if text.ends_with(EXTRA))
+        );
+        assert!(matches!(&history.as_slice().last().unwrap().content[0],
+            ContentBlock::Text { text } if text == POST));
+    }
+
+    #[test_case(Some("  \n ".into()), None ; "whitespace_only_is_none")]
+    #[test_case(Some("  keep plan.md ".into()), Some("keep plan.md") ; "trimmed")]
+    fn normalize_instructions(raw: Option<String>, expected: Option<&str>) {
+        assert_eq!(normalize(&raw), expected);
     }
 
     #[tokio::test]
@@ -289,6 +353,7 @@ mod tests {
             &EventSender::new(raw_tx, 0),
             &CancelToken::none(),
             None,
+            &craft_config::AgentConfig::default(),
         )
         .await
         .unwrap();
@@ -344,6 +409,7 @@ mod tests {
             &EventSender::new(raw_tx, 0),
             &CancelToken::none(),
             None,
+            &craft_config::AgentConfig::default(),
         )
         .await
         .unwrap();
@@ -389,6 +455,7 @@ mod tests {
             &EventSender::new(raw_tx, 0),
             &CancelToken::none(),
             None,
+            &craft_config::AgentConfig::default(),
         )
         .await
         .unwrap();
@@ -435,6 +502,7 @@ mod tests {
             &EventSender::new(raw_tx, 0),
             &CancelToken::none(),
             None,
+            &craft_config::AgentConfig::default(),
         )
         .await
         .unwrap();

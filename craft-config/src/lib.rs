@@ -512,6 +512,8 @@ pub struct AgentFileConfig {
     pub code_execution_timeout_secs: Option<u64>,
     pub max_continuation_turns: Option<u32>,
     pub compaction_buffer: Option<CompactionBuffer>,
+    pub compaction_instructions: Option<String>,
+    pub post_compaction_instructions: Option<String>,
     pub stale_read_check: Option<bool>,
     pub interpreter_max_memory_mb: Option<usize>,
     #[serde(default)]
@@ -1519,6 +1521,20 @@ pub struct AgentConfig {
     #[config(default = DEFAULT_COMPACTION_BUFFER, ty = "u32 | string", default_doc = "20%", desc = "Context reserved for compaction: token count or percent of the context window (e.g. \"20%\")")]
     pub compaction_buffer: CompactionBuffer,
 
+    #[config(
+        ty = "String",
+        default = "None",
+        desc = "Extra instructions appended to the compaction summary prompt"
+    )]
+    pub compaction_instructions: Option<String>,
+
+    #[config(
+        ty = "String",
+        default = "None",
+        desc = "Extra instructions the agent receives after any compaction (e.g. re-read plan.md)"
+    )]
+    pub post_compaction_instructions: Option<String>,
+
     #[config(default = DEFAULT_INTERPRETER_MAX_MEMORY_MB, min = MIN_INTERPRETER_MAX_MEMORY_MB, desc = "Memory limit for code interpreter (MB)")]
     pub interpreter_max_memory_mb: usize,
 
@@ -1610,6 +1626,8 @@ impl AgentConfig {
                 .max_continuation_turns
                 .unwrap_or(DEFAULT_MAX_CONTINUATION_TURNS),
             compaction_buffer: file.compaction_buffer.unwrap_or(DEFAULT_COMPACTION_BUFFER),
+            compaction_instructions: file.compaction_instructions,
+            post_compaction_instructions: file.post_compaction_instructions,
             interpreter_max_memory_mb: file
                 .interpreter_max_memory_mb
                 .unwrap_or(DEFAULT_INTERPRETER_MAX_MEMORY_MB),
