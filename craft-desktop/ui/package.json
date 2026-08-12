@@ -1,7 +1,7 @@
 {
   "name": "ui",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.12.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,14 +16,14 @@
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "shiki": "^4.4.2"
+    "shiki": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
-    "oxlint": "^1.77.0",
+    "oxlint": "^1.78.0",
     "typescript": "~7.0.2",
     "vite": "^8.2.1"
   }

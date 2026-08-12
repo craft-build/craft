@@ -7,9 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-12
+
+### Added
+
+- **tools**: dedicated `list` tool for directory listings, and dropped listing behavior from `read` (`caf633d0`)
+- **providers**: per-provider model allow/exclude policy (`be1f7652`)
+- **openai**: surface Coding Plan usage (`699df612`)
+- **mcp**: static OAuth client credentials (`7b62ea93`)
+- **ui**: user-defined themes (`bd77d24e`)
+- **agent**: custom compaction instructions (`cfb0cd0b`)
+- **ui**: Free badge for OpenCode zero-price models in the model picker (`a6a242a1`)
+- **lua**: expose `needs_input` window state (`e34b9bec`)
+- **ui**: click in the input to position the text cursor (`bf76bf08`)
+- **ui**: width-aware truncation of `cwd_branch` in the status bar, following the system 12/24-hour clock preference with one clock format everywhere (`87aa286e`, `b795ff39`, `8c086080`)
+- **setup**: hint at the active model policy when no provider is available (`75bf2cf3`)
+
+### Changed
+
+- **deps**: raised the declared workspace MSRV from 1.89 to 1.90 to match reality; the `icy_sixel`/`ratatui-image` image-quantization chain (`quantette`) has required Rust 1.90 since the 0.12.0 lockfile, so the previous declaration was already unsatisfiable
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`bstr` 1.13.1, `eyre` 0.6.14, `futures` 0.3.34, `http-body-util` 0.1.5, `icy_sixel` 0.5.1, `minijinja` 2.24.0, `num-integer` 0.1.47, `quantette` 0.6.0, `rand_xoshiro` 0.8.1, `rustls-webpki` 0.103.14, `safe_arch` 1.1.0, `wide` 1.6.1)
+- **docs**: document `ui.clock_format` (`15d28a02`)
+
 ### Fixed
 
-- **agent**: keep tool-use and tool-result rounds together during semantic context curation, and drop orphaned tool results at the OpenAI-compatible provider boundary, fixing `400 tool_call_id not found` / `tool messages need a resolvable tool name` errors on strict backends (e.g. Kimi K3 via Synthetic, Moonshot direct) that halted inference until the session was cleared
+- **agent**: keep tool-use and tool-result rounds together during semantic context curation, and drop orphaned tool results at the OpenAI-compatible provider boundary, fixing `400 tool_call_id not found` / `tool messages need a resolvable tool name` errors on strict backends (e.g. Kimi K3 via Synthetic, Moonshot direct) that halted inference until the session was cleared (`13b38dc4`)
+- **providers**: assert every builtin manifest has an inventory entry (`b35558dd`)
+- **model-picker**: keep the cursor on the provider tab when refreshing (`7ac259d6`)
+- **mcp**: fall back to root OAuth metadata (`a93e67b4`), pin the OAuth token endpoint at interactive auth and reuse it on refresh (`4947f54f`), and gate OAuth error redirects on state (`12c309c7`)
+- **providers**: query the live catalog for free classification (`ae3bca27`), refuse the opencode free-model fallback unless opted in (`be3dbb5c`), and restore the synthetic medium tier while updating stale kimi-k2.6 refs (`84916dae`)
+- **subagent**: return empty text instead of the `(no response)` placeholder (`b7eca5c5`)
+- **providers**: floor thinking at minimal for models that require it (`b3514d9e`), and keep thinking when proxies send both `reasoning_content` and `reasoning` via a custom `Deserialize` for `ChunkDelta` that removes the `serde(alias)` causing duplicate field conflicts (`09560b65`, `64331ed7`, `ce4e1f0c`)
+- **providers**: stop exposing the model registry lock guard (`92b2f9b7`)
+- **storage**: fsync the parent directory after renaming into place (`1417caf6`), and count rewrites separately from epoch so snapshot adoption can't erase them (`ea6677a3`)
+- **ui**: only start background runs when the session is fully quiescent (`6952306a`)
 
 ## [0.12.0] - 2026-08-09
 
@@ -1566,7 +1597,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/craft-build/craft/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/craft-build/craft/compare/v0.11.4...v0.12.0
 [0.11.4]: https://github.com/craft-build/craft/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/craft-build/craft/compare/v0.11.2...v0.11.3
