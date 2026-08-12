@@ -419,7 +419,6 @@ struct FunctionDelta {
 #[derive(Deserialize)]
 struct ChunkDelta {
     content: Option<ContentDelta>,
-    #[serde(alias = "reasoning")]
     reasoning_content: Option<String>,
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -525,7 +524,7 @@ pub async fn parse_sse(
         let chunk: SseChunk = match serde_json::from_str(data) {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, "failed to parse SSE chunk");
+                warn!(error = %e, raw_sse = %data, "failed to parse SSE chunk");
                 continue;
             }
         };
@@ -799,27 +798,6 @@ data: [DONE]\n";
         }
         assert_eq!(thinking, vec!["Let me think", "..."]);
         assert_eq!(text_deltas, vec!["Hello"]);
-    }
-
-    #[tokio::test]
-    async fn parse_sse_reasoning_alias() {
-        let sse = "\
-data: {\"choices\":[{\"delta\":{\"reasoning\":\"Let me think\"}}]}\n\
-\n\
-data: {\"choices\":[{\"delta\":{\"reasoning\":\"...\"}}]}\n\
-\n\
-data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\
-\n\
-data: [DONE]\n";
-
-        let (tx, _rx) = flume::unbounded();
-        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-            .await
-            .unwrap();
-
-        assert!(
-            matches!(&resp.message.content[0], ContentBlock::Thinking { thinking, .. } if thinking == "Let me think...")
-        );
     }
 
     #[test]
