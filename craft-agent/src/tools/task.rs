@@ -538,13 +538,14 @@ fn final_text(messages: &[craft_providers::Message]) -> String {
     messages
         .iter()
         .rev()
-        .filter(|m| matches!(m.role, Role::Assistant))
-        .flat_map(|m| m.content.iter())
-        .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
+        .find(|m| matches!(m.role, Role::Assistant))
+        .and_then(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
         })
-        .unwrap_or("(no response)")
+        .unwrap_or_default()
         .to_string()
 }
 
@@ -622,6 +623,56 @@ mod tests {
     #[test]
     fn extract_json_rejects_when_absent() {
         assert!(extract_json("just prose, no json here").is_err());
+    }
+
+    #[test_case(&[] ; "empty_conversation")]
+    #[test_case(&[("user", "what is 2+2")] ; "only_user_message")]
+    #[test_case(&[("assistant_tool_only", "")] ; "assistant_without_text_block")]
+    fn final_text_is_empty_when_no_assistant_text(messages: &[(&str, &str)]) {
+        let convo: Vec<craft_providers::Message> = messages
+            .iter()
+            .map(|(tag, _)| {
+                let content = if *tag == "assistant_tool_only" {
+                    vec![ContentBlock::tool_use("id", "read", json!({"path": "x"}))]
+                } else {
+                    vec![ContentBlock::Text {
+                        text: "ignored".into(),
+                    }]
+                };
+                let role = if *tag == "user" {
+                    Role::User
+                } else {
+                    Role::Assistant
+                };
+                craft_providers::Message {
+                    role,
+                    content,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        assert_eq!(final_text(&convo), "");
+    }
+
+    #[test]
+    fn final_text_returns_last_assistant_text_block() {
+        let convo = vec![
+            craft_providers::Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "older".into(),
+                }],
+                ..Default::default()
+            },
+            craft_providers::Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "newer".into(),
+                }],
+                ..Default::default()
+            },
+        ];
+        assert_eq!(final_text(&convo), "newer");
     }
 
     /// The audience bitmask decides which agents can call each tool, so flipping a flag is

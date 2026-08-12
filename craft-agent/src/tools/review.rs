@@ -175,13 +175,14 @@ impl Review {
         let text = messages
             .iter()
             .rev()
-            .filter(|m| matches!(m.role, craft_providers::Role::Assistant))
-            .flat_map(|m| m.content.iter())
-            .find_map(|b| match b {
-                craft_providers::ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
+            .find(|m| matches!(m.role, craft_providers::Role::Assistant))
+            .and_then(|m| {
+                m.content.iter().find_map(|b| match b {
+                    craft_providers::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
             })
-            .unwrap_or("(no response)")
+            .unwrap_or_default()
             .to_string();
 
         if let Some(tool_use_id) = ctx.tool_use_id.clone() {

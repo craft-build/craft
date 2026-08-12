@@ -373,13 +373,14 @@ fn final_text(messages: &[Message]) -> String {
     messages
         .iter()
         .rev()
-        .filter(|m| matches!(m.role, Role::Assistant))
-        .flat_map(|m| m.content.iter())
-        .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
+        .find(|m| matches!(m.role, Role::Assistant))
+        .and_then(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
         })
-        .unwrap_or("(no response)")
+        .unwrap_or_default()
         .to_string()
 }
 
