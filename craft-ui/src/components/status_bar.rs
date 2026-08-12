@@ -166,8 +166,9 @@ impl StatusBar {
                 left_spans.push(Span::styled(format!(" {e}"), theme::current().error));
             }
             _ => {
+                let cwd = truncate_tail(&self.cwd_branch, area.width.saturating_sub(8));
                 right_spans.push(Span::styled(
-                    self.cwd_branch.clone(),
+                    cwd,
                     Style::new().fg(theme::current().text_helper),
                 ));
                 right_spans.push(Span::raw(" "));
@@ -181,9 +182,11 @@ impl StatusBar {
             ));
         }
 
+        let right_width: u16 = right_spans.iter().map(|s| s.width() as u16).sum();
+        let max_right = area.width.saturating_sub(8);
         let [left_area, right_area] = Layout::horizontal([
             Constraint::Min(0),
-            Constraint::Length(right_spans.iter().map(|s| s.width() as u16).sum()),
+            Constraint::Length(right_width.min(max_right)),
         ])
         .areas(area);
 
@@ -292,6 +295,19 @@ fn collapse_home_with(path: &str, home: &str) -> String {
     path.strip_prefix(home)
         .map(|rest| format!("~{rest}"))
         .unwrap_or_else(|| path.to_string())
+}
+
+fn truncate_tail(s: &str, max_width: u16) -> String {
+    let max = max_width as usize;
+    if max < 5 {
+        let keep = 5.min(s.len());
+        return s[s.len() - keep..].to_string();
+    }
+    if s.len() > max {
+        let keep = (max - 2).max(1);
+        return format!("..{}", &s[s.len() - keep..]);
+    }
+    s.to_string()
 }
 
 fn cwd_branch_label() -> String {
