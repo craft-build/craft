@@ -14,8 +14,10 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const FAST_LABEL: &str = " [fast]";
+const TRUNCATE_PREFIX: &str = "..";
 
 const CONTEXT_BAR_WIDTH: usize = 10;
 const BAR_FILL: &str = "█";
@@ -166,7 +168,9 @@ impl StatusBar {
                 left_spans.push(Span::styled(format!(" {e}"), theme::current().error));
             }
             _ => {
-                let cwd = truncate_tail(&self.cwd_branch, area.width.saturating_sub(8));
+                let left_width = left_spans.iter().map(Span::width).sum::<usize>() as u16;
+                let cwd =
+                    truncate_tail(&self.cwd_branch, area.width.saturating_sub(left_width + 1));
                 right_spans.push(Span::styled(
                     cwd,
                     Style::new().fg(theme::current().text_helper),
@@ -182,13 +186,9 @@ impl StatusBar {
             ));
         }
 
-        let right_width: u16 = right_spans.iter().map(|s| s.width() as u16).sum();
-        let max_right = area.width.saturating_sub(8);
-        let [left_area, right_area] = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Length(right_width.min(max_right)),
-        ])
-        .areas(area);
+        let right_width = right_spans.iter().map(|s| s.width() as u16).sum();
+        let [left_area, right_area] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).areas(area);
 
         frame.render_widget(Paragraph::new(Line::from(left_spans)), left_area);
         frame.render_widget(
@@ -299,15 +299,21 @@ fn collapse_home_with(path: &str, home: &str) -> String {
 
 fn truncate_tail(s: &str, max_width: u16) -> String {
     let max = max_width as usize;
-    if max < 5 {
-        let keep = 5.min(s.len());
-        return s[s.len() - keep..].to_string();
+    if s.width() <= max {
+        return s.to_string();
     }
-    if s.len() > max {
-        let keep = (max - 2).max(1);
-        return format!("..{}", &s[s.len() - keep..]);
+    let budget = max.saturating_sub(TRUNCATE_PREFIX.width());
+    let mut used = 0;
+    let mut start = s.len();
+    for (i, c) in s.char_indices().rev() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        start = i;
     }
-    s.to_string()
+    format!("{TRUNCATE_PREFIX}{}", &s[start..])
 }
 
 fn cwd_branch_label() -> String {
@@ -432,5 +438,15 @@ mod tests {
         let (filled, empty) = context_bar(pct);
         assert_eq!(filled.chars().count(), expected.0);
         assert_eq!(empty.chars().count(), expected.1);
+    }
+
+    #[test_case("~/projects/craft:main", 30, "~/projects/craft:main" ; "fits_untouched")]
+    #[test_case("~/projects/craft:main", 10, "..aft:main"            ; "ascii_tail")]
+    #[test_case("~/文档/proj:分支", 8, "..j:分支"                    ; "cjk_path_and_branch")]
+    #[test_case("release/🚀-v2", 6, "..-v2"                          ; "emoji_branch")]
+    #[test_case("abc", 2, ".."                                       ; "prefix_only")]
+    #[test_case("", 0, ""                                           ; "empty")]
+    fn truncate_tail_cases(input: &str, max_width: u16, expected: &str) {
+        assert_eq!(truncate_tail(input, max_width), expected);
     }
 }
