@@ -183,6 +183,10 @@ impl FloatManager {
         }
     }
 
+    pub fn needs_input(&self) -> bool {
+        self.windows.iter().any(|win| win.config.needs_input)
+    }
+
     fn evict_split(&mut self, dir: Split, keep_id: u32) {
         let to_remove: Vec<u32> = self
             .windows
@@ -1053,6 +1057,28 @@ mod tests {
         mgr.tick();
         assert!(!mgr.is_open(), "{}", EXPECT_CLOSED);
         assert!(event_rx.drain().any(|e| matches!(e, WinEvent::Close)));
+    }
+
+    #[test]
+    fn needs_input_tracks_window_lifecycle_and_config() {
+        let mut mgr = FloatManager::new();
+        assert!(!mgr.needs_input());
+
+        let (_event_rx, cmd_tx) = open_with_lines(&mut mgr, &["a"]);
+        assert!(!mgr.needs_input());
+
+        cmd_tx
+            .send(WinCommand::SetConfig(FloatConfigPatch {
+                needs_input: Some(true),
+                ..FloatConfigPatch::default()
+            }))
+            .unwrap();
+        mgr.tick();
+        assert!(mgr.needs_input());
+
+        cmd_tx.send(WinCommand::Close).unwrap();
+        mgr.tick();
+        assert!(!mgr.needs_input());
     }
 
     #[test]

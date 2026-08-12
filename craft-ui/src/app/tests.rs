@@ -3388,6 +3388,25 @@ fn open_split_window(app: &mut App, dir: craft_lua::Split) {
 }
 
 #[test]
+fn attention_float_marks_app_as_awaiting_input_until_close() {
+    let mut app = test_app();
+    let buf = Arc::new(craft_agent::SharedBuf::new());
+    let config = craft_lua::FloatConfig {
+        needs_input: true,
+        ..craft_lua::FloatConfig::default()
+    };
+    let (event_tx, _event_rx) = flume::bounded::<craft_lua::WinEvent>(8);
+    let (cmd_tx, cmd_rx) = flume::bounded::<craft_lua::WinCommand>(8);
+
+    app.float_mgr.open(buf, config, true, event_tx, cmd_rx);
+    assert!(app.awaiting_input());
+
+    cmd_tx.send(craft_lua::WinCommand::Close).unwrap();
+    app.float_mgr.tick();
+    assert!(!app.awaiting_input());
+}
+
+#[test]
 fn below_split_reserves_bottom_and_suppresses_input() {
     let mut app = test_app();
     let (msg_before, _b, _s, input_before, splits_before) = app.layout_geometry(TEST_AREA);

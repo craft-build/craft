@@ -46,11 +46,13 @@ impl App {
     }
 
     /// True when the session is blocked on the user (permission prompt,
-    /// pending auth retry, or any other `PendingInput`). Used by the
-    /// multi-session supervisor to report `needs_input` status.
+    /// pending auth retry, a window flagged `needs_input`, or any other
+    /// `PendingInput`). Used by the multi-session supervisor to report
+    /// `needs_input` status.
     pub(crate) fn awaiting_input(&self) -> bool {
         matches!(self.permission_prompt, PermissionPrompt::Open { .. })
             || self.pending_input != PendingInput::None
+            || self.float_mgr.needs_input()
     }
 
     /// The event loop runs this once per frame per session. It syncs whatever

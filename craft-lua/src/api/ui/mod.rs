@@ -249,6 +249,7 @@ pub(crate) fn create_ui_table(
                     let zindex: u16 = opts_tbl.get("zindex").unwrap_or(DEFAULT_ZINDEX);
                     let order: u16 = opts_tbl.get("order").unwrap_or(DEFAULT_ORDER);
                     let visible: bool = opts_tbl.get("visible").unwrap_or(true);
+                    let needs_input: bool = opts_tbl.get("needs_input").unwrap_or(false);
 
                     let width = parse_dimension(&opts_tbl, "width", Dimension::Percent(60));
                     let height = parse_dimension(&opts_tbl, "height", Dimension::Percent(70));
@@ -276,6 +277,7 @@ pub(crate) fn create_ui_table(
                         split,
                         order,
                         visible,
+                        needs_input,
                     };
 
                     let (term_cols, term_rows) = crossterm::terminal::size()
