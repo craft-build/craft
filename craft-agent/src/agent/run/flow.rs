@@ -13,7 +13,7 @@ const MAX_JUDGE_CONTINUATIONS: u8 = 5;
 /// next request would otherwise trail an assistant message, which providers
 /// like Anthropic reject as assistant prefill.
 pub(super) const SHIFT_OUT_TO_GENERAL_PROMPT: &str = "Control returns to `general`. Re-derive the next step from the typed log: shift into the next narrow turn type the work needs, or end the run if the goal is met.";
-const ADVISOR_FOLLOWUP_PROMPT: &str = "<advisor-note>\nA lightweight advisor reviewed your last turn and flagged a {severity}:\n{note}\n\nAddress this concern before finishing. Do not simply acknowledge it; make the change or explain concretely why it does not apply.\n</advisor-note>";
+const ADVISOR_FOLLOWUP_PROMPT: &str = "<advisor-note>\nA lightweight advisor reviewed your last turn and flagged a {severity}:\n{note}\n\nAddress this concern before finishing. Make the change; keep it minimal and do not narrate it in comments or prose. Only explain if it does not apply, in one sentence.\n</advisor-note>";
 
 pub(super) struct AgentFlow {
     pub(super) flow_search: crate::tools::flow_search::FlowSearchHandle,

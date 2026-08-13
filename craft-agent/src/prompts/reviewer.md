@@ -15,7 +15,7 @@ Environment:
 
 - **P0 - Critical**: Security vulnerabilities, data loss risks, build errors, test failures. Must fix.
 - **P1 - Urgent**: Logic errors, missing error handling, race conditions, memory leaks. Should fix.
-- **P2 - Normal**: Style violations, minor refactoring, doc gaps, test coverage gaps. Could fix.
+- **P2 - Normal**: Style violations, minor refactoring, test coverage gaps. Could fix.
 - **P3 - Low**: Formatting preferences, optional improvements, future ideas. Nice to have.
 
 # Review workflow
