@@ -48,6 +48,7 @@ use crate::components::search_modal::{SearchAction, SearchModal};
 use crate::components::stats_modal::StatsModal;
 use crate::components::status_bar::StatusBar;
 use crate::components::theme_picker::{ThemePicker, ThemePickerAction};
+use crate::components::thinking_picker::{ThinkingPicker, ThinkingPickerAction};
 use crate::components::usage_modal::{UsageFetchState, UsageModal};
 use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
@@ -145,6 +146,7 @@ pub struct App {
     pub(super) task_picker: ListPicker<TaskEntry>,
     pub(super) task_picker_original: Option<usize>,
     pub(super) theme_picker: ThemePicker,
+    pub(super) thinking_picker: ThinkingPicker,
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
@@ -281,6 +283,7 @@ impl App {
             task_picker: ListPicker::new(),
             task_picker_original: None,
             theme_picker: ThemePicker::new(),
+            thinking_picker: ThinkingPicker::new(),
             model_picker: ModelPicker::new(available_models),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
@@ -340,6 +343,7 @@ impl App {
         };
         app.task_picker.set_keybindings(app.keybindings.clone());
         app.theme_picker.set_keybindings(app.keybindings.clone());
+        app.thinking_picker.set_keybindings(app.keybindings.clone());
         app.model_picker.set_keybindings(app.keybindings.clone());
         app.model_picker.set_recents(
             craft_storage::model::read_recents(&app.storage)
@@ -868,6 +872,18 @@ impl App {
             return Some(match self.theme_picker.handle_key(key) {
                 ThemePickerAction::Consumed => vec![],
                 ThemePickerAction::Closed => vec![],
+            });
+        }
+
+        if self.thinking_picker.is_open() {
+            return Some(match self.thinking_picker.handle_key(key) {
+                ThinkingPickerAction::Consumed => vec![],
+                ThinkingPickerAction::Close => vec![],
+                ThinkingPickerAction::Select(config) => {
+                    self.state.thinking = config;
+                    self.flash(format!("Thinking: {config}"));
+                    vec![]
+                }
             });
         }
 
@@ -1620,6 +1636,10 @@ impl App {
                     self.flash("Thinking requires a model that supports it".into());
                     return vec![];
                 }
+                if cmd.args.trim().is_empty() {
+                    self.thinking_picker.open(self.state.thinking);
+                    return vec![];
+                }
                 match ThinkingConfig::parse(cmd.args.trim(), self.state.thinking) {
                     Ok(thinking) => {
                         self.state.thinking = thinking;
@@ -2094,6 +2114,7 @@ impl App {
         recipe_picker,
         rewind_picker,
         theme_picker,
+        thinking_picker,
         model_picker,
         login_picker,
         mcp_picker,
@@ -2197,6 +2218,7 @@ impl App {
         try_picker!(self.task_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
+        try_picker!(self.thinking_picker);
         try_picker!(self.model_picker);
         try_picker!(self.login_picker);
         try_picker!(self.mcp_picker);

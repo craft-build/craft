@@ -3189,15 +3189,16 @@ fn bash_prefix_overrides_mode() {
 }
 
 #[test]
-fn thinking_toggle_cycles_off_adaptive() {
+fn thinking_no_args_opens_picker() {
     let mut app = test_app();
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
+    assert!(!app.thinking_picker.is_open());
 
     app.execute_command(cmd("/thinking"));
-    assert_eq!(app.state.thinking, ThinkingConfig::Adaptive);
-
-    app.execute_command(cmd("/thinking"));
+    assert!(app.thinking_picker.is_open());
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
+
+    app.thinking_picker.close();
 }
 
 #[test]
@@ -3224,6 +3225,7 @@ fn thinking_unsupported_model_flashes_error() {
 
     app.execute_command(cmd("/thinking"));
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
+    assert!(!app.thinking_picker.is_open());
     assert!(app.status_bar.flash_text().is_some());
 }
 

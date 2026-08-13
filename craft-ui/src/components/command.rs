@@ -96,7 +96,7 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "/thinking",
-        description: "Toggle extended thinking (off, adaptive, effort level, or budget)",
+        description: "Set thinking level (opens a picker; or pass off, adaptive, effort level, or budget)",
         max_args: 1,
     },
     BuiltinCommand {

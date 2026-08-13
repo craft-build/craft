@@ -47,7 +47,7 @@ Press `/` to open the palette. It lists [built-in commands](./commands.md), your
 | `/btw` | Ask a side question with no tools and no history pollution |
 | `/goal` | Set a goal the agent must meet before stopping |
 | `/yolo` | Toggle skipping permission prompts |
-| `/thinking` | Toggle extended thinking (off, adaptive, effort level, or a token budget) |
+| `/thinking` | Set thinking level (opens a picker; or pass off, adaptive, effort level, or a token budget) |
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/dream` | Consolidate and curate [memory](./plugins.md#memory) |
 | `/distill` | Discover reusable workflows and propose [skills](./skills.md) |
