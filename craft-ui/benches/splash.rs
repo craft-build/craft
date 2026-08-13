@@ -1,8 +1,9 @@
 use craft_ui::splash::Splash;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use std::hint::black_box;
 
 const ACCENT: Color = Color::Cyan;
 

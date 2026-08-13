@@ -7,10 +7,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use monty::{MontyRun, ResolveFutures, RunProgress};
+use monty::{Dump, MontyRun, ResolveFutures, RunProgress, Session, SessionRef, dump};
 use monty_types::{
-    CompileOptions, ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject,
-    NameLookupResult, PrintWriter, PrintWriterCallback, ResourceLimits,
+    CompileOptions, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult,
+    PrintWriter, PrintWriterCallback, ResourceLimits, ResourceTracker,
 };
 use serde_json::Value;
 use tracing::debug;
@@ -113,7 +113,7 @@ fn run_inner(
     )
     .map_err(|e| InterpreterError::Parse(e.to_string()))?;
 
-    let tracker = LimitedTracker::new(limits);
+    let tracker = ResourceTracker::new(limits);
 
     let mut progress = runner
         .start(vec![], tracker, print_writer.reborrow())
@@ -239,26 +239,30 @@ fn run_inner(
 /// to touch the tracker clock on `ResolveFutures`, but loading a dumped run
 /// starts a fresh clock, so a dump/load round-trip resets it. The copy is
 /// cheap next to any real tool call.
-fn reset_clock(
-    state: ResolveFutures<LimitedTracker>,
-) -> Result<ResolveFutures<LimitedTracker>, InterpreterError> {
-    let bytes = RunProgress::ResolveFutures(state)
-        .dump()
+fn reset_clock(state: ResolveFutures) -> Result<ResolveFutures, InterpreterError> {
+    let progress = RunProgress::ResolveFutures(state);
+    let bytes = dump(SCRIPT_NAME, None, SessionRef::Running(&progress))
         .map_err(|e| InterpreterError::Runtime(e.to_string()))?;
-    match RunProgress::load(&bytes).map_err(|e| InterpreterError::Runtime(e.to_string()))? {
-        RunProgress::ResolveFutures(s) => Ok(s),
+    let loaded = Dump::load(&bytes).map_err(|e| InterpreterError::Runtime(e.to_string()))?;
+    match loaded.state {
+        Session::Running(boxed) => match *boxed {
+            RunProgress::ResolveFutures(s) => Ok(s),
+            _ => Err(InterpreterError::Runtime(
+                "clock reset produced unexpected state".into(),
+            )),
+        },
         _ => Err(InterpreterError::Runtime(
-            "clock reset produced unexpected state".into(),
+            "clock reset produced unexpected session state".into(),
         )),
     }
 }
 
 /// Returns resource limits with custom timeout and memory, using default recursion depth.
 pub fn limits(timeout: Duration, max_memory: usize) -> ResourceLimits {
-    ResourceLimits::new()
+    ResourceLimits::default()
         .max_duration(timeout)
         .max_memory(max_memory)
-        .max_recursion_depth(Some(DEFAULT_MAX_RECURSION))
+        .max_recursion_depth(DEFAULT_MAX_RECURSION)
 }
 
 #[cfg(test)]

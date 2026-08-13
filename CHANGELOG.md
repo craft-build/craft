@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-08-13
+
+### Added
+
+- **providers**: port opencode discovery and `craft.ui.action` from maki (`4de6101a`)
+- **ui**: thinking-level picker in the `/thinking` command (`b61fe7ad`)
+- **agent**: auto-review mode for permission prompts (`ad2afb10`)
+
+### Changed
+
+- **deps**: ran `cargo update`, bumping the workspace to 0.12.2 and refreshing `yaml_serde` 0.10.4 -> 0.10.6
+
+### Fixed
+
+- **providers**: drop orphan `tool_result` blocks in bedrock message conversion (`d9aa9087`)
+- **prompts**: curb verbose doc comments and advisor narration (`e6468a78`)
+
 ## [0.12.1] - 2026-08-12
 
 ### Added
@@ -1598,6 +1615,7 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
 [Unreleased]: https://github.com/craft-build/craft/compare/v0.12.1...HEAD
+[0.12.2]: https://github.com/craft-build/craft/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/craft-build/craft/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/craft-build/craft/compare/v0.11.4...v0.12.0
 [0.11.4]: https://github.com/craft-build/craft/compare/v0.11.3...v0.11.4

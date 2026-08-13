@@ -20,6 +20,7 @@ Type `/` in the input box to open the command palette.
 | `/cd` | Change working directory |
 | `/btw` | Ask a quick question (no tools, no history pollution) |
 | `/yolo` | Toggle YOLO mode (skip all permission prompts) |
+| `/auto-review` | Toggle auto-review (an LLM decides permission prompts instead of asking) |
 | `/thinking` | Set thinking level (opens a picker; or pass off, adaptive, effort level, or budget) |
 | `/fast` | Toggle Anthropic fast mode (Opus only) |
 | `/exit` | Exit the application |
