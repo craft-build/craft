@@ -187,6 +187,31 @@ impl MessagesPanel {
         self.messages.push(msg);
     }
 
+    pub fn auto_review_start(&mut self, tool_id: &str) {
+        if let Some(msg) = self.find_tool_msg_mut(tool_id) {
+            msg.review_status = Some("auto-review in progress…".to_string());
+            self.rebuild_tool_segment(tool_id);
+        }
+    }
+
+    pub fn auto_review_decision(
+        &mut self,
+        tool_id: &str,
+        verdict: &str,
+        risk: &str,
+        rationale: &str,
+    ) {
+        if let Some(msg) = self.find_tool_msg_mut(tool_id) {
+            let label = if verdict == "allow" {
+                "allowed"
+            } else {
+                "denied"
+            };
+            msg.review_status = Some(format!("auto-review {label} (risk: {risk}): {rationale}"));
+            self.rebuild_tool_segment(tool_id);
+        }
+    }
+
     pub fn tool_start(&mut self, event: ToolStartEvent) {
         if let Some(msg) = self.find_tool_msg_mut(&event.id) {
             if let DisplayRole::Tool(t) = &mut msg.role {
@@ -1267,6 +1292,12 @@ impl MessagesPanel {
                 Some(ts),
                 rctx.width,
             );
+        }
+        if let Some(review) = &msg.review_status {
+            tl.lines.push(Line::from(vec![
+                Span::styled("  ↳ ", theme::current().tool_annotation),
+                Span::styled(review.clone(), theme::current().tool_annotation),
+            ]));
         }
         tl
     }

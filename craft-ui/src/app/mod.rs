@@ -1631,6 +1631,16 @@ impl App {
                 self.flash(msg.into());
                 vec![]
             }
+            "/auto-review" => {
+                let enabled = self.permissions.toggle_auto_review();
+                let msg = if enabled {
+                    "Auto-review enabled"
+                } else {
+                    "Auto-review disabled"
+                };
+                self.flash(msg.into());
+                vec![]
+            }
             "/thinking" => {
                 if !self.state.model.supports_thinking() {
                     self.flash("Thinking requires a model that supports it".into());

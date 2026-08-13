@@ -88,6 +88,11 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
     if (!sessionId) return;
     dispatch({ type: "COMPOSER_TEXT", tabId: tab.tabId, text: "" });
 
+    // Drift note: `/mode`, `/yolo`, `/auto-review` are matched by name here
+    // rather than driven purely by the server descriptor, because each needs
+    // bespoke toggle/read logic against `configOptions`. If a builtin is
+    // renamed server-side (craft-acp/src/commands.rs BUILTIN_COMMANDS), the
+    // match below silently no-ops; keep the names in sync.
     switch (item.strategy) {
       case "client":
         if (item.name === "/clear") {
@@ -101,6 +106,9 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
         } else if (item.name === "/yolo") {
           const next = tab.configOptions.find((c) => c.id === "yolo")?.currentValue === "true" ? "false" : "true";
           await setConfigOption(tab.tabId, sessionId, "yolo", next).catch(() => {});
+        } else if (item.name === "/auto-review") {
+          const next = tab.configOptions.find((c) => c.id === "auto_review")?.currentValue === "true" ? "false" : "true";
+          await setConfigOption(tab.tabId, sessionId, "auto_review", next).catch(() => {});
         }
         return;
       case "craft_request":

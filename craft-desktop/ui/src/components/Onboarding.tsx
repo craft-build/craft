@@ -2,11 +2,15 @@ import { useEffect, useState } from "react";
 import { homeDir } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppDispatch, useAppState } from "../state/store";
-import { setMode as setSessionMode, startSession } from "../lib/acp";
+import { setConfigOption, setMode as setSessionMode, startSession } from "../lib/acp";
 import { brandGradient, brandGradientSoft, modeColor, modeColorWash } from "../theme";
 import type { SshTarget, TabState } from "../types";
 import foxMark from "../assets/mark-fox.png";
 
+// Drift note: this list is duplicated from the server's session_modes table
+// (craft-acp/src/methods.rs `session_modes` / `new_session_response`). It is
+// only used for the pre-session default-mode picker, before the server has
+// returned `availableModes`. If a mode is added server-side, add it here too.
 const MODES = ["build", "plan", "flow"] as const;
 const MODE_LABELS: Record<string, string> = { build: "Build", plan: "Plan", flow: "Flow" };
 
@@ -21,6 +25,7 @@ export function Onboarding() {
   const [remoteCraft, setRemoteCraft] = useState("");
   const [mode, setMode] = useState<string>("build");
   const [yolo, setYolo] = useState(false);
+  const [autoReview, setAutoReview] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,6 +54,9 @@ export function Onboarding() {
       const resp = await startSession(tabId, effectiveCwd, yolo, ssh);
       if (mode !== "build") {
         await setSessionMode(tabId, resp.sessionId, mode).catch(() => {});
+      }
+      if (autoReview) {
+        await setConfigOption(tabId, resp.sessionId, "auto_review", "true").catch(() => {});
       }
       const basename = effectiveCwd.split("/").filter(Boolean).pop() ?? effectiveCwd;
       const title = ssh ? `${ssh.host}:${basename}` : basename;
@@ -303,6 +311,52 @@ export function Onboarding() {
                   height: 12,
                   borderRadius: "50%",
                   background: yolo ? t.bg : t.textFaint,
+                  transition: "left 0.15s",
+                }}
+              />
+            </span>
+          </div>
+          <div
+            onClick={() => setAutoReview((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "11px 13px",
+              background: t.bgInset,
+              border: `1px solid ${autoReview ? t.accent : t.border}`,
+              borderRadius: "var(--radius-sm)",
+              cursor: "pointer",
+            }}
+          >
+            <span style={{ fontSize: 12, color: autoReview ? t.accent : t.textDim }}>&#129504;</span>
+            <span style={{ flex: 1, fontSize: 12.5, color: t.text }}>
+              Auto-review
+              <span style={{ display: "block", fontSize: 11, color: t.textFaint }}>
+                Let an LLM reviewer allow or deny tool calls
+              </span>
+            </span>
+            <span
+              style={{
+                width: 32,
+                height: 18,
+                borderRadius: "var(--radius-pill)",
+                background: autoReview ? t.accent : t.bg,
+                border: `1px solid ${autoReview ? t.accent : t.border}`,
+                position: "relative",
+                flex: "none",
+                transition: "background 0.15s",
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: 2,
+                  left: autoReview ? 16 : 2,
+                  width: 12,
+                  height: 12,
+                  borderRadius: "50%",
+                  background: autoReview ? t.bg : t.textFaint,
                   transition: "left 0.15s",
                 }}
               />

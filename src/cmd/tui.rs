@@ -98,6 +98,9 @@ fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config
         config.sandbox.mode = craft_config::SandboxMode::Off;
         config.sandbox.enabled = false;
     }
+    if cli.auto_review || config.always_auto_review {
+        config.permissions.auto_review = true;
+    }
     if !cli.allowed_tools.is_empty() {
         config.agent.allowed_tools = cli
             .allowed_tools

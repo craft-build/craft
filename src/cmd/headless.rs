@@ -26,6 +26,7 @@ pub struct HeadlessOptions {
     pub model: Option<String>,
     pub prompt: String,
     pub yolo: bool,
+    pub auto_review: bool,
     pub no_plugins: bool,
     pub no_rtk: bool,
     pub extra_excluded_tools: Vec<&'static str>,
@@ -82,6 +83,9 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         config.permissions.yolo = true;
         config.sandbox.mode = craft_config::SandboxMode::Off;
         config.sandbox.enabled = false;
+    }
+    if opts.auto_review || config.always_auto_review {
+        config.permissions.auto_review = true;
     }
     config.validate()?;
 

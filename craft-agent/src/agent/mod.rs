@@ -1,4 +1,5 @@
 pub mod advisor;
+mod auto_review;
 mod cache;
 pub(crate) mod compaction;
 pub(crate) mod compression_store;

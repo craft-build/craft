@@ -11,6 +11,7 @@ use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use crate::mcp::{McpHandle, UNKNOWN_MCP};
+use crate::permissions::DEFAULT_DENY_GUIDANCE;
 use crate::task_set::TaskSet;
 use crate::tools::ToolContext;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
@@ -389,22 +390,121 @@ async fn enforce_permission(
             "enforce_permission called with dotted name: {name}"
         ));
     }
-    if let Some(scopes) = inv.permission_scopes().await {
-        let tool_key = ToolKey::native(name);
-        ctx.permissions
-            .enforce(
-                &tool_key,
-                &scopes,
-                &ctx.event_tx,
-                ctx.user_response_rx.as_deref(),
-                id,
-                &ctx.cancel,
-                ctx.mode.plan_path(),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+    let Some(scopes) = inv.permission_scopes().await else {
+        return Ok(());
+    };
+    let tool_key = ToolKey::native(name);
+    let plan_path = ctx.mode.plan_path();
+
+    if ctx.permissions.is_auto_review() {
+        if let Err(e) = enforce_with_auto_review(&tool_key, &scopes, ctx, id, plan_path).await {
+            return Err(e.to_string());
+        }
+        return Ok(());
     }
+
+    ctx.permissions
+        .enforce(
+            &tool_key,
+            &scopes,
+            &ctx.event_tx,
+            ctx.user_response_rx.as_deref(),
+            id,
+            &ctx.cancel,
+            plan_path,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+async fn enforce_with_auto_review(
+    tool_key: &ToolKey,
+    scopes: &crate::tools::PermissionScopes,
+    ctx: &ToolContext,
+    id: &str,
+    plan_path: Option<&Path>,
+) -> Result<(), crate::permissions::PermissionError> {
+    use crate::agent::auto_review;
+    use crate::permissions::{PermissionCheck, PermissionError};
+
+    let scope_display = || scopes.scopes.join("; ");
+    let deny = |guidance: Option<String>| match guidance {
+        Some(g) => PermissionError::with_guidance(&tool_key.to_string(), &scope_display(), g),
+        None => PermissionError::new(&tool_key.to_string(), &scope_display()),
+    };
+
+    match ctx.permissions.check_scopes(tool_key, scopes, plan_path) {
+        PermissionCheck::Allowed => return Ok(()),
+        PermissionCheck::Denied => return Err(deny(None)),
+        PermissionCheck::NeedsPrompt { .. } => {}
+    }
+
+    let started = Instant::now();
+    let _ = ctx.event_tx.send(AgentEvent::AutoReviewStart {
+        id: id.to_string(),
+        tool: tool_key.clone(),
+        scopes: scopes.scopes.clone(),
+    });
+    let result = auto_review::review(
+        &ctx.provider,
+        &ctx.model,
+        &tool_key.to_string(),
+        &scopes.scopes,
+        &ctx.cancel,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    match result {
+        Ok(decision) => {
+            let allow = decision.verdict == auto_review::Verdict::Allow;
+            let _ = ctx.event_tx.send(AgentEvent::AutoReviewDecision {
+                id: id.to_string(),
+                tool: tool_key.clone(),
+                scopes: scopes.scopes.clone(),
+                verdict: decision.verdict.as_str().to_string(),
+                risk: decision.risk.as_str().to_string(),
+                rationale: decision.rationale.clone(),
+            });
+            ctx.permissions
+                .apply_auto_review(tool_key, &scopes.scopes, allow);
+            info!(
+                tool = %tool_key,
+                scopes = %scope_display(),
+                verdict = decision.verdict.as_str(),
+                risk = decision.risk.as_str(),
+                rationale = %decision.rationale,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "auto-review decision"
+            );
+            if allow {
+                return Ok(());
+            }
+            Err(deny(Some(decision.rationale)))
+        }
+        Err(err) => {
+            let rationale = err.to_string();
+            warn!(
+                tool = %tool_key,
+                scopes = %scope_display(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                error = %rationale,
+                "auto-review failed closed"
+            );
+            let _ = ctx.event_tx.send(AgentEvent::AutoReviewDecision {
+                id: id.to_string(),
+                tool: tool_key.clone(),
+                scopes: scopes.scopes.clone(),
+                verdict: "deny".to_string(),
+                risk: "unknown".to_string(),
+                rationale: rationale.clone(),
+            });
+            Err(deny(Some(format!(
+                "auto-review denied this action: {rationale}. {DEFAULT_DENY_GUIDANCE}"
+            ))))
+        }
+    }
 }
 
 /// Records a pre-write backup for `path`: lazily starts an auto snapshot,

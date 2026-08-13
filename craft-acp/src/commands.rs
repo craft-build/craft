@@ -147,6 +147,13 @@ const BUILTIN_COMMANDS: &[CommandDescriptor] = &[
         category: CATEGORY_CONFIG,
     },
     CommandDescriptor {
+        name: "/auto-review",
+        description: "Toggle auto-review (LLM reviewer allows/denies tool calls)",
+        max_args: 0,
+        strategy: CommandStrategy::AcpStandard,
+        category: CATEGORY_CONFIG,
+    },
+    CommandDescriptor {
         name: "/model",
         description: "Switch model",
         max_args: 0,

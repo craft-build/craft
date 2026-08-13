@@ -286,6 +286,7 @@ pub struct InteractiveParams {
     pub session_id: Option<SessionRef>,
     pub initial_history: Vec<Message>,
     pub yolo: bool,
+    pub auto_review: bool,
     pub system_prompt_override: Option<String>,
     pub append_system_prompt: Option<String>,
     pub fs: Arc<dyn FsBackend>,
@@ -347,6 +348,9 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     ));
     if params.yolo {
         permissions.toggle_yolo();
+    }
+    if params.auto_review {
+        permissions.toggle_auto_review();
     }
 
     let answer_rx = Arc::new(tokio::sync::Mutex::new(answer_rx));

@@ -478,6 +478,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
     }
 
     let startup_model = model.clone();
+    let auto_review = permissions_config.auto_review;
     let handle = headless::spawn_interactive(InteractiveParams {
         model,
         config,
@@ -492,6 +493,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
         session_id,
         initial_history,
         yolo: permission_mode == PermissionMode::BypassPermissions,
+        auto_review,
         system_prompt_override: cli.system_prompt.clone().filter(|s| !s.is_empty()),
         append_system_prompt: cli.append_system_prompt.clone().filter(|s| !s.is_empty()),
         fs: Arc::new(craft_agent::tools::LocalFs),
@@ -1055,7 +1057,9 @@ impl EventPump {
             | AgentEvent::ModelEscalation { .. }
             | AgentEvent::QuestionRequest { .. }
             | AgentEvent::StagnationDetected { .. }
-            | AgentEvent::FlowProgress { .. } => {}
+            | AgentEvent::FlowProgress { .. }
+            | AgentEvent::AutoReviewStart { .. }
+            | AgentEvent::AutoReviewDecision { .. } => {}
         }
         Ok(())
     }

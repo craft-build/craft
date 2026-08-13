@@ -16,6 +16,7 @@ pub const MODE_FLOW: &str = "flow";
 pub const MODEL_CONFIG_ID: &str = "model";
 pub const MODE_CONFIG_ID: &str = "mode";
 pub const YOLO_CONFIG_ID: &str = "yolo";
+pub const AUTO_REVIEW_CONFIG_ID: &str = "auto_review";
 
 pub fn initialize_response() -> InitializeResponse {
     InitializeResponse::new(ProtocolVersion::V1)
@@ -56,6 +57,19 @@ pub fn yolo_config_option(current: bool) -> SessionConfigOption {
         ],
     )
     .description("Auto-approve all tool permissions")
+}
+
+pub fn auto_review_config_option(current: bool) -> SessionConfigOption {
+    SessionConfigOption::select(
+        AUTO_REVIEW_CONFIG_ID,
+        "Auto Review",
+        current.to_string(),
+        vec![
+            SessionConfigSelectOption::new("false", "Off"),
+            SessionConfigSelectOption::new("true", "On"),
+        ],
+    )
+    .description("Let an LLM reviewer auto-allow or deny non-approved tool calls")
 }
 
 fn model_config_option_default() -> SessionConfigOption {

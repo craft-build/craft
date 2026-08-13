@@ -639,6 +639,19 @@ pub enum AgentEvent {
         #[serde(default)]
         context: PermissionContext,
     },
+    AutoReviewStart {
+        id: String,
+        tool: ToolKey,
+        scopes: Vec<String>,
+    },
+    AutoReviewDecision {
+        id: String,
+        tool: ToolKey,
+        scopes: Vec<String>,
+        verdict: String,
+        risk: String,
+        rationale: String,
+    },
     QuestionRequest {
         id: String,
         questions: Vec<QuestionSpec>,

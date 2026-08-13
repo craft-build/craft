@@ -105,6 +105,10 @@ pub struct Cli {
     #[arg(long, alias = "dangerously-skip-permissions")]
     pub yolo: bool,
 
+    /// Auto-decide permission prompts with an LLM reviewer instead of asking
+    #[arg(long, alias = "A")]
+    pub auto_review: bool,
+
     /// Exit after the agent completes (for automation workflows)
     #[arg(long)]
     pub exit_on_done: bool,
@@ -261,6 +265,9 @@ pub enum Command {
         /// Skip all permission prompts (allow everything)
         #[arg(long)]
         yolo: bool,
+        /// Auto-decide permission prompts with an LLM reviewer instead of asking
+        #[arg(long, alias = "A")]
+        auto_review: bool,
         /// Working directory to run the ACP server in (chdir before startup)
         #[arg(long)]
         cwd: Option<std::path::PathBuf>,
@@ -327,6 +334,9 @@ pub struct RunCommand {
     /// Skip all permission prompts (allow everything)
     #[arg(long)]
     pub yolo: bool,
+    /// Auto-decide permission prompts with an LLM reviewer instead of asking
+    #[arg(long, alias = "A")]
+    pub auto_review: bool,
     /// Skip user `init.lua` files (global and project) but keep the Lua
     /// host and every builtin plugin running, so tools and the default
     /// keymap still load. Use this to recover from a broken `init.lua`
@@ -368,6 +378,9 @@ pub enum RecipeAction {
         /// Skip all permission prompts (allow everything)
         #[arg(long)]
         yolo: bool,
+        /// Auto-decide permission prompts with an LLM reviewer instead of asking
+        #[arg(long, alias = "A")]
+        auto_review: bool,
         /// Disable the Lua plugin system
         #[arg(long)]
         no_plugins: bool,

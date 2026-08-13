@@ -637,6 +637,11 @@ impl ToolLineBuilder {
         if self.is_top_level || self.has_bar {
             // The colored left bar (applied uniformly in `finish`) conveys
             // status instead of a dot, so there's nothing to insert here.
+            // An in-progress bar still animates a spinner character on the
+            // header line, so register it for the per-frame spinner update.
+            if let Indicator::InProgress = indicator {
+                self.spinner_lines.push(0);
+            }
             self.bar_style = match indicator {
                 Indicator::Pending => theme::current().tool_dim,
                 Indicator::InProgress => theme::current().spinner,
@@ -1174,6 +1179,7 @@ mod tests {
             tool_output: output.map(Arc::new),
             live_output: None,
             annotation: None,
+            review_status: None,
             plan_path: None,
             truncated_lines: 0,
             timestamp: None,
@@ -1472,6 +1478,7 @@ mod tests {
             tool_output: Some(Arc::new(ToolOutput::Plain(output))),
             live_output: None,
             annotation: None,
+            review_status: None,
             plan_path: None,
             timestamp: None,
             turn_usage: None,
@@ -1588,6 +1595,7 @@ mod tests {
             tool_output: Some(Arc::new(ToolOutput::Plain(body.to_owned()))),
             live_output: None,
             annotation: None,
+            review_status: None,
             plan_path: None,
             timestamp: None,
             turn_usage: None,
@@ -1628,6 +1636,7 @@ mod tests {
             tool_output: Some(Arc::new(ToolOutput::Plain("plain fallback".into()))),
             live_output: None,
             annotation: None,
+            review_status: None,
             plan_path: None,
             timestamp: None,
             turn_usage: None,
@@ -1861,6 +1870,7 @@ mod tests {
             tool_output,
             live_output,
             annotation: None,
+            review_status: None,
             plan_path: None,
             truncated_lines,
             timestamp: None,
@@ -1969,6 +1979,7 @@ mod tests {
             })),
             live_output: None,
             annotation: None,
+            review_status: None,
             plan_path: None,
             truncated_lines: 0,
             timestamp: None,
@@ -2117,6 +2128,7 @@ mod tests {
             tool_output: Some(Arc::new(ToolOutput::Plain("llm_output_here".into()))),
             live_output: None,
             annotation: None,
+            review_status: None,
             plan_path: None,
             timestamp: None,
             turn_usage: None,
@@ -2156,6 +2168,7 @@ mod tests {
             tool_output: None,
             live_output: None,
             annotation: None,
+            review_status: None,
             plan_path: None,
             timestamp: None,
             turn_usage: None,

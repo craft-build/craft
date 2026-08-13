@@ -73,7 +73,7 @@ impl std::fmt::Display for PermissionError {
 }
 
 impl PermissionError {
-    fn new(tool: &str, scope: &str) -> Self {
+    pub(crate) fn new(tool: &str, scope: &str) -> Self {
         Self {
             tool: tool.to_string(),
             scope: scope.to_string(),
@@ -81,7 +81,7 @@ impl PermissionError {
         }
     }
 
-    fn with_guidance(tool: &str, scope: &str, guidance: String) -> Self {
+    pub(crate) fn with_guidance(tool: &str, scope: &str, guidance: String) -> Self {
         Self {
             tool: tool.to_string(),
             scope: scope.to_string(),
@@ -157,6 +157,7 @@ pub struct PermissionManager {
     config_rules: Vec<PermissionRule>,
     builtin_rules: Vec<PermissionRule>,
     yolo: AtomicBool,
+    auto_review: AtomicBool,
     default: DefaultEffect,
     tool_defaults: HashMap<ToolKey, DefaultEffect>,
     cwd: PathBuf,
@@ -193,6 +194,7 @@ impl PermissionManager {
             session_rules: Mutex::new(Vec::new()),
             config_rules,
             yolo: AtomicBool::new(config.yolo),
+            auto_review: AtomicBool::new(config.auto_review),
             default: config.default,
             tool_defaults: config.tool_defaults,
             cwd,
@@ -208,6 +210,7 @@ impl PermissionManager {
             config_rules: self.config_rules.clone(),
             builtin_rules: self.builtin_rules.clone(),
             yolo: AtomicBool::new(self.is_yolo()),
+            auto_review: AtomicBool::new(self.is_auto_review()),
             default: self.default,
             tool_defaults: self.tool_defaults.clone(),
             cwd: self.cwd.clone(),
@@ -357,6 +360,15 @@ impl PermissionManager {
         self.yolo.load(Ordering::Relaxed)
     }
 
+    pub fn toggle_auto_review(&self) -> bool {
+        let prev = self.auto_review.fetch_xor(true, Ordering::Relaxed);
+        !prev
+    }
+
+    pub fn is_auto_review(&self) -> bool {
+        self.auto_review.load(Ordering::Relaxed)
+    }
+
     /// Outside-cwd paths are not blocked here. They flow through the normal
     /// permission prompt (which uses the same canonicalization via
     /// [`scope_matches`]). Only unresolvable boundaries are hard-blocked.
@@ -431,6 +443,30 @@ impl PermissionManager {
             }
         }
         persist
+    }
+
+    pub fn check_scopes(
+        &self,
+        tool: &ToolKey,
+        scopes: &crate::tools::PermissionScopes,
+        plan_path: Option<&Path>,
+    ) -> PermissionCheck {
+        let scope_refs: Vec<&str> = scopes.scopes.iter().map(|s| s.as_str()).collect();
+        self.check_inner(tool, &scope_refs, scopes.force_prompt, plan_path)
+    }
+
+    /// Persist an auto-review decision as a session rule and return whether it
+    /// allows the call. Mirrors the persistence in `enforce` for user answers.
+    pub fn apply_auto_review(&self, tool: &ToolKey, scopes: &[String], allow: bool) -> bool {
+        let effect = if allow { Effect::Allow } else { Effect::Deny };
+        for s in scopes {
+            self.add_session_rule(PermissionRule {
+                tool: tool.clone(),
+                scope: Some(s.clone()),
+                effect,
+            });
+        }
+        allow
     }
 
     #[allow(clippy::too_many_arguments)]

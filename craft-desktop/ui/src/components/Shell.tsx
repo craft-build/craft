@@ -68,7 +68,28 @@ export function Shell() {
           {active.title}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "none", position: "relative" }}>
-          <YoloToggle active={active} t={t} />
+          <ConfigToggle
+            active={active}
+            t={t}
+            configId="auto_review"
+            label="AUTO-REVIEW"
+            icon="&#129504;"
+            onColor={t.accent}
+            onColorDim={t.accentDim}
+            onTitle="Auto-review on: an LLM reviewer allows/denies tool calls"
+            offTitle="Enable auto-review (LLM reviewer allows/denies tool calls)"
+          />
+          <ConfigToggle
+            active={active}
+            t={t}
+            configId="yolo"
+            label="YOLO"
+            icon="&#9889;"
+            onColor={t.warning}
+            onColorDim={t.warningDim}
+            onTitle="Yolo on: permissions auto-approved"
+            offTitle="Enable yolo (auto-approve permissions)"
+          />
           <ModelPicker active={active} t={t} currentModelLabel={currentModelLabel} />
         </div>
       </div>
@@ -608,16 +629,36 @@ function ModelPicker({
   );
 }
 
-function YoloToggle({ active, t }: { active: TabState; t: Tokens }) {
+function ConfigToggle({
+  active,
+  t,
+  configId,
+  label,
+  icon,
+  onColor,
+  onColorDim,
+  onTitle,
+  offTitle,
+}: {
+  active: TabState;
+  t: Tokens;
+  configId: string;
+  label: string;
+  icon: string;
+  onColor: string;
+  onColorDim: string;
+  onTitle: string;
+  offTitle: string;
+}) {
   const dispatch = useAppDispatch();
-  const yoloOption = active.configOptions.find((c) => c.id === "yolo");
-  const isYolo = yoloOption?.currentValue === "true";
+  const option = active.configOptions.find((c) => c.id === configId);
+  const isOn = option?.currentValue === "true";
 
   const toggle = async () => {
     if (!active.sessionId) return;
-    const next = isYolo ? "false" : "true";
+    const next = isOn ? "false" : "true";
     try {
-      const resp = (await setConfigOption(active.tabId, active.sessionId, "yolo", next)) as {
+      const resp = (await setConfigOption(active.tabId, active.sessionId, configId, next)) as {
         configOptions?: TabState["configOptions"];
       };
       if (resp?.configOptions) {
@@ -628,14 +669,14 @@ function YoloToggle({ active, t }: { active: TabState; t: Tokens }) {
         });
       }
     } catch (e) {
-      console.error("failed to toggle yolo", e);
+      console.error(`failed to toggle ${configId}`, e);
     }
   };
 
   return (
     <div
       onClick={toggle}
-      title={isYolo ? "Yolo on: permissions auto-approved" : "Enable yolo (auto-approve permissions)"}
+      title={isOn ? onTitle : offTitle}
       style={{
         display: "flex",
         alignItems: "center",
@@ -645,14 +686,14 @@ function YoloToggle({ active, t }: { active: TabState; t: Tokens }) {
         fontWeight: 600,
         letterSpacing: 0.3,
         cursor: "pointer",
-        background: isYolo ? t.warningDim : "transparent",
-        color: isYolo ? t.warning : t.textFaint,
-        border: `1px solid ${isYolo ? t.warning : t.border}`,
+        background: isOn ? onColorDim : "transparent",
+        color: isOn ? onColor : t.textFaint,
+        border: `1px solid ${isOn ? onColor : t.border}`,
         borderRadius: "var(--radius-sm)",
       }}
     >
-      <span style={{ fontSize: 11 }}>&#9889;</span>
-      YOLO
+      <span style={{ fontSize: 11 }}>{icon}</span>
+      {label}
     </div>
   );
 }

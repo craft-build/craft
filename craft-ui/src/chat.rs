@@ -220,6 +220,19 @@ impl Chat {
                         cache,
                     }));
             }
+            AgentEvent::AutoReviewStart { id, .. } => {
+                self.messages_panel.auto_review_start(&id);
+            }
+            AgentEvent::AutoReviewDecision {
+                id,
+                verdict,
+                risk,
+                rationale,
+                ..
+            } => {
+                self.messages_panel
+                    .auto_review_decision(&id, &verdict, &risk, &rationale);
+            }
             AgentEvent::FlowProgress { .. } => {}
         }
         ChatEventResult::Continue
@@ -543,6 +556,7 @@ pub fn history_to_display(
                                 tool_output,
                                 live_output: None,
                                 annotation,
+                                review_status: None,
                                 plan_path: None,
                                 timestamp: None,
                                 turn_usage: None,

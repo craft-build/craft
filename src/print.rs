@@ -254,7 +254,9 @@ pub async fn run(
             | AgentEvent::ModelEscalation { .. }
             | AgentEvent::StagnationDetected { .. }
             | AgentEvent::PromptProgress { .. }
-            | AgentEvent::FlowProgress { .. } => {}
+            | AgentEvent::FlowProgress { .. }
+            | AgentEvent::AutoReviewStart { .. }
+            | AgentEvent::AutoReviewDecision { .. } => {}
             AgentEvent::Retry {
                 attempt,
                 message,

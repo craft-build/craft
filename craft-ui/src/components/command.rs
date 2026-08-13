@@ -95,6 +95,11 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 0,
     },
     BuiltinCommand {
+        name: "/auto-review",
+        description: "Toggle auto-review (an LLM decides permission prompts instead of asking)",
+        max_args: 0,
+    },
+    BuiltinCommand {
         name: "/thinking",
         description: "Set thinking level (opens a picker; or pass off, adaptive, effort level, or budget)",
         max_args: 1,
@@ -699,7 +704,7 @@ mod tests {
 
     #[test]
     fn filter_custom_by_substring() {
-        let p = synced_with_custom("/review", sample_custom());
+        let p = synced_with_custom("/project:review", sample_custom());
         assert!(p.is_active());
         assert_eq!(p.filtered.len(), 1);
         assert!(matches!(p.filtered[0].command_type, CommandType::Custom(0)));

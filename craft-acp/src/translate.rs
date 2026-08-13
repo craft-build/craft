@@ -183,6 +183,31 @@ pub fn batch_inner_start(event: &BatchProgressEvent) -> SessionUpdate {
     )
 }
 
+const AUTO_REVIEW_IN_PROGRESS: &str = "auto-review in progress\u{2026}";
+
+fn verdict_label(verdict: &str) -> &str {
+    match verdict.trim().to_ascii_lowercase().as_str() {
+        "allow" | "approved" | "approve" | "yes" | "true" => "allowed",
+        _ => "denied",
+    }
+}
+
+pub fn auto_review_start(id: &str) -> SessionUpdate {
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+        ToolCallId::from(id.to_string()),
+        ToolCallUpdateFields::new().title(AUTO_REVIEW_IN_PROGRESS.to_string()),
+    ))
+}
+
+pub fn auto_review_decision(id: &str, verdict: &str, risk: &str, rationale: &str) -> SessionUpdate {
+    let label = verdict_label(verdict);
+    let title = format!("auto-review {label} (risk: {risk}): {rationale}");
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+        ToolCallId::from(id.to_string()),
+        ToolCallUpdateFields::new().title(title),
+    ))
+}
+
 pub fn tool_output(id: &str, content: &str) -> SessionUpdate {
     let fields = ToolCallUpdateFields::new().content(vec![ToolCallContent::Content(Content::new(
         ContentBlock::Text(TextContent::new(fenced(content))),
@@ -440,6 +465,30 @@ mod tests {
         assert_eq!(json["content"][0]["content"]["text"], "narration");
         let text = json["content"][0]["content"]["text"].as_str().unwrap();
         assert!(!text.starts_with('`'), "text must not be a code fence");
+    }
+
+    #[test]
+    fn auto_review_start_marks_tool_title_in_progress() {
+        let json = serde_json::to_value(auto_review_start("tu-9")).unwrap();
+        assert_eq!(json["sessionUpdate"], "tool_call_update");
+        assert_eq!(json["toolCallId"], "tu-9");
+        assert_eq!(json["title"], "auto-review in progress\u{2026}");
+    }
+
+    #[test_case("allow", "low", "safe read", "auto-review allowed (risk: low): safe read"; "allow_decision")]
+    #[test_case("deny", "high", "destructive write", "auto-review denied (risk: high): destructive write"; "deny_decision")]
+    #[test_case("approved", "medium", "x", "auto-review allowed (risk: medium): x"; "approved_alias_maps_to_allowed")]
+    fn auto_review_decision_matches_tui_text(
+        verdict: &str,
+        risk: &str,
+        rationale: &str,
+        expected_title: &str,
+    ) {
+        let json =
+            serde_json::to_value(auto_review_decision("tu-1", verdict, risk, rationale)).unwrap();
+        assert_eq!(json["sessionUpdate"], "tool_call_update");
+        assert_eq!(json["toolCallId"], "tu-1");
+        assert_eq!(json["title"], expected_title);
     }
 
     #[test_case(Some("import"), "import"; "summary_becomes_title")]

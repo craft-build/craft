@@ -42,6 +42,7 @@ async fn init(model_spec: Option<String>) -> Result<()> {
         model: model_spec,
         prompt: WIKI_INIT_PROMPT.to_string(),
         yolo: false,
+        auto_review: false,
         no_plugins: false,
         no_rtk: false,
         extra_excluded_tools: vec![],

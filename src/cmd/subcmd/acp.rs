@@ -13,7 +13,13 @@ use craft_storage::flow::FlowStore;
 
 use crate::setup;
 
-pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_plugins: bool, no_jit: bool) -> Result<()> {
+pub async fn run(
+    yolo: bool,
+    auto_review: bool,
+    cwd: Option<PathBuf>,
+    no_plugins: bool,
+    no_jit: bool,
+) -> Result<()> {
     let storage = StateDir::resolve().context("resolve data directory")?;
     craft_providers::model_registry::load_from_storage(&storage);
 
@@ -44,6 +50,9 @@ pub async fn run(yolo: bool, cwd: Option<PathBuf>, no_plugins: bool, no_jit: boo
         config.permissions.yolo = true;
         config.sandbox.mode = craft_config::SandboxMode::Off;
         config.sandbox.enabled = false;
+    }
+    if auto_review || config.always_auto_review {
+        config.permissions.auto_review = true;
     }
     config.validate()?;
 

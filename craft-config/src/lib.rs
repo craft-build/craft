@@ -126,6 +126,13 @@ pub const TOP_LEVEL_FIELDS: &[ConfigField] = &[
         description: "Start every session with YOLO mode (skip permission prompts, deny rules still apply)",
     },
     ConfigField {
+        name: "always_auto_review",
+        ty: "bool",
+        default: ConfigValue::Bool(false),
+        min: None,
+        description: "Start every session with auto-review (an LLM auto-decides allow/deny on permission prompts instead of asking)",
+    },
+    ConfigField {
         name: "always_fast",
         ty: "bool",
         default: ConfigValue::Bool(false),
@@ -238,6 +245,7 @@ impl AlwaysThinking {
 #[serde(default, deny_unknown_fields)]
 pub struct RawConfig {
     pub always_yolo: Option<bool>,
+    pub always_auto_review: Option<bool>,
     pub always_fast: Option<bool>,
     pub always_thinking: Option<AlwaysThinking>,
     #[serde(default)]
@@ -261,7 +269,14 @@ pub struct RawConfig {
 
 impl RawConfig {
     pub fn merge(&mut self, overlay: RawConfig) {
-        merge_option!(self, overlay, always_yolo, always_fast, always_thinking);
+        merge_option!(
+            self,
+            overlay,
+            always_yolo,
+            always_auto_review,
+            always_fast,
+            always_thinking
+        );
         self.ui.merge(overlay.ui);
         self.agent.merge(overlay.agent);
         self.provider.merge(overlay.provider);
@@ -298,6 +313,7 @@ impl RawConfig {
         agent.repomap = repomap.clone();
         Ok(Config {
             always_yolo: self.always_yolo.unwrap_or(false),
+            always_auto_review: self.always_auto_review.unwrap_or(false),
             always_fast: self.always_fast.unwrap_or(false),
             always_thinking: self
                 .always_thinking
@@ -933,11 +949,13 @@ pub struct PermissionsConfig {
     pub tool_defaults: HashMap<ToolKey, DefaultEffect>,
     pub rules: Vec<PermissionRule>,
     pub yolo: bool,
+    pub auto_review: bool,
 }
 
 #[derive(Clone)]
 pub struct Config {
     pub always_yolo: bool,
+    pub always_auto_review: bool,
     pub always_fast: bool,
     pub always_thinking: Option<StoredThinking>,
     pub ui: UiConfig,
@@ -2397,6 +2415,7 @@ fn build_permissions(
         tool_defaults,
         rules,
         yolo: false,
+        auto_review: false,
     }
 }
 
@@ -2940,6 +2959,7 @@ tasks = []
     fn validate_rejects_invalid_sections(section: &str, field: &str, value: u64) {
         let mut config = Config {
             always_yolo: false,
+            always_auto_review: false,
             always_fast: false,
             always_thinking: None,
             ui: UiConfig::default(),

@@ -364,6 +364,7 @@ struct SessionInfo {
     session_id: String,
     current_model: String,
     yolo: bool,
+    auto_review: bool,
 }
 
 type SharedSession = Arc<Mutex<Option<SessionInfo>>>;
@@ -456,6 +457,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
                             methods::mode_config_option(methods::MODE_BUILD),
                             methods::model_config_option(&info.current_model, &guard),
                             methods::yolo_config_option(info.yolo),
+                            methods::auto_review_config_option(info.auto_review),
                         ])),
                     );
                 }
@@ -570,6 +572,7 @@ async fn handle_request(
                     methods::mode_config_option(methods::MODE_BUILD),
                     methods::model_config_option(&spec, &specs),
                     methods::yolo_config_option(params.yolo),
+                    methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
             install_session(srv, handle, spec, cwd);
@@ -726,6 +729,7 @@ async fn spawn_session(
         session_id,
         initial_history: history,
         yolo: params.yolo,
+        auto_review: params.permissions_config.auto_review,
         system_prompt_override: None,
         append_system_prompt: None,
         fs,
@@ -821,6 +825,7 @@ fn install_session(
         session_id: session_id.clone(),
         current_model: current_model.clone(),
         yolo: handle.permissions.is_yolo(),
+        auto_review: handle.permissions.is_auto_review(),
     });
     srv.session = Some(SessionState {
         handle,
@@ -969,6 +974,10 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         return handle_set_yolo_config(srv, &req);
     }
 
+    if config_id == methods::AUTO_REVIEW_CONFIG_ID {
+        return handle_set_auto_review_config(srv, &req);
+    }
+
     if config_id != methods::MODEL_CONFIG_ID {
         let detail = format!("unknown config option: {}", req.config_id);
         return Err(AcpError::invalid_params().data(json_str(&detail)));
@@ -998,23 +1007,7 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         info.current_model = spec.clone();
     }
 
-    let mode = srv.session.as_ref().map(|s| &s.current_mode);
-    let mode_id = match mode {
-        Some(AgentMode::Plan(_)) => "plan",
-        _ => "build",
-    };
-    let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(AgentResponse::SetSessionConfigOptionResponse(
-        SetSessionConfigOptionResponse::new(vec![
-            methods::mode_config_option(mode_id),
-            methods::model_config_option(&spec, &specs),
-            methods::yolo_config_option(
-                srv.session
-                    .as_ref()
-                    .is_some_and(|s| s.handle.permissions.is_yolo()),
-            ),
-        ]),
-    ))
+    config_option_response(srv)
 }
 
 fn handle_set_mode_config(
@@ -1023,24 +1016,7 @@ fn handle_set_mode_config(
 ) -> Result<AgentResponse, AcpError> {
     let mode_str = config_value_str(req)?.to_string();
     apply_mode(srv, &mode_str)?;
-
-    let current_model = srv
-        .session
-        .as_ref()
-        .map(|s| s.current_model.clone())
-        .unwrap_or_default();
-    let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(AgentResponse::SetSessionConfigOptionResponse(
-        SetSessionConfigOptionResponse::new(vec![
-            methods::mode_config_option(&mode_str),
-            methods::model_config_option(&current_model, &specs),
-            methods::yolo_config_option(
-                srv.session
-                    .as_ref()
-                    .is_some_and(|s| s.handle.permissions.is_yolo()),
-            ),
-        ]),
-    ))
+    config_option_response(srv)
 }
 
 fn handle_set_yolo_config(
@@ -1048,19 +1024,10 @@ fn handle_set_yolo_config(
     req: &SetSessionConfigOptionRequest,
 ) -> Result<AgentResponse, AcpError> {
     let want = config_value_str(req)? == "true";
-    let (current_model, mode_id) = {
-        let session = srv.session.as_mut().ok_or_else(no_session)?;
-        if want != session.handle.permissions.is_yolo() {
-            session.handle.permissions.toggle_yolo();
-        }
-        let mode_id = match &session.current_mode {
-            AgentMode::Plan(_) => "plan",
-            AgentMode::Flow(_) => "flow",
-            AgentMode::Build => "build",
-        };
-        (session.current_model.clone(), mode_id)
-    };
-
+    let session = srv.session.as_mut().ok_or_else(no_session)?;
+    if want != session.handle.permissions.is_yolo() {
+        session.handle.permissions.toggle_yolo();
+    }
     if let Some(info) = srv
         .shared_session
         .lock()
@@ -1069,13 +1036,49 @@ fn handle_set_yolo_config(
     {
         info.yolo = want;
     }
+    config_option_response(srv)
+}
 
+fn handle_set_auto_review_config(
+    srv: &mut Server,
+    req: &SetSessionConfigOptionRequest,
+) -> Result<AgentResponse, AcpError> {
+    let want = config_value_str(req)? == "true";
+    let session = srv.session.as_mut().ok_or_else(no_session)?;
+    if want != session.handle.permissions.is_auto_review() {
+        session.handle.permissions.toggle_auto_review();
+    }
+    if let Some(info) = srv
+        .shared_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        info.auto_review = want;
+    }
+    config_option_response(srv)
+}
+
+/// Build the full `set_config_option` response from the live session's
+/// current mode/model/permission state. Shared by the mode, yolo, and
+/// auto-review config handlers so the returned options stay in lockstep.
+fn config_option_response(srv: &Server) -> Result<AgentResponse, AcpError> {
+    let session = srv.session.as_ref().ok_or_else(no_session)?;
+    let mode_id = match &session.current_mode {
+        AgentMode::Plan(_) => "plan",
+        AgentMode::Flow(_) => "flow",
+        AgentMode::Build => "build",
+    };
+    let current_model = session.current_model.clone();
+    let yolo = session.handle.permissions.is_yolo();
+    let auto_review = session.handle.permissions.is_auto_review();
     let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
     Ok(AgentResponse::SetSessionConfigOptionResponse(
         SetSessionConfigOptionResponse::new(vec![
             methods::mode_config_option(mode_id),
             methods::model_config_option(&current_model, &specs),
-            methods::yolo_config_option(want),
+            methods::yolo_config_option(yolo),
+            methods::auto_review_config_option(auto_review),
         ]),
     ))
 }
@@ -1396,6 +1399,14 @@ fn start_event_pump(
                         None => continue,
                     }
                 }
+                AgentEvent::AutoReviewStart { id, .. } => translate::auto_review_start(&id),
+                AgentEvent::AutoReviewDecision {
+                    id,
+                    verdict,
+                    risk,
+                    rationale,
+                    ..
+                } => translate::auto_review_decision(&id, &verdict, &risk, &rationale),
                 _ => continue,
             };
             session_update(&out_tx, &sid, update);
