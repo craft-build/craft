@@ -25,6 +25,7 @@ pub(crate) fn system_block(system: &str) -> SystemContentBlock {
 
 pub(crate) fn to_aws_messages(messages: &[Message]) -> Result<Vec<AwsMessage>, AgentError> {
     let mut out = Vec::with_capacity(messages.len());
+    let mut known_tool_use_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for msg in messages {
         let role = match msg.role {
             Role::User => ConversationRole::User,
@@ -32,7 +33,19 @@ pub(crate) fn to_aws_messages(messages: &[Message]) -> Result<Vec<AwsMessage>, A
         };
         let mut blocks: Vec<ContentBlock> = Vec::with_capacity(msg.content.len());
         for block in &msg.content {
+            if let CraftBlock::ToolResult { tool_use_id, .. } = block
+                && !known_tool_use_ids.contains(tool_use_id.as_str())
+            {
+                warn!(
+                    tool_use_id = %tool_use_id,
+                    "bedrock dropping orphan tool_result with no matching tool_use"
+                );
+                continue;
+            }
             blocks.push(to_aws_block(block)?);
+            if let CraftBlock::ToolUse { id, .. } = block {
+                known_tool_use_ids.insert(id.as_str());
+            }
         }
         if blocks.is_empty() {
             blocks.push(ContentBlock::Text(String::new()));
@@ -287,18 +300,25 @@ mod tests {
 
     #[test]
     fn tool_result_block_maps_id_and_status() {
-        let msgs = vec![Message {
-            role: Role::User,
-            content: vec![CraftBlock::ToolResult {
-                tool_use_id: "tu_1".into(),
-                content: "done".into(),
-                images: vec![],
-                is_error: true,
-            }],
-            ..Default::default()
-        }];
+        let msgs = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![CraftBlock::tool_use("tu_1", "bash", json!({}))],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![CraftBlock::ToolResult {
+                    tool_use_id: "tu_1".into(),
+                    content: "done".into(),
+                    images: vec![],
+                    is_error: true,
+                }],
+                ..Default::default()
+            },
+        ];
         let aws = to_aws_messages(&msgs).unwrap();
-        match &aws[0].content[0] {
+        match &aws[1].content[0] {
             AwsContentBlock::ToolResult(tr) => {
                 assert_eq!(tr.tool_use_id(), "tu_1");
                 assert_eq!(
@@ -306,6 +326,49 @@ mod tests {
                     Some(aws_sdk_bedrockruntime::types::ToolResultStatus::Error)
                 );
             }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orphan_tool_result_is_dropped() {
+        // Synthetic post-write events (format-<id>, validation-<id>) and any
+        // other tool_result without a matching tool_use must be omitted, or
+        // Bedrock rejects the request with 400 "unexpected tool_use_id".
+        let msgs = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![CraftBlock::tool_use("tu_real", "bash", json!({}))],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    CraftBlock::ToolResult {
+                        tool_use_id: "tu_real".into(),
+                        content: "done".into(),
+                        images: vec![],
+                        is_error: false,
+                    },
+                    CraftBlock::ToolResult {
+                        tool_use_id: "format-tu_real".into(),
+                        content: "reformatted".into(),
+                        images: vec![],
+                        is_error: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+        let aws = to_aws_messages(&msgs).unwrap();
+        let results: Vec<&AwsContentBlock> = aws[1]
+            .content
+            .iter()
+            .filter(|b| matches!(b, AwsContentBlock::ToolResult(_)))
+            .collect();
+        assert_eq!(results.len(), 1, "orphan tool_result should be dropped");
+        match results[0] {
+            AwsContentBlock::ToolResult(tr) => assert_eq!(tr.tool_use_id(), "tu_real"),
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }
