@@ -413,6 +413,23 @@ pub struct WinView {
     pub auto_scroll: bool,
 }
 
+/// Lua sees these through `craft.ui.action` as the snake_case variant
+/// names, so renaming a variant breaks user configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
+pub enum BuiltinAction {
+    FilePicker,
+    Search,
+    Tasks,
+    Help,
+    PlanToggle,
+    PlanEditor,
+    EditInput,
+    PopQueue,
+    PrevChat,
+    NextChat,
+}
+
 pub enum UiAction {
     OpenWin {
         buf: Arc<SharedBuf>,
@@ -436,6 +453,7 @@ pub enum UiAction {
     WinRestView {
         scroll_top: u16,
     },
+    Builtin(BuiltinAction),
 }
 
 /// Hand an action to the UI event loop. A full or closed channel means the
@@ -463,6 +481,7 @@ pub(crate) async fn ui_roundtrip<T>(
 mod tests {
     use super::*;
     use mlua::Lua;
+    use strum::VariantNames;
     use test_case::test_case;
 
     fn make_entry(lua: &Lua, desc: &str) -> CommandEntry {
@@ -472,6 +491,16 @@ mod tests {
             handler: key,
             description: Arc::from(desc),
             max_args: 0,
+        }
+    }
+
+    #[test]
+    fn builtin_action_names_are_snake_case() {
+        for name in BuiltinAction::VARIANTS {
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "lua-facing action name '{name}' is not snake_case"
+            );
         }
     }
 

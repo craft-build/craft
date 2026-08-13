@@ -4028,6 +4028,23 @@ fn streaming_cancel_wins_over_esc_override() {
     assert!(probe.try_recv().is_none(), "{OVERRIDE_NOT_DISPATCHED}");
 }
 
+#[test]
+fn run_builtin_file_picker_opens_modal() {
+    let mut app = test_app();
+    assert!(app.run_builtin(BuiltinAction::FilePicker).is_empty());
+    assert!(app.file_picker.is_open());
+}
+
+#[test]
+fn run_builtin_tasks_toggles_picker() {
+    let mut app = test_app();
+    assert!(!app.task_picker.is_open());
+    app.run_builtin(BuiltinAction::Tasks);
+    assert!(app.task_picker.is_open());
+    app.run_builtin(BuiltinAction::Tasks);
+    assert!(!app.task_picker.is_open());
+}
+
 #[cfg(unix)]
 #[test]
 fn override_does_not_shadow_suspend() {

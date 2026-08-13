@@ -7,8 +7,8 @@ use humantime::format_duration;
 use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::api::util::command::{
-    Anchor, Border, DEFAULT_ORDER, DEFAULT_ZINDEX, Dimension, FloatConfig, HintEntries, HintWriter,
-    Split, TitlePos, UiAction, WinCommand, WinEvent,
+    Anchor, Border, BuiltinAction, DEFAULT_ORDER, DEFAULT_ZINDEX, Dimension, FloatConfig,
+    HintEntries, HintWriter, Split, TitlePos, UiAction, WinCommand, WinEvent, ui_send,
 };
 pub(crate) mod blit;
 pub(crate) mod buf;
@@ -16,7 +16,9 @@ pub(crate) mod win;
 
 use win::WinHandle;
 
+use crate::api::util::pair::{Pair, try_pair};
 use crate::runtime::with_task_bufs;
+use strum::VariantNames;
 
 const FALLBACK_TERM_COLS: u16 = 80;
 const FALLBACK_TERM_ROWS: u16 = 24;
@@ -206,6 +208,19 @@ pub(crate) fn create_ui_table(
             lua.create_function(move |_, msg: String| {
                 let _ = flash_tx.try_send(UiAction::Flash(msg));
                 Ok(())
+            })?,
+        )?;
+
+        let action_tx = tx.clone();
+        t.set(
+            "action",
+            lua.create_function(move |_, name: String| -> LuaResult<Pair<bool>> {
+                let builtin = try_pair!(name.parse::<BuiltinAction>().map_err(|_| format!(
+                    "unknown action '{name}' (valid: {})",
+                    BuiltinAction::VARIANTS.join(", ")
+                )));
+                try_pair!(ui_send(Some(&action_tx), UiAction::Builtin(builtin)));
+                Ok((Some(true), None))
             })?,
         )?;
 

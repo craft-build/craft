@@ -1011,4 +1011,23 @@ mod tests {
         assert_eq!(wrapped.spec(), format!("my-ollama-wrap/{model_id}"));
         assert_eq!(wrapped.context_window, expected_window);
     }
+
+    #[test]
+    fn discovered_vision_flows_into_curated_provider_model() {
+        crate::model_registry::set_known_models(
+            "synthetic",
+            vec![
+                {
+                    let mut info = ModelInfo::new("syn:test-vision".into());
+                    info.supports_vision = Some(true);
+                    info
+                },
+                ModelInfo::new("syn:test-blind".into()),
+            ],
+        );
+
+        let vision = |id| Model::from_spec(id).unwrap().supports_vision();
+        assert!(vision("synthetic/syn:test-vision"));
+        assert!(!vision("synthetic/syn:test-blind"));
+    }
 }

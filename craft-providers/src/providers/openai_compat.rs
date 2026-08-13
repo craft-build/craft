@@ -231,6 +231,11 @@ impl OpenAiCompatProvider {
             info.max_output_tokens = Some(n as u32);
         } else if let Some(n) = m.get("max_tokens").and_then(|v| v.as_u64()) {
             info.max_output_tokens = Some(n as u32);
+        } else if let Some(n) = m.get("max_output_length").and_then(|v| v.as_u64()) {
+            info.max_output_tokens = Some(n as u32);
+        }
+        if let Some(mods) = m.get("input_modalities").and_then(|v| v.as_array()) {
+            info.supports_vision = Some(mods.iter().any(|v| v.as_str() == Some("image")));
         }
         Some(info)
     }
@@ -718,6 +723,22 @@ mod tests {
     use test_case::test_case;
 
     const TEST_STREAM_TIMEOUT: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn default_model_parser_reads_context_and_output_length() {
+        let m = json!({"id": "m", "context_length": 524_288, "max_output_length": 65_536});
+        let info = OpenAiCompatProvider::default_model_parser(&m).unwrap();
+        assert_eq!(info.context_window, Some(524_288));
+        assert_eq!(info.max_output_tokens, Some(65_536));
+    }
+
+    #[test_case(json!({"id": "m", "input_modalities": ["text", "image"]}), Some(true) ; "image_modality_enables_vision")]
+    #[test_case(json!({"id": "m", "input_modalities": ["text"]}), Some(false) ; "text_only_disables_vision")]
+    #[test_case(json!({"id": "m"}), None ; "missing_modalities_stays_unknown")]
+    fn default_model_parser_vision_flag(m: Value, expected: Option<bool>) {
+        let info = OpenAiCompatProvider::default_model_parser(&m).unwrap();
+        assert_eq!(info.supports_vision, expected);
+    }
 
     #[tokio::test]
     async fn parse_sse_text_and_usage() {

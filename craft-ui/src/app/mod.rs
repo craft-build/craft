@@ -61,7 +61,7 @@ use craft_agent::{
     SharedMessages, SubagentInfo,
 };
 use craft_config::UiConfig;
-use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
+use craft_lua::{BuiltinAction, EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
 use craft_providers::{Model, StopReason, ThinkingConfig, add_cost};
 use craft_storage::StateDir;
 use craft_storage::input_history::InputHistory;
@@ -669,20 +669,16 @@ impl App {
             });
         }
         if self.keybindings.matches(ActionId::Help, key) {
-            self.help_modal.toggle();
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::Help));
         }
         if self.keybindings.matches(ActionId::Tasks, key) {
-            self.open_tasks();
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::Tasks));
         }
         if self.keybindings.matches(ActionId::PrevChat, key) {
-            self.active_chat = self.active_chat.saturating_sub(1);
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::PrevChat));
         }
         if self.keybindings.matches(ActionId::NextChat, key) {
-            self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
-            return Some(vec![]);
+            return Some(self.run_builtin(BuiltinAction::NextChat));
         }
         if self.keybindings.matches(ActionId::ScrollHalfUp, key) {
             let half = self.chats[self.active_chat].half_page();
@@ -928,6 +924,57 @@ impl App {
         None
     }
 
+    /// Single implementation behind both the default keybindings and
+    /// `craft.ui.action`, so a Lua rebind can never drift from the
+    /// original key's behavior.
+    pub(crate) fn run_builtin(&mut self, action: BuiltinAction) -> Vec<Action> {
+        match action {
+            BuiltinAction::FilePicker => {
+                self.file_picker.open(&self.state.session.cwd);
+            }
+            BuiltinAction::Search => {
+                let top = self.chats[self.active_chat].scroll_top();
+                let auto = self.chats[self.active_chat].auto_scroll();
+                self.search_modal.open(top, auto);
+            }
+            BuiltinAction::Tasks => {
+                if self.task_picker.is_open() {
+                    self.task_picker.close();
+                } else {
+                    self.open_tasks();
+                }
+            }
+            BuiltinAction::Help => self.help_modal.toggle(),
+            BuiltinAction::PlanToggle => {
+                if self.state.mode == Mode::Plan {
+                    self.plan_form.toggle();
+                } else if self.flow_awaiting_approval && self.state.mode == Mode::Flow {
+                    self.flow_goal_form.toggle();
+                } else {
+                    self.float_mgr.toggle_panel_visibility();
+                }
+            }
+            BuiltinAction::PlanEditor => {
+                return match self.state.plan.path() {
+                    Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
+                    None => {
+                        self.flash(FLASH_NO_PLAN.into());
+                        vec![]
+                    }
+                };
+            }
+            BuiltinAction::EditInput => return vec![Action::EditInputInEditor],
+            BuiltinAction::PopQueue => {
+                self.queue.remove(0);
+            }
+            BuiltinAction::PrevChat => self.active_chat = self.active_chat.saturating_sub(1),
+            BuiltinAction::NextChat => {
+                self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
+            }
+        }
+        vec![]
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
         self.clear_selection_unless_pending_copy();
 
@@ -990,33 +1037,19 @@ impl App {
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
         if self.keybindings.matches(ActionId::EditInput, key) {
-            return vec![Action::EditInputInEditor];
+            return self.run_builtin(BuiltinAction::EditInput);
         }
         if is_ctrl(&key) {
             if self.keybindings.matches(ActionId::PopQueue, key) {
-                self.queue.remove(0);
+                return self.run_builtin(BuiltinAction::PopQueue);
             } else if self.keybindings.matches(ActionId::OpenEditor, key) {
-                return match self.state.plan.path() {
-                    Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
-                    None => {
-                        self.flash(FLASH_NO_PLAN.into());
-                        vec![]
-                    }
-                };
+                return self.run_builtin(BuiltinAction::PlanEditor);
             } else if self.keybindings.matches(ActionId::PlanToggle, key) {
-                if self.state.mode == Mode::Plan {
-                    self.plan_form.toggle();
-                } else if self.flow_awaiting_approval && self.state.mode == Mode::Flow {
-                    self.flow_goal_form.toggle();
-                } else {
-                    self.float_mgr.toggle_panel_visibility();
-                }
+                return self.run_builtin(BuiltinAction::PlanToggle);
             } else if self.keybindings.matches(ActionId::Search, key) {
-                let top = self.chats[self.active_chat].scroll_top();
-                let auto = self.chats[self.active_chat].auto_scroll();
-                self.search_modal.open(top, auto);
+                return self.run_builtin(BuiltinAction::Search);
             } else if self.keybindings.matches(ActionId::FilePicker, key) {
-                self.file_picker.open(&self.state.session.cwd);
+                return self.run_builtin(BuiltinAction::FilePicker);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
                 self.start_image_paste();
             } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
