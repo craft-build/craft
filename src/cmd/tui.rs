@@ -394,11 +394,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
                 if let Some(session_id) = session_id {
                     eprintln!("Resume session:\n\n  craft -s {session_id}");
                 }
-                // Signal shutdown first so the Lua host's join takes the
-                // priority lane instead of queueing behind bulk work, then
-                // drop the stack (which owns the plugin host) on the
-                // background teardown thread.
-                stack.plugin_host.begin_shutdown();
+                // The host's Drop begins the prioritized Lua shutdown.
                 let started = Instant::now();
                 teardown.defer(move || drop(stack));
                 teardown.join();
