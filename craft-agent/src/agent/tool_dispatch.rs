@@ -32,7 +32,7 @@ pub enum Emit {
 }
 
 const DOOM_LOOP_THRESHOLD: usize = 3;
-const DOOM_LOOP_MESSAGE: &str = "You have called this tool with identical input 3 times in a row. You are stuck in a loop. Break out and try a different approach.";
+const DOOM_LOOP_MESSAGE: &str = "You have called this tool with identical input 3 times in a row. This call was NOT executed. You are stuck in a loop. Retrying the same input will be blocked again. Stop, summarize what you have tried, and take a different approach (different arguments, a different tool, or report the blocker to the user).";
 const MCP_BLOCKED_IN_PLAN: &str = "MCP tools are not available in plan mode";
 const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
 const MCP_SCOPE_PREVIEW_BYTES: usize = 200;
@@ -66,6 +66,16 @@ impl RecentCalls {
         if self.0.len() > DOOM_LOOP_THRESHOLD {
             self.0.pop_front();
         }
+    }
+
+    /// Wipe the recent-call history. Called when a doom loop is detected so
+    /// the model gets a clean window to try a different approach: without
+    /// this, the saturated identical history would re-trigger the doom check
+    /// on the very next identical retry, so the warning would repeat
+    /// identically every turn and the model would have no signal that the
+    /// call is actually being blocked rather than failing transiently.
+    fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -722,6 +732,10 @@ pub(super) async fn process_tool_calls(
             warn!(tool = %name, "doom loop detected, skipping execution");
             outcome.doom_loops += 1;
             immediate_errors.push(ToolDoneEvent::error(id.clone(), DOOM_LOOP_MESSAGE));
+            // The call was blocked, not executed, so clear the history rather
+            // than recording it. Otherwise the saturated identical entries
+            // would re-flag the next retry and the warning would loop forever.
+            recent_calls.clear();
         } else if !is_failure_limit_exempt(&name) && trust.is_dropped(&name) {
             warn!(tool = %name, "tool dropped due to repeated failures");
             immediate_errors.push(ToolDoneEvent::error(

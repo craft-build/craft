@@ -10,6 +10,11 @@
 //! ends regardless. A new user message resets the score and grace flag but
 //! deliberately keeps `recent_calls` and `turn_embeddings` so loops that
 //! survive a "continue" are still detected.
+//!
+//! A doom-loop batch (the model emitted the same tool call N times in a row)
+//! is itself the definition of "stuck", so a single one contributes
+//! `GRACE_THRESHOLD` and triggers the grace call immediately — the per-call
+//! warning alone is too easy for the model to ignore when it repeats.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -19,7 +24,7 @@ use super::tool_dispatch::RecentCalls;
 pub const GRACE_THRESHOLD: u32 = 15;
 pub const HARD_STOP_THRESHOLD: u32 = 25;
 
-const SCORE_DOOM_LOOP: u32 = 5;
+const SCORE_DOOM_LOOP: u32 = 15;
 const SCORE_STAGNATION: u32 = 3;
 const SCORE_INEFFECTIVE_COMPACT: u32 = 2;
 const SCORE_TOOL_ERROR: u32 = 1;
@@ -128,8 +133,8 @@ mod tests {
         assert!(!t.should_hard_stop());
     }
 
-    #[test_case(2, 10 ; "doom_loop_alone_below_grace")]
-    #[test_case(3, 15 ; "doom_loops_reach_grace")]
+    #[test_case(1, 15 ; "single_doom_loop_reaches_grace")]
+    #[test_case(2, 30 ; "two_doom_loops_hard_stop")]
     fn doom_loops_accumulate(loops: u32, expected: u32) {
         let mut t = DoomTracker::new();
         for _ in 0..loops {
@@ -141,24 +146,18 @@ mod tests {
     #[test]
     fn grace_fires_only_once() {
         let mut t = DoomTracker::new();
-        for _ in 0..5 {
-            t.note_doom_loop();
-        }
+        t.note_doom_loop();
         assert!(t.should_grace());
         t.mark_grace_called();
         assert!(!t.should_grace());
-        for _ in 0..5 {
-            t.note_doom_loop();
-        }
+        t.note_doom_loop();
         assert!(t.should_hard_stop());
     }
 
     #[test]
     fn good_behavior_decays_score() {
         let mut t = DoomTracker::new();
-        for _ in 0..3 {
-            t.note_doom_loop();
-        }
+        t.note_doom_loop();
         assert_eq!(t.score(), 15);
         for _ in 0..10 {
             t.note_tool_success();
