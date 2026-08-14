@@ -7,8 +7,8 @@ use crossterm::Command;
 use crossterm::ExecutableCommand;
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 
@@ -19,6 +19,22 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 /// so unsupported terminals are unaffected.
 const SYNC_BEGIN: &str = "\u{1b}[?2026h";
 const SYNC_END: &str = "\u{1b}[?2026l";
+
+/// Mouse tracking modes. We enable only what the UI uses — normal +
+/// button-event tracking under SGR encoding — and deliberately omit
+/// `?1003` (any-motion) tracking.
+///
+/// crossterm's bundled `EnableMouseCapture` turns on `?1003`, which makes
+/// the terminal emit a report on every pointer move. On a fast macOS
+/// trackpad a scroll burst produces a high-density stream of SGR reports
+/// that crossterm can split across two `read(2)` calls; the half it fails
+/// to parse is then surfaced as raw `KeyEvent`s and leaks into the input
+/// bar as literal `ESC[<…M` text (crossterm-rs/crossterm#668). The UI never
+/// needs motion-without-button, so dropping `?1003` removes the trigger
+/// without losing click, drag, or scroll-wheel support. `?1015` is skipped
+/// as redundant with the SGR (`?1006`) encoding.
+const MOUSE_ENABLE: &str = "\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1006h";
+const MOUSE_DISABLE: &str = "\u{1b}[?1006l\u{1b}[?1002l\u{1b}[?1000l";
 
 /// Emits the synchronized-output begin sequence and flushes, so the
 /// terminal enters batched-update mode before the next frame diff.
@@ -83,7 +99,7 @@ impl TerminalGuard {
     pub(crate) fn init() -> Result<(Self, ratatui::DefaultTerminal)> {
         let terminal = ratatui::init();
         stdout().execute(EnableBracketedPaste)?;
-        stdout().execute(EnableMouseCapture)?;
+        write_and_flush(MOUSE_ENABLE)?;
         push_keyboard_enhancement();
         Ok((Self, terminal))
     }
@@ -115,14 +131,14 @@ fn teardown() {
 fn pop_terminal_modes() {
     stdout().execute(crossterm::cursor::Show).ok();
     stdout().execute(PopKeyboardEnhancementFlags).ok();
-    stdout().execute(DisableMouseCapture).ok();
+    let _ = write_and_flush(MOUSE_DISABLE);
     stdout().execute(DisableBracketedPaste).ok();
 }
 
 fn resume(terminal: &mut ratatui::DefaultTerminal) {
     stdout().execute(EnterAlternateScreen).ok();
     stdout().execute(EnableBracketedPaste).ok();
-    stdout().execute(EnableMouseCapture).ok();
+    let _ = write_and_flush(MOUSE_ENABLE);
     terminal::enable_raw_mode().ok();
     push_keyboard_enhancement();
     let _ = terminal.clear();
