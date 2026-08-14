@@ -4,7 +4,9 @@ use craft_providers::adapt_images_for_model;
 use craft_providers::provider::Provider;
 use craft_providers::retry::{MAX_TIMEOUT_RETRIES, RetryState};
 use craft_providers::roles::ChainHop;
-use craft_providers::{Message, Model, ProviderEvent, RequestOptions, StreamResponse};
+use craft_providers::{
+    ContentBlock, Message, Model, ProviderEvent, RequestOptions, StreamResponse,
+};
 use craft_storage::id::SessionRef;
 use serde_json::Value;
 use tracing::warn;
@@ -12,6 +14,23 @@ use tracing::warn;
 use crate::agent::ttsr::TtsrManager;
 use crate::cancel::CancelToken;
 use crate::{AgentError, AgentEvent, EventSender};
+
+const FUNCTIONS_PREFIX: &str = "functions.";
+
+/// GPT models sometimes emit `functions.<name>`, a Codex training habit.
+/// Stripped here at the provider boundary so no raw name enters the agent;
+/// `tool_dispatch::run` reuses this for names arriving out of model JSON.
+pub(crate) fn canonical_tool_name(name: &str) -> &str {
+    name.strip_prefix(FUNCTIONS_PREFIX).unwrap_or(name)
+}
+
+fn canonicalize_tool_names(message: &mut Message) {
+    for block in &mut message.content {
+        if let ContentBlock::ToolUse { name, .. } = block {
+            *name = canonical_tool_name(name).to_owned();
+        }
+    }
+}
 
 async fn forward_provider_events(
     prx: flume::Receiver<ProviderEvent>,
@@ -33,7 +52,7 @@ async fn forward_provider_events(
             }
             ProviderEvent::ToolUseStart { id, name } => AgentEvent::ToolPending {
                 id: id.clone(),
-                name: name.clone(),
+                name: canonical_tool_name(name).to_owned(),
             },
             ProviderEvent::PromptProgress {
                 processed,
@@ -115,7 +134,10 @@ pub(crate) async fn stream_with_retry(
             pending_injection = fired.lock().unwrap().take();
         }
         match result {
-            Ok(r) => return Ok((r, pending_injection)),
+            Ok(mut r) => {
+                canonicalize_tool_names(&mut r.message);
+                return Ok((r, pending_injection));
+            }
             Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
             Err(e) if e.is_retryable() => {
                 let mut advanced = false;
@@ -175,6 +197,7 @@ mod tests {
     use crate::EventSender;
     use async_trait::async_trait;
     use craft_providers::{AgentError, ContentBlock, Message, Role, StopReason};
+    use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -351,5 +374,22 @@ mod tests {
             Some("fallback-model"),
             "should have advanced to the fallback"
         );
+    }
+
+    #[test]
+    fn tool_use_names_canonicalized() {
+        let mut message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text { text: "hi".into() },
+                ContentBlock::tool_use("t1", "functions.bash", json!({})),
+                ContentBlock::tool_use("t2", "read", json!({})),
+                ContentBlock::tool_use("t3", "my_functions.x", json!({})),
+            ],
+            ..Default::default()
+        };
+        canonicalize_tool_names(&mut message);
+        let names: Vec<&str> = message.tool_uses().map(|(_, name, _)| name).collect();
+        assert_eq!(names, ["bash", "read", "my_functions.x"]);
     }
 }

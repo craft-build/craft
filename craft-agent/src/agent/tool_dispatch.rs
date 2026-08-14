@@ -92,8 +92,10 @@ pub async fn run(
 ) -> ToolDoneEvent {
     // Some models (post-trained on Codex sessions) emit tool names as
     // `functions.<name>` instead of just `<name>`, so every call fails with
-    // "unknown tool". Strip the prefix before any lookup.
-    let name = name.strip_prefix("functions.").unwrap_or(name);
+    // "unknown tool". Streamed names are already canonicalized at the
+    // provider boundary (streaming.rs); this covers names re-entering from
+    // model JSON (batch children, `call_tool`, the interpreter bridge).
+    let name = super::streaming::canonical_tool_name(name);
     let entry = registry.get(name);
     // LLM providers send tool names in wire format (server__tool) but our
     // internal index uses server.tool. Only convert if the name isn't a
