@@ -73,10 +73,6 @@ impl ShutdownReport {
             .map(|s| s.id.id())
     }
 
-    pub fn exit_code(&self) -> i32 {
-        self.exit.code()
-    }
-
     pub fn exit_request(&self) -> ExitRequest {
         self.exit
     }

@@ -3,6 +3,7 @@ use std::io::{self, IsTerminal, Read};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use color_eyre::Result;
 use color_eyre::eyre::Context;
@@ -390,10 +391,21 @@ pub async fn run(mut cli: Cli) -> Result<()> {
 
         match outcome {
             RunOutcome::Exit { session_id, code } => {
-                teardown.join();
                 if let Some(session_id) = session_id {
                     eprintln!("Resume session:\n\n  craft -s {session_id}");
                 }
+                // Signal shutdown first so the Lua host's join takes the
+                // priority lane instead of queueing behind bulk work, then
+                // drop the stack (which owns the plugin host) on the
+                // background teardown thread.
+                stack.plugin_host.begin_shutdown();
+                let started = Instant::now();
+                teardown.defer(move || drop(stack));
+                teardown.join();
+                tracing::info!(
+                    stack_ms = started.elapsed().as_millis() as u64,
+                    "plugin host and teardown joined"
+                );
                 if code != 0 {
                     std::process::exit(code);
                 }
@@ -403,7 +415,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
                 tabs: reloaded,
                 focused: f,
             } => {
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let last_good = (stack.config.clone(), stack.model.clone());
                 // Shut the old host down first so nothing can repopulate
                 // the registry after the clear: its sender disconnects, the

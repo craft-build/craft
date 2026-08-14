@@ -37,6 +37,7 @@ use color_eyre::Result;
 use craft_agent::ToolOutput;
 use craft_providers::Message;
 use craft_providers::TokenUsage;
+use std::time::Instant;
 
 pub type AppSession = craft_storage::sessions::Session<Message, TokenUsage, ToolOutput>;
 
@@ -65,14 +66,22 @@ pub fn run(
     let (_guard, mut terminal) = terminal::TerminalGuard::init()?;
     color_compat::init();
     let report = event_loop::EventLoop::new(&mut terminal, params)?.run(initial_prompt)?;
-    Ok(match report.exit_request() {
+    let exit = report.exit_request();
+    Ok(match exit {
         components::ExitRequest::Reload => RunOutcome::Reload {
             tabs: report.tabs().to_vec(),
             focused: report.focused(),
         },
-        _ => RunOutcome::Exit {
-            session_id: report.session_id(),
-            code: report.exit_code(),
-        },
+        exit => {
+            let session_id = report.session_id();
+            let code = exit.code();
+            let started = Instant::now();
+            drop(report);
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "session buffers dropped"
+            );
+            RunOutcome::Exit { session_id, code }
+        }
     })
 }
