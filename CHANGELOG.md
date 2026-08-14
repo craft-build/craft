@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-08-14
+
+### Fixed
+
+- **agent**: canonicalize `functions.<name>` tool calls at the provider boundary so the prefix never leaks into pending spinners, ACP, persisted history, or replayed turns (`5e8c5b96`)
+- **agent**: break doom loops instead of repeating the warning, so the model gets a clear signal the call is blocked (`83c452ea`)
+- **ui**: drop `?1003` any-motion mouse tracking to stop the SGR escape leak (`dc4a68d1`)
+- **ui**: instrument the exit tail and prioritize the Lua shutdown on quit, fixing slow exits after long sessions (`4289ce32`)
+- **ui**: drop redundant `begin_shutdown` in the tui exit arm (`82fe0359`)
+
 ## [0.12.2] - 2026-08-13
 
 ### Added
@@ -1614,7 +1624,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.12.2...HEAD
+[0.12.3]: https://github.com/craft-build/craft/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/craft-build/craft/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/craft-build/craft/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/craft-build/craft/compare/v0.11.4...v0.12.0
