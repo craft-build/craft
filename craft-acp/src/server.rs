@@ -50,7 +50,15 @@ const TODO_WRITE_TOOL: &str = "todo_write";
 const TODO_UPDATE_METHOD_LEGACY: &str = "session/todo_update";
 const TODO_UPDATE_METHOD: &str = "_craft/session/todo_update";
 
-type PendingPrompt = Arc<Mutex<Option<RequestId>>>;
+/// What the client still owes us. Only one permission can be outstanding: the
+/// agent holds the answer channel while it waits for one.
+#[derive(Default)]
+pub(crate) struct Pending {
+    pub(crate) prompt: Option<RequestId>,
+    permission: Option<i64>,
+}
+
+pub(crate) type PendingState = Arc<Mutex<Pending>>;
 type ModelSpecs = Arc<Mutex<Vec<String>>>;
 pub(crate) type PendingRequests = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 
@@ -356,7 +364,7 @@ pub(crate) struct SessionState {
     pub(crate) mcp: Option<craft_agent::McpHandle>,
     pub(crate) current_mode: AgentMode,
     pub(crate) current_model: String,
-    pub(crate) pending_prompt: PendingPrompt,
+    pub(crate) pending: PendingState,
     pub(crate) title_sent: bool,
     pub(crate) cwd: PathBuf,
 }
@@ -823,7 +831,7 @@ async fn install_session(
         teardown_session(&srv.out_tx, prev).await;
     }
     let session_id = handle.session_id.to_string();
-    let pending = PendingPrompt::default();
+    let pending = PendingState::default();
     start_event_pump(
         handle.event_rx.clone(),
         handle.session_id.clone(),
@@ -843,14 +851,19 @@ async fn install_session(
         mcp,
         current_mode: AgentMode::Build,
         current_model,
-        pending_prompt: pending,
+        pending,
         title_sent: false,
         cwd,
     });
 }
 
-fn resolve_pending_cancelled(out_tx: &Sender<Value>, pending: PendingPrompt) {
-    if let Some(id) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+fn resolve_pending_cancelled(out_tx: &Sender<Value>, pending: PendingState) {
+    if let Some(id) = pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prompt
+        .take()
+    {
         let resp = PromptResponse::new(StopReason::Cancelled);
         send(
             out_tx,
@@ -860,7 +873,7 @@ fn resolve_pending_cancelled(out_tx: &Sender<Value>, pending: PendingPrompt) {
 }
 
 async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
-    resolve_pending_cancelled(out_tx, Arc::clone(&session.pending_prompt));
+    resolve_pending_cancelled(out_tx, Arc::clone(&session.pending));
     let _ = session.handle.cancel_tx.try_send(());
     session.handle.task.abort();
     if let Some(mcp) = session.mcp {
@@ -897,9 +910,10 @@ fn handle_prompt(
     let req: PromptRequest = parse_params(raw)?;
     let session = srv.session.as_mut().ok_or_else(no_session)?;
     if session
-        .pending_prompt
+        .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .prompt
         .is_some()
     {
         return Err(AcpError::invalid_request()
@@ -933,10 +947,11 @@ fn handle_prompt(
         .input_tx
         .send(input)
         .map_err(|_| AcpError::internal_error().data(json_str("session ended")))?;
-    *session
-        .pending_prompt
+    session
+        .pending
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+        .unwrap_or_else(|e| e.into_inner())
+        .prompt = Some(id.clone());
     Ok(())
 }
 
@@ -1151,6 +1166,13 @@ fn handle_notification(srv: &Server, method: &str) {
     match method {
         "session/cancel" => {
             if let Some(session) = &srv.session {
+                // Any answer still in flight belongs to the cancelled turn, so
+                // forget its id and let it be dropped on arrival.
+                session
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .permission = None;
                 let _ = session.handle.cancel_tx.try_send(());
             }
         }
@@ -1197,16 +1219,35 @@ fn handle_incoming_response(srv: &Server, raw: &Value) {
         return;
     }
 
-    if let Some(result) = raw.get("result")
-        && let Ok(resp) = serde_json::from_value::<RequestPermissionResponse>(result.clone())
+    let Some(id) = raw.get("id").and_then(Value::as_i64) else {
+        return;
+    };
+    if session
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .permission
+        .take_if(|pending| *pending == id)
+        .is_none()
     {
-        let answer = permissions::outcome_to_answer(&resp.outcome);
-        let _ = session.handle.answer_tx.send(answer.encode());
-    } else if raw.get("error").is_some() {
-        let _ = session
-            .handle
-            .answer_tx
-            .send(craft_agent::permissions::PermissionAnswer::Deny.encode());
+        warn!(id, "response for an unknown request id");
+        return;
+    }
+    let _ = session
+        .handle
+        .answer_tx
+        .send(permission_answer(raw).encode());
+}
+
+/// A response we cannot read still has to answer the agent, or the tool waits
+/// on a permission that will never come.
+fn permission_answer(raw: &Value) -> craft_agent::permissions::PermissionAnswer {
+    match raw
+        .get("result")
+        .map(|result| serde_json::from_value::<RequestPermissionResponse>(result.clone()))
+    {
+        Some(Ok(resp)) => permissions::outcome_to_answer(&resp.outcome),
+        _ => craft_agent::permissions::PermissionAnswer::Deny,
     }
 }
 
@@ -1260,7 +1301,7 @@ fn start_event_pump(
     event_rx: Receiver<Envelope>,
     session_id: SessionRef,
     out_tx: Sender<Value>,
-    pending: PendingPrompt,
+    pending: PendingState,
     next_request_id: Arc<AtomicI64>,
     question_request_ids: Arc<Mutex<HashSet<i64>>>,
 ) {
@@ -1348,6 +1389,7 @@ fn start_event_pump(
                             permissions::permission_options(),
                         ));
                     let req_id = next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
+                    pending.lock().unwrap_or_else(|e| e.into_inner()).permission = Some(req_id);
                     send(
                         &out_tx,
                         Request {
@@ -1380,7 +1422,12 @@ fn start_event_pump(
                     continue;
                 }
                 AgentEvent::Done { reason, .. } => {
-                    if let Some(id) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    if let Some(id) = pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .prompt
+                        .take()
+                    {
                         let resp = PromptResponse::new(translate::map_done_reason(reason));
                         send(
                             &out_tx,
@@ -1390,7 +1437,12 @@ fn start_event_pump(
                     continue;
                 }
                 AgentEvent::Error { message } => {
-                    if let Some(id) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    if let Some(id) = pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .prompt
+                        .take()
+                    {
                         let error = AcpError::internal_error().data(Value::String(message));
                         send(&out_tx, Response::<AgentResponse>::new(id, Err(error)));
                     }
@@ -1498,13 +1550,105 @@ fn json_str(e: &(impl std::fmt::Display + ?Sized)) -> Value {
 #[cfg(test)]
 mod tests {
     use craft_agent::ToolOutput;
+    use craft_agent::permissions::PermissionAnswer;
     use craft_agent::types::ToolStartEvent;
     use craft_providers::{ContentBlock as MsgBlock, Role, TokenUsage};
     use craft_storage::StateDir;
     use craft_storage::sessions::Session;
     use tempfile::TempDir;
+    use test_case::test_case;
 
     use super::*;
+
+    const ANSWERED_ID: i64 = 1001;
+    const UNKNOWN_ID: i64 = 1002;
+
+    fn allow_once(id: i64) -> Value {
+        serde_json::json!({
+            "id": id,
+            "result": { "outcome": { "outcome": "selected", "optionId": "allow_once" } },
+        })
+    }
+
+    #[test_case(allow_once(ANSWERED_ID), PermissionAnswer::AllowOnce ; "selected_option")]
+    #[test_case(serde_json::json!({ "id": ANSWERED_ID, "result": { "outcome": { "outcome": "cancelled" } } }), PermissionAnswer::Deny ; "cancelled_outcome")]
+    #[test_case(serde_json::json!({ "id": ANSWERED_ID, "result": { "nonsense": true } }), PermissionAnswer::Deny ; "unparsable_result")]
+    #[test_case(serde_json::json!({ "id": ANSWERED_ID, "error": { "code": -32603 } }), PermissionAnswer::Deny ; "jsonrpc_error")]
+    fn permission_answer_maps_response(raw: Value, expected: PermissionAnswer) {
+        assert_eq!(permission_answer(&raw), expected);
+    }
+
+    fn server_awaiting_answer() -> (Server, Receiver<String>) {
+        let (answer_tx, answer_rx) = flume::unbounded();
+        let (event_tx, event_rx) = flume::unbounded();
+        let handle = InteractiveHandle {
+            event_rx,
+            raw_event_tx: event_tx,
+            tool_names: Vec::new(),
+            input_tx: flume::unbounded().0,
+            answer_tx,
+            cancel_tx: flume::unbounded().0,
+            model_tx: flume::unbounded().0,
+            session_id: SessionRef::from(CraftId::generate()),
+            permissions: Arc::new(craft_agent::permissions::PermissionManager::new(
+                craft_config::PermissionsConfig::default(),
+                PathBuf::from("/project"),
+            )),
+            task: tokio::spawn(async {}),
+        };
+        let server = Server {
+            out_tx: flume::unbounded().0,
+            model_specs: Arc::new(Mutex::new(Vec::new())),
+            model_policy: Arc::new(craft_config::ModelPolicy::default()),
+            shared_session: Arc::new(Mutex::new(None)),
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
+            question_request_ids: Arc::new(Mutex::new(HashSet::new())),
+            client_caps: Arc::new(ClientCaps::new()),
+            next_request_id: Arc::new(AtomicI64::new(FIRST_OUTGOING_REQUEST_ID)),
+            session: Some(SessionState {
+                handle,
+                mcp: None,
+                current_mode: AgentMode::Build,
+                current_model: String::new(),
+                pending: Arc::new(Mutex::new(Pending {
+                    permission: Some(ANSWERED_ID),
+                    ..Default::default()
+                })),
+                title_sent: false,
+                cwd: PathBuf::from("/project"),
+            }),
+        };
+        (server, answer_rx)
+    }
+
+    #[tokio::test]
+    async fn only_the_outstanding_request_id_is_answered() {
+        let (srv, answer_rx) = server_awaiting_answer();
+
+        handle_incoming_response(&srv, &allow_once(UNKNOWN_ID));
+        assert!(answer_rx.is_empty(), "an unknown id is dropped");
+
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+        assert_eq!(
+            answer_rx.try_recv().ok(),
+            Some(PermissionAnswer::AllowOnce.encode())
+        );
+
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+        assert!(
+            answer_rx.is_empty(),
+            "a replayed answer cannot land on the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_the_outstanding_permission_request() {
+        let (srv, answer_rx) = server_awaiting_answer();
+        handle_notification(&srv, "session/cancel");
+
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+        assert!(answer_rx.is_empty(), "the cancelled turn owns that answer");
+    }
 
     #[test]
     fn load_history_round_trips_stored_messages() {

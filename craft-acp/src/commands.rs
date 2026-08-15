@@ -487,9 +487,10 @@ fn send_prompt_input(
     out_tx: &flume::Sender<Value>,
 ) -> Result<(), AcpError> {
     if session
-        .pending_prompt
+        .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .prompt
         .is_some()
     {
         return Err(AcpError::invalid_request()
