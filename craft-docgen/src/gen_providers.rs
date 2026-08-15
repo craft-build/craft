@@ -47,7 +47,7 @@ Every provider honors a `<SLUG>_BASE_URL` env var (`anthropic` -> `ANTHROPIC_BAS
 ANTHROPIC_BASE_URL=https://my-proxy.internal craft
 ```
 
-It wins over `providers.toml` and built-in defaults. `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` are the same names the official SDKs use, so an existing proxy setup carries over as is. One exception: `OPENAI_BASE_URL` only redirects the platform API, never the ChatGPT Coding Plan backend.
+It wins over `providers.toml` and built-in defaults. `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` are the same names the official SDKs use, so an existing proxy setup carries over as is. Two exceptions: `OPENAI_BASE_URL` only redirects the platform API, never the ChatGPT Coding Plan backend; `XAI_BASE_URL` only redirects the public API-key endpoint, never the OAuth CLI proxy.
 
 You can also set `base_url` for a built-in provider in `~/.config/craft/providers.toml`. It overrides the built-in default and loses to the env var above:
 
@@ -83,6 +83,10 @@ Set `AWS_REGION` to your preferred region (for example `us-east-1`).
 
 > **Deprecated:** the older `CLAUDE_CODE_USE_BEDROCK=1` env var still works (it swaps the `anthropic` provider onto Bedrock via hand-rolled SigV4), but new users should prefer the `bedrock/...` provider above. The legacy path does not support SSO, IMDS, or web identity and will not receive new features."#;
 
+const XAI_OAUTH_NOTE: &str = r#"OAuth uses the same first-party xAI client as the official Grok CLI (`craft auth login xai`). Browser login (PKCE) is the desktop default; device code is recommended over SSH or in a container. Tokens refresh automatically. After login, Craft fetches your account catalog from `GET /v1/models-v2` on the Grok CLI proxy and caches it for 15 minutes. `XAI_BASE_URL` only redirects the public API-key endpoint, never the OAuth proxy.
+
+If `~/.grok/auth.json` already exists, login offers to reuse it without writing that file."#;
+
 const OPENCODE_FREE_MODELS_NOTE: &str = r#"By default Craft hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/craft/providers.toml`:
 
 ```toml
@@ -107,6 +111,7 @@ Models are referenced as `provider/model_id`:
 ```
 anthropic/claude-sonnet-4-6
 openai/gpt-4.1
+xai/grok-4.6
 ```
 
 If the model name is unique across providers, the prefix can be omitted."#;
@@ -276,6 +281,19 @@ fn build_sections() -> Vec<ProviderSection> {
                     entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
                 });
             }
+            ProviderKind::Xai => {
+                sections.push(ProviderSection {
+                    kind,
+                    name: kind.display_name(),
+                    auth_line: format!(
+                        "{} (also supports OAuth via `craft auth login xai`)",
+                        format_auth(kind)
+                    ),
+                    urls: vec![kind.base_url(), "https://cli-chat-proxy.grok.com/v1"],
+                    features: kind.features(),
+                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
+                });
+            }
             _ => {
                 sections.push(ProviderSection {
                     name: kind.display_name(),
@@ -392,6 +410,10 @@ fn write_section(out: &mut String, section: &ProviderSection) {
 
     if section.kind == ProviderKind::Opencode {
         let _ = writeln!(out, "\n{OPENCODE_FREE_MODELS_NOTE}");
+    }
+
+    if section.kind == ProviderKind::Xai {
+        let _ = writeln!(out, "\n{XAI_OAUTH_NOTE}");
     }
 }
 

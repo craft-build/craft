@@ -1,7 +1,7 @@
 use crate::model::{ModelEntry, ModelFamily, ModelTier};
 use crate::providers::{
     anthropic, copilot, custom, deepseek, dynamic, google, llama_cpp, mistral, ollama, openai,
-    openrouter, synthetic, tensorx,
+    openrouter, synthetic, tensorx, xai,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -159,6 +159,17 @@ const OPENCODE_GO: ProviderManifest = ProviderManifest {
     models: &[],
 };
 
+const XAI: ProviderManifest = ProviderManifest {
+    slug: "xai",
+    display_name: "xAI",
+    family: ModelFamily::Generic,
+    supports_thinking: true,
+    accepts_arbitrary_models: true,
+    fallback_max_output: Some(131_072),
+    fallback_context_window: 500_000,
+    models: xai::models(),
+};
+
 const BEDROCK: ProviderManifest = ProviderManifest {
     slug: "bedrock",
     display_name: "Bedrock",
@@ -184,6 +195,7 @@ const BUILTINS: &[ProviderManifest] = &[
     TENSORX,
     OPENCODE,
     OPENCODE_GO,
+    XAI,
     BEDROCK,
 ];
 

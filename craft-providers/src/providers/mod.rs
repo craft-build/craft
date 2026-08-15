@@ -30,6 +30,7 @@ pub mod opencode;
 pub(crate) mod openrouter;
 pub(crate) mod synthetic;
 pub(crate) mod tensorx;
+pub(crate) mod xai;
 
 pub(crate) const MIME_JSON: &str = "application/json";
 pub(crate) const MIME_FORM: &str = "application/x-www-form-urlencoded";

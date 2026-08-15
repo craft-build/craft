@@ -892,6 +892,7 @@ mod tests {
 
     #[test_case("anthropic/claude-99-turbo", "anthropic", "claude-99-turbo" ; "unknown_anthropic_model_accepted")]
     #[test_case("openai/gpt-99", "openai", "gpt-99" ; "unknown_openai_model_accepted")]
+    #[test_case("xai/grok-99", "xai", "grok-99" ; "unknown_xai_model_accepted")]
     #[test_case("synthetic/hf:nonexistent", "synthetic", "hf:nonexistent" ; "unknown_synthetic_model_accepted")]
     #[test_case("ollama/my-custom-model", "ollama", "my-custom-model" ; "unknown_ollama_model_accepted")]
     #[test_case("deepseek/my-custom-model", "deepseek", "my-custom-model" ; "unknown_deepseek_model_accepted")]
@@ -910,6 +911,7 @@ mod tests {
     #[test_case("synthetic/hf:zai-org/GLM-5.2", false ; "synthetic_hf_text_alias")]
     #[test_case("anthropic/claude-sonnet-4-20250514", true ; "claude_vision")]
     #[test_case("openai/gpt-4.1", true ; "gpt_vision")]
+    #[test_case("xai/grok-4.6", true ; "grok_vision")]
     #[test_case("google/gemini-2.5-pro", true ; "gemini_vision")]
     #[test_case("mistral/mistral-medium-latest", false ; "generic_no_vision")]
     fn vision_flag_from_model_entry(spec: &str, expected: bool) {

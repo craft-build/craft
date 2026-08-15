@@ -11,7 +11,14 @@ use craft_storage::log::RotatingFileWriter;
 use craft_storage::model::read_model;
 use tracing_subscriber::EnvFilter;
 
-const PROVIDER_PRIORITY: &[&str] = &["anthropic", "openai", "copilot", "synthetic", "deepseek"];
+const PROVIDER_PRIORITY: &[&str] = &[
+    "anthropic",
+    "openai",
+    "xai",
+    "copilot",
+    "synthetic",
+    "deepseek",
+];
 
 pub async fn resolve_model(
     explicit: Option<&str>,

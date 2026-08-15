@@ -17,11 +17,11 @@ use craft_lua::PluginHost;
 use craft_providers::model::Model;
 use craft_providers::provider::fetch_all_models;
 use craft_providers::{
-    ProviderData, catalog_provider, catalog_providers, copilot_auth, dynamic, openai_auth,
+    ProviderData, catalog_provider, catalog_providers, copilot_auth, dynamic, openai_auth, xai_auth,
 };
 use craft_storage::StateDir;
 use craft_storage::auth::{
-    ProviderCredentials, delete_provider_credentials, load_provider_credentials,
+    ProviderCredentials, delete_provider_credentials, load_provider_credentials, load_tokens,
     save_provider_credentials,
 };
 use craft_storage::model::persist_model;
@@ -52,6 +52,8 @@ pub async fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()
             let slug = slugify(slug);
             if slug == "openai" {
                 openai_auth::login(storage).await?;
+            } else if slug == "xai" {
+                xai_auth::login(storage).await?;
             } else if slug == "copilot" {
                 copilot_auth::login(storage)?;
             } else if builtin_provider(&slug).is_none()
@@ -432,6 +434,7 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
     let slug = slugify(provider);
     match slug.as_str() {
         "openai" => openai_auth::logout(storage)?,
+        "xai" => xai_auth::logout(storage)?,
         "copilot" => copilot_auth::logout(storage)?,
         _ => {
             let mut config = ProvidersConfig::load();
@@ -460,7 +463,9 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
         let def = config.get(b.slug);
         let display = resolve_display_name(b.slug, def);
 
-        if let Some(creds) = load_provider_credentials(storage, b.slug) {
+        if load_tokens(storage, b.slug).is_some() {
+            println!("  \x1b[32m✓\x1b[0m {:<14} {} (oauth)", b.slug, display);
+        } else if let Some(creds) = load_provider_credentials(storage, b.slug) {
             let plan_info = def
                 .and_then(|d| d.plan.as_deref())
                 .map(|p| format!(" ({})", p))

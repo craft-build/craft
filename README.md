@@ -88,6 +88,7 @@ Runtime difference - Craft also significantly retools the async runtime and netw
 
 - Anthropic - `ANTHROPIC_API_KEY` only (OAuth is against the TOS).
 - OpenAI - `OPENAI_API_KEY`, or OAuth via `craft auth login openai`.
+- xAI - `XAI_API_KEY`, or OAuth via `craft auth login xai`.
 - Copilot - `GH_COPILOT_TOKEN`, or an existing sign-in at `~/.config/github-copilot/`.
 - Ollama - `OLLAMA_HOST` for local (for example `http://localhost:11434`), or `OLLAMA_API_KEY` for cloud.
 - Mistral - `MISTRAL_API_KEY`.

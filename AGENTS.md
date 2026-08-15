@@ -44,7 +44,7 @@ Rust workspace, key crates in root dir:
 - craft-agent: Async agent loop on tokio. Holds tool descriptions, the agent state machine, compression, snapshots, and skill loading
 - craft-interpreter: `code_execution` tool implementation built on monty (pydantic/monty, a minimal python interpreter) with async host-call bridging
 - craft-sandbox: OS-level command sandboxing under the logical permission manager (macOS `sandbox-exec`, Linux `bwrap`, Windows no-op in v1). Confines approved commands to the workspace with network gated
-- craft-providers: Integration with LLM providers via APIs (e.g. Anthropic, Z.AI)
+- craft-providers: Integration with LLM providers via APIs (e.g. Anthropic, Z.AI, xAI)
 - craft-storage: Persistent state across runs (e.g. sessions, auth)
 - craft-config: User config
 - craft-config-macro: Proc macro used by craft-config

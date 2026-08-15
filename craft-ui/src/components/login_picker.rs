@@ -8,7 +8,7 @@ use ratatui::widgets::Wrap;
 use craft_config::providers::{self, Protocol, ProviderDef, ProvidersConfig, slugify};
 use craft_providers::catalog_providers_if_available;
 use craft_storage::auth::{
-    ProviderCredentials, load_provider_credentials, save_provider_credentials,
+    ProviderCredentials, load_provider_credentials, load_tokens, save_provider_credentials,
 };
 use craft_storage::model::persist_model;
 
@@ -193,7 +193,8 @@ impl LoginPicker {
         let mut items: Vec<ProviderItem> = builtins
             .iter()
             .map(|b| {
-                let has_key = load_provider_credentials(&storage, b.slug).is_some();
+                let has_key = load_provider_credentials(&storage, b.slug).is_some()
+                    || load_tokens(&storage, b.slug).is_some();
                 let has_env = std::env::var(b.default_api_key_env).is_ok();
                 let configured = !has_key
                     && !has_env
