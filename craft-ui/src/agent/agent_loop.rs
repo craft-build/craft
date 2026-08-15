@@ -10,12 +10,12 @@ use craft_agent::template::Vars;
 use craft_agent::tools::FileReadTracker;
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelMap,
-    CancelToken, CancelTrigger, DoomTracker, Envelope, EventSender, FindingsStore, History,
-    Instructions, McpCommand, PromptRole, SessionMailbox, SharedDoomTracker, SharedFindingsStore,
-    SharedMessages, ToolOutputLines, TurnType,
+    CancelToken, CancelTrigger, DoneReason, DoomTracker, Envelope, EventSender, FindingsStore,
+    History, Instructions, McpCommand, PromptRole, SessionMailbox, SharedDoomTracker,
+    SharedFindingsStore, SharedMessages, ToolOutputLines, TurnType,
 };
 use craft_lua::EventHandle;
-use craft_providers::{AgentError, Message, Model, StopReason, TokenUsage};
+use craft_providers::{AgentError, Message, Model, TokenUsage};
 use craft_storage::flow::FlowStore;
 use craft_storage::id::SessionRef;
 use serde_json::Value;
@@ -352,11 +352,11 @@ impl AgentLoop {
 
         self.clear_cancel_trigger(run_id);
 
-        if matches!(result, Err(AgentError::Cancelled)) {
+        if matches!(result, Ok(DoneReason::Cancelled)) {
             self.min_run_id = run_id + 1;
         }
 
-        result
+        result.map(|_| ())
     }
 
     /// Drive Flow mode through the normal `Agent::run` path. Each prompt
@@ -364,7 +364,7 @@ impl AgentLoop {
     /// no-op advisor, and progress channel attached, then runs one
     /// `agent.run(input)` to completion. `FlowProgress` events flow to the
     /// TUI's FlowPanel through `flow_progress_tx`. The goal-approval gate is
-    /// a terminal `Done { stop_reason: AwaitingGoalApproval }`; the TUI
+    /// a terminal `Done { reason: AwaitingGoalApproval }`; the TUI
     /// re-prompts on `answer_rx` and re-enters with the approval text. The
     /// agent reads its persisted typed log on resume to re-derive the goal
     /// and the next shift (plan §7).
@@ -373,7 +373,7 @@ impl AgentLoop {
     /// per-workstream typed log, thread manager, advisor, and progress channel
     /// attached, then runs it to completion. When the `Tpm -> Plan` gate fires
     /// (`FlowProgress::GoalReady`), the agent ends the run with
-    /// `AwaitingGoalApproval` and the App sets `goal_ready_flag`; this loop
+    /// `AwaitingGoalApproval` (a `DoneReason`) and the App sets `goal_ready_flag`; this loop
     /// then awaits the user's approve/revise/cancel answer (routed through
     /// `answer_rx` by the goal-approval form or a typed reply) and resumes on
     /// approve/revise or cancels on cancel. The agent reads its persisted
@@ -495,8 +495,8 @@ impl AgentLoop {
                 biased;
                 _ = cancel_token.cancelled() => true,
                 r = agent.run(input.clone()) => match r {
-                    Ok(()) => false,
-                    Err(AgentError::Cancelled) => true,
+                    Ok(DoneReason::Cancelled) => true,
+                    Ok(_) => false,
                     Err(e) => {
                         let _ = event_tx.send(AgentEvent::Error {
                             message: e.user_message(),
@@ -562,7 +562,7 @@ impl AgentLoop {
         let _ = event_tx.send(AgentEvent::Done {
             usage: TokenUsage::default(),
             num_turns: 0,
-            stop_reason: Some(StopReason::Cancelled),
+            reason: DoneReason::Cancelled,
         });
         Ok(())
     }
@@ -617,22 +617,11 @@ impl AgentLoop {
     }
 
     fn emit_error(&self, run_id: u64, error: AgentError) {
+        error!(error = %error, "agent error");
         let event_tx = EventSender::new(self.agent_tx.clone(), run_id);
-        match error {
-            AgentError::Cancelled => {
-                let _ = event_tx.send(AgentEvent::Done {
-                    usage: TokenUsage::default(),
-                    num_turns: 0,
-                    stop_reason: Some(StopReason::Cancelled),
-                });
-            }
-            e => {
-                error!(error = %e, "agent error");
-                let _ = event_tx.send(AgentEvent::Error {
-                    message: e.user_message(),
-                });
-            }
-        }
+        let _ = event_tx.send(AgentEvent::Error {
+            message: error.user_message(),
+        });
     }
 }
 

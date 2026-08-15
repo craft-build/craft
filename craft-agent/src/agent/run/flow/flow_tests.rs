@@ -12,7 +12,7 @@ use super::{
 use crate::agent::flow_loop::FlowProgress;
 use crate::agent::history::History;
 use crate::agent::turn_type::TurnType;
-use crate::{AdvisorSeverity, AgentEvent};
+use crate::{AdvisorSeverity, AgentEvent, DoneReason};
 
 #[test]
 fn parse_shift_output_round_trips() {
@@ -235,7 +235,7 @@ async fn flow_tpm_to_plan_emits_goal_ready_and_awaits_approval() {
         matches!(
             e.event,
             AgentEvent::Done {
-                stop_reason: Some(StopReason::AwaitingGoalApproval),
+                reason: DoneReason::AwaitingGoalApproval,
                 ..
             }
         )

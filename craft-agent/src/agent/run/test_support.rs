@@ -166,21 +166,20 @@ pub(super) fn drain_events(rx: &flume::Receiver<Envelope>) -> Vec<Envelope> {
     events
 }
 
-pub(super) async fn run_agent(provider: MockProvider) -> (u32, Option<StopReason>) {
+pub(super) async fn run_agent(provider: MockProvider, max_turns: Option<u32>) -> (u32, DoneReason) {
     let mut history = History::new(Vec::new());
     let (run_params, event_rx) = make_run_params(&mut history);
     let mut params = make_agent_params();
     params.provider = Arc::new(provider);
+    params.config.max_turns = max_turns;
     let agent = Agent::new(params, run_params);
     let _ = agent.run(default_input()).await;
     drain_events(&event_rx)
         .into_iter()
         .find_map(|e| match e.event {
             AgentEvent::Done {
-                num_turns,
-                stop_reason,
-                ..
-            } => Some((num_turns, stop_reason)),
+                num_turns, reason, ..
+            } => Some((num_turns, reason)),
             _ => None,
         })
         .expect("expected Done event")

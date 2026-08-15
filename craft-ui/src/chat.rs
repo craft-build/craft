@@ -17,12 +17,12 @@ use crate::markdown::truncate_output;
 use crate::selection::Selection;
 use craft_agent::tools::{ToolInvocation, ToolRegistry};
 use craft_agent::{
-    AgentEvent, BatchToolStatus, BufferSnapshot, SharedBuf, ToolDoneEvent, ToolOutput,
+    AgentEvent, BatchToolStatus, BufferSnapshot, DoneReason, SharedBuf, ToolDoneEvent, ToolOutput,
     ToolStartEvent,
 };
 use craft_config::{ToolKey, ToolOutputLines, UiConfig};
 use craft_lua::WinView;
-use craft_providers::{ContentBlock, Message, Role, StopReason, TokenUsage};
+use craft_providers::{ContentBlock, Message, Role, TokenUsage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -35,7 +35,7 @@ pub enum ChatEventResult {
     Continue,
     Done {
         usage: TokenUsage,
-        stop_reason: Option<StopReason>,
+        reason: DoneReason,
     },
     QueueItemConsumed {
         text: String,
@@ -142,12 +142,10 @@ impl Chat {
                 return ChatEventResult::QueueItemConsumed { text, image_count };
             }
             AgentEvent::Retry { .. } => unreachable!("handled before handle_event"),
-            AgentEvent::Done {
-                usage, stop_reason, ..
-            } => {
+            AgentEvent::Done { usage, reason, .. } => {
                 self.messages_panel.flush();
                 self.token_usage += usage;
-                return ChatEventResult::Done { usage, stop_reason };
+                return ChatEventResult::Done { usage, reason };
             }
             AgentEvent::Error { message } => {
                 self.messages_panel.flush();

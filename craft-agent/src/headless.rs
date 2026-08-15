@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use craft_providers::Message;
-use craft_providers::StopReason;
 use craft_providers::Timeouts;
 use craft_providers::TokenUsage;
 use craft_providers::model::Model;
@@ -30,18 +29,9 @@ use craft_storage::flow::{FlowStore, project_id as flow_project_id};
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
 
 fn error_event(error: AgentError) -> AgentEvent {
-    match error {
-        AgentError::Cancelled => AgentEvent::Done {
-            usage: TokenUsage::default(),
-            num_turns: 0,
-            stop_reason: Some(StopReason::Cancelled),
-        },
-        e => {
-            error!(error = %e, "agent error");
-            AgentEvent::Error {
-                message: e.user_message(),
-            }
-        }
+    error!(error = %error, "agent error");
+    AgentEvent::Error {
+        message: error.user_message(),
     }
 }
 
@@ -449,7 +439,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 // boundaries. Build/Plan leave these `None` and behave exactly
                 // as before. Flow mode otherwise drives the normal
                 // `Agent::run` path; the approval gate is just a terminal
-                // `Done { stop_reason: AwaitingGoalApproval }`.
+                // `Done { reason: AwaitingGoalApproval }`.
                 let mut flow_thread_history = None;
                 let mut flow_thread_manager = None;
                 let mut flow_advisor: Option<

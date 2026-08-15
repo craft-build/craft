@@ -20,7 +20,7 @@ use craft_agent::cancel::CancelMap;
 use craft_agent::prompt::ResolvedSlots;
 use craft_agent::tools::{FileReadTracker, LocalFs, PromotedTools, ToolRegistry};
 use craft_agent::{
-    Agent, AgentInput, AgentParams, AgentRunParams, CancelToken, DoomTracker, Envelope,
+    Agent, AgentInput, AgentParams, AgentRunParams, CancelToken, DoneReason, DoomTracker, Envelope,
     EventSender, History,
 };
 use craft_config::{CompressionConfig, DefaultEffect, PermissionsConfig, ToolOutputLines};
@@ -378,7 +378,7 @@ fn make_run_params(history: &mut History) -> (AgentRunParams<'_>, flume::Receive
 }
 
 struct CaseOutcome {
-    result: Result<(), AgentError>,
+    result: Result<DoneReason, AgentError>,
     history: Vec<Message>,
 }
 
@@ -432,8 +432,7 @@ async fn run_case(mask: u64) -> CaseOutcome {
         .expect("agent run timed out (loop wedged)");
 
     // Drain the event channel so the unbounded sender never blocks; the
-    // terminal reason is already captured in `result` (the loop returns
-    // Err rather than emitting Done for the cancel/error paths).
+    // terminal reason is already captured in `result`.
     drain_events(&event_rx);
     let history_vec = history.into_vec();
     CaseOutcome {
@@ -468,6 +467,7 @@ async fn recoverable_follow_up(history: Vec<Message>) -> Result<(), AgentError> 
     timeout(RUN_TIMEOUT, agent.run(default_input()))
         .await
         .expect("follow-up run timed out (loop wedged)")
+        .map(|_| ())
 }
 
 /// §4.4 invariants: no orphan tool calls, every tool use paired with a result,
@@ -539,8 +539,8 @@ fn assert_healthy(outcome: &CaseOutcome) {
 fn assert_isolated_terminal(outcome: &CaseOutcome, fault: Fault) {
     match fault {
         Fault::Cancel => assert!(
-            outcome.result.is_err(),
-            "cancel should end in Err(Cancelled)"
+            matches!(&outcome.result, Ok(DoneReason::Cancelled)),
+            "cancel should end in Ok(DoneReason::Cancelled)"
         ),
         Fault::ProviderError | Fault::CompactionInterrupted => assert!(
             outcome.result.is_err(),

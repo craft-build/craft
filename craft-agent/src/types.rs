@@ -14,6 +14,7 @@ use crate::agent::flow_loop::FlowProgress;
 use crate::compression;
 use craft_tool_macro::ArgEnum;
 use serde::{Deserialize, Serialize};
+use strum::Display;
 
 pub const NO_FILES_FOUND: &str = "No files found";
 
@@ -520,6 +521,32 @@ impl ToolDoneEvent {
     }
 }
 
+/// Why a run ended. The provider's `StopReason` describes one turn, this
+/// describes the whole run, including the endings only the agent knows about.
+/// `AwaitingGoalApproval` is craft-only: the flow pipeline paused at its
+/// goal-approval gate and resumes on the next prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Display)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum DoneReason {
+    EndTurn,
+    MaxTokens,
+    MaxTurns,
+    Cancelled,
+    AwaitingGoalApproval,
+}
+
+impl From<Option<StopReason>> for DoneReason {
+    /// We only ask at the end of a turn that called no tool, so a tool-use stop
+    /// and a provider that says nothing both mean the same thing: it is over.
+    fn from(reason: Option<StopReason>) -> Self {
+        match reason {
+            Some(StopReason::MaxTokens) => Self::MaxTokens,
+            Some(StopReason::EndTurn | StopReason::ToolUse) | None => Self::EndTurn,
+        }
+    }
+}
+
 pub fn tool_results(results: Vec<ToolDoneEvent>, config: &CompressionConfig) -> Message {
     Message {
         role: Role::User,
@@ -609,7 +636,7 @@ pub enum AgentEvent {
     Done {
         usage: TokenUsage,
         num_turns: u32,
-        stop_reason: Option<StopReason>,
+        reason: DoneReason,
     },
     AutoCompacting,
     CompactionDone,
@@ -939,6 +966,12 @@ pub struct Envelope {
 mod tests {
     use super::*;
     use test_case::test_case;
+
+    #[test_case(None ; "no_stop_reason")]
+    #[test_case(Some(StopReason::ToolUse) ; "tool_use")]
+    fn stop_reason_without_its_own_ending_becomes_end_turn(stop: Option<StopReason>) {
+        assert_eq!(DoneReason::from(stop), DoneReason::EndTurn);
+    }
 
     #[test]
     fn as_display_text_diff_renders_unified_text() {

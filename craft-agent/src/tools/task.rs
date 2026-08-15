@@ -585,7 +585,7 @@ async fn run_isolated<'h>(
     agent: Agent<'h>,
     input: AgentInput,
     worktree: Option<&Worktree>,
-) -> Result<(), crate::AgentError> {
+) -> Result<crate::DoneReason, crate::AgentError> {
     static WORKTREE_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let Some(wt) = worktree else {
         return agent.run(input).await;

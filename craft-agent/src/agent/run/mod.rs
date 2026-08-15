@@ -22,8 +22,8 @@ use crate::mcp::McpHandle;
 use crate::permissions::PermissionManager;
 use crate::tools::FileReadTracker;
 use crate::{
-    AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, EventSender, InterruptSource,
-    SessionMailbox,
+    AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, DoneReason, EventSender,
+    InterruptSource, SessionMailbox,
 };
 use craft_config::{ModelPolicy, ToolOutputLines};
 
@@ -219,7 +219,7 @@ impl<'h> Agent<'h> {
                 ttsr,
                 mode: AgentMode::default(),
                 turn_type: crate::agent::turn_type::TurnType::General,
-                pending_approval_stop: None,
+                pending_approval: false,
             },
             recency: AgentRecency {
                 scorer: Some(super::semantic::RelevanceScorer::new()),
@@ -310,7 +310,9 @@ impl<'h> Agent<'h> {
         self
     }
 
-    pub async fn run(mut self, mut input: AgentInput) -> Result<(), AgentError> {
+    /// Cancellation is an ending, not a failure: it comes back as
+    /// `Ok(DoneReason::Cancelled)` so callers only report real errors.
+    pub async fn run(mut self, mut input: AgentInput) -> Result<DoneReason, AgentError> {
         compaction::strip_trailing_grace_prompt(self.history, GRACE_CALL_PROMPT);
         self.doom
             .doom
@@ -382,11 +384,17 @@ impl<'h> Agent<'h> {
 
         let result = self.run_loop().await;
 
-        if matches!(result, Err(AgentError::Cancelled)) {
-            sanitize_cancelled_history(self.history, self.compaction.rollback_len);
-        }
+        let reason = match result {
+            Ok(reason) => reason,
+            Err(AgentError::Cancelled) => {
+                sanitize_cancelled_history(self.history, self.compaction.rollback_len);
+                DoneReason::Cancelled
+            }
+            Err(e) => return Err(e),
+        };
+        self.emit_done(reason)?;
 
-        result
+        Ok(reason)
     }
 
     fn push_input_context(&mut self, preamble: Vec<Message>) {
@@ -400,13 +408,12 @@ impl<'h> Agent<'h> {
         }
     }
 
-    async fn run_loop(&mut self) -> Result<(), AgentError> {
+    async fn run_loop(&mut self) -> Result<DoneReason, AgentError> {
         loop {
             if let Some(max) = self.config.max_turns
                 && self.num_turns >= max
             {
-                self.emit_done(None)?;
-                return Ok(());
+                return Ok(DoneReason::MaxTurns);
             }
             let _spec = self.flow.turn_type.spec();
             if matches!(self.flow.mode, AgentMode::Flow(_)) && self.io.cancel.is_cancelled() {
@@ -414,8 +421,7 @@ impl<'h> Agent<'h> {
                     let _ = tx.send(super::flow_loop::FlowProgress::Cancelled);
                 }
                 self.tool_state.snapshot.commit();
-                self.emit_done(Some(StopReason::Cancelled))?;
-                return Ok(());
+                return Ok(DoneReason::Cancelled);
             }
             let (should_grace, should_hard_stop) = {
                 let d = self.doom.doom.lock().unwrap_or_else(|e| e.into_inner());
@@ -434,8 +440,7 @@ impl<'h> Agent<'h> {
                     "doom hard-stop reached, ending run"
                 );
                 self.tool_state.snapshot.commit();
-                self.emit_done(None)?;
-                return Ok(());
+                return Ok(DoneReason::EndTurn);
             }
             if should_grace {
                 self.doom
@@ -460,10 +465,9 @@ impl<'h> Agent<'h> {
             match self.turn().await? {
                 TurnOutcome::Continue => {
                     self.apply_shift_if_requested().await?;
-                    if let Some(stop) = self.flow.pending_approval_stop.take() {
+                    if self.flow.pending_approval {
                         self.tool_state.snapshot.commit();
-                        self.emit_done(Some(stop))?;
-                        return Ok(());
+                        return Ok(DoneReason::AwaitingGoalApproval);
                     }
                 }
                 TurnOutcome::Done(stop_reason) => {
@@ -471,7 +475,7 @@ impl<'h> Agent<'h> {
                     match flow::advisor_turn_action(
                         note,
                         &self.config.advisor,
-                        self.flow.pending_approval_stop.is_some(),
+                        self.flow.pending_approval,
                         self.flow.advisor_continuations,
                     ) {
                         flow::AdvisorTurnAction::Continue(note) => {
@@ -484,8 +488,11 @@ impl<'h> Agent<'h> {
                     if matches!(self.flow.mode, AgentMode::Flow(_)) {
                         self.commit_turn_write(self.flow.turn_type);
                     }
-                    let stop_reason = self.flow.pending_approval_stop.take().or(stop_reason);
-                    self.emit_done(stop_reason)?;
+                    let reason = if self.flow.pending_approval {
+                        DoneReason::AwaitingGoalApproval
+                    } else {
+                        stop_reason.into()
+                    };
 
                     if let Some(ctx) = self.memory_extraction_ctx() {
                         tokio::spawn(async move {
@@ -493,7 +500,7 @@ impl<'h> Agent<'h> {
                         });
                     }
 
-                    return Ok(());
+                    return Ok(reason);
                 }
                 TurnOutcome::ShiftOut => {
                     // A Flow narrow turn finished without shifting. Commit its
@@ -531,17 +538,18 @@ impl<'h> Agent<'h> {
         )))
     }
 
-    fn emit_done(&self, stop_reason: Option<StopReason>) -> Result<(), AgentError> {
+    fn emit_done(&self, reason: DoneReason) -> Result<(), AgentError> {
         info!(
             self.num_turns,
             total_input = self.total_usage.input,
             total_output = self.total_usage.output,
+            %reason,
             "agent run completed"
         );
         self.io.event_tx.send(AgentEvent::Done {
             usage: self.total_usage,
             num_turns: self.num_turns,
-            stop_reason,
+            reason,
         })
     }
 }

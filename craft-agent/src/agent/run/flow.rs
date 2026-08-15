@@ -31,7 +31,7 @@ pub(super) struct AgentFlow {
     pub(super) ttsr: Option<Arc<crate::agent::ttsr::TtsrManager>>,
     pub(super) mode: AgentMode,
     pub(super) turn_type: crate::agent::turn_type::TurnType,
-    pub(super) pending_approval_stop: Option<StopReason>,
+    pub(super) pending_approval: bool,
 }
 
 pub(super) fn parse_shift_output(text: &str) -> Option<crate::types::ToolOutput> {
@@ -296,7 +296,7 @@ impl<'h> Agent<'h> {
                         let _ =
                             tx.send(crate::agent::flow_loop::FlowProgress::GoalReady { goal_doc });
                     }
-                    self.flow.pending_approval_stop = Some(StopReason::AwaitingGoalApproval);
+                    self.flow.pending_approval = true;
                     return Ok(());
                 }
                 self.commit_turn_write(from);

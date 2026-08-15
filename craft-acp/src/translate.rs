@@ -3,6 +3,7 @@ use agent_client_protocol_schema::v1::{
     TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
+use craft_agent::DoneReason;
 use craft_agent::FlowProgress;
 use craft_agent::tools::ToolRegistry;
 use craft_agent::types::{BatchProgressEvent, ToolDoneEvent, ToolOutput, ToolStartEvent};
@@ -263,15 +264,15 @@ pub fn tool_done(event: &ToolDoneEvent) -> SessionUpdate {
     ))
 }
 
-pub fn map_stop_reason(sr: Option<craft_providers::StopReason>) -> StopReason {
-    match sr {
-        Some(craft_providers::StopReason::EndTurn) | None => StopReason::EndTurn,
-        Some(craft_providers::StopReason::MaxTokens) => StopReason::MaxTokens,
-        Some(craft_providers::StopReason::ToolUse) => StopReason::EndTurn,
-        Some(craft_providers::StopReason::Cancelled) => StopReason::Cancelled,
+pub fn map_done_reason(reason: DoneReason) -> StopReason {
+    match reason {
+        DoneReason::EndTurn => StopReason::EndTurn,
+        DoneReason::MaxTokens => StopReason::MaxTokens,
+        DoneReason::MaxTurns => StopReason::MaxTurnRequests,
+        DoneReason::Cancelled => StopReason::Cancelled,
         // The approval gate is a Craft-only pause; ACP has no equivalent, so
         // surface it as EndTurn (the ACP session simply ends from its view).
-        Some(craft_providers::StopReason::AwaitingGoalApproval) => StopReason::EndTurn,
+        DoneReason::AwaitingGoalApproval => StopReason::EndTurn,
     }
 }
 
@@ -507,12 +508,14 @@ mod tests {
         assert_eq!(json["title"], title);
     }
 
-    #[test_case(None; "missing_stop_reason")]
-    #[test_case(Some(craft_providers::StopReason::ToolUse); "tool_use")]
-    fn stop_reason_without_acp_equivalent_maps_to_end_turn(
-        sr: Option<craft_providers::StopReason>,
-    ) {
-        assert_eq!(map_stop_reason(sr), StopReason::EndTurn);
+    /// The only pair whose names disagree, and the one ACP clients read to tell
+    /// "the model stopped" from "the agent ran out of turns".
+    #[test]
+    fn max_turns_maps_to_max_turn_requests() {
+        assert_eq!(
+            map_done_reason(DoneReason::MaxTurns),
+            StopReason::MaxTurnRequests
+        );
     }
 
     fn assistant(content: Vec<MsgBlock>) -> Message {

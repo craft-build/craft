@@ -433,6 +433,7 @@ impl<'h> Agent<'h> {
 mod tests {
     use super::super::test_support::*;
     use super::*;
+    use crate::DoneReason;
     use crate::ExtractedCommand;
     use crate::agent::history::History;
     use crate::cancel::CancelToken;
@@ -507,7 +508,7 @@ mod tests {
         let agent = Agent::new(params, run_params).with_cancel(cancel);
 
         let result = agent.run(default_input()).await;
-        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert_eq!(result.unwrap(), DoneReason::Cancelled);
         assert_ends_with_cancel_marker(&history);
     }
 
@@ -537,20 +538,24 @@ mod tests {
         )));
     }
 
-    #[test_case(&[StopReason::EndTurn],                                                     1, Some(StopReason::EndTurn)  ; "end_turn_completes")]
-    #[test_case(&[StopReason::MaxTokens, StopReason::EndTurn],                                 2, Some(StopReason::EndTurn)  ; "max_tokens_continues")]
-    #[test_case(&[StopReason::MaxTokens, StopReason::MaxTokens, StopReason::MaxTokens, StopReason::MaxTokens], 4, Some(StopReason::MaxTokens) ; "max_tokens_gives_up_after_limit")]
+    /// A truncated answer buys another turn, but only until one of the two
+    /// budgets runs out: the continuation limit or the caller's `max_turns`.
+    #[test_case(&[StopReason::EndTurn], None, 1, DoneReason::EndTurn ; "end_turn_completes")]
+    #[test_case(&[StopReason::MaxTokens, StopReason::EndTurn], None, 2, DoneReason::EndTurn ; "max_tokens_continues")]
+    #[test_case(&[StopReason::MaxTokens; 4], None, 4, DoneReason::MaxTokens ; "max_tokens_gives_up_after_limit")]
+    #[test_case(&[StopReason::MaxTokens, StopReason::EndTurn], Some(1), 1, DoneReason::MaxTurns ; "turn_budget_exhausted")]
     #[tokio::test]
     async fn turn_counting(
         stops: &[StopReason],
+        max_turns: Option<u32>,
         expected_turns: u32,
-        expected_stop: Option<StopReason>,
+        expected_reason: DoneReason,
     ) {
         let responses: Vec<_> = stops.iter().map(|s| text_response(*s)).collect();
         let provider = MockProvider::new(responses);
-        let (turns, stop_reason) = run_agent(provider).await;
+        let (turns, reason) = run_agent(provider, max_turns).await;
         assert_eq!(turns, expected_turns);
-        assert_eq!(stop_reason, expected_stop);
+        assert_eq!(reason, expected_reason);
     }
 
     #[test_case(Some(true),  true,  true  ; "after_tool_use_turn")]

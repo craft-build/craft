@@ -58,12 +58,12 @@ use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
-    AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
-    SharedMessages, SubagentInfo,
+    AgentEvent, DoneReason, Envelope, ImageSource, McpConfigErrors, McpPromptInfo,
+    McpSnapshotReader, SharedMessages, SubagentInfo,
 };
 use craft_config::UiConfig;
 use craft_lua::{BuiltinAction, EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
-use craft_providers::{Model, StopReason, ThinkingConfig, add_cost};
+use craft_providers::{Model, ThinkingConfig, add_cost};
 use craft_storage::StateDir;
 use craft_storage::input_history::InputHistory;
 use craft_storage::model::persist_model;
@@ -1468,12 +1468,12 @@ impl App {
 
         if chat_idx == 0 {
             match result {
-                ChatEventResult::Done { stop_reason, .. } => {
+                ChatEventResult::Done { reason, .. } => {
                     // Flow goal-approval gate: the run is paused, not finished.
                     // `do_flow_run` is still alive on `answer_rx`, so keep
                     // `Streaming` so the cancel key stays reachable. The gate
                     // is otherwise surfaced via `flow_awaiting_approval`.
-                    let is_goal_gate = stop_reason == Some(StopReason::AwaitingGoalApproval);
+                    let is_goal_gate = reason == DoneReason::AwaitingGoalApproval;
                     self.status_bar.clear_flash();
                     self.terminalize_turn(MISSING_TOOL_COMPLETION);
                     self.chat_index.clear();

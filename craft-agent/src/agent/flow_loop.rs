@@ -74,7 +74,7 @@ pub enum FlowProgress {
     /// The TPM turn produced a goal doc and is awaiting host approval. The
     /// host re-prompts; on resume the agent re-derives the next shift from the
     /// persisted goal (plan §7: the approval gate is an ordinary turn
-    /// boundary that ends the run with `StopReason::AwaitingGoalApproval`).
+    /// boundary that ends the run with `DoneReason::AwaitingGoalApproval`).
     GoalReady { goal_doc: String },
     /// The Verifier turn certified the run as complete.
     Done { verdict: String },

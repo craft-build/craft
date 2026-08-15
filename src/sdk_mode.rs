@@ -18,7 +18,8 @@ use craft_agent::permissions::PermissionAnswer;
 use craft_agent::prompt::ResolvedSlots;
 use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{
-    AgentConfig, AgentEvent, AgentInput, AgentMode, Envelope, PermissionsConfig, ToolOutput,
+    AgentConfig, AgentEvent, AgentInput, AgentMode, DoneReason, Envelope, PermissionsConfig,
+    ToolOutput,
 };
 use craft_config::{CompressionConfig, ModelPolicy};
 use craft_providers::model::Model;
@@ -1044,10 +1045,12 @@ impl EventPump {
             AgentEvent::Done {
                 usage,
                 num_turns,
-                stop_reason: _,
+                reason,
             } => {
+                // An interrupted run leaves a partial answer, so it is not a success.
+                let is_error = *reason == DoneReason::Cancelled;
                 let result = mem::take(&mut self.result_text);
-                self.emit_turn_result(false, result, *num_turns, *usage)?;
+                self.emit_turn_result(is_error, result, *num_turns, *usage)?;
             }
             AgentEvent::Error { message } => {
                 self.emit_turn_result(true, message.clone(), 0, TokenUsage::default())?;

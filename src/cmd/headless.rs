@@ -8,11 +8,11 @@ use color_eyre::eyre::Context;
 
 use craft_agent::headless::{self, HeadlessHandle, HeadlessParams};
 use craft_agent::tools::{QUESTION_TOOL_NAME, ToolRegistry};
-use craft_agent::{AgentEvent, Envelope};
+use craft_agent::{AgentEvent, DoneReason, Envelope};
 use craft_config::{load_env_files, load_permissions};
 use craft_lua::PluginHost;
 use craft_providers::Message;
-use craft_providers::{StopReason, Timeouts, TokenUsage};
+use craft_providers::{Timeouts, TokenUsage};
 use craft_storage::StateDir;
 use craft_storage::id::SessionRef;
 use craft_storage::sessions::Session;
@@ -49,7 +49,7 @@ pub struct HeadlessOutcome {
     pub text: String,
     pub usage: TokenUsage,
     pub num_turns: u32,
-    pub stop_reason: Option<StopReason>,
+    pub stop_reason: Option<DoneReason>,
     pub is_error: bool,
     pub session_id: SessionRef,
     pub model_id: String,
@@ -234,11 +234,11 @@ async fn drain(
             AgentEvent::Done {
                 usage,
                 num_turns,
-                stop_reason,
+                reason,
             } => {
                 outcome.usage = *usage;
                 outcome.num_turns = *num_turns;
-                outcome.stop_reason = *stop_reason;
+                outcome.stop_reason = Some(*reason);
                 break;
             }
             AgentEvent::Error { message } => {

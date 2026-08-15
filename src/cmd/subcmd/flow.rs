@@ -3,7 +3,7 @@
 //! a typed log; the pipeline shape emerges from the model's `shift` calls).
 //! Each run opens (or resumes) the per-workstream `ThreadHistory`, attaches it
 //! plus a `ThreadManager`, the no-op advisor, and a progress channel to the
-//! `Agent`, and translates the terminal `AgentEvent::Done` stop reason into a
+//! `Agent`, and translates the terminal `AgentEvent::Done` reason into a
 //! `FlowOutcome` for printing. Also prunes old workstream directories
 //! (`craft flow gc`).
 
@@ -18,11 +18,10 @@ use color_eyre::eyre::{Context, bail};
 use craft_agent::agent::flow_loop::{self, FlowOutcome, FlowRunState};
 use craft_agent::permissions::PermissionManager;
 use craft_agent::{
-    Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, Envelope, FindingsStore,
-    History, ToolOutputLines,
+    Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, DoneReason, Envelope,
+    FindingsStore, History, ToolOutputLines,
 };
 use craft_config::{load_env_files, load_permissions};
-use craft_providers::StopReason;
 use craft_storage::StateDir;
 use craft_storage::flow::FlowStore;
 
@@ -213,7 +212,7 @@ async fn run_flow(
         biased;
         o = collect_outcome(event_rx, progress_rx) => o,
         r = agent.run(input) => match r {
-            Ok(()) => FlowOutcome::Done { verification_report: String::new() },
+            Ok(_) => FlowOutcome::Done { verification_report: String::new() },
             Err(e) => FlowOutcome::Failed {
                 stage: craft_agent::TurnType::General,
                 reason: e.user_message(),
@@ -225,7 +224,7 @@ async fn run_flow(
 }
 
 /// Drain the agent's event stream + Flow progress stream until the terminal
-/// `AgentEvent::Done` arrives, then derive the `FlowOutcome` from its stop
+/// `AgentEvent::Done` arrives, then derive the `FlowOutcome` from its done
 /// reason. Text emitted along the way is concatenated as the outcome's text
 /// body (goal doc, verification report, etc.).
 async fn collect_outcome(
@@ -233,7 +232,7 @@ async fn collect_outcome(
     progress_rx: flume::Receiver<flow_loop::FlowProgress>,
 ) -> FlowOutcome {
     let mut text = String::new();
-    let mut terminal: Option<StopReason> = None;
+    let mut terminal: Option<DoneReason> = None;
     let mut error: Option<String> = None;
     loop {
         tokio::select! {
@@ -242,8 +241,8 @@ async fn collect_outcome(
                 let Ok(envelope) = recv else { break; };
                 match envelope.event {
                     AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
-                    AgentEvent::Done { stop_reason, .. } => {
-                        terminal = stop_reason;
+                    AgentEvent::Done { reason, .. } => {
+                        terminal = Some(reason);
                         break;
                     }
                     AgentEvent::Error { message } => {
@@ -277,10 +276,10 @@ async fn collect_outcome(
         }
     }
     match (terminal, error) {
-        (Some(StopReason::AwaitingGoalApproval), _) => {
+        (Some(DoneReason::AwaitingGoalApproval), _) => {
             FlowOutcome::AwaitingGoalApproval { goal_doc: text }
         }
-        (Some(StopReason::Cancelled), _) => FlowOutcome::Cancelled,
+        (Some(DoneReason::Cancelled), _) => FlowOutcome::Cancelled,
         (Some(_), _) => FlowOutcome::Done {
             verification_report: text,
         },
