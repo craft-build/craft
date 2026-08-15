@@ -1733,6 +1733,7 @@ dependencies = [
  "tree-sitter-zig",
  "tree-sitter-zsh",
  "unicode-normalization",
+ "url",
  "yaml_serde",
 ]
 
