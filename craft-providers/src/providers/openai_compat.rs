@@ -647,7 +647,11 @@ pub async fn parse_sse(
                     acc.id = id;
                 }
                 if let Some(func) = tc.function {
-                    if let Some(name) = func.name {
+                    // GLM-5.2 via Mistral sends "" names in subsequent chunks;
+                    // skip to keep the accumulated name.
+                    if let Some(name) = func.name
+                        && !name.is_empty()
+                    {
                         acc.name = name;
                     }
                     if let Some(args) = func.arguments {
@@ -1008,6 +1012,32 @@ data: [DONE]\n";
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].1, "bash");
         assert_eq!(*tools[0].2, Value::Object(Default::default()));
+    }
+
+    #[tokio::test]
+    async fn parse_sse_empty_name_in_subsequent_chunks_preserves_first_name() {
+        // GLM-5.2 via Mistral sends the tool name in the first chunk and "" in
+        // subsequent chunks. The accumulated name must not be overwritten.
+        let sse = "\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tc_1\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\
+\n\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"path\\\": \\\"/tmp\"}}]}}]}\n\
+\n\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"/file\\\"}\"}}]}}]}\n\
+\n\
+data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\
+\n\
+data: [DONE]\n";
+
+        let (tx, _rx) = flume::unbounded();
+        let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            .await
+            .unwrap();
+
+        let tools: Vec<_> = resp.message.tool_uses().collect();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].1, "read");
+        assert_eq!(tools[0].2["path"], "/tmp/file");
     }
 
     #[test]
