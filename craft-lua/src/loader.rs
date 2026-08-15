@@ -461,11 +461,12 @@ impl EventHandle {
         let _ = self.tx.send(Request::SetSandboxConfig { config });
     }
 
-    pub fn run_command(&self, plugin: Arc<str>, command: Arc<str>, args: String) {
+    pub fn run_command(&self, plugin: Arc<str>, command: Arc<str>, args: String, depth: u8) {
         let _ = self.tx.try_send(Request::RunCommand {
             plugin,
             command,
             args,
+            depth,
         });
     }
 
@@ -663,17 +664,24 @@ mod tests {
     fn run_command_sends_correct_request() {
         let (tx, rx) = flume::bounded(8);
         let handle = EventHandle { tx };
-        handle.run_command(Arc::from("myplugin"), Arc::from("/greet"), "world".into());
+        handle.run_command(
+            Arc::from("myplugin"),
+            Arc::from("/greet"),
+            "world".into(),
+            2,
+        );
         let req = rx.try_recv().unwrap();
         match req {
             Request::RunCommand {
                 plugin,
                 command,
                 args,
+                depth,
             } => {
                 assert_eq!(plugin.as_ref(), "myplugin");
                 assert_eq!(command.as_ref(), "/greet");
                 assert_eq!(args, "world");
+                assert_eq!(depth, 2);
             }
             _ => panic!("expected RunCommand"),
         }

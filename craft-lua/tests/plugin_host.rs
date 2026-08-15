@@ -834,7 +834,7 @@ async fn job_callbacks_fire_while_command_handler_parked() {
     .unwrap();
     let rx = host.ui_action_rx();
     let handle = host.event_handle();
-    handle.run_command(Arc::from("p"), Arc::from("/stream"), String::new());
+    handle.run_command(Arc::from("p"), Arc::from("/stream"), String::new(), 0);
 
     let action = rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -1384,7 +1384,7 @@ fn command_handler_receives_args_and_fargs(args: &str, expected_flash: &str) {
     .unwrap();
     let rx = host.ui_action_rx();
     host.event_handle()
-        .run_command(Arc::from("p"), Arc::from("/echo"), args.to_owned());
+        .run_command(Arc::from("p"), Arc::from("/echo"), args.to_owned(), 0);
 
     let action = rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -1393,6 +1393,52 @@ fn command_handler_receives_args_and_fargs(args: &str, expected_flash: &str) {
         craft_lua::UiAction::Flash(msg) => assert_eq!(msg, expected_flash),
         _ => panic!("expected Flash"),
     }
+}
+
+const RUN_COMMAND_NO_ACTION: &str = "run_command did not reach the UI";
+
+/// `/go` asks for `/cd ~/src` and flashes the `ok, err` pair it gets back. The
+/// command line travels untouched, since the UI is the side that parses it, and
+/// a handler reached at depth 0 asks for depth 1 so a chain of aliases keeps
+/// counting toward the cap.
+#[test_case::test_case(Ok(()), "true|nil" ; "dispatched")]
+#[test_case::test_case(Err("unknown command".into()), "nil|unknown command" ; "rejected")]
+fn run_command_round_trips_through_ui(reply: Result<(), String>, expected_flash: &str) {
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    host.load_source(
+        "p",
+        r#"
+        craft.api.register_command({
+            name = "/go",
+            handler = function()
+                local ok, err = craft.api.run_command("/cd ~/src")
+                craft.ui.flash(tostring(ok) .. "|" .. tostring(err))
+            end,
+        })
+        "#,
+    )
+    .unwrap();
+    let rx = host.ui_action_rx();
+    host.event_handle()
+        .run_command(Arc::from("p"), Arc::from("/go"), String::new(), 0);
+
+    let craft_lua::UiAction::RunCommand {
+        cmdline,
+        depth,
+        reply_tx,
+    } = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect(RUN_COMMAND_NO_ACTION)
+    else {
+        panic!("{RUN_COMMAND_NO_ACTION}");
+    };
+    assert_eq!((cmdline.as_str(), depth), ("/cd ~/src", 1));
+    reply_tx.send(reply).unwrap();
+
+    let action = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect(RUN_COMMAND_NO_ACTION);
+    assert!(matches!(action, craft_lua::UiAction::Flash(msg) if msg == expected_flash));
 }
 
 #[test_case::test_case(

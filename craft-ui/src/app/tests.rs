@@ -1289,7 +1289,7 @@ fn overlay_blocks_ctrl_shortcuts(setup: fn(&mut App)) {
 #[test]
 fn compact_command_sets_streaming() {
     let mut app = test_app();
-    let actions = app.execute_command(cmd("/compact"));
+    let actions = app.execute_command(cmd("/compact"), 0);
     assert!(matches!(&actions[0], Action::Compact));
     assert_eq!(app.status, Status::Streaming);
 }
@@ -1300,7 +1300,7 @@ fn compact_during_streaming_queues_item() {
     app.status = Status::Streaming;
     app.run_id = 1;
 
-    let actions = app.execute_command(cmd("/compact"));
+    let actions = app.execute_command(cmd("/compact"), 0);
     assert!(actions.is_empty());
     assert_eq!(app.queue.len(), 1);
     assert_eq!(app.queue.panel_entries()[0].text, "/compact");
@@ -1768,7 +1768,7 @@ fn queue_command_sets_focus(has_queue: bool) {
     } else {
         test_app()
     };
-    app.execute_command(cmd("/queue"));
+    app.execute_command(cmd("/queue"), 0);
     assert_eq!(app.queue.focus().is_some(), has_queue);
 }
 
@@ -1937,7 +1937,7 @@ fn help_toggles_modal() {
     assert!(!app.help_modal.is_open());
     app.update(Msg::Key(kb::HELP.to_key_event()));
     assert!(app.help_modal.is_open());
-    app.execute_command(cmd("/help"));
+    app.execute_command(cmd("/help"), 0);
     assert!(!app.help_modal.is_open());
 }
 
@@ -2114,11 +2114,11 @@ fn format_with_images_label(count: usize, expected: &str) {
 fn yolo_toggle() {
     let mut app = test_app();
     assert!(!app.permissions.is_yolo());
-    app.execute_command(cmd("/yolo"));
+    app.execute_command(cmd("/yolo"), 0);
     assert!(app.permissions.is_yolo());
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.contains("enabled"), "flash={flash:?}");
-    app.execute_command(cmd("/yolo"));
+    app.execute_command(cmd("/yolo"), 0);
     assert!(!app.permissions.is_yolo());
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.contains("disabled"), "flash={flash:?}");
@@ -2128,7 +2128,7 @@ fn yolo_toggle() {
 fn usage_command_toggles_modal() {
     let mut app = test_app();
     assert!(!app.usage_modal.is_open());
-    let open_actions = app.execute_command(cmd("/usage"));
+    let open_actions = app.execute_command(cmd("/usage"), 0);
     assert!(app.usage_modal.is_open());
     assert!(
         open_actions
@@ -2136,7 +2136,7 @@ fn usage_command_toggles_modal() {
             .any(|a| matches!(a, Action::RefreshUsage)),
         "opening should request a quota refresh"
     );
-    let close_actions = app.execute_command(cmd("/usage"));
+    let close_actions = app.execute_command(cmd("/usage"), 0);
     assert!(!app.usage_modal.is_open());
     assert!(
         !close_actions
@@ -2149,7 +2149,7 @@ fn usage_command_toggles_modal() {
 #[test]
 fn ctrl_r_refreshes_usage_while_modal_open() {
     let mut app = test_app();
-    app.execute_command(cmd("/usage"));
+    app.execute_command(cmd("/usage"), 0);
     assert!(app.usage_modal.is_open());
 
     let actions = app.update(Msg::Key(kb::REFRESH.to_key_event()));
@@ -2163,19 +2163,25 @@ fn ctrl_r_refreshes_usage_while_modal_open() {
 #[test]
 fn cd_command_behavior() {
     let mut app = test_app();
-    app.execute_command(ParsedCommand {
-        name: "/cd".into(),
-        args: "/tmp".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/cd".into(),
+            args: "/tmp".into(),
+        },
+        0,
+    );
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.starts_with("cd /tmp"), "flash={flash:?}");
     let resolved = craft_storage::paths::canonicalize_clean(Path::new("/tmp"));
     assert_eq!(app.state.session.cwd, resolved.to_string_lossy());
 
-    app.execute_command(ParsedCommand {
-        name: "/cd".into(),
-        args: "/nonexistent_path_12345".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/cd".into(),
+            args: "/nonexistent_path_12345".into(),
+        },
+        0,
+    );
     let flash = app.status_bar.flash_text().unwrap();
     assert!(flash.starts_with("cd: "), "error flash={flash:?}");
 }
@@ -2209,6 +2215,93 @@ fn typed_lua_command_with_args_executes() {
 
     assert!(actions.is_empty(), "{LUA_COMMAND_NOT_SENT}");
     assert!(probe.try_recv().is_some(), "{LUA_COMMAND_RAN}");
+}
+
+const RUN_CMDLINE_REJECTED: &str = "a rejected cmdline must not run anything";
+
+#[test_case("/new" ; "plain")]
+#[test_case("/NEW" ; "uppercase")]
+#[test_case("  /new  " ; "surrounding_whitespace")]
+#[test_case("new" ; "missing_slash")]
+fn run_cmdline_executes_builtin(cmdline: &str) {
+    let mut app = test_app();
+
+    let actions = app.run_cmdline(cmdline, 0).unwrap();
+
+    assert!(matches!(&actions[..], [Action::NewSession]));
+}
+
+#[test]
+fn run_cmdline_splits_args_off_the_name() {
+    let mut app = test_app();
+
+    let actions = app.run_cmdline("/btw what is rust?", 0).unwrap();
+
+    assert!(matches!(&actions[..], [Action::Btw(q)] if q == "what is rust?"));
+}
+
+/// Only the typed path clears the input, so a keybind or autocmd reaching for
+/// `run_command` cannot eat a half-written message.
+#[test]
+fn run_cmdline_keeps_typed_input() {
+    let mut app = test_app();
+    app.input_box.set_input("half written".into());
+
+    app.run_cmdline("/usage", 0).unwrap();
+
+    assert_eq!(app.input_box.buffer.value(), "half written");
+}
+
+#[test]
+fn run_cmdline_unknown_name_errors_without_dispatching() {
+    let mut app = test_app();
+    let (handle, probe) = craft_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+
+    let Err(err) = app.run_cmdline("/nope", 0) else {
+        panic!("{RUN_CMDLINE_REJECTED}");
+    };
+
+    assert!(err.contains("/nope"), "err={err:?}");
+    assert!(probe.try_recv_command().is_none(), "{RUN_CMDLINE_REJECTED}");
+}
+
+#[test]
+fn run_cmdline_rejects_past_max_depth() {
+    let mut app = test_app();
+
+    let Err(err) = app.run_cmdline("/new", crate::app::MAX_COMMAND_DEPTH + 1) else {
+        panic!("{RUN_CMDLINE_REJECTED}");
+    };
+
+    assert_eq!(err, crate::app::COMMAND_DEPTH_MSG);
+    assert!(
+        app.run_cmdline("/new", crate::app::MAX_COMMAND_DEPTH)
+            .is_ok(),
+        "the cap itself must still run"
+    );
+}
+
+/// A Lua command reached through an alias carries the hop count onward, or a
+/// cycle of Lua aliases would never trip the cap. It goes out spelled as
+/// registered, since only that spelling dispatches.
+#[test]
+fn run_cmdline_forwards_depth_to_lua_command() {
+    let mut app = test_app_with_lua(LuaCommandReader::from_commands(vec![LuaCommandInfo {
+        name: "/Sessions".into(),
+        description: "Browse sessions".into(),
+        plugin: "sessions".into(),
+        max_args: 0,
+    }]));
+    let (handle, probe) = craft_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+
+    app.run_cmdline("/sessions", 3).unwrap();
+
+    assert_eq!(
+        probe.try_recv_command(),
+        Some(("/Sessions".to_string(), String::new(), 3))
+    );
 }
 
 #[test]
@@ -2500,7 +2593,7 @@ fn search_escape_restores_scroll(scroll_top: u16, auto_scroll: bool) {
 #[test]
 fn mcp_command_opens_picker() {
     let mut app = test_app();
-    app.execute_command(cmd("/mcp"));
+    app.execute_command(cmd("/mcp"), 0);
     assert!(app.mcp_picker.is_open());
 }
 
@@ -2525,7 +2618,7 @@ fn mcp_toggle_dispatches_action() {
         }),
         McpConfigErrors::new(PathBuf::new()),
     );
-    app.execute_command(cmd("/mcp"));
+    app.execute_command(cmd("/mcp"), 0);
 
     let actions = app.update(Msg::Key(key(KeyCode::Enter)));
     assert!(matches!(
@@ -2591,10 +2684,13 @@ fn alt_o_opens_editor_for_input() {
 #[test]
 fn btw_empty_flashes_error() {
     let mut app = test_app();
-    let actions = app.execute_command(ParsedCommand {
-        name: "/btw".into(),
-        args: String::new(),
-    });
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/btw".into(),
+            args: String::new(),
+        },
+        0,
+    );
     assert!(actions.is_empty());
     assert_eq!(
         app.status_bar.flash_text().unwrap(),
@@ -2605,10 +2701,13 @@ fn btw_empty_flashes_error() {
 #[test]
 fn btw_with_question_returns_action() {
     let mut app = test_app();
-    let actions = app.execute_command(ParsedCommand {
-        name: "/btw".into(),
-        args: "what is rust?".into(),
-    });
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/btw".into(),
+            args: "what is rust?".into(),
+        },
+        0,
+    );
     assert!(matches!(&actions[..], [Action::Btw(q)] if q == "what is rust?"));
 }
 
@@ -3181,7 +3280,7 @@ fn thinking_no_args_opens_picker() {
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
     assert!(!app.thinking_picker.is_open());
 
-    app.execute_command(cmd("/thinking"));
+    app.execute_command(cmd("/thinking"), 0);
     assert!(app.thinking_picker.is_open());
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
 
@@ -3192,16 +3291,22 @@ fn thinking_no_args_opens_picker() {
 fn thinking_explicit_args() {
     let mut app = test_app();
 
-    app.execute_command(ParsedCommand {
-        name: "/thinking".into(),
-        args: "8192".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/thinking".into(),
+            args: "8192".into(),
+        },
+        0,
+    );
     assert_eq!(app.state.thinking, ThinkingConfig::Budget(8192));
 
-    app.execute_command(ParsedCommand {
-        name: "/thinking".into(),
-        args: "high".into(),
-    });
+    app.execute_command(
+        ParsedCommand {
+            name: "/thinking".into(),
+            args: "high".into(),
+        },
+        0,
+    );
     assert_eq!(app.state.thinking, ThinkingConfig::Effort(Effort::High));
 }
 
@@ -3210,7 +3315,7 @@ fn thinking_unsupported_model_flashes_error() {
     let mut app = test_app();
     app.state.model.thinking_override = Some(craft_providers::ThinkingSupport::No);
 
-    app.execute_command(cmd("/thinking"));
+    app.execute_command(cmd("/thinking"), 0);
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
     assert!(!app.thinking_picker.is_open());
     assert!(app.status_bar.flash_text().is_some());
@@ -3308,11 +3413,11 @@ fn fast_toggle_on_off_on_opus() {
     set_opus_model(&mut app);
     assert!(!app.state.fast);
 
-    app.execute_command(cmd("/fast"));
+    app.execute_command(cmd("/fast"), 0);
     assert!(app.state.fast);
     assert_eq!(app.status_bar.flash_text(), Some(FAST_ON_MSG));
 
-    app.execute_command(cmd("/fast"));
+    app.execute_command(cmd("/fast"), 0);
     assert!(!app.state.fast);
     assert_eq!(app.status_bar.flash_text(), Some(FAST_OFF_MSG));
 }
@@ -3323,7 +3428,7 @@ fn fast_flashes_error_on_ineligible_model(spec: &str) {
     let mut app = test_app();
     app.state.model = craft_providers::Model::from_spec(spec).unwrap();
 
-    app.execute_command(cmd("/fast"));
+    app.execute_command(cmd("/fast"), 0);
     assert!(!app.state.fast);
     assert_eq!(app.status_bar.flash_text(), Some(FAST_UNSUPPORTED_MSG));
 }

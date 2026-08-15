@@ -4,6 +4,33 @@ use craft_ui::BUILTIN_COMMANDS;
 
 use crate::lua_util;
 
+const ALIASING: &str = r#"## Aliasing commands
+
+Prefer a different name for a command? `craft.api.run_command` runs any slash command exactly as typing it would, so an alias is a one-line handler in your `init.lua` instead of a reimplementation.
+
+```lua
+-- ~/.config/craft/init.lua
+local aliases = {
+    { name = "/clear", target = "/new", description = "Alias for /new" },
+    { name = "/resume", target = "/sessions", description = "Alias for /sessions" },
+}
+
+for _, alias in ipairs(aliases) do
+    craft.api.register_command({
+        name = alias.name,
+        description = alias.description,
+        handler = function()
+            local ok, err = craft.api.run_command(alias.target)
+            if not ok then
+                craft.ui.flash("could not run " .. alias.target .. ": " .. err)
+            end
+        end,
+    })
+end
+```
+
+Both names stay in the palette: aliasing adds a name, it does not rename or hide the original. It works for any command listed above, plus plugin commands and MCP prompts. See the plugins page for matching and error handling, or `craft.ui.action` to bind a key instead of a name."#;
+
 fn write_row(out: &mut String, name: &str, description: &str) {
     writeln!(out, "| `{name}` | {} |", description.replace('|', "\\|")).unwrap();
 }
@@ -107,6 +134,9 @@ pub fn generate() -> String {
         "For example, `/project:review main.rs` replaces `$ARGUMENTS` with `main.rs`."
     )
     .unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(out, "{ALIASING}").unwrap();
 
     if out.ends_with('\n') {
         out.pop();

@@ -171,6 +171,9 @@ pub enum Request {
         plugin: Arc<str>,
         command: Arc<str>,
         args: String,
+        /// How many `craft.api.run_command` hops led here; seeds the handler's
+        /// [`TaskCell::command_depth`] so an alias cycle terminates.
+        depth: u8,
     },
     CollectPromptSlots {
         reply: flume::Sender<craft_agent::prompt::ResolvedSlots>,
@@ -314,6 +317,10 @@ pub(crate) struct TaskCell {
     /// Set by `TaskScope::new`; `enqueue_async_task` upgrades it so queued
     /// `craft.async.run` tasks share ownership of `bufs`. See [`BufsClaim`].
     bufs_claim: Weak<BufsClaim>,
+    /// Slash-command hops that led to this task, so `craft.api.run_command`
+    /// can refuse to extend a chain that never ends. Inherited by
+    /// `craft.async.run` tasks, or a cycle could hop through one and reset it.
+    pub(crate) command_depth: u8,
 }
 
 impl TaskCell {
@@ -336,6 +343,7 @@ impl TaskCell {
             inline_spawn: None,
             cancel_hooks: Vec::new(),
             bufs_claim: Weak::new(),
+            command_depth: 0,
         }
     }
 
@@ -769,7 +777,18 @@ impl TaskScope {
 ///
 /// [detached]: TaskScope::detached
 pub(crate) async fn run_detached<F: Future>(lua: &Lua, fut: F) -> F::Output {
+    run_scoped(lua, TaskScope::detached(lua), fut).await
+}
+
+/// [`run_detached`] for a slash-command handler, seeding the hop count that
+/// `craft.api.run_command` checks before extending the chain.
+pub(crate) async fn run_command_scoped<F: Future>(lua: &Lua, depth: u8, fut: F) -> F::Output {
     let scope = TaskScope::detached(lua);
+    lock_cell(scope.handle()).command_depth = depth;
+    run_scoped(lua, scope, fut).await
+}
+
+async fn run_scoped<F: Future>(lua: &Lua, scope: TaskScope, fut: F) -> F::Output {
     let handle = Arc::clone(scope.handle());
     let pump = async {
         let mut event_buf = Vec::new();
@@ -907,14 +926,21 @@ pub(crate) fn with_live_ctx<R>(lua: &Lua, f: impl FnOnce(&LiveCtx) -> R) -> Opti
     lock_cell(&handle).live.as_ref().map(f)
 }
 
+/// Slash-command hops that led to the running task; 0 outside a command
+/// handler, so a keybind or tool calling `craft.api.run_command` starts fresh.
+pub(crate) fn command_depth(lua: &Lua) -> u8 {
+    lua.app_data_ref::<TaskHandle>()
+        .map_or(0, |handle| lock_cell(&handle).command_depth)
+}
+
 pub(crate) fn enqueue_async_task(lua: &Lua, work_fn: RegistryKey) -> Result<(), mlua::Error> {
     let handle = lua.app_data_ref::<TaskHandle>();
-    let (cancel, live_ctx) = match &handle {
+    let (cancel, live_ctx, command_depth) = match &handle {
         Some(h) => {
             let cell = lock_cell(h);
-            (cell.cancel.clone(), cell.live.clone())
+            (cell.cancel.clone(), cell.live.clone(), cell.command_depth)
         }
-        None => (CancelToken::none(), None),
+        None => (CancelToken::none(), None, 0),
     };
 
     let mut task = PendingAsyncTask {
@@ -923,6 +949,7 @@ pub(crate) fn enqueue_async_task(lua: &Lua, work_fn: RegistryKey) -> Result<(), 
         deadline: Some(Instant::now() + ASYNC_RUN_DEFAULT_DEADLINE),
         live_ctx,
         owner: None,
+        command_depth,
     };
 
     if let Some(h) = &handle {
@@ -1019,6 +1046,7 @@ pub(crate) struct PendingAsyncTask {
     pub deadline: Option<Instant>,
     pub live_ctx: Option<LiveCtx>,
     pub owner: Option<Arc<BufsClaim>>,
+    pub command_depth: u8,
 }
 
 /// Shared ownership of a task's `bufs`: the scope holds one clone, each queued
@@ -1126,15 +1154,14 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
         tokio::task::spawn_local(async move {
             let _gate_guard = GateGuard::new(&g);
 
-            let scope = TaskScope::new(
-                &lua,
-                TaskCell::new(
-                    task.cancel.clone(),
-                    task.deadline,
-                    task.live_ctx.clone(),
-                    active_terminal_backend(&lua),
-                ),
+            let mut cell = TaskCell::new(
+                task.cancel.clone(),
+                task.deadline,
+                task.live_ctx.clone(),
+                active_terminal_backend(&lua),
             );
+            cell.command_depth = task.command_depth;
+            let scope = TaskScope::new(&lua, cell);
             let run = scope.scope_future(run_work_fn(&lua, &task.work_fn, scope.handle()));
 
             let result = run.await;
@@ -2397,6 +2424,7 @@ pub fn spawn(
                             plugin,
                             command,
                             args,
+                            depth,
                         } => {
                             let handler_fn =
                                 rt.lua.app_data_ref::<CommandHandlerMap>().and_then(|m| {
@@ -2417,7 +2445,7 @@ pub fn spawn(
                                         let thread = lua.create_thread(func)?;
                                         thread.into_async::<()>(opts)?.await
                                     };
-                                    if let Err(e) = run_detached(&lua, run).await {
+                                    if let Err(e) = run_command_scoped(&lua, depth, run).await {
                                         tracing::warn!(plugin = %plugin, command = %command, error = %e, "command handler failed");
                                     }
                                     drain_spawn_queue(&lua, &g);
@@ -3609,6 +3637,25 @@ mod tests {
         assert!(err.to_string().contains(SPAWN_QUEUE_NOT_INIT));
     }
 
+    /// Without this a `run_command` cycle could hop through `craft.async.run`
+    /// and start over at depth 0, so the cap would never trip.
+    #[test]
+    fn enqueue_async_task_inherits_command_depth() {
+        let lua = enqueue_test_lua();
+        let mut cell = TaskCell::new(
+            CancelToken::none(),
+            None,
+            None,
+            Arc::new(crate::terminal_backend::LocalTerminal),
+        );
+        cell.command_depth = 3;
+        let _h = set_active(&lua, cell);
+        enqueue_async_task(&lua, enqueue_dummy(&lua)).unwrap();
+
+        let queue = lua.app_data_ref::<SpawnQueue>().unwrap();
+        assert_eq!(queue.borrow()[0].command_depth, 3);
+    }
+
     #[test]
     fn enqueue_async_task_routes_to_inline_spawn_when_set() {
         let lua = enqueue_test_lua();
@@ -3708,6 +3755,7 @@ mod tests {
                 deadline,
                 live_ctx: None,
                 owner: None,
+                command_depth: 0,
             });
     }
 

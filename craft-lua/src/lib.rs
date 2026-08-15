@@ -69,6 +69,23 @@ pub mod test_support {
             self.0.try_recv().ok().map(|_| ())
         }
 
+        /// Next dispatched slash command as `(command, args, depth)`, draining
+        /// other requests.
+        pub fn try_recv_command(&self) -> Option<(String, String, u8)> {
+            while let Ok(req) = self.0.try_recv() {
+                if let Request::RunCommand {
+                    command,
+                    args,
+                    depth,
+                    ..
+                } = req
+                {
+                    return Some((command.to_string(), args, depth));
+                }
+            }
+            None
+        }
+
         /// Next fired autocmd as `(event, data)`, draining other requests.
         pub fn try_recv_autocmd(&self) -> Option<(String, serde_json::Value)> {
             while let Ok(req) = self.0.try_recv() {

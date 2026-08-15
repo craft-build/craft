@@ -21,12 +21,14 @@ use serde_json::Value;
 
 use crate::api::ui::buf::BufHandle;
 use crate::api::util::command::{
-    CommandEntry, CommandHandlerMap, LuaCommandWriter, publish_command_snapshot,
+    CommandEntry, CommandHandlerMap, LuaCommandWriter, UiAction, publish_command_snapshot,
+    ui_roundtrip,
 };
 use crate::api::util::ctx::LuaCtx;
+use crate::api::util::pair::{Pair, try_pair};
 use crate::runtime::{
     HintContent, LiveCtx, PromptHintCallbacks, PromptHintRegistration, RecencySourceCallbacks,
-    RecencySourceRegistration, Request,
+    RecencySourceRegistration, Request, command_depth,
 };
 
 const TOOL_NAME_MAX: usize = 64;
@@ -424,6 +426,7 @@ pub(crate) fn create_api_table(
     pending: PendingTools,
     plugin: Arc<str>,
     opts: crate::api::options::PluginOpts,
+    ui_action_tx: Option<flume::Sender<UiAction>>,
 ) -> LuaResult<Table> {
     let t = lua.create_table()?;
 
@@ -551,7 +554,52 @@ pub(crate) fn create_api_table(
         })?,
     )?;
 
+    if let Some(tx) = ui_action_tx {
+        let run_tx = tx.clone();
+        t.set(
+            "run_command",
+            lua.create_async_function(move |lua: Lua, cmdline: String| {
+                let tx = run_tx.clone();
+                async move { run_command_pair(lua, tx, cmdline).await }
+            })?,
+        )?;
+    }
+
     Ok(t)
+}
+
+/// Runs a slash command by name, exactly as typing it in the input would.
+/// Works for built-ins, custom `/project:` and `/user:` commands, MCP
+/// prompts, and commands other plugins registered.
+///
+/// Use it to alias a command you like under a name you prefer, instead of
+/// reimplementing what it does. See `craft.ui.action` for the same idea
+/// applied to keybound UI actions.
+///
+/// Pass the whole command line, arguments included: `"/cd ~/src"`. The
+/// leading slash is optional. Names match exactly apart from case, so a typo
+/// reports an error instead of running the closest command, and a cycle of
+/// aliases stops with one too.
+///
+/// This returns as soon as the command has been dispatched, not when it
+/// finishes, so aliasing something long-running like `/compact` does not
+/// block your handler.
+async fn run_command_pair(
+    lua: Lua,
+    tx: flume::Sender<UiAction>,
+    cmdline: String,
+) -> LuaResult<Pair<bool>> {
+    let depth = command_depth(&lua).saturating_add(1);
+    let reply = try_pair!(
+        ui_roundtrip(Some(&tx), |reply_tx| UiAction::RunCommand {
+            cmdline,
+            depth,
+            reply_tx,
+        })
+        .await
+    );
+    try_pair!(reply);
+    Ok((Some(true), None))
 }
 
 fn is_valid_tool_name(name: &str) -> bool {

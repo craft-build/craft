@@ -26,6 +26,36 @@ Project settings override global ones. See [Configuration](./configuration.md).
 
 Slash commands accept an `nargs` option that controls how many whitespace-separated arguments they take, spelled like Neovim's `nargs`: `0` (the default), `1`, `"?"` (zero or one), `"*"` (any number), or `"+"` (one or more). Type more than allowed and the command quietly stops matching, sending the input to the model as a normal message. Only the upper bound is checked, so with `"+"` you still handle an empty `opts.args` yourself. The handler receives one `opts` table: `opts.args` is the raw argument string (whitespace kept, may be empty) and `opts.fargs` is the same string split into words.
 
+### `craft.api.run_command()`
+
+```lua
+craft.api.run_command({cmdline})
+```
+
+Runs a slash command by name, exactly as typing it in the input would. Works for built-ins, custom `/project:` and `/user:` commands, MCP prompts, and commands other plugins registered. Use it to alias a command you like under a name you prefer, instead of reimplementing what it does. See `craft.ui.action` for the same idea applied to keybound UI actions.
+
+Pass the whole command line, arguments included: `"/cd ~/src"`. The leading slash is optional. Names match exactly apart from case, so a typo reports an error instead of running the closest command, and a cycle of aliases stops with one too. It returns as soon as the command has been dispatched, not when it finishes, so aliasing something long-running like `/compact` does not block your handler.
+
+**Parameters:**
+
+- `{cmdline}` (`string`) Command line, e.g. `"/new"` or `"/cd ~/src"`.
+
+**Returns:** (`boolean|nil`, `string|nil`) `true` once dispatched, or nil and an error message for an unknown command.
+
+```lua
+-- /resume as an alias for the built-in session picker:
+craft.api.register_command({
+  name = "/resume",
+  description = "Alias for /sessions",
+  handler = function()
+    local ok, err = craft.api.run_command("/sessions")
+    if not ok then
+      craft.ui.flash("could not run /sessions: " .. err)
+    end
+  end,
+})
+```
+
 A minimal custom tool:
 
 ```lua
