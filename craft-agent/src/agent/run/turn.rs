@@ -14,6 +14,11 @@ use super::{Agent, NUDGE_PROMPT, TurnOutcome};
 const STAGNATION_WINDOW_SIZE: usize = 5;
 const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
 
+/// Stands in for the assistant turn the model left blank, so the nudge below
+/// has something to answer. Never a real response: readers that mine history
+/// for model text must skip it.
+pub const EMPTY_RESPONSE_MARKER: &str = "(empty)";
+
 impl<'h> Agent<'h> {
     pub(super) async fn turn(&mut self) -> Result<TurnOutcome, AgentError> {
         if self.io.cancel.is_cancelled() {
@@ -246,7 +251,7 @@ impl<'h> Agent<'h> {
                 self.history.push(Message {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Text {
-                        text: "(empty)".into(),
+                        text: EMPTY_RESPONSE_MARKER.into(),
                     }],
                     ..Default::default()
                 });

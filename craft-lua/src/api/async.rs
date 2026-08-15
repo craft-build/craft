@@ -123,10 +123,17 @@ pub(crate) fn create_async_table(lua: &Lua) -> LuaResult<Table> {
         .call::<Function>(&tbl)?,
     )?;
 
-    // Register `fn` to run as soon as the current task is cancelled, without
-    // waiting for whatever it is doing to finish. Use it to paint the
-    // cancelled state: a handler waiting on children stays parked until they
-    // wind down, so anything after the wait is too late to reach the screen.
+    // Register `fn` to run as soon as the current task is cancelled or hits
+    // its deadline, without waiting for whatever it is doing to finish. Use
+    // it to paint the cancelled state: a handler waiting on children stays
+    // parked until they wind down, so anything after the wait is too late to
+    // reach the screen.
+    //
+    // The callback receives the reason (`"cancelled"` or `"timeout"`) and may
+    // still call `ctx:finish`; the host prefers that reply over the generic
+    // cancelled/timeout error. Mark it `is_error = true` and end it with a
+    // marker, so the model knows the output it gets is cut short.
+    //
     // The callback runs outside your coroutine, so it must not yield. It
     // fires at most once, immediately if the task is already cancelled. An
     // error inside it is logged and never reaches your handler, and the

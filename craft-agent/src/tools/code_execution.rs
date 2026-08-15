@@ -29,6 +29,10 @@ use crate::tools::{ToolAudience, ToolRegistry};
 
 const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const PREAMBLE: &str = "import re\nimport asyncio\nimport sys\nimport os\nimport json\n";
+const CANCELLED_ERR: &str = "cancelled";
+const TIME_LIMIT_SUBSTR: &str = "time limit exceeded";
+const CUT_CANCELLED_FMT: &str = "[cancelled by user; output above is partial]";
+const CUT_NO_OUTPUT_CANCELLED: &str = "[cancelled by user; no output before the cut]";
 
 pub const IMAGE_NOT_VISIBLE_NOTE: &str =
     "image pixels are not visible from here; call the view_image tool directly";
@@ -76,12 +80,13 @@ impl CodeExecution {
         let config = ctx.config.clone();
         let deadline = Deadline::after(timeout);
         let limits = runner::limits(timeout, config.interpreter_max_memory_mb * 1024 * 1024);
+        let env_config = config.clone();
         let env = InterpreterEnv {
             event_tx: ctx.event_tx.clone(),
             mode: ctx.mode.clone(),
             cancel: ctx.cancel.clone(),
             deadline,
-            config,
+            config: env_config,
             permissions: ctx.permissions.clone(),
             file_tracker: ctx.file_tracker.clone(),
             user_response_rx: ctx.user_response_rx.clone(),
@@ -90,7 +95,13 @@ impl CodeExecution {
 
         // We race cancel against the blocking thread. If cancel wins, the Python thread
         // keeps running till it finishes. Threads can not be killed safely.
-        ctx.cancel
+        // The accumulator is shared so a cut short still hands back the lines
+        // streamed so far instead of a bare error.
+        let partial = Arc::new(std::sync::Mutex::new(String::new()));
+        let accumulated = Arc::clone(&partial);
+        let timeout_secs = timeout.as_secs();
+        let result = ctx
+            .cancel
             .race(async {
                 tokio::task::spawn_blocking(move || {
                     let tools = build_tool_fns(&env);
@@ -98,14 +109,14 @@ impl CodeExecution {
                     let code = format!("{PREAMBLE}{code}");
 
                     let result = if let Some(ref id) = tool_use_id {
-                        let mut accumulated = String::new();
                         let mut last_flush = Instant::now();
                         runner::run_streaming(&code, &tools, Some(&resolver), limits, &mut |line| {
-                            accumulated.push_str(line);
+                            let mut acc = accumulated.lock().unwrap_or_else(|e| e.into_inner());
+                            acc.push_str(line);
                             if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL {
                                 env.event_tx.try_send(AgentEvent::ToolOutput {
                                     id: id.to_string(),
-                                    content: accumulated.clone(),
+                                    content: acc.clone(),
                                 });
                                 last_flush = Instant::now();
                             }
@@ -139,13 +150,52 @@ impl CodeExecution {
                 .await
                 .map_err(|e| format!("spawn_blocking failed: {e}"))?
             })
-            .await?
+            .await;
+
+        match result {
+            Ok(out) => out,
+            // Esc or deadline: hand back the lines streamed so far, so the
+            // model keeps what the user just watched instead of a bare error.
+            Err(e) if e == CANCELLED_ERR => Err(cut_reply(
+                &partial.lock().unwrap_or_else(|e| e.into_inner()),
+                &config,
+                CUT_CANCELLED_FMT,
+                CUT_NO_OUTPUT_CANCELLED,
+            )),
+            Err(e) if e.contains(TIME_LIMIT_SUBSTR) => Err(cut_reply(
+                &partial.lock().unwrap_or_else(|e| e.into_inner()),
+                &config,
+                &format!("[timed out after {timeout_secs}s; output above is partial]"),
+                &format!("[timed out after {timeout_secs}s; no output before the cut]"),
+            )),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn start_header(&self) -> String {
         let lines = self.code.lines().count();
         format!("{lines} lines")
     }
+}
+
+/// The partial output a cut-short run streamed, closed with a marker that
+/// tells the model the output is real but unfinished. Never claims output the
+/// model cannot see above the marker: it would go looking for it, or invent it.
+fn cut_reply(
+    partial: &str,
+    config: &AgentConfig,
+    some_output_marker: &str,
+    no_output_marker: &str,
+) -> String {
+    if partial.trim().is_empty() {
+        return no_output_marker.to_owned();
+    }
+    let out = truncate_output(
+        partial.to_owned(),
+        config.max_output_lines,
+        config.max_output_bytes,
+    );
+    format!("{out}\n{some_output_marker}")
 }
 
 super::impl_tool!(

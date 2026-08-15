@@ -1251,6 +1251,10 @@ fn tool_done_removes_live_buf_and_snapshots_dirty() {
     let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
     panel.register_live_buf("t1".into(), Arc::clone(&buf));
     panel.tool_start(start("t1", BASH_TOOL_NAME));
+    // The tool hands that same repaint to the host as its reply body, and the
+    // stale-run_id filter drops it. Taking a body must not cost the screen the
+    // last thing a cancelled tool painted.
+    let _dropped_reply = buf.take();
     panel.tool_done(ToolDoneEvent {
         id: "t1".into(),
         tool: BASH_TOOL_NAME.into(),

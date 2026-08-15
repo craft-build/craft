@@ -2,6 +2,7 @@ local truncate = require("craft.truncate")
 local extract_image_output = require("craft.image_uri")
 local ToolView = require("craft.tool_view")
 local output_limits = require("craft.output_limits")
+local partial = require("craft.partial")
 
 local RTK_REWRITE_TIMEOUT_MS = 2000
 local RTK_UNSUPPORTED_FLAGS = {
@@ -382,6 +383,7 @@ craft.api.register_tool({
     local command = input.command
     local buf, view = create_bash_view(command, ctx)
     local timeout_secs = output:match("^tool bash timed out after (%d+)s$")
+      or output:match("^%[timed out after (%d+)s;")
     if timeout_secs then
       view:append({ { "Timed out after " .. timeout_secs .. "s", "dim" } })
     elseif output:match("^Background task:") then
@@ -442,7 +444,13 @@ craft.api.register_tool({
       bg_next_id = bg_next_id + 1
     end
 
+    local finished = false
+
     local function finish(exit_code)
+      if finished then
+        return
+      end
+      finished = true
       local raw = table.concat(output_parts)
       local is_error = exit_code ~= 0
 
@@ -546,6 +554,17 @@ craft.api.register_tool({
 
       return { llm_output = llm_output, is_error = false, body = buf }
     end
+
+    -- Esc or deadline: hand back the lines streamed so far, so the model
+    -- keeps what the user just watched instead of a bare error.
+    craft.async.on_cancel(function(reason)
+      if finished then
+        return
+      end
+      finished = true
+      local out = truncate(table.concat(output_parts), max_lines, max_bytes)
+      ctx:finish(partial.cut(view, out, reason, timeout_secs))
+    end)
 
     view:append({ { "Waiting for output...", "dim" } })
     return nil

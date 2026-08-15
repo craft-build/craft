@@ -418,9 +418,17 @@ impl Task {
                 agent
             };
 
-            run_isolated(agent, input, worktree.as_ref())
-                .await
-                .map_err(|e| format!("sub-agent error: {e}"))?;
+            if let Err(e) = run_isolated(agent, input, worktree.as_ref()).await {
+                // A run cut short after streaming some text still has the
+                // transcript: half of it beats a bare error.
+                let partial = partial_text(&history.into_vec());
+                if partial.is_empty() {
+                    return Err(format!("sub-agent error: {e}"));
+                }
+                return Err(format!(
+                    "sub-agent interrupted ({e}). Partial output:\n{partial}"
+                ));
+            }
 
             conversation = history.into_vec();
             last_text = final_text(&conversation);
@@ -549,6 +557,24 @@ fn final_text(messages: &[craft_providers::Message]) -> String {
         })
         .unwrap_or_default()
         .to_string()
+}
+
+/// Every assistant text of the run, unlike [`final_text`]'s last one: a
+/// cut-short run's value is everything it managed to say. The empty-response
+/// retry's synthetic marker must not pass for a real response.
+fn partial_text(messages: &[craft_providers::Message]) -> String {
+    messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::Assistant))
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } if text != crate::EMPTY_RESPONSE_MARKER => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Run an isolated subagent inside a linked git worktree. Because the process
