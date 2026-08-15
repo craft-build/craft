@@ -83,6 +83,22 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             supports_vision: false,
         },
         ModelEntry {
+            prefixes: &["glm-5-2", "zai-glm-5-2"],
+            tier: ModelTier::Strong,
+            family: ModelFamily::Glm,
+            default: false,
+            pricing: ModelPricing {
+                input: 1.40,
+                output: 4.40,
+                cache_write: 0.00,
+                cache_read: 0.14,
+                fast: None,
+            },
+            max_output_tokens: None,
+            context_window: 1_000_000,
+            supports_vision: false,
+        },
+        ModelEntry {
             prefixes: &["mistral-small-latest", "mistral-small-2603"],
             tier: ModelTier::Medium,
             family: ModelFamily::Generic,
