@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -227,6 +228,15 @@ enum ServerMode {
 struct LlamaCppModelsResponse {
     #[serde(default)]
     data: Vec<LlamaCppModelData>,
+    #[serde(default)]
+    models: Vec<LlamaCppModelInfo>,
+}
+
+#[derive(Deserialize)]
+struct LlamaCppModelInfo {
+    name: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -299,6 +309,12 @@ impl LocalEndpoint {
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
 
+        let capabilities_map: HashMap<String, Vec<String>> = body
+            .models
+            .into_iter()
+            .map(|m| (m.name, m.capabilities))
+            .collect();
+
         let mut models: Vec<crate::model::ModelInfo> = body
             .data
             .into_iter()
@@ -314,8 +330,13 @@ impl LocalEndpoint {
                     return None;
                 }
                 let context_window = llamacpp_extract_ctx_from_model(&m, &mode, props_n_ctx);
-                let supports_vision =
-                    arch.map(|a| a.input_modalities.iter().any(|m| m.as_str() == "image"));
+                let supports_vision = arch
+                    .map(|a| a.input_modalities.iter().any(|m| m.as_str() == "image"))
+                    .or_else(|| {
+                        capabilities_map
+                            .get(&m.id)
+                            .map(|caps| caps.iter().any(|c| c == "multimodal"))
+                    });
                 let mut info = crate::model::ModelInfo::new(m.id);
                 info.context_window = Some(context_window);
                 info.supports_vision = supports_vision;
