@@ -10,6 +10,10 @@ const SEPARATOR: &str = "__";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Matches the `^[a-zA-Z0-9_-]{1,64}$` wire format the rest of the MCP stack
+/// validates against, so injected names stay compatible with it.
+const MAX_SERVER_NAME_LEN: usize = 64;
+
 pub fn convert_acp_servers(servers: &[McpServer]) -> Vec<ServerConfig> {
     let mut results = Vec::with_capacity(servers.len());
     let mut seen_names: HashMap<String, usize> = HashMap::new();
@@ -117,6 +121,7 @@ fn validate_url(name: &str, url: &str) -> Result<(), String> {
 
 fn sanitize_chars(name: &str) -> String {
     name.bytes()
+        .take(MAX_SERVER_NAME_LEN)
         .map(|b| {
             if b.is_ascii_alphanumeric() || b == b'-' {
                 b as char

@@ -353,6 +353,7 @@ fn shell_arg() -> &'static str {
 
 pub(crate) struct SessionState {
     pub(crate) handle: InteractiveHandle,
+    pub(crate) mcp: Option<craft_agent::McpHandle>,
     pub(crate) current_mode: AgentMode,
     pub(crate) current_model: String,
     pub(crate) pending_prompt: PendingPrompt,
@@ -564,7 +565,8 @@ async fn handle_request(
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
             let cwd = req.cwd.clone();
-            let handle = spawn_session(params, req.cwd, None, Vec::new(), &mcp_servers, fs).await;
+            let (handle, mcp) =
+                spawn_session(params, req.cwd, None, Vec::new(), &mcp_servers, fs).await;
             let spec = params.model.spec();
             let resp = {
                 let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
@@ -575,7 +577,7 @@ async fn handle_request(
                     methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
-            install_session(srv, handle, spec, cwd);
+            install_session(srv, handle, mcp, spec, cwd).await;
             Ok(AgentResponse::NewSessionResponse(resp))
         }
         "session/load" => {
@@ -612,7 +614,7 @@ async fn handle_request(
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
             let cwd = req.cwd.clone();
-            let handle = spawn_session(
+            let (handle, mcp) = spawn_session(
                 params,
                 req.cwd,
                 Some(session_ref),
@@ -630,7 +632,7 @@ async fn handle_request(
                     methods::yolo_config_option(params.yolo),
                 ])
             };
-            install_session(srv, handle, spec, cwd);
+            install_session(srv, handle, mcp, spec, cwd).await;
             Ok(AgentResponse::LoadSessionResponse(resp))
         }
         "session/resume" => {
@@ -663,7 +665,7 @@ async fn handle_request(
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
             let cwd = req.cwd.clone();
-            let handle = spawn_session(
+            let (handle, mcp) = spawn_session(
                 params,
                 req.cwd,
                 Some(session_ref),
@@ -681,11 +683,11 @@ async fn handle_request(
                     methods::yolo_config_option(params.yolo),
                 ])
             };
-            install_session(srv, handle, spec, cwd);
+            install_session(srv, handle, mcp, spec, cwd).await;
             Ok(AgentResponse::ResumeSessionResponse(resp))
         }
         "session/list" => handle_list_sessions(raw),
-        "session/close" => handle_close_session(srv, raw),
+        "session/close" => handle_close_session(srv, raw).await,
         "session/prompt" => match handle_prompt(srv, raw, &id, params) {
             Ok(()) => return,
             Err(e) => Err(e),
@@ -713,9 +715,9 @@ async fn spawn_session(
     history: Vec<Message>,
     client_mcp_servers: &[McpServer],
     fs: Arc<dyn FsBackend>,
-) -> InteractiveHandle {
+) -> (InteractiveHandle, Option<craft_agent::McpHandle>) {
     let mcp_handle = build_mcp_handle(&params.mcp_config, client_mcp_servers).await;
-    headless::spawn_interactive(InteractiveParams {
+    let handle = headless::spawn_interactive(InteractiveParams {
         model: params.model.clone(),
         config: params.config.clone(),
         compression: craft_config::CompressionConfig::default(),
@@ -724,7 +726,7 @@ async fn spawn_session(
         timeouts: params.timeouts,
         prompt_slots: Arc::clone(&params.prompt_slots),
         excluded_tools: Vec::new(),
-        mcp_handle,
+        mcp_handle: mcp_handle.clone(),
         initial_wd: cwd,
         session_id,
         initial_history: history,
@@ -733,7 +735,9 @@ async fn spawn_session(
         system_prompt_override: None,
         append_system_prompt: None,
         fs,
-    })
+    });
+    let mcp = mcp_handle.clone();
+    (handle, mcp)
 }
 
 fn build_delegated_fs(srv: &Server) -> Arc<dyn FsBackend> {
@@ -765,6 +769,12 @@ async fn build_mcp_handle(
 fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {
     let mut merged = local.clone();
     for cfg in client {
+        // `mcp.toml` wins on name, so a client-injected server can never swap
+        // out the credentials the user configured or revive one they disabled.
+        if merged.mcp.contains_key(&cfg.name) {
+            warn!(server = %cfg.name, "client MCP server already configured locally");
+            continue;
+        }
         let raw = craft_agent::mcp::config::RawServerConfig {
             enabled: true,
             timeout: cfg.timeout.as_millis() as u64,
@@ -802,14 +812,15 @@ fn merge_configs(local: &McpConfig, client: &[ServerConfig]) -> McpConfig {
     merged
 }
 
-fn install_session(
+async fn install_session(
     srv: &mut Server,
     handle: InteractiveHandle,
+    mcp: Option<craft_agent::McpHandle>,
     current_model: String,
     cwd: PathBuf,
 ) {
     if let Some(prev) = srv.session.take() {
-        teardown_session(&srv.out_tx, prev);
+        teardown_session(&srv.out_tx, prev).await;
     }
     let session_id = handle.session_id.to_string();
     let pending = PendingPrompt::default();
@@ -829,6 +840,7 @@ fn install_session(
     });
     srv.session = Some(SessionState {
         handle,
+        mcp,
         current_mode: AgentMode::Build,
         current_model,
         pending_prompt: pending,
@@ -847,10 +859,13 @@ fn resolve_pending_cancelled(out_tx: &Sender<Value>, pending: PendingPrompt) {
     }
 }
 
-fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
+async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
     resolve_pending_cancelled(out_tx, Arc::clone(&session.pending_prompt));
     let _ = session.handle.cancel_tx.try_send(());
     session.handle.task.abort();
+    if let Some(mcp) = session.mcp {
+        mcp.shutdown().await;
+    }
 }
 
 fn load_history(session_id: CraftId) -> Result<Vec<Message>, AcpError> {
@@ -1108,7 +1123,7 @@ fn handle_list_sessions(raw: &Value) -> Result<AgentResponse, AcpError> {
     ))
 }
 
-fn handle_close_session(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpError> {
+async fn handle_close_session(srv: &mut Server, raw: &Value) -> Result<AgentResponse, AcpError> {
     let req: CloseSessionRequest = parse_params(raw)?;
     if srv
         .session
@@ -1116,7 +1131,7 @@ fn handle_close_session(srv: &mut Server, raw: &Value) -> Result<AgentResponse, 
         .is_some_and(|s| s.handle.session_id.as_str() == req.session_id.0.as_ref())
     {
         if let Some(session) = srv.session.take() {
-            teardown_session(&srv.out_tx, session);
+            teardown_session(&srv.out_tx, session).await;
         }
         *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -1524,6 +1539,62 @@ mod tests {
         let dir = StateDir::from_path(tmp.path().to_path_buf());
         let err = load_history_from(&dir, CraftId::generate()).unwrap_err();
         assert_eq!(err.code, AcpError::resource_not_found(None).code);
+    }
+
+    #[test]
+    fn merge_configs_keeps_local_server_on_name_conflict() {
+        let local_raw = craft_agent::mcp::config::RawServerConfig {
+            enabled: false,
+            timeout: 1234,
+            transport: craft_agent::mcp::config::RawTransport::Stdio(
+                craft_agent::mcp::config::RawStdioFields {
+                    command: vec!["/local/mcp".into()],
+                    environment: HashMap::new(),
+                },
+            ),
+        };
+        let local = McpConfig {
+            mcp: HashMap::from([("shared".into(), local_raw)]),
+            origins: HashMap::new(),
+        };
+        let client = ServerConfig {
+            name: "shared".into(),
+            timeout: Duration::from_secs(30),
+            transport: Transport::Stdio {
+                program: "/client/mcp".into(),
+                args: vec![],
+                environment: HashMap::new(),
+            },
+        };
+
+        let merged = merge_configs(&local, &[client]);
+        let raw = merged.mcp.get("shared").unwrap();
+        assert!(
+            !raw.enabled,
+            "a client-injected server must not revive a disabled local one"
+        );
+        assert_eq!(raw.timeout, 1234);
+
+        let fresh = merge_configs(
+            &McpConfig {
+                mcp: HashMap::new(),
+                origins: HashMap::new(),
+            },
+            &[ServerConfig {
+                name: "shared".into(),
+                timeout: Duration::from_secs(30),
+                transport: Transport::Stdio {
+                    program: "/client/mcp".into(),
+                    args: vec![],
+                    environment: HashMap::new(),
+                },
+            }],
+        );
+        assert!(fresh.mcp.get("shared").unwrap().enabled);
+        assert_eq!(
+            fresh.origins.get("shared"),
+            Some(&PathBuf::from("acp-client"))
+        );
     }
 
     fn tool_start(name: &str, raw_input: serde_json::Value) -> AgentEvent {
