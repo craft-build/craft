@@ -13,8 +13,8 @@ use tracing::{debug, error, info, warn};
 use crate::mcp::{McpHandle, UNKNOWN_MCP};
 use crate::permissions::DEFAULT_DENY_GUIDANCE;
 use crate::task_set::TaskSet;
-use crate::tools::ToolContext;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
+use crate::tools::{ToolContext, truncate_bytes};
 use crate::{
     AgentError, AgentEvent, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent,
 };
@@ -629,16 +629,7 @@ async fn execute_mcp_tool(
             return done(format!("invalid MCP tool key '{tool_name}': {e}"), true);
         }
     };
-    let perm_scope = {
-        let json = input.to_string();
-        let end = json.len().min(MCP_SCOPE_PREVIEW_BYTES);
-        let end = json.floor_char_boundary(end);
-        if end < json.len() {
-            format!("{}…", &json[..end])
-        } else {
-            json
-        }
-    };
+    let perm_scope = truncate_bytes(&input.to_string(), MCP_SCOPE_PREVIEW_BYTES);
     let perm_scopes = crate::tools::PermissionScopes::single(perm_scope);
 
     if let Err(e) = ctx
