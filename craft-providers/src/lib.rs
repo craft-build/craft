@@ -18,7 +18,7 @@ pub use providers::copilot::auth as copilot_auth;
 pub use providers::dynamic;
 pub use providers::openai::auth as openai_auth;
 pub use providers::opencode::{
-    ProviderData, catalog_provider, catalog_providers, catalog_providers_if_available,
+    ProviderData, catalog_provider, catalog_providers, catalog_providers_if_available, warm_catalog,
 };
 pub use providers::xai::auth as xai_auth;
 pub use types::{

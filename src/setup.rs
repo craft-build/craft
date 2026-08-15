@@ -4,7 +4,7 @@ use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 
 use craft_providers::manifest::ManifestRegistry;
-use craft_providers::model::{Model, ModelTier};
+use craft_providers::model::{Model, ModelError, ModelTier};
 use craft_providers::provider::provider_available;
 use craft_storage::StateDir;
 use craft_storage::log::RotatingFileWriter;
@@ -32,11 +32,11 @@ pub async fn resolve_model(
                 "model {spec:?} is not allowed by provider model policy"
             ));
         }
-        return Model::from_spec(spec).context("invalid --model spec");
+        return from_spec_or_warm_catalog(spec).context("invalid --model spec");
     }
     if let Some(spec) = read_model(storage) {
         if policy.allows(&spec)
-            && let Ok(m) = Model::from_spec(&spec)
+            && let Ok(m) = from_spec_or_warm_catalog(&spec)
         {
             return Ok(m);
         }
@@ -51,7 +51,7 @@ pub async fn resolve_model(
                 "default model {spec:?} is not allowed by provider model policy"
             ));
         }
-        return Model::from_spec(spec).context("invalid default_model in config");
+        return from_spec_or_warm_catalog(spec).context("invalid default_model in config");
     }
     auto_detect_model(policy).await.ok_or_else(|| {
         let policy_note = if policy.is_restrictive() {
@@ -63,6 +63,19 @@ pub async fn resolve_model(
             "no provider available - set an API key (e.g. ANTHROPIC_API_KEY), run `craft auth login`, or use -m to specify a model{policy_note}"
         )
     })
+}
+
+/// An unknown slug may just mean the models.dev catalog has not been loaded
+/// yet, so retry once with a warm catalog. `Model::from_spec` itself must stay
+/// non-blocking: the UI draws with it.
+fn from_spec_or_warm_catalog(spec: &str) -> Result<Model, ModelError> {
+    match Model::from_spec(spec) {
+        Err(ModelError::UnsupportedProvider(_)) => {
+            craft_providers::warm_catalog();
+            Model::from_spec(spec)
+        }
+        result => result,
+    }
 }
 
 async fn auto_detect_model(policy: &craft_config::ModelPolicy) -> Option<Model> {

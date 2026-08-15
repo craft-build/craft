@@ -465,6 +465,13 @@ fn init_catalog_if_needed() -> &'static Mutex<CatalogData> {
     CATALOG.get_or_init(|| Mutex::new(init_catalog_from_cache()))
 }
 
+/// Loads the models.dev catalog from the on-disk cache, fetching once if the
+/// cache is cold or stale. Blocks, so only call it from startup paths; every
+/// other lookup must stay on the `*_if_available` variants.
+pub fn warm_catalog() {
+    init_catalog_if_needed();
+}
+
 impl Opencode {
     fn new_impl(
         slug: &'static str,
