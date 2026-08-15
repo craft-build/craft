@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -228,15 +227,6 @@ enum ServerMode {
 struct LlamaCppModelsResponse {
     #[serde(default)]
     data: Vec<LlamaCppModelData>,
-    #[serde(default)]
-    models: Vec<LlamaCppModelInfo>,
-}
-
-#[derive(Deserialize)]
-struct LlamaCppModelInfo {
-    name: String,
-    #[serde(default)]
-    capabilities: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -309,11 +299,7 @@ impl LocalEndpoint {
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
 
-        let capabilities_map: HashMap<String, Vec<String>> = body
-            .models
-            .into_iter()
-            .map(|m| (m.name, m.capabilities))
-            .collect();
+        let props_vision = llamacpp_props_vision(&props, &mode);
 
         let mut models: Vec<crate::model::ModelInfo> = body
             .data
@@ -332,11 +318,7 @@ impl LocalEndpoint {
                 let context_window = llamacpp_extract_ctx_from_model(&m, &mode, props_n_ctx);
                 let supports_vision = arch
                     .map(|a| a.input_modalities.iter().any(|m| m.as_str() == "image"))
-                    .or_else(|| {
-                        capabilities_map
-                            .get(&m.id)
-                            .map(|caps| caps.iter().any(|c| c == "multimodal"))
-                    });
+                    .or(props_vision);
                 let mut info = crate::model::ModelInfo::new(m.id);
                 info.context_window = Some(context_window);
                 info.supports_vision = supports_vision;
@@ -382,6 +364,16 @@ fn llamacpp_extract_ctx_from_model(
             .filter(|&v| v > 0)
             .or_else(|| (props_n_ctx > 0).then_some(props_n_ctx))
             .unwrap_or(LLAMACPP_DEFAULT_CTX),
+    }
+}
+
+fn llamacpp_props_vision(props: &Value, mode: &ServerMode) -> Option<bool> {
+    match mode {
+        // router props describe the router, not the individual models it serves
+        ServerMode::Router => None,
+        ServerMode::Single | ServerMode::Legacy => {
+            props.pointer("/modalities/vision").and_then(Value::as_bool)
+        }
     }
 }
 
@@ -867,6 +859,40 @@ mod tests {
                 llamacpp_extract_ctx_from_model(&model, &ServerMode::Single, 0),
                 LLAMACPP_DEFAULT_CTX
             );
+        }
+    }
+
+    mod llamacpp_props_vision {
+        use super::super::*;
+
+        #[test]
+        fn reads_vision_from_modalities() {
+            let props = json!({"modalities": {"vision": true, "audio": false}});
+            assert_eq!(
+                llamacpp_props_vision(&props, &ServerMode::Single),
+                Some(true)
+            );
+        }
+
+        #[test]
+        fn returns_false_when_vision_disabled() {
+            let props = json!({"modalities": {"vision": false, "audio": false}});
+            assert_eq!(
+                llamacpp_props_vision(&props, &ServerMode::Single),
+                Some(false)
+            );
+        }
+
+        #[test]
+        fn returns_none_without_modalities() {
+            let props = json!({"total_slots": 4});
+            assert_eq!(llamacpp_props_vision(&props, &ServerMode::Single), None);
+        }
+
+        #[test]
+        fn ignores_props_in_router_mode() {
+            let props = json!({"role": "router", "modalities": {"vision": true}});
+            assert_eq!(llamacpp_props_vision(&props, &ServerMode::Router), None);
         }
     }
 
