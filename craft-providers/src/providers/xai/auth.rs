@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, warn};
 
 use crate::AgentError;
-use crate::providers::{MIME_FORM, ResolvedAuth, urlenc};
+use crate::providers::{KeyPool, MIME_FORM, ResolvedAuth, urlenc};
 
 use super::catalog;
 
@@ -29,6 +29,7 @@ const GROK_CLI_DEFAULT_TTL_MS: u64 = 6 * 60 * 60 * 1000;
 const MS_THRESHOLD: f64 = 10_000_000_000.0;
 
 pub(crate) const PROVIDER: &str = "xai";
+pub(crate) const API_KEY_ENV: &str = "XAI_API_KEY";
 pub(crate) const TOKEN_AUTH: &str = "xai-grok-cli";
 pub(crate) const AUTHENTICATE_RESPONSE: &str = "authenticate-response";
 pub(crate) const CLIENT_IDENTIFIER: &str = "craft";
@@ -258,16 +259,9 @@ pub async fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
         }
     }
 
-    if let Ok(key) = env::var("XAI_API_KEY")
-        && !key.trim().is_empty()
-    {
+    if let Ok(pool) = KeyPool::resolve(PROVIDER, API_KEY_ENV) {
         debug!("using xAI API key authentication");
-        return Ok(ResolvedAuth::bearer(&key));
-    }
-
-    if let Some(creds) = craft_storage::auth::load_provider_credentials(dir, PROVIDER) {
-        debug!("using xAI saved API key");
-        return Ok(ResolvedAuth::bearer(&creds.api_key));
+        return Ok(ResolvedAuth::bearer(pool.current()));
     }
 
     Err(AgentError::Config {
