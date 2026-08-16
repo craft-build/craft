@@ -856,6 +856,11 @@ pub fn is_builtin_tool(name: &str) -> bool {
 use craft_providers::{Message, ProviderEvent, StreamResponse};
 use craft_storage::id::SessionRef;
 
+/// Error returned when a provider-backed path is reached from a context that
+/// has no LLM behind it (CLI one-shots, test stubs). Errors instead of
+/// panicking so a mis-wired context surfaces a clean failure, not a crash.
+const NO_PROVIDER_ERR: &str = "no provider available in this context";
+
 struct NullProvider;
 
 #[async_trait]
@@ -870,15 +875,26 @@ impl Provider for NullProvider {
         _: RequestOptions,
         _: Option<&SessionRef>,
     ) -> Result<StreamResponse, crate::AgentError> {
-        unimplemented!()
+        Err(crate::AgentError::Config {
+            message: NO_PROVIDER_ERR.to_string(),
+        })
     }
 
     async fn list_models(&self) -> Result<Vec<String>, crate::AgentError> {
-        unimplemented!()
+        Err(crate::AgentError::Config {
+            message: NO_PROVIDER_ERR.to_string(),
+        })
     }
 }
 
-pub(crate) fn interpreter_ctx(
+/// ToolContext scaffold for contexts with no LLM behind them: CLI one-shots
+/// (`craft outline`) and test stubs. Mirrors maki's `cli_tool_ctx` + test
+/// support. Any provider-backed call through one of these returns
+/// [`NO_PROVIDER_ERR`] instead of panicking. Contexts inside a live agent run
+/// must never be built from this: the code_execution bridge derives its
+/// nested contexts from the live parent ToolContext so nested tools dispatch
+/// with the real provider (maki's `maki.agent.call_tool(ctx, ...)` shape).
+pub(crate) fn providerless_ctx(
     mode: &AgentMode,
     event_tx: &EventSender,
     cancel: CancelToken,
@@ -1003,7 +1019,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
 pub fn cli_tool_ctx() -> ToolContext {
     let (tx, _rx) = flume::unbounded::<crate::Envelope>();
     let event_tx = crate::EventSender::new(tx, 0);
-    interpreter_ctx(
+    providerless_ctx(
         &AgentMode::Build,
         &event_tx,
         CancelToken::none(),
@@ -1050,7 +1066,7 @@ pub mod test_support {
                 &fallback_tx
             }
         };
-        let mut ctx = interpreter_ctx(
+        let mut ctx = providerless_ctx(
             mode,
             event_tx,
             CancelToken::none(),
@@ -1074,7 +1090,7 @@ pub mod test_support {
     ) -> ToolContext {
         let (tx, _rx) = flume::unbounded::<crate::Envelope>();
         let event_tx = EventSender::new(tx, 0);
-        let mut ctx = interpreter_ctx(
+        let mut ctx = providerless_ctx(
             mode,
             &event_tx,
             CancelToken::none(),

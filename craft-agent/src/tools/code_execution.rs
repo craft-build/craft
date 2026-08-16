@@ -17,15 +17,13 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::tool_dispatch::Emit;
-use crate::cancel::CancelToken;
-use crate::permissions::PermissionManager;
 use crate::task_set::TaskSet;
-use crate::{AgentConfig, AgentEvent, AgentMode, EventSender, ToolInput, ToolOutput};
-use tokio::sync::Mutex;
+use crate::{AgentConfig, AgentEvent, ToolInput, ToolOutput};
+
+use super::Deadline;
+use crate::tools::ToolAudience;
 
 use super::truncate_output;
-use super::{Deadline, FileReadTracker};
-use crate::tools::{ToolAudience, ToolRegistry};
 
 const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const PREAMBLE: &str = "import re\nimport asyncio\nimport sys\nimport os\nimport json\n";
@@ -37,16 +35,13 @@ const CUT_NO_OUTPUT_CANCELLED: &str = "[cancelled by user; no output before the 
 pub const IMAGE_NOT_VISIBLE_NOTE: &str =
     "image pixels are not visible from here; call the view_image tool directly";
 
+// The parent ToolContext with `deadline` capped to the script timeout. Nested
+// tool calls dispatch against clones of it, so the live provider, model
+// policy, permissions, and shared stores (snapshots, pending edits) flow
+// through. A provider-less stub here panics any provider-backed nested path,
+// e.g. auto-review permission checks.
 struct InterpreterEnv {
-    event_tx: EventSender,
-    mode: AgentMode,
-    cancel: CancelToken,
-    deadline: Deadline,
-    config: AgentConfig,
-    permissions: Arc<PermissionManager>,
-    file_tracker: Arc<FileReadTracker>,
-    user_response_rx: Option<Arc<Mutex<flume::Receiver<String>>>>,
-    registry: Arc<ToolRegistry>,
+    ctx: super::ToolContext,
 }
 
 #[derive(Tool, Debug, Clone, Deserialize)]
@@ -80,18 +75,9 @@ impl CodeExecution {
         let config = ctx.config.clone();
         let deadline = Deadline::after(timeout);
         let limits = runner::limits(timeout, config.interpreter_max_memory_mb * 1024 * 1024);
-        let env_config = config.clone();
-        let env = InterpreterEnv {
-            event_tx: ctx.event_tx.clone(),
-            mode: ctx.mode.clone(),
-            cancel: ctx.cancel.clone(),
-            deadline,
-            config: env_config,
-            permissions: ctx.permissions.clone(),
-            file_tracker: ctx.file_tracker.clone(),
-            user_response_rx: ctx.user_response_rx.clone(),
-            registry: Arc::clone(&ctx.registry),
-        };
+        let mut script_ctx = ctx.clone();
+        script_ctx.deadline = deadline;
+        let env = InterpreterEnv { ctx: script_ctx };
 
         // We race cancel against the blocking thread. If cancel wins, the Python thread
         // keeps running till it finishes. Threads can not be killed safely.
@@ -114,7 +100,7 @@ impl CodeExecution {
                             let mut acc = accumulated.lock().unwrap_or_else(|e| e.into_inner());
                             acc.push_str(line);
                             if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL {
-                                env.event_tx.try_send(AgentEvent::ToolOutput {
+                                env.ctx.event_tx.try_send(AgentEvent::ToolOutput {
                                     id: id.to_string(),
                                     content: acc.clone(),
                                 });
@@ -143,8 +129,8 @@ impl CodeExecution {
 
                     Ok(ToolOutput::Plain(truncate_output(
                         output,
-                        env.config.max_output_lines,
-                        env.config.max_output_bytes,
+                        env.ctx.config.max_output_lines,
+                        env.ctx.config.max_output_bytes,
                     )))
                 })
                 .await
@@ -233,52 +219,33 @@ impl super::ToolInvocation for CodeExecution {
 fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
     let mut tools: HashMap<String, ToolFn> = HashMap::new();
 
-    for entry in env.registry.iter().iter() {
+    for entry in env.ctx.registry.iter().iter() {
         let tool_name = entry.name();
         if !entry.tool.audience().contains(ToolAudience::INTERPRETER) {
             continue;
         }
-        if !super::is_tool_enabled(&env.config, tool_name) {
+        if !super::is_tool_enabled(&env.ctx.config, tool_name) {
             continue;
         }
         let name = tool_name.to_string();
-        let tx = env.event_tx.clone();
-        let mode = env.mode.clone();
-        let cancel = env.cancel.clone();
-        let deadline = env.deadline;
-        let permissions = Arc::clone(&env.permissions);
-        let config = env.config.clone();
-        let file_tracker = Arc::clone(&env.file_tracker);
-        let user_response_rx = env.user_response_rx.clone();
-        let registry = Arc::clone(&env.registry);
+        let ctx = env.ctx.clone();
 
         tools.insert(
             name.clone(),
             Box::new(
                 move |fn_name: &str, args: Vec<Value>, kwargs: Vec<(String, Value)>| {
-                    deadline.check()?;
+                    ctx.deadline.check()?;
 
                     let input = build_tool_input(&args, &kwargs)?;
 
-                    let mut inner_ctx = super::interpreter_ctx(
-                        &mode,
-                        &tx,
-                        cancel.clone(),
-                        Arc::clone(&permissions),
-                        Arc::clone(&file_tracker),
-                        user_response_rx.clone(),
-                        Arc::clone(&registry),
-                    );
-                    inner_ctx.deadline = deadline;
-                    inner_ctx.config = config.clone();
                     let done = tokio::runtime::Handle::current().block_on(
                         crate::agent::tool_dispatch::run(
-                            &registry,
-                            inner_ctx.mcp.as_ref(),
+                            &ctx.registry,
+                            ctx.mcp.as_ref(),
                             String::new(),
                             fn_name,
                             &input,
-                            &inner_ctx,
+                            &ctx,
                             Emit::Silent,
                         ),
                     );
@@ -292,35 +259,17 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
 }
 
 fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
-    let tx = env.event_tx.clone();
-    let mode = env.mode.clone();
-    let cancel = env.cancel.clone();
-    let deadline = env.deadline;
-    let config = env.config.clone();
-    let permissions = Arc::clone(&env.permissions);
-    let file_tracker = Arc::clone(&env.file_tracker);
-    let user_response_rx = env.user_response_rx.clone();
-    let registry = Arc::clone(&env.registry);
+    let parent = env.ctx.clone();
 
     Box::new(move |pending_calls: Vec<PendingCall>| {
-        let config = config.clone();
-        let file_tracker = Arc::clone(&file_tracker);
-        let user_response_rx = user_response_rx.clone();
         tokio::runtime::Handle::current().block_on(async {
             let call_ids: Vec<u32> = pending_calls.iter().map(|pc| pc.call_id).collect();
             let mut set = TaskSet::new();
             for pc in pending_calls {
-                let tx = tx.clone();
-                let mode = mode.clone();
-                let cancel = cancel.clone();
-                let permissions = Arc::clone(&permissions);
-                let config = config.clone();
-                let file_tracker = Arc::clone(&file_tracker);
-                let user_response_rx = user_response_rx.clone();
-                let registry = Arc::clone(&registry);
+                let ctx = parent.clone();
 
                 set.spawn(async move {
-                    if let Err(e) = deadline.check() {
+                    if let Err(e) = ctx.deadline.check() {
                         return (pc.call_id, Err(e));
                     }
 
@@ -329,24 +278,13 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
                         Err(e) => return (pc.call_id, Err(e)),
                     };
 
-                    let mut inner_ctx = super::interpreter_ctx(
-                        &mode,
-                        &tx,
-                        cancel,
-                        Arc::clone(&permissions),
-                        file_tracker,
-                        user_response_rx,
-                        Arc::clone(&registry),
-                    );
-                    inner_ctx.deadline = deadline;
-                    inner_ctx.config = config;
                     let done = crate::agent::tool_dispatch::run(
-                        &inner_ctx.registry,
-                        inner_ctx.mcp.as_ref(),
+                        &ctx.registry,
+                        ctx.mcp.as_ref(),
                         String::new(),
                         &pc.name,
                         &input,
-                        &inner_ctx,
+                        &ctx,
                         Emit::Silent,
                     )
                     .await;
@@ -400,6 +338,12 @@ fn build_tool_input(args: &[Value], kwargs: &[(String, Value)]) -> Result<Value,
 mod tests {
     use std::fs;
 
+    use async_trait::async_trait;
+    use craft_providers::provider::Provider;
+    use craft_providers::{
+        ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason,
+        StreamResponse, TokenUsage,
+    };
     use serde_json::json;
     use test_case::test_case;
 
@@ -407,6 +351,74 @@ mod tests {
     use crate::tools::test_support::stub_ctx;
 
     use super::*;
+
+    const ALLOW_DECISION: &str = r#"{"verdict":"allow","risk":"low","rationale":"trusted"}"#;
+
+    struct AllowReviewer;
+
+    #[async_trait]
+    impl Provider for AllowReviewer {
+        async fn stream_message(
+            &self,
+            _: &Model,
+            _: &[Message],
+            _: &str,
+            _: &Value,
+            _: &flume::Sender<ProviderEvent>,
+            _: RequestOptions,
+            _: Option<&craft_storage::id::SessionRef>,
+        ) -> Result<StreamResponse, crate::AgentError> {
+            Ok(StreamResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: ALLOW_DECISION.into(),
+                    }],
+                    ..Default::default()
+                },
+                usage: TokenUsage::default(),
+                stop_reason: Some(StopReason::EndTurn),
+            })
+        }
+
+        async fn list_models(&self) -> Result<Vec<String>, crate::AgentError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Nested tool calls must dispatch with the live parent provider. The
+    /// auto-review permission check is provider-backed, so a provider-less
+    /// nested context used to panic (`unimplemented!` in NullProvider) and
+    /// now fails closed. With the live provider the reviewer allows the
+    /// write and the file lands.
+    #[tokio::test]
+    async fn nested_tool_dispatches_with_live_provider() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("nested.txt");
+        let path_str = path.to_string_lossy();
+
+        let permissions = Arc::new(crate::permissions::PermissionManager::new(
+            craft_config::PermissionsConfig {
+                default: craft_config::DefaultEffect::Prompt,
+                rules: vec![],
+                ..Default::default()
+            },
+            dir.path().to_path_buf(),
+        ));
+        permissions.toggle_auto_review();
+
+        let mut ctx =
+            crate::tools::test_support::stub_ctx_with_permissions(&AgentMode::Build, permissions);
+        ctx.provider = Arc::new(AllowReviewer);
+
+        let ci = CodeExecution {
+            code: format!("await write(path='{path_str}', content='nested-write-ok')"),
+            timeout: None,
+        };
+        ci.execute(&ctx).await.unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "nested-write-ok");
+    }
 
     #[tokio::test]
     async fn read_tool_via_interpreter() {
