@@ -1,6 +1,7 @@
 use shell_words::split;
 use std::io::{Write, stdout};
 use std::path::Path;
+use std::thread::ThreadId;
 use std::time::Instant;
 
 use color_eyre::Result;
@@ -98,12 +99,39 @@ impl TerminalMux {
 
 impl TerminalGuard {
     pub(crate) fn init() -> Result<(Self, ratatui::DefaultTerminal)> {
+        // Capture BEFORE `ratatui::init`: that installs its own hook chained
+        // onto the current one, and we need to hold the app's reporting hook
+        // (panic log + color_eyre), not ratatui's restore chain.
+        let prev = std::panic::take_hook();
         let terminal = ratatui::init();
+        // Replace ratatui's hook, which restores the terminal on a panic in
+        // ANY thread. Background panics are usually caught (tokio JoinError,
+        // craft-lua catch_unwind) and the TUI keeps running, so a restore
+        // there leaves the tty in cooked mode with echo while our mouse
+        // tracking (?1000/?1002/?1006) stays enabled: the driver then echoes
+        // every wheel event as literal `^[[<65;39;240M` over the UI. Only
+        // the thread that owns the terminal may restore it.
+        let ui_thread = std::thread::current().id();
+        std::panic::set_hook(Box::new(move |info| {
+            route_panic(ui_thread, &panic_restore, &|| prev(info));
+        }));
         stdout().execute(EnableBracketedPaste)?;
         write_and_flush(MOUSE_ENABLE)?;
         push_keyboard_enhancement();
         Ok((Self, terminal))
     }
+}
+
+fn panic_restore() {
+    pop_terminal_modes();
+    ratatui::restore();
+}
+
+fn route_panic(ui_thread: ThreadId, restore: &dyn Fn(), report: &dyn Fn()) {
+    if std::thread::current().id() == ui_thread {
+        restore();
+    }
+    report();
 }
 
 impl Drop for TerminalGuard {
@@ -236,6 +264,48 @@ pub(crate) fn is_muxed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn counting_hook() -> (Arc<AtomicUsize>, Arc<AtomicUsize>, impl Fn(), impl Fn()) {
+        let restore = Arc::new(AtomicUsize::new(0));
+        let report = Arc::new(AtomicUsize::new(0));
+        let r = Arc::clone(&restore);
+        let p = Arc::clone(&report);
+        (
+            restore,
+            report,
+            move || {
+                r.fetch_add(1, Ordering::Relaxed);
+            },
+            move || {
+                p.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+    }
+
+    // A panic on any thread other than the UI one must not touch the
+    // terminal, only report: the TUI keeps running after caught panics.
+    #[test]
+    fn background_thread_panic_reports_without_restoring() {
+        let ui_thread = std::thread::current().id();
+        let (restore, report, on_restore, on_report) = counting_hook();
+        std::thread::spawn(move || route_panic(ui_thread, &on_restore, &on_report))
+            .join()
+            .expect("route_panic thread");
+        assert_eq!(restore.load(Ordering::Relaxed), 0);
+        assert_eq!(report.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn ui_thread_panic_restores_and_reports() {
+        let ui_thread = std::thread::current().id();
+        let (restore, report, on_restore, on_report) = counting_hook();
+        route_panic(ui_thread, &on_restore, &on_report);
+        assert_eq!(restore.load(Ordering::Relaxed), 1);
+        assert_eq!(report.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn sync_sequences_match_spec() {
