@@ -105,6 +105,10 @@ fn run_inner(
     limits: ResourceLimits,
     print_writer: &mut PrintWriter<'_>,
 ) -> Result<Option<Value>, InterpreterError> {
+    let _sandbox = limits
+        .max_memory
+        .is_some()
+        .then(crate::alloc::SandboxScope::enter);
     let runner = MontyRun::new(
         code.to_owned(),
         SCRIPT_NAME,
@@ -297,6 +301,61 @@ mod tests {
         let result = run("2 + 3", &empty_tools(), None, default_limits()).unwrap();
         assert_eq!(result.output, Some(json!(5)));
         assert!(result.stdout.is_empty());
+    }
+
+    const NESTED_TIMEOUT: Duration = Duration::from_secs(5);
+    const NESTED_DEADLOCK: &str = "nested run deadlocked";
+    const SMALL_MAX_MEMORY: usize = 2 * 1024 * 1024;
+    const OVER_LIMIT_ALLOC: &str = "x = [0] * 10_000_000";
+    const MEMORY_ERR_FRAGMENT: &str = "memory";
+
+    fn small_memory_limits() -> ResourceLimits {
+        limits(Duration::from_secs(30), SMALL_MAX_MEMORY)
+    }
+
+    fn assert_memory_error(err: InterpreterError) {
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains(MEMORY_ERR_FRAGMENT), "got: {msg}");
+    }
+
+    /// A run that rebased the shared baseline on entry would forgive an
+    /// already running one its whole usage.
+    #[test]
+    fn concurrent_memory_limited_runs_both_enforce() {
+        let spawn = || {
+            std::thread::spawn(|| {
+                run(
+                    OVER_LIMIT_ALLOC,
+                    &empty_tools(),
+                    None,
+                    small_memory_limits(),
+                )
+                .unwrap_err()
+            })
+        };
+        for handle in [spawn(), spawn()] {
+            assert_memory_error(handle.join().unwrap());
+        }
+    }
+
+    /// Shape of workflow mode: a script awaits `task`, and the subagent it
+    /// waits on runs a script of its own. Scopes that serialized would sit
+    /// on each other forever.
+    #[test]
+    fn nested_run_from_a_tool_does_not_deadlock() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let subagent: ToolFn = Box::new(|_, _, _| {
+                let inner = std::thread::spawn(|| {
+                    run("2 + 3", &empty_tools(), None, default_limits()).unwrap()
+                });
+                Ok(inner.join().unwrap().output.unwrap())
+            });
+            let tools = HashMap::from([("task".to_owned(), subagent)]);
+            let _ = tx.send(run("task()", &tools, None, default_limits()));
+        });
+        let result = rx.recv_timeout(NESTED_TIMEOUT).expect(NESTED_DEADLOCK);
+        assert_eq!(result.unwrap().output, Some(json!(5)));
     }
 
     #[test]
