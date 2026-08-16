@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-08-16
+
+### Added
+
+- **providers**: xAI provider with OAuth login (`7822265f`)
+- **providers**: `mistral-medium-3-5` alias for the Medium 3.5 model (`63709c2a`), and pricing for GLM-5.2 hosted by Mistral (`925e5a9f`)
+- **lua**: `craft.api.run_command` to run slash commands by name (`b55d9ab9`)
+- **agent**: a real reason on `AgentEvent::Done` (`DoneReason`), so cancel is a normal end of run instead of an error, and cancelled prompts return `cancelled` instead of `internal_error` over ACP (`a33688e5`)
+- **agent**: keep partial output when tools are cancelled or time out, so the model sees what the user watched stream by (`e6732a94`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`error-code` 3.4.0, `find-msvc-tools` 0.1.11, `inotify` 0.11.5, `libredox` 0.1.20, `litemap` 0.8.3, `pest` 2.9.0, `pkg-config` 0.3.34, `potential_utf` 0.1.6, `safe_arch` 1.2.0, `tinystr` 0.8.4, `uuid` 1.24.1, `wayland-backend` 0.3.17, `writeable` 0.6.4, `zerotrie` 0.2.5, `zerovec` 0.11.7, icu crates 2.3.0)
+
+### Performance
+
+- **ui**: paint only when something changed (`107d79dc`)
+- **lua**: slow the watchdog poll to 50ms (`859edbc4`)
+
+### Fixed
+
+- **ui**: stop the ratatui panic hook restoring the terminal off-thread (`6ed7c2a5`)
+- **xai**: read the API key from `providers.toml` (`74cbc551`)
+- **interpreter**: share the memory budget instead of taking turns (`fd5cfecc`)
+- **providers**: always get a warm model catalog for the default model (`20f5c607`)
+- **providers/llama-cpp**: detect vision via `/props` modalities in single-model mode (`89d17a24`, `5a5059ac`)
+- **providers**: `openai_compat` keeps the accumulated tool name when subsequent streaming chunks send an empty one, fixing GLM-5.2 via Mistral tool calls (`d20faf3d`)
+- **acp**: route client responses by request id (`f2414e26`), and let the local `mcp.toml` win over client-injected servers (`ef28146a`)
+- **agent**: make MCP permission previews UTF-8 safe (`b263697a`)
+- **mcp**: preserve authorization endpoint query parameters (`33b9ffaa`)
+
 ## [0.12.3] - 2026-08-14
 
 ### Fixed
@@ -1624,7 +1655,8 @@ First craft version. Fork from maki v0.3.8; the `maki-*` crates are renamed to
   plugin directories now visited on load; plugin name derived from the file stem
   instead of a hardcoded `"user"`. (`3ceb90c`)
 
-[Unreleased]: https://github.com/craft-build/craft/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/craft-build/craft/compare/v0.12.4...HEAD
+[0.12.4]: https://github.com/craft-build/craft/compare/v0.12.3...v0.12.4
 [0.12.3]: https://github.com/craft-build/craft/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/craft-build/craft/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/craft-build/craft/compare/v0.12.0...v0.12.1
