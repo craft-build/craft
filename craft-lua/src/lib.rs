@@ -27,7 +27,9 @@ pub use terminal_backend::{
 pub mod test_support {
     use crate::KeymapReader;
     use crate::api::keymap::{KeymapEntry, KeymapWriter};
-    use crate::api::util::command::{LuaCommandInfo, LuaCommandReader, LuaCommandWriter};
+    use crate::api::util::command::{
+        HintEntries, HintReader, HintWriter, LuaCommandInfo, LuaCommandReader, LuaCommandWriter,
+    };
     use crate::loader::EventHandle;
     use crate::runtime::Request;
 
@@ -42,6 +44,20 @@ pub mod test_support {
     pub fn lua_command_writer_pair() -> (LuaCommandWriterHandle, LuaCommandReader) {
         let (writer, reader) = LuaCommandWriter::new();
         (LuaCommandWriterHandle(writer), reader)
+    }
+
+    /// Stands in for the Lua thread publishing a plugin's status hints.
+    pub struct HintWriterHandle(HintWriter);
+
+    impl HintWriterHandle {
+        pub fn publish(&self, entries: HintEntries) {
+            self.0.publish(entries);
+        }
+    }
+
+    pub fn hint_writer_pair() -> (HintWriterHandle, HintReader) {
+        let (writer, reader) = HintWriter::new();
+        (HintWriterHandle(writer), reader)
     }
 
     pub fn keymap_reader_with(entries: Vec<KeymapEntry>) -> KeymapReader {

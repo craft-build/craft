@@ -35,8 +35,6 @@ struct ViewLayout {
 
 impl App {
     pub fn view(&mut self, frame: &mut Frame) {
-        self.status_bar.clear_expired_hint();
-
         self.sync_flow_snapshot();
         let form_visible = self.permission_prompt.is_open()
             || self.plan_form_active()
@@ -283,9 +281,6 @@ impl App {
         }
 
         if self.file_picker.is_open() {
-            if let Some(flash) = self.file_picker.tick() {
-                self.status_bar.flash(flash);
-            }
             overlay_rect = self.file_picker.view(frame, full);
         }
 
@@ -319,13 +314,11 @@ impl App {
             overlay_rect = r;
         }
         if self.usage_modal.is_open() {
-            let quota = self.usage_slot.load();
             let ctx = crate::components::usage_modal::UsageModalContext {
                 total: &self.state.token_usage,
                 by_model: self.state.session.usage_by_model(),
                 model: &self.state.model,
                 fast: self.state.fast,
-                quota: quota.as_deref(),
                 clock_format: self.ui_config.clock_format,
             };
             let r = self.usage_modal.view(frame, full, &ctx);
@@ -489,7 +482,7 @@ impl App {
     }
 
     fn lua_hint_line(&self) -> Option<Line<'static>> {
-        let snap = self.hint_reader.load();
+        let snap = self.hints.get()?;
         if snap.entries.is_empty() {
             return None;
         }

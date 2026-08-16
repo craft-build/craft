@@ -22,9 +22,11 @@ use crate::animation::spinner_str;
 use crate::components::keybindings::key;
 use crate::markdown::{hr_line, plain_lines, text_to_lines, truncate_output};
 use crate::render_worker::RenderWorker;
+use crate::repaint::{Cadence, Dirty};
 use crate::selection::Selection;
 use crate::splash::{ColorTransition, Splash};
 use crate::theme;
+use crate::update;
 use craft_config::{ClockFormat, ToolOutputLines, UiConfig};
 use craft_lua::{EventHandle, RestoreItem, WinView};
 use serde_json::Value;
@@ -889,14 +891,32 @@ impl MessagesPanel {
         output.owned_instructions()
     }
 
-    pub fn is_animating(&self) -> bool {
-        self.in_progress_count() > 0
-            || self.streaming_thinking.is_animating()
-            || self.streaming_text.is_animating()
-            || self.show_idle_splash()
+    /// Drains the highlight worker and every live tool buffer. These used to
+    /// run inside [`Self::view`], which is why a running tool had to claim it
+    /// was animating: it was the only way to keep them fed.
+    pub fn tick(&mut self) -> Dirty {
+        let mut dirty = self.drain_highlights() | self.poll_live_bufs();
+        if self.show_idle_splash() {
+            dirty |= self.idle_splash.poll_update(update::latest_version());
+        }
+        dirty
+    }
+
+    pub fn cadence(&self) -> Cadence {
+        // Collapsed thinking draws a line count, not the text, so its
+        // typewriter reveals nothing and never advances either, since only
+        // `view` ticks it. Believing it would pin the loop at full frame rate
+        // for the whole reasoning phase.
+        let smooth = self.streaming_text.is_animating()
             || self.accent.is_animating()
-            || !self.live_bufs.is_empty()
-            || self.streaming_thinking_collapsed()
+            || (self.streaming_thinking.is_animating() && !self.streaming_thinking_collapsed());
+        Cadence::any([
+            // A running tool draws a spinner. Its output arriving is data, and
+            // `tick` reports that separately.
+            Cadence::when(self.in_progress_count() > 0, Cadence::SPINNER),
+            Cadence::when(smooth, Cadence::SMOOTH),
+            Cadence::when(self.show_idle_splash(), self.idle_splash.cadence()),
+        ])
     }
 
     fn streaming_thinking_collapsed(&self) -> bool {
@@ -945,8 +965,6 @@ impl MessagesPanel {
         if theme_changed {
             self.collect_stale_snapshots(theme_gen);
         }
-        self.drain_highlights();
-        self.poll_live_bufs();
         self.rebuild_line_cache();
         if self.in_progress_count() > 0 {
             self.update_spinners();
@@ -1257,23 +1275,25 @@ impl MessagesPanel {
         );
     }
 
-    fn poll_live_bufs(&mut self) {
-        let mut dirty = Vec::new();
+    fn poll_live_bufs(&mut self) -> Dirty {
+        let mut updated = Vec::new();
         let mut stale = Vec::new();
         for (id, entry) in &mut self.live_bufs {
             if let Some(lines) = entry.buf.read_if_dirty() {
                 entry.dirty_seen = true;
-                dirty.push((id.clone(), lines));
+                updated.push((id.clone(), lines));
             } else if entry.dirty_seen {
                 stale.push(id.clone());
             }
         }
-        for (tool_id, lines) in dirty {
+        let dirty = Dirty::from(!updated.is_empty());
+        for (tool_id, lines) in updated {
             self.store_snapshot(&tool_id, BufferSnapshot::from_arc(lines), None);
         }
         for id in stale {
             self.live_bufs.remove(&id);
         }
+        dirty
     }
 
     fn build_tool_segment_lines(
@@ -1407,7 +1427,8 @@ impl MessagesPanel {
         }
     }
 
-    fn drain_highlights(&mut self) {
+    fn drain_highlights(&mut self) -> Dirty {
+        let mut dirty = Dirty::NO;
         while let Some(result) = self.hl_worker.try_recv() {
             if let Some(seg) = self
                 .cache
@@ -1416,8 +1437,10 @@ impl MessagesPanel {
                 .find(|s| s.matches_pending_highlight(result.id))
             {
                 seg.apply_highlight_result(result.lines);
+                dirty = Dirty::YES;
             }
         }
+        dirty
     }
 
     fn rebuild_tool_segment(&mut self, tool_id: &str) {

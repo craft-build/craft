@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::clipboard::CopyResult;
+use crate::repaint::Dirty;
 use crate::selection::{self, ContentRegion, EdgeScroll, Selection, SelectionState, SelectionZone};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -147,7 +148,7 @@ impl App {
         sel.update(edge_row, col, scroll);
     }
 
-    pub fn tick_edge_scroll(&mut self) {
+    pub fn tick_edge_scroll(&mut self) -> Dirty {
         let (dir, zone, col) = match self.selection_state {
             Some(SelectionState::Dragging {
                 ref sel,
@@ -155,20 +156,21 @@ impl App {
                 last_drag_col,
             }) => {
                 let Some(es) = edge_scroll else {
-                    return;
+                    return Dirty::NO;
                 };
                 if es.last_tick.elapsed() < EDGE_SCROLL_INTERVAL {
-                    return;
+                    return Dirty::NO;
                 }
                 let dir = es.dir;
                 es.last_tick = Instant::now();
                 (dir, sel.zone, last_drag_col)
             }
-            _ => return,
+            _ => return Dirty::NO,
         };
 
         self.scroll_zone(zone, dir);
         self.update_selection_to_edge(zone, col);
+        Dirty::YES
     }
 
     pub(super) fn copy_selection(

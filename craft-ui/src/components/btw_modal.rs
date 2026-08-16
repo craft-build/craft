@@ -3,6 +3,7 @@ use crate::components::Overlay;
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::components::streaming_content::StreamingContent;
+use crate::repaint::{Cadence, Dirty};
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -62,33 +63,39 @@ impl BtwModal {
         self.rx.is_some()
     }
 
-    pub fn is_animating(&self) -> bool {
-        self.rx.is_some() || self.answer.is_animating()
+    /// Only the typewriter moves on its own, and only while it is on screen.
+    /// A pending stream is drained by [`Self::poll`], which reports its own
+    /// [`Dirty`].
+    pub fn cadence(&self) -> Cadence {
+        Cadence::when(self.open && self.answer.is_animating(), Cadence::SMOOTH)
     }
 
     pub fn is_open(&self) -> bool {
         self.open
     }
 
-    pub fn poll(&mut self) {
+    pub fn poll(&mut self) -> Dirty {
         let Some(ref rx) = self.rx else {
-            return;
+            return Dirty::NO;
         };
+        let mut dirty = Dirty::NO;
         while let Ok(event) = rx.try_recv() {
+            dirty = Dirty::YES;
             match event {
                 BtwEvent::TextDelta(text) => self.answer.push(&text),
                 BtwEvent::Done => {
                     self.rx = None;
-                    return;
+                    break;
                 }
                 BtwEvent::Error(msg) => {
                     self.answer.clear();
                     self.answer.push(&msg);
                     self.rx = None;
-                    return;
+                    break;
                 }
             }
         }
+        dirty
     }
 
     pub fn scroll(&mut self, delta: i32) {
@@ -170,6 +177,10 @@ impl Overlay for BtwModal {
     fn close(&mut self) {
         self.close()
     }
+
+    fn cadence(&self) -> Cadence {
+        self.cadence()
+    }
 }
 
 #[cfg(test)]
@@ -200,7 +211,7 @@ mod tests {
         let mut m = BtwModal::new(0);
         let tx = open_modal(&mut m, "q");
         tx.send(BtwEvent::TextDelta("some answer".into())).unwrap();
-        m.poll();
+        let _ = m.poll();
         m.scroll.update_dimensions(100, 10);
         m.scroll.scroll(-5);
         m.close();
@@ -217,7 +228,7 @@ mod tests {
         let tx = open_modal(&mut m, "q");
         tx.send(BtwEvent::TextDelta("hello ".into())).unwrap();
         tx.send(BtwEvent::TextDelta("world".into())).unwrap();
-        m.poll();
+        let _ = m.poll();
         assert!(m.answer_eq("hello world"));
     }
 
@@ -226,7 +237,7 @@ mod tests {
         let mut m = BtwModal::new(0);
         let tx = open_modal(&mut m, "q");
         tx.send(BtwEvent::Done).unwrap();
-        m.poll();
+        let _ = m.poll();
         assert!(!m.is_streaming());
     }
 
@@ -236,7 +247,7 @@ mod tests {
         let tx = open_modal(&mut m, "q");
         tx.send(BtwEvent::TextDelta("partial".into())).unwrap();
         tx.send(BtwEvent::Error("oops".into())).unwrap();
-        m.poll();
+        let _ = m.poll();
         assert!(m.answer_eq("oops"));
         assert!(!m.is_streaming());
     }
@@ -280,7 +291,7 @@ mod tests {
         let mut m = BtwModal::new(0);
         let tx1 = open_modal(&mut m, "first");
         tx1.send(BtwEvent::TextDelta("leftover".into())).unwrap();
-        m.poll();
+        let _ = m.poll();
         m.scroll.update_dimensions(100, 10);
         m.scroll.scroll(-10);
         let _tx2 = open_modal(&mut m, "second");
@@ -301,7 +312,7 @@ mod tests {
     #[test]
     fn poll_noop_when_no_rx() {
         let mut m = BtwModal::new(0);
-        m.poll();
+        let _ = m.poll();
         assert!(!m.is_open());
     }
 }

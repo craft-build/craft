@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::components::Overlay;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
+use crate::repaint::{Cadence, Dirty, Watch};
 use crate::theme;
 
 const TITLE: &str = " Models ";
@@ -101,10 +102,10 @@ impl PickerItem for ModelEntry {
 pub struct ModelPicker {
     picker: ListPicker<ModelEntry>,
     models: Arc<ArcSwapOption<Vec<String>>>,
+    available: Watch<Vec<String>>,
     recents: Vec<String>,
     current_spec: String,
-    last_spec_count: usize,
-    dirty: bool,
+    needs_rebuild: bool,
     /// User-moved entry to restore on refresh: `(tab_title, spec)`.
     anchor: Option<(String, String)>,
     tabs: Vec<Tab>,
@@ -123,10 +124,10 @@ impl ModelPicker {
                 .with_footer_builder(footer_line)
                 .with_header(1),
             models,
+            available: Watch::default(),
             recents: Vec::new(),
             current_spec: String::new(),
-            last_spec_count: 0,
-            dirty: false,
+            needs_rebuild: false,
             anchor: None,
             tabs: Vec::new(),
             active_tab: 0,
@@ -135,29 +136,32 @@ impl ModelPicker {
 
     pub fn set_recents(&mut self, recents: Vec<String>) {
         self.recents = recents;
-        self.dirty = true;
+        self.needs_rebuild = true;
     }
 
     pub fn open(&mut self, current_spec: &str) {
         self.current_spec = current_spec.to_owned();
         self.anchor = None;
-        self.dirty = false;
+        self.needs_rebuild = false;
+        let _ = self.available.poll(self.models.load_full());
         self.tabs = self.load_entries();
         self.picker.open(self.active_entries(), TITLE);
         self.preselect_current_model();
     }
 
-    fn try_refresh(&mut self) {
+    /// Providers fetch their model lists in the background and drop them into
+    /// a shared slot, which wakes nothing. An open picker has to notice on its
+    /// own, so `App::tick` polls this instead of [`Self::view`] reading the
+    /// slot mid render.
+    pub fn refresh(&mut self) -> Dirty {
         if !self.picker.is_open() {
-            return;
+            return Dirty::NO;
         }
-        let guard = self.models.load();
-        let spec_count = guard.as_deref().map_or(0, Vec::len);
-        if spec_count == self.last_spec_count && !self.dirty {
-            return;
+        let arrived = self.available.poll(self.models.load_full());
+        if arrived == Dirty::NO && !self.needs_rebuild {
+            return Dirty::NO;
         }
-        drop(guard);
-        self.dirty = false;
+        self.needs_rebuild = false;
         self.tabs = self.load_entries();
         let (tab, spec) = match self.anchor.clone() {
             Some((tab_title, spec)) => (
@@ -177,6 +181,7 @@ impl ModelPicker {
         self.active_tab = tab;
         self.picker.replace_items(self.active_entries());
         self.picker.select_item_by(|e| e.spec == spec);
+        Dirty::YES
     }
 
     fn active_entries(&self) -> Vec<ModelEntry> {
@@ -206,10 +211,8 @@ impl ModelPicker {
             .unwrap_or(0)
     }
 
-    fn load_entries(&mut self) -> Vec<Tab> {
-        let guard = self.models.load();
-        let specs = guard.as_deref();
-        self.last_spec_count = specs.map_or(0, Vec::len);
+    fn load_entries(&self) -> Vec<Tab> {
+        let specs = self.available.get();
 
         let mut tabs: Vec<Tab> = Vec::new();
 
@@ -306,7 +309,7 @@ impl ModelPicker {
             && let Some(entry) = self.picker.selected_item()
         {
             let spec = entry.spec.clone();
-            self.dirty = true;
+            self.needs_rebuild = true;
             return if entry.override_tiers.contains(&tier) {
                 ModelPickerAction::UnassignTier(spec, tier)
             } else {
@@ -357,7 +360,6 @@ impl ModelPicker {
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
-        self.try_refresh();
         let popup = self.picker.view(frame, area);
         if let Some(header) = self.picker.header_area() {
             render_tabs(frame, header, &self.tabs, self.active_tab);
@@ -373,6 +375,10 @@ impl Overlay for ModelPicker {
 
     fn close(&mut self) {
         self.close()
+    }
+
+    fn cadence(&self) -> Cadence {
+        self.picker.cadence()
     }
 }
 
@@ -466,6 +472,32 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use test_case::test_case;
 
+    const SAME_SIZED_LIST: &str = "a republished list of the same length is still a new list";
+    const SWAPPED_SPEC: &str = "zai/glm-5";
+
+    /// A provider that republishes the same number of specs has still changed
+    /// the list. Comparing lengths calls that no change, and the picker goes on
+    /// offering models that are gone.
+    #[test]
+    fn a_same_sized_model_list_owes_a_frame() {
+        let models = Arc::new(ArcSwapOption::empty());
+        models.store(Some(Arc::new(vec![
+            "anthropic/claude-sonnet-4-20250514".into(),
+        ])));
+        let mut p = ModelPicker::new(Arc::clone(&models));
+        p.open("");
+        assert_eq!(p.refresh(), Dirty::NO);
+
+        models.store(Some(Arc::new(vec![SWAPPED_SPEC.into()])));
+        assert_eq!(p.refresh(), Dirty::YES, "{SAME_SIZED_LIST}");
+        assert!(
+            p.picker
+                .selected_item()
+                .is_some_and(|e| e.spec == SWAPPED_SPEC),
+            "{SAME_SIZED_LIST}"
+        );
+    }
+
     fn test_models() -> Arc<ArcSwapOption<Vec<String>>> {
         let models = Arc::new(ArcSwapOption::empty());
         models.store(Some(Arc::new(vec![
@@ -501,7 +533,7 @@ mod tests {
             "anthropic/claude-sonnet-4-20250514".into(),
             "anthropic/claude-opus-4-6-20260101".into(),
         ])));
-        p.try_refresh();
+        let _ = p.refresh();
 
         let action = p.handle_key(key(KeyCode::Enter));
         assert!(
@@ -580,7 +612,7 @@ mod tests {
             "anthropic/claude-opus-4-6-20260101".into(),
             "zai/glm-5".into(),
         ])));
-        p.try_refresh();
+        let _ = p.refresh();
 
         let action = p.handle_key(key(KeyCode::Enter));
         assert!(
@@ -785,7 +817,7 @@ mod tests {
         models.store(Some(Arc::new(vec![
             "anthropic/claude-sonnet-4-20250514".into(),
         ])));
-        p.try_refresh();
+        let _ = p.refresh();
 
         assert!(
             p.active_tab < p.tabs.len(),
@@ -846,7 +878,7 @@ mod tests {
             "anthropic/claude-opus-4-6-20260101".into(),
             "zai/glm-5".into(),
         ])));
-        p.try_refresh();
+        let _ = p.refresh();
 
         let entry = p.picker.selected_item().expect("selection after refresh");
         assert_eq!(entry.spec, "zai/glm-5");
@@ -867,7 +899,7 @@ mod tests {
         p.open("anthropic/claude-sonnet-4-20250514");
 
         models.store(None);
-        p.try_refresh();
+        let _ = p.refresh();
         let entry = p.picker.selected_item().expect("selection during collapse");
         assert_eq!(entry.spec, "anthropic/claude-sonnet-4-20250514");
         assert_eq!(p.tabs[p.active_tab].title, "Recent");
@@ -877,7 +909,7 @@ mod tests {
             "anthropic/claude-opus-4-6-20260101".into(),
             "zai/glm-5".into(),
         ])));
-        p.try_refresh();
+        let _ = p.refresh();
 
         let entry = p.picker.selected_item().expect("selection after arrival");
         assert_eq!(entry.spec, "anthropic/claude-sonnet-4-20250514");
@@ -909,7 +941,7 @@ mod tests {
             "anthropic/claude-opus-4-6-20260101".into(),
             "zai/glm-5".into(),
         ])));
-        p.try_refresh();
+        let _ = p.refresh();
 
         let entry = p.picker.selected_item().expect("selection after refresh");
         assert_eq!(
@@ -944,13 +976,13 @@ mod tests {
         p.handle_key(key(KeyCode::Char('m')));
 
         models.store(None);
-        p.try_refresh();
+        let _ = p.refresh();
         models.store(Some(Arc::new(vec![
             "anthropic/claude-sonnet-4-20250514".into(),
             "anthropic/claude-opus-4-6-20260101".into(),
             "zai/glm-5".into(),
         ])));
-        p.try_refresh();
+        let _ = p.refresh();
 
         let entry = p.picker.selected_item().expect("selection after refresh");
         assert_eq!(entry.spec, "zai/glm-5");

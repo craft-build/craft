@@ -1,6 +1,8 @@
 use super::segment;
 use super::*;
 use crate::components::scrollbar::SCROLLBAR_THUMB;
+use crate::repaint::Cadence;
+use crate::repaint::Dirty;
 use crate::selection::{Selection, SelectionZone};
 use craft_agent::tools::{BASH_TOOL_NAME, GREP_TOOL_NAME, WRITE_TOOL_NAME};
 use craft_agent::{
@@ -9,6 +11,7 @@ use craft_agent::{
 };
 use ratatui::backend::TestBackend;
 use std::collections::HashSet;
+use std::time::Duration;
 use test_case::test_case;
 
 fn snap_line(text: &str) -> SnapshotLine {
@@ -398,9 +401,119 @@ fn cancel_in_progress_marks_pending_as_error(cache_built: bool) {
     panel.cancel_in_progress();
 
     assert_eq!(panel.in_progress_count(), 0);
-    assert!(!panel.is_animating());
+    assert_eq!(panel.cadence(), Cadence::IDLE);
     assert_eq!(msg_status(&panel, "t1"), ToolStatus::Success);
     assert_eq!(msg_status(&panel, "t2"), ToolStatus::Error);
+}
+
+const THINKING_TEXT: &str = "a long chain of reasoning";
+const HIGHLIGHTED_CODE: &str = "fn main() {}";
+const HIGHLIGHT_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Only `view` advances a typewriter, and collapsed thinking is never drawn,
+/// so its reveal can never finish. Believing it would hold the loop at full
+/// frame rate for as long as the model reasons.
+#[test_case(true  => Cadence::SMOOTH ; "expanded_thinking_reveals")]
+#[test_case(false => Cadence::IDLE   ; "collapsed_thinking_reveals_nothing")]
+fn thinking_animates_only_while_it_is_on_screen(show_thinking: bool) -> Cadence {
+    let config = UiConfig {
+        show_thinking,
+        ..UiConfig::default()
+    };
+    let mut panel = MessagesPanel::new(config, EventHandle::disconnected_for_test());
+
+    panel.thinking_delta(THINKING_TEXT);
+
+    assert!(
+        panel.streaming_thinking.is_animating(),
+        "the typewriter is mid-reveal, it just has nowhere to draw"
+    );
+    panel.cadence()
+}
+
+/// A waiting tool used to claim the whole screen was animating, which is what
+/// pinned the loop at full frame rate. It draws one spinner glyph, so the
+/// glyph rate is all it may ask for. Text arriving beside it earns the smooth
+/// budget.
+#[test_case(false => Cadence::SPINNER ; "waiting_tool_only_spins")]
+#[test_case(true  => Cadence::SMOOTH  ; "streaming_text_beside_it_wins")]
+fn cadence_while_a_tool_is_in_progress(text_streaming: bool) -> Cadence {
+    let mut panel = panel_with_tools(&[("t1", BASH_TOOL_NAME)]);
+    if text_streaming {
+        panel.text_delta("an answer arriving while the tool still runs");
+    }
+    assert_eq!(
+        panel.in_progress_count(),
+        1,
+        "the spinner source has to be live or this proves nothing"
+    );
+    panel.cadence()
+}
+
+/// Without the `show_idle_splash` gate the splash keeps asking for smooth
+/// frames for the rest of the session, long after the first message pushed it
+/// off screen.
+#[test]
+fn splash_stops_driving_cadence_once_a_message_exists() {
+    let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
+    assert_eq!(
+        panel.cadence(),
+        Cadence::SMOOTH,
+        "the wiring drifts while the splash is the only thing drawn"
+    );
+
+    panel.tool_start(start("t1", BASH_TOOL_NAME));
+    panel.tool_done(ToolDoneEvent {
+        id: "t1".into(),
+        tool: BASH_TOOL_NAME.into(),
+        output: ToolOutput::Plain("ok".into()),
+        is_error: false,
+        annotation: None,
+        written_path: None,
+    });
+
+    assert_eq!(panel.cadence(), Cadence::IDLE, "the splash is gone");
+}
+
+/// `drain_highlights` moved out of `view`, so `tick` is the only thing feeding
+/// the worker now. The wait is the worker's own round trip, not a sleep: the
+/// loop ends the moment the result lands, and the deadline only turns a broken
+/// drain into a failure instead of a hang.
+#[test]
+fn tick_drains_the_highlight_worker() {
+    let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
+    panel.tool_start(start("t1", "read"));
+    panel.tool_done(ToolDoneEvent {
+        id: "t1".into(),
+        tool: "read".into(),
+        output: ToolOutput::ReadCode {
+            path: "file.rs".into(),
+            start_line: 1,
+            lines: vec![HIGHLIGHTED_CODE.into()],
+            prefix: String::new(),
+            total_lines: 1,
+            instructions: None,
+            no_compress: false,
+        },
+        is_error: false,
+        annotation: None,
+        written_path: None,
+    });
+    rebuild(&mut panel);
+
+    let deadline = std::time::Instant::now() + HIGHLIGHT_DEADLINE;
+    while panel.tick() == Dirty::NO {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a highlighted tool stays unstyled until some unrelated repaint"
+        );
+        std::thread::yield_now();
+    }
+
+    assert!(
+        seg_text(&panel, "t1").contains(HIGHLIGHTED_CODE),
+        "the applied result replaces the highlight range in place"
+    );
 }
 
 #[test]

@@ -1,9 +1,13 @@
 use super::*;
 use crate::agent::shared_queue;
 use crate::chat::{CANCELLED_TEXT, DONE_TEXT, ERROR_TEXT};
+use crate::components::btw_modal::BtwEvent;
 use crate::components::command::ParsedCommand;
+use crate::components::file_picker::EMPTY_DIR_MSG;
 use crate::components::keybindings::{KeybindContext, key as kb};
-use crate::components::{ExitRequest, key, test_model};
+use crate::components::{ExitRequest, buffer_text, key, test_model};
+use crate::repaint::expect::{OWED, QUIET};
+use crate::repaint::{Cadence, Dirty, Watch};
 use crate::selection::{SelectableZone, SelectionState, SelectionZone};
 
 use arc_swap::ArcSwap;
@@ -13,6 +17,7 @@ use craft_agent::{
     McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use craft_config::{PermissionsConfig, UiConfig};
+use craft_lua::test_support::{HintWriterHandle, hint_writer_pair};
 use craft_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
 use craft_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
 use craft_storage::sessions::{StoredMode, StoredThinking};
@@ -27,8 +32,52 @@ fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
     app.zones.push(SelectableZone { area, zone });
 }
 
+const TASK_ID: &str = "task1";
+const SUB_TOOL_ID: &str = "sub_t1";
+const TOOL_OUTPUT_LINE: &str = "hello from the subagent";
+const LATE_MODEL_SPEC: &str = "zai/glm-5";
+const HINT_PLUGIN: &str = "statusline";
+const HINT_TEXT: &str = "2/4 staged";
+const HINT_STYLE: &str = "fg";
+const RETRY_MESSAGE: &str = "overloaded";
+const RETRY_DELAY: Duration = Duration::from_secs(5);
+const MISSING_DIR: &str = "gone";
+const WALK_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) fn test_app() -> App {
     test_app_with_lua(LuaCommandReader::empty())
+}
+
+/// A `test_app` past its idle splash, whose drifting wiring would mask
+/// every other cadence.
+fn app_without_splash() -> App {
+    let mut app = test_app();
+    app.status = Status::Streaming;
+    app.run_id = 1;
+    app.update(agent_msg(AgentEvent::TextDelta { text: "hi".into() }));
+    app.update(done_event());
+    app
+}
+
+/// Hands back the slot providers publish their model lists into, since the app
+/// keeps no handle to it once the picker owns it.
+fn app_with_model_slot() -> (App, Arc<ArcSwapOption<Vec<String>>>) {
+    let models = Arc::new(ArcSwapOption::empty());
+    let mut app = test_app();
+    app.model_picker = ModelPicker::new(Arc::clone(&models));
+    (app, models)
+}
+
+/// Hands back the end a plugin publishes hints through. That is the Lua thread
+/// in production, and this test here. Seeding the watch from the new reader is
+/// what `App::new` does, and skipping it would make the first poll report the
+/// swap itself.
+fn app_with_hints() -> (App, HintWriterHandle) {
+    let (writer, reader) = hint_writer_pair();
+    let mut app = test_app();
+    app.hints = Watch::seeded(reader.load_full());
+    app.hint_reader = reader;
+    (app, writer)
 }
 
 fn test_app_with_lua(lua_commands: LuaCommandReader) -> App {
@@ -1498,20 +1547,211 @@ fn ctrl_c_while_streaming_cancels_instead_of_quitting() {
     assert_ne!(app.exit_request, ExitRequest::Success);
 }
 
+/// The whole point of issue 778: a settled session paints nothing at all. Any
+/// poller that starts reporting a change on every tick trips this.
+#[test]
+fn settled_app_owes_no_frame_and_does_not_animate() {
+    let mut app = app_without_splash();
+
+    assert_eq!(app.cadence(), Cadence::IDLE);
+    assert_eq!(app.tick(), Dirty::NO, "{QUIET}");
+}
+
+/// Nothing wakes the loop when a background thread drops an answer into a
+/// shared slot, so `tick` has to go and look. The tick that first sees it is
+/// also the only one allowed to claim a frame: `tick` runs on every turn of the
+/// loop, so a poller that keeps saying yes never lets it sleep again.
+#[track_caller]
+fn assert_owes_one_frame(app: &mut App, arrival: impl FnOnce()) {
+    assert_eq!(app.tick(), Dirty::NO, "{QUIET}");
+    arrival();
+    assert_eq!(app.tick(), Dirty::YES, "{OWED}");
+    assert_eq!(app.tick(), Dirty::NO, "{QUIET}");
+}
+
+/// `/usage` spawns a detached fetch that stores its answer with nothing
+/// listening, so an unpolled modal sits on `Loading` until the user presses
+/// some unrelated key.
+#[test]
+fn usage_quota_arriving_in_the_background_owes_a_frame() {
+    let mut app = test_app();
+    app.execute_command(cmd("/usage"), 0);
+    let slot = Arc::clone(&app.usage_slot);
+
+    assert_owes_one_frame(&mut app, || {
+        slot.store(Some(Arc::new(UsageFetchState::Loading)));
+    });
+}
+
+/// Providers publish their model list into a shared slot that wakes nothing,
+/// so an open picker keeps showing the stale list until the user happens to
+/// press a key.
+#[test]
+fn model_list_arriving_in_the_background_owes_a_frame() {
+    let (mut app, models) = app_with_model_slot();
+    app.execute_command(cmd("/model"), 0);
+    assert!(app.model_picker.is_open());
+
+    assert_owes_one_frame(&mut app, || {
+        models.store(Some(Arc::new(vec![LATE_MODEL_SPEC.into()])));
+    });
+}
+
+/// Tool output streams into a subagent's chat while the parent chat is the one
+/// on screen. Draining only the active chat would lose it, and the task picker
+/// and a later switch would show nothing.
+#[test]
+fn tick_drains_live_bufs_of_background_chats() {
+    let mut app = test_app();
+    app.run_id = 1;
+    app.update(agent_msg(tool_start(TASK_ID, "task")));
+    app.update(subagent_msg(tool_start(SUB_TOOL_ID, "bash"), TASK_ID, None));
+    let buf = Arc::new(craft_agent::SharedBuf::new());
+    app.update(subagent_msg(
+        AgentEvent::LiveToolBuf {
+            id: SUB_TOOL_ID.into(),
+            body: Arc::clone(&buf),
+        },
+        TASK_ID,
+        None,
+    ));
+    assert_eq!(app.active_chat, 0, "the subagent's chat is the hidden one");
+
+    assert_owes_one_frame(&mut app, || {
+        buf.append(craft_agent::SnapshotLine::plain(TOOL_OUTPUT_LINE.into()));
+    });
+}
+
+/// A plugin publishes hints from the Lua thread, and the loop never hears back
+/// from that thread. The footer they draw in is on screen the whole time, so a
+/// publish nobody polled for shows up on some later, unrelated keypress, or
+/// never.
+#[test]
+fn status_hints_published_by_a_plugin_reach_the_screen() {
+    let (mut app, plugin) = app_with_hints();
+    plugin.publish(vec![(
+        Arc::from(HINT_PLUGIN),
+        vec![(HINT_TEXT.into(), HINT_STYLE.into())],
+    )]);
+
+    assert!(
+        !rendered(&mut app).contains(HINT_TEXT),
+        "a hint no poller has seen must not be on screen"
+    );
+    assert_eq!(app.tick(), Dirty::YES, "{OWED}");
+    assert!(rendered(&mut app).contains(HINT_TEXT));
+
+    plugin.publish(vec![]);
+    assert_eq!(app.tick(), Dirty::YES, "{OWED}");
+    assert!(!rendered(&mut app).contains(HINT_TEXT));
+}
+
+fn rendered(app: &mut App) -> String {
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| app.view(frame)).unwrap();
+    buffer_text(terminal.backend().buffer())
+}
+
+/// When the picker gives up on a directory it cannot list, the flash is the
+/// only trace the user gets. Forwarding it moved from `view` into `tick`, and
+/// dropping that hop closes the picker with no explanation at all. The loop
+/// ends the moment the walker thread answers; the deadline only turns a
+/// missing hop into a failure instead of a hang.
+#[test]
+fn tick_forwards_the_file_picker_flash_to_the_status_bar() {
+    let tmp = TempDir::new().unwrap();
+    let mut app = test_app();
+    app.file_picker
+        .open(&tmp.path().join(MISSING_DIR).to_string_lossy());
+
+    let deadline = Instant::now() + WALK_TIMEOUT;
+    while app.status_bar.flash_text().is_none() {
+        assert!(Instant::now() < deadline, "the picker never flashed");
+        let _ = app.tick();
+        std::thread::yield_now();
+    }
+
+    assert_eq!(app.status_bar.flash_text(), Some(EMPTY_DIR_MSG));
+    assert!(!app.file_picker.is_open());
+}
+
+/// A waiting tool draws a spinner, which changes once per `SPINNER_FRAME`.
+/// Claiming `SMOOTH` here paints five identical frames for every visible one,
+/// for as long as the tool runs.
+#[test]
+fn waiting_tool_animates_at_the_spinner_rate() {
+    let mut app = app_without_splash();
+    app.update(agent_msg(tool_start("t1", "bash")));
+
+    assert_eq!(app.cadence(), Cadence::SPINNER);
+}
+
+/// The bar spins for a whole streaming turn, again while a restore is in
+/// flight, and once more for a retry countdown. The old `is_animating` only
+/// knew about the restore, so the other two froze mid turn.
+#[test_case(Status::Streaming, false, false => Cadence::SPINNER ; "streaming_turn")]
+#[test_case(Status::Idle, true, false => Cadence::SPINNER ; "restoring_session")]
+#[test_case(Status::Idle, false, true => Cadence::SPINNER ; "retry_countdown")]
+#[test_case(Status::Idle, false, false => Cadence::IDLE ; "nothing_in_flight")]
+fn status_bar_motion_reaches_app_cadence(
+    status: Status,
+    restoring: bool,
+    retrying: bool,
+) -> Cadence {
+    let mut app = app_without_splash();
+    app.status = status;
+    app.restoring.store(restoring, Ordering::Relaxed);
+    if retrying {
+        app.retry_info = Some(RetryInfo {
+            attempt: 1,
+            message: RETRY_MESSAGE.into(),
+            deadline: Instant::now() + RETRY_DELAY,
+        });
+    }
+    app.cadence()
+}
+
+/// `App::cadence` asks `overlays()` as a group, so a moving overlay only
+/// reaches the loop through that fold.
+#[test]
+fn open_overlay_motion_reaches_app_cadence() {
+    let mut app = app_without_splash();
+    assert_eq!(app.cadence(), Cadence::IDLE);
+
+    let (event_tx, _event_rx) = flume::bounded::<craft_lua::WinEvent>(8);
+    let (_cmd_tx, cmd_rx) = flume::bounded::<craft_lua::WinCommand>(8);
+    app.float_mgr.open(
+        Arc::new(craft_agent::SharedBuf::new()),
+        craft_lua::FloatConfig::default(),
+        true,
+        event_tx,
+        cmd_rx,
+    );
+    assert_eq!(
+        app.cadence(),
+        Cadence::SPINNER,
+        "an open float's spinners only turn if the app keeps painting"
+    );
+
+    app.close_all_overlays();
+    assert_eq!(app.cadence(), Cadence::IDLE);
+}
+
 #[test]
 fn edge_scroll_makes_app_animating() {
-    let mut app = test_app();
-    app.status = Status::Streaming;
-    app.run_id = 1;
-    app.update(agent_msg(AgentEvent::TextDelta { text: "x".into() }));
-    app.update(done_event());
-    assert!(!app.is_animating());
+    let mut app = app_without_splash();
+    assert_eq!(app.cadence(), Cadence::IDLE);
     let zone = Rect::new(0, 2, 80, 20);
     set_zone(&mut app, SelectionZone::Messages, zone);
     app.active_chat().scroll_to_top();
     app.update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 10));
     app.update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 1));
-    assert!(app.is_animating());
+    assert_eq!(
+        app.cadence(),
+        Cadence::SMOOTH,
+        "an edge-scrolling drag advances on a timer, with no events to wake us"
+    );
 }
 
 #[test]
@@ -1685,19 +1925,15 @@ fn tick_edge_scroll_noop_on_pending_copy() {
     let mut app = test_app();
     make_pending_copy(&mut app);
 
-    app.tick_edge_scroll();
+    let _ = app.tick_edge_scroll();
     assert!(app.selection_state.as_ref().unwrap().is_pending_copy());
 }
 
 #[test]
 fn pending_copy_not_animating() {
-    let mut app = test_app();
-    app.status = Status::Streaming;
-    app.run_id = 1;
-    app.update(agent_msg(AgentEvent::TextDelta { text: "x".into() }));
-    app.update(done_event());
+    let mut app = app_without_splash();
     make_pending_copy(&mut app);
-    assert!(!app.is_animating());
+    assert_eq!(app.cadence(), Cadence::IDLE);
 }
 
 #[test]
@@ -2399,7 +2635,7 @@ fn tick_error_expiry(age: Duration, expect_error: bool) {
         message: "fail".into(),
         since: Instant::now() - age,
     };
-    app.tick_error_expiry();
+    let _ = app.tick_error_expiry();
     assert_eq!(matches!(app.status, Status::Error { .. }), expect_error);
 }
 
@@ -2714,10 +2950,16 @@ fn btw_with_question_returns_action() {
 #[test]
 fn btw_modal_key_routing_and_animation() {
     let mut app = test_app();
-    let (_tx, rx) = flume::bounded(1);
+    let (tx, rx) = flume::bounded(1);
     app.btw_modal.open("test", rx);
 
-    assert!(app.btw_modal.is_animating());
+    // A pending stream is data, drained by `poll`. Only the typewriter
+    // revealing the answer moves on its own.
+    assert!(app.btw_modal.is_streaming());
+    assert_eq!(app.btw_modal.cadence(), Cadence::IDLE);
+    tx.send(BtwEvent::TextDelta("hi".into())).unwrap();
+    assert_eq!(app.btw_modal.poll(), Dirty::YES);
+    assert_eq!(app.btw_modal.cadence(), Cadence::SMOOTH);
 
     let actions = app.update(Msg::Key(key(KeyCode::Char('x'))));
     assert!(actions.is_empty());
@@ -2727,7 +2969,7 @@ fn btw_modal_key_routing_and_animation() {
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(actions.is_empty());
     assert!(!app.btw_modal.is_open());
-    assert!(!app.btw_modal.is_animating());
+    assert_eq!(app.btw_modal.cadence(), Cadence::IDLE);
 }
 
 #[test]
@@ -2834,7 +3076,7 @@ fn parent_done_reconciles_unresolved_children_and_tools() {
     assert!(app.state.session.subagents().is_empty());
     assert_eq!(app.state.session.messages().len(), 2);
     assert!(app.state.session.tool_outputs().is_empty());
-    assert!(!app.is_animating());
+    assert_eq!(app.cadence(), Cadence::IDLE);
 }
 
 #[test]
@@ -3513,7 +3755,7 @@ fn attention_float_marks_app_as_awaiting_input_until_close() {
     assert!(app.awaiting_input());
 
     cmd_tx.send(craft_lua::WinCommand::Close).unwrap();
-    app.float_mgr.tick();
+    let _ = app.float_mgr.tick();
     assert!(!app.awaiting_input());
 }
 

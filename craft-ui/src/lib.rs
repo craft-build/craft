@@ -19,6 +19,7 @@ pub mod image;
 mod image_render;
 mod markdown;
 mod render_worker;
+pub mod repaint;
 mod selection;
 pub mod splash;
 mod storage_writer;
