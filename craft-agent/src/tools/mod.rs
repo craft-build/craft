@@ -888,12 +888,12 @@ impl Provider for NullProvider {
 }
 
 /// ToolContext scaffold for contexts with no LLM behind them: CLI one-shots
-/// (`craft outline`) and test stubs. Mirrors maki's `cli_tool_ctx` + test
+/// (`craft outline`) and test stubs. Mirrors upstream `cli_tool_ctx` + test
 /// support. Any provider-backed call through one of these returns
 /// [`NO_PROVIDER_ERR`] instead of panicking. Contexts inside a live agent run
 /// must never be built from this: the code_execution bridge derives its
 /// nested contexts from the live parent ToolContext so nested tools dispatch
-/// with the real provider (maki's `maki.agent.call_tool(ctx, ...)` shape).
+/// with the real provider (upstream `agent.call_tool(ctx, ...)` shape).
 pub(crate) fn providerless_ctx(
     mode: &AgentMode,
     event_tx: &EventSender,

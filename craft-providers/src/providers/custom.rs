@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(model.provider.as_ref(), "opencode");
     }
 
-    // Guards the custom-provider half of the regression that maki's
+    // Guards the custom-provider half of the regression that upstream
     // 7c5d693 fixed: discovery must surface context_window / max_output_tokens
     // into `model_from_def`, not just fall through to the protocol default.
     #[test]
