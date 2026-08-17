@@ -423,6 +423,7 @@ pub(crate) fn test_model() -> craft_providers::Model {
         pricing: test_pricing(),
         max_output_tokens: Some(8192),
         context_window: TEST_CONTEXT_WINDOW,
+        thinking_fields: None,
     }
 }
 
