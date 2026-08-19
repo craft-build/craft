@@ -16,6 +16,7 @@ use clap::ValueEnum;
 use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 use craft_agent::headless::{HeadlessHandle, HeadlessParams};
+use craft_agent::permissions::PluginRuleStore;
 use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{AgentConfig, AgentEvent, DoneReason, Envelope, ImageSource, PermissionsConfig};
 use craft_config::ModelPolicy;
@@ -149,6 +150,7 @@ pub async fn run(
     lua_handle: EventHandle,
     fast: bool,
     model_policy: Arc<ModelPolicy>,
+    plugin_rules: Arc<PluginRuleStore>,
 ) -> Result<()> {
     let prompt = match prompt_arg {
         Some(p) => p,
@@ -184,6 +186,7 @@ pub async fn run(
         fast,
         model_policy,
         mode: craft_agent::AgentMode::Build,
+        plugin_rules,
     });
 
     let HeadlessHandle {

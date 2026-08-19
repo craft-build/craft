@@ -743,6 +743,7 @@ async fn spawn_session(
         system_prompt_override: None,
         append_system_prompt: None,
         fs,
+        plugin_rules: Arc::clone(&params.plugin_rules),
     });
     let mcp = mcp_handle.clone();
     (handle, mcp)
@@ -1593,6 +1594,7 @@ mod tests {
             permissions: Arc::new(craft_agent::permissions::PermissionManager::new(
                 craft_config::PermissionsConfig::default(),
                 PathBuf::from("/project"),
+                Arc::default(),
             )),
             task: tokio::spawn(async {}),
         };

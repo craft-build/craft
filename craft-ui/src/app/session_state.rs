@@ -378,6 +378,7 @@ mod tests {
         let permissions = PermissionManager::new(
             craft_config::PermissionsConfig::default(),
             std::path::PathBuf::from("/tmp"),
+            Arc::default(),
         );
         state.session_mut().meta = state.build_meta(&permissions);
         assert_eq!(

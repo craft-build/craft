@@ -92,6 +92,7 @@ pub async fn run(
         prompt_slots: Arc::new(prompt_slots),
         yolo,
         model_policy: Arc::new(config.provider.model_policy.clone()),
+        plugin_rules: plugin_host.plugin_rules(),
         plugin_host,
         flow_store,
     })

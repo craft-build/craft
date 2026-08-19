@@ -15,7 +15,7 @@ use tracing::{error, warn};
 
 use crate::agent::{self, History};
 use crate::cancel::{CancelMap, CancelToken};
-use crate::permissions::PermissionManager;
+use crate::permissions::{PermissionManager, PluginRuleStore};
 use crate::prompt::ResolvedSlots;
 use crate::template;
 use crate::tools::{FileReadTracker, FsBackend, ToolRegistry};
@@ -93,6 +93,7 @@ pub struct HeadlessParams {
     /// path; `Flow(workstream_id)` for `craft flow` (Phase 1: Flow mode runs a
     /// General turn, same as Build, until the turn-typed loop lands in Phase 2).
     pub mode: AgentMode,
+    pub plugin_rules: Arc<PluginRuleStore>,
 }
 
 pub struct HeadlessHandle {
@@ -202,6 +203,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     permissions: Arc::new(PermissionManager::new(
                         params.permissions_config,
                         working_dir_path,
+                        params.plugin_rules,
                     )),
                     session_id: Some(session_ref_clone.clone()),
                     mailbox: None,
@@ -280,6 +282,7 @@ pub struct InteractiveParams {
     pub system_prompt_override: Option<String>,
     pub append_system_prompt: Option<String>,
     pub fs: Arc<dyn FsBackend>,
+    pub plugin_rules: Arc<PluginRuleStore>,
 }
 
 pub struct InteractiveHandle {
@@ -335,6 +338,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     let permissions = Arc::new(PermissionManager::new(
         params.permissions_config,
         params.initial_wd.clone(),
+        Arc::clone(&params.plugin_rules),
     ));
     if params.yolo {
         permissions.toggle_yolo();

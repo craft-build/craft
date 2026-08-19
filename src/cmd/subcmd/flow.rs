@@ -166,7 +166,11 @@ async fn run_flow(
             model: model.clone(),
             config: config.agent.clone(),
             tool_output_lines: ToolOutputLines::default(),
-            permissions: Arc::new(PermissionManager::new(load_permissions(&cwd), cwd.clone())),
+            permissions: Arc::new(PermissionManager::new(
+                load_permissions(&cwd),
+                cwd.clone(),
+                plugin_host.plugin_rules(),
+            )),
             session_id: None,
             mailbox: None,
             timeouts,

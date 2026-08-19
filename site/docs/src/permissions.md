@@ -2,13 +2,14 @@
 
 Craft uses a permission system to decide what each tool is allowed to do and when to ask you first.
 
-Rules come from three layers, combined for resolution:
+Rules come from four layers, combined for resolution:
 
 1. **Session rules**, set during the current session (in-memory only)
 2. **Config rules**, loaded from TOML permission files
 3. **Builtin rules**, the hardcoded defaults
+4. **Plugin rules**, declared by plugins via `craft.api.register_permission_rule` (see the plugins docs)
 
-Any matching deny blocks the tool. No exceptions.
+Any matching deny blocks the tool. No exceptions, so a config deny always beats a plugin allow.
 
 ## Check Flow
 
@@ -27,6 +28,8 @@ For every tool call, Craft resolves permission like this:
 | `edit` | Project directory | Files outside require permission |
 | `multiedit` | Project directory | Files outside require permission |
 | `task` | `*` (all) | Subagent spawning always allowed |
+
+The memory plugin uses a plugin rule to pre-allow the file-write tools inside its notes directory (under Craft's state dir), so the agent can edit memory notes directly without a prompt.
 
 These tools require explicit permission:
 

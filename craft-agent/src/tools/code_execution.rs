@@ -404,6 +404,7 @@ mod tests {
                 ..Default::default()
             },
             dir.path().to_path_buf(),
+            Arc::default(),
         ));
         permissions.toggle_auto_review();
 

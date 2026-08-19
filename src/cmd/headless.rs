@@ -148,6 +148,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         fast,
         model_policy: Arc::new(config.provider.model_policy.clone()),
         mode: opts.mode,
+        plugin_rules: plugin_host.plugin_rules(),
     });
 
     let outcome = drain(

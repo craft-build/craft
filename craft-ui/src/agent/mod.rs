@@ -423,6 +423,7 @@ mod tests {
         let permissions = Arc::new(PermissionManager::new(
             PermissionsConfig::default(),
             PathBuf::from("/tmp"),
+            Arc::default(),
         ));
         let flow_store = Arc::new(craft_storage::flow::FlowStore::from_root(PathBuf::from(
             "/tmp",

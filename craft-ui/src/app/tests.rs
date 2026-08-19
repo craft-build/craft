@@ -88,6 +88,7 @@ fn test_app_with_lua(lua_commands: LuaCommandReader) -> App {
             ..Default::default()
         },
         PathBuf::from("/tmp"),
+        Arc::default(),
     ));
     let model = test_model();
     let mut app = App::new(
@@ -703,6 +704,7 @@ fn load_session_clears_plan() {
                 ..Default::default()
             },
             PathBuf::from("/tmp"),
+            Arc::default(),
         )),
         Arc::from([]),
         craft_lua::EventHandle::disconnected_for_test(),

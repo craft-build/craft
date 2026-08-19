@@ -2,28 +2,57 @@ local ToolView = require("craft.tool_view")
 local helpers = require("memory_helpers")
 local ListPicker = require("craft.list_picker")
 
+local WRITE_TOOLS = { "write", "edit", "multiedit", "edit_lines", "insert_lines" }
+
 local function memories_path_suffix()
   local cwd = craft.uv.cwd()
   local root = craft.fs.root(cwd, ".git") or cwd
   return "projects/" .. helpers.project_id(root) .. "/memories"
 end
 
+local function legacy_dir_if_exists(suffix)
+  local legacy = craft.env.legacy_dir()
+  if not legacy then
+    return nil
+  end
+  local dir = craft.fs.joinpath(legacy, suffix)
+  local meta = craft.fs.metadata(dir)
+  if meta and meta.is_dir then
+    return dir
+  end
+end
+
+-- Notes live outside cwd, where file-write tools normally prompt; pre-allow
+-- them here so the agent can edit notes directly. Reads may come from the
+-- legacy dir while writes go to the state dir, so cover both.
+local function register_write_rules()
+  local suffix = memories_path_suffix()
+  local dirs = { legacy_dir_if_exists(suffix) }
+  local state = craft.env.state_dir()
+  if state then
+    dirs[#dirs + 1] = craft.fs.joinpath(state, suffix)
+  end
+  for _, dir in ipairs(dirs) do
+    for _, tool in ipairs(WRITE_TOOLS) do
+      craft.api.register_permission_rule({ tool = tool, scope = dir .. "/**" })
+    end
+  end
+end
+register_write_rules()
+
 local function resolve_dir(check_legacy)
+  local suffix = memories_path_suffix()
   if check_legacy then
-    local legacy = craft.env.legacy_dir()
-    if legacy then
-      local dir = craft.fs.joinpath(legacy, memories_path_suffix())
-      local meta = craft.fs.metadata(dir)
-      if meta and meta.is_dir then
-        return dir
-      end
+    local dir = legacy_dir_if_exists(suffix)
+    if dir then
+      return dir
     end
   end
   local state = craft.env.state_dir()
   if not state then
     return nil, "cannot resolve state dir"
   end
-  return craft.fs.joinpath(state, memories_path_suffix())
+  return craft.fs.joinpath(state, suffix)
 end
 
 craft.api.register_prompt_hint({
@@ -236,12 +265,22 @@ local function cmd_delete(path, dir)
   return "deleted " .. path
 end
 
+local function with_dir(res, dir)
+  local prefix = "dir: " .. dir .. "\n\n"
+  if type(res) == "string" then
+    return prefix .. res
+  end
+  res.llm_output = prefix .. res.llm_output
+  return res
+end
+
 craft.api.register_tool({
   name = "memory",
   description = "Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.\n\n"
     .. "- Save important context before compaction or to build up project knowledge.\n"
     .. "- Keep entries concise and current. Delete outdated information.\n"
-    .. "- Use `view` with a search query (not a filename) to recall memories: keyword search is always-on; semantic search is used when available.",
+    .. "- Use `view` with a search query (not a filename) to recall memories: keyword search is always-on; semantic search is used when available.\n"
+    .. "- Notes are plain files; `view` reports the dir, so use the edit tool on `<dir>/<name>` for targeted changes.",
 
   schema = {
     type = "object",
@@ -295,6 +334,9 @@ craft.api.register_tool({
     end
     if err then
       return { llm_output = "error: " .. err, is_error = true }
+    end
+    if cmd == "view" then
+      return with_dir(result, dir)
     end
     return result
   end,

@@ -23,6 +23,7 @@ Project settings override global ones. See [Configuration](./configuration.md).
 | `register_recency_source({ ... })` | A per-turn volatile fact (e.g. live repo state) appended to the latest user message at request time. Takes `name` and a `callback` returning a string or nil; rebuilt every turn and never persisted |
 | `register_options({ ... })` | Declare the options your plugin accepts under `plugins.<name>` in `craft.setup`. Returns the user's values merged with your defaults |
 | `set_prompt({ ... })` | Override a singleton prompt slot (`identity` or `tone`). Takes `slot`, `content` (string or callback), and optional `prompt` |
+| `register_permission_rule({ ... })` | Declare an agent permission rule for a native tool, so paths your plugin owns do not prompt |
 
 Slash commands accept an `nargs` option that controls how many whitespace-separated arguments they take, spelled like Neovim's `nargs`: `0` (the default), `1`, `"?"` (zero or one), `"*"` (any number), or `"+"` (one or more). Type more than allowed and the command quietly stops matching, sending the input to the model as a normal message. Only the upper bound is checked, so with `"+"` you still handle an empty `opts.args` yourself. The handler receives one `opts` table: `opts.args` is the raw argument string (whitespace kept, may be empty) and `opts.fargs` is the same string split into words.
 
@@ -53,6 +54,32 @@ craft.api.register_command({
       craft.ui.flash("could not run /sessions: " .. err)
     end
   end,
+})
+```
+
+### `craft.api.register_permission_rule()`
+
+```lua
+craft.api.register_permission_rule({spec})
+```
+
+Declare an agent permission rule for a native tool. Use it to pre-allow (or pre-deny) tool calls on paths your plugin owns, like a storage directory outside the working dir, so the user is not prompted for them.
+
+Rules live as long as the plugin is loaded: a reload replaces them, and a reload that registers none clears the old ones. User config and session deny rules always win over a plugin allow.
+
+**Parameters:**
+
+- `{spec}` (`table`) Rule specification:
+  - `tool` (`string`) Required. Native tool name (e.g. "edit", "write"). MCP tools and the "*" wildcard are not allowed.
+  - `scope` (`string`) Required. Scope pattern the rule applies to, e.g. "/abs/dir/**" for a directory subtree.
+  - `effect` (`string`) Optional. "allow" (default) or "deny".
+
+**Example:**
+
+```lua
+craft.api.register_permission_rule({
+  tool = "write",
+  scope = notes_dir .. "/**",
 })
 ```
 

@@ -14,7 +14,7 @@ use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 use craft_agent::headless::{self, InteractiveHandle, InteractiveParams};
 use craft_agent::mcp;
-use craft_agent::permissions::PermissionAnswer;
+use craft_agent::permissions::{PermissionAnswer, PluginRuleStore};
 use craft_agent::prompt::ResolvedSlots;
 use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{
@@ -442,6 +442,7 @@ pub struct SdkParams {
     pub prompt_slots: ResolvedSlots,
     pub fast: bool,
     pub model_policy: Arc<ModelPolicy>,
+    pub plugin_rules: Arc<PluginRuleStore>,
 }
 
 struct Shared {
@@ -462,6 +463,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
         prompt_slots,
         fast,
         model_policy,
+        plugin_rules,
     } = params;
     cli.warn_ignored_flags();
     if let Some(max) = cli.max_turns {
@@ -498,6 +500,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
         system_prompt_override: cli.system_prompt.clone().filter(|s| !s.is_empty()),
         append_system_prompt: cli.append_system_prompt.clone().filter(|s| !s.is_empty()),
         fs: Arc::new(craft_agent::tools::LocalFs),
+        plugin_rules,
     });
 
     let (out_tx, out_rx) = flume::unbounded::<String>();

@@ -341,6 +341,7 @@ fn make_agent_params(model: Model, provider: Arc<dyn Provider>) -> AgentParams {
                 ..Default::default()
             },
             std::path::PathBuf::from("/tmp"),
+            Arc::default(),
         )),
         session_id: None,
         mailbox: None,

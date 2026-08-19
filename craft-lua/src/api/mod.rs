@@ -29,13 +29,15 @@ use std::sync::Arc;
 use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::api::options::PluginOpts;
-use crate::api::tool::PendingTools;
+use crate::api::tool::{PendingRules, PendingTools};
 use crate::api::util::command::UiAction;
 use crate::plugin_permissions::PluginPermissions;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_craft_global(
     lua: &Lua,
     pending: PendingTools,
+    pending_rules: PendingRules,
     plugin: Arc<str>,
     ui_action_tx: Option<flume::Sender<UiAction>>,
     permissions: &PluginPermissions,
@@ -47,6 +49,7 @@ pub(crate) fn create_craft_global(
     let api = tool::create_api_table(
         lua,
         pending,
+        pending_rules,
         Arc::clone(&plugin),
         opts,
         ui_action_tx.clone(),

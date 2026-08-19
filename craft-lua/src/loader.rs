@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use craft_agent::permissions::PluginRuleStore;
 use craft_agent::tools::ToolRegistry;
 use craft_config::{PluginsConfig, RawConfig};
 use include_dir::{Dir, include_dir};
@@ -84,6 +85,7 @@ static BUNDLED_DIRS: LazyLock<&'static [&'static Dir<'static>]> = LazyLock::new(
 
 pub struct PluginHost {
     inner: LuaThread,
+    plugin_rules: Arc<PluginRuleStore>,
 }
 
 impl Drop for PluginHost {
@@ -131,8 +133,26 @@ impl PluginHost {
         terminal_backend: Arc<dyn TerminalBackend>,
         jit: bool,
     ) -> Result<Self, PluginError> {
-        let lua = runtime::spawn(registry, *BUNDLED_DIRS, embed_tx, terminal_backend, jit)?;
-        Ok(Self { inner: lua })
+        let plugin_rules = Arc::new(PluginRuleStore::default());
+        let lua = runtime::spawn(
+            registry,
+            *BUNDLED_DIRS,
+            embed_tx,
+            terminal_backend,
+            jit,
+            Arc::clone(&plugin_rules),
+        )?;
+        Ok(Self {
+            inner: lua,
+            plugin_rules,
+        })
+    }
+
+    /// The store that `craft.api.register_permission_rule` writes into. Hand
+    /// it to every [`craft_agent::permissions::PermissionManager`] so plugin
+    /// rules apply to all sessions.
+    pub fn plugin_rules(&self) -> Arc<PluginRuleStore> {
+        Arc::clone(&self.plugin_rules)
     }
 
     /// Stop the Lua thread from taking new work without joining it, so the

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use craft_agent::mcp::config::McpConfig;
+use craft_agent::permissions::PluginRuleStore;
 use craft_agent::prompt::ResolvedSlots;
 use craft_agent::{AgentConfig, PermissionsConfig};
 use craft_config::ModelPolicy;
@@ -29,6 +30,7 @@ pub struct AcpParams {
     pub model_policy: Arc<ModelPolicy>,
     pub plugin_host: PluginHost,
     pub flow_store: Arc<FlowStore>,
+    pub plugin_rules: Arc<PluginRuleStore>,
 }
 
 pub async fn run(params: AcpParams) -> color_eyre::Result<()> {

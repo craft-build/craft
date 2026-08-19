@@ -13,6 +13,7 @@ use craft_agent::tools::{
     PermissionScopes, ToolAudience, ToolContext, ToolExecResult, ToolInvocation,
 };
 use craft_agent::{AgentEvent, BufferSnapshot, ImageMediaType, ImageSource, SharedBuf, ToolOutput};
+use craft_config::{Effect, PermissionRule, ToolKey};
 use flume::Sender;
 use mlua::{
     Function, Lua, LuaSerdeExt, RegistryKey, Result as LuaResult, Table, Value as LuaValue,
@@ -36,6 +37,7 @@ const TOOL_HANDLER_RETURN_ERR: &str =
     "tool handler must return string or {output=string, is_error?=bool}";
 const TIMEOUT_PARSE_ERR: &str = "register_tool: 'timeout' must be a positive number, 0, or false";
 const NARGS_ERR: &str = r#"register_command: 'nargs' must be 0, 1, "?", "*", or "+""#;
+const PERMISSION_RULE_KEYS: &[&str] = &["tool", "scope", "effect"];
 const MAX_HINT_CONTENT_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone)]
@@ -73,6 +75,8 @@ pub(crate) struct PendingTool {
 }
 
 pub(crate) type PendingTools = Arc<Mutex<Vec<PendingTool>>>;
+
+pub(crate) type PendingRules = Arc<Mutex<Vec<PermissionRule>>>;
 
 pub(crate) struct LuaTool {
     pub(crate) name: Arc<str>,
@@ -424,6 +428,7 @@ fn parse_hint_content(lua: &Lua, spec: &Table) -> LuaResult<HintContent> {
 pub(crate) fn create_api_table(
     lua: &Lua,
     pending: PendingTools,
+    pending_rules: PendingRules,
     plugin: Arc<str>,
     opts: crate::api::options::PluginOpts,
     ui_action_tx: Option<flume::Sender<UiAction>>,
@@ -439,6 +444,13 @@ pub(crate) fn create_api_table(
         "register_tool",
         lua.create_function(move |lua, spec: Table| {
             register_tool_from_lua(lua, &spec, pending.clone())
+        })?,
+    )?;
+
+    t.set(
+        "register_permission_rule",
+        lua.create_function(move |_lua, spec: Table| {
+            register_permission_rule(&spec, &pending_rules)
         })?,
     )?;
 
@@ -674,6 +686,79 @@ fn check_schema_field(schema: &Value, key: &str, field: &str) -> LuaResult<()> {
             "register_tool: {key} field '{field}' not in schema properties or not type 'string'"
         )));
     }
+    Ok(())
+}
+
+/// Declare an agent permission rule for a native tool. Use it to pre-allow
+/// (or pre-deny) tool calls on paths your plugin owns, like a storage
+/// directory outside the working dir, so the user is not prompted for them.
+///
+/// Rules live as long as the plugin is loaded: a reload replaces them, and a
+/// reload that registers none clears the old ones. User config and session
+/// deny rules always win over a plugin allow.
+///
+/// `spec.tool` is a required native tool name (no wildcard or MCP),
+/// `spec.scope` a required non-empty pattern, `spec.effect` an optional
+/// "allow" (default) or "deny".
+fn register_permission_rule(spec: &Table, pending_rules: &PendingRules) -> LuaResult<()> {
+    for entry in spec.pairs::<String, LuaValue>() {
+        let (key, _) = entry.map_err(|_| {
+            mlua::Error::runtime("register_permission_rule: spec keys must be strings")
+        })?;
+        if !PERMISSION_RULE_KEYS.contains(&key.as_str()) {
+            return Err(mlua::Error::runtime(format!(
+                "register_permission_rule: unknown key '{key}' (valid: tool, scope, effect)"
+            )));
+        }
+    }
+
+    let tool: String = spec.get("tool").map_err(|_| {
+        mlua::Error::runtime("register_permission_rule: 'tool' must be a native tool name string")
+    })?;
+    let tool = match ToolKey::parse(&tool) {
+        Ok(key @ ToolKey::Native(_)) => key,
+        Ok(_) => {
+            return Err(mlua::Error::runtime(
+                "register_permission_rule: only native tools are allowed (no wildcard or MCP)",
+            ));
+        }
+        Err(e) => {
+            return Err(mlua::Error::runtime(format!(
+                "register_permission_rule: {e}"
+            )));
+        }
+    };
+
+    let scope: String = spec
+        .get("scope")
+        .map_err(|_| mlua::Error::runtime("register_permission_rule: 'scope' must be a string"))?;
+    if scope.is_empty() {
+        return Err(mlua::Error::runtime(
+            "register_permission_rule: 'scope' must be non-empty",
+        ));
+    }
+
+    let effect = spec
+        .get::<Option<String>>("effect")
+        .map_err(|_| mlua::Error::runtime("register_permission_rule: 'effect' must be a string"))?;
+    let effect = match effect.as_deref() {
+        None | Some("allow") => Effect::Allow,
+        Some("deny") => Effect::Deny,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "register_permission_rule: invalid effect '{other}' (expected \"allow\" or \"deny\")"
+            )));
+        }
+    };
+
+    pending_rules
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(PermissionRule {
+            tool,
+            scope: Some(scope),
+            effect,
+        });
     Ok(())
 }
 

@@ -1363,6 +1363,7 @@ mod tests {
         let permissions = Arc::new(PermissionManager::new(
             deny_all_write,
             dir.path().to_path_buf(),
+            Arc::default(),
         ));
         let ctx =
             crate::tools::test_support::stub_ctx_with_permissions(&AgentMode::Build, permissions);

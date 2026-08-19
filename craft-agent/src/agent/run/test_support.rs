@@ -123,6 +123,7 @@ pub(super) fn make_agent_params() -> AgentParams {
                 ..Default::default()
             },
             std::path::PathBuf::from("/tmp"),
+            Arc::default(),
         )),
         session_id: None,
         mailbox: None,
@@ -356,6 +357,7 @@ pub(super) fn flow_agent_params(
                 ..Default::default()
             },
             std::path::PathBuf::from("/tmp"),
+            Arc::default(),
         )),
         session_id: None,
         mailbox: None,

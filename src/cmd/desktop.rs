@@ -151,6 +151,7 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
         permissions: Arc::new(craft_agent::permissions::PermissionManager::new(
             config.permissions,
             cwd.clone(),
+            plugin_host.plugin_rules(),
         )),
         timeouts,
         provider,

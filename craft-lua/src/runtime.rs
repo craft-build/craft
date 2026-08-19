@@ -28,6 +28,7 @@ use mlua::{
 };
 use serde_json::Value;
 
+use craft_agent::permissions::PluginRuleStore;
 use craft_config::RawConfig;
 
 use crate::api::autocmd::AutocmdStore;
@@ -38,7 +39,8 @@ use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{
-    LuaOutputFormat, LuaTool, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply,
+    LuaOutputFormat, LuaTool, PendingRules, PendingTool, PendingTools, PermissionScopeSpec,
+    ToolCallReply,
 };
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
@@ -1234,6 +1236,7 @@ struct LuaRuntime {
     _watchdog: Watchdog,
     lua: Lua,
     pending: PendingTools,
+    plugin_rules: Arc<PluginRuleStore>,
     plugins: PluginMap,
     registry: Arc<ToolRegistry>,
     tx: flume::Sender<Request>,
@@ -1259,6 +1262,7 @@ impl LuaRuntime {
         embed_tx: Option<crate::api::embed::EmbedChannel>,
         terminal_backend: Arc<dyn TerminalBackend>,
         jit: bool,
+        plugin_rules: Arc<PluginRuleStore>,
     ) -> Result<Self, PluginError> {
         let lua = Lua::new();
         let compiler = install_compiler(&lua, jit);
@@ -1304,6 +1308,7 @@ impl LuaRuntime {
             _watchdog: watchdog,
             lua,
             pending,
+            plugin_rules,
             plugins: Rc::new(RefCell::new(HashMap::new())) as PluginMap,
             registry,
             tx,
@@ -1666,9 +1671,13 @@ impl LuaRuntime {
         };
 
         let require_root = plugin_dir.as_ref().map(|d| d.join("lua"));
+        // Scoped to this load so a failed load simply drops its rules; only a
+        // successful load commits them to the store.
+        let pending_rules: PendingRules = Arc::default();
         let craft = create_craft_global(
             &self.lua,
             Arc::clone(&self.pending),
+            Arc::clone(&pending_rules),
             Arc::clone(&name),
             self.ui_action_tx.clone(),
             permissions,
@@ -1766,6 +1775,8 @@ impl LuaRuntime {
                 )
             })
             .collect();
+        let rules = std::mem::take(&mut *pending_rules.lock().unwrap_or_else(|e| e.into_inner()));
+        self.plugin_rules.replace(&name, rules);
         self.plugins.borrow_mut().insert(name, keys);
 
         Ok(())
@@ -1773,6 +1784,7 @@ impl LuaRuntime {
 
     fn clear_plugin(&mut self, plugin: &str) {
         self.registry.clear_plugin(plugin);
+        self.plugin_rules.remove(plugin);
         self.drop_plugin_keys(plugin);
         if let Some(mut store) = self.lua.app_data_mut::<KeymapStore>() {
             let keys = store.clear_plugin(plugin);
@@ -2291,6 +2303,7 @@ pub fn spawn(
     embed_tx: Option<crate::api::embed::EmbedChannel>,
     terminal_backend: Arc<dyn TerminalBackend>,
     jit: bool,
+    plugin_rules: Arc<PluginRuleStore>,
 ) -> Result<LuaThread, PluginError> {
     let (tx, rx) = flume::unbounded::<Request>();
     let tx_clone = tx.clone();
@@ -2314,10 +2327,11 @@ pub fn spawn(
                  command_writer,
                  keymap_writer,
                  hint_writer,
-                  embed_tx,
-                  terminal_backend,
-                  jit,
-              ) {
+                   embed_tx,
+                   terminal_backend,
+                   jit,
+                   plugin_rules,
+               ) {
                 Ok(r) => {
                     let _ = init_tx.send(Ok(()));
                     r
