@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use craft_providers::{ContentBlock, Message, Role, StopReason, StreamResponse, TokenUsage};
+use craft_providers::{Message, Role, StopReason, StreamResponse, TokenUsage};
 use tracing::{error, info, warn};
 
 use crate::agent::streaming::stream_with_retry;
@@ -14,10 +14,9 @@ use super::{Agent, NUDGE_PROMPT, TurnOutcome};
 const STAGNATION_WINDOW_SIZE: usize = 5;
 const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
 
-/// Stands in for the assistant turn the model left blank, so the nudge below
-/// has something to answer. Never a real response: readers that mine history
-/// for model text must skip it.
-pub const EMPTY_RESPONSE_MARKER: &str = "(empty)";
+/// A model that stalls once often stalls again on the retry, so it gets a
+/// second chance before the turn ends empty handed.
+const MAX_NUDGES: u32 = 2;
 
 impl<'h> Agent<'h> {
     pub(super) async fn turn(&mut self) -> Result<TurnOutcome, AgentError> {
@@ -239,27 +238,11 @@ impl<'h> Agent<'h> {
                 &self.io.event_tx,
             );
         } else {
-            let has_text = response.message.first_text_content().is_some();
-
-            if !has_text
-                && !self.tool_state.post_tool_empty_retried
-                && self.history.has_recent_tool_results(5)
-            {
-                self.tool_state.post_tool_empty_retried = true;
-                warn!("empty response after tool calls, nudging model to continue");
-                self.io.event_tx.send(AgentEvent::Nudge)?;
-                self.history.push(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: EMPTY_RESPONSE_MARKER.into(),
-                    }],
-                    ..Default::default()
-                });
-                self.history.push(Message::synthetic(NUDGE_PROMPT.into()));
+            if response.message.first_text_content().is_some() {
+                self.history.push(response.message);
+            } else if self.recover_stalled_turn()? {
                 return Ok(TurnOutcome::Continue);
             }
-
-            self.history.push(response.message);
 
             if stop_reason == Some(StopReason::MaxTokens)
                 && self.num_turns <= self.config.max_continuation_turns
@@ -298,11 +281,31 @@ impl<'h> Agent<'h> {
         }
     }
 
+    /// The turn came back without text, so [`Message::empty_marker`] takes its
+    /// place in history. Returns true when the model was nudged to try again.
+    fn recover_stalled_turn(&mut self) -> Result<bool, AgentError> {
+        // Asked before the marker lands, since it shifts the recent window.
+        let nudge = self.tool_state.nudges < MAX_NUDGES && self.history.has_recent_tool_results(5);
+        self.history.push(Message::empty_marker());
+        if !nudge {
+            return Ok(false);
+        }
+
+        self.tool_state.nudges += 1;
+        warn!(
+            nudges = self.tool_state.nudges,
+            "empty response after tool calls, nudging model to continue"
+        );
+        self.io.event_tx.send(AgentEvent::Nudge)?;
+        self.history.push(Message::synthetic(NUDGE_PROMPT.into()));
+        Ok(true)
+    }
+
     pub(super) async fn process_tool_calls(
         &mut self,
         response: StreamResponse,
     ) -> Result<ToolBatchOutcome, AgentError> {
-        self.tool_state.post_tool_empty_retried = false;
+        self.tool_state.nudges = 0;
         let ctx = self.tool_context();
         let mut recent = {
             let mut d = self.doom.doom.lock().unwrap_or_else(|e| e.into_inner());
@@ -444,35 +447,61 @@ mod tests {
     };
     use test_case::test_case;
 
-    #[tokio::test]
-    async fn nudge_on_empty_after_tools() {
-        let (events, done) = run_nudge(vec![
+    #[test_case(
+        vec![
             tool_call_response("glob", "t1"),
             empty_response(),
             text_response(StopReason::EndTurn),
-        ])
-        .await;
-        assert!(has_event(&events, |e| matches!(e, AgentEvent::Nudge)));
-        assert_eq!(done.expect("expected Done event"), 3);
-    }
-
-    #[tokio::test]
-    async fn no_nudge_when_text_after_tools() {
-        let (events, done) = run_nudge(vec![
+        ],
+        3, 1
+        ; "nudge_on_empty_after_tools"
+    )]
+    #[test_case(
+        vec![
+            tool_call_response("glob", "t1"),
+            thinking_response(),
+            empty_response(),
+            empty_response(),
+        ],
+        4, 2
+        ; "nudges_twice_then_gives_up"
+    )]
+    #[test_case(
+        vec![
             tool_call_response("glob", "t1"),
             text_response(StopReason::EndTurn),
-        ])
-        .await;
-        assert!(!has_event(&events, |e| matches!(e, AgentEvent::Nudge)));
-        assert_eq!(done.expect("expected Done event"), 2);
-    }
-
+        ],
+        2, 0
+        ; "no_nudge_when_text_after_tools"
+    )]
+    #[test_case(
+        vec![empty_response(), text_response(StopReason::EndTurn)],
+        1, 0
+        ; "no_nudge_without_recent_tools"
+    )]
     #[tokio::test]
-    async fn no_nudge_without_recent_tools() {
-        let (events, done) =
-            run_nudge(vec![empty_response(), text_response(StopReason::EndTurn)]).await;
-        assert!(!has_event(&events, |e| matches!(e, AgentEvent::Nudge)));
-        assert_eq!(done.expect("expected Done event"), 1);
+    async fn nudge_behavior(
+        responses: Vec<StreamResponse>,
+        expected_turns: u32,
+        expected_nudges: usize,
+    ) {
+        let (events, done, history) = run_nudge(responses).await;
+
+        let nudges = events
+            .iter()
+            .filter(|e| matches!(e.event, AgentEvent::Nudge))
+            .count();
+        assert_eq!(nudges, expected_nudges);
+        assert_eq!(done.expect("expected Done event"), expected_turns);
+
+        assert!(
+            history
+                .as_slice()
+                .iter()
+                .all(|m| m.content.iter().any(|b| !b.is_thinking())),
+            "history holds a message no provider will accept: {:?}",
+            history.as_slice()
+        );
     }
 
     #[tokio::test]

@@ -45,7 +45,6 @@ use recency::AgentRecency;
 use tools::AgentTools;
 
 pub use compaction::{estimate_message_tokens, resolve_compaction_model};
-pub use turn::EMPTY_RESPONSE_MARKER;
 
 const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
 const HOOK_BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -187,7 +186,7 @@ impl<'h> Agent<'h> {
                 subagent_cancels: params.subagent_cancels,
                 guardrails: ToolGuardrails::new(),
                 trust_tracker: TrustTracker::new(craft_config::TrustDecayConfig::default()),
-                post_tool_empty_retried: false,
+                nudges: 0,
             },
             compaction: AgentCompaction {
                 auto_compact: super::compaction::auto_compact_enabled(),

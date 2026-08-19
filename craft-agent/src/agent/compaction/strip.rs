@@ -24,12 +24,7 @@ pub(super) fn strip_images(messages: &mut [Message]) {
 
 pub(super) fn strip_thinking(messages: &mut [Message]) {
     for msg in messages {
-        msg.content.retain(|block| {
-            !matches!(
-                block,
-                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
-            )
-        });
+        msg.content.retain(|block| !block.is_thinking());
     }
 }
 

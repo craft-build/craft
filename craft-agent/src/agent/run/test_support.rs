@@ -88,10 +88,21 @@ pub(super) fn text_response(stop_reason: StopReason) -> StreamResponse {
 }
 
 pub(super) fn empty_response() -> StreamResponse {
+    assistant_response(vec![])
+}
+
+pub(super) fn thinking_response() -> StreamResponse {
+    assistant_response(vec![ContentBlock::Thinking {
+        thinking: "stalled".into(),
+        signature: None,
+    }])
+}
+
+fn assistant_response(content: Vec<ContentBlock>) -> StreamResponse {
     StreamResponse {
         message: Message {
             role: Role::Assistant,
-            content: vec![],
+            content,
             ..Default::default()
         },
         usage: TokenUsage::default(),
@@ -277,7 +288,9 @@ pub(super) fn vcc_overflow_history() -> Vec<Message> {
     msgs
 }
 
-pub(super) async fn run_nudge(responses: Vec<StreamResponse>) -> (Vec<Envelope>, Option<u32>) {
+pub(super) async fn run_nudge(
+    responses: Vec<StreamResponse>,
+) -> (Vec<Envelope>, Option<u32>, History) {
     let mut history = History::new(Vec::new());
     let (run_params, event_rx) = make_run_params(&mut history);
     let mut params = make_agent_params();
@@ -289,7 +302,7 @@ pub(super) async fn run_nudge(responses: Vec<StreamResponse>) -> (Vec<Envelope>,
         AgentEvent::Done { num_turns, .. } => Some(*num_turns),
         _ => None,
     });
-    (events, done)
+    (events, done, history)
 }
 
 pub(super) fn shift_tool_call(tool_id: &str, target: &str, rationale: &str) -> StreamResponse {

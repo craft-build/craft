@@ -79,6 +79,9 @@ impl ImageSource {
 pub const IMAGE_OMITTED_NOTE: &str =
     "[image omitted: the current model does not support image input]";
 
+/// See [`Message::empty_marker`].
+pub const EMPTY_RESPONSE_MARKER: &str = "(empty)";
+
 /// For models without vision, image blocks become a text note instead of a
 /// wire block the API would reject. History keeps the pixels, so switching
 /// back to a vision-capable model restores them.
@@ -162,6 +165,12 @@ pub enum ContentBlock {
     Image {
         source: ImageSource,
     },
+}
+
+impl ContentBlock {
+    pub fn is_thinking(&self) -> bool {
+        matches!(self, Self::Thinking { .. } | Self::RedactedThinking { .. })
+    }
 }
 
 /// Who a message came from, which `role` cannot say. Providers only
@@ -266,6 +275,19 @@ impl Message {
         }
     }
 
+    /// Stands in for an assistant turn with no text, thinking alone or empty,
+    /// which providers reject as the trailing message. Never a real response:
+    /// readers mining history for model text must skip it.
+    pub fn empty_marker() -> Self {
+        Self {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: EMPTY_RESPONSE_MARKER.into(),
+            }],
+            ..Default::default()
+        }
+    }
+
     pub fn user_text(&self) -> Option<&str> {
         match &self.display_text {
             Some(t) if t.is_empty() => None,
@@ -276,7 +298,11 @@ impl Message {
 
     pub fn first_text_content(&self) -> Option<&str> {
         self.content.iter().find_map(|b| match b {
-            ContentBlock::Text { text } if !text.is_empty() => Some(text.as_str()),
+            ContentBlock::Text { text }
+                if !text.trim().is_empty() && text != EMPTY_RESPONSE_MARKER =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
     }

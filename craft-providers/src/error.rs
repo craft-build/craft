@@ -28,6 +28,8 @@ pub enum AgentError {
     ContentPolicy { message: String },
     #[error("billing error: {message}")]
     Billing { message: String },
+    #[error("compaction returned no summary")]
+    EmptySummary,
 }
 
 impl AgentError {
@@ -47,7 +49,8 @@ impl AgentError {
             | Self::Cancelled
             | Self::ContextOverflow { .. }
             | Self::ContentPolicy { .. }
-            | Self::Billing { .. } => false,
+            | Self::Billing { .. }
+            | Self::EmptySummary => false,
         }
     }
 
@@ -91,6 +94,7 @@ impl AgentError {
             }
             Self::ContentPolicy { message } => format!("content policy violation: {message}"),
             Self::Billing { .. } => "billing error, check your API credits or plan".into(),
+            Self::EmptySummary => "compaction returned no summary, history kept as is".into(),
         }
     }
 

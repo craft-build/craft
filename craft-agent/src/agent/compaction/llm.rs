@@ -135,6 +135,12 @@ pub(crate) async fn compact_history(
         }
     };
 
+    // A summary the model never wrote would throw the session away for nothing.
+    if response.message.first_text_content().is_none() {
+        info!("compaction returned no text, using static fallback");
+        return Ok(static_fallback(history));
+    }
+
     event_tx.send(AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
         message: response.message.clone(),
         usage: response.usage,
