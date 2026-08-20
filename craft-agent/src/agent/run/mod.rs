@@ -186,7 +186,6 @@ impl<'h> Agent<'h> {
                 subagent_cancels: params.subagent_cancels,
                 guardrails: ToolGuardrails::new(),
                 trust_tracker: TrustTracker::new(craft_config::TrustDecayConfig::default()),
-                nudges: 0,
             },
             compaction: AgentCompaction {
                 auto_compact: super::compaction::auto_compact_enabled(),

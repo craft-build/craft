@@ -18,6 +18,9 @@ const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
 /// plenty of chances before the turn ends empty handed.
 const MAX_NUDGES: u32 = 20;
 
+/// Counted over non-padding messages.
+const RECENT_TOOL_WINDOW: usize = 5;
+
 /// Without this note a cancelled reply replays in history as a finished
 /// turn, and a model resuming its own cut-off text can wedge the session
 /// (seen with llama.cpp stuck on an unterminated tool call).
@@ -304,20 +307,15 @@ impl<'h> Agent<'h> {
     /// The turn came back without text, so [`Message::empty_marker`] takes its
     /// place in history. Returns true when the model was nudged to try again.
     fn recover_stalled_turn(&mut self) -> Result<bool, AgentError> {
-        // Asked before the marker lands, since it shifts the recent window.
-        // Each nudge pads history with a marker and a prompt, so the window
-        // widens to keep the original tool results in sight.
-        let depth = 5 + 2 * self.tool_state.nudges as usize;
-        let nudge =
-            self.tool_state.nudges < MAX_NUDGES && self.history.has_recent_tool_results(depth);
+        let nudges = self.history.recent_nudges();
+        let nudge = nudges < MAX_NUDGES && self.history.has_recent_tool_results(RECENT_TOOL_WINDOW);
         self.history.push(Message::empty_marker());
         if !nudge {
             return Ok(false);
         }
 
-        self.tool_state.nudges += 1;
         warn!(
-            nudges = self.tool_state.nudges,
+            nudges = nudges + 1,
             "empty response after tool calls, nudging model to continue"
         );
         self.io.event_tx.send(AgentEvent::Nudge)?;
@@ -329,7 +327,6 @@ impl<'h> Agent<'h> {
         &mut self,
         response: StreamResponse,
     ) -> Result<ToolBatchOutcome, AgentError> {
-        self.tool_state.nudges = 0;
         let ctx = self.tool_context();
         let mut recent = {
             let mut d = self.doom.doom.lock().unwrap_or_else(|e| e.into_inner());
@@ -524,6 +521,40 @@ mod tests {
             "history holds a message no provider will accept: {:?}",
             history.as_slice()
         );
+    }
+
+    /// Pins the regression where a stale nudge counter made a follow-up
+    /// "continue" end instantly: the budget lives in the history tail, and
+    /// the new user message breaks the streak.
+    #[tokio::test]
+    async fn nudge_budget_resets_on_new_run() {
+        let first_run = [tool_call_response("glob", "t1")]
+            .into_iter()
+            .chain((0..=MAX_NUDGES).map(|_| empty_response()))
+            .collect();
+        let second_run = vec![empty_response(), text_response(StopReason::EndTurn)];
+        let mut history = History::new(Vec::new());
+        let (run_params, event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = std::sync::Arc::new(MockProvider::new(first_run));
+        let _ = Agent::new(params, run_params).run(default_input()).await;
+
+        // `run` consumes the agent, so the follow-up message gets a fresh
+        // one over the same history.
+        let (run_params, second_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = std::sync::Arc::new(MockProvider::new(second_run));
+        let _ = Agent::new(params, run_params).run(default_input()).await;
+        let events: Vec<_> = drain_events(&event_rx)
+            .into_iter()
+            .chain(drain_events(&second_rx))
+            .collect();
+
+        let nudges = events
+            .iter()
+            .filter(|e| matches!(e.event, AgentEvent::Nudge))
+            .count();
+        assert_eq!(nudges, MAX_NUDGES as usize + 1);
     }
 
     /// Streams `delta` (if any), fires `cancel_after_delta` (if any),

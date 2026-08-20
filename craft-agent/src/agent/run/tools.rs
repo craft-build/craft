@@ -33,5 +33,4 @@ pub(super) struct AgentTools {
     pub(super) subagent_cancels: Arc<CancelMap<String>>,
     pub(super) guardrails: ToolGuardrails,
     pub(super) trust_tracker: TrustTracker,
-    pub(super) nudges: u32,
 }
