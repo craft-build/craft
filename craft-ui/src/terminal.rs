@@ -1,9 +1,9 @@
 use shell_words::split;
 use std::io::{Write, stdout};
 use std::path::Path;
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::thread::ThreadId;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use craft_config::NotificationMethod;
@@ -20,6 +20,9 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 
 const FALLBACK_NOTIFICATION_MESSAGE: &str = "Craft needs attention";
 const BELL_SEQUENCE: &str = "\u{7}";
+/// Raw mode is already on when the tmux query runs, so a wedged tmux server
+/// must not be able to hang startup with Ctrl-C disabled.
+const TMUX_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// CSI ?2026h — begin synchronized output. Terminals that support it
 /// batch all subsequent writes until the matching end, eliminating the
@@ -199,17 +202,26 @@ fn auto_supports_osc9(env: &TerminalEnvironment<'_>, tmux: Option<&TmuxClient>) 
 }
 
 fn query_tmux_client() -> Option<TmuxClient> {
-    let output = ProcessCommand::new("tmux")
+    let mut child = ProcessCommand::new("tmux")
         .args([
             "display-message",
             "-p",
             "#{client_termtype}\t#{client_termname}",
         ])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
+    match wait_timeout::ChildExt::wait_timeout(&mut child, TMUX_QUERY_TIMEOUT) {
+        Ok(Some(status)) if status.success() => {}
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
     }
+    let output = child.wait_with_output().ok()?;
     let output = String::from_utf8(output.stdout).ok()?;
     let (term_type, term_name) = output.trim_end().split_once('\t')?;
     Some(TmuxClient {

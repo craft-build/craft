@@ -19,6 +19,7 @@ color-eyre = { workspace = true }
 tracing = { workspace = true }
 syntect = { workspace = true }
 unicode-width = { workspace = true }
+wait-timeout = { workspace = true }
 serde_json = { workspace = true }
 arboard = { workspace = true }
 jiff = { workspace = true }
