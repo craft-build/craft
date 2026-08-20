@@ -26,6 +26,21 @@ Inside the TUI, `/sessions` opens a picker that lists sessions for the current d
 
 Run `/checkpoint` to write a clean checkpoint of the current session. This makes the next resume faster and safer, since compaction and intermediate state are flushed to disk.
 
+## Archived Logs
+
+Compaction replaces the older turns in the session's on-disk log with the summary. The dropped turns are not lost: before the rewrite, craft parks the previous log at `sessions/archive/<session-id>/<n>.jsonl` in the [state directory](./configuration.md#directory-layout). It keeps the newest three per session, and at most 32 MB of them. The names count up, so the highest number is the newest.
+
+An archive is a complete session file, so `jq` or an editor reads it as it is. To open one in craft you have to put it back in place of the live log, which drops the session's current state, so move that out of the way first:
+
+```sh
+cd ~/.local/state/craft/sessions
+mv <session-id>.jsonl <session-id>.jsonl.bak
+cp archive/<session-id>/<n>.jsonl <session-id>.jsonl
+craft -s <session-id>
+```
+
+`CRAFT_DISABLE_AUTOCOMPACT=1` turns off the automatic compaction. A manual `/compact` still compacts.
+
 ## What Is Saved
 
 - The full message history and token usage
