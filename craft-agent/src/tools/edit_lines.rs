@@ -158,7 +158,7 @@ impl super::ToolInvocation for EditLines {
 pub struct InsertLines {
     #[param(description = "Absolute path to the file", alias = "file_path")]
     path: String,
-    #[param(description = "Line number to insert before (1-indexed). Use 1 to insert at the top.")]
+    #[param(description = "Line number to insert after (1-indexed). Use 0 to insert at the top.")]
     line: usize,
     #[param(description = "Text to insert")]
     new_string: String,
@@ -169,30 +169,32 @@ impl InsertLines {
     pub const DESCRIPTION: &str = include_str!("insert_lines.md");
     pub const EXAMPLES: Option<&str> = Some(
         r#"[
-  {"path": "/project/src/lib.rs", "line": 5, "new_string": "// inserted before line 5"},
-  {"path": "/project/notes.txt", "line": 1, "new_string": "top of file"}
+  {"path": "/project/src/lib.rs", "line": 4, "new_string": "// inserted after line 4"},
+  {"path": "/project/notes.txt", "line": 0, "new_string": "top of file"}
 ]"#,
     );
 
-    fn insert_lines(content: &str, line: usize, new_string: &str) -> Result<String, String> {
+    fn insert_lines(content: &str, after_line: usize, new_string: &str) -> Result<String, String> {
         let trailing_nl = content.ends_with('\n');
         let body = content.strip_suffix('\n').unwrap_or(content);
         let lines: Vec<&str> = body.split('\n').collect();
         let count = lines.len();
 
-        if line < 1 || line > count + 1 {
-            return Err(format!("line {line} {OUT_OF_RANGE} (1-{})", count + 1));
+        if after_line > count {
+            return Err(format!(
+                "after line {after_line} {OUT_OF_RANGE} (0-{count})"
+            ));
         }
 
         let mut result: Vec<&str> =
             Vec::with_capacity(count + new_string.matches('\n').count() + 2);
-        for &l in &lines[..line - 1] {
+        for &l in &lines[..after_line] {
             result.push(l);
         }
         for l in new_string.split('\n') {
             result.push(l);
         }
-        for &l in &lines[line - 1..] {
+        for &l in &lines[after_line..] {
             result.push(l);
         }
 
@@ -230,7 +232,7 @@ impl InsertLines {
         };
 
         let summary = format!(
-            "inserted at line {} in {}{}",
+            "inserted after line {} in {}{}",
             self.line,
             relative_path(&path),
             warn
@@ -345,20 +347,20 @@ mod tests {
     }
 
     #[test]
-    fn insert_lines_basic() {
+    fn insert_lines_after_anchor() {
         let content = "aaa\nbbb\nccc\n";
 
-        let r1 = InsertLines::insert_lines(content, 1, "ZZZ").unwrap();
-        assert_eq!(r1, "ZZZ\naaa\nbbb\nccc\n");
+        let r0 = InsertLines::insert_lines(content, 0, "TOP").unwrap();
+        assert_eq!(r0, "TOP\naaa\nbbb\nccc\n");
 
         let r2 = InsertLines::insert_lines(content, 2, "XXX\nYYY").unwrap();
-        assert_eq!(r2, "aaa\nXXX\nYYY\nbbb\nccc\n");
+        assert_eq!(r2, "aaa\nbbb\nXXX\nYYY\nccc\n");
 
-        let r3 = InsertLines::insert_lines(content, 4, "END").unwrap();
+        let r3 = InsertLines::insert_lines(content, 3, "END").unwrap();
         assert_eq!(r3, "aaa\nbbb\nccc\nEND\n");
 
-        let r4 = InsertLines::insert_lines(content, 2, "").unwrap();
-        assert_eq!(r4, "aaa\n\nbbb\nccc\n");
+        let r_empty = InsertLines::insert_lines(content, 2, "").unwrap();
+        assert_eq!(r_empty, "aaa\nbbb\n\nccc\n");
     }
 
     #[test]
@@ -366,12 +368,7 @@ mod tests {
         let content = "aaa\nbbb\nccc\n";
 
         assert!(
-            InsertLines::insert_lines(content, 0, "x")
-                .unwrap_err()
-                .contains(OUT_OF_RANGE)
-        );
-        assert!(
-            InsertLines::insert_lines(content, 5, "x")
+            InsertLines::insert_lines(content, 4, "x")
                 .unwrap_err()
                 .contains(OUT_OF_RANGE)
         );
@@ -381,7 +378,7 @@ mod tests {
     fn insert_lines_preserves_missing_trailing_newline() {
         let content = "aaa\nbbb\nccc";
         assert_eq!(
-            InsertLines::insert_lines(content, 3, "INS").unwrap(),
+            InsertLines::insert_lines(content, 2, "INS").unwrap(),
             "aaa\nbbb\nINS\nccc"
         );
     }
@@ -447,7 +444,7 @@ mod tests {
         pre_read(&ctx, &path);
         let tool = InsertLines::parse_input(&json!({
             "path": path,
-            "line": 2,
+            "line": 1,
             "new_string": "INS"
         }))
         .unwrap();
