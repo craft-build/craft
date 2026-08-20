@@ -4,10 +4,9 @@
 //! request they cannot answer.
 
 use agent_client_protocol_schema::v1::{
-    ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
-    ElicitationContentValue, ElicitationFormMode, ElicitationPropertySchema, ElicitationSchema,
-    ElicitationScope, ElicitationSessionScope, EnumOption, MultiSelectPropertySchema,
-    StringPropertySchema, ToolCallId,
+    ClientCapabilities, CreateElicitationRequest, ElicitationContentValue, ElicitationFormMode,
+    ElicitationPropertySchema, ElicitationSchema, ElicitationScope, ElicitationSessionScope,
+    EnumOption, MultiSelectPropertySchema, StringPropertySchema, ToolCallId,
 };
 use craft_agent::tools::question::QuestionAnswer;
 use craft_agent::types::QuestionSpec;
@@ -101,15 +100,23 @@ pub fn answer_from_response(raw_result: &str) -> QuestionAnswer {
         dismissed: true,
         answers: vec![],
     };
-    let Ok(response) = serde_json::from_str::<CreateElicitationResponse>(raw_result) else {
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(raw_result) else {
         return dismissed;
     };
-    let ElicitationAction::Accept(accept) = response.action else {
+    if response["action"] != "accept" {
         return dismissed;
-    };
-    let Some(content) = accept.content else {
-        return dismissed;
-    };
+    }
+    // Values parse per key: nothing in the schema is `required`, so clients
+    // may null out skipped fields, and one unreadable value should cost one
+    // answer, not the whole form.
+    let content: std::collections::BTreeMap<String, ElicitationContentValue> = response["content"]
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| Some((k.clone(), serde_json::from_value(v.clone()).ok()?)))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut answers: Vec<Vec<String>> = Vec::new();
     for (k, v) in &content {
@@ -220,6 +227,18 @@ mod tests {
         .to_string();
         let answer = answer_from_response(&raw);
         assert_eq!(answer.answers, vec![vec![], vec!["auth"]]);
+    }
+
+    #[test]
+    fn nulled_out_field_costs_one_answer_not_the_form() {
+        let raw = serde_json::json!({
+            "action": "accept",
+            "content": { "q1": "axum", "q2": null }
+        })
+        .to_string();
+        let answer = answer_from_response(&raw);
+        assert!(!answer.dismissed);
+        assert_eq!(answer.answers, vec![vec!["axum"]]);
     }
 
     #[test_case(r#"{"action":"decline"}"# ; "decline")]
