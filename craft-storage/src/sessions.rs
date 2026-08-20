@@ -54,7 +54,7 @@ const ARCHIVE_KEEP: usize = 3;
 /// budget of their own. The newest archive always survives, whatever it weighs.
 const ARCHIVE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// A `msg` line starts with this. Matching the prefix beats parsing the log.
-const MSG_PREFIX: &str = r#"{"t":"msg""#;
+const MSG_PREFIX: &[u8] = br#"{"t":"msg""#;
 
 /// Hands out the token that tags one append-only run of a message list.
 /// Process wide, so two runs never pick the same number.
@@ -556,16 +556,24 @@ fn archive_if_shrinking<M, U, T>(dir: &Path, session: &Session<M, U, T>) {
 
 /// `None` when the file is missing or unreadable, and the rewrite then goes
 /// ahead as before: nobody should lose a save because the old file would not
-/// count.
+/// count. The scan reads bytes into one reused buffer rather than allocating
+/// and UTF-8-validating a `String` per line, which is what made the pass show
+/// up next to the write it rides along with.
 fn count_msg_lines(path: &Path) -> Option<usize> {
     let file = fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
     let mut count = 0;
-    for line in BufReader::new(file).lines() {
-        if line.ok()?.starts_with(MSG_PREFIX) {
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return Some(count),
+            Ok(_) => {}
+        }
+        if line.starts_with(MSG_PREFIX) {
             count += 1;
         }
     }
-    Some(count)
 }
 
 /// The archive is a second name for the log's current inode. The rewrite
@@ -2259,9 +2267,9 @@ mod tests {
     }
 
     fn msg_line_count(path: &Path) -> usize {
-        fs::read_to_string(path)
+        fs::read(path)
             .unwrap()
-            .lines()
+            .split(|&b| b == b'\n')
             .filter(|line| line.starts_with(MSG_PREFIX))
             .count()
     }
