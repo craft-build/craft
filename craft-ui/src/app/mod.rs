@@ -1568,8 +1568,10 @@ impl App {
                     self.subagent_answers.clear();
                     if !is_goal_gate {
                         self.status = Status::Idle;
-                        self.lua_event_handle
-                            .fire_autocmd("TurnEnd", serde_json::json!({}));
+                        self.lua_event_handle.fire_autocmd(
+                            "TurnEnd",
+                            serde_json::json!({ "session_id": self.state.session.id }),
+                        );
                     }
                     if self.exit_on_done && !is_goal_gate {
                         self.exit_request = ExitRequest::Success;

@@ -1,10 +1,28 @@
 local helpers = require("todo_helpers")
 
+-- One Lua runtime serves every session, so todos are keyed by the session
+-- that wrote them and the panel only renders for the focused session.
+local todos = {}
+local focused = nil
 local state = {
-  items = {},
   win = nil,
   buf = nil,
 }
+
+local function items_of(sid)
+  return todos[sid or ""] or {}
+end
+
+local function is_focused(sid)
+  return not focused or sid == focused
+end
+
+local function hide_panel()
+  if state.win then
+    state.win:hide()
+  end
+  craft.ui.set_status_hint(nil)
+end
 
 local function ensure_panel()
   if state.buf and state.win then
@@ -26,29 +44,32 @@ local function ensure_panel()
   })
 end
 
-local function update_panel()
+local function update_panel(items)
   ensure_panel()
-  helpers.render_todos(state.buf, state.items)
+  helpers.render_todos(state.buf, items)
 
   local done = 0
-  for _, item in ipairs(state.items) do
+  for _, item in ipairs(items) do
     if item.status == "completed" or item.status == "cancelled" then
       done = done + 1
     end
   end
-  local total = #state.items
+  local total = #items
 
-  if total > 0 then
-    local rows = craft.ui.terminal_size().rows
-    state.win:set_config({ height = helpers.fit_panel_height(total, rows) })
-    craft.ui.set_status_hint({
-      { done .. "/" .. total, "dim" },
-      { " Ctrl+T", "dim" },
-    })
-    state.win:show()
+  local rows = craft.ui.terminal_size().rows
+  state.win:set_config({ height = helpers.fit_panel_height(total, rows) })
+  craft.ui.set_status_hint({
+    { done .. "/" .. total, "dim" },
+    { " Ctrl+T", "dim" },
+  })
+  state.win:show()
+end
+
+local function sync_panel(items)
+  if #items == 0 then
+    hide_panel()
   else
-    craft.ui.set_status_hint(nil)
-    state.win:hide()
+    update_panel(items)
   end
 end
 
@@ -91,46 +112,58 @@ craft.api.register_tool({
       },
     },
   },
-  handler = function(input)
+  handler = function(input, ctx)
     if not input.todos then
       return "error: todos array is required"
     end
 
+    local sid = (ctx and ctx:session_id()) or ""
     if #input.todos == 0 then
-      state.items = {}
-      if state.win then
-        state.win:hide()
+      todos[sid] = nil
+      if is_focused(sid) then
+        hide_panel()
       end
-      craft.ui.set_status_hint(nil)
       return "Todos cleared"
     end
 
-    state.items = input.todos
-    update_panel()
+    todos[sid] = input.todos
+    if is_focused(sid) then
+      update_panel(input.todos)
+    end
     return ""
   end,
 })
 
 craft.api.create_autocmd("SessionStart", {
-  callback = function()
-    state.items = {}
-    if state.win then
-      state.win:hide()
-      state.win = nil
+  callback = function(ev)
+    local sid = ev.data and ev.data.session_id
+    if sid then
+      todos[sid] = nil
     end
-    if state.buf then
+    if is_focused(sid) then
+      if state.win then
+        state.win:hide()
+        state.win = nil
+      end
       state.buf = nil
+      craft.ui.set_status_hint(nil)
     end
-    craft.ui.set_status_hint(nil)
   end,
 })
 
-local function clear_todos()
-  state.items = {}
-  if state.win and state.win:is_open() then
-    state.win:hide()
-  end
-  craft.ui.set_status_hint(nil)
-end
+craft.api.create_autocmd({ "TurnEnd", "SessionReset" }, {
+  callback = function(ev)
+    local sid = ev.data and ev.data.session_id or ""
+    todos[sid] = nil
+    if is_focused(sid) then
+      hide_panel()
+    end
+  end,
+})
 
-craft.api.create_autocmd({ "TurnEnd", "SessionReset" }, { callback = clear_todos })
+craft.api.create_autocmd("SessionFocusChanged", {
+  callback = function(ev)
+    focused = ev.data and ev.data.session_id
+    sync_panel(items_of(focused))
+  end,
+})
