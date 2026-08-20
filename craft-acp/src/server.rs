@@ -41,7 +41,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::{AcpParams, mcp as acp_mcp, methods, permissions, translate};
+use crate::{AcpParams, elicitation, mcp as acp_mcp, methods, permissions, translate};
 
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 const DELEGATION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -50,12 +50,18 @@ const TODO_WRITE_TOOL: &str = "todo_write";
 const TODO_UPDATE_METHOD_LEGACY: &str = "session/todo_update";
 const TODO_UPDATE_METHOD: &str = "_craft/session/todo_update";
 
-/// What the client still owes us. Only one permission can be outstanding: the
-/// agent holds the answer channel while it waits for one.
+/// What the client still owes us. `ask` is the one outstanding request that
+/// blocks a tool (permission or elicitation): there can only be one, because
+/// both wait on the agent's single answer channel.
 #[derive(Default)]
 pub(crate) struct Pending {
     pub(crate) prompt: Option<RequestId>,
-    permission: Option<i64>,
+    ask: Option<(i64, AskKind)>,
+}
+
+pub(crate) enum AskKind {
+    Permission,
+    Elicitation,
 }
 
 pub(crate) type PendingState = Arc<Mutex<Pending>>;
@@ -385,6 +391,7 @@ pub(crate) struct Server {
     shared_session: SharedSession,
     pending_requests: PendingRequests,
     question_request_ids: Arc<Mutex<HashSet<i64>>>,
+    client_elicits_form: bool,
     client_caps: Arc<ClientCaps>,
     next_request_id: Arc<AtomicI64>,
     session: Option<SessionState>,
@@ -483,6 +490,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         shared_session,
         pending_requests,
         question_request_ids: Arc::new(Mutex::new(HashSet::new())),
+        client_elicits_form: false,
         client_caps,
         next_request_id,
         session: None,
@@ -557,6 +565,7 @@ async fn handle_request(
         "initialize" => {
             if let Ok(req) = parse_params::<InitializeRequest>(raw) {
                 srv.client_caps.apply(&req.client_capabilities);
+                srv.client_elicits_form = elicitation::supports_form(&req.client_capabilities);
             }
             Ok(AgentResponse::InitializeResponse(
                 methods::initialize_response(),
@@ -843,6 +852,7 @@ async fn install_session(
         Arc::clone(&pending),
         Arc::clone(&srv.next_request_id),
         Arc::clone(&srv.question_request_ids),
+        srv.client_elicits_form,
         cwd.clone(),
         craft_storage::paths::home(),
     );
@@ -1186,7 +1196,7 @@ fn handle_notification(srv: &Server, method: &str) {
                     .pending
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .permission = None;
+                    .ask = None;
                 let _ = session.handle.cancel_tx.try_send(());
             }
         }
@@ -1236,21 +1246,38 @@ fn handle_incoming_response(srv: &Server, raw: &Value) {
     let Some(id) = raw.get("id").and_then(Value::as_i64) else {
         return;
     };
-    if session
+    let ask = session
         .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .permission
-        .take_if(|pending| *pending == id)
-        .is_none()
-    {
+        .ask
+        .take_if(|(ask_id, _)| *ask_id == id);
+    let Some((_, kind)) = ask else {
         warn!(id, "response for an unknown request id");
         return;
+    };
+    match kind {
+        AskKind::Permission => {
+            let _ = session
+                .handle
+                .answer_tx
+                .send(permission_answer(raw).encode());
+        }
+        // The waiting question dispatch decodes this; an error response
+        // parses to nothing and counts as a dismissal.
+        AskKind::Elicitation => {
+            let answer = elicitation::answer_from_response(
+                &raw.get("result")
+                    .cloned()
+                    .unwrap_or(Value::Null)
+                    .to_string(),
+            );
+            let _ = session
+                .handle
+                .answer_tx
+                .send(craft_agent::tools::question::encode_answer(&answer));
+        }
     }
-    let _ = session
-        .handle
-        .answer_tx
-        .send(permission_answer(raw).encode());
 }
 
 /// A response we cannot read still has to answer the agent, or the tool waits
@@ -1319,6 +1346,7 @@ fn start_event_pump(
     pending: PendingState,
     next_request_id: Arc<AtomicI64>,
     question_request_ids: Arc<Mutex<HashSet<i64>>>,
+    client_elicits_form: bool,
     cwd: PathBuf,
     home: Option<PathBuf>,
 ) {
@@ -1407,19 +1435,32 @@ fn start_event_pump(
                             ToolCallUpdate::new(ToolCallId::from(id), fields),
                             permissions::permission_options(),
                         ));
-                    let req_id = next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
-                    pending.lock().unwrap_or_else(|e| e.into_inner()).permission = Some(req_id);
-                    send(
+                    ask_client(
                         &out_tx,
-                        Request {
-                            id: RequestId::Number(req_id),
-                            method: Arc::from(request.method()),
-                            params: Some(request),
-                        },
+                        &pending,
+                        &next_request_id,
+                        AskKind::Permission,
+                        request,
                     );
                     continue;
                 }
                 AgentEvent::QuestionRequest { id, questions } => {
+                    // Form-capable clients get the standardized
+                    // `elicitation/create`; everyone else (craft-desktop) keeps
+                    // the custom `session/question` request.
+                    if client_elicits_form
+                        && let Ok(request) =
+                            elicitation::form_request(sid.0.as_ref(), Some(id.clone()), &questions)
+                    {
+                        ask_client(
+                            &out_tx,
+                            &pending,
+                            &next_request_id,
+                            AskKind::Elicitation,
+                            AgentRequest::CreateElicitationRequest(request),
+                        );
+                        continue;
+                    }
                     let req_id = next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
                     question_request_ids
                         .lock()
@@ -1553,6 +1594,28 @@ fn emit_todo_update(out_tx: &Sender<Value>, sid: &SessionId, todos: &serde_json:
     }
 }
 
+/// Sends a request the client must answer and records it as the outstanding
+/// ask, registered before sending so the response can never race past us.
+fn ask_client(
+    out_tx: &Sender<Value>,
+    pending: &PendingState,
+    next_request_id: &AtomicI64,
+    kind: AskKind,
+    request: AgentRequest,
+) -> i64 {
+    let id = next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
+    pending.lock().unwrap_or_else(|e| e.into_inner()).ask = Some((id, kind));
+    send(
+        out_tx,
+        Request {
+            id: RequestId::Number(id),
+            method: Arc::from(request.method()),
+            params: Some(request),
+        },
+    );
+    id
+}
+
 pub(crate) fn no_session() -> AcpError {
     AcpError::invalid_request().data(json_str("no active session"))
 }
@@ -1598,6 +1661,10 @@ mod tests {
     }
 
     fn server_awaiting_answer() -> (Server, Receiver<String>) {
+        server_with_ask(AskKind::Permission)
+    }
+
+    fn server_with_ask(kind: AskKind) -> (Server, Receiver<String>) {
         let (answer_tx, answer_rx) = flume::unbounded();
         let (event_tx, event_rx) = flume::unbounded();
         let handle = InteractiveHandle {
@@ -1623,6 +1690,7 @@ mod tests {
             shared_session: Arc::new(Mutex::new(None)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             question_request_ids: Arc::new(Mutex::new(HashSet::new())),
+            client_elicits_form: false,
             client_caps: Arc::new(ClientCaps::new()),
             next_request_id: Arc::new(AtomicI64::new(FIRST_OUTGOING_REQUEST_ID)),
             session: Some(SessionState {
@@ -1631,7 +1699,7 @@ mod tests {
                 current_mode: AgentMode::Build,
                 current_model: String::new(),
                 pending: Arc::new(Mutex::new(Pending {
-                    permission: Some(ANSWERED_ID),
+                    ask: Some((ANSWERED_ID, kind)),
                     ..Default::default()
                 })),
                 title_sent: false,
@@ -1659,6 +1727,21 @@ mod tests {
             answer_rx.is_empty(),
             "a replayed answer cannot land on the next request"
         );
+    }
+
+    #[tokio::test]
+    async fn elicitation_response_forwards_the_encoded_answer() {
+        let (srv, answer_rx) = server_with_ask(AskKind::Elicitation);
+        let raw = serde_json::json!({
+            "id": ANSWERED_ID,
+            "result": { "action": "accept", "content": { "q1": "axum" } },
+        });
+
+        handle_incoming_response(&srv, &raw);
+        let forwarded = answer_rx.try_recv().unwrap();
+        let answer = craft_agent::tools::question::decode_answer(&forwarded).unwrap();
+        assert!(!answer.dismissed);
+        assert_eq!(answer.answers, vec![vec!["axum".to_string()]]);
     }
 
     #[tokio::test]

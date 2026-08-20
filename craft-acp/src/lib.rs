@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod elicitation;
 pub mod mcp;
 pub mod methods;
 pub mod permissions;
