@@ -14,9 +14,9 @@ use super::{Agent, NUDGE_PROMPT, TurnOutcome};
 const STAGNATION_WINDOW_SIZE: usize = 5;
 const STAGNATION_SIMILARITY_THRESHOLD: f32 = 0.85;
 
-/// A model that stalls once often stalls again on the retry, so it gets a
-/// second chance before the turn ends empty handed.
-const MAX_NUDGES: u32 = 2;
+/// A model that stalls once often stalls again on the retry, so it gets
+/// plenty of chances before the turn ends empty handed.
+const MAX_NUDGES: u32 = 20;
 
 /// Without this note a cancelled reply replays in history as a finished
 /// turn, and a model resuming its own cut-off text can wedge the session
@@ -305,7 +305,11 @@ impl<'h> Agent<'h> {
     /// place in history. Returns true when the model was nudged to try again.
     fn recover_stalled_turn(&mut self) -> Result<bool, AgentError> {
         // Asked before the marker lands, since it shifts the recent window.
-        let nudge = self.tool_state.nudges < MAX_NUDGES && self.history.has_recent_tool_results(5);
+        // Each nudge pads history with a marker and a prompt, so the window
+        // widens to keep the original tool results in sight.
+        let depth = 5 + 2 * self.tool_state.nudges as usize;
+        let nudge =
+            self.tool_state.nudges < MAX_NUDGES && self.history.has_recent_tool_results(depth);
         self.history.push(Message::empty_marker());
         if !nudge {
             return Ok(false);
@@ -477,14 +481,12 @@ mod tests {
         ; "nudge_on_empty_after_tools"
     )]
     #[test_case(
-        vec![
-            tool_call_response("glob", "t1"),
-            thinking_response(),
-            empty_response(),
-            empty_response(),
-        ],
-        4, 2
-        ; "nudges_twice_then_gives_up"
+        [tool_call_response("glob", "t1"), thinking_response()]
+            .into_iter()
+            .chain((0..MAX_NUDGES).map(|_| empty_response()))
+            .collect(),
+        MAX_NUDGES + 1, MAX_NUDGES as usize
+        ; "gives_up_after_max_nudges"
     )]
     #[test_case(
         vec![
