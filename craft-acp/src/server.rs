@@ -617,13 +617,14 @@ async fn handle_request(
                     return;
                 }
             };
-            let (history, recorded_cwd, restored_usage) = match load_history(session_ref.id()) {
-                Ok(h) => h,
-                Err(e) => {
-                    srv.respond(id, Err(e));
-                    return;
-                }
-            };
+            let (history, recorded_cwd, restored_usage, restored_model) =
+                match load_history(session_ref.id()) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        srv.respond(id, Err(e));
+                        return;
+                    }
+                };
             let sid = SessionId::from(session_ref.to_string());
             let home = craft_storage::paths::home();
             let replay_cwd = recorded_cwd.as_deref().unwrap_or(&req.cwd);
@@ -652,8 +653,12 @@ async fn handle_request(
                 ])
             };
             // The restored total predates any per-turn cost, so price it once
-            // with the current model; later turns add their own exact cost.
-            let restored_cost = params.model.cost_of(&restored_usage, false);
+            // with the model the session recorded (the current default may
+            // cost 10x more or less); later turns add their own exact cost.
+            let restored_cost = Model::from_spec(&restored_model)
+                .ok()
+                .and_then(|m| m.cost_of(&restored_usage, false))
+                .or_else(|| params.model.cost_of(&restored_usage, false));
             install_session(srv, handle, mcp, spec, cwd, restored_cost).await;
             Ok(AgentResponse::LoadSessionResponse(resp))
         }
@@ -677,7 +682,8 @@ async fn handle_request(
                     return;
                 }
             };
-            let (history, _, restored_usage) = match load_history(session_ref.id()) {
+            let (history, _, restored_usage, restored_model) = match load_history(session_ref.id())
+            {
                 Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
@@ -705,7 +711,10 @@ async fn handle_request(
                     methods::yolo_config_option(params.yolo),
                 ])
             };
-            let restored_cost = params.model.cost_of(&restored_usage, false);
+            let restored_cost = Model::from_spec(&restored_model)
+                .ok()
+                .and_then(|m| m.cost_of(&restored_usage, false))
+                .or_else(|| params.model.cost_of(&restored_usage, false));
             install_session(srv, handle, mcp, spec, cwd, restored_cost).await;
             Ok(AgentResponse::ResumeSessionResponse(resp))
         }
@@ -904,7 +913,7 @@ async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
 
 fn load_history(
     session_id: CraftId,
-) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage), AcpError> {
+) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage, String), AcpError> {
     let storage = craft_storage::StateDir::resolve()
         .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
     load_history_from(&storage, session_id)
@@ -916,7 +925,7 @@ fn load_history(
 fn load_history_from(
     storage: &craft_storage::StateDir,
     session_id: CraftId,
-) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage), AcpError> {
+) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage, String), AcpError> {
     let session: craft_storage::sessions::Session<
         Message,
         craft_providers::TokenUsage,
@@ -930,7 +939,8 @@ fn load_history_from(
         None
     };
     let usage = session.token_usage;
-    Ok((session.take_messages(), recorded, usage))
+    let model = session.model.clone();
+    Ok((session.take_messages(), recorded, usage, model))
 }
 
 fn handle_prompt(
@@ -1782,7 +1792,8 @@ mod tests {
         };
         session.save(&dir).unwrap();
 
-        let (history, recorded, usage) = load_history_from(&dir, session.id.id()).unwrap();
+        let (history, recorded, usage, model) = load_history_from(&dir, session.id.id()).unwrap();
+        assert_eq!(model, "anthropic/test-model");
         assert_eq!(
             serde_json::to_value(&history).unwrap(),
             serde_json::to_value(&messages).unwrap()
@@ -1798,7 +1809,7 @@ mod tests {
         let mut session: Session<Message, TokenUsage, ToolOutput> =
             Session::new("anthropic/test-model", "relative/project");
         session.save(&dir).unwrap();
-        let (_, recorded, _) = load_history_from(&dir, session.id.id()).unwrap();
+        let (_, recorded, _, _) = load_history_from(&dir, session.id.id()).unwrap();
         assert_eq!(recorded, None);
     }
 
