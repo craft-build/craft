@@ -731,7 +731,14 @@ async fn run_auth_script(
             serde_json::from_str(&stdout).map_err(|e| AgentError::Config {
                 message: format!("{} {subcommand}: invalid JSON: {e}", script_path.display()),
             })?;
-        *lock_unpoison(&auth) = parsed.into();
+        let mut fresh: ResolvedAuth = parsed.into();
+        let mut guard = lock_unpoison(&auth);
+        // A script that omits base_url keeps the resolved one; falling back to
+        // the provider's default origin would silently repoint the token.
+        if fresh.base_url.is_none() {
+            fresh.base_url = guard.base_url.take();
+        }
+        *guard = fresh;
         Ok(())
     })
     .await
@@ -752,14 +759,34 @@ impl Provider for DynamicProvider {
         opts: RequestOptions,
         session_id: Option<&SessionRef>,
     ) -> Result<StreamResponse, AgentError> {
-        match self
-            .inner
-            .stream_message(model, messages, system, tools, event_tx, opts, session_id)
-            .await
-        {
+        // First attempt streams through a counting relay: a 401 is only
+        // retried when it preceded every event. Replaying deltas onto a
+        // channel that already delivered part of the answer would duplicate
+        // text in the UI and, after a cancel, in the history.
+        let (tx, rx) = flume::unbounded();
+        let attempt = async {
+            let result = self
+                .inner
+                .stream_message(model, messages, system, tools, &tx, opts, session_id)
+                .await;
+            drop(tx);
+            result
+        };
+        let forward = async move {
+            let mut forwarded = 0usize;
+            while let Ok(ev) = rx.recv_async().await {
+                forwarded += 1;
+                if event_tx.send_async(ev).await.is_err() {
+                    break;
+                }
+            }
+            forwarded
+        };
+        let (result, forwarded) = futures::future::join(attempt, forward).await;
+        match result {
             // The script mints credentials without the user, so an expired
             // token costs one silent refresh instead of a re-login prompt.
-            Err(e) if e.is_auth_error() => {
+            Err(e) if e.is_auth_error() && forwarded == 0 => {
                 debug!(error = %e, "auth error, refreshing script-backed credentials");
                 match self
                     .refresh_gate
