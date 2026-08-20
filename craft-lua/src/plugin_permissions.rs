@@ -1,3 +1,4 @@
+use std::io;
 use std::path::Path;
 
 use mlua::Lua;
@@ -11,6 +12,8 @@ pub enum Permission {
     Run,
     Env,
 }
+
+const MANIFEST_FILE: &str = "plugin.toml";
 
 const PERM_KEYS: [&str; 5] = ["fs_read", "fs_write", "net", "run", "env"];
 
@@ -79,21 +82,44 @@ impl PluginPermissions {
 
 pub fn denied_error(perm: Permission) -> mlua::Error {
     let perm_key = PERM_KEYS[perm as usize];
-    mlua::Error::RuntimeError(format!(
-        "Permission denied: {perm:?}. Add '{perm_key}' to [permissions] in plugin.toml"
-    ))
+    let msg = format!(
+        "Permission denied: {perm:?}. Add '{perm_key}' to [permissions] in {MANIFEST_FILE}"
+    );
+    tracing::warn!(permission = perm_key, "{msg}");
+    mlua::Error::RuntimeError(msg)
 }
 
 pub fn load_plugin_permissions(plugin_dir: Option<&Path>) -> PluginPermissions {
     let Some(dir) = plugin_dir else {
         return PluginPermissions::trusted();
     };
-    let toml_path = dir.join("plugin.toml");
-    let Ok(contents) = std::fs::read_to_string(&toml_path) else {
-        return PluginPermissions::denied();
-    };
-    match toml::from_str(&contents) {
-        Ok(value) => PluginPermissions::from_manifest(&value),
-        Err(_) => PluginPermissions::denied(),
+    let toml_path = dir.join(MANIFEST_FILE);
+    match std::fs::read_to_string(&toml_path) {
+        Ok(contents) => match toml::from_str(&contents) {
+            Ok(value) => PluginPermissions::from_manifest(&value),
+            Err(e) => {
+                tracing::warn!(
+                    path = %toml_path.display(),
+                    error = %e,
+                    "cannot read {MANIFEST_FILE}, denying all permissions"
+                );
+                PluginPermissions::denied()
+            }
+        },
+        Err(e) => {
+            if e.kind() == io::ErrorKind::NotFound {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    "no {MANIFEST_FILE} next to plugin; all permissions denied. Create one next \n                     to it and list the permissions under [permissions] to grant them"
+                );
+            } else {
+                tracing::warn!(
+                    path = %toml_path.display(),
+                    error = %e,
+                    "cannot read {MANIFEST_FILE}, denying all permissions"
+                );
+            }
+            PluginPermissions::denied()
+        }
     }
 }

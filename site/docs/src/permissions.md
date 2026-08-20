@@ -165,6 +165,16 @@ Some constructs are too complex to analyze statically, so they always trigger a 
 - Subshells: `(...)`, `{ ... }`
 - Arithmetic expansion: `$((...))`
 
+## Plugin Permissions
+
+Lua plugins have a separate, unrelated gate. A `plugin.toml` manifest next to the Lua file controls which gated `craft.*` APIs it may call: `fs_read`, `fs_write`, `net`, `run`, and `env`. No manifest means every gated call is denied, and craft logs a warning at load time. A denied call raises an error naming the missing permission, and craft logs a warning even when the plugin wraps the call in `pcall`.
+
+```toml
+[permissions]
+fs_read = true
+fs_write = true
+```
+
 ## Session Persistence
 
 When you save a session, its permission rules are saved too. Loading the session restores them.
