@@ -17,7 +17,7 @@ use agent_client_protocol_schema::v1::{
     SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
     SetSessionModeRequest, SetSessionModeResponse, StopReason, TerminalId, TerminalOutputRequest,
     TerminalOutputResponse, TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
-    UsageUpdate, WriteTextFileRequest, WriteTextFileResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use color_eyre::eyre::Context;
 use craft_agent::headless::{self, InteractiveHandle, InteractiveParams};
@@ -30,8 +30,8 @@ use craft_config::ModelPolicy;
 use craft_lua::{
     LocalTerminal, TerminalBackend, TerminalEvent, TerminalFuture, TerminalHandle, TerminalSpec,
 };
-use craft_providers::Message;
 use craft_providers::model::Model;
+use craft_providers::{Message, TokenUsage, add_cost};
 use craft_storage::id::{CraftId, SessionRef};
 use flume::{Receiver, Sender};
 use serde::Serialize;
@@ -594,7 +594,7 @@ async fn handle_request(
                     methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
-            install_session(srv, handle, mcp, spec, cwd).await;
+            install_session(srv, handle, mcp, spec, cwd, None).await;
             Ok(AgentResponse::NewSessionResponse(resp))
         }
         "session/load" => {
@@ -617,7 +617,7 @@ async fn handle_request(
                     return;
                 }
             };
-            let history = match load_history(session_ref.id()) {
+            let (history, recorded_cwd, restored_usage) = match load_history(session_ref.id()) {
                 Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
@@ -626,11 +626,10 @@ async fn handle_request(
             };
             let sid = SessionId::from(session_ref.to_string());
             let home = craft_storage::paths::home();
-            let replay_cwd = history.1.as_deref().unwrap_or(&req.cwd);
-            for update in translate::replay_history(&history.0, replay_cwd, home.as_deref()) {
+            let replay_cwd = recorded_cwd.as_deref().unwrap_or(&req.cwd);
+            for update in translate::replay_history(&history, replay_cwd, home.as_deref()) {
                 session_update(&srv.out_tx, &sid, update);
             }
-            let history = history.0;
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
             let cwd = req.cwd.clone();
@@ -652,7 +651,10 @@ async fn handle_request(
                     methods::yolo_config_option(params.yolo),
                 ])
             };
-            install_session(srv, handle, mcp, spec, cwd).await;
+            // The restored total predates any per-turn cost, so price it once
+            // with the current model; later turns add their own exact cost.
+            let restored_cost = params.model.cost_of(&restored_usage, false);
+            install_session(srv, handle, mcp, spec, cwd, restored_cost).await;
             Ok(AgentResponse::LoadSessionResponse(resp))
         }
         "session/resume" => {
@@ -675,8 +677,8 @@ async fn handle_request(
                     return;
                 }
             };
-            let history = match load_history(session_ref.id()) {
-                Ok((h, _)) => h,
+            let (history, _, restored_usage) = match load_history(session_ref.id()) {
+                Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
                     return;
@@ -703,7 +705,8 @@ async fn handle_request(
                     methods::yolo_config_option(params.yolo),
                 ])
             };
-            install_session(srv, handle, mcp, spec, cwd).await;
+            let restored_cost = params.model.cost_of(&restored_usage, false);
+            install_session(srv, handle, mcp, spec, cwd, restored_cost).await;
             Ok(AgentResponse::ResumeSessionResponse(resp))
         }
         "session/list" => handle_list_sessions(raw),
@@ -839,6 +842,7 @@ async fn install_session(
     mcp: Option<craft_agent::McpHandle>,
     current_model: String,
     cwd: PathBuf,
+    initial_cost: Option<f64>,
 ) {
     if let Some(prev) = srv.session.take() {
         teardown_session(&srv.out_tx, prev).await;
@@ -855,6 +859,7 @@ async fn install_session(
         srv.client_elicits_form,
         cwd.clone(),
         craft_storage::paths::home(),
+        initial_cost,
     );
     *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionInfo {
         session_id: session_id.clone(),
@@ -897,7 +902,9 @@ async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
     }
 }
 
-fn load_history(session_id: CraftId) -> Result<(Vec<Message>, Option<PathBuf>), AcpError> {
+fn load_history(
+    session_id: CraftId,
+) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage), AcpError> {
     let storage = craft_storage::StateDir::resolve()
         .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
     load_history_from(&storage, session_id)
@@ -909,7 +916,7 @@ fn load_history(session_id: CraftId) -> Result<(Vec<Message>, Option<PathBuf>), 
 fn load_history_from(
     storage: &craft_storage::StateDir,
     session_id: CraftId,
-) -> Result<(Vec<Message>, Option<PathBuf>), AcpError> {
+) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage), AcpError> {
     let session: craft_storage::sessions::Session<
         Message,
         craft_providers::TokenUsage,
@@ -922,7 +929,8 @@ fn load_history_from(
     } else {
         None
     };
-    Ok((session.take_messages(), recorded))
+    let usage = session.token_usage;
+    Ok((session.take_messages(), recorded, usage))
 }
 
 fn handle_prompt(
@@ -1349,15 +1357,22 @@ fn start_event_pump(
     client_elicits_form: bool,
     cwd: PathBuf,
     home: Option<PathBuf>,
+    initial_cost: Option<f64>,
 ) {
     tokio::spawn(async move {
         let sid = SessionId::from(session_id.to_string());
+        let mut cost_total = initial_cost;
         let mut sub_buffers: HashMap<String, String> = HashMap::new();
 
         while let Ok(Envelope {
             event, subagent, ..
         }) = event_rx.recv_async().await
         {
+            // Subagent stream events stay out of the transcript, but their
+            // turns still spend session money.
+            if let AgentEvent::TurnComplete(tc) = &event {
+                add_cost(&mut cost_total, tc.cost);
+            }
             if let Some(info) = &subagent {
                 if matches!(
                     event,
@@ -1508,18 +1523,7 @@ fn start_event_pump(
                     }
                     continue;
                 }
-                AgentEvent::TurnComplete(tc) => {
-                    let used = tc.context_size.unwrap_or_else(|| tc.usage.context_tokens());
-                    session_update(
-                        &out_tx,
-                        &sid,
-                        SessionUpdate::UsageUpdate(UsageUpdate::new(
-                            used.into(),
-                            tc.context_window.into(),
-                        )),
-                    );
-                    continue;
-                }
+                AgentEvent::TurnComplete(tc) => translate::usage_update(&tc, cost_total),
                 AgentEvent::FlowProgress { progress } => {
                     match translate::flow_progress(&progress) {
                         Some(u) => u,
@@ -1771,14 +1775,20 @@ mod tests {
         let mut session: Session<Message, TokenUsage, ToolOutput> =
             Session::new("anthropic/test-model", "/project");
         session.replace_messages(messages.clone());
+        session.token_usage = TokenUsage {
+            input: 1_000,
+            output: 200,
+            ..Default::default()
+        };
         session.save(&dir).unwrap();
 
-        let (history, recorded) = load_history_from(&dir, session.id.id()).unwrap();
+        let (history, recorded, usage) = load_history_from(&dir, session.id.id()).unwrap();
         assert_eq!(
             serde_json::to_value(&history).unwrap(),
             serde_json::to_value(&messages).unwrap()
         );
         assert_eq!(recorded, Some(PathBuf::from("/project")));
+        assert_eq!(usage, session.token_usage);
     }
 
     #[test]
@@ -1788,7 +1798,7 @@ mod tests {
         let mut session: Session<Message, TokenUsage, ToolOutput> =
             Session::new("anthropic/test-model", "relative/project");
         session.save(&dir).unwrap();
-        let (_, recorded) = load_history_from(&dir, session.id.id()).unwrap();
+        let (_, recorded, _) = load_history_from(&dir, session.id.id()).unwrap();
         assert_eq!(recorded, None);
     }
 
