@@ -9,9 +9,7 @@ use craft_agent::tools::ToolRegistry;
 use craft_agent::types::{
     BatchProgressEvent, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
-use craft_providers::{
-    ContentBlock as MsgBlock, ImageMediaType, Message, Role as MsgRole, TokenUsage,
-};
+use craft_providers::{ContentBlock as MsgBlock, ImageMediaType, Message, Role as MsgRole};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -578,6 +576,7 @@ mod tests {
     use std::sync::Arc;
 
     use craft_providers::ImageSource;
+    use craft_providers::TokenUsage;
     use serde_json::json;
     use test_case::test_case;
 

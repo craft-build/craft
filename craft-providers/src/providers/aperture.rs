@@ -255,22 +255,14 @@ impl Aperture {
             base_url: Some(base_url),
             headers: Vec::new(),
         }));
-        Ok(Self::with_auth_and_overrides(
-            auth,
-            timeouts,
-            load_overrides(),
-        )?)
+        Self::with_auth_and_overrides(auth, timeouts, load_overrides())
     }
 
     pub(crate) fn with_auth(
         auth: Arc<Mutex<ResolvedAuth>>,
         timeouts: Timeouts,
     ) -> Result<Self, AgentError> {
-        Ok(Self::with_auth_and_overrides(
-            auth,
-            timeouts,
-            load_overrides(),
-        )?)
+        Self::with_auth_and_overrides(auth, timeouts, load_overrides())
     }
 
     /// Single constructor: the overrides are injected so tests can pass an
