@@ -616,9 +616,12 @@ async fn handle_request(
                 }
             };
             let sid = SessionId::from(session_ref.to_string());
-            for update in translate::replay_history(&history) {
+            let home = craft_storage::paths::home();
+            let replay_cwd = history.1.as_deref().unwrap_or(&req.cwd);
+            for update in translate::replay_history(&history.0, replay_cwd, home.as_deref()) {
                 session_update(&srv.out_tx, &sid, update);
             }
+            let history = history.0;
             let mcp_servers = req.mcp_servers.clone();
             let fs = build_delegated_fs(srv);
             let cwd = req.cwd.clone();
@@ -664,7 +667,7 @@ async fn handle_request(
                 }
             };
             let history = match load_history(session_ref.id()) {
-                Ok(h) => h,
+                Ok((h, _)) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
                     return;
@@ -840,6 +843,8 @@ async fn install_session(
         Arc::clone(&pending),
         Arc::clone(&srv.next_request_id),
         Arc::clone(&srv.question_request_ids),
+        cwd.clone(),
+        craft_storage::paths::home(),
     );
     *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionInfo {
         session_id: session_id.clone(),
@@ -882,16 +887,19 @@ async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
     }
 }
 
-fn load_history(session_id: CraftId) -> Result<Vec<Message>, AcpError> {
+fn load_history(session_id: CraftId) -> Result<(Vec<Message>, Option<PathBuf>), AcpError> {
     let storage = craft_storage::StateDir::resolve()
         .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
     load_history_from(&storage, session_id)
 }
 
+/// History plus the absolute cwd the session recorded in its header. Tool
+/// inputs from a past run resolve against that cwd, not the client's current
+/// one; a non-absolute recording falls back to the caller's cwd.
 fn load_history_from(
     storage: &craft_storage::StateDir,
     session_id: CraftId,
-) -> Result<Vec<Message>, AcpError> {
+) -> Result<(Vec<Message>, Option<PathBuf>), AcpError> {
     let session: craft_storage::sessions::Session<
         Message,
         craft_providers::TokenUsage,
@@ -899,7 +907,12 @@ fn load_history_from(
     > = craft_storage::sessions::Session::load(session_id, storage).map_err(|e| {
         AcpError::resource_not_found(Some(format!("session/{session_id}"))).data(json_str(&e))
     })?;
-    Ok(session.take_messages())
+    let recorded = if Path::new(&session.cwd).is_absolute() {
+        Some(PathBuf::from(&session.cwd))
+    } else {
+        None
+    };
+    Ok((session.take_messages(), recorded))
 }
 
 fn handle_prompt(
@@ -1298,6 +1311,7 @@ fn image_media_type(mime: &str) -> ImageMediaType {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_event_pump(
     event_rx: Receiver<Envelope>,
     session_id: SessionRef,
@@ -1305,6 +1319,8 @@ fn start_event_pump(
     pending: PendingState,
     next_request_id: Arc<AtomicI64>,
     question_request_ids: Arc<Mutex<HashSet<i64>>>,
+    cwd: PathBuf,
+    home: Option<PathBuf>,
 ) {
     tokio::spawn(async move {
         let sid = SessionId::from(session_id.to_string());
@@ -1369,9 +1385,11 @@ fn start_event_pump(
                 AgentEvent::TextDelta { text } => translate::text_delta(&text),
                 AgentEvent::ThinkingDelta { text } => translate::thinking_delta(&text),
                 AgentEvent::ToolPending { id, name } => translate::tool_pending(&id, &name),
-                AgentEvent::ToolStart(event) => translate::tool_start(&event),
+                AgentEvent::ToolStart(event) => {
+                    translate::tool_start(&event, &cwd, home.as_deref())
+                }
                 AgentEvent::ToolOutput { id, content } => translate::tool_output(&id, &content),
-                AgentEvent::ToolDone(event) => translate::tool_done(&event),
+                AgentEvent::ToolDone(event) => translate::tool_done(&event, &cwd, home.as_deref()),
                 AgentEvent::BatchProgress(event) => {
                     if event.status != BatchToolStatus::InProgress {
                         continue;
@@ -1672,11 +1690,23 @@ mod tests {
         session.replace_messages(messages.clone());
         session.save(&dir).unwrap();
 
-        let history = load_history_from(&dir, session.id.id()).unwrap();
+        let (history, recorded) = load_history_from(&dir, session.id.id()).unwrap();
         assert_eq!(
             serde_json::to_value(&history).unwrap(),
             serde_json::to_value(&messages).unwrap()
         );
+        assert_eq!(recorded, Some(PathBuf::from("/project")));
+    }
+
+    #[test]
+    fn load_history_records_absolute_cwd_only() {
+        let tmp = TempDir::new().unwrap();
+        let dir = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session: Session<Message, TokenUsage, ToolOutput> =
+            Session::new("anthropic/test-model", "relative/project");
+        session.save(&dir).unwrap();
+        let (_, recorded) = load_history_from(&dir, session.id.id()).unwrap();
+        assert_eq!(recorded, None);
     }
 
     #[test]
