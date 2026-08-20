@@ -24,6 +24,7 @@ use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, S
 
 use super::ResolvedAuth;
 use super::anthropic::Anthropic;
+use super::aperture::Aperture;
 use super::copilot::Copilot;
 use super::deepseek::DeepSeek;
 use super::google::Google;
@@ -576,6 +577,10 @@ pub async fn create(
         ),
         ProviderKind::Xai => Box::new(
             Xai::with_auth(auth.clone(), timeouts)?.with_system_prefix(meta.system_prefix.clone()),
+        ),
+        ProviderKind::Aperture => Box::new(
+            Aperture::with_auth(auth.clone(), timeouts)?
+                .with_system_prefix(meta.system_prefix.clone()),
         ),
         ProviderKind::Bedrock => {
             return Err(AgentError::Config {

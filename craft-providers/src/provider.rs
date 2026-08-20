@@ -14,6 +14,7 @@ use crate::model::{Model, ModelFamily};
 use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::anthropic::bedrock;
+use crate::providers::aperture::Aperture;
 use crate::providers::copilot::Copilot;
 use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
@@ -52,6 +53,7 @@ pub enum ProviderKind {
     #[strum(serialize = "xai")]
     Xai,
     Bedrock,
+    Aperture,
 }
 
 impl ProviderKind {
@@ -71,6 +73,7 @@ impl ProviderKind {
             Self::Opencode => "Opencode Zen",
             Self::Xai => "xAI",
             Self::Bedrock => "Bedrock",
+            Self::Aperture => "Aperture",
         }
     }
 
@@ -92,6 +95,7 @@ impl ProviderKind {
             // Bedrock auth is the AWS SDK credential chain, not a static key.
             // Surfaced only so `craft auth status` has a column to show.
             Self::Bedrock => "AWS_REGION",
+            Self::Aperture => "",
         }
     }
 
@@ -113,6 +117,7 @@ impl ProviderKind {
             Self::Opencode => "https://opencode.ai/zen/v1",
             Self::Xai => "https://api.x.ai/v1",
             Self::Bedrock => "https://bedrock-runtime.<region>.amazonaws.com (AWS SDK)",
+            Self::Aperture => "Aperture gateway (set APERTURE_HOST)",
         }
     }
 
@@ -164,6 +169,9 @@ impl ProviderKind {
             Self::Bedrock => Some(
                 "AWS SDK auth (SSO/IMDS/profiles/env), ConverseStream, inference-profile discovery",
             ),
+            Self::Aperture => Some(
+                "Tailscale Aperture LLM gateway; set APERTURE_HOST or configure in providers.toml",
+            ),
             _ => None,
         }
     }
@@ -184,6 +192,7 @@ impl ProviderKind {
             Self::Opencode => ModelFamily::Generic,
             Self::Xai => ModelFamily::Generic,
             Self::Bedrock => ModelFamily::Claude,
+            Self::Aperture => ModelFamily::Generic,
         }
     }
 
@@ -200,6 +209,7 @@ impl ProviderKind {
                 | Self::Opencode
                 | Self::Xai
                 | Self::Bedrock
+                | Self::Aperture
         )
     }
 
@@ -223,6 +233,7 @@ impl ProviderKind {
             Self::Opencode => Some(128_000),
             Self::Xai => Some(131_072),
             Self::Bedrock => Some(128_000),
+            Self::Aperture => Some(16_384),
         }
     }
 
@@ -242,6 +253,7 @@ impl ProviderKind {
             Self::Opencode => 256_000,
             Self::Xai => 500_000,
             Self::Bedrock => 200_000,
+            Self::Aperture => 128_000,
         }
     }
 
@@ -280,6 +292,7 @@ impl ProviderKind {
                         .into(),
                 })
             }
+            Self::Aperture => Ok(Box::new(Aperture::new(timeouts)?)),
         }
     }
 }
@@ -349,6 +362,18 @@ pub async fn provider_for_slug(
 
 pub async fn provider_available(slug: &str) -> bool {
     provider_for_slug(slug, Timeouts::default()).await.is_ok()
+}
+
+/// Adjust a model against its provider's static table without retaining the
+/// provider, so a resumed model matches one started fresh (e.g. an Aperture
+/// model inheriting its routed provider's context window and thinking
+/// support). Sync, unlike `provider_for_slug`: callers reconcile sessions
+/// outside an async context.
+pub fn adjust_model(model: &mut Model, timeouts: Timeouts) -> Result<(), AgentError> {
+    if ProviderKind::from_str(&model.provider).is_ok_and(|k| k == ProviderKind::Aperture) {
+        Aperture::new(timeouts)?.adjust_model(model);
+    }
+    Ok(())
 }
 
 pub async fn from_model(

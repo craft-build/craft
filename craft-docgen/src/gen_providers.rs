@@ -136,6 +136,7 @@ Each entry under `providers.toml` is a table keyed by the provider slug:
 | `default_model` | string | No | Default model identifier without the provider prefix |
 | `discover_models` | bool | No | Query the provider for model list at startup (default `false`) |
 | `models` | array of tables | No | Override context window and max output for specific models |
+| `overrides` | table | No | Aperture only. Per-upstream model overrides (see below) |
 
 The `models` table is useful when a provider's `/models` endpoint does not report context sizes, or reports incorrect ones. Each entry has:
 
@@ -172,7 +173,26 @@ Use the provider with:
 craft -m my-proxy/gpt-4.1
 ```
 
-Custom providers appear in `craft auth login` and the model picker just like built-in ones."#;
+Custom providers appear in `craft auth login` and the model picker just like built-in ones.
+
+### Aperture overrides
+
+Aperture proxies upstream providers, exposing each model as `aperture/<upstream>/<model>`. Overrides keyed by upstream provider id live under `[aperture.overrides]`:
+
+```toml
+[aperture.overrides.llmserver]
+base = "llama-cpp"
+context_window = 131072
+max_output_tokens = 16384
+
+[aperture.overrides.llmserver.models."qwen-3.6"]
+context_window = 262144
+supports_vision = true
+```
+
+Provider-level fields apply to every model from that upstream; per-model entries under `models` win field by field. Fields: `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, `base` (remaps an opaque vendor to a native provider; e.g. `llama-cpp`, `google`, `anthropic`), and `path_prefix`. Model ids containing dots must be quoted (`"qwen3.6"`) since TOML treats a bare dotted key as a nested table.
+
+Craft sends `/v1` (or `/v1beta` for Gemini routes), and Aperture appends that path to the upstream's base url. If an upstream base url already carries its own path, set `path_prefix = ""` for it to avoid a doubled path."#;
 
 fn dynamic_providers_section() -> String {
     let valid_values: Vec<String> = ProviderKind::iter().map(|k| format!("`{k}`")).collect();
@@ -280,6 +300,8 @@ fn format_auth(kind: ProviderKind) -> String {
     let env = kind.api_key_env();
     if kind == ProviderKind::Ollama {
         format!("`OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `{env}` for auth")
+    } else if kind == ProviderKind::Aperture {
+        "`APERTURE_HOST` (e.g. `https://your-host.tailnet.ts.net`)".into()
     } else {
         format!("`{env}`")
     }
@@ -397,6 +419,9 @@ fn no_catalog_note(kind: ProviderKind) -> &'static str {
         }
         ProviderKind::LlamaCpp => {
             "Connects to any OpenAI-compatible `/v1` endpoint. Craft asks the server for the list of installed models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."
+        }
+        ProviderKind::Aperture => {
+            "Aperture discovers models from your gateway. Set `APERTURE_HOST` to your Tailscale Aperture endpoint (e.g. `https://your-host.tailnet.ts.net`). No API key needed, Tailscale handles auth."
         }
         ProviderKind::OpenRouter => {
             "OpenRouter aggregates models from many providers behind a single API. Craft asks the OpenRouter API for the list of available models, so there's no built-in catalog. Tiers are guessed from list order: the first model becomes strong, the second medium, and the rest weak."

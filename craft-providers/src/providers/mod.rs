@@ -13,6 +13,7 @@ pub(crate) fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 pub(crate) mod anthropic;
+pub(crate) mod aperture;
 #[cfg(feature = "bedrock")]
 pub(crate) mod bedrock;
 pub(crate) mod copilot;

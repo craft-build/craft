@@ -5,7 +5,8 @@ use std::sync::Arc;
 use craft_agent::TurnType;
 use craft_agent::permissions::PermissionManager;
 use craft_config::{Effect, ModelPolicy};
-use craft_providers::{Model, ThinkingConfig, TokenUsage};
+use craft_providers::provider::adjust_model;
+use craft_providers::{Model, ThinkingConfig, Timeouts, TokenUsage};
 use craft_storage::StateDir;
 use craft_storage::sessions::{SessionMeta, StoredEffect, StoredMode, StoredRule};
 
@@ -38,7 +39,7 @@ impl SessionState {
         storage: &StateDir,
         model_policy: &ModelPolicy,
     ) -> Self {
-        let model = model_policy
+        let mut model = model_policy
             .allows(&session.model)
             .then(|| Model::from_spec(&session.model))
             .transpose()
@@ -48,6 +49,12 @@ impl SessionState {
                 session.model = fallback_model.spec();
                 fallback_model.clone()
             });
+        // Apply the provider's per-model adjustments (e.g. Aperture's
+        // routed-provider inheritance) so a resumed session matches one
+        // started fresh.
+        if let Err(e) = adjust_model(&mut model, Timeouts::default()) {
+            tracing::warn!(model = %model.id, error = %e, "failed to adjust resumed model");
+        }
 
         let mode = match session.meta.mode {
             Some(StoredMode::Plan) => Mode::Plan,
@@ -268,6 +275,7 @@ pub(crate) fn stored_to_rules(stored: &[StoredRule]) -> Vec<craft_config::Permis
 mod tests {
     use super::*;
     use crate::components::test_model;
+    use craft_storage::sessions::StoredThinking;
 
     fn make_plan_session(mode: Option<StoredMode>, plan_path: Option<String>) -> AppSession {
         let mut session = AppSession::new("test-model", "/tmp");
@@ -421,5 +429,26 @@ mod tests {
             &mut model, &overrides, 4_096, 32_768
         ));
         assert_eq!(model.context_window, crate::components::TEST_CONTEXT_WINDOW);
+    }
+
+    #[test]
+    fn from_session_applies_provider_adjust_model() {
+        // SAFETY: this test runs single-threaded; no other thread reads the env.
+        unsafe { std::env::set_var("APERTURE_HOST", "https://example.com") };
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session = AppSession::new("aperture/mistral/glm-5-2", "/tmp");
+        session.meta.thinking = Some(StoredThinking::Adaptive);
+        let state =
+            SessionState::from_session(session, &test_model(), &storage, &ModelPolicy::default());
+        assert!(
+            state.model.supports_thinking(),
+            "resumed aperture/mistral/glm-5-2 should inherit thinking support from adjust_model",
+        );
+        assert_eq!(
+            state.thinking,
+            ThinkingConfig::Adaptive,
+            "resumed thinking config should be preserved when the model supports it",
+        );
     }
 }
