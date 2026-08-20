@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-08-20
+
+### Added
+
+- **providers**: Aperture provider (`8c0bb24d`)
+- **providers**: silently refresh dynamic provider auth on 401 (`ac27ff7f`)
+- **providers/llama-cpp**: configure native thinking fields (`29e0c1f5`)
+- **acp**: report session usage updates (`f22988b6`), and tool call file locations for follow-along (`0c24940f`)
+- **ui**: terminal attention notifications (`754c9955`)
+- **memory**: make notes editable with the plain edit tool (`a5ed75d7`)
+
+### Changed
+
+- **tools**: `insert_lines` inserts after the anchor line instead of before it (`41333dc2`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`darling` 0.24.1, `h2` 0.4.18, `quinn-proto` 0.11.17, `ref-cast` 1.0.27, `similar` 3.2.0, `swift-rs` 1.0.8, `yaml_serde` 0.10.7, `zerovec` 0.11.8)
+
+### Fixed
+
+- **ui**: bound the tmux capability query at startup (`48f8313c`)
+- **plugins**: hand startup-restored todos to the first focused session (`71c3f03b`), and scope the todo panel to the session that wrote it (`12cb8a9d`)
+- **acp**: report the row `insert_lines` actually inserts at (`2426d3d1`), stop losing question answers over elicitation (`0e3d910b`), and price restored usage with the session's recorded model (`31677635`)
+- **providers**: harden gateway wire parsing (`e8182c72`), harden the silent 401 auth refresh (`7cf4c641`), detect adaptive thinking behind gateway-prefixed models (`67e02d77`), and opt back into visible thinking on new Anthropic models (`321d3644`)
+- **agent**: keep text streamed before a cancel in the context (`dde0836c`), and stop a stalled turn from bricking the session (`76711036`)
+- **lua**: warn when `plugin.toml` is missing or unreadable (`4a264ac5`)
+- **interpreter**: dispatch nested tool calls with the live provider (`0bf3b236`)
+
 ## [0.12.4] - 2026-08-16
 
 ### Added
