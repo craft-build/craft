@@ -14,6 +14,7 @@
 - [Commands](./commands.md)
 - [Keybindings](./keybindings.md)
 - [Permissions](./permissions.md)
+- [Notifications](./notifications.md)
 
 # Providers & Models
 

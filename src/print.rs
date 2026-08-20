@@ -242,6 +242,7 @@ pub async fn run(
             | AgentEvent::ToolDone(_)
             | AgentEvent::BatchProgress(_)
             | AgentEvent::QueueItemConsumed { .. }
+            | AgentEvent::QueueDrained
             | AgentEvent::AutoCompacting
             | AgentEvent::CompactionDone
             | AgentEvent::AuthRequired

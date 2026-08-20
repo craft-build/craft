@@ -229,6 +229,7 @@ impl App {
     /// once per run.
     pub(super) fn start_run(&mut self, input: AgentInput, display: String) -> Vec<Action> {
         self.run_id += 1;
+        self.clear_exit_request();
         self.recoverable_queue.clear();
         self.status = Status::Streaming;
         self.lua_event_handle

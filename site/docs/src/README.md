@@ -11,6 +11,7 @@ It is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik, wri
 - **Multiple providers.** Anthropic, OpenAI, Google, Copilot, DeepSeek, Mistral, Ollama, llama.cpp, OpenRouter, Synthetic, TensorX, and a dynamic provider system for plugging in your own. See [Providers](./providers.md).
 - **MCP support.** Connect external tool servers over stdio or HTTP. See [MCP](./mcp.md).
 - **Permissions.** Fine-grained allow/deny rules, plus a YOLO mode. See [Permissions](./permissions.md).
+- **Notifications.** Terminal bells or OSC 9 alerts when a session finishes or needs input. See [Notifications](./notifications.md).
 - **Sub-agents.** Spin up read-only research agents or full-access workers that run in parallel.
 - **Session persistence.** Pick up where you left off, context and permissions intact. See [Sessions](./sessions.md).
 - **Python sandbox.** A minimal interpreter for running Python snippets safely inside the agent loop.

@@ -150,6 +150,13 @@ impl PermissionPrompt {
         };
     }
 
+    pub(crate) fn tool(&self) -> Option<&ToolKey> {
+        match self {
+            Self::Open { tool, .. } => Some(tool),
+            Self::Closed => None,
+        }
+    }
+
     pub fn subagent_id(&self) -> Option<&str> {
         match self {
             Self::Open { subagent_id, .. } => subagent_id.as_deref(),

@@ -374,6 +374,7 @@ pub struct PluginFileConfig {
 pub struct UiFileConfig {
     pub splash_animation: Option<bool>,
     pub scrollbar: Option<bool>,
+    pub notifications: Option<NotificationMethod>,
     pub flash_duration_ms: Option<u64>,
     pub typewriter_ms_per_char: Option<u64>,
     pub mouse_scroll_lines: Option<u32>,
@@ -383,6 +384,16 @@ pub struct UiFileConfig {
     pub clock_format: Option<ClockFormat>,
     pub tool_output_lines: Option<ToolOutputLinesFile>,
     pub keybindings: Option<HashMap<String, KeybindingOverride>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationMethod {
+    #[default]
+    Auto,
+    Osc9,
+    Bell,
+    Off,
 }
 
 /// A keybinding override: a single chord, a list of chords, or null/empty to disable.
@@ -409,6 +420,7 @@ impl UiFileConfig {
             overlay,
             splash_animation,
             scrollbar,
+            notifications,
             flash_duration_ms,
             typewriter_ms_per_char,
             mouse_scroll_lines,
@@ -990,6 +1002,14 @@ pub struct UiConfig {
     #[config(default = true, desc = "Show vertical scrollbar in scrollable areas")]
     pub scrollbar: bool,
 
+    #[config(
+        default = NotificationMethod::Auto,
+        ty = "string",
+        default_doc = "auto",
+        desc = "Terminal notification method: auto, osc9, bell, or off"
+    )]
+    pub notifications: NotificationMethod,
+
     #[config(default = DEFAULT_FLASH_DURATION_MS, desc = "Duration of flash messages (ms)")]
     pub flash_duration_ms: u64,
 
@@ -1055,6 +1075,7 @@ impl UiConfig {
         Self {
             splash_animation: f.splash_animation.unwrap_or(true),
             scrollbar: f.scrollbar.unwrap_or(true),
+            notifications: f.notifications.unwrap_or_default(),
             flash_duration_ms: f.flash_duration_ms.unwrap_or(DEFAULT_FLASH_DURATION_MS),
             typewriter_ms_per_char: f
                 .typewriter_ms_per_char
@@ -2820,6 +2841,7 @@ mod tests {
     fn empty_config_returns_defaults() {
         let config = RawConfig::default().into_config(false).unwrap();
         assert!(config.ui.splash_animation);
+        assert_eq!(config.ui.notifications, NotificationMethod::Auto);
         assert_eq!(config.agent.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
         assert_eq!(
             config.provider.connect_timeout,
@@ -2830,6 +2852,22 @@ mod tests {
             DEFAULT_MAX_LOG_BYTES_MB * 1024 * 1024
         );
         assert!(config.ui.keybindings.is_empty());
+    }
+
+    #[test_case("auto", NotificationMethod::Auto ; "auto")]
+    #[test_case("osc9", NotificationMethod::Osc9 ; "osc9")]
+    #[test_case("bell", NotificationMethod::Bell ; "bell")]
+    #[test_case("off", NotificationMethod::Off ; "off")]
+    fn notifications_deserialize(value: &str, expected: NotificationMethod) {
+        let raw: RawConfig =
+            toml::from_str(&format!("[ui]\nnotifications = \"{value}\"\n")).unwrap();
+        assert_eq!(raw.into_config(false).unwrap().ui.notifications, expected);
+    }
+
+    #[test]
+    fn notifications_reject_unknown_value() {
+        let result: Result<RawConfig, _> = toml::from_str("[ui]\nnotifications = \"desktop\"\n");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2885,6 +2923,7 @@ tasks = []
             always_yolo: Some(false),
             ui: UiFileConfig {
                 splash_animation: Some(false),
+                notifications: Some(NotificationMethod::Bell),
                 flash_duration_ms: Some(2000),
                 ..Default::default()
             },
@@ -2897,6 +2936,10 @@ tasks = []
         };
         let overlay = RawConfig {
             always_yolo: Some(true),
+            ui: UiFileConfig {
+                notifications: Some(NotificationMethod::Off),
+                ..Default::default()
+            },
             agent: AgentFileConfig {
                 max_output_lines: Some(5000),
                 ..Default::default()
@@ -2909,6 +2952,11 @@ tasks = []
         assert_eq!(base.agent.max_output_lines, Some(5000), "overlay wins");
         assert_eq!(base.agent.max_line_bytes, Some(800), "base preserved");
         assert_eq!(base.ui.splash_animation, Some(false), "base preserved");
+        assert_eq!(
+            base.ui.notifications,
+            Some(NotificationMethod::Off),
+            "overlay wins"
+        );
         assert_eq!(base.ui.flash_duration_ms, Some(2000), "base preserved");
     }
 

@@ -193,6 +193,7 @@ use std::path::PathBuf;
 
 pub enum Action {
     SendMessage(Box<AgentInput>),
+    ManualExit,
     ShellCommand {
         id: String,
         command: String,
@@ -220,7 +221,6 @@ pub enum Action {
     Suspend,
     RefreshModels,
     RefreshUsage,
-    Quit,
     ProviderReady {
         model_spec: String,
         provider: Result<Arc<dyn Provider>, String>,

@@ -143,6 +143,7 @@ impl Chat {
             AgentEvent::QueueItemConsumed { text, image_count } => {
                 return ChatEventResult::QueueItemConsumed { text, image_count };
             }
+            AgentEvent::QueueDrained => {}
             AgentEvent::Retry { .. } => unreachable!("handled before handle_event"),
             AgentEvent::Done { usage, reason, .. } => {
                 self.messages_panel.flush();
