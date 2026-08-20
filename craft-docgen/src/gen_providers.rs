@@ -192,7 +192,7 @@ supports_vision = true
 
 Provider-level fields apply to every model from that upstream; per-model entries under `models` win field by field. Fields: `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`, `base` (remaps an opaque vendor to a native provider; e.g. `llama-cpp`, `google`, `anthropic`), and `path_prefix`. Model ids containing dots must be quoted (`"qwen3.6"`) since TOML treats a bare dotted key as a nested table.
 
-Craft sends `/v1` (or `/v1beta` for Gemini routes), and Aperture appends that path to the upstream's base url. If an upstream base url already carries its own path, set `path_prefix = ""` for it to avoid a doubled path."#;
+Craft sends `/v1` (or `/v1beta` for Gemini routes, nothing for Anthropic), and Aperture appends that path to the upstream's base url. If an upstream base url already carries its own path, set `path_prefix = ""` for it to avoid a doubled path."#;
 
 fn dynamic_providers_section() -> String {
     let valid_values: Vec<String> = ProviderKind::iter().map(|k| format!("`{k}`")).collect();

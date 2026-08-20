@@ -159,13 +159,31 @@ fn kind_supports_thinking(kind: ProviderKind) -> bool {
 /// follows the API format the request uses: `/v1` for OpenAI chat (and for the
 /// generic gateway path), `/v1beta` for Gemini. Anthropic gets none because its
 /// provider rebuilds `/v1/messages` from the bare origin. An upstream whose
-/// base url already carries a path would double up, so `path_prefix` in the
-/// overrides can replace it per gateway provider.
+/// base url already carries a path (e.g. a Z.AI base url with `/api/paas/v4`)
+/// would double up, so `path_prefix` in the overrides can replace it per
+/// gateway provider.
+/// Exhaustive on purpose: a new `ProviderKind` must state its prefix here
+/// instead of silently inheriting `/v1`.
 fn default_path_prefix(kind: Option<ProviderKind>) -> &'static str {
     match kind {
         Some(ProviderKind::Anthropic) => "",
         Some(ProviderKind::Google) => GEMINI_PATH_PREFIX,
-        _ => DEFAULT_PATH_PREFIX,
+        Some(
+            ProviderKind::Ollama
+            | ProviderKind::LlamaCpp
+            | ProviderKind::Mistral
+            | ProviderKind::DeepSeek
+            | ProviderKind::OpenRouter
+            | ProviderKind::Synthetic
+            | ProviderKind::TensorX
+            | ProviderKind::OpenAi
+            | ProviderKind::Copilot
+            | ProviderKind::Opencode
+            | ProviderKind::Xai
+            | ProviderKind::Bedrock
+            | ProviderKind::Aperture,
+        )
+        | None => DEFAULT_PATH_PREFIX,
     }
 }
 
@@ -564,7 +582,8 @@ mod tests {
         assert_eq!(auth.lock().unwrap().base_url.as_deref(), expected);
     }
 
-    #[test_case(Some("") , Some("https://aperture.example.com") ; "empty_prefix_keeps_bare_host")]
+    #[test_case(Some(""), Some("https://aperture.example.com") ; "empty_prefix_keeps_bare_host")]
+    #[test_case(Some("v1"), Some("https://aperture.example.com/v1") ; "configured_prefix_beats_anthropic_default")]
     #[test_case(Some("api/paas/v4"), Some("https://aperture.example.com/api/paas/v4") ; "prefix_gets_leading_slash")]
     #[test_case(Some("/v1/"), Some("https://aperture.example.com/v1") ; "prefix_trailing_slash_trimmed")]
     fn routed_auth_path_prefix_override_wins(configured: Option<&str>, expected: Option<&str>) {
@@ -574,7 +593,7 @@ mod tests {
         };
         let auth = routed_auth(
             &test_auth(),
-            &path_prefix(Some(ProviderKind::TensorX), &merged),
+            &path_prefix(Some(ProviderKind::Anthropic), &merged),
         );
         assert_eq!(auth.lock().unwrap().base_url.as_deref(), expected);
     }
