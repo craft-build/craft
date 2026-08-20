@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use craft_providers::{Message, Role, StopReason, StreamResponse, TokenUsage};
+use craft_providers::{ContentBlock, Message, Role, StopReason, StreamResponse, TokenUsage};
 use tracing::{error, info, warn};
 
-use crate::agent::streaming::stream_with_retry;
+use crate::agent::streaming::{StreamError, stream_with_retry};
 use crate::agent::tool_dispatch::{self, ToolBatchOutcome};
 use crate::tools::Deadline;
 use crate::tools::ToolContext;
@@ -129,14 +129,26 @@ impl<'h> Agent<'h> {
                 }
                 r
             }
-            Err(e) if e.is_auth_error() => {
+            Err(StreamError::Cancelled { streamed }) => {
+                // Keep the partial reply the view still shows so the next
+                // turn's model sees text the user was already reading.
+                if !streamed.trim().is_empty() {
+                    self.history.push(Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text { text: streamed }],
+                        ..Default::default()
+                    });
+                }
+                return Err(AgentError::Cancelled);
+            }
+            Err(StreamError::Other(e)) if e.is_auth_error() => {
                 return self.io.wait_for_reauth(e, self.num_turns).await;
             }
-            Err(e) if e.is_overflow() => {
+            Err(StreamError::Other(e)) if e.is_overflow() => {
                 info!("context overflow detected, will attempt auto-compact");
                 return Ok(TurnOutcome::Overflow);
             }
-            Err(e) => {
+            Err(StreamError::Other(e)) => {
                 let (kind, action) = crate::agent::recovery::classify(&e);
                 error!(
                     error = %e,
@@ -504,41 +516,131 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cancel_token_aborts_during_api_call() {
-        struct HangingProvider;
-        #[async_trait]
-        impl Provider for HangingProvider {
-            async fn stream_message(
-                &self,
-                _: &Model,
-                _: &[Message],
-                _: &str,
-                _: &serde_json::Value,
-                _: &flume::Sender<ProviderEvent>,
-                _: RequestOptions,
-                _: Option<&craft_storage::id::SessionRef>,
-            ) -> Result<StreamResponse, AgentError> {
-                std::future::pending::<()>().await;
-                unreachable!()
+    /// Streams `delta` (if any), fires `cancel_after_delta` (if any),
+    /// then fails with `fail_status` or hangs until cancelled.
+    #[derive(Default)]
+    struct StubStreamProvider {
+        delta: Option<&'static str>,
+        cancel_after_delta: std::sync::Mutex<Option<crate::cancel::CancelTrigger>>,
+        fail_status: Option<u16>,
+    }
+
+    #[async_trait]
+    impl Provider for StubStreamProvider {
+        async fn stream_message(
+            &self,
+            _: &Model,
+            _: &[Message],
+            _: &str,
+            _: &serde_json::Value,
+            ptx: &flume::Sender<ProviderEvent>,
+            _: RequestOptions,
+            _: Option<&craft_storage::id::SessionRef>,
+        ) -> Result<StreamResponse, AgentError> {
+            if let Some(text) = self.delta {
+                ptx.send(ProviderEvent::TextDelta { text: text.into() })
+                    .unwrap();
             }
-            async fn list_models(&self) -> Result<Vec<String>, AgentError> {
-                unimplemented!()
+            if let Some(trigger) = self.cancel_after_delta.lock().unwrap().take() {
+                trigger.cancel();
+            }
+            match self.fail_status {
+                Some(status) => Err(AgentError::Api {
+                    status,
+                    message: "stub".into(),
+                }),
+                None => std::future::pending().await,
             }
         }
+        async fn list_models(&self) -> Result<Vec<String>, AgentError> {
+            unimplemented!()
+        }
+    }
 
+    #[tokio::test]
+    async fn cancel_token_aborts_during_api_call() {
         let (trigger, cancel) = CancelToken::new();
         trigger.cancel();
 
         let mut history = History::new(Vec::new());
         let (run_params, _event_rx) = make_run_params(&mut history);
         let mut params = make_agent_params();
-        params.provider = std::sync::Arc::new(HangingProvider);
+        params.provider = std::sync::Arc::new(StubStreamProvider::default());
         let agent = Agent::new(params, run_params).with_cancel(cancel);
 
         let result = agent.run(default_input()).await;
         assert_eq!(result.unwrap(), DoneReason::Cancelled);
         assert_ends_with_cancel_marker(&history);
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_stream_keeps_partial_text_in_history() {
+        const PARTIAL: &str = "partial answer";
+        let (trigger, cancel) = CancelToken::new();
+        let provider = StubStreamProvider {
+            delta: Some(PARTIAL),
+            cancel_after_delta: std::sync::Mutex::new(Some(trigger)),
+            ..Default::default()
+        };
+        let mut history = History::new(Vec::new());
+        let (run_params, _event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = std::sync::Arc::new(provider);
+        let agent = Agent::new(params, run_params).with_cancel(cancel);
+
+        assert_eq!(
+            agent.run(default_input()).await.unwrap(),
+            DoneReason::Cancelled
+        );
+        assert_ends_with_cancel_marker(&history);
+        let messages = history.as_slice();
+        let partial = &messages[messages.len() - 2];
+        assert!(matches!(partial.role, Role::Assistant));
+        assert!(matches!(&partial.content[0], ContentBlock::Text { text } if text == PARTIAL));
+    }
+
+    /// The `Retry` event already made the view drop the failed attempt's
+    /// text, so history must not resurrect it (see `StreamError`).
+    #[tokio::test]
+    async fn cancel_during_retry_backoff_discards_failed_attempt_text() {
+        const PARTIAL: &str = "doomed attempt";
+        let (trigger, cancel) = CancelToken::new();
+        let provider = StubStreamProvider {
+            delta: Some(PARTIAL),
+            fail_status: Some(429),
+            ..Default::default()
+        };
+        let mut history = History::new(Vec::new());
+        let (run_params, event_rx) = make_run_params(&mut history);
+        let mut params = make_agent_params();
+        params.provider = std::sync::Arc::new(provider);
+        let agent = Agent::new(params, run_params).with_cancel(cancel);
+
+        let mut trigger = Some(trigger);
+        let pump = tokio::spawn(async move {
+            while let Ok(envelope) = event_rx.recv_async().await {
+                if matches!(envelope.event, AgentEvent::Retry { .. })
+                    && let Some(t) = trigger.take()
+                {
+                    t.cancel();
+                }
+            }
+        });
+
+        assert_eq!(
+            agent.run(default_input()).await.unwrap(),
+            DoneReason::Cancelled
+        );
+        pump.abort();
+
+        assert_ends_with_cancel_marker(&history);
+        assert!(
+            history.as_slice().iter().all(|m| !m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == PARTIAL))),
+            "failed attempt's text must not reach history"
+        );
     }
 
     #[test_case(

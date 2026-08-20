@@ -38,12 +38,14 @@ async fn forward_provider_events(
     ttsr: Option<Arc<TtsrManager>>,
     turn: u32,
     fired: Arc<std::sync::Mutex<Option<String>>>,
-) {
+) -> String {
+    let mut streamed = String::new();
     let ttsr_ref = ttsr.as_deref();
     while let Ok(pe) = prx.recv_async().await {
         let ae = match &pe {
             ProviderEvent::TextDelta { text } => {
                 observe_ttsr(ttsr_ref, text, turn, &fired);
+                streamed.push_str(text);
                 AgentEvent::TextDelta { text: text.clone() }
             }
             ProviderEvent::ThinkingDelta { text } => {
@@ -68,6 +70,7 @@ async fn forward_provider_events(
             break;
         }
     }
+    streamed
 }
 
 fn observe_ttsr(
@@ -91,6 +94,31 @@ fn observe_ttsr(
     }
 }
 
+/// Cancelling mid-stream carries the text the user still sees on screen,
+/// so the caller can keep it in history. A cancel during the retry backoff
+/// carries nothing: the `Retry` event already made the view drop the failed
+/// attempt's text, and history must agree with the view.
+#[derive(Debug)]
+pub(crate) enum StreamError {
+    Cancelled { streamed: String },
+    Other(AgentError),
+}
+
+impl From<AgentError> for StreamError {
+    fn from(e: AgentError) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl From<StreamError> for AgentError {
+    fn from(e: StreamError) -> Self {
+        match e {
+            StreamError::Cancelled { .. } => Self::Cancelled,
+            StreamError::Other(e) => e,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_with_retry(
     provider: &dyn Provider,
@@ -105,7 +133,7 @@ pub(crate) async fn stream_with_retry(
     fallbacks: &[ChainHop],
     ttsr: Option<Arc<TtsrManager>>,
     turn: u32,
-) -> Result<(StreamResponse, Option<String>), AgentError> {
+) -> Result<(StreamResponse, Option<String>), StreamError> {
     let mut active_provider: &dyn Provider = provider;
     let mut active_model: &Model = model;
     let messages = adapt_images_for_model(model, messages);
@@ -129,7 +157,7 @@ pub(crate) async fn stream_with_retry(
             _ = cancel.cancelled() => Err(AgentError::Cancelled),
         };
         drop(ptx);
-        let _ = forwarder.await;
+        let streamed = forwarder.await.unwrap_or_default();
         if pending_injection.is_none() {
             pending_injection = fired.lock().unwrap().take();
         }
@@ -138,7 +166,7 @@ pub(crate) async fn stream_with_retry(
                 canonicalize_tool_names(&mut r.message);
                 return Ok((r, pending_injection));
             }
-            Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+            Err(AgentError::Cancelled) => return Err(StreamError::Cancelled { streamed }),
             Err(e) if e.is_retryable() => {
                 let mut advanced = false;
                 if e.should_rotate_key() {
@@ -167,7 +195,7 @@ pub(crate) async fn stream_with_retry(
                 if !advanced {
                     let (attempt, delay) = retry.next_delay();
                     if matches!(e, AgentError::Timeout { .. }) && attempt > MAX_TIMEOUT_RETRIES {
-                        return Err(e);
+                        return Err(e.into());
                     }
                     let delay_ms = delay.as_millis() as u64;
                     warn!(attempt, delay_ms, error = %e, "retryable, will retry");
@@ -181,12 +209,14 @@ pub(crate) async fn stream_with_retry(
                         _ = cancel.cancelled() => {}
                     }
                     if cancel.is_cancelled() {
-                        return Err(AgentError::Cancelled);
+                        return Err(StreamError::Cancelled {
+                            streamed: String::new(),
+                        });
                     }
                 }
             }
-            Err(e) if e.should_abort() => return Err(e),
-            Err(e) => return Err(e.classify()),
+            Err(e) if e.should_abort() => return Err(e.into()),
+            Err(e) => return Err(e.classify().into()),
         }
     }
 }

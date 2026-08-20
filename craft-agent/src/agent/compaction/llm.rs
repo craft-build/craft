@@ -103,6 +103,7 @@ pub(crate) async fn compact_history(
             0,
         )
         .await
+        .map_err(AgentError::from)
         {
             Ok((r, _)) => break r,
             Err(e) if e.is_overflow() => {
