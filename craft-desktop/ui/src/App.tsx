@@ -21,7 +21,10 @@ export default function App() {
         dispatch({ type: "PERMISSION_REQUEST", tabId, requestId, title: toolTitle, options });
       }),
       onQuestion(({ tabId, requestId, params }) => {
-        const questions = (params?.questions ?? []) as unknown as QuestionSpec[];
+        const questions = ((params?.questions ?? []) as Array<Record<string, unknown>>).map((q) => ({
+          ...q,
+          multiSelect: q.multiSelect ?? q.multi_select,
+        })) as unknown as QuestionSpec[];
         dispatch({ type: "QUESTION_REQUEST", tabId, requestId, questions });
       }),
       onPromptDone(({ tabId, ok, error }) => {
