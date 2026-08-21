@@ -44,8 +44,16 @@ pub fn TopBar() -> Element {
         "#8089a3"
     };
 
+    #[cfg(feature = "desktop")]
+    let desktop = dioxus::desktop::use_window();
+
     rsx! {
-        header { class: "topbar",
+        header {
+            class: "topbar",
+            onmousedown: move |_| {
+                #[cfg(feature = "desktop")]
+                desktop.drag();
+            },
             div { class: "topbar-title", "{title}" }
             div { class: "chip",
                 IconRepo {}
@@ -58,7 +66,10 @@ pub fn TopBar() -> Element {
             StatusPill { state: state }
             div { class: "topbar-divider" }
             IconHelp {}
-            button { class: "icon-btn", onclick: move |_| s.panel_open.toggle(),
+            button {
+                class: "icon-btn",
+                onmousedown: move |e| e.stop_propagation(),
+                onclick: move |_| s.panel_open.toggle(),
                 IconPanel { stroke: panel_stroke.to_string() }
             }
         }
