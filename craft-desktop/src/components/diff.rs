@@ -52,24 +52,20 @@ pub fn diff_stat(old_text: &str, new_text: &str) -> (usize, usize) {
 
 #[component]
 pub fn DiffLines(lines: Vec<DiffLine>) -> Element {
+    let rows: Vec<(&'static str, &'static str, &str)> = lines
+        .iter()
+        .map(|l| match l.kind {
+            DiffKind::Add => ("code-line add", "+", l.text.as_str()),
+            DiffKind::Del => ("code-line del", "-", l.text.as_str()),
+            DiffKind::Ctx => ("code-line dctx", " ", l.text.as_str()),
+        })
+        .collect();
     rsx! {
         div { class: "codeblock",
-            for (i, l) in lines.iter().enumerate() {
-                div {
-                    key: "{i}",
-                    class: match l.kind {
-                        DiffKind::Add => "code-line add",
-                        DiffKind::Del => "code-line del",
-                        DiffKind::Ctx => "code-line ctx",
-                    },
-                    span { class: "code-gutter",
-                        match l.kind {
-                            DiffKind::Add => "+",
-                            DiffKind::Del => "-",
-                            DiffKind::Ctx => " ",
-                        }
-                    }
-                    span { "{l.text}" }
+            for (i, (class, gutter, text)) in rows.iter().enumerate() {
+                div { key: "{i}", class: "{class}",
+                    span { class: "code-gutter", "{gutter}" }
+                    span { class: "code-text", "{text}" }
                 }
             }
         }

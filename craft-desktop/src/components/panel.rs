@@ -3,7 +3,27 @@
 use dioxus::prelude::*;
 
 use crate::components::{DiffLines, diff};
-use crate::state::{AppState, active_tab, toggle_file};
+use crate::state::{AppState, ToolDiff, active_tab, toggle_file};
+
+/// One card per file: later edits of the same path supersede earlier diffs.
+fn dedupe_by_path(diffs: Vec<ToolDiff>) -> Vec<ToolDiff> {
+    let mut out: Vec<ToolDiff> = Vec::new();
+    for d in diffs {
+        match out.iter_mut().find(|x| x.path == d.path) {
+            Some(slot) => *slot = d,
+            None => out.push(d),
+        }
+    }
+    out
+}
+
+struct Card {
+    path: String,
+    open: bool,
+    adds: usize,
+    dels: usize,
+    lines: Vec<diff::DiffLine>,
+}
 
 #[component]
 pub fn ChangesPanel() -> Element {
@@ -11,7 +31,22 @@ pub fn ChangesPanel() -> Element {
     let Some(tab) = active_tab(s) else {
         return rsx! {};
     };
-    let diffs = tab.diffs();
+    let open_files = s.open_files.read();
+    let cards: Vec<Card> = dedupe_by_path(tab.diffs())
+        .into_iter()
+        .map(|d| {
+            let old = d.old_text.as_deref().unwrap_or("");
+            let (adds, dels) = diff::diff_stat(old, &d.new_text);
+            Card {
+                open: open_files.contains(&d.path),
+                path: d.path,
+                adds,
+                dels,
+                lines: diff::diff_lines(old, &d.new_text),
+            }
+        })
+        .collect();
+    drop(open_files);
 
     rsx! {
         div { class: "changes-panel",
@@ -21,26 +56,24 @@ pub fn ChangesPanel() -> Element {
                 button { class: "panel-close", onclick: move |_| s.panel_open.set(false), "×" }
             }
             div { class: "panel-body",
-                if diffs.is_empty() {
+                if cards.is_empty() {
                     div { class: "empty-tasks", "No file changes yet." }
                 }
-                for (i, d) in diffs.iter().enumerate() {
+                for card in cards {
                     {
-                        let open = s.open_files.read().contains(&d.path) || (s.open_files.read().is_empty() && i == 0);
-                        let caret = if open { "▾" } else { "▸" };
-                        let (adds, dels) = diff::diff_stat(d.old_text.as_deref().unwrap_or(""), &d.new_text);
-                        let lines = diff::diff_lines(d.old_text.as_deref().unwrap_or(""), &d.new_text);
-                        let path = d.path.clone();
+                        let path = card.path.clone();
                         rsx! {
-                            div { class: "file-card", key: "{i}",
-                                button { class: "file-head", onclick: move |_| toggle_file(s, &path),
-                                    span { class: "file-caret", "{caret}" }
-                                    span { class: "file-path", "{path}" }
-                                    span { class: "file-adds", "+{adds}" }
-                                    span { class: "file-dels", "-{dels}" }
+                            div { class: "file-card", key: "{path}",
+                                button {
+                                    class: "file-head",
+                                    onclick: move |_| toggle_file(s, &path),
+                                    span { class: "file-caret", if card.open { "▾" } else { "▸" } }
+                                    span { class: "file-path", "{card.path}" }
+                                    span { class: "file-adds", "+{card.adds}" }
+                                    span { class: "file-dels", "-{card.dels}" }
                                 }
-                                if open {
-                                    DiffLines { lines: lines }
+                                if card.open {
+                                    DiffLines { lines: card.lines }
                                 }
                             }
                         }

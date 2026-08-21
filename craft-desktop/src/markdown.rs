@@ -96,16 +96,18 @@ fn MdBlockView(block: MdBlock) -> Element {
                                 RunsView { runs: runs_of(&parse_inline(&line.inline)) }
                             }
                         },
+                        // Body wrapper keeps inline runs (incl. `code` chips) inside a
+                        // block container; as direct flex items they would blockify.
                         BlockKind::UnorderedListItem { depth } => rsx! {
                             div { class: "md-li", key: "u{j}", style: format!("padding-left:{}px", *depth * 16 + 8),
                                 span { class: "md-bullet", "•" }
-                                RunsView { runs: runs_of(&parse_inline(&line.inline)) }
+                                div { class: "md-li-body", RunsView { runs: runs_of(&parse_inline(&line.inline)) } }
                             }
                         },
                         BlockKind::OrderedListItem { depth, marker } => rsx! {
                             div { class: "md-li", key: "o{j}", style: format!("padding-left:{}px", *depth * 16 + 8),
                                 span { class: "md-marker", "{marker}" }
-                                RunsView { runs: runs_of(&parse_inline(&line.inline)) }
+                                div { class: "md-li-body", RunsView { runs: runs_of(&parse_inline(&line.inline)) } }
                             }
                         },
                         BlockKind::HorizontalRule => rsx! {
