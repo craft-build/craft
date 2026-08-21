@@ -33,7 +33,12 @@ fn main() {
     // config entirely on other platforms.
     dioxus::LaunchBuilder::new()
         .with_cfg(desktop! {
-            dioxus::desktop::Config::default().with_window(
+            let config = dioxus::desktop::Config::default();
+            // `with_menu` must precede `with_window`: dioxus only accepts a
+            // menu while decorations are still on, then keeps it.
+            #[cfg(target_os = "macos")]
+            let config = config.with_menu(edit_menu());
+            config.with_window(
                 dioxus::desktop::WindowBuilder::new()
                     .with_title("craft")
                     .with_decorations(false)
@@ -43,6 +48,29 @@ fn main() {
             )
         })
         .launch(App);
+}
+
+/// Frameless windows get no default menu bar from dioxus, but on macOS the
+/// Edit menu's key equivalents are what route Cmd+C/X/V/A to the webview.
+/// Reinstall the standard Edit items.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn edit_menu() -> dioxus::desktop::muda::Menu {
+    use dioxus::desktop::muda::{Menu, PredefinedMenuItem, Submenu};
+
+    let menu = Menu::new();
+    let edit = Submenu::new("Edit", true);
+    edit.append_items(&[
+        &PredefinedMenuItem::undo(None),
+        &PredefinedMenuItem::redo(None),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::cut(None),
+        &PredefinedMenuItem::copy(None),
+        &PredefinedMenuItem::paste(None),
+        &PredefinedMenuItem::select_all(None),
+    ])
+    .expect("predefined menu items are valid");
+    menu.append(&edit).expect("submenu append is valid");
+    menu
 }
 
 #[component]
