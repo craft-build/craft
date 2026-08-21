@@ -116,6 +116,19 @@ pub fn flow_progress(progress: &FlowProgress) -> Option<SessionUpdate> {
     Some(thinking_delta(&text))
 }
 
+/// Render the always-on advisor's note as a thought chunk, mirroring the
+/// terminal's `[advisor:{severity}] {message}` display.
+pub fn advisor_note(severity: &str, message: &str) -> SessionUpdate {
+    thinking_delta(&format!("advisor ▸ {severity}: {message}"))
+}
+
+/// Surface an agent info message (e.g. advisor lifecycle notices) as a
+/// thought chunk. Clients otherwise never see these; the terminal renders
+/// them inline.
+pub fn info(message: &str) -> SessionUpdate {
+    thinking_delta(message)
+}
+
 pub fn user_message_chunk(text: &str) -> SessionUpdate {
     SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
         text.to_string(),
@@ -973,6 +986,24 @@ mod tests {
         let text = json["content"]["text"].as_str().unwrap();
         assert!(text.contains("advisor"), "got {text}");
         assert!(text.contains("stale child"), "got {text}");
+    }
+
+    #[test]
+    fn advisor_note_renders_as_thought() {
+        let json = serde_json::to_value(advisor_note("concern", "missing error handling")).unwrap();
+        assert_eq!(json["sessionUpdate"], "agent_thought_chunk");
+        let text = json["content"]["text"].as_str().unwrap();
+        assert!(text.contains("advisor"), "got {text}");
+        assert!(text.contains("concern"), "got {text}");
+        assert!(text.contains("missing error handling"), "got {text}");
+    }
+
+    #[test]
+    fn info_renders_as_thought() {
+        let json = serde_json::to_value(info("advisor reviewing recent activity…")).unwrap();
+        assert_eq!(json["sessionUpdate"], "agent_thought_chunk");
+        let text = json["content"]["text"].as_str().unwrap();
+        assert!(text.contains("advisor reviewing"), "got {text}");
     }
 
     fn start_event(tool: &str, raw_input: Option<serde_json::Value>) -> ToolStartEvent {

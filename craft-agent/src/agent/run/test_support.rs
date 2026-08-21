@@ -74,12 +74,14 @@ pub(super) fn default_model() -> Model {
 }
 
 pub(super) fn text_response(stop_reason: StopReason) -> StreamResponse {
+    text_reply("response", stop_reason)
+}
+
+pub(super) fn text_reply(text: &str, stop_reason: StopReason) -> StreamResponse {
     StreamResponse {
         message: Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text {
-                text: "response".into(),
-            }],
+            content: vec![ContentBlock::Text { text: text.into() }],
             ..Default::default()
         },
         usage: TokenUsage::default(),

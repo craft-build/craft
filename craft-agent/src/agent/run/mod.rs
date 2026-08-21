@@ -478,6 +478,13 @@ impl<'h> Agent<'h> {
                     ) {
                         flow::AdvisorTurnAction::Continue(note) => {
                             self.flow.advisor_continuations += 1;
+                            let _ = self.io.event_tx.send(AgentEvent::Info {
+                                message: flow::advisor_continuation_info(
+                                    &note,
+                                    self.flow.advisor_continuations,
+                                    self.config.advisor.max_act_turns,
+                                ),
+                            });
                             self.history.push(flow::advisor_followup_message(&note));
                             continue;
                         }

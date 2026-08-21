@@ -13,6 +13,7 @@ const MAX_JUDGE_CONTINUATIONS: u8 = 5;
 /// next request would otherwise trail an assistant message, which providers
 /// like Anthropic reject as assistant prefill.
 pub(super) const SHIFT_OUT_TO_GENERAL_PROMPT: &str = "Control returns to `general`. Re-derive the next step from the typed log: shift into the next narrow turn type the work needs, or end the run if the goal is met.";
+pub(super) const ADVISOR_REVIEWING_INFO: &str = "advisor reviewing recent activity…";
 const ADVISOR_FOLLOWUP_PROMPT: &str = "<advisor-note>\nA lightweight advisor reviewed your last turn and flagged a {severity}:\n{note}\n\nAddress this concern before finishing. Make the change; keep it minimal and do not narrate it in comments or prose. Only explain if it does not apply, in one sentence.\n</advisor-note>";
 
 pub(super) struct AgentFlow {
@@ -70,6 +71,18 @@ pub(super) fn advisor_turn_action(
     AdvisorTurnAction::Continue(note)
 }
 
+pub(super) fn advisor_continuation_info(
+    note: &crate::agent::advisor::AdvisorNote,
+    continuation: u32,
+    max: u32,
+) -> String {
+    format!(
+        "advisor raised a {} ({}); continuing to address it ({continuation}/{max})",
+        note.severity.as_str(),
+        note.message,
+    )
+}
+
 pub(super) fn advisor_followup_message(note: &crate::agent::advisor::AdvisorNote) -> Message {
     Message::synthetic(
         ADVISOR_FOLLOWUP_PROMPT
@@ -81,6 +94,9 @@ pub(super) fn advisor_followup_message(note: &crate::agent::advisor::AdvisorNote
 impl<'h> Agent<'h> {
     pub(super) async fn run_advisor(&mut self) -> Option<crate::agent::advisor::AdvisorNote> {
         let state = self.flow.advisor_state.as_mut()?;
+        let _ = self.io.event_tx.send(AgentEvent::Info {
+            message: ADVISOR_REVIEWING_INFO.into(),
+        });
         let result = crate::agent::advisor::review(
             state,
             self.history.as_slice(),

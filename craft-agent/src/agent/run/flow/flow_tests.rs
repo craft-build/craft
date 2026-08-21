@@ -6,8 +6,8 @@ use test_case::test_case;
 use super::super::Agent;
 use super::super::test_support::*;
 use super::{
-    AdvisorTurnAction, SHIFT_OUT_TO_GENERAL_PROMPT, advisor_followup_message, advisor_turn_action,
-    parse_shift_output,
+    ADVISOR_REVIEWING_INFO, AdvisorTurnAction, SHIFT_OUT_TO_GENERAL_PROMPT,
+    advisor_continuation_info, advisor_followup_message, advisor_turn_action, parse_shift_output,
 };
 use crate::agent::flow_loop::FlowProgress;
 use crate::agent::history::History;
@@ -534,4 +534,80 @@ fn advisor_followup_message_carries_note_and_is_hidden() {
     assert!(text.contains("concern"));
     assert!(text.contains("missing error handling"));
     assert_eq!(msg.display_text.as_deref(), Some(""));
+}
+
+#[test]
+fn advisor_continuation_info_describes_note_and_budget() {
+    let note = advisor_note(AdvisorSeverity::Concern, "missing error handling");
+    assert_eq!(
+        advisor_continuation_info(&note, 1, 2),
+        "advisor raised a concern (missing error handling); continuing to address it (1/2)"
+    );
+}
+
+#[tokio::test]
+async fn advisor_run_emits_reviewing_info_note_and_continuation_info() {
+    const ADVISOR_NOTE_LINE: &str = "CONCERN: missing error handling";
+    const OK_LINE: &str = "OK";
+    // A slash-less spec cannot parse, so `resolve_advisor` falls back to the
+    // active (mock) provider and this test never touches the network.
+    const BAD_MODEL_SPEC: &str = "not-a-valid-spec";
+
+    let mut history = History::new(Vec::new());
+    let (run_params, event_rx) = make_run_params(&mut history);
+    let mut params = make_agent_params();
+    params.config.advisor = craft_config::AdvisorConfig {
+        model: Some(BAD_MODEL_SPEC.into()),
+        ..advisor_cfg(craft_config::AdvisorAutoAct::Concern, 2)
+    };
+    params.provider = std::sync::Arc::new(MockProvider::new(vec![
+        text_response(StopReason::EndTurn),
+        text_reply(ADVISOR_NOTE_LINE, StopReason::EndTurn),
+        text_response(StopReason::EndTurn),
+        text_reply(OK_LINE, StopReason::EndTurn),
+    ]));
+    Agent::new(params, run_params)
+        .run(default_input())
+        .await
+        .unwrap();
+
+    let events = drain_events(&event_rx);
+    let reviewing = events
+        .iter()
+        .filter(|e| matches!(&e.event, AgentEvent::Info { message } if message == ADVISOR_REVIEWING_INFO))
+        .count();
+    assert_eq!(reviewing, 2, "one review per done-turn");
+    assert!(has_event(&events, |e| matches!(
+        e,
+        AgentEvent::AdvisorNote { severity, message }
+            if severity == "concern" && message == "missing error handling"
+    )));
+    let expected = advisor_continuation_info(
+        &advisor_note(AdvisorSeverity::Concern, "missing error handling"),
+        1,
+        2,
+    );
+    assert!(has_event(&events, |e| matches!(
+        e,
+        AgentEvent::Info { message } if *message == expected
+    )));
+}
+
+#[tokio::test]
+async fn disabled_advisor_emits_no_lifecycle_info() {
+    let mut history = History::new(Vec::new());
+    let (run_params, event_rx) = make_run_params(&mut history);
+    let mut params = make_agent_params();
+    params.provider =
+        std::sync::Arc::new(MockProvider::new(vec![text_response(StopReason::EndTurn)]));
+    Agent::new(params, run_params)
+        .run(default_input())
+        .await
+        .unwrap();
+
+    let events = drain_events(&event_rx);
+    assert!(!has_event(&events, |e| matches!(
+        e,
+        AgentEvent::Info { message } if message == ADVISOR_REVIEWING_INFO
+    )));
 }

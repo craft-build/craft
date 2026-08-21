@@ -1483,6 +1483,10 @@ fn start_event_pump(
                         None => continue,
                     }
                 }
+                AgentEvent::AdvisorNote { severity, message } => {
+                    translate::advisor_note(&severity, &message)
+                }
+                AgentEvent::Info { message } => translate::info(&message),
                 AgentEvent::AutoReviewStart { id, .. } => translate::auto_review_start(&id),
                 AgentEvent::AutoReviewDecision {
                     id,
@@ -1865,6 +1869,60 @@ mod tests {
             output: None,
         }));
         assert!(todo_update_from_event(&event).is_none());
+    }
+
+    #[tokio::test]
+    async fn event_pump_forwards_advisor_events_as_thought_updates() {
+        let (event_tx, event_rx) = flume::unbounded::<craft_agent::Envelope>();
+        let (out_tx, out_rx) = flume::unbounded::<Value>();
+        start_event_pump(
+            event_rx,
+            SessionRef::from(CraftId::generate()),
+            out_tx,
+            Arc::new(Mutex::new(Pending::default())),
+            Arc::new(AtomicI64::new(FIRST_OUTGOING_REQUEST_ID)),
+            PathBuf::from("/project"),
+            None,
+            None,
+        );
+
+        let envelope = |event: AgentEvent| craft_agent::Envelope {
+            event,
+            subagent: None,
+            run_id: 0,
+        };
+        event_tx
+            .send(envelope(AgentEvent::AdvisorNote {
+                severity: "concern".into(),
+                message: "missing error handling".into(),
+            }))
+            .unwrap();
+        event_tx
+            .send(envelope(AgentEvent::Info {
+                message: "advisor reviewing recent activity…".into(),
+            }))
+            .unwrap();
+
+        let note = out_rx.recv_async().await.unwrap();
+        assert_eq!(note["method"], "session/update");
+        let note_update = &note["params"]["update"];
+        assert_eq!(note_update["sessionUpdate"], "agent_thought_chunk");
+        let note_text = note_update["content"]["text"].as_str().unwrap();
+        assert!(note_text.contains("advisor"), "got {note_text}");
+        assert!(
+            note_text.contains("missing error handling"),
+            "got {note_text}"
+        );
+
+        let info = out_rx.recv_async().await.unwrap();
+        assert_eq!(
+            info["params"]["update"]["sessionUpdate"],
+            "agent_thought_chunk"
+        );
+        let info_text = info["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(info_text.contains("advisor reviewing"), "got {info_text}");
     }
 
     #[test]
