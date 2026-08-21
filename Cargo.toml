@@ -92,6 +92,9 @@ craft-highlight = { path = "craft-highlight" }
 craft-markdown = { path = "craft-markdown" }
 craft-repomap = { path = "craft-repomap" }
 craft-sandbox = { path = "craft-sandbox" }
+dioxus = "0.7"
+rfd = "0.15"
+which = "8"
 playwright-rs = { version = "0.15", default-features = false, features = ["macros", "aws-lc", "rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }

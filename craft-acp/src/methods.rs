@@ -121,8 +121,12 @@ pub fn resume_session_response() -> ResumeSessionResponse {
 }
 
 pub fn model_config_option(current: &str, specs: &[String]) -> SessionConfigOption {
+    // Duplicated specs (e.g. a model reachable through two provider configs)
+    // must not leak into the option list: clients key menu items by value.
+    let mut seen = std::collections::HashSet::new();
     let mut options: Vec<SessionConfigSelectOption> = specs
         .iter()
+        .filter(|spec| seen.insert(spec.as_str()))
         .map(|spec| SessionConfigSelectOption::new(spec.clone(), spec.clone()))
         .collect();
     if !specs.iter().any(|spec| spec == current) {

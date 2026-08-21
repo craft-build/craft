@@ -6,28 +6,37 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Desktop GUI for the craft coding harness, built on Tauri and the Agent Client Protocol."
+description = "Desktop GUI for the craft coding harness, built on Dioxus and the Agent Client Protocol."
 
 [[bin]]
 name = "craft-desktop"
 path = "src/main.rs"
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
+dioxus = { workspace = true, features = ["desktop"] }
+craft-highlight = { workspace = true }
+craft-markdown = { workspace = true }
+craft-storage = { workspace = true }
+flume = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-craft-storage = { workspace = true }
+syntect = { workspace = true }
 toml = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-flume = { workspace = true }
-which = "8"
+similar = { workspace = true }
+two-face = { workspace = true }
+uuid = { workspace = true }
+which = { workspace = true }
+rfd = { workspace = true }
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+web = ["dioxus/web"]
+mobile = ["dioxus/mobile"]
 
 [dev-dependencies]
 test-case = { workspace = true }

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use craft_storage::StateDir;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::Deserialize;
+use syntect::highlighting::Theme;
 
 const DEFAULT_THEME: &str = "craft";
 const RESERVED_KEYS: &[&str] = &["palette", "ui", "inherits"];
@@ -275,20 +275,26 @@ pub static BUNDLED_THEMES: &[ThemeEntry] = &[
     },
 ];
 
-#[derive(Serialize, Debug)]
+#[derive(Debug)]
 pub struct ThemeName {
     pub name: String,
     pub label: String,
 }
 
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
+/// Foreground-mix ratios for the `--ink-*` background tints. These slots are
+/// always *background* fills under primary/secondary text (seg items, cards,
+/// selected rows), so they must stay background-adjacent regardless of theme.
+const INK_800_MIX: f32 = 0.05;
+const INK_700_MIX: f32 = 0.08;
+const INK_600_MIX: f32 = 0.13;
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ThemeTokens {
     pub name: String,
     pub label: String,
     pub bg: String,
     pub bg_elevated: String,
-    pub bg_inset: String,
     pub border: String,
     pub text: String,
     pub text_dim: String,
@@ -296,7 +302,9 @@ pub struct ThemeTokens {
     pub accent: String,
     pub accent_dim: String,
     pub accent_dim2: String,
+    #[allow(dead_code)]
     pub accent_secondary: String,
+    #[allow(dead_code)]
     pub accent_tertiary: String,
     pub accent_text: String,
     pub success: String,
@@ -305,10 +313,46 @@ pub struct ThemeTokens {
     pub warning_dim: String,
     pub info: String,
     pub mode_colors: ModeColors,
-    pub syntax_theme: Value,
+    pub syntax_theme: Theme,
 }
 
-#[derive(Serialize, Debug)]
+impl ThemeTokens {
+    /// CSS custom-property overrides mapping this theme's tokens onto the
+    /// craft-code design-system variables.
+    pub fn css_vars(&self) -> String {
+        let grad = format!(
+            "linear-gradient(135deg,{},{} 55%,{})",
+            self.accent, self.accent_secondary, self.accent_tertiary
+        );
+        let bg_rgb = parse_hex_rgb(&self.bg).unwrap_or(Rgb(0x06, 0x09, 0x11));
+        let fg_rgb = parse_hex_rgb(&self.text).unwrap_or(Rgb(0xf7, 0xf8, 0xfb));
+        let ink_800 = hex_string(lerp_rgb(bg_rgb, fg_rgb, INK_800_MIX));
+        let ink_700 = hex_string(lerp_rgb(bg_rgb, fg_rgb, INK_700_MIX));
+        let ink_600 = hex_string(lerp_rgb(bg_rgb, fg_rgb, INK_600_MIX));
+        format!(
+            "--bg-app:{bg};--bg-surface:{elev};--bg-surface-raised:{ink_800};--border-subtle:{border};--border-strong:{border};\
+             --text-primary:{text};--text-secondary:{dim};--text-tertiary:{faint};--accent-primary:{accent};--accent-text:{accent_text};\
+             --status-success:{success};--status-danger:{danger};--status-warning:{warning};--status-info:{info};--focus-ring:{accent};\
+             --grad-brand:{grad};--blue-400:{accent};--blue-500:{accent};--violet-400:{accent};--ink-600:{ink_600};--ink-700:{ink_700};--ink-800:{ink_800}",
+            bg = self.bg,
+            elev = self.bg_elevated,
+            border = self.border,
+            text = self.text,
+            dim = self.text_dim,
+            faint = self.text_faint,
+            accent = self.accent,
+            accent_text = self.accent_text,
+            success = self.success,
+            danger = self.danger,
+            warning = self.warning,
+            info = self.info,
+            grad = grad,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ModeColors {
     pub build: String,
     pub plan: String,
@@ -468,27 +512,39 @@ fn build_syntax_theme(
     raw_palette: &HashMap<String, String>,
     background: Option<Rgb>,
     foreground: Option<Rgb>,
-) -> Value {
-    let mut settings = Map::new();
+) -> Theme {
+    use std::str::FromStr;
+    use syntect::highlighting::{
+        FontStyle, ScopeSelectors, StyleModifier, ThemeItem, ThemeSettings,
+    };
+
+    let to_color = |c: Rgb| syntect::highlighting::Color {
+        r: c.0,
+        g: c.1,
+        b: c.2,
+        a: 0xff,
+    };
+
+    let mut settings = ThemeSettings::default();
     if let Some(bg) = background {
-        settings.insert("background".to_string(), Value::String(hex_string(bg)));
+        settings.background = Some(to_color(bg));
     }
     if let Some(fg) = foreground {
-        settings.insert("foreground".to_string(), Value::String(hex_string(fg)));
-        settings.insert("caret".to_string(), Value::String(hex_string(fg)));
+        settings.foreground = Some(to_color(fg));
+        settings.caret = Some(to_color(fg));
     }
     if let Some(c) = resolve_palette_color_fallback("current_line", palette, raw_palette)
         .or_else(|| resolve_palette_color_fallback("selection", palette, raw_palette))
     {
-        settings.insert("lineHighlight".to_string(), Value::String(hex_string(c)));
+        settings.line_highlight = Some(to_color(c));
     }
     if let Some(c) = resolve_palette_color_fallback("selection", palette, raw_palette)
         .or_else(|| resolve_palette_color_fallback("current_line", palette, raw_palette))
     {
-        settings.insert("selection".to_string(), Value::String(hex_string(c)));
+        settings.selection = Some(to_color(c));
     }
 
-    let mut token_colors: Vec<Value> = Vec::new();
+    let mut items: Vec<ThemeItem> = Vec::new();
 
     for (key, value) in full_table {
         if RESERVED_KEYS.contains(&key.as_str()) || key.starts_with("ui.") {
@@ -509,31 +565,32 @@ fn build_syntax_theme(
         else {
             continue;
         };
-        let tm_scope = helix_to_textmate_scope(key);
-        let mut entry = Map::new();
-        entry.insert("scope".to_string(), Value::String(tm_scope.to_string()));
-        let mut style = Map::new();
-        style.insert("foreground".to_string(), Value::String(hex_string(fg)));
+        let Ok(selector) = ScopeSelectors::from_str(helix_to_textmate_scope(key)) else {
+            continue;
+        };
+        let mut style = StyleModifier {
+            foreground: Some(to_color(fg)),
+            ..Default::default()
+        };
         if def.modifiers.iter().any(|m| m == "bold") {
-            style.insert("fontStyle".to_string(), Value::String("bold".to_string()));
+            style.font_style = Some(FontStyle::BOLD);
         } else if def.modifiers.iter().any(|m| m == "italic") {
-            style.insert("fontStyle".to_string(), Value::String("italic".to_string()));
+            style.font_style = Some(FontStyle::ITALIC);
         } else if def.modifiers.iter().any(|m| m == "underlined") {
-            style.insert(
-                "fontStyle".to_string(),
-                Value::String("underline".to_string()),
-            );
+            style.font_style = Some(FontStyle::UNDERLINE);
         }
-        entry.insert("settings".to_string(), Value::Object(style));
-        token_colors.push(Value::Object(entry));
+        items.push(ThemeItem {
+            scope: selector,
+            style,
+        });
     }
 
-    let mut root = Map::new();
-    root.insert("name".to_string(), Value::String("craft".to_string()));
-    root.insert("type".to_string(), Value::String("dark".to_string()));
-    root.insert("settings".to_string(), Value::Object(settings));
-    root.insert("tokenColors".to_string(), Value::Array(token_colors));
-    Value::Object(root)
+    Theme {
+        name: Some("craft".to_string()),
+        author: None,
+        settings,
+        scopes: items,
+    }
 }
 
 pub fn parse_theme(name: &str, label: &str, toml_str: &str) -> Result<ThemeTokens, String> {
@@ -549,7 +606,6 @@ pub fn parse_theme(name: &str, label: &str, toml_str: &str) -> Result<ThemeToken
     let fg = foreground.unwrap_or(Rgb(0xf0, 0xf0, 0xf0));
 
     let bg_elevated = lerp_rgb(bg, fg, 0.04);
-    let bg_inset = lerp_rgb(bg, fg, 0.02);
 
     let comment = resolve_palette_color_fallback("comment", &palette, &raw_palette)
         .unwrap_or(lerp_rgb(fg, bg, 0.5));
@@ -674,7 +730,6 @@ pub fn parse_theme(name: &str, label: &str, toml_str: &str) -> Result<ThemeToken
         label: label.to_string(),
         bg: hex_string(bg),
         bg_elevated: hex_string(bg_elevated),
-        bg_inset: hex_string(bg_inset),
         border: hex_with_alpha(border_rgb, 0.6),
         text: hex_string(fg),
         text_dim: hex_string(text_dim),
@@ -751,13 +806,26 @@ pub fn get_theme_by_name(name: &str) -> Result<ThemeTokens, String> {
 
 pub fn current_theme() -> ThemeTokens {
     let name = current_theme_name();
-    get_theme_by_name(&name).unwrap_or_else(|_| {
-        let entry = BUNDLED_THEMES
-            .iter()
-            .find(|e| e.name == DEFAULT_THEME)
-            .expect("default theme must exist");
-        parse_theme(entry.name, entry.label, entry.toml).expect("default theme must parse")
-    })
+    get_theme_by_name(&name).unwrap_or_else(|_| current_theme_fallback())
+}
+
+/// Parses the default theme directly; only fails if the bundled toml is
+/// corrupted, so it is safe to use as an infallible last resort.
+pub fn current_theme_fallback() -> ThemeTokens {
+    let entry = BUNDLED_THEMES
+        .iter()
+        .find(|e| e.name == DEFAULT_THEME)
+        .expect("default theme must exist");
+    parse_theme(entry.name, entry.label, entry.toml).expect("default theme must parse")
+}
+
+/// Applies a theme app-wide: persists the choice (shared with the TUI),
+/// swaps the syntax-highlight theme, and returns the UI tokens.
+pub fn apply_theme(name: &str) -> ThemeTokens {
+    persist_theme_name(name);
+    let tokens = get_theme_by_name(name).unwrap_or_else(|_| current_theme_fallback());
+    craft_highlight::set_theme(tokens.syntax_theme.clone());
+    tokens
 }
 
 #[cfg(test)]
@@ -786,29 +854,15 @@ mod tests {
         let tokens = parse_theme(entry.name, entry.label, entry.toml).unwrap();
         assert_eq!(tokens.bg, "#282a36");
         assert_eq!(tokens.text, "#f8f8f2");
-        assert!(
-            !tokens.syntax_theme["tokenColors"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            tokens.syntax_theme["settings"]["background"]
-                .as_str()
-                .unwrap()
-                .starts_with('#')
-        );
+        assert!(tokens.syntax_theme.scopes.len() > 20);
+        assert!(tokens.syntax_theme.settings.background.is_some());
     }
 
     #[test]
     fn syntax_theme_has_scopes() {
         let entry = BUNDLED_THEMES.iter().find(|e| e.name == "dracula").unwrap();
         let tokens = parse_theme(entry.name, entry.label, entry.toml).unwrap();
-        let scopes = tokens.syntax_theme["tokenColors"].as_array().unwrap();
-        assert!(scopes.len() > 20);
-        let first = &scopes[0];
-        assert!(first["scope"].is_string());
-        assert!(first["settings"]["foreground"].is_string());
+        assert!(tokens.syntax_theme.scopes.len() > 20);
     }
 
     #[test]
@@ -817,52 +871,22 @@ mod tests {
     }
 
     #[test]
-    fn tokens_serialize_to_camel_case() {
+    fn css_vars_cover_design_system() {
         let entry = BUNDLED_THEMES.iter().find(|e| e.name == "dracula").unwrap();
         let tokens = parse_theme(entry.name, entry.label, entry.toml).unwrap();
-        let json = serde_json::to_value(&tokens).unwrap();
-        let obj = json.as_object().unwrap();
-        assert!(
-            obj.contains_key("bgElevated"),
-            "missing camelCase bgElevated"
-        );
-        assert!(obj.contains_key("bgInset"), "missing camelCase bgInset");
-        assert!(obj.contains_key("accentDim"), "missing camelCase accentDim");
-        assert!(
-            obj.contains_key("accentText"),
-            "missing camelCase accentText"
-        );
-        assert!(obj.contains_key("textDim"), "missing camelCase textDim");
-        assert!(obj.contains_key("textFaint"), "missing camelCase textFaint");
-        assert!(
-            obj.contains_key("warningDim"),
-            "missing camelCase warningDim"
-        );
-        assert!(
-            obj.contains_key("accentSecondary"),
-            "missing camelCase accentSecondary"
-        );
-        assert!(
-            obj.contains_key("accentTertiary"),
-            "missing camelCase accentTertiary"
-        );
-        assert!(obj.contains_key("info"), "missing info field");
-        assert!(
-            obj.contains_key("modeColors"),
-            "missing camelCase modeColors"
-        );
-        assert!(
-            obj.contains_key("syntaxTheme"),
-            "missing camelCase syntaxTheme"
-        );
-        assert!(
-            !obj.contains_key("bg_elevated"),
-            "snake_case leaked into JSON"
-        );
-        assert!(
-            !obj.contains_key("mode_colors"),
-            "snake_case leaked into JSON"
-        );
+        let vars = tokens.css_vars();
+        for key in [
+            "--bg-app",
+            "--bg-surface",
+            "--bg-surface-raised",
+            "--border-subtle",
+            "--text-primary",
+            "--accent-primary",
+            "--status-success",
+            "--grad-brand",
+        ] {
+            assert!(vars.contains(key), "css_vars missing {key}");
+        }
     }
 
     #[test]
@@ -885,6 +909,31 @@ mod tests {
                 "theme '{}' accent_text does not use the stronger-contrast option",
                 entry.name
             );
+        }
+    }
+
+    #[test]
+    fn ink_tints_stay_background_adjacent() {
+        const TINT_NOT_BETWEEN_BG_AND_TEXT: &str =
+            "ink tint luminance escapes the bg-to-text range; text on it would clash";
+        for entry in BUNDLED_THEMES {
+            let tokens = parse_theme(entry.name, entry.label, entry.toml).unwrap();
+            let vars = tokens.css_vars();
+            let grab_var = |key: &str| {
+                let start = vars.find(key).expect("css var missing") + key.len() + 1;
+                parse_hex_rgb(&vars[start..start + 7]).expect("css var is not a hex color")
+            };
+            let bg_lum = relative_luminance(grab_var("--bg-app"));
+            let fg_lum = relative_luminance(grab_var("--text-primary"));
+            let (lo, hi) = (bg_lum.min(fg_lum), bg_lum.max(fg_lum));
+            for key in ["--ink-600", "--ink-700", "--ink-800"] {
+                let tint_lum = relative_luminance(grab_var(key));
+                assert!(
+                    tint_lum > lo && tint_lum < hi,
+                    "{TINT_NOT_BETWEEN_BG_AND_TEXT}: theme '{}' {key}",
+                    entry.name
+                );
+            }
         }
     }
 }

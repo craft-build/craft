@@ -3,8 +3,8 @@
 //!
 //! Wire-format correctness lives here (field names, method names); the rest
 //! of the crate treats requests/responses/notifications as opaque
-//! `serde_json::Value`s and lets the frontend interpret ACP's `SessionUpdate`
-//! shapes directly, since the UI needs to render them anyway.
+//! `serde_json::Value`s and lets the state layer interpret ACP's
+//! `SessionUpdate` shapes directly, since the UI renders them anyway.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,20 +14,16 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
+
+use crate::backend::Event;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// `session/prompt` resolves only when the agent's turn ends (tool calls,
 /// subagents, Flow stages...), which can legitimately run for many minutes.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 30);
-const SESSION_UPDATE_EVENT: &str = "acp://session-update";
-const PERMISSION_REQUEST_EVENT: &str = "acp://permission-request";
-const ELICITATION_REQUEST_EVENT: &str = "acp://elicitation-request";
-const CLOSED_EVENT: &str = "acp://closed";
-const TODO_UPDATE_EVENT: &str = "acp://todo-update";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -48,7 +44,7 @@ type PendingMap = std::sync::Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 /// Where and how to launch the `craft acp` process. `Local` spawns the
 /// resolved binary directly; `Ssh` forwards ACP over an `ssh` connection so
 /// the tab drives a remote agent instead of a local one.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LaunchTarget {
     Local {
         craft_binary: PathBuf,
@@ -68,10 +64,11 @@ pub struct AcpClient {
 
 impl AcpClient {
     /// Spawns the `craft acp` process (locally or over `ssh`) and starts the
-    /// reader/writer tasks. Events for this client are tagged with `tab_id` so
-    /// the frontend can route them to the right session tab.
+    /// reader/writer tasks on the given runtime. Notifications for this client
+    /// are tagged with `tab_id` so the state layer can route them.
     pub fn spawn(
-        app: AppHandle,
+        rt: &tokio::runtime::Handle,
+        events: flume::Sender<Event>,
         tab_id: String,
         target: &LaunchTarget,
         cwd: &Path,
@@ -87,7 +84,7 @@ impl AcpClient {
         let stderr = child.stderr.take().expect("stderr was piped");
 
         let (stdin_tx, stdin_rx) = flume::unbounded::<Value>();
-        tokio::spawn(async move {
+        rt.spawn(async move {
             while let Ok(msg) = stdin_rx.recv_async().await {
                 let Ok(mut line) = serde_json::to_vec(&msg) else {
                     continue;
@@ -99,7 +96,7 @@ impl AcpClient {
             }
         });
 
-        tokio::spawn(async move {
+        rt.spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 tracing::debug!(target: "craft-acp-stderr", "{line}");
@@ -109,20 +106,19 @@ impl AcpClient {
         let pending: PendingMap = Default::default();
         let pending_reader = std::sync::Arc::clone(&pending);
         let reader_tab_id = tab_id.clone();
-        let reader_app = app.clone();
-        tokio::spawn(async move {
+        let reader_events = events.clone();
+        rt.spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    handle_incoming(&reader_app, &reader_tab_id, value, &pending_reader);
-                } else {
-                    tracing::warn!(tab_id = %reader_tab_id, "invalid JSON from craft acp: {line}");
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(value) => handle_incoming(&reader_events, &reader_tab_id, value, &pending_reader),
+                    Err(_) => tracing::warn!(tab_id = %reader_tab_id, "invalid JSON from craft acp: {line}"),
                 }
             }
-            let _ = reader_app.emit(CLOSED_EVENT, json!({ "tabId": reader_tab_id }));
+            let _ = reader_events.send(Event::Closed { tab_id: reader_tab_id });
         });
 
         Ok(Self {
@@ -203,10 +199,9 @@ impl AcpClient {
     }
 
     /// Resolves only once the agent's turn ends (see `PROMPT_TIMEOUT`).
-    /// Callers should spawn this rather than await it inline from a command
-    /// handler; `session/update` notifications carry the live content while
-    /// the turn is in flight, and the resolution here is just the final
-    /// stop-reason signal.
+    /// Callers should spawn this rather than await it inline; the
+    /// `session/update` notifications carry the live content while the turn
+    /// is in flight, and the resolution here is just the final stop signal.
     pub async fn send_prompt(&self, session_id: &str, text: &str) -> Result<Value, ClientError> {
         self.call_with_timeout(
             "session/prompt",
@@ -242,17 +237,13 @@ impl AcpClient {
     }
 
     /// Enumerate the server's command palette (builtins + custom commands
-    /// discovered from the session cwd). Wrapped in a struct so the frontend
-    /// can route each entry by `strategy` without re-implementing discovery.
+    /// discovered from the session cwd).
     pub async fn list_commands(&self) -> Result<Value, ClientError> {
         self.call("_craft/listCommands", json!({})).await
     }
 
-    /// Dispatch a `_craft/*` request. Used by the desktop command palette for
-    /// commands whose `strategy` is `craft_request` (compact, btw, cd,
-    /// command/run, meta/prompt, wiki/*, map/*, etc.). The method string is
-    /// server-validated to start with `_craft/` so this can't be used to send
-    /// arbitrary JSON-RPC.
+    /// Dispatch a `_craft/*` request. The method string is server-validated
+    /// to start with `_craft/` so this can't send arbitrary JSON-RPC.
     pub async fn craft_command(&self, method: &str, params: Value) -> Result<Value, ClientError> {
         if !method.starts_with("_craft/") {
             return Err(ClientError::Agent(json!({
@@ -293,7 +284,12 @@ impl Drop for AcpClient {
     }
 }
 
-fn handle_incoming(app: &AppHandle, tab_id: &str, value: Value, pending: &PendingMap) {
+fn handle_incoming(
+    events: &flume::Sender<Event>,
+    tab_id: &str,
+    value: Value,
+    pending: &PendingMap,
+) {
     if value.get("result").is_some() || value.get("error").is_some() {
         if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let sender = pending
@@ -317,35 +313,36 @@ fn handle_incoming(app: &AppHandle, tab_id: &str, value: Value, pending: &Pendin
     let params = value.get("params").cloned().unwrap_or(Value::Null);
 
     match (method.as_str(), value.get("id").cloned()) {
+        // `params` here is the `SessionNotification` wrapper
+        // (`{sessionId, update}`), not the `SessionUpdate` itself — unwrap it
+        // so the state layer gets the `sessionUpdate`-tagged object directly.
         ("session/update", None) => {
-            // `params` here is the `SessionNotification` wrapper
-            // (`{sessionId, update}`), not the `SessionUpdate` itself —
-            // unwrap it so the frontend gets the `sessionUpdate`-tagged
-            // object directly.
             let inner = params.get("update").cloned().unwrap_or(Value::Null);
-            let _ = app.emit(
-                SESSION_UPDATE_EVENT,
-                json!({ "tabId": tab_id, "update": inner }),
-            );
+            let _ = events.send(Event::SessionUpdate {
+                tab_id: tab_id.to_string(),
+                update: inner,
+            });
         }
         ("session/request_permission", Some(request_id)) => {
-            let _ = app.emit(
-                PERMISSION_REQUEST_EVENT,
-                json!({ "tabId": tab_id, "requestId": request_id, "params": params }),
-            );
+            let _ = events.send(Event::Permission {
+                tab_id: tab_id.to_string(),
+                request_id,
+                params,
+            });
         }
         ("session/todo_update", None) | ("_craft/session/todo_update", None) => {
             let todos = params.get("todos").cloned().unwrap_or(Value::Array(vec![]));
-            let _ = app.emit(
-                TODO_UPDATE_EVENT,
-                json!({ "tabId": tab_id, "todos": todos }),
-            );
+            let _ = events.send(Event::Todos {
+                tab_id: tab_id.to_string(),
+                todos,
+            });
         }
         ("elicitation/create", Some(request_id)) => {
-            let _ = app.emit(
-                ELICITATION_REQUEST_EVENT,
-                json!({ "tabId": tab_id, "requestId": request_id, "params": params }),
-            );
+            let _ = events.send(Event::Question {
+                tab_id: tab_id.to_string(),
+                request_id,
+                params,
+            });
         }
         (other, id) => {
             tracing::debug!(
