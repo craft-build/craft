@@ -175,14 +175,14 @@ pub async fn resolve_permission(
 }
 
 #[tauri::command]
-pub async fn resolve_question(
+pub async fn respond_elicitation(
     state: State<'_, AppState>,
     tab_id: String,
     request_id: Value,
     result: Value,
 ) -> Result<(), String> {
     let client = get_client(&state, &tab_id).await?;
-    client.respond_question(request_id, result);
+    client.respond_elicitation(request_id, result);
     Ok(())
 }
 

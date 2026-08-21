@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { brandGradient, modeLabel, terminalBg, type Tokens } from "../theme";
 import { useAppDispatch } from "../state/store";
-import { cancelPrompt, craftCommandRoute, listCommands, resolvePermission, resolveQuestion, sendPrompt, setConfigOption, setMode } from "../lib/acp";
+import { cancelPrompt, craftCommandRoute, listCommands, resolvePermission, respondElicitation, sendPrompt, setConfigOption, setMode } from "../lib/acp";
 import type { ChatItem, ContentBlock, QuestionSpec, TabState, ToolCallContent } from "../types";
 import { Markdown, stripAnchors, langFromPath } from "./Markdown";
 import { DiffView } from "./DiffView";
@@ -32,6 +32,10 @@ function formatTokens(n: number): string {
   if (n < 1_000) return String(n);
   if (n < 1_000_000) return `${Math.round(n / 1_000)}K`;
   return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+function formatCost(n: number): string {
+  return n < 1 ? n.toFixed(3) : n.toFixed(2);
 }
 
 function ContextUsage({ used, size, t }: { used: number; size: number; t: Tokens }) {
@@ -178,6 +182,11 @@ export function ChatPane({ tab, t }: { tab: TabState; t: Tokens }) {
         {tab.contextSize > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", borderBottom: `1px solid ${t.border}` }}>
             <ContextUsage used={tab.contextUsed} size={tab.contextSize} t={t} />
+            {tab.sessionCost > 0 && (
+              <span style={{ fontSize: 11, color: t.textFaint, whiteSpace: "nowrap" }}>
+                ${formatCost(tab.sessionCost)} session
+              </span>
+            )}
           </div>
         )}
         <div style={{ padding: "10px 20px 14px", display: "flex", alignItems: "flex-end", gap: 8 }}>
@@ -473,8 +482,13 @@ function QuestionCard({
           if (showCustom[i] && customText[i]?.trim()) return [customText[i].trim()];
           return s;
         });
+    const content: Record<string, string | string[]> = {};
+    answers.forEach((a, i) => {
+      if (a.length > 0) content[`q${i + 1}`] = item.questions[i].multiSelect ? a : a[0];
+    });
+    const result = dismissed ? { action: "cancel" as const } : { action: "accept" as const, content };
     try {
-      await resolveQuestion(tab.tabId, item.requestId, { dismissed, answers });
+      await respondElicitation(tab.tabId, item.requestId, result);
       dispatch({ type: "QUESTION_RESOLVED", tabId: tab.tabId, requestId: item.requestId, answers });
     } catch (e) {
       setError(String(e));

@@ -1,9 +1,35 @@
 import { useEffect } from "react";
 import { useAppDispatch, useAppState } from "./state/store";
-import { onClosed, onPermissionRequest, onPromptDone, onQuestion, onSessionUpdate, onTodoUpdate } from "./lib/acp";
+import { onClosed, onElicitation, onPermissionRequest, onPromptDone, onSessionUpdate, onTodoUpdate } from "./lib/acp";
 import type { PermissionOption, QuestionSpec, SessionUpdate } from "./types";
 import { Onboarding } from "./components/Onboarding";
 import { Shell } from "./components/Shell";
+
+/** Rebuilds the card's question list from an elicitation form schema. The
+ * server maps questions to positional keys (`q1`, `q2`, ...) with
+ * string/array properties; enum option titles carry the description as
+ * `"label - description"`, so it is split back out. */
+function schemaToQuestions(props: Record<string, unknown> | undefined): QuestionSpec[] {
+  const byPosition = (key: string) => Number(key.replace(/\D/g, "")) || 0;
+  return Object.entries(props ?? {})
+    .sort(([a], [b]) => byPosition(a) - byPosition(b))
+    .map(([, raw]) => {
+      const p = raw as {
+        type?: string;
+        title?: string;
+        oneOf?: { const: string; title?: string }[];
+        items?: { anyOf?: { const: string; title?: string }[] };
+      };
+      return {
+        question: p.title ?? "",
+        options: (p.oneOf ?? p.items?.anyOf ?? []).map((o) => ({
+          label: o.const,
+          description: o.title?.startsWith(`${o.const} - `) ? o.title.slice(o.const.length + 3) : undefined,
+        })),
+        multiSelect: p.type === "array",
+      };
+    });
+}
 
 export default function App() {
   const state = useAppState();
@@ -20,11 +46,8 @@ export default function App() {
         const options = (params?.options ?? []) as unknown as PermissionOption[];
         dispatch({ type: "PERMISSION_REQUEST", tabId, requestId, title: toolTitle, options });
       }),
-      onQuestion(({ tabId, requestId, params }) => {
-        const questions = ((params?.questions ?? []) as Array<Record<string, unknown>>).map((q) => ({
-          ...q,
-          multiSelect: q.multiSelect ?? q.multi_select,
-        })) as unknown as QuestionSpec[];
+      onElicitation(({ tabId, requestId, params }) => {
+        const questions = schemaToQuestions(params?.requestedSchema?.properties);
         dispatch({ type: "QUESTION_REQUEST", tabId, requestId, questions });
       }),
       onPromptDone(({ tabId, ok, error }) => {

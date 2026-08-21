@@ -127,6 +127,7 @@ export interface UsageUpdateEvent {
   sessionUpdate: "usage_update";
   used: number;
   size: number;
+  cost?: { amount: number; currency: string };
 }
 
 export type SessionUpdate =
@@ -236,6 +237,7 @@ export interface TabState {
   connectionError: string | null;
   contextUsed: number;
   contextSize: number;
+  sessionCost: number;
   /** Null for a local session; set for SSH-launched tabs so history, prompt
    * routing, and titles reuse the same transport. */
   ssh: SshTarget | null;

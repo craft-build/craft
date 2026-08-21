@@ -182,8 +182,13 @@ function applySessionUpdate(tab: TabState, update: SessionUpdate): TabState {
       return u.title ? { ...tab, title: u.title } : tab;
     }
     case "usage_update": {
-      const u = update as { used: number; size: number };
-      return { ...tab, contextUsed: u.used, contextSize: u.size };
+      const u = update as { used: number; size: number; cost?: { amount: number } };
+      return {
+        ...tab,
+        contextUsed: u.used,
+        contextSize: u.size,
+        sessionCost: u.cost?.amount ?? tab.sessionCost,
+      };
     }
     default:
       return tab;

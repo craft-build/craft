@@ -189,6 +189,7 @@ function Sidebar({
         connectionError: null,
         contextUsed: 0,
         contextSize: 0,
+        sessionCost: 0,
         ssh: active.ssh,
         commands: null,
       },

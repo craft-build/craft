@@ -32,7 +32,7 @@ The `model` value is a `provider/model-id` spec, same format as `craft --model`.
 - **Model switching.** Pick a model from the editor's dropdown, mid-session. All configured providers show up.
 - **Modes.** Switch between build (full access) and plan (read-only) from the editor.
 - **Permissions.** Tool permission prompts appear in the editor: allow or reject, once or always.
-- **Questions.** The `question` tool becomes a native form in editors that support ACP elicitation, like Zed. Other clients get a Craft question prompt, and the model asks in plain text as a last resort.
+- **Questions.** The `question` tool becomes a native form in clients that support ACP elicitation, like Zed and Craft Desktop. Clients without elicitation see the model ask in plain text instead.
 - **Live tool calls.** Tool progress streams as it happens, including sub-agents and batched calls.
 - **Images and context.** Prompts can include images and editor-attached files.
 

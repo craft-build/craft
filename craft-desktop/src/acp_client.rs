@@ -25,7 +25,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 30);
 const SESSION_UPDATE_EVENT: &str = "acp://session-update";
 const PERMISSION_REQUEST_EVENT: &str = "acp://permission-request";
-const QUESTION_REQUEST_EVENT: &str = "acp://question";
+const ELICITATION_REQUEST_EVENT: &str = "acp://elicitation-request";
 const CLOSED_EVENT: &str = "acp://closed";
 const TODO_UPDATE_EVENT: &str = "acp://todo-update";
 
@@ -178,7 +178,7 @@ impl AcpClient {
             "initialize",
             json!({
                 "protocolVersion": 1,
-                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "elicitation": { "form": {} } },
                 "clientInfo": { "name": "craft-desktop", "version": env!("CARGO_PKG_VERSION") },
             }),
         )
@@ -273,7 +273,9 @@ impl AcpClient {
         let _ = self.stdin_tx.send(msg);
     }
 
-    pub fn respond_question(&self, request_id: Value, result: Value) {
+    /// Replies to an incoming `elicitation/create` request (question tool).
+    /// `result` is `{action: "accept", content}` or `{action: "cancel"}`.
+    pub fn respond_elicitation(&self, request_id: Value, result: Value) {
         let msg = json!({ "jsonrpc": "2.0", "id": request_id, "result": result });
         let _ = self.stdin_tx.send(msg);
     }
@@ -339,9 +341,9 @@ fn handle_incoming(app: &AppHandle, tab_id: &str, value: Value, pending: &Pendin
                 json!({ "tabId": tab_id, "todos": todos }),
             );
         }
-        ("session/question", Some(request_id)) => {
+        ("elicitation/create", Some(request_id)) => {
             let _ = app.emit(
-                QUESTION_REQUEST_EVENT,
+                ELICITATION_REQUEST_EVENT,
                 json!({ "tabId": tab_id, "requestId": request_id, "params": params }),
             );
         }

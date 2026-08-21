@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -390,8 +390,6 @@ pub(crate) struct Server {
     model_policy: Arc<ModelPolicy>,
     shared_session: SharedSession,
     pending_requests: PendingRequests,
-    question_request_ids: Arc<Mutex<HashSet<i64>>>,
-    client_elicits_form: bool,
     client_caps: Arc<ClientCaps>,
     next_request_id: Arc<AtomicI64>,
     session: Option<SessionState>,
@@ -489,8 +487,6 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         model_policy: Arc::clone(&params.model_policy),
         shared_session,
         pending_requests,
-        question_request_ids: Arc::new(Mutex::new(HashSet::new())),
-        client_elicits_form: false,
         client_caps,
         next_request_id,
         session: None,
@@ -565,7 +561,6 @@ async fn handle_request(
         "initialize" => {
             if let Ok(req) = parse_params::<InitializeRequest>(raw) {
                 srv.client_caps.apply(&req.client_capabilities);
-                srv.client_elicits_form = elicitation::supports_form(&req.client_capabilities);
             }
             Ok(AgentResponse::InitializeResponse(
                 methods::initialize_response(),
@@ -864,8 +859,6 @@ async fn install_session(
         srv.out_tx.clone(),
         Arc::clone(&pending),
         Arc::clone(&srv.next_request_id),
-        Arc::clone(&srv.question_request_ids),
-        srv.client_elicits_form,
         cwd.clone(),
         craft_storage::paths::home(),
         initial_cost,
@@ -1237,30 +1230,6 @@ fn handle_incoming_response(srv: &Server, raw: &Value) {
 
     let Some(session) = &srv.session else { return };
 
-    let is_question = id_in_response(raw).is_some_and(|id| {
-        srv.question_request_ids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id)
-    });
-
-    if is_question {
-        let answer_json = raw
-            .get("result")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({ "dismissed": true, "answers": [] }));
-        let qa: craft_agent::tools::question::QuestionAnswer = serde_json::from_value(answer_json)
-            .unwrap_or_else(|_| craft_agent::tools::question::QuestionAnswer {
-                dismissed: true,
-                answers: vec![],
-            });
-        let _ = session
-            .handle
-            .answer_tx
-            .send(craft_agent::tools::question::encode_answer(&qa));
-        return;
-    }
-
     let Some(id) = raw.get("id").and_then(Value::as_i64) else {
         return;
     };
@@ -1308,10 +1277,6 @@ fn permission_answer(raw: &Value) -> craft_agent::permissions::PermissionAnswer 
         Some(Ok(resp)) => permissions::outcome_to_answer(&resp.outcome),
         _ => craft_agent::permissions::PermissionAnswer::Deny,
     }
-}
-
-fn id_in_response(raw: &Value) -> Option<i64> {
-    raw.get("id").and_then(Value::as_i64)
 }
 
 fn extract_prompt_content(blocks: &[ContentBlock]) -> (String, Vec<ImageSource>) {
@@ -1363,8 +1328,6 @@ fn start_event_pump(
     out_tx: Sender<Value>,
     pending: PendingState,
     next_request_id: Arc<AtomicI64>,
-    question_request_ids: Arc<Mutex<HashSet<i64>>>,
-    client_elicits_form: bool,
     cwd: PathBuf,
     home: Option<PathBuf>,
     initial_cost: Option<f64>,
@@ -1470,12 +1433,11 @@ fn start_event_pump(
                     continue;
                 }
                 AgentEvent::QuestionRequest { id, questions } => {
-                    // Form-capable clients get the standardized
-                    // `elicitation/create`; everyone else (craft-desktop) keeps
-                    // the custom `session/question` request.
-                    if client_elicits_form
-                        && let Ok(request) =
-                            elicitation::form_request(sid.0.as_ref(), Some(id.clone()), &questions)
+                    // The standardized `elicitation/create` form is the only
+                    // question channel; every client we ship against supports
+                    // it.
+                    if let Ok(request) =
+                        elicitation::form_request(sid.0.as_ref(), Some(id.clone()), &questions)
                     {
                         ask_client(
                             &out_tx,
@@ -1484,26 +1446,7 @@ fn start_event_pump(
                             AskKind::Elicitation,
                             AgentRequest::CreateElicitationRequest(request),
                         );
-                        continue;
                     }
-                    let req_id = next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
-                    question_request_ids
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(req_id);
-                    let params = serde_json::json!({
-                        "sessionId": sid,
-                        "requestId": id,
-                        "questions": questions,
-                    });
-                    send(
-                        &out_tx,
-                        Request {
-                            id: RequestId::Number(req_id),
-                            method: Arc::from("session/question"),
-                            params: Some(params),
-                        },
-                    );
                     continue;
                 }
                 AgentEvent::Done { reason, .. } => {
@@ -1703,8 +1646,6 @@ mod tests {
             model_policy: Arc::new(craft_config::ModelPolicy::default()),
             shared_session: Arc::new(Mutex::new(None)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            question_request_ids: Arc::new(Mutex::new(HashSet::new())),
-            client_elicits_form: false,
             client_caps: Arc::new(ClientCaps::new()),
             next_request_id: Arc::new(AtomicI64::new(FIRST_OUTGOING_REQUEST_ID)),
             session: Some(SessionState {

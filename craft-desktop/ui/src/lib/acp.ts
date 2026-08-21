@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { NewSessionResponse, QuestionSpec, SshTarget, TodoItem } from "../types";
+import type { NewSessionResponse, SshTarget, TodoItem } from "../types";
 import type { Tokens, ThemeName } from "../theme";
 
 export function getTheme(): Promise<Tokens> {
@@ -62,12 +62,12 @@ export function resolvePermission(
   return invoke("resolve_permission", { tabId, requestId, optionId });
 }
 
-export function resolveQuestion(
+export function respondElicitation(
   tabId: string,
   requestId: unknown,
-  result: { dismissed: boolean; answers: string[][] },
+  result: { action: "accept"; content: Record<string, string | string[]> } | { action: "cancel" },
 ): Promise<void> {
-  return invoke("resolve_question", { tabId, requestId, result });
+  return invoke("respond_elicitation", { tabId, requestId, result });
 }
 
 export function cancelPrompt(tabId: string, sessionId: string): Promise<void> {
@@ -159,10 +159,10 @@ export interface PermissionRequestEventPayload {
   requestId: unknown;
   params: { sessionId: string; toolCall: { toolCallId: string; title: string }; options: unknown[] };
 }
-export interface QuestionRequestEventPayload {
+export interface ElicitationRequestEventPayload {
   tabId: string;
   requestId: unknown;
-  params: { sessionId: string; requestId: string; questions: QuestionSpec[] };
+  params: { sessionId: string; message?: string; requestedSchema?: { properties?: Record<string, unknown> } };
 }
 export interface PromptDoneEventPayload {
   tabId: string;
@@ -183,8 +183,8 @@ export function onPermissionRequest(
 ): Promise<UnlistenFn> {
   return listen<PermissionRequestEventPayload>("acp://permission-request", (e) => cb(e.payload));
 }
-export function onQuestion(cb: (p: QuestionRequestEventPayload) => void): Promise<UnlistenFn> {
-  return listen<QuestionRequestEventPayload>("acp://question", (e) => cb(e.payload));
+export function onElicitation(cb: (p: ElicitationRequestEventPayload) => void): Promise<UnlistenFn> {
+  return listen<ElicitationRequestEventPayload>("acp://elicitation-request", (e) => cb(e.payload));
 }
 export function onPromptDone(cb: (p: PromptDoneEventPayload) => void): Promise<UnlistenFn> {
   return listen<PromptDoneEventPayload>("acp://prompt-done", (e) => cb(e.payload));

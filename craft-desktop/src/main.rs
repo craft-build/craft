@@ -24,7 +24,7 @@ fn main() {
             commands::set_mode,
             commands::set_config_option,
             commands::resolve_permission,
-            commands::resolve_question,
+            commands::respond_elicitation,
             commands::cancel_prompt,
             commands::close_tab,
             commands::get_theme,
