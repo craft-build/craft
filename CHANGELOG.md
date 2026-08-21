@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-21
+
+### Added
+
+- **desktop**: transition to a new dioxus based application (`86d16990`), adopting `elicitation/create` and showing session cost (`7a298412`)
+- **markdown**: allow 1500 bytes per line before truncating (`d295ae09`)
+
+### Changed
+
+- **agent**: give a stalled model 20 nudges instead of 2 (`304b4ea6`)
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile
+
+### Fixed
+
+- **desktop**: honor multi-select questions from the ACP server (`a1427e34`)
+- **agent**: reset the nudge budget when a new user message arrives (`22eb7c18`), show the nudge notice once per streak (`65698134`), stop a typed `(empty)` from reading as a stall marker (`5d2f8577`), and mark cancel-kept partial text as truncated (`37fa832f`)
+- **storage**: archive the session log before a shrink rewrite (`01c7bd03`), archive it only once the rewrite is about to land (`d434c8ea`), scan the shrink check as bytes (`24b2e664`), and stop archive cleanup from failing a session delete (`cbf9099e`)
+- **providers/aperture**: make the default path prefix exhaustive per route (`199000da`)
+- **ui**: keep the section header visible when a picker scrolls mid-section (`25df8190`), close the file picker on an empty walk (`e0b8c81d`), and stop the file picker underflowing in a one row viewport (`3500a5b3`)
+
 ## [0.12.5] - 2026-08-20
 
 ### Added
