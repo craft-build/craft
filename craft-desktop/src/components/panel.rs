@@ -42,7 +42,7 @@ pub fn ChangesPanel() -> Element {
                 path: d.path,
                 adds,
                 dels,
-                lines: diff::diff_lines(old, &d.new_text),
+                lines: diff::diff_lines_folded(old, &d.new_text),
             }
         })
         .collect();
