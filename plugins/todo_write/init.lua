@@ -73,6 +73,11 @@ local function sync_panel(items)
   end
 end
 
+craft.api.register_prompt_hint({
+  slot = "tool_usage",
+  content = "- Use todo_write for multi-step tasks (3+ steps); update **after EACH step** (done + next in_progress), never batched at the end.",
+})
+
 craft.api.register_tool({
   name = "todo_write",
   description = "Track and update progress on multi-step tasks. Use this tool to plan and track tasks (must be 3+ steps). Update after EACH completed step, not only all at once. Each task needs an id (e.g. T1, T1.1), content, and status. Parent-child relationships are supported via the parent field.",
