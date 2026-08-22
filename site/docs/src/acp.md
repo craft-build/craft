@@ -29,7 +29,7 @@ The `model` value is a `provider/model-id` spec, same format as `craft --model`.
 ## What works
 
 - **Sessions persist.** Loading a session replays the full conversation in the editor, so you can resume where you left off.
-- **Model switching.** Pick a model from the editor's dropdown, mid-session. All configured providers show up.
+- **Model switching.** Pick a model from the editor's dropdown, mid-session. All configured providers show up. Providers that list their models over the wire (OpenRouter and friends) are discovered in the background, so the dropdown keeps filling up for a moment after the session starts, one provider at a time.
 - **Modes.** Switch between build (full access) and plan (read-only) from the editor.
 - **Permissions.** Tool permission prompts appear in the editor: allow or reject, once or always.
 - **Questions.** The `question` tool becomes a native form in clients that support ACP elicitation, like Zed and Craft Desktop. Clients without elicitation see the model ask in plain text instead.

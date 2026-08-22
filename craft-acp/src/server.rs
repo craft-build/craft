@@ -459,7 +459,15 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
                     return;
                 }
                 let mut specs = bg_specs.lock().unwrap_or_else(|e| e.into_inner());
-                specs.extend(batch.models);
+                let known = specs.len();
+                for spec in batch.models {
+                    if !specs.contains(&spec) {
+                        specs.push(spec);
+                    }
+                }
+                if specs.len() == known {
+                    return;
+                }
                 let guard = specs.clone();
                 drop(specs);
 
