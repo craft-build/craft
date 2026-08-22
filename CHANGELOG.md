@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-08-22
+
+### Added
+
+- **desktop+acp**: thinking level picker (`c12f3de0`) and image support (`95ac66ec`)
+- **desktop**: onboarding traffic lights and permission dropdown (`2f9a99ee`), target new tasks at the active or chosen project (`62f5bd46`), a skills section for browsing and managing project and user skills (`667b9e00`), an open-project button in the sidebar (`3a026bf3`), and folding of unchanged context with inner scroll in the changes panel (`f3ab9074`)
+- **desktop**: make the topbar a window drag region (`a1bf7b9c`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (`is-macro` 0.3.8, `ordered-float` 5.5.0, `rustls-webpki` 0.103.15)
+- **desktop**: remove inert sidebar controls (`3087b023`)
+
+### Fixed
+
+- **acp**: include the thinking config option in session responses (`5217f754`), resolve the session id when loading sessions over ACP (`53ede0dd`), and surface advisor activity as thought chunks (`1dee6e35`)
+- **desktop**: apply the picked model to new task sessions (`3e47ea3c`), left-align the ⌘K palette row text (`49b93082`), restore copy-paste shortcuts with an explicit edit menu (`a96743fa`), and repair diff, markdown, and changes-panel rendering (`6d22a1d3`)
+- **todo_write**: spell out the per step update in the system prompt (`06a3c510`)
+- **ui**: keep the measured baseline when a rewind resizes the context (`3074113f`)
+
 ## [0.13.0] - 2026-08-21
 
 ### Added
