@@ -8,9 +8,8 @@ use dioxus::prelude::*;
 use crate::backend::Backend;
 use crate::components::{IconImage, IconList, IconSend, IconShield, IconStop};
 use crate::state::{
-    AppState, DEFAULT_MODES, Popover, SUGGESTIONS, View, active_tab, attachment_from_path,
-    cancel_prompt, send_message, set_config_option, set_mode, set_new_task_model, set_perm,
-    toggle_popover,
+    AppState, DEFAULT_MODES, Popover, View, active_tab, attachment_from_path, cancel_prompt,
+    send_message, set_config_option, set_mode, set_new_task_model, set_perm, toggle_popover,
 };
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
@@ -154,6 +153,11 @@ pub fn route_command(
             _ => {}
         },
         "craft_request" => {
+            // Custom commands and meta prompts start an agent turn
+            // fire-and-forget; mark the tab busy so the stop button appears
+            // and a cancel can be sent. `_craft/session/turn_done` clears it.
+            let runs_turn = entry.custom_name.is_some()
+                || entry.method.as_deref() == Some("_craft/meta/prompt");
             if let Some(custom) = &entry.custom_name {
                 backend.craft_command(
                     tab.id.clone(),
@@ -171,6 +175,9 @@ pub fn route_command(
                     Ok(params) => backend.craft_command(tab.id.clone(), method.clone(), params),
                     Err(e) => tracing::warn!("{e}"),
                 }
+            }
+            if runs_turn && let Some(t) = s.tabs.write().iter_mut().find(|t| t.id == tab.id) {
+                t.pending = true;
             }
         }
         _ => {
@@ -396,6 +403,25 @@ pub fn Composer() -> Element {
         .map(|(_, name)| name.clone())
         .unwrap_or_else(|| current_mode.clone());
     let model_option = tab.as_ref().and_then(|t| t.config("model").cloned());
+    let thinking_option = tab.as_ref().and_then(|t| t.config("thinking").cloned());
+    let thinking_options: Vec<(String, String, bool)> = thinking_option
+        .iter()
+        .flat_map(|c| {
+            c.options
+                .iter()
+                .map(|(v, n)| (v.clone(), n.clone(), *v == c.current_value))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let thinking_label = thinking_option
+        .as_ref()
+        .and_then(|c| {
+            c.options
+                .iter()
+                .find(|(v, _)| *v == c.current_value)
+                .map(|(_, name)| name.clone())
+        })
+        .unwrap_or_else(|| "thinking".to_string());
     let current_model = model_option
         .as_ref()
         .map(|c| {
@@ -659,17 +685,6 @@ pub fn Composer() -> Element {
                         IconImage {}
                     }
 
-                    if is_new {
-                        for (i, (label, text)) in SUGGESTIONS.iter().enumerate() {
-                            button {
-                                class: "bar-btn suggestion",
-                                key: "{i}",
-                                onclick: move |_| s.draft.set(text.to_string()),
-                                "{label}"
-                            }
-                        }
-                    }
-
                     div { class: "grow" }
 
                     if let Some(err) = s.start_error.read().clone() {
@@ -677,6 +692,33 @@ pub fn Composer() -> Element {
                     }
 
                     if let Some(_tab) = tab.clone() {
+                        if thinking_option.is_some() {
+                            div { class: "dd",
+                                button { class: "bar-btn thinking", onclick: move |_| toggle_popover(s, Popover::Thinking),
+                                    "{thinking_label}"
+                                    span { class: "caret", "▾" }
+                                }
+                                if *s.popover.read() == Popover::Thinking {
+                                    div { class: "menu thinking",
+                                        for (value, name, is_selected) in thinking_options.iter() {
+                                            button {
+                                                class: if *is_selected { "menu-item selected" } else { "menu-item" },
+                                                key: "{value}",
+                                                onclick: {
+                                                    let value = value.clone();
+                                                    move |_| {
+                                                        set_config_option(s, backend, "thinking".to_string(), value.clone());
+                                                        s.popover.set(Popover::None);
+                                                    }
+                                                },
+                                                span { class: "grow menu-item-title", "{name}" }
+                                                span { class: "menu-check", if *is_selected { "✓" } else { "" } }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if model_option.is_some() {
                             div { class: "dd",
                                 button { class: "bar-btn model", onclick: move |_| toggle_popover(s, Popover::Model),

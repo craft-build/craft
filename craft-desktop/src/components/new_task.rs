@@ -3,11 +3,11 @@
 use dioxus::prelude::*;
 
 use crate::components::IconLogo;
-use crate::state::{AppState, SUGGESTIONS};
+use crate::state::AppState;
 
 #[component]
 pub fn NewTaskView() -> Element {
-    let mut s = use_context::<AppState>();
+    let s = use_context::<AppState>();
 
     let cwd = s.new_task_cwd.read().clone();
 
@@ -19,19 +19,6 @@ pub fn NewTaskView() -> Element {
                 div { class: "hero-desc", "Craft can edit files, run commands, and review changes on your behalf. Describe what you want done." }
                 if let Some(cwd) = &cwd {
                     div { class: "hero-cwd", "{cwd}" }
-                }
-            }
-            div { class: "hero-suggestions",
-                for (i, (label, text)) in SUGGESTIONS.iter().enumerate() {
-                    button {
-                        class: "suggestion-pill",
-                        key: "{i}",
-                        onclick: {
-                            let text = text.to_string();
-                            move |_| s.draft.set(text.clone())
-                        },
-                        "{label}"
-                    }
                 }
             }
         }

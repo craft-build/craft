@@ -95,6 +95,8 @@ pub struct StartOptions {
     pub mode: Option<String>,
     pub auto_review: bool,
     pub model: Option<String>,
+    /// Thinking level (off/low/medium/high/xhigh) applied before the first prompt.
+    pub thinking: Option<String>,
     /// Sent as the first prompt once the session is live.
     pub initial_prompt: Option<String>,
     /// Images attached to the initial prompt.
@@ -173,6 +175,7 @@ impl Backend {
             mode,
             auto_review,
             model,
+            thinking,
             initial_prompt,
             initial_images,
         } = opts;
@@ -220,6 +223,12 @@ impl Backend {
                         && let Err(e) = client.set_config_option(session_id, "model", model).await
                     {
                         tracing::warn!(tab_id = %tab_id, model, error = %e, "failed to set model");
+                    }
+                    if let Some(thinking) = thinking.as_deref()
+                        && let Err(e) =
+                            client.set_config_option(session_id, "thinking", thinking).await
+                    {
+                        tracing::warn!(tab_id = %tab_id, thinking, error = %e, "failed to set thinking");
                     }
                     if auto_review {
                         let _ = client
@@ -383,11 +392,23 @@ impl Backend {
         }
     }
 
-    /// Dispatches a `_craft/*` extension request for the tab's session.
+    /// Dispatches a `_craft/*` extension request for the tab's session. For
+    /// methods that start an agent turn, a failure resolves the busy state
+    /// directly (the `_craft/session/turn_done` notification covers success).
     pub fn craft_command(&self, tab_id: String, method: String, params: Value) {
         if let Ok(client) = self.client(&tab_id) {
+            let events = self.events.clone();
             self.rt.spawn(async move {
-                let _ = client.craft_command(&method, params).await;
+                let result = client.craft_command(&method, params).await;
+                if result.is_err()
+                    && matches!(method.as_str(), "_craft/command/run" | "_craft/meta/prompt")
+                {
+                    let _ = events.send(Event::PromptDone {
+                        tab_id,
+                        ok: false,
+                        error: result.err().map(|e| e.to_string()),
+                    });
+                }
             });
         }
     }

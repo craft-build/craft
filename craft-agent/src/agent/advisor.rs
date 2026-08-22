@@ -168,10 +168,10 @@ pub async fn review(
     state: &mut AdvisorState,
     history: &[Message],
     config: &AdvisorConfig,
-    active_provider: &Arc<dyn Provider>,
-    active_model: &Model,
+    active: (&Arc<dyn Provider>, &Model),
     timeouts: craft_providers::Timeouts,
     session_id: Option<&SessionRef>,
+    cancel: &crate::cancel::CancelToken,
 ) -> Result<Option<AdvisorNote>, CrateAgentError> {
     let delta = build_delta(history, state.last_reviewed);
     state.last_reviewed = history.len();
@@ -182,15 +182,10 @@ pub async fn review(
     let user_msg = format!("# Agent delta\n{delta}\n\nReview this delta. One line, or OK.");
     let messages = vec![Message::user(user_msg)];
 
-    let (provider, model): (Arc<dyn Provider>, Model) = resolve_advisor(
-        config,
-        Arc::clone(active_provider),
-        active_model.clone(),
-        timeouts,
-    )
-    .await;
+    let (provider, model): (Arc<dyn Provider>, Model) =
+        resolve_advisor(config, active, timeouts).await;
 
-    let text = collect_text(provider.as_ref(), &model, &messages, session_id).await?;
+    let text = collect_text(provider.as_ref(), &model, &messages, session_id, cancel).await?;
     let Some(note) = parse_note(&text) else {
         return Ok(None);
     };
@@ -199,16 +194,16 @@ pub async fn review(
 
 async fn resolve_advisor(
     config: &AdvisorConfig,
-    fallback_provider: Arc<dyn Provider>,
-    fallback_model: Model,
+    active: (&Arc<dyn Provider>, &Model),
     timeouts: craft_providers::Timeouts,
 ) -> (Arc<dyn Provider>, Model) {
+    let (fallback_provider, fallback_model) = active;
     if let Some(spec) = config.model.as_deref() {
         let mut model = match Model::from_spec(spec) {
             Ok(m) => m,
             Err(e) => {
                 warn!(error = %e, spec, "advisor model spec invalid; using active model");
-                return (fallback_provider, fallback_model);
+                return (Arc::clone(fallback_provider), fallback_model.clone());
             }
         };
         match craft_providers::provider::from_model(&mut model, timeouts).await {
@@ -219,7 +214,7 @@ async fn resolve_advisor(
     let role = craft_providers::roles::resolve_role(
         ModelRole::Advisor,
         fallback_model.clone(),
-        Arc::clone(&fallback_provider),
+        Arc::clone(fallback_provider),
         timeouts,
     )
     .await;
@@ -231,21 +226,24 @@ async fn collect_text(
     model: &Model,
     messages: &[Message],
     session_id: Option<&SessionRef>,
+    cancel: &crate::cancel::CancelToken,
 ) -> Result<String, CrateAgentError> {
     let (ptx, _prx) = flume::unbounded();
     let system = ADVISOR_SYSTEM.to_string();
     let tools = Value::Array(vec![]);
-    let response = provider
-        .stream_message(
-            model,
-            messages,
-            &system,
-            &tools,
-            &ptx,
-            RequestOptions::default(),
-            session_id,
-        )
-        .await?;
+    let stream = provider.stream_message(
+        model,
+        messages,
+        &system,
+        &tools,
+        &ptx,
+        RequestOptions::default(),
+        session_id,
+    );
+    let response = cancel
+        .race(stream)
+        .await
+        .map_err(|_| CrateAgentError::Cancelled)??;
     Ok(response.message.user_text().unwrap_or_default().to_string())
 }
 

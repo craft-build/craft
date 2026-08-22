@@ -14,6 +14,7 @@ pub const MODE_PLAN: &str = "plan";
 pub const MODE_FLOW: &str = "flow";
 
 pub const MODEL_CONFIG_ID: &str = "model";
+pub const THINKING_CONFIG_ID: &str = "thinking";
 pub const MODE_CONFIG_ID: &str = "mode";
 pub const YOLO_CONFIG_ID: &str = "yolo";
 pub const AUTO_REVIEW_CONFIG_ID: &str = "auto_review";
@@ -72,6 +73,23 @@ pub fn auto_review_config_option(current: bool) -> SessionConfigOption {
     .description("Let an LLM reviewer auto-allow or deny non-approved tool calls")
 }
 
+pub const THINKING_LEVELS: [(&str, &str); 5] = [
+    ("off", "Off"),
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "XHigh"),
+];
+
+pub fn thinking_config_option(current: &str) -> SessionConfigOption {
+    let options: Vec<_> = THINKING_LEVELS
+        .iter()
+        .map(|(value, name)| SessionConfigSelectOption::new(value.to_string(), name.to_string()))
+        .collect();
+    SessionConfigOption::select(THINKING_CONFIG_ID, "Thinking", current.to_string(), options)
+        .category(SessionConfigOptionCategory::Model)
+}
+
 fn model_config_option_default() -> SessionConfigOption {
     SessionConfigOption::select(
         MODEL_CONFIG_ID,
@@ -99,6 +117,7 @@ pub fn new_session_response(session_id: &str) -> NewSessionResponse {
         .config_options(vec![
             mode_config_option(MODE_BUILD),
             model_config_option_default(),
+            thinking_config_option("off"),
         ])
 }
 
@@ -108,6 +127,7 @@ pub fn load_session_response() -> LoadSessionResponse {
         .config_options(vec![
             mode_config_option(MODE_BUILD),
             model_config_option_default(),
+            thinking_config_option("off"),
         ])
 }
 
@@ -117,6 +137,7 @@ pub fn resume_session_response() -> ResumeSessionResponse {
         .config_options(vec![
             mode_config_option(MODE_BUILD),
             model_config_option_default(),
+            thinking_config_option("off"),
         ])
 }
 

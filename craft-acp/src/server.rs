@@ -370,6 +370,7 @@ pub(crate) struct SessionState {
     pub(crate) mcp: Option<craft_agent::McpHandle>,
     pub(crate) current_mode: AgentMode,
     pub(crate) current_model: String,
+    pub(crate) current_thinking: String,
     pub(crate) pending: PendingState,
     pub(crate) title_sent: bool,
     pub(crate) cwd: PathBuf,
@@ -378,6 +379,7 @@ pub(crate) struct SessionState {
 struct SessionInfo {
     session_id: String,
     current_model: String,
+    thinking: String,
     yolo: bool,
     auto_review: bool,
 }
@@ -470,6 +472,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
                         SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![
                             methods::mode_config_option(methods::MODE_BUILD),
                             methods::model_config_option(&info.current_model, &guard),
+                            methods::thinking_config_option(&info.thinking),
                             methods::yolo_config_option(info.yolo),
                             methods::auto_review_config_option(info.auto_review),
                         ])),
@@ -540,10 +543,16 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         }
     }
 
+    // The client is gone (stdin EOF, e.g. the desktop app exited). Tear the
+    // session down, then hard-exit: the runtime's blocking pool (lua plugin
+    // host threads, watchers) can otherwise keep the process alive and orphan
+    // it. Session history is persisted continuously, so this is safe mid-turn.
+    if let Some(session) = server.session.take() {
+        teardown_session(&server.out_tx, session).await;
+    }
     drop(server);
     let _ = writer_task.await;
-
-    Ok(())
+    std::process::exit(0);
 }
 
 fn request_id(v: &Value) -> RequestId {
@@ -866,6 +875,7 @@ async fn install_session(
     *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionInfo {
         session_id: session_id.clone(),
         current_model: current_model.clone(),
+        thinking: "off".to_string(),
         yolo: handle.permissions.is_yolo(),
         auto_review: handle.permissions.is_auto_review(),
     });
@@ -874,6 +884,7 @@ async fn install_session(
         mcp,
         current_mode: AgentMode::Build,
         current_model,
+        current_thinking: "off".to_string(),
         pending,
         title_sent: false,
         cwd,
@@ -980,6 +991,7 @@ fn handle_prompt(
         message,
         mode: session.current_mode.clone(),
         images,
+        thinking: parse_thinking(&session.current_thinking),
         ..Default::default()
     };
 
@@ -1049,6 +1061,10 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         return handle_set_auto_review_config(srv, &req);
     }
 
+    if config_id == methods::THINKING_CONFIG_ID {
+        return handle_set_thinking_config(srv, &req);
+    }
+
     if config_id != methods::MODEL_CONFIG_ID {
         let detail = format!("unknown config option: {}", req.config_id);
         return Err(AcpError::invalid_params().data(json_str(&detail)));
@@ -1078,6 +1094,27 @@ fn handle_set_config(srv: &mut Server, raw: &Value) -> Result<AgentResponse, Acp
         info.current_model = spec.clone();
     }
 
+    config_option_response(srv)
+}
+
+fn handle_set_thinking_config(
+    srv: &mut Server,
+    req: &SetSessionConfigOptionRequest,
+) -> Result<AgentResponse, AcpError> {
+    let value = config_value_str(req)?.to_string();
+    if craft_storage::sessions::StoredThinking::parse_setting(&value).is_err() {
+        return Err(AcpError::invalid_params().data(json_str("unknown thinking level")));
+    }
+    let session = srv.session.as_mut().ok_or_else(no_session)?;
+    session.current_thinking = value.clone();
+    if let Some(info) = srv
+        .shared_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        info.thinking = value;
+    }
     config_option_response(srv)
 }
 
@@ -1141,6 +1178,7 @@ fn config_option_response(srv: &Server) -> Result<AgentResponse, AcpError> {
         AgentMode::Build => "build",
     };
     let current_model = session.current_model.clone();
+    let thinking = session.current_thinking.clone();
     let yolo = session.handle.permissions.is_yolo();
     let auto_review = session.handle.permissions.is_auto_review();
     let specs = srv.model_specs.lock().unwrap_or_else(|e| e.into_inner());
@@ -1148,10 +1186,17 @@ fn config_option_response(srv: &Server) -> Result<AgentResponse, AcpError> {
         SetSessionConfigOptionResponse::new(vec![
             methods::mode_config_option(mode_id),
             methods::model_config_option(&current_model, &specs),
+            methods::thinking_config_option(&thinking),
             methods::yolo_config_option(yolo),
             methods::auto_review_config_option(auto_review),
         ]),
     ))
+}
+
+pub(crate) fn parse_thinking(value: &str) -> craft_providers::ThinkingConfig {
+    craft_storage::sessions::StoredThinking::parse_setting(value)
+        .map(Into::into)
+        .unwrap_or_default()
 }
 
 fn handle_list_sessions(raw: &Value) -> Result<AgentResponse, AcpError> {
@@ -1456,29 +1501,33 @@ fn start_event_pump(
                     continue;
                 }
                 AgentEvent::Done { reason, .. } => {
-                    if let Some(id) = pending
+                    let id = pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .prompt
-                        .take()
-                    {
+                        .take();
+                    if let Some(id) = id {
                         let resp = PromptResponse::new(translate::map_done_reason(reason));
                         send(
                             &out_tx,
                             Response::new(id, Ok(AgentResponse::PromptResponse(resp))),
                         );
+                    } else {
+                        notify_turn_done(&out_tx, &sid);
                     }
                     continue;
                 }
                 AgentEvent::Error { message } => {
-                    if let Some(id) = pending
+                    let id = pending
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .prompt
-                        .take()
-                    {
+                        .take();
+                    if let Some(id) = id {
                         let error = AcpError::internal_error().data(Value::String(message));
                         send(&out_tx, Response::<AgentResponse>::new(id, Err(error)));
+                    } else {
+                        notify_turn_done(&out_tx, &sid);
                     }
                     continue;
                 }
@@ -1541,6 +1590,18 @@ fn todo_update_from_event(event: &AgentEvent) -> Option<&serde_json::Value> {
         }
         _ => None,
     }
+}
+
+/// Tell the client a turn that was started fire-and-forget (via
+/// `_craft/command/run` or `_craft/meta/prompt`, which have no `session/prompt`
+/// request to resolve) has ended, so it can clear its busy state.
+fn notify_turn_done(out_tx: &Sender<Value>, sid: &SessionId) {
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "_craft/session/turn_done",
+        "params": { "sessionId": sid.0 }
+    });
+    let _ = out_tx.send(msg);
 }
 
 fn emit_todo_update(out_tx: &Sender<Value>, sid: &SessionId, todos: &serde_json::Value) {
@@ -1663,6 +1724,7 @@ mod tests {
                 mcp: None,
                 current_mode: AgentMode::Build,
                 current_model: String::new(),
+                current_thinking: "off".to_string(),
                 pending: Arc::new(Mutex::new(Pending {
                     ask: Some((ANSWERED_ID, kind)),
                     ..Default::default()

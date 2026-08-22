@@ -92,8 +92,12 @@ pub(super) fn advisor_followup_message(note: &crate::agent::advisor::AdvisorNote
 }
 
 impl<'h> Agent<'h> {
-    pub(super) async fn run_advisor(&mut self) -> Option<crate::agent::advisor::AdvisorNote> {
-        let state = self.flow.advisor_state.as_mut()?;
+    pub(super) async fn run_advisor(
+        &mut self,
+    ) -> Result<Option<crate::agent::advisor::AdvisorNote>, crate::AgentError> {
+        let Some(state) = self.flow.advisor_state.as_mut() else {
+            return Ok(None);
+        };
         let _ = self.io.event_tx.send(AgentEvent::Info {
             message: ADVISOR_REVIEWING_INFO.into(),
         });
@@ -101,10 +105,10 @@ impl<'h> Agent<'h> {
             state,
             self.history.as_slice(),
             &self.config.advisor,
-            &self.io.provider,
-            &self.io.model,
+            (&self.io.provider, &self.io.model),
             self.io.timeouts,
             self.io.session_id.as_ref(),
+            &self.io.cancel,
         )
         .await;
         match result {
@@ -113,12 +117,13 @@ impl<'h> Agent<'h> {
                     severity: note.severity.as_str().to_string(),
                     message: note.message.clone(),
                 });
-                Some(note)
+                Ok(Some(note))
             }
-            Ok(None) => None,
+            Ok(None) => Ok(None),
+            Err(crate::AgentError::Cancelled) => Err(crate::AgentError::Cancelled),
             Err(e) => {
                 warn!(error = %e, "advisor review failed");
-                None
+                Ok(None)
             }
         }
     }

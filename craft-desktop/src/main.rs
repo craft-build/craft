@@ -150,7 +150,8 @@ fn App() -> Element {
                     div { class: "main-col",
                         TopBar {}
                         div { class: "content-area",
-                            div { class: "center-col",
+                            div {
+                                class: if is_new { "center-col grid-bg" } else { "center-col" },
                                 match view {
                                     View::New => rsx! { NewTaskView {} },
                                     View::Session => rsx! { SessionView {} },

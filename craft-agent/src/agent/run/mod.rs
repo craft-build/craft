@@ -469,7 +469,18 @@ impl<'h> Agent<'h> {
                     }
                 }
                 TurnOutcome::Done(stop_reason) => {
-                    let note = self.run_advisor().await;
+                    let note = match self.run_advisor().await {
+                        Ok(note) => note,
+                        // The user cancelled while the advisor review was in
+                        // flight; end the run cancelled like a stream cancel.
+                        Err(_) => {
+                            if let Some(tx) = self.flow.flow_progress_tx.as_ref() {
+                                let _ = tx.send(super::flow_loop::FlowProgress::Cancelled);
+                            }
+                            self.tool_state.snapshot.commit();
+                            return Ok(DoneReason::Cancelled);
+                        }
+                    };
                     match flow::advisor_turn_action(
                         note,
                         &self.config.advisor,

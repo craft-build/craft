@@ -28,21 +28,6 @@ pub fn set_theme(mut s: AppState, name: &str) {
     s.theme.set(name.to_string());
 }
 
-pub const SUGGESTIONS: [(&str, &str); 3] = [
-    (
-        "Explain this repo",
-        "Give me a tour of this repo — the entry points and where the agent loop lives.",
-    ),
-    (
-        "Fix a failing test",
-        "A test is failing on CI but passes locally. Find out why.",
-    ),
-    (
-        "Review the last commit",
-        "Review the last commit on main and flag anything risky.",
-    ),
-];
-
 /// Modes offered before the server reports `availableModes`.
 pub const DEFAULT_MODES: [&str; 3] = ["build", "plan", "flow"];
 
@@ -72,6 +57,7 @@ pub enum Popover {
     Theme,
     Mode,
     Model,
+    Thinking,
     Perm,
 }
 
@@ -444,6 +430,8 @@ pub struct AppState {
     /// Model picked in the composer for the next new task; `None` falls back
     /// to the active (or most recent) tab's current model.
     pub new_task_model: Signal<Option<String>>,
+    /// Thinking level picked for the next new task.
+    pub new_task_thinking: Signal<Option<String>>,
     pub draft: Signal<String>,
     /// Images attached in the composer, sent with the next prompt.
     pub attachments: Signal<Vec<ImageAttachment>>,
@@ -492,6 +480,7 @@ pub fn provide_state() -> AppState {
         yolo: use_signal(|| false),
         auto_review: use_signal(|| false),
         new_task_model: use_signal(|| None),
+        new_task_thinking: use_signal(|| None),
         draft: use_signal(String::new),
         focused: use_signal(|| false),
         open_files: use_signal(HashSet::new),
@@ -1352,6 +1341,7 @@ pub fn send_message(mut s: AppState, backend: &Backend) {
                         .or_else(|| s.tabs.read().last().cloned())
                         .and_then(|t| t.config("model").map(|c| c.current_value.clone()))
                 }),
+                thinking: s.new_task_thinking.read().clone(),
                 initial_prompt: Some(text).filter(|t| !t.is_empty()),
                 initial_images: images,
             },
@@ -1392,6 +1382,7 @@ pub fn start_from_onboarding(
             mode,
             auto_review,
             model: None,
+            thinking: None,
             initial_prompt: None,
 
             initial_images: Vec::new(),
@@ -1432,6 +1423,7 @@ pub fn load_session(mut s: AppState, backend: &Backend, summary: SessionSummary)
             mode: None,
             auto_review: false,
             model: None,
+            thinking: None,
             initial_prompt: None,
 
             initial_images: Vec::new(),
@@ -1456,6 +1448,7 @@ pub fn open_project(mut s: AppState, backend: &Backend, cwd: String) {
             mode: None,
             auto_review: false,
             model: None,
+            thinking: None,
             initial_prompt: None,
 
             initial_images: Vec::new(),
@@ -1521,6 +1514,9 @@ pub fn set_perm(mut s: AppState, backend: &Backend, yolo: bool, auto_review: boo
 pub fn set_config_option(mut s: AppState, backend: &Backend, config_id: String, value: String) {
     if config_id == "model" {
         s.new_task_model.set(Some(value.clone()));
+    }
+    if config_id == "thinking" {
+        s.new_task_thinking.set(Some(value.clone()));
     }
     if let Some(tab) = active_tab(s)
         && let Some(session_id) = tab.session_id.clone()
@@ -1685,6 +1681,7 @@ pub fn create_skill_with_ai(
             mode: None,
             auto_review: false,
             model: None,
+            thinking: None,
             initial_prompt: Some(prompt),
 
             initial_images: Vec::new(),

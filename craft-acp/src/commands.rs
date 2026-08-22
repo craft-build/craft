@@ -505,6 +505,7 @@ fn send_prompt_input(
         message: text,
         mode: session.current_mode.clone(),
         images: Vec::new(),
+        thinking: server::parse_thinking(&session.current_thinking),
         ..Default::default()
     };
     session

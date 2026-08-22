@@ -367,6 +367,14 @@ fn handle_incoming(
                 params,
             });
         }
+        ("_craft/session/turn_done", None) => {
+            // A fire-and-forget turn (slash command) ended; clears busy state.
+            let _ = events.send(Event::PromptDone {
+                tab_id: tab_id.to_string(),
+                ok: true,
+                error: None,
+            });
+        }
         (other, id) => {
             tracing::debug!(
                 tab_id,
