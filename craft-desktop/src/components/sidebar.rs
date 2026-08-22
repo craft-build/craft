@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 
 use crate::components::{IconAutomations, IconClose, IconFolder, IconNew, IconSearch, IconSkills};
 use crate::state::{
-    AppState, Popover, View, close_tab, load_session, open_new_task, open_project, open_skills,
-    select_task, set_theme, toggle_popover,
+    AppState, Popover, View, close_tab, load_session, open_new_task, open_new_task_in,
+    open_project, open_skills, select_task, set_theme, toggle_popover,
 };
 
 #[component]
@@ -117,45 +117,62 @@ pub fn Sidebar() -> Element {
                     }
                 }
                 for (gi, (name, rows)) in groups.iter().enumerate() {
-                    div { class: "project", key: "g{gi}",
-                        div { class: "project-row",
-                            IconFolder {}
-                            span { "{name}" }
-                        }
-                        for row in rows.iter() {
-                            {
-                                let sel = in_session && row.id == active_id;
-                                let style = format!(
-                                    "background:{};color:{}",
-                                    if sel { "var(--ink-700)" } else { "transparent" },
-                                    if sel { "var(--text-primary)" } else { "var(--text-secondary)" },
-                                );
-                                let dot = row.status_dot();
-                                let id = row.id.clone();
-                                rsx! {
-                                    div { class: "task-row", key: "{id}", style: style,
-                                        span { class: "task-dot", style: "background:{dot}" }
-                                        button {
-                                            class: "task-title",
-                                            onclick: {
-                                                let id = id.clone();
-                                                move |_| select_task(s, id.clone())
-                                            },
-                                            "{row.title}"
-                                        }
-                                        button {
-                                            class: "task-close",
-                                            onclick: {
-                                                move |_| close_tab(s, backend, id.clone())
-                                            },
-                                            IconClose {}
+                    {
+                        let project_cwd = rows
+                            .first()
+                            .map(|t| t.cwd.clone())
+                            .unwrap_or_default();
+                        rsx! {
+                            div { class: "project", key: "g{gi}",
+                                div { class: "project-row",
+                                    IconFolder {}
+                                    span { "{name}" }
+                                    button {
+                                        class: "project-new",
+                                        title: "New task in {name}",
+                                        onclick: {
+                                            let cwd = project_cwd.clone();
+                                            move |_| open_new_task_in(s, cwd.clone())
+                                        },
+                                        IconNew {}
+                                    }
+                                }
+                                for row in rows.iter() {
+                                    {
+                                        let sel = in_session && row.id == active_id;
+                                        let style = format!(
+                                            "background:{};color:{}",
+                                            if sel { "var(--ink-700)" } else { "transparent" },
+                                            if sel { "var(--text-primary)" } else { "var(--text-secondary)" },
+                                        );
+                                        let dot = row.status_dot();
+                                        let id = row.id.clone();
+                                        rsx! {
+                                            div { class: "task-row", key: "{id}", style: style,
+                                                span { class: "task-dot", style: "background:{dot}" }
+                                                button {
+                                                    class: "task-title",
+                                                    onclick: {
+                                                        let id = id.clone();
+                                                        move |_| select_task(s, id.clone())
+                                                    },
+                                                    "{row.title}"
+                                                }
+                                                button {
+                                                    class: "task-close",
+                                                    onclick: {
+                                                        move |_| close_tab(s, backend, id.clone())
+                                                    },
+                                                    IconClose {}
+                                                }
+                                            }
                                         }
                                     }
                                 }
+                                if rows.is_empty() {
+                                    div { class: "empty-tasks", "No tasks yet" }
+                                }
                             }
-                        }
-                        if rows.is_empty() {
-                            div { class: "empty-tasks", "No tasks yet" }
                         }
                     }
                 }

@@ -410,6 +410,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .hero-copy { text-align: center; display: flex; flex-direction: column; gap: 8px }
 .hero-title { font-family: var(--font-display); font-size: 22px; font-weight: 600; color: var(--text-primary) }
 .hero-desc { font-size: 14px; color: var(--text-tertiary); max-width: 420px; line-height: 1.55 }
+.hero-cwd { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl }
 .hero-suggestions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; max-width: 560px }
 .suggestion-pill {
 	padding: 7px 13px;
@@ -807,6 +808,9 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .projects-header { display: flex; align-items: center; padding-right: 6px; }
 .projects-header .projects-add { margin-left: auto; display: flex; align-items: center; background: none; border: none; padding: 2px; cursor: pointer; border-radius: var(--radius-sm); }
 .projects-header .projects-add:hover { background: var(--ink-600); }
+.project-row .project-new { margin-left: auto; display: flex; align-items: center; background: none; border: none; padding: 2px; cursor: pointer; border-radius: var(--radius-sm); color: inherit; opacity: 0; }
+.project-row:hover .project-new { opacity: 1; }
+.project-row .project-new:hover { background: var(--ink-600); }
 .task-row .task-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; border: none; padding: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; }
 .task-row .task-close { display: flex; align-items: center; background: none; border: none; padding: 0 2px; cursor: pointer; opacity: 0; }
 .task-row:hover .task-close { opacity: 1; }

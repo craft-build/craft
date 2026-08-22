@@ -370,6 +370,8 @@ pub struct AppState {
     pub palette_open: Signal<bool>,
     pub palette_selected: Signal<usize>,
     pub query: Signal<String>,
+    /// Project dir the "Start a task" screen will start the session in.
+    pub new_task_cwd: Signal<Option<String>>,
     pub popover: Signal<Popover>,
     pub theme: Signal<String>,
     /// Default mode for sessions started before the server reports modes.
@@ -412,6 +414,7 @@ pub fn provide_state() -> AppState {
         palette_open: use_signal(|| false),
         palette_selected: use_signal(|| 0usize),
         query: use_signal(String::new),
+        new_task_cwd: use_signal(|| None),
         popover: use_signal(|| Popover::None),
         theme: use_signal(crate::theme::current_theme_name),
         mode: use_signal(|| "build".to_string()),
@@ -987,7 +990,18 @@ pub fn apply_session_update(tab: &mut Tab, update: &Value) {
 
 // ------------------------------------------------------------------ actions
 
-pub fn open_new_task(mut s: AppState) {
+pub fn open_new_task(s: AppState) {
+    let cwd = active_tab(s).map(|t| t.cwd);
+    show_new_task(s, cwd);
+}
+
+/// New-task composer pinned to a specific project (sidebar project "+").
+pub fn open_new_task_in(s: AppState, cwd: String) {
+    show_new_task(s, Some(cwd));
+}
+
+fn show_new_task(mut s: AppState, cwd: Option<String>) {
+    s.new_task_cwd.set(cwd);
     s.view.set(View::New);
     s.panel_open.set(false);
     s.palette_open.set(false);
@@ -1174,19 +1188,20 @@ pub fn send_message(mut s: AppState, backend: &Backend) {
         backend.send_prompt(tab.id, session_id, text);
         scroll_transcript_down();
     } else {
-        // New task: reuse the last cwd (or home) and start a session whose
-        // first prompt is the draft.
+        // New task: reuse the composer target (or home) and start a session
+        // whose first prompt is the draft.
         let cwd = s
-            .tabs
+            .new_task_cwd
             .read()
-            .last()
-            .map(|t| t.cwd.clone())
+            .clone()
+            .or_else(|| s.tabs.read().last().map(|t| t.cwd.clone()))
             .or_else(|| craft_storage::paths::home().map(|p| p.to_string_lossy().into_owned()))
             .unwrap_or_else(|| ".".to_string());
         let mode = s.mode.read().clone();
         let yolo = *s.yolo.read();
         let auto_review = *s.auto_review.read();
         s.draft.set(String::new());
+        s.new_task_cwd.set(None);
         s.starting.set(true);
         backend.start_session(
             new_tab_id(),
