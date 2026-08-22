@@ -9,7 +9,8 @@ use crate::backend::Backend;
 use crate::components::{IconImage, IconList, IconSend, IconShield, IconStop};
 use crate::state::{
     AppState, DEFAULT_MODES, Popover, SUGGESTIONS, View, active_tab, attachment_from_path,
-    cancel_prompt, send_message, set_config_option, set_mode, set_perm, toggle_popover,
+    cancel_prompt, send_message, set_config_option, set_mode, set_new_task_model, set_perm,
+    toggle_popover,
 };
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
@@ -704,14 +705,18 @@ pub fn Composer() -> Element {
                                                 button {
                                                     class: if *is_selected { "menu-item selected" } else { "menu-item" },
                                                     key: "{value}",
-                                                    onclick: {
-                                                        let value = value.clone();
-                                                        move |_| {
-                                                            model_provider_tab.set(model_provider(&value).to_string());
-                                                            set_config_option(s, backend, "model".to_string(), value.clone());
-                                                            s.popover.set(Popover::None);
-                                                        }
-                                                    },
+                                        onclick: {
+                                            let value = value.clone();
+                                            move |_| {
+                                                model_provider_tab.set(model_provider(&value).to_string());
+                                                if is_new {
+                                                    set_new_task_model(s, value.clone());
+                                                } else {
+                                                    set_config_option(s, backend, "model".to_string(), value.clone());
+                                                }
+                                                s.popover.set(Popover::None);
+                                            }
+                                        },
                                                     span { class: "grow menu-item-title mono", "{name}" }
                                                     span { class: "menu-check", if *is_selected { "✓" } else { "" } }
                                                 }

@@ -441,6 +441,9 @@ pub struct AppState {
     /// Permission policy for new sessions: yolo / auto-review toggles.
     pub yolo: Signal<bool>,
     pub auto_review: Signal<bool>,
+    /// Model picked in the composer for the next new task; `None` falls back
+    /// to the active (or most recent) tab's current model.
+    pub new_task_model: Signal<Option<String>>,
     pub draft: Signal<String>,
     /// Images attached in the composer, sent with the next prompt.
     pub attachments: Signal<Vec<ImageAttachment>>,
@@ -488,6 +491,7 @@ pub fn provide_state() -> AppState {
         mode: use_signal(|| "build".to_string()),
         yolo: use_signal(|| false),
         auto_review: use_signal(|| false),
+        new_task_model: use_signal(|| None),
         draft: use_signal(String::new),
         focused: use_signal(|| false),
         open_files: use_signal(HashSet::new),
@@ -1277,6 +1281,17 @@ pub fn toggle_question_option(
     );
 }
 
+pub fn set_new_task_model(mut s: AppState, value: String) {
+    s.new_task_model.set(Some(value.clone()));
+    if let Some(tab) = active_tab(s) {
+        with_tab(s, &tab.id, |t| {
+            if let Some(c) = t.config_options.iter_mut().find(|c| c.id == "model") {
+                c.current_value = value.clone();
+            }
+        });
+    }
+}
+
 pub fn send_message(mut s: AppState, backend: &Backend) {
     let text = s.draft.read().trim().to_string();
     let attachments = s.attachments.read().clone();
@@ -1332,6 +1347,11 @@ pub fn send_message(mut s: AppState, backend: &Backend) {
                 ssh: None,
                 mode: (mode != "build").then_some(mode),
                 auto_review,
+                model: s.new_task_model.read().clone().or_else(|| {
+                    active_tab(s)
+                        .or_else(|| s.tabs.read().last().cloned())
+                        .and_then(|t| t.config("model").map(|c| c.current_value.clone()))
+                }),
                 initial_prompt: Some(text).filter(|t| !t.is_empty()),
                 initial_images: images,
             },
@@ -1371,6 +1391,7 @@ pub fn start_from_onboarding(
             ssh,
             mode,
             auto_review,
+            model: None,
             initial_prompt: None,
 
             initial_images: Vec::new(),
@@ -1410,6 +1431,7 @@ pub fn load_session(mut s: AppState, backend: &Backend, summary: SessionSummary)
             ssh: None,
             mode: None,
             auto_review: false,
+            model: None,
             initial_prompt: None,
 
             initial_images: Vec::new(),
@@ -1433,6 +1455,7 @@ pub fn open_project(mut s: AppState, backend: &Backend, cwd: String) {
             ssh: None,
             mode: None,
             auto_review: false,
+            model: None,
             initial_prompt: None,
 
             initial_images: Vec::new(),
@@ -1495,7 +1518,10 @@ pub fn set_perm(mut s: AppState, backend: &Backend, yolo: bool, auto_review: boo
     }
 }
 
-pub fn set_config_option(s: AppState, backend: &Backend, config_id: String, value: String) {
+pub fn set_config_option(mut s: AppState, backend: &Backend, config_id: String, value: String) {
+    if config_id == "model" {
+        s.new_task_model.set(Some(value.clone()));
+    }
     if let Some(tab) = active_tab(s)
         && let Some(session_id) = tab.session_id.clone()
     {
@@ -1658,6 +1684,7 @@ pub fn create_skill_with_ai(
             ssh: None,
             mode: None,
             auto_review: false,
+            model: None,
             initial_prompt: Some(prompt),
 
             initial_images: Vec::new(),

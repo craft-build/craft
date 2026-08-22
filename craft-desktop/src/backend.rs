@@ -94,6 +94,7 @@ pub struct StartOptions {
     pub ssh: Option<SshTarget>,
     pub mode: Option<String>,
     pub auto_review: bool,
+    pub model: Option<String>,
     /// Sent as the first prompt once the session is live.
     pub initial_prompt: Option<String>,
     /// Images attached to the initial prompt.
@@ -171,6 +172,7 @@ impl Backend {
             ssh: _,
             mode,
             auto_review,
+            model,
             initial_prompt,
             initial_images,
         } = opts;
@@ -213,6 +215,11 @@ impl Backend {
                     };
                     if let Some(mode) = mode.as_deref() {
                         let _ = client.set_mode(session_id, mode).await;
+                    }
+                    if let Some(model) = model.as_deref()
+                        && let Err(e) = client.set_config_option(session_id, "model", model).await
+                    {
+                        tracing::warn!(tab_id = %tab_id, model, error = %e, "failed to set model");
                     }
                     if auto_review {
                         let _ = client
