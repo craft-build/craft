@@ -53,6 +53,7 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
             craft_providers::ContentBlock::Text { text } => Some(text.len()),
             craft_providers::ContentBlock::ToolResult { content, .. } => Some(content.len()),
             craft_providers::ContentBlock::ToolUse { input, .. } => Some(input.to_string().len()),
+            craft_providers::ContentBlock::Thinking { thinking, .. } => Some(thinking.len()),
             _ => None,
         })
         .sum();
