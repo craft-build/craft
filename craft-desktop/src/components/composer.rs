@@ -1,14 +1,30 @@
 //! Message composer: textarea plus the mode / model dropdowns, context ring,
-//! send/stop button, the connection-error banner, and the `/` command palette.
+//! send/stop button, image attachments (drag-drop or attach button), the
+//! connection-error banner, and the `/` command palette.
 
+use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 
 use crate::backend::Backend;
-use crate::components::{IconList, IconSend, IconShield, IconStop};
+use crate::components::{IconImage, IconList, IconSend, IconShield, IconStop};
 use crate::state::{
-    AppState, DEFAULT_MODES, Popover, SUGGESTIONS, View, active_tab, cancel_prompt, send_message,
-    set_config_option, set_mode, set_perm, toggle_popover,
+    AppState, DEFAULT_MODES, Popover, SUGGESTIONS, View, active_tab, attachment_from_path,
+    cancel_prompt, send_message, set_config_option, set_mode, set_perm, toggle_popover,
 };
+
+const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+/// Reads dropped or picked image files into pending composer attachments.
+/// Non-image and oversized files are skipped (see `attachment_from_path`).
+fn attach_files(mut s: AppState, paths: Vec<std::path::PathBuf>) {
+    let new: Vec<_> = paths
+        .iter()
+        .filter_map(|p| attachment_from_path(p))
+        .collect();
+    if !new.is_empty() {
+        s.attachments.write().extend(new);
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub struct CmdEntry {
@@ -161,6 +177,7 @@ pub fn route_command(
                 tab.id.clone(),
                 session_id,
                 format!("{} {}", entry.name, args).trim().to_string(),
+                Vec::new(),
             );
             if let Some(t) = s.tabs.write().iter_mut().find(|t| t.id == tab.id) {
                 t.pending = true;
@@ -244,8 +261,9 @@ pub fn Composer() -> Element {
     let connection_error = tab.as_ref().and_then(|t| t.connection_error.clone());
 
     let draft = s.draft.read().clone();
+    let attachments = s.attachments.read().clone();
     let focused = *s.focused.read();
-    let can_send = !draft.trim().is_empty() && !pending;
+    let can_send = (!draft.trim().is_empty() || !attachments.is_empty()) && !pending;
     let placeholder = if is_new {
         "Describe the task"
     } else {
@@ -470,7 +488,42 @@ pub fn Composer() -> Element {
                     }
                 }
             }
-            div { class: "composer", style: "border-color:{composer_border}",
+            div {
+                class: if *s.drop_hint.read() { "composer dropping" } else { "composer" },
+                style: "border-color:{composer_border}",
+                ondragenter: move |e| {
+                    e.prevent_default();
+                    s.drop_hint.set(true);
+                },
+                ondragover: move |e| e.prevent_default(),
+                ondragleave: move |_| s.drop_hint.set(false),
+                ondrop: move |e| {
+                    e.prevent_default();
+                    s.drop_hint.set(false);
+                    attach_files(s, e.files().iter().map(|f| f.path()).collect());
+                },
+                if !attachments.is_empty() {
+                    div { class: "composer-attachments",
+                        for (i, img) in attachments.iter().enumerate() {
+                            {
+                                let uri = img.data_uri();
+                                rsx! {
+                                    div { class: "composer-attachment", key: "{img.name}-{i}",
+                                        img { src: "{uri}", alt: "{img.name}" }
+                                        button {
+                                            class: "composer-attachment-remove",
+                                            title: "Remove attachment",
+                                            onclick: move |_| {
+                                                s.attachments.write().remove(i);
+                                            },
+                                            "×"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 textarea {
                     class: "composer-input",
                     rows: 2,
@@ -590,6 +643,19 @@ pub fn Composer() -> Element {
                                 }
                             }
                         }
+                    }
+
+                    button {
+                        class: "bar-btn attach",
+                        title: "Attach an image",
+                        onclick: move |_| {
+                            let paths = rfd::FileDialog::new()
+                                .add_filter("Images", IMAGE_EXTS)
+                                .pick_files()
+                                .unwrap_or_default();
+                            attach_files(s, paths);
+                        },
+                        IconImage {}
                     }
 
                     if is_new {

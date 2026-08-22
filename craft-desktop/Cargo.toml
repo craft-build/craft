@@ -13,6 +13,7 @@ name = "craft-desktop"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
 dioxus = { workspace = true, features = ["desktop"] }
 craft-highlight = { workspace = true }
 craft-markdown = { workspace = true }

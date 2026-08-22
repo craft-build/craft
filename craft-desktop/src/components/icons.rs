@@ -111,6 +111,17 @@ pub fn IconPlus() -> Element {
 }
 
 #[component]
+pub fn IconImage() -> Element {
+    rsx! {
+        svg { width: 15, height: 15, view_box: "0 0 24 24", fill: "none", stroke: "#8089a3", stroke_width: "1.7",
+            rect { x: 3, y: 3, width: 18, height: 18, rx: 2 }
+            circle { cx: 9, cy: 9, r: 2 }
+            path { d: "m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" }
+        }
+    }
+}
+
+#[component]
 pub fn IconShield(stroke: String) -> Element {
     rsx! {
         svg { width: 14, height: 14, view_box: "0 0 24 24", fill: "none", stroke: stroke, stroke_width: "1.7",

@@ -956,17 +956,23 @@ fn handle_prompt(
     }
 
     let (message, images) = extract_prompt_content(&req.prompt);
-    if !message.is_empty() {
+    {
         let sid = SessionId::from(session.handle.session_id.to_string());
-        session_update(&srv.out_tx, &sid, translate::user_message_chunk(&message));
-        if !session.title_sent {
-            let title = craft_storage::sessions::generate_title(&[Message::user(message.clone())]);
-            session_update(
-                &srv.out_tx,
-                &sid,
-                SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title)),
-            );
-            session.title_sent = true;
+        if !message.is_empty() {
+            session_update(&srv.out_tx, &sid, translate::user_message_chunk(&message));
+            if !session.title_sent {
+                let title =
+                    craft_storage::sessions::generate_title(&[Message::user(message.clone())]);
+                session_update(
+                    &srv.out_tx,
+                    &sid,
+                    SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title(title)),
+                );
+                session.title_sent = true;
+            }
+        }
+        for source in &images {
+            session_update(&srv.out_tx, &sid, translate::user_image_chunk(source));
         }
     }
 

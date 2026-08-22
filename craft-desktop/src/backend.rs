@@ -96,6 +96,8 @@ pub struct StartOptions {
     pub auto_review: bool,
     /// Sent as the first prompt once the session is live.
     pub initial_prompt: Option<String>,
+    /// Images attached to the initial prompt.
+    pub initial_images: Vec<crate::acp::PromptImage>,
 }
 
 pub struct Backend {
@@ -170,6 +172,7 @@ impl Backend {
             mode,
             auto_review,
             initial_prompt,
+            initial_images,
         } = opts;
         let load_cwd = cwd.clone();
         spawn_handle.spawn(async move {
@@ -221,7 +224,10 @@ impl Backend {
                 .await;
                 match outcome {
                     Ok(resp) => {
-                        if let Some(prompt) = &initial_prompt
+                        let has_text = initial_prompt
+                            .as_deref()
+                            .is_some_and(|p| !p.trim().is_empty());
+                        if (has_text || !initial_images.is_empty())
                             && let Some(session_id) = resp.get("sessionId").and_then(Value::as_str)
                         {
                             // Fire and forget: the prompt's completion
@@ -230,9 +236,10 @@ impl Backend {
                             let ev = events.clone();
                             let tab = tab_id.clone();
                             let sid = session_id.to_string();
-                            let text = prompt.clone();
+                            let text = initial_prompt.unwrap_or_default();
+                            let images = initial_images.clone();
                             handle.spawn(async move {
-                                let result = c.send_prompt(&sid, &text).await;
+                                let result = c.send_prompt(&sid, &text, &images).await;
                                 let _ = ev.send(Event::PromptDone {
                                     tab_id: tab,
                                     ok: result.is_ok(),
@@ -294,11 +301,17 @@ impl Backend {
         });
     }
 
-    pub fn send_prompt(&self, tab_id: String, session_id: String, text: String) {
+    pub fn send_prompt(
+        &self,
+        tab_id: String,
+        session_id: String,
+        text: String,
+        images: Vec<crate::acp::PromptImage>,
+    ) {
         if let Ok(client) = self.client(&tab_id) {
             let events = self.events.clone();
             self.rt.spawn(async move {
-                let result = client.send_prompt(&session_id, &text).await;
+                let result = client.send_prompt(&session_id, &text, &images).await;
                 let _ = events.send(Event::PromptDone {
                     tab_id,
                     ok: result.is_ok(),

@@ -41,6 +41,13 @@ pub enum ClientError {
 
 type PendingMap = std::sync::Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 
+/// A base64-encoded image attached to a `session/prompt` request.
+#[derive(Clone, Debug)]
+pub struct PromptImage {
+    pub mime_type: String,
+    pub data: String,
+}
+
 /// Where and how to launch the `craft acp` process. `Local` spawns the
 /// resolved binary directly; `Ssh` forwards ACP over an `ssh` connection so
 /// the tab drives a remote agent instead of a local one.
@@ -202,10 +209,26 @@ impl AcpClient {
     /// Callers should spawn this rather than await it inline; the
     /// `session/update` notifications carry the live content while the turn
     /// is in flight, and the resolution here is just the final stop signal.
-    pub async fn send_prompt(&self, session_id: &str, text: &str) -> Result<Value, ClientError> {
+    pub async fn send_prompt(
+        &self,
+        session_id: &str,
+        text: &str,
+        images: &[PromptImage],
+    ) -> Result<Value, ClientError> {
+        let mut prompt = Vec::with_capacity(images.len() + 1);
+        if !text.is_empty() {
+            prompt.push(json!({ "type": "text", "text": text }));
+        }
+        for image in images {
+            prompt.push(json!({
+                "type": "image",
+                "data": image.data,
+                "mimeType": image.mime_type,
+            }));
+        }
         self.call_with_timeout(
             "session/prompt",
-            json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": text }] }),
+            json!({ "sessionId": session_id, "prompt": prompt }),
             PROMPT_TIMEOUT,
         )
         .await

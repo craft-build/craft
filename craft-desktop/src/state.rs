@@ -119,10 +119,53 @@ pub struct ToolDiff {
     pub new_text: String,
 }
 
+/// A base64 image: a pending composer attachment, an image in a user
+/// message, or an image produced by a tool result.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ImageAttachment {
+    /// File name for composer chips; empty for transcript images.
+    pub name: String,
+    pub mime_type: String,
+    pub data: String,
+}
+
+impl ImageAttachment {
+    /// `<img src>` value without staging the bytes on disk.
+    pub fn data_uri(&self) -> String {
+        format!("data:{};base64,{}", self.mime_type, self.data)
+    }
+}
+
+/// Mirrors craft-agent's `MAX_IMAGE_BYTES`; larger attachments are skipped.
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+
+/// Reads an image file for the composer; `None` for non-image, unreadable,
+/// or oversized files.
+pub fn attachment_from_path(path: &std::path::Path) -> Option<ImageAttachment> {
+    let mime_type = match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+        return None;
+    }
+    use base64::Engine;
+    Some(ImageAttachment {
+        name: path.file_name()?.to_string_lossy().into_owned(),
+        mime_type: mime_type.into(),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum ToolContent {
     Text(String),
     Diff(ToolDiff),
+    Image(ImageAttachment),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -175,12 +218,31 @@ pub struct QuestionItem {
 /// old `ChatItem` union in `types.ts`.
 #[derive(Clone, PartialEq, Debug)]
 pub enum ChatItem {
-    User { id: u64, text: String },
-    Assistant { id: u64, text: String },
-    Thinking { id: u64, text: String },
-    Tool { id: u64, call: ToolCall },
-    Permission { id: u64, item: PermissionItem },
-    Question { id: u64, item: QuestionItem },
+    User {
+        id: u64,
+        text: String,
+        images: Vec<ImageAttachment>,
+    },
+    Assistant {
+        id: u64,
+        text: String,
+    },
+    Thinking {
+        id: u64,
+        text: String,
+    },
+    Tool {
+        id: u64,
+        call: ToolCall,
+    },
+    Permission {
+        id: u64,
+        item: PermissionItem,
+    },
+    Question {
+        id: u64,
+        item: QuestionItem,
+    },
 }
 
 impl ChatItem {
@@ -380,6 +442,10 @@ pub struct AppState {
     pub yolo: Signal<bool>,
     pub auto_review: Signal<bool>,
     pub draft: Signal<String>,
+    /// Images attached in the composer, sent with the next prompt.
+    pub attachments: Signal<Vec<ImageAttachment>>,
+    /// True while a file drag hovers over the composer (drop highlight).
+    pub drop_hint: Signal<bool>,
     pub focused: Signal<bool>,
     pub open_files: Signal<HashSet<String>>,
     pub expanded_tools: Signal<HashSet<u64>>,
@@ -405,6 +471,8 @@ pub struct AppState {
 
 pub fn provide_state() -> AppState {
     let state = AppState {
+        attachments: use_signal(Vec::new),
+        drop_hint: use_signal(|| false),
         tabs: use_signal(Vec::new),
         active_id: use_signal(String::new),
         view: use_signal(|| View::New),
@@ -791,8 +859,26 @@ fn parse_tool_content(value: Option<&Value>) -> Vec<ToolContent> {
                     .to_string(),
             })),
             Some("content") => {
-                let text = content_text(c.get("content").unwrap_or(&Value::Null));
-                (!text.is_empty()).then_some(ToolContent::Text(text))
+                let inner = c.get("content").unwrap_or(&Value::Null);
+                match inner.get("type").and_then(Value::as_str) {
+                    Some("image") => {
+                        let (Some(data), Some(mime_type)) = (
+                            inner.get("data").and_then(Value::as_str),
+                            inner.get("mimeType").and_then(Value::as_str),
+                        ) else {
+                            return None;
+                        };
+                        Some(ToolContent::Image(ImageAttachment {
+                            name: String::new(),
+                            mime_type: mime_type.to_string(),
+                            data: data.to_string(),
+                        }))
+                    }
+                    _ => {
+                        let text = content_text(inner);
+                        (!text.is_empty()).then_some(ToolContent::Text(text))
+                    }
+                }
             }
             _ => None,
         })
@@ -819,12 +905,36 @@ pub fn apply_session_update(tab: &mut Tab, update: &Value) {
     let items = &mut tab.items;
     match kind {
         "user_message_chunk" => {
-            let text = content_text(update.get("content").unwrap_or(&Value::Null));
+            let content = update.get("content").unwrap_or(&Value::Null);
+            if content.get("type").and_then(Value::as_str) == Some("image") {
+                let (Some(data), Some(mime_type)) = (
+                    content.get("data").and_then(Value::as_str),
+                    content.get("mimeType").and_then(Value::as_str),
+                ) else {
+                    return;
+                };
+                let image = ImageAttachment {
+                    name: String::new(),
+                    mime_type: mime_type.to_string(),
+                    data: data.to_string(),
+                };
+                match items.last_mut() {
+                    Some(ChatItem::User { images, .. }) => images.push(image),
+                    _ => items.push(ChatItem::User {
+                        id: next_id(),
+                        text: String::new(),
+                        images: vec![image],
+                    }),
+                }
+                return;
+            }
+            let text = content_text(content);
             match items.last_mut() {
                 Some(ChatItem::User { text: t, .. }) => t.push_str(&text),
                 _ => items.push(ChatItem::User {
                     id: next_id(),
                     text,
+                    images: Vec::new(),
                 }),
             }
         }
@@ -1169,9 +1279,17 @@ pub fn toggle_question_option(
 
 pub fn send_message(mut s: AppState, backend: &Backend) {
     let text = s.draft.read().trim().to_string();
-    if text.is_empty() || *s.starting.read() {
+    let attachments = s.attachments.read().clone();
+    if (text.is_empty() && attachments.is_empty()) || *s.starting.read() {
         return;
     }
+    let images: Vec<crate::acp::PromptImage> = attachments
+        .iter()
+        .map(|a| crate::acp::PromptImage {
+            mime_type: a.mime_type.clone(),
+            data: a.data.clone(),
+        })
+        .collect();
 
     if *s.view.read() == View::Session {
         let Some(tab) = active_tab(s) else { return };
@@ -1182,10 +1300,11 @@ pub fn send_message(mut s: AppState, backend: &Backend) {
             return;
         }
         s.draft.set(String::new());
+        s.attachments.set(Vec::new());
         with_tab(s, &tab.id, |t| {
             t.pending = true;
         });
-        backend.send_prompt(tab.id, session_id, text);
+        backend.send_prompt(tab.id, session_id, text, images);
         scroll_transcript_down();
     } else {
         // New task: reuse the composer target (or home) and start a session
@@ -1201,6 +1320,7 @@ pub fn send_message(mut s: AppState, backend: &Backend) {
         let yolo = *s.yolo.read();
         let auto_review = *s.auto_review.read();
         s.draft.set(String::new());
+        s.attachments.set(Vec::new());
         s.new_task_cwd.set(None);
         s.starting.set(true);
         backend.start_session(
@@ -1212,7 +1332,8 @@ pub fn send_message(mut s: AppState, backend: &Backend) {
                 ssh: None,
                 mode: (mode != "build").then_some(mode),
                 auto_review,
-                initial_prompt: Some(text),
+                initial_prompt: Some(text).filter(|t| !t.is_empty()),
+                initial_images: images,
             },
         );
     }
@@ -1251,6 +1372,8 @@ pub fn start_from_onboarding(
             mode,
             auto_review,
             initial_prompt: None,
+
+            initial_images: Vec::new(),
         },
     );
 }
@@ -1288,6 +1411,8 @@ pub fn load_session(mut s: AppState, backend: &Backend, summary: SessionSummary)
             mode: None,
             auto_review: false,
             initial_prompt: None,
+
+            initial_images: Vec::new(),
         },
     );
 }
@@ -1309,6 +1434,8 @@ pub fn open_project(mut s: AppState, backend: &Backend, cwd: String) {
             mode: None,
             auto_review: false,
             initial_prompt: None,
+
+            initial_images: Vec::new(),
         },
     );
 }
@@ -1532,6 +1659,8 @@ pub fn create_skill_with_ai(
             mode: None,
             auto_review: false,
             initial_prompt: Some(prompt),
+
+            initial_images: Vec::new(),
         },
     );
 }
@@ -1652,5 +1781,93 @@ mod tests {
         assert!(!qs[0].multi_select);
         assert!(qs[1].multi_select);
         assert_eq!(qs[1].options[0].description.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn user_image_chunk_appends_to_last_user_item() {
+        let mut t = tab();
+        apply_session_update(
+            &mut t,
+            &json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "look" } }),
+        );
+        apply_session_update(
+            &mut t,
+            &json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "image", "data": "b64", "mimeType": "image/png" } }),
+        );
+        match &t.items[..] {
+            [ChatItem::User { text, images, .. }] => {
+                assert_eq!(text, "look");
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].data_uri(), "data:image/png;base64,b64");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_image_chunk_without_text_opens_new_item() {
+        let mut t = tab();
+        apply_session_update(
+            &mut t,
+            &json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "image", "data": "b64", "mimeType": "image/gif" } }),
+        );
+        match &t.items[..] {
+            [ChatItem::User { text, images, .. }] => {
+                assert!(text.is_empty());
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].mime_type, "image/gif");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_image_content_parses_from_tool_call_update() {
+        let mut t = tab();
+        apply_session_update(
+            &mut t,
+            &json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "status": "completed",
+                "content": [
+                    { "type": "content", "content": { "type": "text", "text": "```\n[image a.png]\n```" } },
+                    { "type": "content", "content": { "type": "image", "data": "b64", "mimeType": "image/webp" } }
+                ]
+            }),
+        );
+        match &t.items[..] {
+            [ChatItem::Tool { call, .. }] => match &call.content[..] {
+                [ToolContent::Text(_), ToolContent::Image(img)] => {
+                    assert_eq!(img.mime_type, "image/webp");
+                    assert_eq!(img.data, "b64");
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn attachment_from_path_reads_image_and_rejects_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        std::fs::write(&png, b"png-bytes").unwrap();
+        let attachment = attachment_from_path(&png).expect("png loads");
+        assert_eq!(attachment.mime_type, "image/png");
+        assert_eq!(attachment.name, "shot.png");
+        use base64::Engine;
+        assert_eq!(
+            attachment.data,
+            base64::engine::general_purpose::STANDARD.encode(b"png-bytes")
+        );
+
+        let svg = dir.path().join("icon.svg");
+        std::fs::write(&svg, b"<svg/>").unwrap();
+        assert!(attachment_from_path(&svg).is_none());
+
+        let huge = dir.path().join("huge.jpg");
+        std::fs::write(&huge, vec![0u8; MAX_ATTACHMENT_BYTES + 1]).unwrap();
+        assert!(attachment_from_path(&huge).is_none());
     }
 }

@@ -9,7 +9,9 @@ use craft_agent::tools::ToolRegistry;
 use craft_agent::types::{
     BatchProgressEvent, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
-use craft_providers::{ContentBlock as MsgBlock, ImageMediaType, Message, Role as MsgRole};
+use craft_providers::{
+    ContentBlock as MsgBlock, ImageMediaType, ImageSource, Message, Role as MsgRole,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -133,6 +135,23 @@ pub fn user_message_chunk(text: &str) -> SessionUpdate {
     SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
         text.to_string(),
     ))))
+}
+
+/// Echo an image the client attached to a prompt (or that replay surfaces in
+/// a user message) so the client transcript can render it.
+pub fn user_image_chunk(source: &ImageSource) -> SessionUpdate {
+    SessionUpdate::UserMessageChunk(ContentChunk::new(image_content_block(source)))
+}
+
+fn image_content_block(source: &ImageSource) -> ContentBlock {
+    ContentBlock::Image(ImageContent::new(
+        source.data.to_string(),
+        mime_type(&source.media_type),
+    ))
+}
+
+fn image_tool_content(source: &ImageSource) -> ToolCallContent {
+    ToolCallContent::Content(Content::new(image_content_block(source)))
 }
 
 pub fn subagent_breadcrumb(label: &str) -> String {
@@ -366,13 +385,16 @@ pub fn tool_done(event: &ToolDoneEvent, cwd: &Path, home: Option<&Path>) -> Sess
         }
         _ => {
             let text = event.output.as_text();
-            if text.is_empty() {
-                vec![]
-            } else {
-                vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+            let mut content = Vec::new();
+            if !text.is_empty() {
+                content.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
                     TextContent::new(fenced(&text)),
-                )))]
+                ))));
             }
+            if let Some(source) = event.output.image_source() {
+                content.push(image_tool_content(source));
+            }
+            content
         }
     };
 
@@ -457,21 +479,17 @@ fn replay_user(
             MsgBlock::ToolResult {
                 tool_use_id,
                 content,
+                images,
                 is_error,
-                ..
             } => updates.push(replay_tool_result(
                 tool_use_id,
                 content,
+                images,
                 *is_error,
                 tool_inputs.get(tool_use_id).copied(),
             )),
             MsgBlock::Image { source } => {
-                updates.push(SessionUpdate::UserMessageChunk(ContentChunk::new(
-                    ContentBlock::Image(ImageContent::new(
-                        source.data.to_string(),
-                        mime_type(&source.media_type),
-                    )),
-                )));
+                updates.push(user_image_chunk(source));
             }
             _ => {}
         }
@@ -517,6 +535,7 @@ fn replay_tool_call(
 fn replay_tool_result(
     id: &str,
     content: &str,
+    images: &[ImageSource],
     is_error: bool,
     input: Option<&serde_json::Value>,
 ) -> SessionUpdate {
@@ -529,10 +548,15 @@ fn replay_tool_result(
 
     if let Some(diff) = input.and_then(reconstruct_diff) {
         fields = fields.content(vec![ToolCallContent::Diff(diff)]);
-    } else if !content.is_empty() {
-        fields = fields.content(vec![ToolCallContent::Content(Content::new(
-            ContentBlock::Text(TextContent::new(fenced(content))),
-        ))]);
+    } else {
+        let mut tool_content = Vec::new();
+        if !content.is_empty() {
+            tool_content.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
+                TextContent::new(fenced(content)),
+            ))));
+        }
+        tool_content.extend(images.iter().map(image_tool_content));
+        fields = fields.content(tool_content);
     }
 
     SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
@@ -898,6 +922,64 @@ mod tests {
         assert_eq!(json[0]["content"]["type"], "image");
         assert_eq!(json[0]["content"]["mimeType"], "image/png");
         assert_eq!(json[0]["content"]["data"], "b64data");
+    }
+
+    #[test]
+    fn replay_tool_result_includes_image_content() {
+        let messages = vec![
+            assistant(vec![MsgBlock::tool_use(
+                "tu-view",
+                "view_image",
+                serde_json::json!({"path": "shot.png"}),
+            )]),
+            Message {
+                role: MsgRole::User,
+                content: vec![MsgBlock::ToolResult {
+                    tool_use_id: "tu-view".into(),
+                    content: "[image shot.png]".into(),
+                    images: vec![ImageSource {
+                        media_type: ImageMediaType::Png,
+                        data: std::sync::Arc::from("b64data"),
+                    }],
+                    is_error: false,
+                }],
+                display_text: None,
+                ..Default::default()
+            },
+        ];
+        let json = updates_json(&messages);
+        let result_update = &json[1];
+        assert_eq!(result_update["content"][0]["type"], "content");
+        assert_eq!(result_update["content"][1]["content"]["type"], "image");
+        assert_eq!(result_update["content"][1]["content"]["data"], "b64data");
+        assert_eq!(
+            result_update["content"][1]["content"]["mimeType"],
+            "image/png"
+        );
+    }
+
+    #[test]
+    fn tool_done_emits_image_content_for_image_output() {
+        let event = ToolDoneEvent {
+            id: "t-img".into(),
+            tool: Arc::from("browser"),
+            output: ToolOutput::Image {
+                caption: "[screenshot of https://a.test]".into(),
+                source: ImageSource {
+                    media_type: ImageMediaType::Png,
+                    data: std::sync::Arc::from("b64shot"),
+                },
+            },
+            is_error: false,
+            annotation: None,
+            written_path: None,
+        };
+        let json =
+            serde_json::to_value(tool_done(&event, Path::new(CWD), Some(Path::new(HOME)))).unwrap();
+        assert_eq!(json["content"][0]["content"]["type"], "text");
+        assert_eq!(json["content"][1]["content"]["type"], "image");
+        assert_eq!(json["content"][1]["content"]["data"], "b64shot");
+        assert_eq!(json["content"][1]["content"]["mimeType"], "image/png");
     }
 
     #[test_case("read", ToolKind::Read ; "read")]

@@ -37,9 +37,25 @@ pub fn Transcript() -> Element {
                 }
                 for item in tab.items.iter() {
                     {match item {
-                        ChatItem::User { id, text } => rsx! {
+                        ChatItem::User { id, text, images } => rsx! {
                             div { class: "msg-user-row", key: "{id}",
-                                div { class: "msg-user", "{text}" }
+                                div { class: "msg-user",
+                                    if !text.is_empty() {
+                                        "{text}"
+                                    }
+                                    if !images.is_empty() {
+                                        div { class: "msg-user-images",
+                                            for (i, img) in images.iter().enumerate() {
+                                                {
+                                                    let uri = img.data_uri();
+                                                    rsx! {
+                                                        img { class: "msg-user-image", key: "{i}", src: "{uri}", alt: if img.name.is_empty() { "image" } else { img.name.as_str() } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         },
                         ChatItem::Assistant { id, text } => rsx! {
@@ -89,7 +105,15 @@ fn ToolRow(id: u64) -> Element {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let has_output = diff.is_some() || !text.is_empty();
+    let images = call
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            crate::state::ToolContent::Image(i) => Some(i.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let has_output = diff.is_some() || !text.is_empty() || !images.is_empty();
     let expanded = s.expanded_tools.read().contains(&id);
     let stats = diff
         .as_ref()
@@ -124,6 +148,18 @@ fn ToolRow(id: u64) -> Element {
                                 span { class: "diff-file", "{d.path}" }
                             }
                             DiffLines { lines: diff::diff_lines(d.old_text.as_deref().unwrap_or(""), &d.new_text) }
+                        }
+                    }
+                    if !images.is_empty() {
+                        div { class: "tool-images",
+                            for (i, img) in images.iter().enumerate() {
+                                {
+                                    let uri = img.data_uri();
+                                    rsx! {
+                                        img { class: "tool-image", key: "{i}", src: "{uri}", alt: "tool output image" }
+                                    }
+                                }
+                            }
                         }
                     }
                     if !text.is_empty() {
