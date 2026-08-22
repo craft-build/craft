@@ -33,6 +33,7 @@
               # NOTE: these are cargo git dependencies; set hash to "" and
               # rebuild to get the correct value.
               outputHashes = {
+                "crossterm-0.29.0" = "sha256-A5lgiEEi7mktf7m2GljdAxst7Fdl7Uqko29Xq6o90Ow=";
                 "monty-0.0.17" = "sha256-f+WcznnOMSc0ahgfvgVec4U0nH9j022NLnWQLdISv3M=";
                 "ruff_python_ast-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";
                 "ruff_python_parser-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";
