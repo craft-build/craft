@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 
 use crate::components::{IconAutomations, IconClose, IconFolder, IconNew, IconSearch, IconSkills};
 use crate::state::{
-    AppState, Popover, View, close_tab, load_session, open_new_task, open_project, select_task,
-    set_theme, toggle_popover,
+    AppState, Popover, View, close_tab, load_session, open_new_task, open_project, open_skills,
+    select_task, set_theme, toggle_popover,
 };
 
 #[component]
@@ -80,7 +80,13 @@ pub fn Sidebar() -> Element {
                     IconAutomations {}
                     span { class: "grow", "Recent" }
                 }
-                button { class: "side-action", IconSkills {}, span { class: "grow", "Skills" } }
+                button {
+                    class: "side-action",
+                    class: if *s.view.read() == View::Skills { "active" } else { "" },
+                    onclick: move |_| open_skills(s),
+                    IconSkills {}
+                    span { class: "grow", "Skills" }
+                }
             }
 
             nav { class: "sidebar-projects",

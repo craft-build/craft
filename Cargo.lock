@@ -2119,6 +2119,7 @@ dependencies = [
  "serde_json",
  "similar",
  "syntect",
+ "tempfile",
  "test-case",
  "thiserror 2.0.20",
  "tokio",
@@ -2128,6 +2129,7 @@ dependencies = [
  "two-face",
  "uuid",
  "which",
+ "yaml_serde",
 ]
 
 [[package]]

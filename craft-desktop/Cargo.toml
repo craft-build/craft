@@ -40,3 +40,5 @@ mobile = ["dioxus/mobile"]
 
 [dev-dependencies]
 test-case = { workspace = true }
+tempfile = { workspace = true }
+serde_yaml = { workspace = true }

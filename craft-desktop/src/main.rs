@@ -4,13 +4,15 @@ mod acp;
 mod backend;
 mod components;
 mod markdown;
+mod skills;
 mod state;
 mod theme;
 
 use dioxus::prelude::*;
 
 use components::{
-    ChangesPanel, Composer, NewTaskView, Onboarding, Palette, SessionView, Sidebar, TopBar,
+    ChangesPanel, Composer, NewTaskView, Onboarding, Palette, SessionView, Sidebar, SkillsView,
+    TopBar,
 };
 use state::{Popover, View, provide_state};
 
@@ -103,7 +105,9 @@ fn App() -> Element {
     let theme_style = tokens.css_vars();
 
     let has_tabs = !s.tabs.read().is_empty();
-    let is_new = *s.view.read() == View::New;
+    let view = *s.view.read();
+    let is_new = view == View::New;
+    let is_skills = view == View::Skills;
 
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
@@ -147,12 +151,14 @@ fn App() -> Element {
                         TopBar {}
                         div { class: "content-area",
                             div { class: "center-col",
-                                if is_new {
-                                    NewTaskView {}
-                                } else {
-                                    SessionView {}
+                                match view {
+                                    View::New => rsx! { NewTaskView {} },
+                                    View::Session => rsx! { SessionView {} },
+                                    View::Skills => rsx! { SkillsView {} },
                                 }
-                                Composer {}
+                                if !is_skills {
+                                    Composer {}
+                                }
                             }
                             if *s.panel_open.read() && !is_new {
                                 ChangesPanel {}

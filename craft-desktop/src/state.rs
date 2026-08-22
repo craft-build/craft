@@ -62,6 +62,8 @@ pub enum View {
     New,
     /// An active session transcript.
     Session,
+    /// The Skills section: browse and manage on-disk skills.
+    Skills,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -387,6 +389,16 @@ pub struct AppState {
     pub starting: Signal<bool>,
     /// Question card selections, keyed by item id.
     pub selections: Signal<Vec<(u64, Vec<Vec<usize>>)>>,
+    /// Skills section: skills visible from the current project context.
+    pub skills: Signal<Vec<crate::skills::Skill>>,
+    /// Skills section: last list/save/delete error to surface to the user.
+    pub skills_error: Signal<Option<String>>,
+    /// Skills section: open editor form state, `None` when browsing.
+    pub skill_editor: Signal<Option<crate::skills::SkillDraft>>,
+    /// Skills section: skill queued for deletion until the user confirms.
+    pub skill_delete: Signal<Option<crate::skills::Skill>>,
+    /// Skills section: the create-with-AI panel is open.
+    pub skill_ai_open: Signal<bool>,
 }
 
 pub fn provide_state() -> AppState {
@@ -414,6 +426,11 @@ pub fn provide_state() -> AppState {
         start_error: use_signal(|| None),
         starting: use_signal(|| false),
         selections: use_signal(Vec::new),
+        skills: use_signal(Vec::new),
+        skills_error: use_signal(|| None),
+        skill_editor: use_signal(|| None),
+        skill_delete: use_signal(|| None),
+        skill_ai_open: use_signal(|| false),
     };
     use_context_provider(|| state);
     state
@@ -1347,6 +1364,161 @@ pub fn set_config_option(s: AppState, backend: &Backend, config_id: String, valu
         });
         backend.set_config_option(tab.id, session_id, config_id, value);
     }
+}
+
+// -------------------------------------------------------------------- skills
+
+/// Open the Skills section and load the skills visible from the current
+/// project context (active tab cwd, else last tab cwd, else home).
+pub fn open_skills(mut s: AppState) {
+    s.view.set(View::Skills);
+    s.panel_open.set(false);
+    s.palette_open.set(false);
+    refresh_skills(s);
+}
+
+/// The project context the Skills section lists from, mirroring the
+/// "current project" rule used by the sidebar.
+pub fn skills_cwd(s: AppState) -> Option<String> {
+    active_tab(s)
+        .map(|t| t.cwd.clone())
+        .or_else(|| s.tabs.read().last().map(|t| t.cwd.clone()))
+        .or_else(|| craft_storage::paths::home().map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Reload the skill list from disk. IO problems surface via `skills_error`.
+pub fn refresh_skills(mut s: AppState) {
+    let Some(cwd) = skills_cwd(s) else {
+        s.skills.set(Vec::new());
+        s.skills_error
+            .set(Some("no project context to list skills from".into()));
+        return;
+    };
+    s.skills
+        .set(crate::skills::list(std::path::Path::new(&cwd)));
+    s.skills_error.set(None);
+}
+
+/// Open the editor for a new skill (defaults to project scope).
+pub fn begin_new_skill(mut s: AppState) {
+    s.skill_editor.set(Some(crate::skills::SkillDraft::new()));
+}
+
+/// Open the editor pre-filled from an existing skill; the name is fixed.
+pub fn begin_edit_skill(mut s: AppState, skill: crate::skills::Skill) {
+    s.skill_editor
+        .set(Some(crate::skills::SkillDraft::from_skill(&skill)));
+}
+
+pub fn cancel_skill_editor(mut s: AppState) {
+    s.skill_editor.set(None);
+}
+
+/// Persist the current editor draft to disk and close it on success.
+pub fn save_skill_editor(mut s: AppState) {
+    let Some(draft) = s.skill_editor.read().clone() else {
+        return;
+    };
+    if draft.description.trim().is_empty() {
+        s.skills_error.set(Some("description is required".into()));
+        return;
+    }
+    let result = match &draft.target {
+        Some(path) => crate::skills::update(path, &draft),
+        None => {
+            let dir = match draft.scope {
+                crate::skills::SkillScope::Project => {
+                    let Some(cwd) = skills_cwd(s) else {
+                        s.skills_error
+                            .set(Some("no project context to create a skill in".into()));
+                        return;
+                    };
+                    crate::skills::project_write_dir(std::path::Path::new(&cwd))
+                }
+                crate::skills::SkillScope::Global => match crate::skills::global_write_dir() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        s.skills_error.set(Some(e));
+                        return;
+                    }
+                },
+            };
+            crate::skills::create(&dir, &draft).map(|_| ())
+        }
+    };
+    match result {
+        Ok(()) => {
+            s.skill_editor.set(None);
+            refresh_skills(s);
+        }
+        Err(e) => s.skills_error.set(Some(e)),
+    }
+}
+
+/// Delete a skill after the UI confirm; back into browsing state either way.
+pub fn delete_skill(mut s: AppState, skill: crate::skills::Skill) {
+    s.skill_delete.set(None);
+    match crate::skills::delete(&skill) {
+        Ok(()) => refresh_skills(s),
+        Err(e) => s.skills_error.set(Some(e)),
+    }
+}
+
+/// Spawn a session seeded with instructions to author a SKILL.md from the
+/// user's description. The session tab takes over the view when it starts.
+pub fn create_skill_with_ai(
+    mut s: AppState,
+    backend: &Backend,
+    description: String,
+    scope: crate::skills::SkillScope,
+) {
+    let description = description.trim().to_string();
+    if description.is_empty() || *s.starting.read() {
+        return;
+    }
+    let Some(cwd) = skills_cwd(s) else {
+        s.skills_error
+            .set(Some("no project context to create a skill in".into()));
+        return;
+    };
+    let target_dir = match scope {
+        crate::skills::SkillScope::Project => {
+            crate::skills::project_write_dir(std::path::Path::new(&cwd))
+        }
+        crate::skills::SkillScope::Global => match crate::skills::global_write_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                s.skills_error.set(Some(e));
+                return;
+            }
+        },
+    };
+    let prompt = format!(
+        "Create one craft skill implementing the user's description below.\n\
+         Write a single file at `{dir}/<name>/SKILL.md` where `<name>` is a \
+         kebab-case slug you choose. The file must start with YAML frontmatter \
+         fenced by `---` lines containing `name:`, `description:`, and \
+         `when_to_use:` (one line each), followed by a markdown body with \
+         step-by-step instructions a future agent could follow. Create the \
+         directory as needed. Do not create anything else.\n\n\
+         Skill description: {description}",
+        dir = target_dir.display(),
+    );
+    s.skill_ai_open.set(false);
+    s.starting.set(true);
+    s.start_error.set(None);
+    backend.start_session(
+        new_tab_id(),
+        None,
+        crate::backend::StartOptions {
+            cwd,
+            yolo: false,
+            ssh: None,
+            mode: None,
+            auto_review: false,
+            initial_prompt: Some(prompt),
+        },
+    );
 }
 
 /// Keep the transcript pinned to the newest item. Double rAF so the DOM has
