@@ -397,6 +397,16 @@ impl StoredThinking {
             }
         }
     }
+
+    /// Inverse of [`parse_setting`](Self::parse_setting).
+    pub fn setting_string(self) -> String {
+        match self {
+            Self::Off => "off".to_string(),
+            Self::Adaptive => "adaptive".to_string(),
+            Self::Effort { level } => level.as_str().to_string(),
+            Self::Budget { tokens } => tokens.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2668,6 +2678,19 @@ mod tests {
     #[test_case("high", Ok(StoredThinking::Effort { level: Effort::High }) ; "effort_level")]
     fn parse_setting(input: &str, expected: Result<StoredThinking, ThinkingParseError>) {
         assert_eq!(StoredThinking::parse_setting(input), expected);
+    }
+
+    #[test_case("off" ; "off")]
+    #[test_case("adaptive" ; "adaptive")]
+    #[test_case("high" ; "effort")]
+    #[test_case("4096" ; "budget")]
+    fn setting_string_round_trips_through_parse(input: &str) {
+        let stored = StoredThinking::parse_setting(input).unwrap();
+        assert_eq!(stored.setting_string(), input);
+        assert_eq!(
+            StoredThinking::parse_setting(&stored.setting_string()),
+            Ok(stored)
+        );
     }
 
     // Six ascending values in a six-variant enum also proves ALL is complete.

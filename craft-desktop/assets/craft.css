@@ -16,7 +16,6 @@
 	--green-500: #3ddc84; --amber-500: #f0a93e; --red-500: #f0455f;
 	--grad-brand: linear-gradient(135deg, var(--blue-500) 0%, var(--violet-500) 55%, var(--magenta-500) 100%);
 	--grad-brand-soft: linear-gradient(135deg, rgba(79, 141, 255, .16) 0%, rgba(148, 87, 242, .16) 55%, rgba(225, 63, 234, .16) 100%);
-	--grad-radial-glow: radial-gradient(60% 60% at 50% 30%, rgba(148, 87, 242, .35) 0%, rgba(10, 14, 26, 0) 70%);
 	--bg-app: var(--ink-950); --bg-canvas: var(--black); --bg-surface: var(--ink-900); --bg-surface-raised: var(--ink-800); --bg-surface-overlay: var(--ink-700);
 	--bg-sunken: #02040a;
 	--border-subtle: var(--line-800); --border-default: var(--line-700); --border-strong: var(--line-600);
@@ -101,9 +100,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 	height: 100%;
 	display: flex;
 	position: relative;
-	background:
-		radial-gradient(120% 90% at 50% -10%, #101528 0%, rgba(3, 5, 10, 0) 60%),
-		var(--bg-app);
+	background: var(--bg-app);
 	border: 1px solid var(--border-default);
 	border-radius: 14px;
 	overflow: hidden;

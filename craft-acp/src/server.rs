@@ -594,11 +594,12 @@ async fn handle_request(
                 methods::new_session_response(handle.session_id.as_str()).config_options(vec![
                     methods::mode_config_option(methods::MODE_BUILD),
                     methods::model_config_option(&spec, &specs),
+                    methods::thinking_config_option("off"),
                     methods::yolo_config_option(params.yolo),
                     methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
-            install_session(srv, handle, mcp, spec, cwd, None).await;
+            install_session(srv, handle, mcp, spec, "off".to_string(), cwd, None).await;
             Ok(AgentResponse::NewSessionResponse(resp))
         }
         "session/load" => {
@@ -621,18 +622,17 @@ async fn handle_request(
                     return;
                 }
             };
-            let (history, recorded_cwd, restored_usage, restored_model) =
-                match load_history(session_ref.id()) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        srv.respond(id, Err(e));
-                        return;
-                    }
-                };
+            let loaded = match load_history(session_ref.id()) {
+                Ok(h) => h,
+                Err(e) => {
+                    srv.respond(id, Err(e));
+                    return;
+                }
+            };
             let sid = SessionId::from(session_ref.to_string());
             let home = craft_storage::paths::home();
-            let replay_cwd = recorded_cwd.as_deref().unwrap_or(&req.cwd);
-            for update in translate::replay_history(&history, replay_cwd, home.as_deref()) {
+            let replay_cwd = loaded.recorded_cwd.as_deref().unwrap_or(&req.cwd);
+            for update in translate::replay_history(&loaded.history, replay_cwd, home.as_deref()) {
                 session_update(&srv.out_tx, &sid, update);
             }
             let mcp_servers = req.mcp_servers.clone();
@@ -642,7 +642,7 @@ async fn handle_request(
                 params,
                 req.cwd,
                 Some(session_ref),
-                history,
+                loaded.history,
                 &mcp_servers,
                 fs,
             )
@@ -653,17 +653,19 @@ async fn handle_request(
                 methods::load_session_response().config_options(vec![
                     methods::mode_config_option(methods::MODE_BUILD),
                     methods::model_config_option(&spec, &specs),
+                    methods::thinking_config_option(&loaded.thinking),
                     methods::yolo_config_option(params.yolo),
+                    methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
             // The restored total predates any per-turn cost, so price it once
             // with the model the session recorded (the current default may
             // cost 10x more or less); later turns add their own exact cost.
-            let restored_cost = Model::from_spec(&restored_model)
+            let restored_cost = Model::from_spec(&loaded.model)
                 .ok()
-                .and_then(|m| m.cost_of(&restored_usage, false))
-                .or_else(|| params.model.cost_of(&restored_usage, false));
-            install_session(srv, handle, mcp, spec, cwd, restored_cost).await;
+                .and_then(|m| m.cost_of(&loaded.usage, false))
+                .or_else(|| params.model.cost_of(&loaded.usage, false));
+            install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::LoadSessionResponse(resp))
         }
         "session/resume" => {
@@ -686,8 +688,7 @@ async fn handle_request(
                     return;
                 }
             };
-            let (history, _, restored_usage, restored_model) = match load_history(session_ref.id())
-            {
+            let loaded = match load_history(session_ref.id()) {
                 Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
@@ -701,7 +702,7 @@ async fn handle_request(
                 params,
                 req.cwd,
                 Some(session_ref),
-                history,
+                loaded.history,
                 &mcp_servers,
                 fs,
             )
@@ -712,14 +713,16 @@ async fn handle_request(
                 methods::resume_session_response().config_options(vec![
                     methods::mode_config_option(methods::MODE_BUILD),
                     methods::model_config_option(&spec, &specs),
+                    methods::thinking_config_option(&loaded.thinking),
                     methods::yolo_config_option(params.yolo),
+                    methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
-            let restored_cost = Model::from_spec(&restored_model)
+            let restored_cost = Model::from_spec(&loaded.model)
                 .ok()
-                .and_then(|m| m.cost_of(&restored_usage, false))
-                .or_else(|| params.model.cost_of(&restored_usage, false));
-            install_session(srv, handle, mcp, spec, cwd, restored_cost).await;
+                .and_then(|m| m.cost_of(&loaded.usage, false))
+                .or_else(|| params.model.cost_of(&loaded.usage, false));
+            install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::ResumeSessionResponse(resp))
         }
         "session/list" => handle_list_sessions(raw),
@@ -854,6 +857,7 @@ async fn install_session(
     handle: InteractiveHandle,
     mcp: Option<craft_agent::McpHandle>,
     current_model: String,
+    thinking: String,
     cwd: PathBuf,
     initial_cost: Option<f64>,
 ) {
@@ -875,7 +879,7 @@ async fn install_session(
     *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(SessionInfo {
         session_id: session_id.clone(),
         current_model: current_model.clone(),
-        thinking: "off".to_string(),
+        thinking: thinking.clone(),
         yolo: handle.permissions.is_yolo(),
         auto_review: handle.permissions.is_auto_review(),
     });
@@ -884,7 +888,7 @@ async fn install_session(
         mcp,
         current_mode: AgentMode::Build,
         current_model,
-        current_thinking: "off".to_string(),
+        current_thinking: thinking,
         pending,
         title_sent: false,
         cwd,
@@ -915,9 +919,16 @@ async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
     }
 }
 
-fn load_history(
-    session_id: CraftId,
-) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage, String), AcpError> {
+#[derive(Debug)]
+struct LoadedHistory {
+    history: Vec<Message>,
+    recorded_cwd: Option<PathBuf>,
+    usage: TokenUsage,
+    model: String,
+    thinking: String,
+}
+
+fn load_history(session_id: CraftId) -> Result<LoadedHistory, AcpError> {
     let storage = craft_storage::StateDir::resolve()
         .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
     load_history_from(&storage, session_id)
@@ -929,7 +940,7 @@ fn load_history(
 fn load_history_from(
     storage: &craft_storage::StateDir,
     session_id: CraftId,
-) -> Result<(Vec<Message>, Option<PathBuf>, TokenUsage, String), AcpError> {
+) -> Result<LoadedHistory, AcpError> {
     let session: craft_storage::sessions::Session<
         Message,
         craft_providers::TokenUsage,
@@ -944,7 +955,18 @@ fn load_history_from(
     };
     let usage = session.token_usage;
     let model = session.model.clone();
-    Ok((session.take_messages(), recorded, usage, model))
+    let thinking = session
+        .meta
+        .thinking
+        .map(|t| t.setting_string())
+        .unwrap_or_else(|| "off".to_string());
+    Ok(LoadedHistory {
+        history: session.take_messages(),
+        recorded_cwd: recorded,
+        usage,
+        model,
+        thinking,
+    })
 }
 
 fn handle_prompt(
@@ -1805,14 +1827,30 @@ mod tests {
         };
         session.save(&dir).unwrap();
 
-        let (history, recorded, usage, model) = load_history_from(&dir, session.id.id()).unwrap();
-        assert_eq!(model, "anthropic/test-model");
+        let loaded = load_history_from(&dir, session.id.id()).unwrap();
+        assert_eq!(loaded.model, "anthropic/test-model");
+        assert_eq!(loaded.thinking, "off");
         assert_eq!(
-            serde_json::to_value(&history).unwrap(),
+            serde_json::to_value(&loaded.history).unwrap(),
             serde_json::to_value(&messages).unwrap()
         );
-        assert_eq!(recorded, Some(PathBuf::from("/project")));
-        assert_eq!(usage, session.token_usage);
+        assert_eq!(loaded.recorded_cwd, Some(PathBuf::from("/project")));
+        assert_eq!(loaded.usage, session.token_usage);
+    }
+
+    #[test]
+    fn load_history_restores_stored_thinking() {
+        let tmp = TempDir::new().unwrap();
+        let dir = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session: Session<Message, TokenUsage, ToolOutput> =
+            Session::new("anthropic/test-model", "/project");
+        session.meta.thinking = Some(craft_storage::sessions::StoredThinking::Effort {
+            level: craft_storage::sessions::Effort::High,
+        });
+        session.save(&dir).unwrap();
+
+        let thinking = load_history_from(&dir, session.id.id()).unwrap().thinking;
+        assert_eq!(thinking, "high");
     }
 
     #[test]
@@ -1822,8 +1860,8 @@ mod tests {
         let mut session: Session<Message, TokenUsage, ToolOutput> =
             Session::new("anthropic/test-model", "relative/project");
         session.save(&dir).unwrap();
-        let (_, recorded, _, _) = load_history_from(&dir, session.id.id()).unwrap();
-        assert_eq!(recorded, None);
+        let loaded = load_history_from(&dir, session.id.id()).unwrap();
+        assert_eq!(loaded.recorded_cwd, None);
     }
 
     #[test]
