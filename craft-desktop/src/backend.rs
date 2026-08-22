@@ -192,11 +192,19 @@ impl Backend {
                     .insert(tab_id.clone(), Arc::clone(&client));
                 let outcome = async {
                     client.initialize().await.map_err(|e| e.to_string())?;
-                    let resp = match &load {
+                    let mut resp = match &load {
                         Some(session_id) => client.load_session(session_id, Path::new(&cwd)).await,
                         None => client.new_session(Path::new(&cwd)).await,
                     }
                     .map_err(|e| e.to_string())?;
+                    // The ACP `session/load` response omits `sessionId` (the
+                    // client supplied it); echo it back so downstream code can
+                    // treat both response shapes alike.
+                    if let (None, Some(id)) = (resp.get("sessionId"), &load)
+                        && let Some(obj) = resp.as_object_mut()
+                    {
+                        obj.insert("sessionId".to_string(), Value::String(id.clone()));
+                    }
                     let Some(session_id) = resp.get("sessionId").and_then(Value::as_str) else {
                         return Err("session response missing sessionId".to_string());
                     };
