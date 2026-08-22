@@ -258,7 +258,7 @@ pub fn Sidebar() -> Element {
 /// window (close / minimize / zoom) and swallow mousedown so the surrounding
 /// drag region doesn't start a window drag; elsewhere they are decorative.
 #[component]
-fn TrafficLights() -> Element {
+pub(crate) fn TrafficLights() -> Element {
     #[cfg(feature = "desktop")]
     {
         let desktop = dioxus::desktop::use_window();

@@ -5,6 +5,7 @@
 use dioxus::prelude::*;
 
 use crate::backend::SshTarget;
+use crate::components::composer::PERMS;
 use crate::state::{AppState, DEFAULT_MODES, start_from_onboarding};
 
 #[component]
@@ -21,8 +22,11 @@ pub fn Onboarding() -> Element {
     let mut remote_cwd = use_signal(String::new);
     let mut remote_craft = use_signal(String::new);
     let mut mode = use_signal(|| "build".to_string());
-    let mut yolo = use_signal(|| false);
-    let mut auto_review = use_signal(|| false);
+    let mut perm = use_signal(|| 0usize);
+    let mut perm_open = use_signal(|| false);
+
+    let perm_index = *perm.read();
+    let selected = PERMS[perm_index];
 
     let binary = backend.craft_binary();
     let binary_found = binary.is_file() || binary == std::path::Path::new("craft");
@@ -39,10 +43,10 @@ pub fn Onboarding() -> Element {
                 s,
                 backend,
                 cwd.read().clone(),
-                *yolo.read(),
+                selected.yolo,
                 None,
                 (*mode.read() != "build").then(|| mode.cloned()),
-                *auto_review.read(),
+                selected.auto_review,
             );
         } else {
             let host_val = host.read().trim().to_string();
@@ -55,13 +59,13 @@ pub fn Onboarding() -> Element {
                 s,
                 backend,
                 remote_val,
-                *yolo.read(),
+                selected.yolo,
                 Some(SshTarget {
                     host: host_val,
                     remote_craft: (!craft.is_empty()).then_some(craft),
                 }),
                 (*mode.read() != "build").then(|| mode.cloned()),
-                *auto_review.read(),
+                selected.auto_review,
             );
         }
     };
@@ -168,19 +172,30 @@ pub fn Onboarding() -> Element {
 
                 div { class: "ob-section",
                     div { class: "ob-label", "PERMISSIONS" }
-                    button { class: "ob-toggle", onclick: move |_| yolo.toggle(),
-                        span { class: "grow",
-                            "Yolo mode"
-                            span { class: "ob-toggle-desc", "Auto-approve all tool permissions" }
+                    div { class: "dd",
+                        button { class: "bar-btn perm", onclick: move |_| perm_open.toggle(),
+                            "{selected.label}"
+                            span { class: "caret", "▾" }
                         }
-                        span { class: if *yolo.read() { "ob-switch on" } else { "ob-switch" } }
-                    }
-                    button { class: "ob-toggle", onclick: move |_| auto_review.toggle(),
-                        span { class: "grow",
-                            "Auto-review"
-                            span { class: "ob-toggle-desc", "Let an LLM reviewer allow or deny tool calls" }
+                        if *perm_open.read() {
+                            div { class: "menu perm",
+                                for (i, p) in PERMS.iter().enumerate() {
+                                    button {
+                                        class: if i == perm_index { "menu-item-col selected" } else { "menu-item-col" },
+                                        key: "{i}",
+                                        onclick: move |_| {
+                                            perm.set(i);
+                                            perm_open.set(false);
+                                        },
+                                        span { class: "menu-check", if i == perm_index { "✓" } else { "" } }
+                                        span { class: "menu-item-body",
+                                            span { class: "menu-item-title", "{p.label}" }
+                                            span { class: "menu-item-desc", "{p.desc}" }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        span { class: if *auto_review.read() { "ob-switch on" } else { "ob-switch" } }
                     }
                 }
 

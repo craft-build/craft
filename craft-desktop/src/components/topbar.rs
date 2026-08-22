@@ -3,6 +3,7 @@
 
 use dioxus::prelude::*;
 
+use crate::components::sidebar::TrafficLights;
 use crate::components::ui::PillState;
 use crate::components::{IconBranch, IconHelp, IconPanel, IconRepo, StatusPill};
 use crate::state::{AppState, View, active_tab};
@@ -54,6 +55,9 @@ pub fn TopBar() -> Element {
                 #[cfg(feature = "desktop")]
                 desktop.drag();
             },
+            if s.tabs.read().is_empty() {
+                TrafficLights {}
+            }
             div { class: "topbar-title", "{title}" }
             div { class: "chip",
                 IconRepo {}
