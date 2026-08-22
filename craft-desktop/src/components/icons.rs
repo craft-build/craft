@@ -52,15 +52,6 @@ pub fn IconFolder() -> Element {
 }
 
 #[component]
-pub fn IconSliders() -> Element {
-    rsx! {
-        svg { width: 15, height: 15, view_box: "0 0 24 24", fill: "none", stroke: "#5b6784", stroke_width: "1.6",
-            path { d: "M3 6h18M7 12h10M10 18h4" }
-        }
-    }
-}
-
-#[component]
 pub fn IconRepo() -> Element {
     rsx! {
         svg { width: 13, height: 13, view_box: "0 0 24 24", fill: "none", stroke: "#5b6784", stroke_width: "1.8",

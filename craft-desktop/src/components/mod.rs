@@ -18,8 +18,7 @@ pub use composer::Composer;
 pub use diff::DiffLines;
 pub use icons::{
     IconAutomations, IconBranch, IconChanges, IconClose, IconFolder, IconHelp, IconList, IconLogo,
-    IconNew, IconPanel, IconRepo, IconSearch, IconSend, IconShield, IconSkills, IconSliders,
-    IconStop,
+    IconNew, IconPanel, IconRepo, IconSearch, IconSend, IconShield, IconSkills, IconStop,
 };
 pub use new_task::NewTaskView;
 pub use onboarding::Onboarding;

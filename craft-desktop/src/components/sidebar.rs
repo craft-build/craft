@@ -3,9 +3,7 @@
 
 use dioxus::prelude::*;
 
-use crate::components::{
-    IconAutomations, IconClose, IconFolder, IconNew, IconSearch, IconSkills, IconSliders,
-};
+use crate::components::{IconAutomations, IconClose, IconFolder, IconNew, IconSearch, IconSkills};
 use crate::state::{
     AppState, Popover, View, close_tab, load_session, open_new_task, open_project, select_task,
     set_theme, toggle_popover,
@@ -15,7 +13,6 @@ use crate::state::{
 pub fn Sidebar() -> Element {
     let mut s = use_context::<AppState>();
     let backend = crate::backend::get();
-    let mut seg = use_signal(|| "project");
 
     #[cfg(feature = "desktop")]
     let desktop = dioxus::desktop::use_window();
@@ -84,23 +81,6 @@ pub fn Sidebar() -> Element {
                     span { class: "grow", "Recent" }
                 }
                 button { class: "side-action", IconSkills {}, span { class: "grow", "Skills" } }
-            }
-
-            div { class: "sidebar-toggle",
-                div { class: "seg",
-                    button {
-                        class: if *seg.read() == "group" { "seg-item active" } else { "seg-item" },
-                        onclick: move |_| seg.set("group"),
-                        "group"
-                    }
-                    button {
-                        class: if *seg.read() == "project" { "seg-item active" } else { "seg-item" },
-                        onclick: move |_| seg.set("project"),
-                        "project"
-                    }
-                }
-                div { class: "grow" }
-                IconSliders {}
             }
 
             nav { class: "sidebar-projects",
