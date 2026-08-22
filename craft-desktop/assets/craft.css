@@ -823,6 +823,9 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .palette-row.active { background: var(--ink-800); }
 
 /* sidebar extras */
+.projects-header { display: flex; align-items: center; padding-right: 6px; }
+.projects-header .projects-add { margin-left: auto; display: flex; align-items: center; background: none; border: none; padding: 2px; cursor: pointer; border-radius: var(--radius-sm); }
+.projects-header .projects-add:hover { background: var(--ink-600); }
 .task-row .task-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; border: none; padding: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; }
 .task-row .task-close { display: flex; align-items: center; background: none; border: none; padding: 0 2px; cursor: pointer; opacity: 0; }
 .task-row:hover .task-close { opacity: 1; }

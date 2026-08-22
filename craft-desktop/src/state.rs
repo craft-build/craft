@@ -1260,6 +1260,27 @@ pub fn load_session(mut s: AppState, backend: &Backend, summary: SessionSummary)
     );
 }
 
+/// Open a project directory as a fresh session tab.
+pub fn open_project(mut s: AppState, backend: &Backend, cwd: String) {
+    if *s.starting.read() {
+        return;
+    }
+    s.starting.set(true);
+    s.start_error.set(None);
+    backend.start_session(
+        new_tab_id(),
+        None,
+        crate::backend::StartOptions {
+            cwd,
+            yolo: false,
+            ssh: None,
+            mode: None,
+            auto_review: false,
+            initial_prompt: None,
+        },
+    );
+}
+
 pub fn close_tab(mut s: AppState, backend: &Backend, id: String) {
     backend.close_tab(&id);
     let mut tabs = s.tabs.write_unchecked();

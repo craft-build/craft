@@ -7,8 +7,8 @@ use crate::components::{
     IconAutomations, IconClose, IconFolder, IconNew, IconSearch, IconSkills, IconSliders,
 };
 use crate::state::{
-    AppState, Popover, View, close_tab, load_session, open_new_task, select_task, set_theme,
-    toggle_popover,
+    AppState, Popover, View, close_tab, load_session, open_new_task, open_project, select_task,
+    set_theme, toggle_popover,
 };
 
 #[component]
@@ -104,7 +104,32 @@ pub fn Sidebar() -> Element {
             }
 
             nav { class: "sidebar-projects",
-                div { class: "projects-label", "Projects" }
+                div { class: "projects-header",
+                    div { class: "projects-label", "Projects" }
+                    button {
+                        class: "projects-add",
+                        title: "Open project…",
+                        onclick: move |_| {
+                            let default_dir = s
+                                .tabs
+                                .read()
+                                .last()
+                                .map(|t| t.cwd.clone())
+                                .or_else(|| {
+                                    craft_storage::paths::home()
+                                        .map(|h| h.to_string_lossy().into_owned())
+                                })
+                                .unwrap_or_else(|| "/".to_string());
+                            if let Some(picked) = rfd::FileDialog::new()
+                                .set_directory(default_dir)
+                                .pick_folder()
+                            {
+                                open_project(s, backend, picked.to_string_lossy().into_owned());
+                            }
+                        },
+                        IconNew {}
+                    }
+                }
                 for (gi, (name, rows)) in groups.iter().enumerate() {
                     div { class: "project", key: "g{gi}",
                         div { class: "project-row",
