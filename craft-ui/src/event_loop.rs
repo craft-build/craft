@@ -23,7 +23,10 @@ use craft_agent::{
     AgentConfig, AgentEvent, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle,
 };
 use craft_config::UiConfig;
-use craft_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, UiAction};
+use craft_lua::{
+    EventHandle, HintReader, KeymapReader, LuaCommandReader, ModelRequest, SessionRequest,
+    UiAction, UiReply,
+};
 use craft_providers::Timeouts;
 use craft_providers::provider::{Provider, fetch_all_models, from_model};
 use craft_providers::{Message, Model};
@@ -54,6 +57,9 @@ use crate::watch;
 const DRAIN_BUDGET: usize = 256;
 const AGENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DELETE_FOCUSED_ERR: &str = "cannot delete the focused session";
+const MODEL_POLICY_ERR: &str = "Model is not allowed by policy";
+const INVALID_MODEL_ERR: &str = "Invalid model";
+const PROVIDER_INIT_ERR: &str = "Failed to create provider";
 const NOT_LIVE_ERR: &str = "session not live";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
@@ -1043,6 +1049,9 @@ impl<'t> EventLoop<'t> {
             UiAction::Session { req, reply_tx } => {
                 self.handle_session_request(req, reply_tx);
             }
+            UiAction::Model { req, reply_tx } => {
+                let _ = reply_tx.send(self.handle_model_request(req));
+            }
             UiAction::WinSaveView { reply_tx } => {
                 let _ = reply_tx.send(self.focused_app().win_view());
             }
@@ -1172,12 +1181,7 @@ impl<'t> EventLoop<'t> {
     /// `List` replies from a background task (the scan can be slow); every
     /// other request is answered synchronously by the event loop, which owns
     /// the live runtimes.
-    fn handle_session_request(
-        &mut self,
-        req: craft_lua::SessionRequest,
-        reply_tx: flume::Sender<craft_lua::SessionReply>,
-    ) {
-        use craft_lua::SessionRequest;
+    fn handle_session_request(&mut self, req: SessionRequest, reply_tx: flume::Sender<UiReply>) {
         match req {
             SessionRequest::List => {
                 let storage = self.ctx.storage.clone();
@@ -1300,7 +1304,38 @@ impl<'t> EventLoop<'t> {
         }
     }
 
-    fn submit_text(&mut self, idx: usize, text: String) -> craft_lua::SessionReply {
+    /// Lua acts on the focused session, the same target the model picker and
+    /// `/thinking` write to.
+    fn handle_model_request(&mut self, req: ModelRequest) -> UiReply {
+        match req {
+            ModelRequest::Get => Ok(self.focused_app().model_state()),
+            ModelRequest::Available => {
+                let available = self.ctx.available_models.load();
+                Ok(json!(
+                    available.as_deref().map(Vec::as_slice).unwrap_or(&[])
+                ))
+            }
+            ModelRequest::Set {
+                spec,
+                thinking,
+                fast,
+            } => {
+                if let Some(spec) = spec {
+                    self.change_model(&spec)?;
+                }
+                let app = self.focused_app();
+                if let Some(thinking) = thinking {
+                    app.set_thinking(&thinking)?;
+                }
+                if let Some(fast) = fast {
+                    app.set_fast(fast)?;
+                }
+                Ok(app.model_state())
+            }
+        }
+    }
+
+    fn submit_text(&mut self, idx: usize, text: String) -> UiReply {
         let msg = QueuedMessage {
             text,
             images: Vec::new(),
@@ -1538,7 +1573,11 @@ impl<'t> EventLoop<'t> {
                     self.respawn_agent(idx, loaded.messages);
                 }
             }
-            Action::ChangeModel(spec) => self.change_model(spec),
+            Action::ChangeModel(spec) => {
+                if let Err(e) = self.change_model(&spec) {
+                    self.focused_app().flash(e);
+                }
+            }
             Action::RefreshProvider { slug } => self.refresh_provider(slug),
             Action::AssignTier(spec, tier) => {
                 craft_providers::model_registry::set_and_persist(
@@ -1667,7 +1706,7 @@ impl<'t> EventLoop<'t> {
                             rt.app.usage_slot.store(None);
                         }
                     }
-                    Err(e) => rt.app.flash(format!("Failed to create provider: {e}")),
+                    Err(e) => rt.app.flash(format!("{PROVIDER_INIT_ERR}: {e}")),
                 }
                 if let Some(loaded) = pending_load_session {
                     self.respawn_agent(idx, loaded.messages);
@@ -1706,36 +1745,31 @@ impl<'t> EventLoop<'t> {
         }
     }
 
-    fn change_model(&mut self, spec: String) {
+    fn change_model(&mut self, spec: &str) -> Result<(), String> {
         let idx = self.focused;
-        if !self.ctx.model_policy.allows(&spec) {
-            self.sessions[idx]
-                .app
-                .flash(format!("Model is not allowed by policy: {spec}"));
-            return;
+        if !self.ctx.model_policy.allows(spec) {
+            return Err(format!("{MODEL_POLICY_ERR}: {spec}"));
         }
-        match Model::from_spec(&spec) {
-            Ok(mut new_model) => {
-                let model_spec = new_model.spec();
-                if model_spec == self.sessions[idx].model_slot.load().model.spec() {
-                    return;
-                }
-                let timeouts = self.ctx.timeouts;
-                let tx = self.sessions[idx].action_tx.clone();
-                tokio::spawn(async move {
-                    let result = from_model(&mut new_model, timeouts)
-                        .await
-                        .map(|p| Arc::from(p) as Arc<dyn Provider>)
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(Action::ProviderReady {
-                        model_spec,
-                        provider: result,
-                        pending_load_session: None,
-                    });
-                });
-            }
-            Err(e) => self.sessions[idx].app.flash(format!("Invalid model: {e}")),
+        let mut new_model =
+            Model::from_spec(spec).map_err(|e| format!("{INVALID_MODEL_ERR}: {e}"))?;
+        let model_spec = new_model.spec();
+        if model_spec == self.sessions[idx].model_slot.load().model.spec() {
+            return Ok(());
         }
+        let timeouts = self.ctx.timeouts;
+        let tx = self.sessions[idx].action_tx.clone();
+        tokio::spawn(async move {
+            let result = from_model(&mut new_model, timeouts)
+                .await
+                .map(|p| Arc::from(p) as Arc<dyn Provider>)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Action::ProviderReady {
+                model_spec,
+                provider: result,
+                pending_load_session: None,
+            });
+        });
+        Ok(())
     }
 
     fn refresh_models(&self) {
@@ -1805,9 +1839,10 @@ impl<'t> EventLoop<'t> {
                     pending_load_session: None,
                 });
             });
-        } else if let Some(builtin) = craft_config::providers::builtin_provider(&slug) {
-            let spec = builtin.default_model.to_string();
-            self.change_model(spec);
+        } else if let Some(builtin) = craft_config::providers::builtin_provider(&slug)
+            && let Err(e) = self.change_model(builtin.default_model)
+        {
+            self.focused_app().flash(e);
         }
     }
 

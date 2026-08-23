@@ -127,6 +127,20 @@ Each spec table accepts:
 
 The returned table is the merged options: the user's value where set, otherwise the default, or `nil` when neither exists.
 
+## `craft.model`
+
+The model behind the focused session. Good for a keybind that flips between your two go-to models, or lifts thinking for one hard question. Without an interactive UI every function returns `nil, "no interactive UI attached"`.
+
+- `craft.model.get()` reads the focused session's model, thinking level, and fast mode. Returns `{spec, id, provider, thinking, fast, supports_thinking, supports_fast}`, or nil and an error. The `thinking` string uses the same spelling `set` accepts, so a table from `get` can go straight back into `set`.
+- `craft.model.available()` lists the model specs you can switch to: what the providers you are logged into offer, minus what your model policy blocks. The list fills in the background at startup, so right after launch it can still be empty.
+- `craft.model.set(opts)` switches the model, thinking level, or fast mode. Pass a bare spec string, or a table with any of `spec` (`"provider/id"`), `thinking` (`"off"`, `"adaptive"`, an effort level like `"high"`, a token budget, or `""` to toggle), and `fast` (boolean). Fields you leave out stay as they are, so this doubles as a thinking-only switch. Returns the new state, or nil and an error.
+
+```lua
+craft.model.set("anthropic/claude-opus-4-6")
+craft.model.set({ spec = "zai/glm-5", thinking = "high" })
+craft.keymap.set("n", "<M-t>", function() craft.model.set({ thinking = "" }) end)
+```
+
 ## Prompt slots
 
 The system prompt is assembled from named slots. Two kinds exist:

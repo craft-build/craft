@@ -9,6 +9,7 @@ pub(crate) mod image;
 pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
+pub(crate) mod model;
 pub(crate) mod net;
 pub(crate) mod options;
 pub(crate) mod session;
@@ -71,6 +72,10 @@ pub(crate) fn create_craft_global(
     craft.set(
         "session",
         session::create_session_table(lua, ui_action_tx.clone())?,
+    )?;
+    craft.set(
+        "model",
+        model::create_model_table(lua, ui_action_tx.clone())?,
     )?;
     craft.set(
         "ui",

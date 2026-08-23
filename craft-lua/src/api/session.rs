@@ -6,9 +6,8 @@ use craft_agent::SessionMailbox;
 use craft_storage::id::CraftId;
 use mlua::{Lua, Result as LuaResult, Table};
 
-use crate::api::util::command::{SessionRequest, UiAction, ui_roundtrip};
-use crate::api::util::convert::json_to_lua;
-use crate::api::util::pair::{Pair, err_pair, try_pair};
+use crate::api::util::command::{SessionRequest, UiAction, ui_json_roundtrip};
+use crate::api::util::pair::{Pair, err_pair};
 
 const BLANK_NOTIFY_ERR: &str = "text must not be blank";
 const SESSION_REQUIRED_ERR: &str = "session is required";
@@ -18,10 +17,11 @@ async fn roundtrip(
     tx: Option<flume::Sender<UiAction>>,
     req: SessionRequest,
 ) -> LuaResult<Pair<mlua::Value>> {
-    let reply =
-        try_pair!(ui_roundtrip(tx.as_ref(), |reply_tx| UiAction::Session { req, reply_tx }).await);
-    let value = try_pair!(reply);
-    Ok((Some(json_to_lua(&lua, &value)?), None))
+    ui_json_roundtrip(&lua, tx.as_ref(), |reply_tx| UiAction::Session {
+        req,
+        reply_tx,
+    })
+    .await
 }
 
 pub(crate) fn create_session_table(

@@ -89,6 +89,7 @@ const CANCEL_MSG: &str = "Cancelled.";
 const FLASH_CANCEL: &str = "Press esc again to stop...";
 const FLASH_REWIND: &str = "Press esc again to rewind...";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
+const THINKING_UNSUPPORTED_MSG: &str = "Thinking requires a model that supports it";
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
 const SET_CONTEXT_WINDOW_USAGE: &str = "Usage: /set-context-window [model] <tokens> (tokens > 0)";
@@ -569,6 +570,39 @@ impl App {
 
     pub(crate) fn flash(&mut self, msg: String) {
         self.status_bar.flash(msg);
+    }
+
+    /// Takes the spelling both `/thinking` and `craft.model.set` accept; a
+    /// blank {input} toggles.
+    pub(crate) fn set_thinking(&mut self, input: &str) -> Result<ThinkingConfig, String> {
+        if !self.state.model.supports_thinking() {
+            return Err(THINKING_UNSUPPORTED_MSG.into());
+        }
+        self.state.thinking =
+            ThinkingConfig::parse(input.trim(), self.state.thinking).map_err(str::to_owned)?;
+        Ok(self.state.thinking)
+    }
+
+    pub(crate) fn set_fast(&mut self, fast: bool) -> Result<(), String> {
+        if fast && !self.state.model.supports_fast() {
+            return Err(FAST_UNSUPPORTED_MSG.into());
+        }
+        self.state.fast = fast;
+        Ok(())
+    }
+
+    /// What `craft.model.get` hands to Lua.
+    pub(crate) fn model_state(&self) -> serde_json::Value {
+        let model = &self.state.model;
+        serde_json::json!({
+            "spec": model.spec(),
+            "id": model.id,
+            "provider": model.provider.to_string(),
+            "thinking": self.state.thinking.to_string(),
+            "fast": self.state.fast,
+            "supports_thinking": model.supports_thinking(),
+            "supports_fast": model.supports_fast(),
+        })
     }
 
     pub(crate) fn record_recent_model(&mut self, spec: &str) {
@@ -1758,36 +1792,25 @@ impl App {
             }
             "/thinking" => {
                 if !self.state.model.supports_thinking() {
-                    self.flash("Thinking requires a model that supports it".into());
+                    self.flash(THINKING_UNSUPPORTED_MSG.into());
                     return vec![];
                 }
                 if cmd.args.trim().is_empty() {
                     self.thinking_picker.open(self.state.thinking);
                     return vec![];
                 }
-                match ThinkingConfig::parse(cmd.args.trim(), self.state.thinking) {
-                    Ok(thinking) => {
-                        self.state.thinking = thinking;
-                        self.flash(format!("Thinking: {thinking}"));
-                    }
-                    Err(msg) => self.flash(msg.into()),
+                match self.set_thinking(&cmd.args) {
+                    Ok(thinking) => self.flash(format!("Thinking: {thinking}")),
+                    Err(msg) => self.flash(msg),
                 }
                 vec![]
             }
             "/fast" => {
-                if !self.state.model.supports_fast() {
-                    self.flash(FAST_UNSUPPORTED_MSG.into());
-                    return vec![];
+                let fast = !self.state.fast;
+                match self.set_fast(fast) {
+                    Ok(()) => self.flash(if fast { FAST_ON_MSG } else { FAST_OFF_MSG }.into()),
+                    Err(msg) => self.flash(msg),
                 }
-                self.state.fast = !self.state.fast;
-                self.flash(
-                    if self.state.fast {
-                        FAST_ON_MSG
-                    } else {
-                        FAST_OFF_MSG
-                    }
-                    .into(),
-                );
                 vec![]
             }
             "/exit" => self.quit(),
