@@ -1,4 +1,5 @@
 use crate::render_worker::RenderWorker;
+use crate::theme;
 
 use super::super::code_view::SectionFlags;
 use super::super::tool_display::{HighlightRequest, ToolLines};
@@ -33,12 +34,17 @@ struct CachedHeight {
 #[derive(Default, PartialEq, Eq)]
 struct HighlightKey {
     has_output: bool,
+    theme_gen: u64,
 }
 
 impl HighlightKey {
+    /// The generation is read here rather than passed in: a theme only swaps
+    /// from `update`, never mid-`view`, and a missed call site would silently
+    /// splice old-palette lines back in.
     fn from_request(hl: Option<&HighlightRequest>) -> Self {
         Self {
             has_output: hl.is_some_and(|h| h.output.is_some()),
+            theme_gen: theme::generation(),
         }
     }
 }
@@ -60,6 +66,11 @@ pub(super) struct Segment {
     pub has_bar: bool,
     pub hyperlinks: Vec<crate::hyperlink::Hyperlink>,
     pub image: Option<std::sync::Arc<crate::image_render::ImageRenderState>>,
+    /// Lines were laid out at a width or theme that is no longer current.
+    /// Cleared by `set_lines` (whole vector replaced) and up front by
+    /// `reflow_segment`; partial splices (`apply_highlight_result`) leave it
+    /// set so the segment still reflows later.
+    pub(super) stale: bool,
 }
 
 impl Segment {
@@ -97,6 +108,7 @@ impl Segment {
 
     pub fn set_lines(&mut self, lines: Vec<Line<'static>>) {
         self.lines = lines;
+        self.stale = false;
         self.invalidate_height();
     }
 
@@ -108,9 +120,18 @@ impl Segment {
         self.invalidate_height();
     }
 
+    /// Height in the document layout. While `stale` is set this is the height
+    /// measured at an older width, which is what keeps a resize off the
+    /// O(transcript) path: re-measuring means re-wrapping every line.
+    ///
+    /// Render, `segment_at_row` and the scrollbar all read this same number so
+    /// the layout stays self consistent, and `reflow_viewport` keeps every
+    /// segment the viewport can reach fresh. A caller that re-wraps the lines
+    /// itself has to use `drawn_height`, or it disagrees with the layout by
+    /// however much the width moved.
     pub fn height(&self, width: u16) -> u16 {
         if let Some(c) = self.cached_height.get()
-            && c.at_width == width
+            && (c.at_width == width || self.stale)
         {
             return c.height;
         }
@@ -125,6 +146,12 @@ impl Segment {
             height: h,
         }));
         h
+    }
+
+    /// Rows the lines really take at `width`, ignoring the cache. Same as
+    /// `height` for any segment that is not stale.
+    pub fn drawn_height(&self, width: u16) -> u16 {
+        wrapped_line_count(&self.lines, width)
     }
 
     fn invalidate_height(&self) {
@@ -278,6 +305,26 @@ impl SegmentCache {
         None
     }
 
+    /// The segment holding `doc_row` and the row's offset inside it. Survives
+    /// a reflow, which a bare document-line offset does not.
+    pub fn anchor_at(&self, doc_row: u32, width: u16) -> Option<(usize, u16)> {
+        let (i, _, start) = self.segment_at_row(doc_row, width)?;
+        Some((i, (doc_row - start).min(u16::MAX as u32) as u16))
+    }
+
+    /// Where `anchor` sits now, clamped in case the reflow shrank the segment
+    /// it points into.
+    pub fn anchor_offset(&self, (idx, rel): (usize, u16), width: u16) -> u32 {
+        let before: u32 = self
+            .segments
+            .iter()
+            .take(idx)
+            .map(|s| s.height(width) as u32)
+            .sum();
+        let h = self.segments.get(idx).map_or(0, |s| s.height(width));
+        before + rel.min(h.saturating_sub(1)) as u32
+    }
+
     pub fn segments(&self) -> &[Segment] {
         &self.segments
     }
@@ -317,9 +364,10 @@ impl SegmentCache {
             .collect()
     }
 
-    pub fn invalidate_from_msg_count(&mut self) {
-        self.msg_count = 0;
-        self.segments.clear();
+    pub fn mark_all_width_stale(&mut self) {
+        for seg in &mut self.segments {
+            seg.stale = true;
+        }
     }
 }
 
@@ -330,4 +378,63 @@ pub(super) fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> u16 {
     Paragraph::new(lines.to_vec())
         .wrap(Wrap { trim: false })
         .line_count(width) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OTHER_THEME: &str = "dracula";
+
+    #[test]
+    fn reuse_highlight_keys_on_theme_not_width() {
+        use crate::components::code_view::RenderLimits;
+        use craft_agent::ToolOutput;
+        use std::sync::Arc;
+
+        let output = Arc::new(ToolOutput::ReadCode {
+            path: "f.rs".into(),
+            start_line: 1,
+            lines: vec!["fn main() {}".into()],
+            prefix: String::new(),
+            total_lines: 1,
+            instructions: None,
+            no_compress: false,
+        });
+        let key = || {
+            HighlightKey::from_request(Some(&HighlightRequest {
+                range: (1, 3),
+                input: None,
+                output: Some(Arc::clone(&output)),
+                limits: RenderLimits {
+                    script: 0,
+                    output: 0,
+                },
+            }))
+        };
+        let seg = Segment {
+            highlight_key: key(),
+            highlight_range: Some((1, 3)),
+            lines: vec![
+                Line::raw("h"),
+                Line::raw("a"),
+                Line::raw("b"),
+                Line::raw("t"),
+            ],
+            ..Segment::default()
+        };
+
+        // Highlighted lines are source lines, not wrapped rows (the worker
+        // job carries no width), so the key deliberately omits width.
+        assert!(
+            seg.reuse_highlight(&key(), (1, 3)).is_some(),
+            "reuse must fire across a width change; highlight lines are width-independent"
+        );
+
+        theme::set(theme::load_by_name(OTHER_THEME).unwrap());
+        assert!(
+            seg.reuse_highlight(&key(), (1, 3)).is_none(),
+            "theme mismatch must force a fresh highlight, not splice old-palette lines"
+        );
+    }
 }
