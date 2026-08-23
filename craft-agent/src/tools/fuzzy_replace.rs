@@ -2,6 +2,7 @@ use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
 pub(super) const NO_MATCH: &str = "old_string not found in file";
+pub(super) const EMPTY_OLD_STRING: &str = "old_string cannot be empty";
 pub(super) const MULTIPLE_MATCHES: &str = "old_string matches multiple locations; add surrounding context to make it unique, or use occurrence param to select which match";
 pub(super) const OCCURRENCE_OUT_OF_RANGE: &str = "occurrence number exceeds number of matches";
 
@@ -9,6 +10,8 @@ const SINGLE_CANDIDATE_THRESHOLD: f64 = 0.0;
 const MULTI_CANDIDATE_THRESHOLD: f64 = 0.3;
 const CONTEXT_AWARE_LINE_MIN: usize = 3;
 const CONTEXT_AWARE_MATCH_RATIO: f64 = 0.5;
+
+use std::collections::HashMap;
 
 type Replacer = fn(&str, &str) -> Vec<String>;
 
@@ -58,6 +61,13 @@ fn replace_inner(
     replace_all: bool,
     occurrence: Option<usize>,
 ) -> Result<ReplaceResult, String> {
+    if old_string.is_empty() {
+        return Err(EMPTY_OLD_STRING.into());
+    }
+    if old_string.trim().is_empty() {
+        return Err(NO_MATCH.into());
+    }
+
     const PASSES: &[(Replacer, Pass)] = &[
         (exact, Pass::Exact),
         (line_trimmed, Pass::LineTrimmed),
@@ -93,6 +103,7 @@ fn replace_inner(
     };
 
     let try_pass = |candidates: Vec<String>,
+                    find: &str,
                     replacement: &str,
                     pass: Pass,
                     any_found: &mut bool,
@@ -103,9 +114,15 @@ fn replace_inner(
         }
 
         if replace_all {
-            if content.contains(&candidates[0]) {
+            let matched = &candidates[0];
+            let at: Vec<(usize, usize)> = content
+                .match_indices(matched.as_str())
+                .map(|(s, _)| (s, s + matched.len()))
+                .collect();
+            if !at.is_empty() {
+                let text = replacement_text(content, matched, find, replacement, &at);
                 return Some(ReplaceResult {
-                    content: content.replace(&candidates[0], replacement),
+                    content: content.replace(matched.as_str(), &text),
                     pass,
                 });
             }
@@ -122,8 +139,10 @@ fn replace_inner(
         if let Some(occ) = occurrence {
             if occ > 0 && occ <= positions.len() {
                 let (start, end) = positions[occ - 1];
+                let text =
+                    replacement_text(content, &content[start..end], find, replacement, &positions);
                 return Some(ReplaceResult {
-                    content: apply_at(start, end, replacement),
+                    content: apply_at(start, end, &text),
                     pass,
                 });
             }
@@ -132,8 +151,10 @@ fn replace_inner(
 
         if positions.len() == 1 {
             let (start, end) = positions[0];
+            let text =
+                replacement_text(content, &content[start..end], find, replacement, &positions);
             return Some(ReplaceResult {
-                content: apply_at(start, end, replacement),
+                content: apply_at(start, end, &text),
                 pass,
             });
         }
@@ -145,6 +166,7 @@ fn replace_inner(
         let candidates = r(content, old_string);
         if let Some(result) = try_pass(
             candidates,
+            old_string,
             new_string,
             pass,
             &mut any_found,
@@ -160,6 +182,7 @@ fn replace_inner(
         let escaped_new = unescape(new_string);
         if let Some(result) = try_pass(
             candidates,
+            &unescaped,
             &escaped_new,
             Pass::EscapeNormalized,
             &mut any_found,
@@ -182,6 +205,109 @@ fn replace_inner(
         Err(MULTIPLE_MATCHES.into())
     } else {
         Err(NO_MATCH.into())
+    }
+}
+
+fn indent_of(line: &str) -> &str {
+    let end = line
+        .find(|c: char| c != ' ' && c != '\t')
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
+// Only `old_string` was ever checked against the file, so the drift between the
+// two is the sole evidence of what the matcher forgave. Positions correspond
+// when the line counts agree, which every matcher but `block_anchor` guarantees;
+// otherwise only lines whose content agrees are the same line.
+fn indent_drift<'m, 'f>(matched: &'m str, find: &'f str) -> Option<HashMap<&'f str, &'m str>> {
+    let file_lines: Vec<&str> = matched.split('\n').collect();
+    let model_lines: Vec<&str> = find.split('\n').collect();
+    let paired_by_position = file_lines.len() == model_lines.len();
+    let mut drift = HashMap::new();
+    let mut forgave = false;
+    for (file_line, model_line) in file_lines.iter().zip(&model_lines) {
+        let same_line = paired_by_position || file_line.trim() == model_line.trim();
+        if same_line && !file_line.trim().is_empty() && !model_line.trim().is_empty() {
+            let (model_indent, file_indent) = (indent_of(model_line), indent_of(file_line));
+            if !drift.contains_key(model_indent) {
+                forgave |= model_indent != file_indent;
+                drift.insert(model_indent, file_indent);
+            }
+        }
+    }
+    forgave.then_some(drift)
+}
+
+// A column the model never used is extrapolated from the deepest one it did, so
+// a level the replacement adds keeps the shape the model gave it. A column
+// shallower than any in the block belongs to a line that leaves the block, a
+// new top level definition say, so it stays where the model put it.
+fn rebase(drift: &HashMap<&str, &str>, indent: &str) -> String {
+    if let Some(&exact_column) = drift.get(indent) {
+        return exact_column.to_string();
+    }
+    let deepest = drift
+        .keys()
+        .filter(|&&m| m.len() < indent.len() && indent.starts_with(m))
+        .max_by_key(|&&m| m.len());
+    deepest.map_or_else(
+        || indent.to_string(),
+        |d| format!("{}{}", drift[d], &indent[d.len()..]),
+    )
+}
+
+// The model can write `old_string` sloppily and `new_string` in the file's own
+// frame, and then there is nothing left to correct.
+fn written_in_file_frame(drift: &HashMap<&str, &str>, replacement: &str) -> bool {
+    replacement.split('\n').all(|line| {
+        line.trim().is_empty()
+            || drift
+                .values()
+                .any(|&file_indent| indent_of(line) == file_indent)
+    })
+}
+
+// Corrects exactly what the match forgave in `old_string`, and nothing else.
+// Indentation only means something for a block that starts its own line; a
+// match landing mid line keeps whatever the model wrote.
+fn reindent(matched: &str, find: &str, replacement: &str) -> String {
+    let Some(drift) = indent_drift(matched, find) else {
+        return replacement.to_string();
+    };
+    if written_in_file_frame(&drift, replacement) {
+        return replacement.to_string();
+    }
+
+    replacement
+        .split('\n')
+        .map(|line| {
+            if line.trim().is_empty() {
+                line.to_string()
+            } else {
+                let indent = indent_of(line);
+                format!("{}{}", rebase(&drift, indent), &line[indent.len()..])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn all_start_a_line(content: &str, at: &[(usize, usize)]) -> bool {
+    at.iter()
+        .all(|&(s, _)| s == 0 || content.as_bytes()[s - 1] == b'\n')
+}
+
+fn replacement_text(
+    content: &str,
+    matched: &str,
+    find: &str,
+    replacement: &str,
+    at: &[(usize, usize)],
+) -> String {
+    if all_start_a_line(content, at) {
+        reindent(matched, find, replacement)
+    } else {
+        replacement.to_string()
     }
 }
 
@@ -645,10 +771,118 @@ mod tests {
 
     #[test_case("fn foo() {}", "MISSING", NO_MATCH ; "no_match")]
     #[test_case("let x = 1;\nlet x = 1;", "let x = 1;", MULTIPLE_MATCHES ; "ambiguous")]
+    #[test_case("abc", "", EMPTY_OLD_STRING ; "empty_old_string")]
+    #[test_case("a\n\nb", "   ", NO_MATCH ; "whitespace_only_old_string")]
     fn replace_rejects(content: &str, search: &str, expected_err: &str) {
         assert_eq!(
             replace_simple(content, search, "x").unwrap_err(),
             expected_err
+        );
+    }
+
+    #[test]
+    fn fuzzy_match_reindents_new_string() {
+        let content = "class Foo\n  def bar\n    baz(\n      a,\n    )\n  end\nend\n";
+        let old = "def bar\n  baz(\n    a,\n  )\nend";
+        let new = "def bar\n  baz(\n    a,\n    b,\n  )\nend";
+        assert_eq!(
+            replace_simple(content, old, new).unwrap(),
+            "class Foo\n  def bar\n    baz(\n      a,\n      b,\n    )\n  end\nend\n"
+        );
+    }
+
+    #[test]
+    fn reindent_ignores_new_string_own_indentation() {
+        let content = "class A\n  def f\n    x\n  end\nend\n";
+        let old = "def f\n  x\nend";
+        let new = "  def f\n    y\n  end";
+        assert_eq!(
+            replace_simple(content, old, new).unwrap(),
+            "class A\n  def f\n    y\n  end\nend\n"
+        );
+    }
+
+    #[test]
+    fn reindent_converts_spaces_to_tabs() {
+        let content = "\tfn f() {\n\t\tif x {\n\t\t\tg();\n\t\t}\n\t}";
+        let old = "fn f() {\n    if x {\n        g();\n    }\n}";
+        let new = "fn f() {\n    if x {\n        h();\n    }\n}";
+        assert_eq!(
+            replace_simple(content, old, new).unwrap(),
+            "\tfn f() {\n\t\tif x {\n\t\t\th();\n\t\t}\n\t}"
+        );
+    }
+
+    #[test]
+    fn reindent_leaves_a_correct_new_string_alone() {
+        let content = "def f():\n    a = 1\n    return a\n";
+        let old = "    a = 1\n    return a";
+        let new = "    a = 1\n    return a\n\n\ndef g():\n    return 2";
+        assert_eq!(
+            replace_simple(content, old, new).unwrap(),
+            "def f():\n    a = 1\n    return a\n\n\ndef g():\n    return 2\n"
+        );
+    }
+
+    #[test]
+    fn reindent_leaves_a_line_that_exits_the_block_alone() {
+        let content = "def f():\n    a = 1\n    return a\n";
+        let new = "  a = 1\n  return a\n\n\ndef g():\n  return 2";
+        assert_eq!(
+            replace_simple(content, "  a = 1\n  return a", new).unwrap(),
+            "def f():\n    a = 1\n    return a\n\n\ndef g():\n    return 2\n"
+        );
+    }
+
+    #[test]
+    fn reindent_keeps_the_block_when_a_column_zero_line_is_dropped() {
+        let content = "def f():\n    a = 1\n# TODO\n    b = 2\n";
+        let old = "  a = 1\n# TODO\n  b = 2";
+        assert_eq!(
+            replace_simple(content, old, "  a = 1\n  b = 2").unwrap(),
+            "def f():\n    a = 1\n    b = 2\n"
+        );
+    }
+
+    #[test]
+    fn reindent_takes_its_widths_from_the_block_not_the_file() {
+        let content = "M = \"\"\"\n\tgcc x.c\n\"\"\"\n\ndef g():\n    if x:\n        foo()\n";
+        let old = "  if x:\n    foo()";
+        let result = replace_simple(content, old, "  if x:\n    foo()\n    baz()").unwrap();
+        assert_eq!(
+            result,
+            "M = \"\"\"\n\tgcc x.c\n\"\"\"\n\ndef g():\n    if x:\n        foo()\n        baz()\n"
+        );
+    }
+
+    #[test]
+    fn reindent_leaves_a_midline_match_alone() {
+        assert_eq!(
+            replace_simple(
+                "    let x = compute(a,  b);",
+                "compute(a, b)",
+                "compute(c, d)"
+            )
+            .unwrap(),
+            "    let x = compute(c, d);"
+        );
+    }
+
+    #[test]
+    fn reindent_applies_to_every_replaced_occurrence() {
+        let content = "  a();\n  b();\nx\n  a();\n  b();\n";
+        let result = replace(content, "a();\nb();", "a();\nc();\nb();", true, None).unwrap();
+        assert_eq!(
+            result.content,
+            "  a();\n  c();\n  b();\nx\n  a();\n  c();\n  b();\n"
+        );
+    }
+
+    #[test]
+    fn exact_match_keeps_new_string_indentation() {
+        assert_eq!(
+            replace_simple("  a\n  b\n", "  a\n  b", "  a\n      b").unwrap(),
+            "  a\n      b\n"
         );
     }
 
