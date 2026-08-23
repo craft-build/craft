@@ -13,6 +13,41 @@ Project settings override global ones. See [Configuration](./configuration.md).
 
 `init.lua` is also the natural place to register your own tools and commands with the `craft.api` functions below.
 
+## Your own plugins
+
+`init.lua` can `require()` Lua modules, and that is where your own plugins live. The module root is the `lua/` directory next to `init.lua`, both globally and per project:
+
+- `~/.config/craft/lua/<name>.lua` (a legacy `~/.craft/lua/` works too, and loads first)
+- `<project>/.craft/lua/<name>.lua`
+
+A module name is its path under `lua/` without the extension: `lua/hello.lua` is loaded with `require("hello")`, `lua/acme/tools.lua` with `require("acme.tools")`. `require` is sandboxed to the `lua/` directory and cannot reach files outside it. Nothing under `lua/` loads on its own, so `init.lua` stays the entry point.
+
+A minimal plugin, in `~/.config/craft/lua/hello.lua`:
+
+```lua
+craft.api.register_tool({
+    name = "hello",
+    description = "Say hello to a name.",
+    schema = {
+        required = { "name" },
+        properties = { name = { type = "string" } },
+    },
+    handler = function(args)
+        return { llm_output = "hello " .. args.name }
+    end,
+})
+```
+
+Loaded from `~/.config/craft/init.lua`:
+
+```lua
+require("hello")
+```
+
+Run `/reload` to pick up changes. If something fails to load, read `craft.log` in the directory `craft.env.logs_dir()` returns (Linux: `~/.local/logs/craft/`); `craft.log.info(...)` calls from your plugin land there too. Keep a plugin's settings in a local table or export a `setup(opts)` function for `init.lua` to call, rather than using `craft.api.register_options`: a `plugins.<name>` table for a plugin Craft does not ship fails startup with an unknown-plugin error.
+
+The builtin `plugin-dev` skill carries the same guide, so asking Craft to write a plugin for you works without pasting any of this.
+
 ## `craft.api`
 
 | Function | Registers |

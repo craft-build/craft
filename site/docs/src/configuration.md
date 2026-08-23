@@ -278,6 +278,8 @@ The `plugins` table turns plugins on or off and passes options to them. All bund
 
 Each plugin checks its own options at startup. A typo, a wrong type, or an unknown plugin name gives you a clear error right away. The old `tools` table is gone. If your config still uses it, Craft stops at startup and shows you the new form.
 
+This table is for bundled plugins only. Your own plugins go under `lua/` next to your `init.lua`, globally or per project. See [Plugins](./plugins.md).
+
 ```lua
 craft.setup({
     plugins = {

@@ -10,16 +10,55 @@ Craft plugins are plain Lua files (Luau) that run inside craft. A plugin can reg
 
 ## Where plugin code goes
 
-- `~/.config/craft/init.lua` - global, loaded for every project
-- `<project>/.craft/init.lua` - project-local
+Plugins live in the craft config dir. There are two of them, same layout:
 
-Either file can call `craft.setup({ ... })` for configuration and register tools or commands. There are no separate plugin directories yet; bundled plugins ship inside the binary.
+- `~/.config/craft/` - global, every project (if a legacy `~/.craft/` exists, craft loads its init.lua too, first)
+- `<project>/.craft/` - this project only
+
+```
+init.lua        the only file craft runs; require()s plugins, calls craft.setup()
+lua/<name>.lua  plugin modules, loaded by require("<name>")
+```
+
+Nothing under `lua/` loads on its own. A module name is its path under `lua/` without the extension: `lua/browser.lua` is `require("browser")`, `lua/acme/tools.lua` is `require("acme.tools")`. `require` is sandboxed to that directory, you cannot reach files outside it.
+
+## Creating a plugin
+
+1. Write the code in `~/.config/craft/lua/<name>.lua`. The `craft` global is already there, nothing to import. For a project-only plugin use `<project>/.craft/` here and in every step below.
+
+```lua
+craft.api.register_tool({
+  name = "hello",
+  description = "Say hello to a name.",
+  schema = { type = "object", properties = { name = { type = "string" } }, required = { "name" } },
+  handler = function(args)
+    return { llm_output = "hello " .. args.name }
+  end,
+})
+```
+
+2. Load it from `~/.config/craft/init.lua`, creating that file if missing:
+
+```lua
+require("hello")
+```
+
+3. Run `/reload`, then read the log as described below, to see that it loaded and what it printed.
+
+Leave `craft.api.register_options` to bundled plugins: craft rejects a `plugins.<name>` table for a plugin it does not ship, and startup fails. Keep settings in a local table, or export a `setup(opts)` function `init.lua` calls.
 
 ## Development loop
 
-You cannot run slash commands or restart craft. After editing, ask the user to run `/reload` (rebuilds plugins and config in place). Until then your changes are not live. If a backtrace comes out useless, suggest restarting with `--no-jit`.
+`/reload` rebuilds plugins and config in place, no restart needed. Until it runs, an edited plugin is still the old one.
 
-To debug, add `craft.log.info|warn|error(...)` calls. They write to `craft.log` in the directory `craft.env.logs_dir()` returns (Linux: `~/.local/logs/craft/`). Read that file yourself after the user reloads and reproduces.
+To debug, add `craft.log.info|warn|error(...)` calls. They write to `craft.log` in the directory `craft.env.logs_dir()` returns (Linux: `~/.local/logs/craft/`). When a backtrace comes out useless, start craft with `--no-jit`: plugins then run on the interpreter, with full debug info.
+
+## Notes for the agent
+
+- Never write a plugin into craft's own source tree. The `plugins/` directory of the craft repo holds the plugins that ship with craft, compiled into the binary, so a file dropped there does nothing until craft is rebuilt. That holds even when the project you have open is a craft checkout.
+- Both global config dirs can exist, and the legacy `~/.craft/` loads first, so look before you write.
+- The config dir sits outside the project, but it is an ordinary directory: create files there with the normal write and edit tools.
+- You cannot run slash commands or restart craft, so ask the user to run `/reload` and to reproduce the problem, then read the log yourself.
 
 ## Conventions
 
@@ -69,7 +108,7 @@ A tool spec passed to `craft.api.register_tool` has:
 
 ## A complete real example
 
-The bundled `glob` tool, verbatim: options registration, schema, header and restore hooks, error handling, LLM output truncation, collapsible UI view:
+The bundled `glob` tool, verbatim: schema, header and restore hooks, error handling, LLM output truncation, collapsible UI view. It is a bundled plugin, so it opens with `register_options`, which your own plugin skips:
 
 ```lua
 local truncate = require("craft.truncate")
