@@ -26,7 +26,33 @@ use crate::tools::ToolAudience;
 use super::truncate_output;
 
 const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
-const PREAMBLE: &str = "import re\nimport asyncio\nimport sys\nimport os\nimport json\n";
+// `[ERROR] ` is the same marker the batch tool uses for a failed child, so a
+// failure reads the same wherever the model meets it.
+const ASYNCIO_GATHER: &str = "asyncio.gather";
+const GATHER_HINT: &str =
+    "\n\nHint: `gather(...)` keeps the other results, returning `[ERROR] ...` for the failed call.";
+// `asyncio.gather` cancels its siblings the moment one call raises, throwing away
+// results the model already paid for, so `gather` awaits each call in its own
+// `try` instead. Awaiting one at a time is still concurrent: every call was made
+// before the first await, so they all sit pending and the host dispatches them in
+// one batch. Tasks look like the obvious fix, but monty fails the whole gather on
+// an external call error rather than raising inside the awaiting task, and a
+// coroutine wrapper is lazy, so a call handed over that way would run alone.
+// Only `RuntimeError` is caught, the shape a failed tool call arrives in; a
+// TypeError from the script itself must still stop the run.
+const PREAMBLE: &str = concat!(
+    "import re\nimport asyncio\nimport sys\nimport os\nimport json\n",
+    "async def gather(*calls):\n",
+    "    if len(calls) == 1 and isinstance(calls[0], list):\n",
+    "        calls = calls[0]\n",
+    "    results = []\n",
+    "    for c in calls:\n",
+    "        try:\n",
+    "            results.append(await c)\n",
+    "        except RuntimeError as e:\n",
+    "            results.append('[ERROR] ' + str(e))\n",
+    "    return results\n",
+);
 const CANCELLED_ERR: &str = "cancelled";
 const TIME_LIMIT_SUBSTR: &str = "time limit exceeded";
 const CUT_CANCELLED_FMT: &str = "[cancelled by user; output above is partial]";
@@ -47,7 +73,7 @@ struct InterpreterEnv {
 #[derive(Tool, Debug, Clone, Deserialize)]
 pub struct CodeExecution {
     #[param(
-        description = "Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. Use `await asyncio.gather(...)` for concurrency."
+        description = "Python code to execute. Tools are async functions that return strings (not objects). You MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. Use `await gather(...)` for concurrency."
     )]
     code: String,
     #[param(description = "Script execution timeout in seconds (default 30)")]
@@ -58,7 +84,7 @@ impl CodeExecution {
     pub const NAME: &str = "code_execution";
     pub const DESCRIPTION: &str = include_str!("code_execution.md");
     pub const EXAMPLES: Option<&str> = Some(
-        r##"[{"code": "files = (await glob(pattern='**/*.rs')).strip().split('\\n')\nresults = await asyncio.gather(*[read(path=f, offset=1, limit=0) for f in files if f.strip()])\nfor f, c in zip(files, results):\n    if 'fn main' in c: print(f)"},
+        r##"[{"code": "files = (await glob(pattern='**/*.rs')).strip().split('\\n')\nresults = await gather(*[read(path=f, offset=1, limit=0) for f in files if f.strip()])\nfor f, c in zip(files, results):\n    if 'fn main' in c: print(f)"},
             {"code": "result = await grep(pattern='TODO', include='*.rs')\nprint(f\"{len(result.strip().splitlines())} TODOs found\")"},
             {"code": "content = await webfetch(url='https://example.com/docs')\nfor line in content.splitlines():\n    if 'auth' in line.lower(): print(line)"}]"##,
     );
@@ -71,6 +97,7 @@ impl CodeExecution {
             )?,
         );
         let code = self.code.clone();
+        let used_asyncio_gather = code.contains(ASYNCIO_GATHER);
         let tool_use_id = ctx.tool_use_id.clone();
         let config = ctx.config.clone();
         let deadline = Deadline::after(timeout);
@@ -92,25 +119,43 @@ impl CodeExecution {
                 tokio::task::spawn_blocking(move || {
                     let tools = build_tool_fns(&env);
                     let resolver = build_async_resolver(&env);
-                    let code = format!("{PREAMBLE}{code}");
 
-                    let result = if let Some(ref id) = tool_use_id {
+                    let mut on_line: Box<dyn FnMut(&str)> = if let Some(ref id) = tool_use_id {
+                        let id = id.to_string();
                         let mut last_flush = Instant::now();
-                        runner::run_streaming(&code, &tools, Some(&resolver), limits, &mut |line| {
+                        Box::new(move |line: &str| {
                             let mut acc = accumulated.lock().unwrap_or_else(|e| e.into_inner());
                             acc.push_str(line);
                             if last_flush.elapsed() >= STREAM_FLUSH_INTERVAL {
                                 env.ctx.event_tx.try_send(AgentEvent::ToolOutput {
-                                    id: id.to_string(),
+                                    id: id.clone(),
                                     content: acc.clone(),
                                 });
                                 last_flush = Instant::now();
                             }
                         })
                     } else {
-                        runner::run(&code, &tools, Some(&resolver), limits)
-                    }
-                    .map_err(|e| e.to_string())?;
+                        Box::new(|_| {})
+                    };
+                    let result = runner::run(
+                        &code,
+                        PREAMBLE,
+                        &tools,
+                        Some(&resolver),
+                        limits,
+                        &mut on_line,
+                    )
+                    .map_err(|e| {
+                        // The run is already paid for, so point a script that reached
+                        // for `asyncio.gather` at the wrapper that would have kept its
+                        // other results.
+                        let e = e.to_string();
+                        if used_asyncio_gather {
+                            format!("{e}{GATHER_HINT}")
+                        } else {
+                            e
+                        }
+                    })?;
 
                     let mut output = String::new();
                     if !result.stdout.is_empty() {
@@ -289,7 +334,11 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
                     )
                     .await;
 
-                    let result = super::interpreter_bridge::flatten(&done).map(Value::String);
+                    // Name the tool on every failure: neither a traceback nor a
+                    // list of gathered results says which call broke.
+                    let result = super::interpreter_bridge::flatten(&done)
+                        .map(Value::String)
+                        .map_err(|e| format!("{}: {e}", pc.name));
                     (pc.call_id, result)
                 });
             }
@@ -444,6 +493,102 @@ mod tests {
     #[test_case(&[], &[],                                json!({})               ; "no_args")]
     fn build_tool_input_cases(args: &[Value], kwargs: &[(String, Value)], expected: Value) {
         assert_eq!(build_tool_input(args, kwargs).unwrap(), expected);
+    }
+
+    const GATHER_HINT_SUBSTR: &str = "`gather(...)` keeps the other results";
+    const ERROR_PREFIX: &str = "[ERROR] ";
+
+    fn run_script(code: String) -> Result<String, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let ctx = stub_ctx(&AgentMode::Build);
+            CodeExecution {
+                code,
+                timeout: None,
+            }
+            .execute(&ctx)
+            .await
+            .map(|out| out.as_text())
+        })
+    }
+
+    fn ok_and_missing(dir: &tempfile::TempDir) -> (String, String) {
+        let ok = dir.path().join("ok.txt");
+        fs::write(&ok, "ok-content").unwrap();
+        let missing = dir.path().join("missing.txt");
+        (
+            ok.to_string_lossy().into_owned(),
+            missing.to_string_lossy().into_owned(),
+        )
+    }
+
+    fn fill_paths(template: &str, ok: &str, missing: &str) -> String {
+        template.replace("{ok}", ok).replace("{missing}", missing)
+    }
+
+    /// The list form covers a model that forgets the `*`. It must run rather
+    /// than cost a TypeError round-trip.
+    #[test_case("gather(read(path='{ok}', offset=1, limit=0), read(path='{missing}', offset=1, limit=0))"
+        ; "varargs")]
+    #[test_case("gather([read(path='{ok}', offset=1, limit=0), read(path='{missing}', offset=1, limit=0)])"
+        ; "single_list")]
+    fn gather_keeps_sibling_results_when_one_call_fails(call: &str) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (ok, missing) = ok_and_missing(&dir);
+        let call = fill_paths(call, &ok, &missing);
+        let out = run_script(format!("ok, bad = await {call}\nprint(ok)\nprint(bad)"))
+            .expect("a failed call must not fail the script");
+        assert!(out.contains("ok-content"), "got: {out}");
+        assert!(
+            out.contains(&format!("{ERROR_PREFIX}read:")),
+            "failed call must name the tool and its error: {out}"
+        );
+    }
+
+    /// Only a failed tool call belongs in the results. The script's own mistake
+    /// must stop the run instead of hiding as an `[ERROR]` entry.
+    #[test]
+    fn gather_lets_script_errors_through() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (ok, _) = ok_and_missing(&dir);
+        let err = run_script(format!(
+            "await gather(read(path='{ok}', offset=1, limit=0), 'not a call')"
+        ))
+        .expect_err("awaiting a non-call must raise");
+        assert!(!err.contains(ERROR_PREFIX), "got: {err}");
+    }
+
+    /// `asyncio.gather` still cancels its siblings, so its error is the one
+    /// place worth pointing at the wrapper. A bare await is fail-fast on
+    /// purpose and must not nag.
+    #[test_case("await read(path='{missing}', offset=1, limit=0)", false
+        ; "plain_await_stays_fail_fast")]
+    #[test_case(
+        "await asyncio.gather(read(path='{ok}', offset=1, limit=0), read(path='{missing}', offset=1, limit=0))",
+        true ; "asyncio_gather_points_at_the_wrapper"
+    )]
+    fn failed_call_error_names_the_tool_and_hints_only_for_asyncio_gather(
+        template: &str,
+        hint: bool,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (ok, missing) = ok_and_missing(&dir);
+        let err =
+            run_script(fill_paths(template, &ok, &missing)).expect_err("a failed call must raise");
+        assert!(err.contains("read:"), "got: {err}");
+        assert_eq!(err.contains(GATHER_HINT_SUBSTR), hint, "got: {err}");
+    }
+
+    /// The model counts lines in the code it wrote, so the preamble it never
+    /// sees must not shift them.
+    #[test]
+    fn traceback_lines_are_numbered_from_the_users_first_line() {
+        let err = run_script("x = 1\nprint(boom_undefined)".into())
+            .expect_err("undefined name must error");
+        assert!(err.contains("line 2, in <module>"), "got: {err}");
     }
 
     #[tokio::test]
