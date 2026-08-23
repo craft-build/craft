@@ -21,8 +21,8 @@ use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{AgentConfig, AgentEvent, DoneReason, Envelope, ImageSource, PermissionsConfig};
 use craft_config::ModelPolicy;
 use craft_lua::EventHandle;
-use craft_providers::TokenUsage;
 use craft_providers::model::Model;
+use craft_providers::{TokenUsage, add_cost};
 use craft_storage::id::SessionRef;
 use serde::Serialize;
 use serde_json::Value;
@@ -219,6 +219,9 @@ pub async fn run(
     let mut is_error = false;
     let mut num_turns: u32 = 0;
     let mut usage = TokenUsage::default();
+    // Summed as the turns land: rates move mid-run, and only a turn knows the
+    // rate it paid.
+    let mut cost = None;
     let mut stop_reason: Option<DoneReason> = None;
 
     while let Ok(envelope) = event_rx.recv_async().await {
@@ -278,6 +281,7 @@ pub async fn run(
                 }
             }
             AgentEvent::TurnComplete(tc) => {
+                add_cost(&mut cost, tc.cost);
                 if let Some(out) = &mut verbose_out {
                     let content_value = serde_json::to_value(&tc.message.content)?;
                     out.emit(&AssistantEvent {
@@ -330,7 +334,8 @@ pub async fn run(
     }
 
     let duration_ms = start.elapsed().as_millis();
-    let total_cost_usd = usage.cost(&model.pricing, fast);
+    // Zero on an unpriced model, which is what its turns reported too.
+    let total_cost_usd = cost.unwrap_or_default();
 
     match format {
         OutputFormat::Text => {

@@ -547,7 +547,10 @@ impl<'h> Agent<'h> {
                 message: response.message.clone(),
                 usage: response.usage,
                 model: self.io.model.id.clone(),
-                cost: self.io.model.cost_of(&response.usage, self.io.opts.fast),
+                cost: self
+                    .io
+                    .model
+                    .billed_cost(&response.usage, self.io.opts.fast),
                 context_size: Some(response.usage.context_tokens()),
                 context_window: self.io.model.context_window,
             },

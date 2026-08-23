@@ -6,7 +6,7 @@ use craft_agent::TurnType;
 use craft_agent::permissions::PermissionManager;
 use craft_config::{Effect, ModelPolicy};
 use craft_providers::provider::adjust_model;
-use craft_providers::{Model, ThinkingConfig, Timeouts, TokenUsage};
+use craft_providers::{Model, ThinkingConfig, Timeouts, TokenUsage, settle_session};
 use craft_storage::StateDir;
 use craft_storage::sessions::{SessionMeta, StoredEffect, StoredMode, StoredRule};
 
@@ -105,7 +105,7 @@ impl SessionState {
         let context_size = session.meta.context_size;
         let context_window_overrides = session.meta.context_window_overrides.clone();
         let fast = session.meta.fast && model.supports_fast();
-        let cost = model.cost_of(&token_usage, fast);
+        let cost = settle_session(&token_usage, session.usage_by_model_mut(), &model, fast);
 
         Self {
             thinking: session
@@ -274,8 +274,77 @@ pub(crate) fn stored_to_rules(stored: &[StoredRule]) -> Vec<craft_config::Permis
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::test_model;
+    use crate::components::{test_model, test_pricing};
+    use craft_providers::{FastPricing, ModelPricing};
     use craft_storage::sessions::StoredThinking;
+    use test_case::test_case;
+
+    const RECORDED_COST: f64 = 0.42;
+    /// A round million, so a per-million rate reads straight off the bill.
+    const MILLION_INPUT: TokenUsage = TokenUsage {
+        input: 1_000_000,
+        output: 0,
+        cache_creation: 0,
+        cache_read: 0,
+    };
+    /// [`MILLION_INPUT`] at `test_pricing`'s standard input rate.
+    const LIST_PRICE: f64 = 3.0;
+    /// Twice the standard rate, so a resume that ignores `fast` bills half.
+    const FAST_INPUT_RATE: f64 = 6.0;
+    const UNRESOLVABLE_MODEL: &str = "a-model-no-table-has-ever-heard-of";
+    const FAST_FLAG_LOST: &str = "the model has fast pricing, so the flag must survive as stored";
+
+    fn resumed(session: AppSession, model: &Model) -> SessionState {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        SessionState::from_session(session, model, &storage, &ModelPolicy::default())
+    }
+
+    /// An old session: counters, no per-model breakdown.
+    fn session_with_counters() -> AppSession {
+        let mut session = AppSession::new("test-model", "/tmp");
+        session.token_usage = MILLION_INPUT;
+        session
+    }
+
+    /// A resumed session opens on the bill it ran up, not on its counters
+    /// re-priced with whatever model is selected now. The model that recorded
+    /// this one prices to nothing, so only the recorded cost can answer.
+    #[test]
+    fn resumed_session_opens_on_the_cost_its_turns_recorded() {
+        let mut session = session_with_counters();
+        session.add_model_usage(
+            UNRESOLVABLE_MODEL,
+            session.token_usage.billed(Some(RECORDED_COST)),
+        );
+        let state = resumed(session, &test_model());
+        assert_eq!(state.cost, Some(RECORDED_COST));
+    }
+
+    /// Older sessions kept counters only, and those are priced with the
+    /// session's own clamped `fast` flag. A hardcoded `false` would open a
+    /// resumed fast session on half its bill.
+    #[test_case(false => Some(LIST_PRICE)     ; "standard_rates")]
+    #[test_case(true  => Some(FAST_INPUT_RATE) ; "fast_rates")]
+    fn resume_without_a_breakdown_prices_the_counters(fast: bool) -> Option<f64> {
+        let mut session = session_with_counters();
+        session.meta.fast = fast;
+        let model = Model {
+            pricing: ModelPricing {
+                fast: Some(FastPricing {
+                    input: FAST_INPUT_RATE,
+                    output: test_pricing().output,
+                }),
+                ..test_pricing()
+            },
+            ..test_model()
+        };
+
+        let state = resumed(session, &model);
+
+        assert_eq!(state.fast, fast, "{FAST_FLAG_LOST}");
+        state.cost
+    }
 
     fn make_plan_session(mode: Option<StoredMode>, plan_path: Option<String>) -> AppSession {
         let mut session = AppSession::new("test-model", "/tmp");

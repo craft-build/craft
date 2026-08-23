@@ -65,3 +65,5 @@ Queue up multiple prompts while the agent is busy. They run in order once the cu
 ## Visibility
 
 Craft keeps cost and usage in the open. The status bar always shows token count, cost, and the active model. Each sub-agent gets its own chat you can flip through with **Ctrl+N** / **Ctrl+P**, and **Ctrl+F** searches the conversation.
+
+Each turn is priced when it happens and that number is stored with the session. Prices move (DeepSeek, for one, doubles every rate during peak UTC hours), so a total re-priced later would be a guess. What you see is what you were billed.

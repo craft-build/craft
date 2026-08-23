@@ -31,8 +31,9 @@ use craft_lua::{
     LocalTerminal, TerminalBackend, TerminalEvent, TerminalFuture, TerminalHandle, TerminalSpec,
 };
 use craft_providers::model::Model;
-use craft_providers::{Message, TokenUsage, add_cost};
+use craft_providers::{Message, TokenUsage, add_cost, settle_session};
 use craft_storage::id::{CraftId, SessionRef};
+use craft_storage::sessions::StoredTokenUsage;
 use flume::{Receiver, Sender};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -630,7 +631,7 @@ async fn handle_request(
                     return;
                 }
             };
-            let loaded = match load_history(session_ref.id()) {
+            let mut loaded = match load_history(session_ref.id()) {
                 Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
@@ -666,13 +667,17 @@ async fn handle_request(
                     methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
-            // The restored total predates any per-turn cost, so price it once
-            // with the model the session recorded (the current default may
-            // cost 10x more or less); later turns add their own exact cost.
-            let restored_cost = Model::from_spec(&loaded.model)
-                .ok()
-                .and_then(|m| m.cost_of(&loaded.usage, false))
-                .or_else(|| params.model.cost_of(&loaded.usage, false));
+            // Priced against the model the session recorded, not the one
+            // selected now (which may cost 10x more or less). Later turns add
+            // their own exact cost.
+            let recorded_model =
+                Model::from_spec(&loaded.model).unwrap_or_else(|_| params.model.clone());
+            let restored_cost = settle_session(
+                &loaded.usage,
+                &mut loaded.by_model,
+                &recorded_model,
+                RESTORED_FAST,
+            );
             install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::LoadSessionResponse(resp))
         }
@@ -696,7 +701,7 @@ async fn handle_request(
                     return;
                 }
             };
-            let loaded = match load_history(session_ref.id()) {
+            let mut loaded = match load_history(session_ref.id()) {
                 Ok(h) => h,
                 Err(e) => {
                     srv.respond(id, Err(e));
@@ -726,10 +731,14 @@ async fn handle_request(
                     methods::auto_review_config_option(params.permissions_config.auto_review),
                 ])
             };
-            let restored_cost = Model::from_spec(&loaded.model)
-                .ok()
-                .and_then(|m| m.cost_of(&loaded.usage, false))
-                .or_else(|| params.model.cost_of(&loaded.usage, false));
+            let recorded_model =
+                Model::from_spec(&loaded.model).unwrap_or_else(|_| params.model.clone());
+            let restored_cost = settle_session(
+                &loaded.usage,
+                &mut loaded.by_model,
+                &recorded_model,
+                RESTORED_FAST,
+            );
             install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::ResumeSessionResponse(resp))
         }
@@ -927,11 +936,15 @@ async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
     }
 }
 
+/// ACP has no fast-mode toggle, so a restored total is priced at standard rates.
+const RESTORED_FAST: bool = false;
+
 #[derive(Debug)]
 struct LoadedHistory {
     history: Vec<Message>,
     recorded_cwd: Option<PathBuf>,
     usage: TokenUsage,
+    by_model: HashMap<String, StoredTokenUsage>,
     model: String,
     thinking: String,
 }
@@ -962,6 +975,7 @@ fn load_history_from(
         None
     };
     let usage = session.token_usage;
+    let by_model = session.usage_by_model().clone();
     let model = session.model.clone();
     let thinking = session
         .meta
@@ -972,6 +986,7 @@ fn load_history_from(
         history: session.take_messages(),
         recorded_cwd: recorded,
         usage,
+        by_model,
         model,
         thinking,
     })
@@ -1844,6 +1859,60 @@ mod tests {
         );
         assert_eq!(loaded.recorded_cwd, Some(PathBuf::from("/project")));
         assert_eq!(loaded.usage, session.token_usage);
+    }
+
+    /// Resuming must bill what the session actually paid. If `by_model` came
+    /// back empty or lost its recorded costs, ACP would re-price the restored
+    /// total against today's table and disagree with the TUI.
+    #[test]
+    fn load_history_prices_a_resumed_session_at_what_it_paid() {
+        const SELECTED_SPEC: &str = "anthropic/claude-sonnet-4-5";
+        /// Neither resolves in the price tables, so nothing can re-price a
+        /// restored session back onto the recorded number by luck.
+        const RETIRED_SPEC: &str = "retired-vendor/retired-model-9000";
+        const RETIRED_MODEL_ID: &str = "retired-model-9000";
+        const RECORDED_COST: f64 = 1.25;
+
+        let tmp = TempDir::new().unwrap();
+        let dir = StateDir::from_path(tmp.path().to_path_buf());
+        let mut session: Session<Message, TokenUsage, ToolOutput> =
+            Session::new(RETIRED_SPEC, "/project");
+        session.token_usage = TokenUsage {
+            input: 1_000_000,
+            output: 200_000,
+            ..Default::default()
+        };
+        session.add_model_usage(
+            RETIRED_MODEL_ID,
+            StoredTokenUsage {
+                input: 1_000_000,
+                output: 200_000,
+                cost: Some(RECORDED_COST),
+                ..Default::default()
+            },
+        );
+        session.save(&dir).unwrap();
+
+        let mut loaded = load_history_from(&dir, session.id.id()).unwrap();
+        assert_eq!(
+            loaded.by_model[RETIRED_MODEL_ID].cost,
+            Some(RECORDED_COST),
+            "the per-model breakdown survives the file"
+        );
+
+        // Mirrors `session/load`: the recorded spec no longer parses, so the
+        // selected model stands in, and that must not change the bill.
+        let recorded_model = Model::from_spec(&loaded.model)
+            .unwrap_or_else(|_| Model::from_spec(SELECTED_SPEC).expect("a shipped model"));
+        assert_eq!(
+            settle_session(
+                &loaded.usage,
+                &mut loaded.by_model,
+                &recorded_model,
+                RESTORED_FAST
+            ),
+            Some(RECORDED_COST)
+        );
     }
 
     #[test]

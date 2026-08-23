@@ -133,7 +133,11 @@ impl App {
             .as_deref()
             .and_then(|spec| Model::from_spec(spec).ok());
         let model = resolved.as_ref().unwrap_or(&self.state.model);
-        let cost_usd = usage.cost(&model.pricing, self.state.fast);
+        // Billed, not listed: the record follows the turn that just ran, so a
+        // provider's clock schedule (DeepSeek peak hours) applies to it.
+        let cost_usd = model
+            .billed_cost(&usage, self.state.fast)
+            .unwrap_or_default();
         let provider = model.provider_display_name().to_string();
         let record = craft_storage::stats::CostRecord {
             session_id: self.state.session.id.as_str().to_string(),

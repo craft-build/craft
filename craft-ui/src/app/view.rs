@@ -316,6 +316,7 @@ impl App {
         if self.usage_modal.is_open() {
             let ctx = crate::components::usage_modal::UsageModalContext {
                 total: &self.state.token_usage,
+                total_cost: self.state.cost,
                 by_model: self.state.session.usage_by_model(),
                 model: &self.state.model,
                 fast: self.state.fast,

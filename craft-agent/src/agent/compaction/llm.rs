@@ -146,7 +146,7 @@ pub(crate) async fn compact_history(
         message: response.message.clone(),
         usage: response.usage,
         model: model.id.clone(),
-        cost: model.cost_of(&response.usage, false),
+        cost: model.billed_cost(&response.usage, false),
         context_size: Some(response.usage.context_tokens()),
         context_window: model.context_window,
     })))?;
