@@ -137,6 +137,7 @@ usvg = "0.48"
 resvg = "0.48"
 tiny-skia = "0.12"
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
+keyring = "4"
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 flume = { version = "0.12", default-features = false, features = ["async", "select"] }

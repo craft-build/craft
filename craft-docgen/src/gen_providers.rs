@@ -327,7 +327,7 @@ fn build_sections() -> Vec<ProviderSection> {
                     name: kind.display_name(),
                     kind,
                     auth_line: format!(
-                        "{} (or run `craft auth login copilot` to import a token from gh)",
+                        "{} (or run `craft auth login copilot` to import a token from gh CLI, the Copilot client, or the system keyring)",
                         format_auth(kind)
                     ),
                     urls: vec![kind.base_url()],
