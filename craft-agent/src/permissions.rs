@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use craft_config::{
     DefaultEffect, Effect, FILE_WRITE_TOOLS, PermissionRule, PermissionTarget, PermissionsConfig,
@@ -16,6 +17,8 @@ use crate::{AgentEvent, EventSender};
 
 pub const DEFAULT_DENY_GUIDANCE: &str =
     "Do not retry. Try a different approach or ask the user for guidance.";
+
+pub(crate) const ASK_TIMEOUT: Duration = Duration::from_secs(60 * 30);
 
 /// Tests assert on this exact prefix; a wording tweak here updates them in one place.
 pub const PERMISSION_DENIED_PREFIX: &str = "Permission denied for";
@@ -563,15 +566,16 @@ impl PermissionManager {
             scopes: s2.clone(),
             context: scopes.context.clone(),
         });
-        let response = cancel.race(guard.recv_async()).await;
+        let response = tokio::time::timeout(ASK_TIMEOUT, cancel.race(guard.recv_async())).await;
         drop(guard);
 
         let answer = match response {
-            Ok(Ok(a)) => a,
-            Ok(Err(_)) => {
+            Ok(Ok(Ok(a))) => a,
+            Ok(Ok(Err(_))) => {
                 warn!(tool = %tool, scope = %scope_display(), "permission channel closed");
                 return Err(deny(None));
             }
+            Ok(Err(_)) => return Err(deny(None)),
             Err(_) => return Err(deny(None)),
         };
 

@@ -11,7 +11,7 @@ use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use crate::mcp::{McpHandle, UNKNOWN_MCP};
-use crate::permissions::DEFAULT_DENY_GUIDANCE;
+use crate::permissions::{ASK_TIMEOUT, DEFAULT_DENY_GUIDANCE};
 use crate::task_set::TaskSet;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
 use crate::tools::{ToolContext, truncate_bytes};
@@ -325,16 +325,17 @@ async fn run_headless_question(
             id: request_id.clone(),
             questions: questions.clone(),
         });
-        ctx.cancel.race(guard.recv_async()).await
+        tokio::time::timeout(ASK_TIMEOUT, ctx.cancel.race(guard.recv_async())).await
     };
 
     let raw = match response {
-        Ok(Ok(s)) => s,
-        Ok(Err(_)) => {
+        Ok(Ok(Ok(s))) => s,
+        Ok(Ok(Err(_))) => {
             warn!("question answer channel closed");
             return done_error("question answer channel closed".to_string());
         }
-        Err(_) => return done_error("cancelled".to_string()),
+        Ok(Err(_)) => return done_error("cancelled".to_string()),
+        Err(_) => return done_error("question answer timed out".to_string()),
     };
 
     let answer = crate::tools::question::decode_answer(&raw).unwrap_or_else(|| {
