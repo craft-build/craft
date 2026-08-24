@@ -51,13 +51,13 @@ const TODO_WRITE_TOOL: &str = "todo_write";
 const TODO_UPDATE_METHOD_LEGACY: &str = "session/todo_update";
 const TODO_UPDATE_METHOD: &str = "_craft/session/todo_update";
 
-/// What the client still owes us. `ask` is the one outstanding request that
-/// blocks a tool (permission or elicitation): there can only be one, because
-/// both wait on the agent's single answer channel.
+/// What the client still owes us. `asks` holds every outstanding request
+/// that blocks a tool (permission or elicitation); tools run concurrently,
+/// so answers are matched by request id instead of assuming a single ask.
 #[derive(Default)]
 pub(crate) struct Pending {
     pub(crate) prompt: Option<RequestId>,
-    ask: Option<(i64, AskKind)>,
+    asks: HashMap<i64, AskKind>,
 }
 
 pub(crate) enum AskKind {
@@ -1297,13 +1297,14 @@ fn handle_notification(srv: &Server, method: &str) {
     match method {
         "session/cancel" => {
             if let Some(session) = &srv.session {
-                // Any answer still in flight belongs to the cancelled turn, so
-                // forget its id and let it be dropped on arrival.
+                // Any answers still in flight belong to the cancelled turn,
+                // so forget their ids and let them be dropped on arrival.
                 session
                     .pending
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .ask = None;
+                    .asks
+                    .clear();
                 let _ = session.handle.cancel_tx.try_send(());
             }
         }
@@ -1329,13 +1330,13 @@ fn handle_incoming_response(srv: &Server, raw: &Value) {
     let Some(id) = raw.get("id").and_then(Value::as_i64) else {
         return;
     };
-    let ask = session
+    let kind = session
         .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .ask
-        .take_if(|(ask_id, _)| *ask_id == id);
-    let Some((_, kind)) = ask else {
+        .asks
+        .remove(&id);
+    let Some(kind) = kind else {
         warn!(id, "response for an unknown request id");
         return;
     };
@@ -1484,6 +1485,28 @@ fn start_event_pump(
                             translate::subagent_content_update(parent_id, buf),
                         );
                     }
+                    // Asks must reach the client: the subagent blocks on the
+                    // session's shared answer channel, so dropping one wedges
+                    // the whole turn.
+                    AgentEvent::PermissionRequest {
+                        id, tool, scopes, ..
+                    } => forward_permission_ask(
+                        &out_tx,
+                        &pending,
+                        &next_request_id,
+                        &sid,
+                        id,
+                        &tool.to_string(),
+                        scopes,
+                    ),
+                    AgentEvent::QuestionRequest { id, questions } => forward_question_ask(
+                        &out_tx,
+                        &pending,
+                        &next_request_id,
+                        &sid,
+                        id,
+                        questions,
+                    ),
                     _ => {}
                 }
                 continue;
@@ -1511,38 +1534,26 @@ fn start_event_pump(
                 AgentEvent::PermissionRequest {
                     id, tool, scopes, ..
                 } => {
-                    let fields =
-                        ToolCallUpdateFields::new().title(format!("{tool}: {}", scopes.join(", ")));
-                    let request =
-                        AgentRequest::RequestPermissionRequest(RequestPermissionRequest::new(
-                            sid.clone(),
-                            ToolCallUpdate::new(ToolCallId::from(id), fields),
-                            permissions::permission_options(),
-                        ));
-                    ask_client(
+                    forward_permission_ask(
                         &out_tx,
                         &pending,
                         &next_request_id,
-                        AskKind::Permission,
-                        request,
+                        &sid,
+                        &id,
+                        &tool.to_string(),
+                        &scopes,
                     );
                     continue;
                 }
                 AgentEvent::QuestionRequest { id, questions } => {
-                    // The standardized `elicitation/create` form is the only
-                    // question channel; every client we ship against supports
-                    // it.
-                    if let Ok(request) =
-                        elicitation::form_request(sid.0.as_ref(), Some(id.clone()), &questions)
-                    {
-                        ask_client(
-                            &out_tx,
-                            &pending,
-                            &next_request_id,
-                            AskKind::Elicitation,
-                            AgentRequest::CreateElicitationRequest(request),
-                        );
-                    }
+                    forward_question_ask(
+                        &out_tx,
+                        &pending,
+                        &next_request_id,
+                        &sid,
+                        &id,
+                        &questions,
+                    );
                     continue;
                 }
                 AgentEvent::Done { reason, .. } => {
@@ -1667,7 +1678,7 @@ fn emit_todo_update(out_tx: &Sender<Value>, sid: &SessionId, todos: &serde_json:
     }
 }
 
-/// Sends a request the client must answer and records it as the outstanding
+/// Sends a request the client must answer and records it as an outstanding
 /// ask, registered before sending so the response can never race past us.
 fn ask_client(
     out_tx: &Sender<Value>,
@@ -1677,7 +1688,11 @@ fn ask_client(
     request: AgentRequest,
 ) -> i64 {
     let id = next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
-    pending.lock().unwrap_or_else(|e| e.into_inner()).ask = Some((id, kind));
+    pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .asks
+        .insert(id, kind);
     send(
         out_tx,
         Request {
@@ -1687,6 +1702,52 @@ fn ask_client(
         },
     );
     id
+}
+
+fn forward_permission_ask(
+    out_tx: &Sender<Value>,
+    pending: &PendingState,
+    next_request_id: &Arc<AtomicI64>,
+    sid: &SessionId,
+    id: &str,
+    tool: &str,
+    scopes: &[String],
+) {
+    let fields = ToolCallUpdateFields::new().title(format!("{tool}: {}", scopes.join(", ")));
+    let request = AgentRequest::RequestPermissionRequest(RequestPermissionRequest::new(
+        sid.clone(),
+        ToolCallUpdate::new(ToolCallId::new(id), fields),
+        permissions::permission_options(),
+    ));
+    ask_client(
+        out_tx,
+        pending,
+        next_request_id,
+        AskKind::Permission,
+        request,
+    );
+}
+
+fn forward_question_ask(
+    out_tx: &Sender<Value>,
+    pending: &PendingState,
+    next_request_id: &Arc<AtomicI64>,
+    sid: &SessionId,
+    id: &str,
+    questions: &[craft_agent::types::QuestionSpec],
+) {
+    // The standardized `elicitation/create` form is the only question channel;
+    // every client we ship against supports it.
+    if let Ok(request) = elicitation::form_request(sid.0.as_ref(), Some(id.to_string()), questions)
+    {
+        ask_client(
+            out_tx,
+            pending,
+            next_request_id,
+            AskKind::Elicitation,
+            AgentRequest::CreateElicitationRequest(request),
+        );
+    }
 }
 
 pub(crate) fn no_session() -> AcpError {
@@ -1738,6 +1799,10 @@ mod tests {
     }
 
     fn server_with_ask(kind: AskKind) -> (Server, Receiver<String>) {
+        server_with_asks(HashMap::from([(ANSWERED_ID, kind)]))
+    }
+
+    fn server_with_asks(asks: HashMap<i64, AskKind>) -> (Server, Receiver<String>) {
         let (answer_tx, answer_rx) = flume::unbounded();
         let (event_tx, event_rx) = flume::unbounded();
         let handle = InteractiveHandle {
@@ -1771,7 +1836,7 @@ mod tests {
                 current_model: String::new(),
                 current_thinking: "off".to_string(),
                 pending: Arc::new(Mutex::new(Pending {
-                    ask: Some((ANSWERED_ID, kind)),
+                    asks,
                     ..Default::default()
                 })),
                 title_sent: false,
@@ -1823,6 +1888,31 @@ mod tests {
 
         handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
         assert!(answer_rx.is_empty(), "the cancelled turn owns that answer");
+    }
+
+    #[tokio::test]
+    async fn concurrent_asks_each_get_their_answer() {
+        let (srv, answer_rx) = server_with_asks(HashMap::from([
+            (ANSWERED_ID, AskKind::Permission),
+            (UNKNOWN_ID, AskKind::Elicitation),
+        ]));
+
+        handle_incoming_response(
+            &srv,
+            &serde_json::json!({
+                "id": UNKNOWN_ID,
+                "result": { "action": "accept", "content": { "q1": "axum" } },
+            }),
+        );
+        handle_incoming_response(&srv, &allow_once(ANSWERED_ID));
+
+        let elicitation = answer_rx.try_recv().unwrap();
+        assert!(elicitation.contains("axum"), "first answer was not dropped");
+        assert_eq!(
+            answer_rx.try_recv().ok(),
+            Some(PermissionAnswer::AllowOnce.encode())
+        );
+        assert!(answer_rx.is_empty());
     }
 
     #[test]

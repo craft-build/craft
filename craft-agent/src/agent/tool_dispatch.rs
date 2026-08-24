@@ -317,13 +317,14 @@ async fn run_headless_question(
     let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
 
     let request_id = craft_storage::id::CraftId::generate().to_string();
-    let _ = ctx.event_tx.send(AgentEvent::QuestionRequest {
-        id: request_id.clone(),
-        questions: questions.clone(),
-    });
-
     let response = {
+        // Lock before asking: concurrent tools serialize on this channel, so
+        // the host's waiting ask is always the one this tool is blocked on.
         let guard = answer_rx.lock().await;
+        let _ = ctx.event_tx.send(AgentEvent::QuestionRequest {
+            id: request_id.clone(),
+            questions: questions.clone(),
+        });
         ctx.cancel.race(guard.recv_async()).await
     };
 
