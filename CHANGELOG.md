@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-08-24
+
+### Added
+
+- **lua**: `craft.model` so a keybind can switch model and thinking (`e5cbaa98`)
+- **ui**: flag discovered free models and sort them first in the picker (`0229ac25`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile
+- **providers/copilot**: use the keyring for the token (`dcf9cf9b`)
+- **ui**: reflow only the viewport on resize instead of the whole transcript (`ad268307`)
+
+### Fixed
+
+- **acp**: answer subagent asks and match answers by request id (`1fb5eaa9`), and merge model batches quietly as they land (`da7d867a`)
+- **agent**: bound the host answer wait so a dropped response cannot wedge a turn (`8ed1171b`)
+- **code_execution**: keep results a failed `gather` call didn't touch (`dd07ecdb`)
+- **deps**: patch crossterm for bracketed paste on Windows (`fefcaaa2`)
+- **desktop**: make the thinking menu expand upwards (`c295e5ce`)
+- **edit**: reindent a replacement when the match was fuzzy (`515b4ca0`)
+- **plugins**: tell the agent where user plugins actually live (`0b2e7bb3`)
+- **providers**: update DeepSeek prices and bill peak hours (`e523506b`)
+
 ## [0.13.1] - 2026-08-22
 
 ### Added
