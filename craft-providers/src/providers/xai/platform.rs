@@ -334,6 +334,7 @@ mod tests {
             }),
             supports_vision_override: Some(true),
             pricing: ModelPricing::ZERO,
+            discovered_free: false,
             max_output_tokens: Some(131_072),
             context_window: 500_000,
             thinking_fields: None,

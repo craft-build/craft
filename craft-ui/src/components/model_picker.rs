@@ -19,6 +19,7 @@ use crate::theme;
 
 const TITLE: &str = " Models ";
 const RECENT_SECTION: &str = "Recent";
+const FREE_LABEL: &str = "Free";
 const FREE_PREFIX: &str = "Free · ";
 
 fn footer_line() -> Line<'static> {
@@ -74,6 +75,7 @@ struct ModelEntry {
     provider_display: String,
     suffix: Option<String>,
     tier: String,
+    free: bool,
     override_tiers: Vec<ModelTier>,
 }
 
@@ -250,6 +252,11 @@ impl ModelPicker {
             }
         }
         provider_tabs.sort_by(|a, b| a.0.cmp(&b.0));
+        // Stable: keep each provider's curated order, but hoist free models
+        // ahead of paid ones inside its tab.
+        for (_, entries) in &mut provider_tabs {
+            entries.sort_by_key(|e| !e.free);
+        }
         for (name, entries) in provider_tabs {
             tabs.push(Tab {
                 title: name,
@@ -409,10 +416,10 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
             .collect::<Vec<_>>()
             .join("/")
     };
-    let tier = if free {
-        format!("{FREE_PREFIX}{tier}")
-    } else {
-        tier
+    let tier = match (free, tier.is_empty()) {
+        (true, true) => FREE_LABEL.to_string(),
+        (true, false) => format!("{FREE_PREFIX}{tier}"),
+        (false, _) => tier,
     };
     Some(ModelEntry {
         spec: spec.to_string(),
@@ -420,6 +427,7 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
         provider_display,
         suffix: None,
         tier,
+        free,
         override_tiers,
     })
 }
@@ -987,5 +995,70 @@ mod tests {
         let entry = p.picker.selected_item().expect("selection after refresh");
         assert_eq!(entry.spec, "zai/glm-5");
         assert_eq!(p.tabs[p.active_tab].title, "Z.AI");
+    }
+
+    fn discovered(id: &str, pricing: craft_providers::ModelPricing) -> craft_providers::ModelInfo {
+        craft_providers::ModelInfo {
+            pricing: Some(pricing),
+            ..craft_providers::ModelInfo::new(id.into())
+        }
+    }
+
+    const OX_SPEC: &str = "openrouter/stealth/ox-alpha";
+    const PAID_ID: &str = "vendor/paid-model";
+    const PAID_PRICING: craft_providers::ModelPricing = craft_providers::ModelPricing {
+        input: 3.0,
+        output: 15.0,
+        cache_write: 0.0,
+        cache_read: 0.0,
+        fast: None,
+    };
+
+    fn register_openrouter_models() {
+        model_registry::set_known_models(
+            "openrouter",
+            vec![
+                discovered("stealth/ox-alpha", craft_providers::ModelPricing::ZERO),
+                discovered(PAID_ID, PAID_PRICING),
+            ],
+        );
+    }
+
+    #[test]
+    fn zero_priced_discovery_marks_entry_free() {
+        register_openrouter_models();
+        let entry = parse_model_entry(OX_SPEC).unwrap();
+        assert!(
+            entry.tier.starts_with(FREE_PREFIX),
+            "zero-priced discovery must mark the entry free"
+        );
+    }
+
+    #[test]
+    fn paid_discovery_not_marked_free() {
+        register_openrouter_models();
+        let entry = parse_model_entry(&format!("openrouter/{PAID_ID}")).unwrap();
+        assert!(
+            !entry.tier.starts_with(FREE_PREFIX),
+            "paid discovery must not mark the entry free"
+        );
+    }
+
+    #[test]
+    fn free_models_sort_before_paid_within_a_provider() {
+        register_openrouter_models();
+        let models = Arc::new(ArcSwapOption::empty());
+        models.store(Some(Arc::new(vec![
+            format!("openrouter/{PAID_ID}"),
+            OX_SPEC.into(),
+        ])));
+        let mut p = ModelPicker::new(models);
+        p.open("");
+        let ids: Vec<&str> = p.tabs[p.active_tab]
+            .entries
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(ids, ["stealth/ox-alpha", PAID_ID]);
     }
 }

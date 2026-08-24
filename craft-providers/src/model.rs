@@ -245,6 +245,9 @@ pub struct Model {
     pub thinking_override: Option<ThinkingSupport>,
     pub supports_vision_override: Option<bool>,
     pub pricing: ModelPricing,
+    /// Discovery reported an explicit all-zero price. Distinct from a zero
+    /// `pricing`, which also covers "no price is known".
+    pub discovered_free: bool,
     /// `None` when unknown, see [`ProviderKind::fallback_max_output`].
     pub max_output_tokens: Option<u32>,
     pub context_window: u32,
@@ -263,9 +266,10 @@ impl Model {
         let discovered = discovered.as_ref();
         let tier = model_registry::tier_for(&spec, manifest.slug, static_entry.map(|e| e.tier));
         let family = static_entry.map_or(manifest.family, |entry| entry.family);
-        let pricing = discovered
-            .and_then(|info| info.pricing.clone())
-            .or_else(|| static_entry.map(|entry| entry.pricing.clone()))
+        let discovered_pricing = discovered.and_then(|info| info.pricing.as_ref());
+        let pricing = discovered_pricing
+            .or_else(|| static_entry.map(|entry| &entry.pricing))
+            .cloned()
             .unwrap_or_default();
         let max_output_tokens = discovered
             .and_then(|info| info.max_output_tokens)
@@ -285,6 +289,7 @@ impl Model {
             thinking_override: None,
             supports_vision_override: None,
             pricing,
+            discovered_free: discovered_pricing.is_some_and(ModelPricing::is_zero),
             max_output_tokens,
             context_window,
             thinking_fields: None,
@@ -486,12 +491,15 @@ impl Model {
 
     /// Free public models surfaced through the OpenCode family (Zen/Go),
     /// using the catalog's definition of free (zero input and output price),
-    /// the same one that gates `enable_free_models`.
+    /// the same one that gates `enable_free_models`, plus models a provider's
+    /// `/models` call reported at an explicit zero price.
     ///
     /// Queries the live catalog rather than `self.pricing`, which may not yet
-    /// reflect catalog prices when discovery hasn't seeded the registry.
+    /// reflect catalog prices when discovery hasn't seeded the registry, and
+    /// which reads zero for "price unknown" too.
     pub fn is_free(&self) -> bool {
-        crate::providers::opencode::free_model_if_available(&self.provider, &self.id)
+        self.discovered_free
+            || crate::providers::opencode::free_model_if_available(&self.provider, &self.id)
     }
 }
 
@@ -664,6 +672,14 @@ mod tests {
         cache_read: 44,
     };
     const RECORDED_COST: f64 = 0.25;
+    const FREE_MEANS_A_KNOWN_ZERO: &str = "only a price discovery reported as zero means free";
+    const PAID_PRICING: ModelPricing = ModelPricing {
+        input: 3.0,
+        output: 15.0,
+        cache_write: 0.0,
+        cache_read: 0.0,
+        fast: None,
+    };
 
     #[test_case(999, "999"         ; "under_thousand")]
     #[test_case(1_000, "1.0k"      ; "thousand")]
@@ -1068,6 +1084,25 @@ mod tests {
         let vision = |id| Model::from_spec(id).unwrap().supports_vision();
         assert!(vision("synthetic/syn:test-vision"));
         assert!(!vision("synthetic/syn:test-blind"));
+    }
+
+    /// "We could not read a price" must never reach the picker as "free", so
+    /// only an explicit zero from discovery sets the flag.
+    #[test_case(Some(ModelPricing::ZERO), true  ; "explicit_zero_is_free")]
+    #[test_case(Some(PAID_PRICING),       false ; "priced_is_not_free")]
+    #[test_case(None,                     false ; "unknown_price_is_not_free")]
+    fn discovered_pricing_decides_free(pricing: Option<ModelPricing>, expected: bool) {
+        let model_id = "test-discovered-free-model";
+        crate::model_registry::set_known_models(
+            "ollama",
+            vec![ModelInfo {
+                pricing,
+                ..ModelInfo::new(model_id.to_string())
+            }],
+        );
+
+        let model = Model::from_base(ManifestRegistry::get("ollama").unwrap(), "ollama", model_id);
+        assert_eq!(model.is_free(), expected, "{FREE_MEANS_A_KNOWN_ZERO}");
     }
 
     /// A schedule hung on the wrong manifest silently doubles every turn of a
