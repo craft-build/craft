@@ -176,6 +176,16 @@ craft.model.set({ spec = "zai/glm-5", thinking = "high" })
 craft.keymap.set("n", "<M-t>", function() craft.model.set({ thinking = "" }) end)
 ```
 
+## `craft.ui`
+
+- `craft.ui.set_window_title(title)` sets the terminal emulator's window title. Pass an empty string to clear it. The title passes through tmux, GNU screen, and zellij untouched, and control characters are stripped, so model text cannot inject escape sequences into the terminal. On exit Craft hands the title back to the shell, on terminals that support the title stack.
+
+```lua
+craft.ui.set_window_title("craft: " .. session_name)
+-- Give the title back to the shell:
+craft.ui.set_window_title("")
+```
+
 ## Prompt slots
 
 The system prompt is assembled from named slots. Two kinds exist:

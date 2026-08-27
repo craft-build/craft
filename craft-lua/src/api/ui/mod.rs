@@ -211,6 +211,15 @@ pub(crate) fn create_ui_table(
             })?,
         )?;
 
+        let title_tx = tx.clone();
+        t.set(
+            "set_window_title",
+            lua.create_function(move |_, title: String| {
+                let _ = title_tx.try_send(UiAction::SetWindowTitle(title));
+                Ok(())
+            })?,
+        )?;
+
         let action_tx = tx.clone();
         t.set(
             "action",
