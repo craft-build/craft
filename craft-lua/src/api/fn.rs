@@ -460,7 +460,7 @@ pub(crate) fn create_fn_table(
             let rest_tx = rest_tx.clone();
             async move {
                 let topline = view.get::<Option<i64>>("topline")?.unwrap_or(1);
-                let scroll_top = topline.saturating_sub(1).clamp(0, i64::from(u16::MAX)) as u16;
+                let scroll_top = topline.saturating_sub(1).clamp(0, i64::MAX) as u32;
                 try_pair!(ui_send(
                     rest_tx.as_ref(),
                     UiAction::WinRestView { scroll_top }
@@ -759,8 +759,8 @@ mod tests {
 
     #[tokio::test]
     async fn winsaveview_reports_the_viewport_one_based() {
-        const SCROLL_TOP: u16 = 6;
-        const LINE_COUNT: u16 = 100;
+        const SCROLL_TOP: u32 = 6;
+        const LINE_COUNT: u32 = 100;
         const HEIGHT: u16 = 24;
 
         let (tx, rx) = flume::unbounded::<UiAction>();
@@ -784,8 +784,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(err, None);
-        assert_eq!(view.get::<u16>("topline").unwrap(), SCROLL_TOP + 1);
-        assert_eq!(view.get::<u16>("line_count").unwrap(), LINE_COUNT);
+        assert_eq!(view.get::<u32>("topline").unwrap(), SCROLL_TOP + 1);
+        assert_eq!(view.get::<u32>("line_count").unwrap(), LINE_COUNT);
         assert_eq!(view.get::<u16>("height").unwrap(), HEIGHT);
         assert!(!view.get::<bool>("auto_scroll").unwrap());
     }
@@ -794,7 +794,7 @@ mod tests {
     #[test_case("{}", 0 ; "missing_topline_defaults_to_first_line")]
     #[test_case("{ topline = -5 }", 0 ; "below_range_clamps_to_first_line")]
     #[tokio::test]
-    async fn winrestview_forwards_zero_based_scroll_top(arg: &'static str, expected: u16) {
+    async fn winrestview_forwards_zero_based_scroll_top(arg: &'static str, expected: u32) {
         let (tx, rx) = flume::unbounded::<UiAction>();
         let lua = lua_with_view(Some(tx));
         let (ok, err): (bool, Option<String>) = lua

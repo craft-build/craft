@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::tasks::{TaskOutcome, TaskStatus};
-use crate::components::messages::{MessagesPanel, PromptProgress};
+use crate::components::messages::{MessagesPanel, PromptProgress, ScrollPos};
 use crate::components::render_hints::RenderHintsRegistry;
 use crate::components::tool_display::{
     append_annotation, output_limits_from_hints, tool_output_annotation,
@@ -276,8 +276,8 @@ impl Chat {
         self.messages_panel.scroll(delta);
     }
 
-    pub fn set_scroll_top(&mut self, top: u16) {
-        self.messages_panel.set_scroll_top(top);
+    pub fn scroll_to_row(&mut self, doc_row: u32) {
+        self.messages_panel.scroll_to_row(doc_row);
     }
 
     pub fn half_page(&self) -> i32 {
@@ -304,8 +304,8 @@ impl Chat {
         self.messages_panel.scroll_to_segment(segment_index);
     }
 
-    pub fn restore_scroll(&mut self, scroll_top: u16, auto_scroll: bool) {
-        self.messages_panel.restore_scroll(scroll_top, auto_scroll);
+    pub fn restore_scroll(&mut self, scroll: ScrollPos, auto_scroll: bool) {
+        self.messages_panel.restore_scroll(scroll, auto_scroll);
     }
 
     pub fn set_highlight_segment(&mut self, idx: Option<usize>) {
@@ -328,12 +328,12 @@ impl Chat {
         self.messages_panel.view(frame, area, has_selection);
     }
 
-    pub fn scroll_top(&self) -> u16 {
-        self.messages_panel.scroll_top()
+    pub fn scroll_pos(&self) -> ScrollPos {
+        self.messages_panel.scroll_pos()
     }
 
-    pub fn segment_heights(&self) -> Vec<u16> {
-        self.messages_panel.segment_heights()
+    pub fn scroll_doc_row(&self) -> u32 {
+        self.messages_panel.scroll_doc_row()
     }
 
     pub fn segment_search_texts(&self) -> Vec<&str> {

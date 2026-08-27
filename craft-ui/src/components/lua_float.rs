@@ -537,12 +537,12 @@ fn render_window(frame: &mut Frame, win: &mut FloatWindow, popup: Rect) {
         frame.render_widget(Paragraph::new(pinned), pa);
     }
 
-    if scrollable as u16 > win.viewport_h {
+    if scrollable as u32 > u32::from(win.viewport_h) {
         render_vertical_scrollbar(
             frame,
             scroll_area,
-            scrollable as u16,
-            win.scroll_offset as u16,
+            scrollable as u32,
+            win.scroll_offset as u32,
         );
     }
 }
