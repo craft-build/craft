@@ -19,6 +19,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const FAST_LABEL: &str = " [fast]";
 const YOLO_LABEL: &str = " [yolo]";
+const YOLO_DIM_FACTOR: f32 = 0.5;
 const TRUNCATE_PREFIX: &str = "..";
 
 const CONTEXT_BAR_WIDTH: usize = 10;
@@ -266,7 +267,10 @@ pub fn view_model_row(frame: &mut Frame, area: Rect, ctx: &StatusBarContext) {
 
     let mut right_spans = Vec::new();
     if ctx.yolo {
-        right_spans.push(Span::styled(YOLO_LABEL, theme::current().error));
+        right_spans.push(Span::styled(
+            YOLO_LABEL,
+            theme::dim_style(theme::current().error, YOLO_DIM_FACTOR),
+        ));
     }
     right_spans.push(Span::styled(
         format!(
