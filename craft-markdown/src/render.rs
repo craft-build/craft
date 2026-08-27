@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::iter;
 use std::mem;
 
-use craft_highlight::CodeHighlighter;
+use craft_highlight::{CodeHighlighter, StyledSegment};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
@@ -112,17 +112,18 @@ impl Line {
 
 /// Convenience wrapper around [`Renderer::render`] for one-shot use.
 pub fn render(text: &str, width: u16) -> Vec<Line> {
-    Renderer::new().render(text, width, 0)
+    Renderer::new().render(text, width)
 }
 
 /// Reuses highlighter and table-width caches across calls so streaming
 /// (successive prefixes of a growing message) doesn't re-highlight completed
-/// code lines. Bump `theme_gen` to flush caches after a theme change.
+/// code lines. Caches are flushed automatically when the syntax theme changes.
 pub struct Renderer {
     highlighters: Vec<CodeHighlighter>,
     table_col_widths: Vec<Vec<usize>>,
     theme_gen: u64,
     wrap_paragraphs: bool,
+    incremental: bool,
 }
 
 impl Default for Renderer {
@@ -130,8 +131,9 @@ impl Default for Renderer {
         Self {
             highlighters: Vec::new(),
             table_col_widths: Vec::new(),
-            theme_gen: 0,
+            theme_gen: craft_highlight::theme_generation(),
             wrap_paragraphs: true,
+            incremental: false,
         }
     }
 }
@@ -150,7 +152,18 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self, text: &str, width: u16, theme_gen: u64) -> Vec<Line> {
+    /// For successive prefixes of one growing message: keeps per-block
+    /// highlighter state so a new token costs one line, not one block.
+    pub fn streaming() -> Self {
+        Self {
+            wrap_paragraphs: false,
+            incremental: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn render(&mut self, text: &str, width: u16) -> Vec<Line> {
+        let theme_gen = craft_highlight::theme_generation();
         if theme_gen != self.theme_gen {
             self.highlighters.clear();
             self.theme_gen = theme_gen;
@@ -163,6 +176,7 @@ impl Renderer {
             table_idx: 0,
             highlighters: &mut self.highlighters,
             table_col_widths: &mut self.table_col_widths,
+            incremental: self.incremental,
         };
         let ctx = RenderCtx {
             width,
@@ -190,6 +204,25 @@ struct RenderState<'a> {
     table_idx: usize,
     highlighters: &'a mut Vec<CodeHighlighter>,
     table_col_widths: &'a mut Vec<Vec<usize>>,
+    incremental: bool,
+}
+
+impl RenderState<'_> {
+    /// A streaming block keeps growing, so it advances its own highlighter and
+    /// pays only for the lines that just arrived. Everyone else renders text
+    /// that is already finished, where the shared content cache turns a
+    /// re-render at a new width into a lookup.
+    fn code_segments(&mut self, lang: &str, code: &str) -> Vec<Vec<StyledSegment>> {
+        if !self.incremental {
+            return craft_highlight::highlight_block(lang, code)
+                .as_ref()
+                .clone();
+        }
+        if self.code_idx >= self.highlighters.len() {
+            self.highlighters.push(CodeHighlighter::new(lang));
+        }
+        self.highlighters[self.code_idx].update(code).to_vec()
+    }
 }
 
 /// Streaming can split tokens differently than a oneshot render because the
@@ -229,10 +262,7 @@ fn render_block(
         }
         Block::Code { lang, code } => {
             ensure_blank_line(lines);
-            if state.code_idx >= state.highlighters.len() {
-                state.highlighters.push(CodeHighlighter::new(lang));
-            }
-            let segments: Vec<_> = state.highlighters[state.code_idx].update(code).to_vec();
+            let segments = state.code_segments(lang, code);
             let start = lines.len();
             for segs in segments {
                 let mut spans = vec![Span::new(CODE_BAR, StyleToken::CodeBar)];
@@ -764,6 +794,54 @@ mod tests {
     use super::*;
     use test_case::test_case;
 
+    use std::iter;
+
+    use syntect::highlighting::{Theme, ThemeSet};
+
+    const NARROW_WIDTH: u16 = 24;
+    const COLORED_THEME: &str = "base16-ocean.dark";
+
+    /// The code bodies wrap at `NARROW_WIDTH`, so the reuse tests below can
+    /// interleave widths and mean it.
+    const SAME_BODY_AS_RUST: &str = "```rust\nfn x() { let y = 1; let z = y + 2; }\n```";
+    const SAME_BODY_AS_PYTHON: &str = "```python\nfn x() { let y = 1; let z = y + 2; }\n```";
+    const LONG_RUST_BLOCK: &str =
+        "```rust\nfn a() { let a = 1; let b = 2; }\nfn b() {}\nlet c = 3;\n```";
+    const SHORT_RUST_BLOCK: &str = "```rust\nlet c = 3;\n```";
+    const STREAMED_CODE: &str = "```rust\nfn main() {\n    let x = 1;\n}\n```";
+
+    const AGREEMENT_CORPUS: &[&str] = &[
+        "hello world\n# heading\n\npara",
+        "| H1 | H2 |\n| --- | --- |\n| a | b |\n| c | d |",
+        "## title with `code`\n\n- one\n- two\n- three\n\n```py\nx=1\ny=2\n```\nend",
+        "```notalang\nplain body\nsecond line\n```",
+        "```\n```",
+        "```rust\nlet a = 1;\n\nlet b = 2;   \n```",
+        "- item\n\n  ```rust\n  fn nested() {}\n  ```\n\n- next",
+        "text\n\n```python\ndef f():\n    return 1\n```\n\ntail",
+        "```rust\nfn a() {}\nlet x = 1;\n```\n\n```python\nx = 1\n```",
+    ];
+
+    /// The syntax theme is a process global. Nextest gives every test its own
+    /// process, `cargo test` does not, so a test holds this for as long as it
+    /// cares about the palette and no sibling's swap lands mid output.
+    fn exclusive_theme() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    const STALE_REUSE: &str = "a reused renderer must render like a fresh one";
+    const INDISTINGUISHABLE: &str =
+        "the two renders must differ, otherwise the assertion below cannot fail";
+
+    /// The default theme paints every scope the same color, and
+    /// `coalesce_adjacent_spans` then merges a whole line into one span, so a
+    /// language mixup would render byte-identical and the reuse assertions
+    /// below could not see it.
+    fn use_colored_theme() {
+        craft_highlight::set_theme(ThemeSet::load_defaults().themes[COLORED_THEME].clone());
+    }
+
     const TEST_WIDTH: u16 = 80;
 
     fn find_span<'a>(lines: &'a [Line], text: &str) -> Option<&'a Span> {
@@ -955,12 +1033,11 @@ mod tests {
     fn renderer_caches_table_column_widths_across_calls() {
         let mut r = Renderer::new();
         let width = 120;
-        r.render("| A | B |\n| --- | --- |\n| hi | there |", width, 0);
+        r.render("| A | B |\n| --- | --- |\n| hi | there |", width);
         let widths_after_first = r.table_col_widths[0].clone();
         r.render(
             "| A | B |\n| --- | --- |\n| hi | there |\n| longer | x |",
             width,
-            0,
         );
         for (i, (&old, &new)) in widths_after_first
             .iter()
@@ -969,16 +1046,6 @@ mod tests {
         {
             assert!(new >= old, "table width shrank at col {i}: {old} -> {new}");
         }
-    }
-
-    #[test]
-    fn renderer_caches_highlighter_state_across_streaming_updates() {
-        let mut r = Renderer::new();
-        let text = "```rust\nfn main() {}\n```";
-        let a = r.render(text, TEST_WIDTH, 0);
-        let b = r.render(text, TEST_WIDTH, 0);
-        assert_eq!(a, b, "stable input must produce stable output");
-        assert_eq!(r.highlighters.len(), 1);
     }
 
     #[test]
@@ -1024,29 +1091,107 @@ mod tests {
         assert!(!truncate_long_lines(&without_nl).ends_with('\n'));
     }
 
+    /// A `Renderer` that is not `streaming()` is reused across every message and
+    /// every width in the transcript. The empty `highlighters` pins that only
+    /// the content cache is in play, and that cache ignores width, so revisiting
+    /// a width must not hand back the wrapping of the one in between.
+    #[test_case(SAME_BODY_AS_RUST, SAME_BODY_AS_PYTHON; "language_changes_at_the_same_block_index")]
+    #[test_case(LONG_RUST_BLOCK, SHORT_RUST_BLOCK; "code_body_shrinks_at_the_same_block_index")]
+    fn a_reused_renderer_renders_each_text_like_a_fresh_one(first: &str, second: &str) {
+        let _theme = exclusive_theme();
+        use_colored_theme();
+        let fresh = |text: &str, width| Renderer::unwrapped().render(text, width);
+        assert_ne!(
+            fresh(first, TEST_WIDTH),
+            fresh(second, TEST_WIDTH),
+            "{INDISTINGUISHABLE}"
+        );
+        assert!(
+            fresh(first, NARROW_WIDTH).len() > fresh(first, TEST_WIDTH).len(),
+            "the code must actually wrap at the narrow width"
+        );
+
+        let mut reused = Renderer::unwrapped();
+        for (text, width) in [
+            (first, TEST_WIDTH),
+            (second, NARROW_WIDTH),
+            (first, NARROW_WIDTH),
+            (second, TEST_WIDTH),
+            (first, TEST_WIDTH),
+        ] {
+            assert_eq!(
+                reused.render(text, width),
+                fresh(text, width),
+                "{STALE_REUSE}: text={text:?} width={width}"
+            );
+        }
+        assert!(
+            reused.highlighters.is_empty(),
+            "the non-incremental path must use the content cache, not position-keyed highlighters"
+        );
+    }
+
+    /// A message goes through the streaming renderer while it arrives and
+    /// through the cached path forever after, so any disagreement shows up as a
+    /// flicker the moment it goes static. Nothing streams through a wrapping
+    /// renderer, so this is the only convergence that has to hold.
     #[test]
-    fn streaming_matches_oneshot() {
-        const CORPUS: &[&str] = &[
-            "hello world\n# heading\n\npara",
-            "```rust\nfn main() {}\n```",
-            "| H1 | H2 |\n| --- | --- |\n| a | b |\n| c | d |",
-            "## title with `code`\n\n- one\n- two\n- three\n\n```py\nx=1\ny=2\n```\nend",
-        ];
-        const WIDTHS: &[u16] = &[20, 40, 80];
-        for text in CORPUS {
-            for &w in WIDTHS {
-                let oneshot = Renderer::new().render(text, w, 0);
-                let mut streamer = Renderer::new();
+    fn streamed_prefixes_end_where_the_cached_path_starts() {
+        const WIDTHS: &[u16] = &[20, 40, TEST_WIDTH];
+        let _theme = exclusive_theme();
+        use_colored_theme();
+        let wrapping_block = format!("```rust\nlet x = [{}];\n```", "\"aa\", ".repeat(40));
+        let corpus = AGREEMENT_CORPUS
+            .iter()
+            .copied()
+            .chain(iter::once(wrapping_block.as_str()));
+
+        for text in corpus {
+            for &width in WIDTHS {
+                let mut streamer = Renderer::streaming();
                 for end in 1..text.len() {
-                    if !text.is_char_boundary(end) {
-                        continue;
+                    if text.is_char_boundary(end) {
+                        let _ = streamer.render(&text[..end], width);
                     }
-                    let _ = streamer.render(&text[..end], w, 0);
                 }
-                let final_streamed = streamer.render(text, w, 0);
-                assert_eq!(final_streamed, oneshot, "mismatch text={text:?} width={w}");
+                assert_eq!(
+                    streamer.render(text, width),
+                    Renderer::unwrapped().render(text, width),
+                    "{STALE_REUSE}: text={text:?} width={width}"
+                );
             }
         }
+    }
+
+    /// A theme change lands while a message is still arriving. Adopting the new
+    /// generation is not enough: the highlighter still holds `completed_lines`
+    /// of segments in the old palette, and unless the flush really drops them
+    /// the user watches two-colored code until the message ends.
+    #[test]
+    fn a_mid_stream_theme_change_repaints_already_streamed_lines() {
+        let _theme = exclusive_theme();
+        craft_highlight::set_theme(Theme::default());
+        let under_old_theme = Renderer::streaming().render(STREAMED_CODE, TEST_WIDTH);
+
+        let mut streamer = Renderer::streaming();
+        let switch_at = STREAMED_CODE.len() / 2;
+        for end in 1..STREAMED_CODE.len() {
+            if !STREAMED_CODE.is_char_boundary(end) {
+                continue;
+            }
+            if end == switch_at {
+                use_colored_theme();
+            }
+            let _ = streamer.render(&STREAMED_CODE[..end], TEST_WIDTH);
+        }
+
+        let under_new_theme = Renderer::streaming().render(STREAMED_CODE, TEST_WIDTH);
+        assert_ne!(under_old_theme, under_new_theme, "{INDISTINGUISHABLE}");
+        assert_eq!(
+            streamer.render(STREAMED_CODE, TEST_WIDTH),
+            under_new_theme,
+            "already streamed lines must be repainted with the current theme"
+        );
     }
 
     #[test]
@@ -1087,28 +1232,10 @@ mod tests {
     }
 
     #[test]
-    fn theme_gen_change_clears_highlighter_cache() {
-        let mut r = Renderer::new();
-        let code = "```rust\nlet x = 42;\n```";
-        r.render(code, TEST_WIDTH, 0);
-        assert_eq!(
-            r.highlighters.len(),
-            1,
-            "one highlighter after first render"
-        );
-        let gen0_output = r.render(code, TEST_WIDTH, 0);
-        assert_eq!(r.highlighters.len(), 1);
-        let gen1_output = r.render(code, TEST_WIDTH, 1);
-        assert_eq!(r.highlighters.len(), 1, "highlighter rebuilt at new gen");
-        assert_eq!(r.theme_gen, 1, "theme_gen updated");
-        assert_eq!(gen0_output, gen1_output, "same theme produces same output");
-    }
-
-    #[test]
     fn unwrapped_mode_does_not_wrap_paragraphs() {
         let long_para = "word ".repeat(50);
         let mut r = Renderer::unwrapped();
-        let lines = r.render(long_para.trim(), 30, 0);
+        let lines = r.render(long_para.trim(), 30);
         let para_lines: Vec<_> = lines
             .iter()
             .filter(|l| l.kind == LineKind::Paragraph)
@@ -1125,7 +1252,7 @@ mod tests {
         let long_code = "a".repeat(60);
         let input = format!("```\n{long_code}\n```");
         let mut r = Renderer::unwrapped();
-        let lines = r.render(&input, 20, 0);
+        let lines = r.render(&input, 20);
         let code_lines: Vec<_> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
         assert!(
             code_lines.len() > 1,
@@ -1155,21 +1282,14 @@ mod tests {
 
     #[test]
     fn multiple_code_blocks_get_separate_highlighters() {
-        let mut r = Renderer::new();
-        let two_blocks = "```rust\nfn a() {}\n```\n\n```python\nx = 1\n```";
-        r.render(two_blocks, TEST_WIDTH, 0);
-        assert_eq!(
-            r.highlighters.len(),
-            2,
-            "each code block gets its own highlighter"
+        let mut r = Renderer::streaming();
+        r.render(
+            "```rust\nfn a() {}\n```\n\n```python\nx = 1\n```",
+            TEST_WIDTH,
         );
-        let one_block = "```rust\nfn a() {}\n```";
-        r.render(one_block, TEST_WIDTH, 0);
-        assert_eq!(
-            r.highlighters.len(),
-            1,
-            "highlighters truncated to match block count"
-        );
+        assert_eq!(r.highlighters.len(), 2);
+        r.render("```rust\nfn a() {}\n```", TEST_WIDTH);
+        assert_eq!(r.highlighters.len(), 1);
     }
 
     #[test]

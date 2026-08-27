@@ -18,6 +18,7 @@ mod hyperlink;
 pub mod image;
 mod image_render;
 mod markdown;
+pub use markdown::text_to_lines;
 mod render_worker;
 pub mod repaint;
 mod selection;
