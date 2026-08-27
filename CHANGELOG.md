@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-08-27
+
+### Added
+
+- **code_execution**: MCP tools callable from python (`87709e1c`)
+- **config**: `--no-rtk` moved into `agent.rtk` (`f54d392f`)
+- **edit**: `edit_lines` on by default (`b4888f7b`)
+- **lua**: tasks picker moved to Lua, running subagents first (`4233872d`)
+- **ui**: window title support with lua binding (`5481f2f0`), dimmed yolo in the status bar (`daf02a25`), and the `/yolo` toggle kept across session resume (`2b1324ea`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile
+- **markdown**: cache highlighted code, a rebuild is forty times cheaper (`37a237e3`)
+- **ui**: one wrap engine, ten times faster than a Paragraph (`bb9b3321`), transcript scrolling in (segment, row) (`e44ed861`), selections anchored to segments (`5222420c`), and one honest height per segment (`3d3ab9e5`)
+
+### Fixed
+
+- **edit**: stop sinking a replacement that adds a nesting level (`f135ceb2`)
+- **ui**: aim the reflow window at the visible rows, not the anchor surroundings (`c4dfed9f`)
+
 ## [0.13.2] - 2026-08-24
 
 ### Added
