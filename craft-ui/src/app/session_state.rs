@@ -154,6 +154,7 @@ impl SessionState {
                 .then(|| self.flow.workstream_id.clone()),
             flow_stage: self.flow.stage.map(|s| s.as_str().to_string()),
             context_window_overrides: self.context_window_overrides.clone(),
+            yolo: permissions.persisted_yolo(),
         }
     }
 

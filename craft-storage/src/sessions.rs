@@ -168,6 +168,10 @@ pub struct SessionMeta {
     pub flow_stage: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub context_window_overrides: HashMap<String, u32>,
+    /// `None` when the user never set yolo for this session, which is what
+    /// makes `--yolo` a property of the invocation rather than of the log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo: Option<bool>,
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells
@@ -2897,6 +2901,25 @@ mod tests {
 
         let loaded = TestSession::load_from(session.id.id(), dir).unwrap();
         assert!(loaded.meta.fast);
+    }
+
+    #[test]
+    fn session_meta_yolo_backward_compat() {
+        let json = r#"{"mode":"build"}"#;
+        let meta: super::SessionMeta = serde_json::from_str(json).unwrap();
+        assert!(meta.yolo.is_none());
+    }
+
+    #[test]
+    fn session_yolo_persists_through_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.meta.yolo = Some(true);
+        session.save_to(dir).unwrap();
+
+        let loaded = TestSession::load_from(session.id.id(), dir).unwrap();
+        assert_eq!(loaded.meta.yolo, Some(true));
     }
 
     #[test]

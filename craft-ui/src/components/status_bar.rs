@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const FAST_LABEL: &str = " [fast]";
+const YOLO_LABEL: &str = " [yolo]";
 const TRUNCATE_PREFIX: &str = "..";
 
 const CONTEXT_BAR_WIDTH: usize = 10;
@@ -50,6 +51,7 @@ pub struct StatusBarContext<'a> {
     pub retry_info: Option<&'a RetryInfo>,
     pub thinking_label: Option<Cow<'static, str>>,
     pub fast: bool,
+    pub yolo: bool,
     pub restoring: bool,
 }
 
@@ -262,7 +264,11 @@ pub fn view_model_row(frame: &mut Frame, area: Rect, ctx: &StatusBarContext) {
         left_spans.push(Span::styled(FAST_LABEL, t.status_dim));
     }
 
-    let mut right_spans = vec![Span::styled(
+    let mut right_spans = Vec::new();
+    if ctx.yolo {
+        right_spans.push(Span::styled(YOLO_LABEL, theme::current().error));
+    }
+    right_spans.push(Span::styled(
         format!(
             "{}/{} ({}%) ",
             format_tokens(ctx.stats.context_size),
@@ -270,7 +276,7 @@ pub fn view_model_row(frame: &mut Frame, area: Rect, ctx: &StatusBarContext) {
             pct,
         ),
         Style::new().fg(t.text_secondary),
-    )];
+    ));
     let (filled, empty) = context_bar(pct);
     right_spans.push(Span::styled(filled, t.accent));
     right_spans.push(Span::styled(empty, t.status_dim));
@@ -498,6 +504,47 @@ mod tests {
         let (filled, empty) = context_bar(pct);
         assert_eq!(filled.chars().count(), expected.0);
         assert_eq!(empty.chars().count(), expected.1);
+    }
+
+    /// Yolo now outlives the process that turned it on, so the one-shot flash
+    /// is no longer enough to tell the user their prompts are being skipped.
+    #[test_case(true  => true  ; "a_bypassed_session_says_so")]
+    #[test_case(false => false ; "a_prompting_session_stays_quiet")]
+    fn the_model_row_advertises_yolo(yolo: bool) -> bool {
+        const BAR_WIDTH: u16 = 80;
+        let ctx = StatusBarContext {
+            status: &Status::Idle,
+            mode_label: "normal".into(),
+            mode_style: Style::new(),
+            model_id: "test-model",
+            stats: UsageStats {
+                context_size: 100,
+                cost: None,
+                global_cost: None,
+                context_window: 1000,
+                show_global: false,
+            },
+            auto_scroll: true,
+            chat_name: None,
+            retry_info: None,
+            thinking_label: None,
+            fast: false,
+            yolo,
+            restoring: false,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(BAR_WIDTH, 4)).unwrap();
+        terminal
+            .draw(|f| view_model_row(f, f.area(), &ctx))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+            .contains(YOLO_LABEL.trim())
     }
 
     #[test_case("~/projects/craft:main", 30, "~/projects/craft:main" ; "fits_untouched")]

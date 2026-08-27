@@ -335,14 +335,13 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     };
 
     let working_dir = params.initial_wd.to_string_lossy().into_owned();
+    let mut permissions_config = params.permissions_config;
+    permissions_config.yolo |= params.yolo;
     let permissions = Arc::new(PermissionManager::new(
-        params.permissions_config,
+        permissions_config,
         params.initial_wd.clone(),
         Arc::clone(&params.plugin_rules),
     ));
-    if params.yolo {
-        permissions.toggle_yolo();
-    }
     if params.auto_review {
         permissions.toggle_auto_review();
     }

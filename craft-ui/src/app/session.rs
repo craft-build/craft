@@ -9,7 +9,7 @@ use crate::components::{Action, LoadedSession};
 use craft_agent::agent::estimate_message_tokens;
 use craft_providers::{Model, TokenUsage};
 use craft_storage::id::CraftId;
-use craft_storage::sessions::StoredSubagent;
+use craft_storage::sessions::{SessionMeta, StoredSubagent};
 
 use crate::AppSession;
 
@@ -292,6 +292,7 @@ impl App {
     pub(crate) fn restore_resumed_session(&mut self) {
         self.permissions
             .load_session_rules(stored_to_rules(&self.state.session.meta.session_rules));
+        self.apply_stored_yolo(&self.state.session.meta);
         self.restore_display();
         self.flush_restored_queue();
         for w in self.state.warnings.drain(..) {
@@ -323,9 +324,19 @@ impl App {
         }
     }
 
+    /// Shared by every restore path: `focus_session` picks between resuming in
+    /// place and spawning a fresh runtime by tab state alone, so the same key
+    /// press has to land on the same permissions. The stored value replaces
+    /// whatever the previous session was running with, and a session that
+    /// stored nothing falls back to `--yolo` / `always_yolo`.
+    fn apply_stored_yolo(&self, meta: &SessionMeta) {
+        self.permissions.set_session_yolo(meta.yolo);
+    }
+
     pub(super) fn reset_session(&mut self) -> Vec<Action> {
         self.checkpoint_now();
         self.reset_ui_chrome();
+        self.permissions.set_session_yolo(None);
         let ended = self.state.session.id.clone();
         self.lua_event_handle
             .fire_autocmd("SessionReset", serde_json::json!({ "session_id": ended }));
@@ -400,6 +411,7 @@ impl App {
         self.checkpoint_now();
         self.permissions
             .load_session_rules(stored_to_rules(&session.meta.session_rules));
+        self.apply_stored_yolo(&session.meta);
         self.state =
             SessionState::from_session(session, fallback_model, &self.storage, &self.model_policy);
         for w in self.state.warnings.drain(..) {
