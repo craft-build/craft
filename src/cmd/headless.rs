@@ -28,7 +28,6 @@ pub struct HeadlessOptions {
     pub yolo: bool,
     pub auto_review: bool,
     pub no_plugins: bool,
-    pub no_rtk: bool,
     pub extra_excluded_tools: Vec<&'static str>,
     /// Extra environment context (e.g. shell history) injected before the prompt.
     pub context: Vec<String>,
@@ -75,7 +74,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         .context("load init.lua files")?;
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config(opts.no_rtk)
+        .into_config()
         .context("invalid config")?;
     config.permissions = load_permissions(&cwd);
 

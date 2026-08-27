@@ -31,7 +31,6 @@ pub async fn run(args: RunCommand) -> Result<()> {
         yolo: args.yolo,
         auto_review: args.auto_review,
         no_plugins: args.no_plugins,
-        no_rtk: false,
         extra_excluded_tools: vec![],
         context: vec![],
         persist_session: !args.no_session,

@@ -44,7 +44,6 @@ async fn init(model_spec: Option<String>) -> Result<()> {
         yolo: false,
         auto_review: false,
         no_plugins: false,
-        no_rtk: false,
         extra_excluded_tools: vec![],
         context: vec![],
         persist_session: false,
@@ -75,7 +74,7 @@ async fn ingest(source: PathBuf, model_spec: Option<String>) -> Result<()> {
         .context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
 
     setup::init_logging(&config.storage);

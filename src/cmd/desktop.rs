@@ -20,7 +20,6 @@ pub struct DesktopArgs {
     pub yolo: bool,
     pub no_commands: bool,
     pub no_plugins: bool,
-    pub no_rtk: bool,
     pub prompt: Option<String>,
 }
 
@@ -91,7 +90,7 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
 
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config(args.no_rtk)
+        .into_config()
         .context("invalid config")?;
     config.permissions = load_permissions(&cwd);
 

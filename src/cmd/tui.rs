@@ -90,7 +90,7 @@ fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config
 
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config(cli.no_rtk)
+        .into_config()
         .context("invalid config")?;
     config.permissions = load_permissions(cwd);
 
@@ -471,7 +471,7 @@ mod tests {
 
     fn test_config() -> Config {
         RawConfig::default()
-            .into_config(false)
+            .into_config()
             .expect("default config")
     }
 

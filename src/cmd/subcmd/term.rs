@@ -124,7 +124,6 @@ async fn run_query(
         yolo: false,
         auto_review: false,
         no_plugins: false,
-        no_rtk: false,
         extra_excluded_tools: vec![],
         context,
         persist_session: false,

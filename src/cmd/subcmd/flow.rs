@@ -75,7 +75,7 @@ async fn run_flow(
         .context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
     let _ = load_permissions(&cwd);
 

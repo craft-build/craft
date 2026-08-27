@@ -52,7 +52,7 @@ Runtime difference - Craft also significantly retools the async runtime and netw
 - **Tool dedup cache** - caches read-only tool results (`read`, `grep`, `glob`, `index`) keyed by argument hash, bounded to 64 entries with FIFO eviction and cleared on compaction. Cache hits are prefixed with `[cached]`.
 - **Lua embed API** - `embed(text)` and `similarity(a, b)` are exposed to the Lua plugin host through a channel-based bridge.
 - Compact system prompt, tool descriptions, and examples throughout.
-- Optional [rtk](https://github.com/rtk-ai/rtk) support to cut bash output tokens (disable with `--no-rtk`).
+- Optional [rtk](https://github.com/rtk-ai/rtk) support to cut bash output tokens (disable with `craft.setup({ agent = { rtk = false } })` in your `init.lua`).
 
 ### Reliability and guardrails
 

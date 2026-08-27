@@ -1761,7 +1761,7 @@ fn cancelled_bash_keeps_streamed_output_as_partial() {
             ctx.cancel = token;
             // The rtk probe costs up to two 2s job waits before the command
             // even starts: pointless here, and a flake risk under load.
-            ctx.config.no_rtk = true;
+            ctx.config.rtk = false;
             let input = serde_json::json!({ "command": BASH_PARTIAL_CMD });
             result_tx
                 .send(exec_with_ctx(&reg, "bash", input, &ctx).await)

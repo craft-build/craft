@@ -586,7 +586,7 @@ fn load_provider_model_policy(
         .context("load init.lua files")?;
     let config = raw
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
     Ok(config.provider.model_policy)
 }
@@ -660,7 +660,7 @@ pub async fn outline(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
 
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
     config.validate()?;
     config.permissions = load_permissions(&cwd);
@@ -754,7 +754,7 @@ pub fn prompt(
         .context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
     host.load_builtins(&config.plugins)
         .context("load builtin plugins")?;

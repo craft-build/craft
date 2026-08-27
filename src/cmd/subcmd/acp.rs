@@ -42,7 +42,7 @@ pub async fn run(
 
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config(false)
+        .into_config()
         .context("invalid config")?;
     config.permissions = load_permissions(&cwd);
 

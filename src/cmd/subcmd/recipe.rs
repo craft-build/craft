@@ -165,7 +165,6 @@ pub(crate) async fn execute_recipe(
         yolo: opts.yolo,
         auto_review: opts.auto_review,
         no_plugins: opts.no_plugins,
-        no_rtk: false,
         extra_excluded_tools: vec![],
         context: vec![],
         persist_session: !opts.no_session,

@@ -153,7 +153,7 @@ local function denied_command_reason(command)
 end
 
 local function rtk_rewrite(command, ctx)
-  if ctx:config("no_rtk") then
+  if not ctx:config("rtk", true) then
     return nil
   end
 

@@ -150,6 +150,7 @@ Remappable actions:
 | `post_compaction_instructions` | String | `none` | - | Extra instructions the agent receives after any compaction (e.g. re-read plan.md) |
 | `interpreter_max_memory_mb` | usize | `50` | 10 | Memory limit for code interpreter (MB) |
 | `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |
+| `rtk` | bool | `true` | - | Rewrite bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed |
 
 ### `agent.validation`
 
