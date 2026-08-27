@@ -257,14 +257,39 @@ fn rebase(drift: &HashMap<&str, &str>, indent: &str) -> String {
 }
 
 // The model can write `old_string` sloppily and `new_string` in the file's own
-// frame, and then there is nothing left to correct.
+// frame, and then there is nothing left to correct. Two independent signs of
+// that, either one enough: every column the replacement uses is already a file
+// column, or the replacement's base column is the file's one rather than the
+// model's. The second matters because a replacement that adds a nesting level
+// uses a column neither side has seen, which defeats the first on its own and
+// would push the whole block a level deeper.
+//
+// The bases only tell the frames apart when they differ; when they agree the
+// drift is a widening of the inner levels, which the column test still catches
+// and reindent has to correct otherwise.
 fn written_in_file_frame(drift: &HashMap<&str, &str>, replacement: &str) -> bool {
-    replacement.split('\n').all(|line| {
-        line.trim().is_empty()
-            || drift
-                .values()
-                .any(|&file_indent| indent_of(line) == file_indent)
-    })
+    let mut base: Option<(&str, &str)> = None;
+    for (&model_indent, &file_indent) in drift {
+        if base.is_none_or(|(m, _)| model_indent.len() < m.len()) {
+            base = Some((model_indent, file_indent));
+        }
+    }
+    let (model_base, file_base) = base.unwrap_or(("", ""));
+
+    let mut every_column_known = true;
+    let mut replacement_base: Option<&str> = None;
+    for line in replacement.split('\n') {
+        if !line.trim().is_empty() {
+            let indent = indent_of(line);
+            every_column_known &= drift.values().any(|&f| f == indent);
+            if replacement_base.is_none_or(|r| indent.len() < r.len()) {
+                replacement_base = Some(indent);
+            }
+        }
+    }
+
+    every_column_known
+        || replacement_base.is_some_and(|r| r == file_base && file_base != model_base)
 }
 
 // Corrects exactly what the match forgave in `old_string`, and nothing else.
@@ -821,6 +846,51 @@ mod tests {
         assert_eq!(
             replace_simple(content, old, new).unwrap(),
             "def f():\n    a = 1\n    return a\n\n\ndef g():\n    return 2\n"
+        );
+    }
+
+    // A replacement that adds a nesting level uses a column the file has never
+    // shown, so the "every column is a file column" test cannot recognise the
+    // frame on its own and the whole block used to sink a level.
+    #[test]
+    fn reindent_leaves_a_file_frame_new_string_that_adds_a_level_alone() {
+        let content = "def f():\n    if x:\n        a()\n    return 1\n";
+        let old = "if x:\na()";
+        let new = "    if x:\n        if y:\n            a()";
+        assert_eq!(
+            replace_simple(content, old, new).unwrap(),
+            "def f():\n    if x:\n        if y:\n            a()\n    return 1\n"
+        );
+    }
+
+    #[test]
+    fn reindent_still_rebases_a_model_frame_new_string_that_adds_a_level() {
+        let content = "def f():\n    if x:\n        a()\n    return 1\n";
+        let old = "if x:\na()";
+        let new = "if x:\n    if y:\n        a()";
+        assert_eq!(
+            replace_simple(content, old, new).unwrap(),
+            "def f():\n    if x:\n        if y:\n            a()\n    return 1\n"
+        );
+    }
+
+    // Bases agree here, so only the columns tell the frames apart: the file's own
+    // widths are already in `new_string`, nothing to correct.
+    #[test]
+    fn reindent_leaves_a_file_frame_new_string_alone_when_only_widths_drifted() {
+        let content = "if x:\n    a()\n";
+        assert_eq!(
+            replace_simple(content, "if x:\n  a()", "if x:\n    a()\n    b()").unwrap(),
+            "if x:\n    a()\n    b()\n"
+        );
+    }
+
+    #[test]
+    fn reindent_widens_inner_levels_when_the_base_column_is_shared() {
+        let content = "if x:\n    a()\n";
+        assert_eq!(
+            replace_simple(content, "if x:\n  a()", "if x:\n  a()\n  b()").unwrap(),
+            "if x:\n    a()\n    b()\n"
         );
     }
 
