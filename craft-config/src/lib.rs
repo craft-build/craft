@@ -88,7 +88,9 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "websearch",
 ];
 
-pub const OPT_IN_TOOLS: &[&str] = &["edit_lines", "insert_lines"];
+pub const OPT_IN_TOOLS: &[&str] = &["insert_lines"];
+/// Native tools on by default that the plugins table can still turn off.
+pub const TOGGLEABLE_TOOLS: &[&str] = &["edit_lines"];
 
 pub const FILE_WRITE_TOOLS: &[&str] = &["write", "edit", "multiedit", "edit_lines", "insert_lines"];
 
@@ -309,6 +311,11 @@ impl RawConfig {
                 disabled_tools.push(name.to_string());
             }
         }
+        for &name in TOGGLEABLE_TOOLS {
+            if self.plugins.get(name).and_then(|t| t.enabled) == Some(false) {
+                disabled_tools.push(name.to_string());
+            }
+        }
         let mut agent = AgentConfig::from_file(self.agent, no_rtk, disabled_tools);
         let repomap = RepoMapConfig::from_file(self.repomap);
         agent.repomap = repomap.clone();
@@ -336,8 +343,9 @@ impl RawConfig {
     /// A `plugins.<name>` key that matches no bundled plugin is a typo or an
     /// old config, so fail loudly instead of letting it silently drift.
     /// The legacy `tools` table is rejected with a pointer to `plugins`.
-    /// `OPT_IN_TOOLS` names (native edit sub-tools toggled through the
-    /// plugins table) are accepted even though they are not Lua plugins.
+    /// `OPT_IN_TOOLS` and `TOGGLEABLE_TOOLS` names (native edit sub-tools
+    /// toggled through the plugins table) are accepted even though they are
+    /// not Lua plugins.
     fn validate_plugin_tables(&self) -> Result<(), ConfigError> {
         if !self.tools.is_empty() {
             return Err(ConfigError::RenamedToolsTable);
@@ -346,7 +354,9 @@ impl RawConfig {
             .plugins
             .keys()
             .filter(|name| {
-                !DEFAULT_BUILTINS.contains(&name.as_str()) && !OPT_IN_TOOLS.contains(&name.as_str())
+                !DEFAULT_BUILTINS.contains(&name.as_str())
+                    && !OPT_IN_TOOLS.contains(&name.as_str())
+                    && !TOGGLEABLE_TOOLS.contains(&name.as_str())
             })
             .collect();
         unknown.sort();
@@ -3955,6 +3965,40 @@ tasks = []
                     .disabled_tools
                     .contains(&name.to_string()),
                 "{name} should be enabled when configured"
+            );
+        }
+    }
+
+    #[test]
+    fn toggleable_tools_are_on_unless_disabled() {
+        let default_config = RawConfig::default().into_config(false).unwrap();
+        for &name in TOGGLEABLE_TOOLS {
+            assert!(
+                !default_config
+                    .agent
+                    .disabled_tools
+                    .contains(&name.to_string()),
+                "{name} should be enabled by default"
+            );
+        }
+
+        let mut plugins = HashMap::new();
+        for &name in TOGGLEABLE_TOOLS {
+            plugins.insert(name.to_string(), plugin_enabled(false));
+        }
+        let disabled_config = RawConfig {
+            plugins,
+            ..Default::default()
+        }
+        .into_config(false)
+        .unwrap();
+        for &name in TOGGLEABLE_TOOLS {
+            assert!(
+                disabled_config
+                    .agent
+                    .disabled_tools
+                    .contains(&name.to_string()),
+                "{name} should be disabled when configured"
             );
         }
     }

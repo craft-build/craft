@@ -82,7 +82,7 @@ Replace an exact string match in a file.
 | `replace_all` | boolean | no | false | Replace all occurrences |
 | `occurrence` | integer | no |  | When multiple matches exist, select the Nth occurrence (1-indexed). Without this, multiple matches cause an error. |
 
-### `edit_lines` *(native, opt-in)*
+### `edit_lines` *(native)*
 
 Edit lines by number. Replaces lines from `start` to `end` (inclusive) with `new_string`. Use empty `new_string` to delete a range. Do not use with the batch tool.
 
