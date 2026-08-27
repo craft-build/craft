@@ -237,7 +237,7 @@ super::impl_tool!(
     kind = "execute",
     tier = super::ToolTier::Core,
     augment = |desc: &mut String, ctx: &super::DescriptionContext| {
-        desc.push_str(&super::build_interpreter_tools_description(ctx.filter));
+        desc.push_str(&super::build_interpreter_tools_description(ctx));
     },
 );
 
@@ -261,24 +261,38 @@ impl super::ToolInvocation for CodeExecution {
     }
 }
 
+/// Every dispatchable name in one list, next to the router that dispatches
+/// them, so the names the sandbox binds and the names `run` accepts can never
+/// drift apart. Registry tools must opt in via `ToolAudience::INTERPRETER`;
+/// MCP names carry `all` because a reachable session already offers them.
+/// Returns `(bind, dispatch)` pairs: call `dispatch`, bind `bind`.
+fn bound_tool_names(ctx: &super::ToolContext) -> Vec<(String, String)> {
+    crate::agent::tool_dispatch::callable(ctx)
+        .into_iter()
+        .filter(|entry| entry.audience.contains(ToolAudience::INTERPRETER))
+        // `alias` covers hyphens; what is left is a name no substitution can
+        // fix, like a leading digit. Binding it would raise a SyntaxError the
+        // model cannot act on.
+        .filter_map(|entry| {
+            let bind = entry
+                .alias
+                .clone()
+                .or_else(|| is_identifier(&entry.name).then(|| entry.name.clone()))?;
+            Some((bind, entry.name))
+        })
+        .collect()
+}
+
 fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
     let mut tools: HashMap<String, ToolFn> = HashMap::new();
 
-    for entry in env.ctx.registry.iter().iter() {
-        let tool_name = entry.name();
-        if !entry.tool.audience().contains(ToolAudience::INTERPRETER) {
-            continue;
-        }
-        if !super::is_tool_enabled(&env.ctx.config, tool_name) {
-            continue;
-        }
-        let name = tool_name.to_string();
+    for (bind, name) in bound_tool_names(&env.ctx) {
         let ctx = env.ctx.clone();
 
         tools.insert(
-            name.clone(),
+            bind,
             Box::new(
-                move |fn_name: &str, args: Vec<Value>, kwargs: Vec<(String, Value)>| {
+                move |_fn_name: &str, args: Vec<Value>, kwargs: Vec<(String, Value)>| {
                     ctx.deadline.check()?;
 
                     let input = build_tool_input(&args, &kwargs)?;
@@ -288,7 +302,7 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
                             &ctx.registry,
                             ctx.mcp.as_ref(),
                             String::new(),
-                            fn_name,
+                            &name,
                             &input,
                             &ctx,
                             Emit::Silent,
@@ -303,8 +317,21 @@ fn build_tool_fns(env: &InterpreterEnv) -> HashMap<String, ToolFn> {
     tools
 }
 
+/// A Python identifier body: binding anything else would fail at compile time
+/// inside the sandbox with an error the model cannot act on.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
     let parent = env.ctx.clone();
+    // Python can only await the names it was bound, so aliases have to map back
+    // to the real dispatch name here too.
+    let bound: HashMap<String, String> = bound_tool_names(&env.ctx).into_iter().collect();
 
     Box::new(move |pending_calls: Vec<PendingCall>| {
         tokio::runtime::Handle::current().block_on(async {
@@ -312,6 +339,10 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
             let mut set = TaskSet::new();
             for pc in pending_calls {
                 let ctx = parent.clone();
+                let name = bound
+                    .get(&pc.name)
+                    .cloned()
+                    .unwrap_or_else(|| pc.name.clone());
 
                 set.spawn(async move {
                     if let Err(e) = ctx.deadline.check() {
@@ -327,7 +358,7 @@ fn build_async_resolver(env: &InterpreterEnv) -> AsyncResolver {
                         &ctx.registry,
                         ctx.mcp.as_ref(),
                         String::new(),
-                        &pc.name,
+                        &name,
                         &input,
                         &ctx,
                         Emit::Silent,
@@ -486,6 +517,73 @@ mod tests {
         };
         let output = ci.execute(&ctx).await.unwrap().as_text();
         assert!(output.contains("line1"));
+    }
+
+    // --- MCP tools callable from the sandbox (ported policy tests) ---
+
+    use crate::mcp::test_support::stub_handle;
+
+    const MCP_TOOL_QUALIFIED: &str = "srv.fetch_issue";
+    const MCP_TOOL_WIRE: &str = "srv__fetch_issue";
+    const HYPHEN_QUALIFIED: &str = "srv.get-docs";
+    const HYPHEN_ALIAS: &str = "srv__get_docs";
+    /// The stub transport fails every request with this, so seeing it proves the
+    /// call reached MCP routing instead of dying at name lookup.
+    const MCP_REACHED_ERR: &str = "unknown MCP tool";
+    const NAME_ERROR: &str = "NameError";
+    const MCP_NOTE_SUBSTR: &str = "MCP tools are callable too";
+
+    fn mcp_ctx(qualified: &str) -> crate::tools::ToolContext {
+        let mut ctx = stub_ctx(&AgentMode::Build);
+        ctx.mcp = Some(stub_handle(&[(qualified, "")]));
+        ctx
+    }
+
+    fn run_code_with_mcp(qualified: &str, code: &str) -> Result<String, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            CodeExecution {
+                code: code.to_owned(),
+                timeout: None,
+            }
+            .execute(&mcp_ctx(qualified))
+            .await
+            .map(|out| out.as_text())
+        })
+    }
+
+    #[test_case(MCP_TOOL_QUALIFIED, MCP_TOOL_WIRE  ; "deferred_wire_name_binds")]
+    #[test_case(HYPHEN_QUALIFIED, HYPHEN_ALIAS     ; "hyphenated_tool_binds_an_alias")]
+    fn mcp_tool_is_callable_from_the_sandbox(qualified: &str, bound: &str) {
+        let err = run_code_with_mcp(qualified, &format!("print(await {bound}())"))
+            .expect_err("the stub transport fails every call");
+        assert!(err.contains(MCP_REACHED_ERR), "got: {err}");
+    }
+
+    /// `code_execution` itself is MODEL-audience: a script must not be able to
+    /// spawn a nested sandbox.
+    #[test]
+    fn model_only_tool_stays_out_of_the_sandbox() {
+        let err = run_code_with_mcp(MCP_TOOL_QUALIFIED, "print(await code_execution())")
+            .expect_err("a model-only tool must not be bound at all");
+        assert!(err.contains(NAME_ERROR), "got: {err}");
+    }
+
+    /// A caller that drops MCP must not hand the sandbox a description
+    /// promising MCP tools it cannot call.
+    #[test_case(true  ; "session_keeps_mcp")]
+    #[test_case(false ; "session_drops_mcp")]
+    fn description_promises_mcp_only_when_the_session_keeps_it(with_mcp: bool) {
+        let filter = crate::tools::ToolFilter::All;
+        let dctx = crate::tools::DescriptionContext {
+            filter: &filter,
+            mcp: with_mcp,
+        };
+        let desc = super::super::build_interpreter_tools_description(&dctx);
+        assert_eq!(desc.contains(MCP_NOTE_SUBSTR), with_mcp, "got: {desc}");
     }
 
     #[test_case(&[], &[("path".into(), json!("/foo"))],  json!({"path": "/foo"}) ; "kwargs")]

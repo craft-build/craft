@@ -361,7 +361,10 @@ fn build_tools(audience: ToolAudience, ctx: &ToolContext, vars: &Vars, model: &M
         .map(|e| e.name().to_owned())
         .collect();
     let filter = ToolFilter::Only(tool_names);
-    let ctx_desc = DescriptionContext { filter: &filter };
+    let ctx_desc = DescriptionContext {
+        filter: &filter,
+        mcp: ctx.mcp.is_some(),
+    };
     let mut tools =
         ToolRegistry::native().definitions(vars, &ctx_desc, model.supports_tool_examples());
     if let Some(ref mcp) = ctx.mcp {

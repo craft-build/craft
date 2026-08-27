@@ -862,6 +862,81 @@ fn intern(name: String) -> Arc<str> {
     arc
 }
 
+/// Stands in for a live MCP session in tests: publishes the given tools
+/// (qualified `server.tool` names) behind a transport that fails every call
+/// with `unknown MCP tool`, so a test can prove a call reached MCP routing
+/// instead of dying at name lookup.
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+
+    struct FailingTransport;
+
+    impl McpTransport for FailingTransport {
+        fn send_request<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Option<Value>,
+        ) -> transport::BoxFuture<'a, Result<Value, McpError>> {
+            Box::pin(async {
+                Err(McpError::UnknownTool {
+                    name: String::new(),
+                })
+            })
+        }
+        fn send_notification<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Option<Value>,
+        ) -> transport::BoxFuture<'a, Result<(), McpError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn shutdown<'a>(&'a self) -> transport::BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+        fn server_name(&self) -> &Arc<str> {
+            static NAME: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+            NAME.get_or_init(|| Arc::from("stub"))
+        }
+        fn transport_kind(&self) -> &'static str {
+            "stub"
+        }
+    }
+
+    pub fn stub_handle(tools: &[(&str, &str)]) -> McpHandle {
+        let transport: Arc<dyn McpTransport> = Arc::new(FailingTransport);
+        let mut index = ToolIndex::default();
+        for (qualified, description) in tools {
+            let (_server, raw) = qualified
+                .split_once(SEPARATOR)
+                .unwrap_or((qualified, "tool"));
+            index.tools.insert(
+                intern(qualified.to_string()),
+                ToolRef {
+                    raw_name: (*raw).to_string(),
+                    transport: Arc::clone(&transport),
+                },
+            );
+            index.descriptors = {
+                let mut arr: Vec<Value> = index.descriptors.to_vec();
+                arr.push(json!({
+                    "name": wire_tool_name(qualified),
+                    "description": description,
+                    "input_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+                }));
+                arr.into()
+            };
+        }
+        let index = Arc::new(ArcSwap::from_pointee(index));
+        McpHandle {
+            cmd_tx: flume::unbounded().0,
+            snapshot: Arc::new(ArcSwap::from_pointee(McpSnapshot::default())),
+            index,
+            ready_rx: flume::bounded(0).1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

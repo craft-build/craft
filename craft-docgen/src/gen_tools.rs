@@ -279,6 +279,7 @@ pub fn generate() -> String {
         &vars,
         &DescriptionContext {
             filter: &ToolFilter::All,
+            mcp: false,
         },
         false,
     );

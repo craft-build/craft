@@ -762,6 +762,7 @@ pub fn prompt(
     if tools {
         let ctx = DescriptionContext {
             filter: &ToolFilter::All,
+            mcp: false,
         };
         let defs = reg.definitions(&vars, &ctx, true);
         if names {

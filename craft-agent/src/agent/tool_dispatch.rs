@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
-use crate::mcp::{McpHandle, UNKNOWN_MCP};
+use crate::mcp::{McpHandle, UNKNOWN_MCP, wire_tool_name};
 use crate::permissions::{ASK_TIMEOUT, DEFAULT_DENY_GUIDANCE};
 use crate::task_set::TaskSet;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
-use crate::tools::{ToolContext, truncate_bytes};
+use crate::tools::{ToolAudience, ToolContext, ToolFilter, truncate_bytes};
 use crate::{
     AgentError, AgentEvent, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent,
 };
@@ -277,6 +277,120 @@ pub async fn run(
         warn!(tool = %mcp_lookup, "unknown tool");
         done_error(msg)
     }
+}
+
+const SOURCE_NATIVE: &str = "native";
+const SOURCE_MCP: &str = "mcp";
+
+/// One callable name, as [`run`] would route it. It lives beside the router so
+/// whoever binds tool names (the `code_execution` sandbox) and whoever
+/// dispatches them can never drift into answering differently.
+pub struct Callable {
+    /// The name to dispatch. Never an alias.
+    pub name: String,
+    /// A name a host that binds tools as identifiers can use, set only when
+    /// `name` is not one already (MCP servers publish `srv__get-docs`). Call
+    /// `name`, bind `alias`.
+    pub alias: Option<String>,
+    pub source: &'static str,
+    /// The audience of whatever will run, not of whatever shares its name.
+    pub audience: ToolAudience,
+    /// Registry tools only. MCP tools publish their schema to the model in the
+    /// request's tool array, so repeating it here would buy an allocation per
+    /// call and nothing else.
+    pub schema: Option<Value>,
+}
+
+/// Every name this context can dispatch. A name belongs to the first source
+/// [`run`] would reach, and is claimed before any filter runs: a registry tool
+/// the sandbox may not call still owns its name, or an MCP server publishing
+/// the same wire name becomes a way around the gate.
+///
+/// Filtered like the request's tool array is: the config's `disabled_tools`
+/// and the model's capabilities. The caller reads its own policy off
+/// `audience` (a sandbox wants `ToolAudience::INTERPRETER`, which is also the
+/// gate here).
+///
+/// Recompute per call: the MCP index changes whenever a server comes or goes.
+pub fn callable(ctx: &ToolContext) -> Vec<Callable> {
+    let filter = ToolFilter::from_config(&ctx.config, &ctx.model, &[]);
+    let mut out: Vec<Callable> = Vec::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+    let mut claim = |name: &str, audience: ToolAudience| {
+        let first = claimed.insert(name.to_owned());
+        first && audience.contains(ToolAudience::INTERPRETER)
+    };
+
+    for entry in ctx.registry.iter().iter() {
+        let audience = entry.tool.audience();
+        if !claim(entry.name(), audience) || !filter.matches(entry.name()) {
+            continue;
+        }
+        out.push(Callable {
+            name: entry.name().to_owned(),
+            alias: None,
+            source: SOURCE_NATIVE,
+            audience,
+            schema: Some(entry.tool.schema()),
+        });
+    }
+    if let Some(mcp) = ctx.mcp.as_ref() {
+        let mut names: Vec<String> = mcp
+            .tool_names()
+            .into_iter()
+            .map(|qualified| wire_tool_name(&qualified))
+            .collect();
+        names.sort();
+        for name in names {
+            // MCP has no audience system: a server is reachable or it is not,
+            // and a session holding one already offers its tools to the model.
+            if claim(&name, ToolAudience::all()) {
+                out.push(Callable {
+                    name,
+                    alias: None,
+                    source: SOURCE_MCP,
+                    audience: ToolAudience::all(),
+                    schema: None,
+                });
+            }
+        }
+    }
+    assign_aliases(&mut out);
+    out
+}
+
+/// Fills in `alias` for names an identifier cannot hold. A collision (a server
+/// publishing both `get-docs` and `get_docs`) leaves both aliases unset rather
+/// than pointing one name at the other's tool.
+fn assign_aliases(tools: &mut [Callable]) {
+    let aliases: Vec<Option<String>> = tools.iter().map(|t| identifier_alias(&t.name)).collect();
+    let mut claims: HashMap<String, usize> = HashMap::new();
+    for claimant in tools
+        .iter()
+        .map(|t| t.name.clone())
+        .chain(aliases.iter().flatten().cloned())
+    {
+        *claims.entry(claimant).or_default() += 1;
+    }
+    for (tool, alias) in tools.iter_mut().zip(aliases) {
+        if alias.as_deref().is_some_and(|a| claims[a] == 1) {
+            tool.alias = alias;
+        }
+    }
+}
+
+fn identifier_alias(name: &str) -> Option<String> {
+    let is_body = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // A leading digit is not something substitution can fix without inventing a
+    // character the model never saw.
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    name.chars().any(|c| !is_body(c)).then(|| {
+        name.chars()
+            .map(|c| if is_body(c) { c } else { '_' })
+            .collect()
+    })
 }
 
 async fn run_headless_question(
@@ -1294,6 +1408,88 @@ mod tests {
             guardrails.check_before_call(crate::tools::EDIT_TOOL_NAME, &input, false),
             super::super::guardrails::GuardrailDecision::Allow,
             "edit must never be guardrail-blocked"
+        );
+    }
+
+    // --- callable (the list the code_execution sandbox binds) ---
+
+    use crate::mcp::test_support::stub_handle;
+
+    fn callable_names(ctx: &ToolContext) -> Vec<String> {
+        crate::agent::tool_dispatch::callable(ctx)
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    }
+
+    fn mcp_ctx(tools: &[(&str, &str)]) -> ToolContext {
+        let mut ctx = crate::tools::test_support::stub_ctx(&AgentMode::Build);
+        ctx.mcp = Some(stub_handle(tools));
+        ctx
+    }
+
+    const PROBE_WIRE: &str = "srv__probe";
+    const OTHER_WIRE: &str = "srv__other";
+    const PROBE_QUALIFIED: &str = "srv.probe";
+
+    /// MCP tools are dispatchable names the sandbox must be able to bind.
+    #[tokio::test]
+    async fn callable_lists_mcp_wire_names() {
+        let ctx = mcp_ctx(&[(PROBE_QUALIFIED, ""), ("srv.other", "")]);
+        let names = callable_names(&ctx);
+        assert!(names.contains(&PROBE_WIRE.to_owned()), "got: {names:?}");
+        assert!(names.contains(&OTHER_WIRE.to_owned()), "got: {names:?}");
+    }
+
+    /// The sandbox gets the same tools the request's array does, so a tool the
+    /// user disabled is not reachable by writing a script instead.
+    #[tokio::test]
+    async fn callable_drops_what_the_config_disabled() {
+        let mut ctx = crate::tools::test_support::stub_ctx(&AgentMode::Build);
+        ctx.config.disabled_tools = vec!["read".to_owned()];
+        assert!(!callable_names(&ctx).contains(&"read".to_owned()));
+    }
+
+    /// Losing on audience is not the same as freeing the name: MCP publishing
+    /// the wire name of a gated registry tool must not become a way around it.
+    #[tokio::test]
+    async fn mcp_cannot_republish_a_name_the_registry_gated() {
+        let mut ctx = mcp_ctx(&[(PROBE_QUALIFIED, "")]);
+        let registry = ToolRegistry::new();
+        registry
+            .register(
+                crate::tools::test_support::mock_tool(PROBE_WIRE, ToolAudience::MAIN),
+                crate::tools::registry::ToolSource::Native,
+            )
+            .unwrap();
+        ctx.registry = Arc::new(registry);
+        assert!(!callable_names(&ctx).contains(&PROBE_WIRE.to_owned()));
+    }
+
+    #[test_case("srv.get_docs", "srv__get_docs", None                  ; "identifier_needs_no_alias")]
+    #[test_case("srv.get-docs", "srv__get-docs", Some("srv__get_docs") ; "hyphen_becomes_underscore")]
+    fn alias_is_set_only_when_the_name_is_not_an_identifier(
+        qualified: &str,
+        wire: &str,
+        expected: Option<&str>,
+    ) {
+        let ctx = mcp_ctx(&[(qualified, "")]);
+        let entry = crate::agent::tool_dispatch::callable(&ctx)
+            .into_iter()
+            .find(|c| c.name == wire)
+            .expect("the published tool is callable");
+        assert_eq!(entry.alias.as_deref(), expected);
+    }
+
+    /// Two names collapsing onto one alias would silently point a caller at the
+    /// wrong tool, so neither gets one.
+    #[tokio::test]
+    async fn colliding_aliases_are_dropped() {
+        let ctx = mcp_ctx(&[("srv.get-docs", ""), ("srv.get_docs", "")]);
+        assert!(
+            crate::agent::tool_dispatch::callable(&ctx)
+                .iter()
+                .all(|c| c.alias.is_none())
         );
     }
 

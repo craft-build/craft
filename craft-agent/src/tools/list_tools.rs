@@ -83,7 +83,10 @@ fn list_all(ctx: &super::ToolContext) -> ToolOutput {
 
     let registry = ToolRegistry::native();
     let filter = ToolFilter::All;
-    let dctx = DescriptionContext { filter: &filter };
+    let dctx = DescriptionContext {
+        filter: &filter,
+        mcp: ctx.mcp.is_some(),
+    };
     for entry in registry.iter().iter() {
         let name = entry.name().to_string();
         if name == ListTools::NAME {

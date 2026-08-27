@@ -77,7 +77,7 @@ use crate::agent::LoadedInstructions;
 use crate::cancel::{CancelMap, CancelToken};
 use crate::mcp::McpHandle;
 use crate::permissions::PermissionManager;
-use crate::{AgentConfig, AgentMode, EventSender};
+use crate::{AgentConfig, AgentMode, EventSender, ToolOutput};
 use craft_config::ToolOutputLines;
 use craft_providers::Model;
 use craft_providers::RequestOptions;
@@ -85,6 +85,8 @@ use craft_providers::provider::Provider;
 
 pub struct DescriptionContext<'a> {
     pub filter: &'a ToolFilter,
+    /// Whether the session being described can reach MCP tools.
+    pub mcp: bool,
 }
 
 const SMALL_MODEL_CORE_TOOLS: &[&str] = &["read", "edit", "write", "bash", "glob", "grep"];
@@ -551,8 +553,12 @@ fn format_tool_signature(name: &str, schema: &Value) -> String {
     format!("- {name}({}) -> str", params.join(", "))
 }
 
+/// MCP names and schemas already sit in the request's tool array, so point at
+/// those instead of repeating them here.
+const MCP_TOOLS_NOTE: &str = "\nMCP tools are callable too, with the arguments their definitions declare. Hyphens become underscores (`srv__get-docs` is `srv__get_docs`).\n";
+
 /// Walks the registry so adding a new `INTERPRETER` tool shows up automatically.
-pub(crate) fn build_interpreter_tools_description(filter: &ToolFilter) -> String {
+pub(crate) fn build_interpreter_tools_description(ctx: &DescriptionContext) -> String {
     let mut desc =
         String::from("\n\nAvailable tools (called as Python functions with keyword arguments):\n");
     let registry = ToolRegistry::native();
@@ -561,12 +567,15 @@ pub(crate) fn build_interpreter_tools_description(filter: &ToolFilter) -> String
         if !entry.tool.audience().contains(ToolAudience::INTERPRETER) {
             continue;
         }
-        if !filter.matches(name) {
+        if !ctx.filter.matches(name) {
             continue;
         }
         let schema = entry.tool.schema();
         desc.push_str(&format_tool_signature(name, &schema));
         desc.push('\n');
+    }
+    if ctx.mcp {
+        desc.push_str(MCP_TOOLS_NOTE);
     }
     desc
 }
@@ -1039,9 +1048,57 @@ pub fn cli_tool_ctx() -> ToolContext {
 }
 
 pub mod test_support {
+    use std::borrow::Cow;
+
     use crate::{Envelope, EventSender};
 
     use super::*;
+
+    /// Registry and routing tests care about the name and audience only, never
+    /// about what the tool returns.
+    pub fn mock_tool(name: &str, audience: ToolAudience) -> Arc<dyn registry::Tool> {
+        Arc::new(MockTool {
+            name: name.to_owned(),
+            audience,
+        })
+    }
+
+    struct MockTool {
+        name: String,
+        audience: ToolAudience,
+    }
+
+    struct MockInvocation;
+
+    impl registry::ToolInvocation for MockInvocation {
+        fn start_header(&self) -> registry::HeaderFuture {
+            registry::HeaderFuture::Ready(registry::HeaderResult::plain("mock".into()))
+        }
+        fn execute<'a>(self: Box<Self>, _ctx: &'a ToolContext) -> registry::ExecFuture<'a> {
+            Box::pin(async { registry::ToolExecResult::from(Ok(ToolOutput::Plain(String::new()))) })
+        }
+    }
+
+    impl registry::Tool for MockTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self, _ctx: &DescriptionContext) -> Cow<'_, str> {
+            "mock tool".into()
+        }
+        fn schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false})
+        }
+        fn audience(&self) -> ToolAudience {
+            self.audience
+        }
+        fn parse(
+            &self,
+            _input: &Value,
+        ) -> Result<Box<dyn registry::ToolInvocation>, registry::ParseError> {
+            Ok(Box::new(MockInvocation))
+        }
+    }
 
     static TEST_PERMISSIONS: LazyLock<Arc<PermissionManager>> = LazyLock::new(|| {
         Arc::new(PermissionManager::new(
@@ -1497,6 +1554,7 @@ mod tests {
             &vars,
             &DescriptionContext {
                 filter: &ToolFilter::All,
+                mcp: false,
             },
             true,
         );
@@ -1528,6 +1586,7 @@ mod tests {
             &vars,
             &DescriptionContext {
                 filter: &ToolFilter::All,
+                mcp: false,
             },
             true,
         );
@@ -1541,7 +1600,10 @@ mod tests {
     fn definitions_filtered_returns_only_requested() {
         let vars = Vars::new().set("{cwd}", "/tmp");
         let filter = ToolFilter::Only(vec!["read".into()]);
-        let ctx = DescriptionContext { filter: &filter };
+        let ctx = DescriptionContext {
+            filter: &filter,
+            mcp: false,
+        };
         let filtered = ToolRegistry::native().definitions(&vars, &ctx, true);
         let names: Vec<&str> = filtered
             .as_array()

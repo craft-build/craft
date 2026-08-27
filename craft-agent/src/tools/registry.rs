@@ -24,6 +24,10 @@ bitflags! {
         const RESEARCH_SUB = 0b0010;
         const GENERAL_SUB  = 0b0100;
         const INTERPRETER  = 0b1000;
+        /// Every audience a model speaks from, and none of the ones a sandbox
+        /// calls from: the default for a tool whose owner never opted into
+        /// being called by a script.
+        const MODEL = Self::MAIN.bits() | Self::RESEARCH_SUB.bits() | Self::GENERAL_SUB.bits();
     }
 }
 
@@ -697,7 +701,10 @@ mod tests {
         .unwrap();
 
         let filter = crate::tools::ToolFilter::All;
-        let ctx = DescriptionContext { filter: &filter };
+        let ctx = DescriptionContext {
+            filter: &filter,
+            mcp: false,
+        };
         let vars = Vars::new();
         let defs = reg.definitions(&vars, &ctx, false);
         let arr = defs.as_array().expect("definitions returns array");
