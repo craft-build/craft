@@ -15,7 +15,7 @@ use crate::components::tool_display::{
 use crate::components::{DisplayMessage, DisplayRole, ToolRole, ToolStatus};
 use crate::markdown::truncate_output;
 
-use crate::selection::Selection;
+use crate::selection::{DocPos, RowPos, Selection};
 use craft_agent::tools::{ToolInvocation, ToolRegistry};
 use craft_agent::{
     AgentEvent, BatchToolStatus, BufferSnapshot, DoneReason, SharedBuf, ToolDoneEvent, ToolOutput,
@@ -332,8 +332,12 @@ impl Chat {
         self.messages_panel.scroll_pos()
     }
 
-    pub fn scroll_doc_row(&self) -> u32 {
-        self.messages_panel.scroll_doc_row()
+    pub fn doc_pos_at(&self, rel_row: u16, col: u16) -> DocPos {
+        self.messages_panel.doc_pos_at(rel_row, col)
+    }
+
+    pub fn project_row(&self, pos: DocPos) -> RowPos {
+        self.messages_panel.project_row(pos)
     }
 
     pub fn segment_search_texts(&self) -> Vec<&str> {
