@@ -5,7 +5,7 @@ mod selection;
 mod tests;
 
 use self::render::RenderCursor;
-use self::segment::{Segment, SegmentCache, wrapped_line_count};
+use self::segment::{Segment, SegmentCache};
 use self::selection::parse_batch_inner_id;
 
 use super::render_hints::RenderHintsRegistry;
@@ -27,6 +27,7 @@ use crate::selection::Selection;
 use crate::splash::{ColorTransition, Splash};
 use crate::theme;
 use crate::update;
+use crate::wrap;
 use craft_config::{ClockFormat, ToolOutputLines, UiConfig};
 use craft_lua::{EventHandle, RestoreItem, WinView};
 use serde_json::Value;
@@ -1011,7 +1012,7 @@ impl MessagesPanel {
             if cached_count > 0 || !streaming_heights.is_empty() {
                 streaming_heights.push(1);
             }
-            streaming_heights.push(wrapped_line_count(lines, width));
+            streaming_heights.push(wrap::total_rows(lines, width));
         }
 
         if !self.streaming_text.is_empty() {
@@ -1019,7 +1020,7 @@ impl MessagesPanel {
             if cached_count > 0 || !streaming_heights.is_empty() {
                 streaming_heights.push(1);
             }
-            streaming_heights.push(wrapped_line_count(lines, width));
+            streaming_heights.push(wrap::total_rows(lines, width));
         }
 
         let streaming_sum: u32 = streaming_heights.iter().map(|&h| h as u32).sum();

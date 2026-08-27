@@ -470,9 +470,7 @@ mod tests {
     use craft_config::RawConfig;
 
     fn test_config() -> Config {
-        RawConfig::default()
-            .into_config()
-            .expect("default config")
+        RawConfig::default().into_config().expect("default config")
     }
 
     #[test]

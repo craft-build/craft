@@ -25,6 +25,7 @@ pub mod splash;
 mod storage_writer;
 mod text_buffer;
 mod theme;
+pub mod wrap;
 pub use theme::BUNDLED_THEMES;
 pub mod update;
 

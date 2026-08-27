@@ -1,10 +1,11 @@
 use crate::render_worker::RenderWorker;
 use crate::theme;
 
+use crate::wrap;
+
 use super::super::code_view::SectionFlags;
 use super::super::tool_display::{HighlightRequest, ToolLines};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
 use std::cell::Cell;
 
 const INST_SUFFIX: &str = "__inst";
@@ -136,10 +137,10 @@ impl Segment {
             return c.height;
         }
         let h = if let Some(img) = &self.image {
-            let caption = wrapped_line_count(&self.lines, width);
+            let caption = wrap::total_rows(&self.lines, width);
             caption.saturating_add(img.rows)
         } else {
-            wrapped_line_count(&self.lines, width)
+            wrap::total_rows(&self.lines, width)
         };
         self.cached_height.set(Some(CachedHeight {
             at_width: width,
@@ -151,7 +152,7 @@ impl Segment {
     /// Rows the lines really take at `width`, ignoring the cache. Same as
     /// `height` for any segment that is not stale.
     pub fn drawn_height(&self, width: u16) -> u16 {
-        wrapped_line_count(&self.lines, width)
+        wrap::total_rows(&self.lines, width)
     }
 
     fn invalidate_height(&self) {
@@ -369,15 +370,6 @@ impl SegmentCache {
             seg.stale = true;
         }
     }
-}
-
-pub(super) fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> u16 {
-    if width == 0 {
-        return lines.len() as u16;
-    }
-    Paragraph::new(lines.to_vec())
-        .wrap(Wrap { trim: false })
-        .line_count(width) as u16
 }
 
 #[cfg(test)]

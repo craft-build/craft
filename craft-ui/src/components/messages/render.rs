@@ -72,7 +72,7 @@ impl RenderCursor {
         style: Option<Style>,
         frame: &mut Frame,
     ) {
-        let caption_h = super::segment::wrapped_line_count(caption, self.viewport.width);
+        let caption_h = crate::wrap::total_rows(caption, self.viewport.width);
         let total_h = caption_h.saturating_add(img.rows);
         if self.skip >= total_h {
             self.skip -= total_h;
