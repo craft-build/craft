@@ -2426,6 +2426,7 @@ fn a_click_on_the_top_row_reaches_the_scrolled_segment() {
     render(&mut panel, 80, 10);
     panel.scroll_to_segment(panel.cache.find_by_tool_id(TARGET).unwrap());
 
+    let mut expanded = false;
     for width in [80, 40] {
         render(&mut panel, width, 10);
         let area = Rect::new(0, 0, width, 10);
@@ -2433,10 +2434,15 @@ fn a_click_on_the_top_row_reaches_the_scrolled_segment() {
             panel.handle_click(area.y, area),
             "no click at width {width}"
         );
+        expanded = !expanded;
+        assert_eq!(
+            panel.lua_expanded.contains(TARGET),
+            expanded,
+            "each click at width {width} must toggle the scrolled segment"
+        );
     }
 
-    assert!(panel.lua_expanded.contains(TARGET));
-    assert_eq!(panel.lua_expanded.len(), 1, "no other tool was clicked");
+    assert_eq!(panel.lua_expanded.len(), usize::from(expanded));
 }
 
 /// A document row used to be a `u16`, so a long session silently clamped: the
