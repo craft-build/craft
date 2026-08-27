@@ -13,7 +13,7 @@ pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,
     HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest, SessionRequest,
-    Split, TitlePos, UiAction, UiReply, WinCommand, WinEvent, WinView,
+    Split, TaskRequest, TitlePos, UiAction, UiReply, WinCommand, WinEvent, WinView,
 };
 pub use error::PluginError;
 pub use loader::{EventHandle, LuaRecencySource, PluginHost};

@@ -40,7 +40,7 @@ impl App {
             || self.plan_form_active()
             || self.flow_goal_form_active();
         let layout = self.compute_layout(frame, form_visible);
-        let render_chat = self.resolve_render_chat();
+        let render_chat = self.active_chat;
 
         self.render_background(frame);
         self.render_messages(frame, &layout, render_chat);
@@ -171,16 +171,6 @@ impl App {
         }
     }
 
-    fn resolve_render_chat(&self) -> usize {
-        if self.task_picker.is_open() {
-            self.task_picker
-                .selected_index()
-                .unwrap_or(self.active_chat)
-        } else {
-            self.active_chat
-        }
-    }
-
     fn render_background(&self, frame: &mut Frame) {
         let bg =
             Block::default().style(ratatui::style::Style::new().bg(theme::current().background));
@@ -239,7 +229,7 @@ impl App {
                 Block::default().style(Style::new().bg(theme::current().layer01)),
                 layout.input_area,
             );
-            let render_chat = self.resolve_render_chat();
+            let render_chat = self.active_chat;
             let ctx = self.status_bar_context(render_chat);
             status_bar::view_model_row(frame, layout.model_row_area, &ctx);
             let streaming = self.status == Status::Streaming;
@@ -274,10 +264,6 @@ impl App {
 
         if self.search_modal.is_open() {
             overlay_rect = self.search_modal.view(frame, layout.msg_area);
-        }
-
-        if self.task_picker.is_open() {
-            overlay_rect = self.task_picker.view(frame, full);
         }
 
         if self.file_picker.is_open() {
@@ -506,8 +492,6 @@ impl App {
             contexts.push(KeybindContext::QueueFocus);
         } else if self.rewind_picker.is_open() {
             contexts.push(KeybindContext::RewindPicker);
-        } else if self.task_picker.is_open() {
-            contexts.push(KeybindContext::TaskPicker);
         } else if self.theme_picker.is_open() {
             contexts.push(KeybindContext::ThemePicker);
         } else if self.model_picker.is_open() {

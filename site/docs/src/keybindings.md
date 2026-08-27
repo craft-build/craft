@@ -13,7 +13,6 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+S` | File picker |
 | `Ctrl+O` | Open plan in editor |
 | `Ctrl+T` | Toggle todo / plan panel |
-| `Ctrl+X` | Open tasks |
 
 ## Editing
 
@@ -81,11 +80,19 @@ Some pickers add extra bindings on top of the defaults:
 | Session Picker | `Ctrl+R` | Rename session |
 | Session Picker | `Ctrl+D` | Delete session (press twice) |
 
+## Built-in Plugin Keys
+
+Built-in plugins register these themselves, and your own plugins can add more with `craft.keymap.set`.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+X` | Open tasks |
+
 ## Context Inheritance
 
 Child contexts inherit their parent's bindings and add their own.
 
-- **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
+- **Pickers** is the base for: Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
 
 ## Overriding Keybindings
 

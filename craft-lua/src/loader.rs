@@ -73,6 +73,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/sessions"),
     },
     BundledPlugin {
+        name: "task",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/task"),
+    },
+    BundledPlugin {
         name: "lib",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/lib"),
     },
@@ -664,20 +668,20 @@ mod tests {
         );
     }
 
+    /// `/tasks` and `/sessions` used to be Rust commands. The plugins that took
+    /// them over have to keep the names, or the palette quietly loses a row.
     #[test]
-    fn sessions_builtin_registers_commands() {
+    fn builtin_plugins_register_their_commands() {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
         let snap = host.command_reader().load();
         let names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
-        assert!(
-            names.contains(&"/sessions"),
-            "expected /sessions command, got: {names:?}"
-        );
-        assert!(
-            names.contains(&"/rename"),
-            "expected /rename command, got: {names:?}"
-        );
+        for command in ["/sessions", "/rename", "/tasks"] {
+            assert!(
+                names.contains(&command),
+                "expected {command} command, got: {names:?}"
+            );
+        }
     }
 
     #[test]

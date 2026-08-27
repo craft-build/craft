@@ -12,6 +12,7 @@ mod queue;
 mod session;
 pub(crate) mod session_state;
 pub(crate) mod shell;
+pub(crate) mod tasks;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod view;
@@ -23,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::AppSession;
+use crate::app::tasks::TaskOutcome;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
@@ -34,7 +36,6 @@ use crate::components::flow_panel::{FlowPanel, FlowSnapshot};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
 use crate::components::keybindings::{ActionId, KeybindingResolver, key, normalize_key};
-use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
@@ -106,29 +107,7 @@ const NOTIFICATION_PREVIEW_CHARS: usize = 200;
 pub(crate) const MAX_COMMAND_DEPTH: u8 = 8;
 pub(crate) const COMMAND_DEPTH_MSG: &str = "slash command nested too deeply (alias cycle?)";
 
-const TASK_DONE_DETAIL: &str = "✓ ";
 const MISSING_TOOL_COMPLETION: &str = "Tool did not report completion before the turn ended";
-
-/// `Option<bool>` lets us distinguish the main chat (None, no status indicator)
-/// from subagents (Some, with spinner or checkmark).
-#[derive(Clone)]
-pub(super) struct TaskEntry {
-    name: String,
-    finished: Option<bool>,
-    chat_index: usize,
-}
-
-impl PickerItem for TaskEntry {
-    fn label(&self) -> &str {
-        &self.name
-    }
-    fn detail(&self) -> Option<&str> {
-        matches!(self.finished, Some(true)).then_some(TASK_DONE_DETAIL)
-    }
-    fn is_spinning(&self) -> bool {
-        matches!(self.finished, Some(false))
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Notification {
@@ -221,8 +200,6 @@ pub struct App {
     pub(super) chat_index: HashMap<String, usize>,
     pub(crate) input_box: InputBox,
     pub(super) command_palette: CommandPalette,
-    pub(super) task_picker: ListPicker<TaskEntry>,
-    pub(super) task_picker_original: Option<usize>,
     pub(super) theme_picker: ThemePicker,
     pub(super) thinking_picker: ThinkingPicker,
     pub(super) model_picker: ModelPicker,
@@ -359,8 +336,6 @@ impl App {
                 mcp_reader.clone(),
                 lua_command_reader,
             ),
-            task_picker: ListPicker::new(),
-            task_picker_original: None,
             theme_picker: ThemePicker::new(),
             thinking_picker: ThinkingPicker::new(),
             model_picker: ModelPicker::new(available_models),
@@ -421,7 +396,6 @@ impl App {
             watch_enabled,
             warn_tx: None,
         };
-        app.task_picker.set_keybindings(app.keybindings.clone());
         app.theme_picker.set_keybindings(app.keybindings.clone());
         app.thinking_picker.set_keybindings(app.keybindings.clone());
         app.model_picker.set_keybindings(app.keybindings.clone());
@@ -729,45 +703,11 @@ impl App {
             };
         }
         try_picker!(self.rewind_picker);
-        try_picker!(self.task_picker);
         try_picker!(self.model_picker);
         try_picker!(self.file_picker);
         let zone = self.zone_at(row, column)?.zone;
         self.scroll_zone(zone, delta);
         Some(zone)
-    }
-
-    fn task_entries(&self) -> Vec<TaskEntry> {
-        self.chats
-            .iter()
-            .enumerate()
-            .map(|(chat_index, chat)| TaskEntry {
-                name: chat.name.clone(),
-                finished: (chat_index > 0).then_some(chat.is_finished()),
-                chat_index,
-            })
-            .collect()
-    }
-
-    fn open_tasks(&mut self) {
-        self.task_picker_original = Some(self.active_chat);
-        self.task_picker.open(self.task_entries(), " Tasks ");
-        self.task_picker.select(self.active_chat);
-    }
-
-    fn sync_task_picker(&mut self) {
-        if !self.task_picker.is_open() {
-            return;
-        }
-        let selected = self
-            .task_picker
-            .selected_item()
-            .map(|entry| entry.chat_index);
-        self.task_picker.replace_items(self.task_entries());
-        if let Some(chat_index) = selected {
-            self.task_picker
-                .select_item_by(|entry| entry.chat_index == chat_index);
-        }
     }
 
     /// Ctrl shortcuts that apply when no overlay owns input.
@@ -789,9 +729,6 @@ impl App {
         }
         if self.keybindings.matches(ActionId::Help, key) {
             return Some(self.run_builtin(BuiltinAction::Help));
-        }
-        if self.keybindings.matches(ActionId::Tasks, key) {
-            return Some(self.run_builtin(BuiltinAction::Tasks));
         }
         if self.keybindings.matches(ActionId::PrevChat, key) {
             return Some(self.run_builtin(BuiltinAction::PrevChat));
@@ -956,25 +893,6 @@ impl App {
             return Some(vec![]);
         }
 
-        if self.task_picker.is_open() {
-            if self.keybindings.matches(ActionId::Tasks, key) {
-                self.task_picker.close();
-                return Some(vec![]);
-            }
-            return Some(match self.task_picker.handle_key(key) {
-                PickerAction::Consumed | PickerAction::Toggle(..) => vec![],
-                PickerAction::Select(entry) => {
-                    self.task_picker_original = None;
-                    self.active_chat = entry.chat_index;
-                    vec![]
-                }
-                PickerAction::Close => {
-                    self.active_chat = self.task_picker_original.take().unwrap_or(0);
-                    vec![]
-                }
-            });
-        }
-
         if self.rewind_picker.is_open() {
             return Some(match self.rewind_picker.handle_key(key) {
                 RewindPickerAction::Consumed => vec![],
@@ -1067,13 +985,6 @@ impl App {
                 let top = self.chats[self.active_chat].scroll_top();
                 let auto = self.chats[self.active_chat].auto_scroll();
                 self.search_modal.open(top, auto);
-            }
-            BuiltinAction::Tasks => {
-                if self.task_picker.is_open() {
-                    self.task_picker.close();
-                } else {
-                    self.open_tasks();
-                }
             }
             BuiltinAction::Help => self.help_modal.toggle(),
             BuiltinAction::PlanToggle => {
@@ -1354,7 +1265,7 @@ impl App {
             self.flow_awaiting_approval = false;
             self.send_answer(craft_agent::FLOW_CANCEL_ANSWER.to_owned());
         }
-        self.finish_subagents(DisplayRole::Error, CANCELLED_TEXT);
+        self.finish_subagents(TaskOutcome::Error, CANCELLED_TEXT);
         self.subagent_answers.clear();
         self.shell.cancel_all();
         for chat in &mut self.chats {
@@ -1385,7 +1296,7 @@ impl App {
 
         self.chats[self.active_chat].flush();
         self.chats[self.active_chat].cancel_in_progress();
-        self.chats[self.active_chat].mark_finished(DisplayRole::Error, CANCELLED_TEXT);
+        self.chats[self.active_chat].mark_finished(TaskOutcome::Error, CANCELLED_TEXT);
         self.subagent_answers.remove(&tool_use_id);
 
         vec![Action::CancelSubagent { tool_use_id }]
@@ -1460,10 +1371,13 @@ impl App {
             messages,
         } = envelope.event
         {
+            // Workflow sessions use synthetic ids that no ToolDone will match,
+            // so we finish them here on SubagentHistory. This event only knows
+            // that the transcript closed, so say Unknown and leave the verdict
+            // to the ToolDone that follows elsewhere.
             if let Some(&sub_idx) = self.chat_index.get(tool_use_id.as_str()) {
-                self.chats[sub_idx].mark_finished(DisplayRole::Done, DONE_TEXT);
+                self.chats[sub_idx].mark_finished(TaskOutcome::Unknown, DONE_TEXT);
             }
-            self.sync_task_picker();
             self.state
                 .session_mut()
                 .set_subagent_messages(tool_use_id, messages);
@@ -1490,14 +1404,13 @@ impl App {
                 .session_mut()
                 .insert_tool_output(e.id.clone(), e.output.clone());
             if let Some(&sub_idx) = self.chat_index.get(&e.id) {
-                let (role, text) = if e.is_error {
-                    (DisplayRole::Error, ERROR_TEXT)
+                let (outcome, text) = if e.is_error {
+                    (TaskOutcome::Error, ERROR_TEXT)
                 } else {
-                    (DisplayRole::Done, DONE_TEXT)
+                    (TaskOutcome::Done, DONE_TEXT)
                 };
-                self.chats[sub_idx].mark_finished(role, text);
+                self.chats[sub_idx].mark_finished(outcome, text);
             }
-            self.sync_task_picker();
         }
 
         if let AgentEvent::Retry {
@@ -1648,7 +1561,8 @@ impl App {
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
         }
-        let mut chat = Chat::new(
+        let mut chat = Chat::subagent(
+            id,
             subagent.name.clone(),
             self.ui_config.clone(),
             self.lua_event_handle.clone(),
@@ -1659,7 +1573,6 @@ impl App {
             chat.push_user_message(prompt);
         }
         self.chats.push(chat);
-        self.sync_task_picker();
         self.sync_subagents();
         idx
     }
@@ -1692,10 +1605,6 @@ impl App {
     /// handler so an alias cycle keeps counting. 0 when the user typed it.
     fn execute_command(&mut self, cmd: ParsedCommand, depth: u8) -> Vec<Action> {
         match cmd.name.as_str() {
-            "/tasks" => {
-                self.open_tasks();
-                vec![]
-            }
             "/compact" => {
                 if self.status == Status::Streaming {
                     self.queue_compact();
@@ -2259,7 +2168,6 @@ impl App {
         float_mgr,
         search_modal,
         file_picker,
-        task_picker,
         recipe_picker,
         rewind_picker,
         theme_picker,
@@ -2351,31 +2259,30 @@ impl App {
         ])
     }
 
-    fn finish_subagents(&mut self, role: DisplayRole, text: &str) {
-        self.retain_resolved_subagents(role, text);
+    fn finish_subagents(&mut self, outcome: TaskOutcome, text: &str) {
+        self.retain_resolved_subagents(outcome, text);
         self.chat_index.clear();
     }
 
     /// Terminalizes every tool left in progress when a turn ends, sparing
     /// shell commands that outlive the agent.
     fn terminalize_turn(&mut self, message: &str) {
-        self.retain_resolved_subagents(DisplayRole::Error, ERROR_TEXT);
+        self.retain_resolved_subagents(TaskOutcome::Error, ERROR_TEXT);
         self.chats[0].fail_in_progress_except(message.into(), self.shell.active_ids());
         for chat in self.chats.iter_mut().skip(1) {
             chat.fail_in_progress_with_message(message.into());
         }
-        self.sync_task_picker();
     }
 
     /// Marks unfinished subagent chats as ended and drops them from
     /// `chat_index`, so the session records only the children that really
     /// completed.
-    fn retain_resolved_subagents(&mut self, role: DisplayRole, text: &str) {
+    fn retain_resolved_subagents(&mut self, outcome: TaskOutcome, text: &str) {
         self.chat_index.retain(|_, &mut sub_idx| {
             if self.chats[sub_idx].is_finished() {
                 true
             } else {
-                self.chats[sub_idx].mark_finished(role.clone(), text);
+                self.chats[sub_idx].mark_finished(outcome, text);
                 false
             }
         });
@@ -2414,7 +2321,6 @@ impl App {
             };
         }
         try_picker!(self.file_picker);
-        try_picker!(self.task_picker);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
         try_picker!(self.thinking_picker);

@@ -81,6 +81,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "question",
     "sessions",
     "skill",
+    "task",
     "todo_write",
     "view_image",
     "webfetch",

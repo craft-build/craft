@@ -34,6 +34,7 @@ fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
 }
 
 const TASK_ID: &str = "task1";
+pub(crate) const RESEARCH_NAME: &str = "research";
 const SUB_TOOL_ID: &str = "sub_t1";
 const TOOL_OUTPUT_LINE: &str = "hello from the subagent";
 const LATE_MODEL_SPEC: &str = "zai/glm-5";
@@ -543,12 +544,12 @@ fn type_and_submit(app: &mut App, text: &str) -> Vec<Action> {
     app.update(Msg::Key(key(KeyCode::Enter)))
 }
 
-fn cancel_app(app: &mut App) {
+pub(crate) fn cancel_app(app: &mut App) {
     app.last_esc = Some(Instant::now());
     app.update(Msg::Key(key(KeyCode::Esc)));
 }
 
-fn error_app(app: &mut App) {
+pub(crate) fn error_app(app: &mut App) {
     app.update(agent_msg(AgentEvent::Error {
         message: "boom".into(),
     }));
@@ -1170,7 +1171,6 @@ fn turn_complete_accumulates_usage_by_model() {
 #[test]
 fn cancel_resets_all_chats_and_indices() {
     let mut app = app_with_subagent();
-    open_tasks_picker(&mut app);
     app.update(subagent_msg(
         AgentEvent::ToolStart(Box::new(ToolStartEvent {
             id: "sub_t1".into(),
@@ -1197,14 +1197,22 @@ fn cancel_resets_all_chats_and_indices() {
 
     let actions = app.handle_cancel();
     assert!(matches!(actions.as_slice(), [Action::CancelAgent { .. }]));
-    assert!(!app.task_picker.is_open());
     assert_eq!(app.chats[0].in_progress_count(), 0);
     assert_eq!(app.chats[1].in_progress_count(), 0);
     assert!(app.chats[1].is_finished());
     assert!(app.chat_index.is_empty());
 }
 
-fn finish_subagent(app: &mut App, id: &str, is_error: bool) {
+/// What a subagent's own session sends when it closes, which the `task` tool
+/// does before it reports success or failure.
+pub(crate) fn close_subagent_transcript(app: &mut App, id: &str) {
+    app.update(agent_msg(AgentEvent::SubagentHistory {
+        tool_use_id: id.into(),
+        messages: vec![],
+    }));
+}
+
+pub(crate) fn finish_subagent(app: &mut App, id: &str, is_error: bool) {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: id.into(),
         tool: "task".into(),
@@ -1261,29 +1269,17 @@ fn batch_subagent_done_marker(is_error: bool, expected_text: &str, expected_role
     assert_eq!(app.chats[1].last_message_role(), Some(expected_role));
 }
 
-fn open_tasks_picker(app: &mut App) {
-    for c in "/tasks".chars() {
-        app.update(Msg::Key(key(KeyCode::Char(c))));
-    }
-    app.update(Msg::Key(key(KeyCode::Enter)));
-}
-
-#[test]
-fn ctrl_x_toggles_tasks_picker() {
-    let mut app = test_app();
-    app.update(Msg::Key(kb::TASKS.to_key_event()));
-    assert!(app.task_picker.is_open());
-    app.update(Msg::Key(kb::TASKS.to_key_event()));
-    assert!(!app.task_picker.is_open());
-}
-
-fn app_with_subagent_id(id: &str) -> App {
-    let mut app = streaming_app();
+pub(crate) fn start_subagent(app: &mut App, id: &str, name: &str) {
     app.update(subagent_msg(
         AgentEvent::TextDelta { text: "x".into() },
         id,
-        Some("research"),
+        Some(name),
     ));
+}
+
+pub(crate) fn app_with_subagent_id(id: &str) -> App {
+    let mut app = streaming_app();
+    start_subagent(&mut app, id, RESEARCH_NAME);
     app
 }
 
@@ -1291,127 +1287,45 @@ fn app_with_subagent() -> App {
     app_with_subagent_id("task1")
 }
 
+/// The shape the picker filters on: the main chat first without a status, then
+/// every status a subagent can report, spelled the way Lua reads it.
 #[test]
-fn open_task_picker_refreshes_after_tool_done() {
-    let mut app = app_with_subagent();
-    open_tasks_picker(&mut app);
-    assert!(
-        app.task_picker
-            .selected_item()
-            .is_some_and(|entry| entry.chat_index == 0)
+fn tasks_report_main_chat_then_subagent_outcomes() {
+    let mut app = app_with_subagent_id("task1");
+    for (id, name) in [("task2", "build"), ("task3", "deploy")] {
+        app.update(subagent_msg(
+            AgentEvent::TextDelta { text: "y".into() },
+            id,
+            Some(name),
+        ));
+    }
+    finish_subagent(&mut app, "task1", false);
+    finish_subagent(&mut app, "task2", true);
+
+    let tasks = serde_json::to_value(app.tasks()).unwrap();
+    assert_eq!(
+        tasks,
+        serde_json::json!([
+            { "id": "main", "name": "Main", "focused": true },
+            { "id": "task1", "name": "research", "status": "done", "focused": false },
+            { "id": "task2", "name": "build", "status": "error", "focused": false },
+            { "id": "task3", "name": "deploy", "status": "working", "focused": false },
+        ])
     );
-
-    finish_subagent_task(&mut app, false);
-
-    assert!(app.task_picker.is_open());
-    assert_eq!(app.task_picker.item(1).unwrap().finished, Some(true));
 }
 
+/// Escaping out of a subagent takes the single-chat cancel path instead of the
+/// sweep over the whole turn, and that path has to land the task in `error`
+/// too, or it spins forever.
 #[test]
-fn open_task_picker_inserts_new_child_without_changing_selection() {
+fn cancelling_from_inside_a_subagent_reports_error() {
     let mut app = app_with_subagent();
-    open_tasks_picker(&mut app);
-    app.update(Msg::Key(key(KeyCode::Down)));
-
-    app.update(subagent_msg(
-        AgentEvent::TextDelta { text: "new".into() },
-        "task2",
-        Some("build"),
-    ));
-
-    assert_eq!(app.task_picker.item(2).unwrap().name, "build");
-    assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 1);
-}
-
-#[test]
-fn filtered_task_picker_enter_selects_entry_chat() {
-    let mut app = app_with_subagent_id("task1");
-    app.update(subagent_msg(
-        AgentEvent::TextDelta { text: "y".into() },
-        "task2",
-        Some("build"),
-    ));
-    open_tasks_picker(&mut app);
-    app.update(Msg::Key(key(KeyCode::Char('b'))));
-
-    assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 2);
-    app.update(Msg::Key(key(KeyCode::Enter)));
-
-    assert!(!app.task_picker.is_open());
-    assert_eq!(app.active_chat, 2);
-}
-
-#[test]
-fn filtered_task_picker_refresh_preserves_selected_chat_identity() {
-    let mut app = app_with_subagent_id("task1");
-    app.update(subagent_msg(
-        AgentEvent::TextDelta { text: "y".into() },
-        "task2",
-        Some("build"),
-    ));
-    open_tasks_picker(&mut app);
-    app.update(Msg::Key(key(KeyCode::Char('b'))));
-    assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 2);
-
-    app.update(subagent_msg(
-        AgentEvent::TextDelta { text: "z".into() },
-        "task3",
-        Some("benchmark"),
-    ));
-
-    assert!(app.task_picker.is_open());
-    assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 2);
-}
-
-#[test]
-fn open_task_picker_refreshes_after_subagent_history() {
-    let mut app = app_with_subagent_id("session-abc");
-    open_tasks_picker(&mut app);
-
-    app.update(agent_msg(AgentEvent::SubagentHistory {
-        tool_use_id: "session-abc".into(),
-        messages: vec![],
-    }));
-
-    assert!(app.task_picker.is_open());
-    assert_eq!(app.task_picker.item(1).unwrap().finished, Some(true));
-}
-
-#[test]
-fn closed_task_picker_stays_closed_after_lifecycle_events() {
-    let mut app = app_with_subagent();
-    finish_subagent_task(&mut app, false);
-    app.update(subagent_msg(
-        AgentEvent::TextDelta { text: "new".into() },
-        "task2",
-        Some("build"),
-    ));
-    assert!(!app.task_picker.is_open());
-}
-
-#[test]
-fn picker_escape_restores_chat() {
-    let mut app = app_with_subagent();
-    assert_eq!(app.active_chat, 0);
-
-    open_tasks_picker(&mut app);
-    app.update(Msg::Key(key(KeyCode::Down)));
-    app.update(Msg::Key(key(KeyCode::Esc)));
-
-    assert!(!app.task_picker.is_open());
-    assert_eq!(app.active_chat, 0);
-}
-
-#[test]
-fn picker_enter_stays_at_navigated() {
-    let mut app = app_with_subagent();
-
-    open_tasks_picker(&mut app);
-    app.update(Msg::Key(key(KeyCode::Down)));
-    app.update(Msg::Key(key(KeyCode::Enter)));
-
-    assert!(!app.task_picker.is_open());
-    assert_eq!(app.active_chat, 1);
+    app.focus_task(TASK_ID).unwrap();
+    cancel_app(&mut app);
+    assert_eq!(
+        serde_json::to_value(app.tasks()).unwrap()[1]["status"],
+        serde_json::json!("error")
+    );
 }
 
 const OVERLAY_BLOCKED_KEYS: &[KeyEvent] = &[
@@ -1437,10 +1351,9 @@ fn focus_queue(app: &mut App) {
     app.queue.set_focus_at(0);
 }
 
-#[test_case(open_tasks_picker as fn(&mut App) ; "task_picker")]
-#[test_case(open_help                         ; "help_modal")]
-#[test_case(open_search                       ; "search_modal")]
-#[test_case(focus_queue                       ; "queue_focus")]
+#[test_case(open_help as fn(&mut App) ; "help_modal")]
+#[test_case(open_search               ; "search_modal")]
+#[test_case(focus_queue               ; "queue_focus")]
 fn overlay_blocks_ctrl_shortcuts(setup: fn(&mut App)) {
     let mut app = app_with_subagent();
     setup(&mut app);
@@ -2342,12 +2255,6 @@ fn help_modal_consumes_keys_and_esc_closes() {
     ; "queue_focus"
 )]
 #[test_case(
-    |app: &mut App| { open_tasks_picker(app); },
-    &[KeybindContext::TaskPicker],
-    &[KeybindContext::Editing]
-    ; "task_picker"
-)]
-#[test_case(
     |app: &mut App| {
         app.state.session_mut().push_message(Message::user("test".into()));
         app.open_rewind_picker();
@@ -3014,7 +2921,10 @@ fn mcp_toggle_dispatches_action() {
     ; "consumed_by_plan_form"
 )]
 #[test_case(
-    |app: &mut App| { open_tasks_picker(app); },
+    |app: &mut App| {
+        app.state.session_mut().push_message(Message::user("test".into()));
+        app.open_rewind_picker();
+    },
     ""
     ; "routed_to_open_picker"
 )]
@@ -3249,15 +3159,12 @@ fn parent_error_refreshes_picker_and_persists_only_completed_children() {
         "model-c",
     ));
     finish_subagent(&mut app, "task3", false);
-    open_tasks_picker(&mut app);
 
     app.update(agent_msg(AgentEvent::Error {
         message: "boom".into(),
     }));
     app.checkpoint();
 
-    assert!(app.task_picker.is_open());
-    assert_eq!(app.task_picker.item(2).unwrap().finished, Some(true));
     let saved: Vec<_> = app
         .state
         .session
@@ -3429,8 +3336,12 @@ fn flush_restored_queue_drops_recovery_snapshot() {
 
 // --- Plan form integration tests ---
 
-fn done_event() -> Msg {
+pub(crate) fn done_event() -> Msg {
     agent_msg(done())
+}
+
+pub(crate) fn end_turn(app: &mut App) {
+    app.update(done_event());
 }
 
 fn implement_msg(parallel: bool) -> String {
@@ -4615,16 +4526,6 @@ fn run_builtin_file_picker_opens_modal() {
     let mut app = test_app();
     assert!(app.run_builtin(BuiltinAction::FilePicker).is_empty());
     assert!(app.file_picker.is_open());
-}
-
-#[test]
-fn run_builtin_tasks_toggles_picker() {
-    let mut app = test_app();
-    assert!(!app.task_picker.is_open());
-    app.run_builtin(BuiltinAction::Tasks);
-    assert!(app.task_picker.is_open());
-    app.run_builtin(BuiltinAction::Tasks);
-    assert!(!app.task_picker.is_open());
 }
 
 #[cfg(unix)]

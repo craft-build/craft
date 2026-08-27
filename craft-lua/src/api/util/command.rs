@@ -411,6 +411,11 @@ pub enum SessionRequest {
     SetTitle { id: String, title: String },
 }
 
+pub enum TaskRequest {
+    List,
+    Focus { id: String },
+}
+
 pub enum ModelRequest {
     Get,
     Available,
@@ -440,7 +445,6 @@ pub struct WinView {
 pub enum BuiltinAction {
     FilePicker,
     Search,
-    Tasks,
     Help,
     PlanToggle,
     PlanEditor,
@@ -469,6 +473,10 @@ pub enum UiAction {
     },
     Model {
         req: ModelRequest,
+        reply_tx: flume::Sender<UiReply>,
+    },
+    Task {
+        req: TaskRequest,
         reply_tx: flume::Sender<UiReply>,
     },
     WinSaveView {

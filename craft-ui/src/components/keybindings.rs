@@ -144,7 +144,6 @@ pub mod key {
     pub const FILE_PICKER: Bind = ctrl_bind!('s');
     pub const OPEN_EDITOR: Bind = ctrl_bind!('o');
     pub const PLAN_TOGGLE: Bind = ctrl_bind!('t');
-    pub const TASKS: Bind = ctrl_bind!('x');
     pub const REFRESH: Bind = ctrl_bind!('r');
     pub const SUSPEND: Bind = ctrl_bind!('z');
     pub const DELETE: Bind = ctrl_bind!('d');
@@ -176,7 +175,6 @@ pub enum ActionId {
     FilePicker,
     OpenEditor,
     PlanToggle,
-    Tasks,
     Suspend,
     Delete,
     KillLine,
@@ -204,7 +202,6 @@ impl ActionId {
             Self::FilePicker => "file_picker",
             Self::OpenEditor => "open_editor",
             Self::PlanToggle => "plan_toggle",
-            Self::Tasks => "tasks",
             Self::Suspend => "suspend",
             Self::Delete => "delete",
             Self::KillLine => "kill_line",
@@ -236,7 +233,6 @@ impl ActionId {
             Self::FilePicker => &[key::FILE_PICKER],
             Self::OpenEditor => &[key::OPEN_EDITOR],
             Self::PlanToggle => &[key::PLAN_TOGGLE],
-            Self::Tasks => &[key::TASKS],
             Self::Suspend => &[key::SUSPEND],
             Self::Delete => &[key::DELETE],
             Self::KillLine => &[key::KILL_LINE],
@@ -259,7 +255,6 @@ pub enum KeybindContext {
     Streaming,
     Picker,
     FormInput,
-    TaskPicker,
     RewindPicker,
     ThemePicker,
     ModelPicker,
@@ -277,7 +272,6 @@ impl KeybindContext {
             Self::Streaming => "While Streaming",
             Self::Picker => "Pickers",
             Self::FormInput => "Form",
-            Self::TaskPicker => "Task Picker",
             Self::RewindPicker => "Rewind Picker",
             Self::ThemePicker => "Theme Picker",
             Self::ModelPicker => "Model Picker",
@@ -290,8 +284,7 @@ impl KeybindContext {
 
     pub const fn parent(self) -> Option<KeybindContext> {
         match self {
-            Self::TaskPicker
-            | Self::RewindPicker
+            Self::RewindPicker
             | Self::ThemePicker
             | Self::ModelPicker
             | Self::QueueFocus
@@ -445,13 +438,6 @@ pub const KEYBINDS: &[Keybind] = &[
         action_id: Some(ActionId::PlanToggle),
         label: KeyLabel::Single(key::PLAN_TOGGLE.label),
         description: "Toggle todo / plan panel",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        action_id: Some(ActionId::Tasks),
-        label: KeyLabel::Single(key::TASKS.label),
-        description: "Open tasks",
         context: KeybindContext::General,
         platform: Platform::All,
     },

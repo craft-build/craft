@@ -6,6 +6,9 @@ const LUA_CONTEXT_BINDS: &[(&str, &str, &str)] = &[
     ("Session Picker", "`Ctrl+D`", "Delete session (press twice)"),
 ];
 
+// Built-in plugins register these themselves, so they never reach `KEYBINDS`.
+const PLUGIN_BINDS: &[(&str, &str)] = &[("`Ctrl+X`", "Open tasks")];
+
 const MAIN_CONTEXTS: &[KeybindContext] = &[
     KeybindContext::General,
     KeybindContext::Editing,
@@ -86,6 +89,13 @@ fn write_context_specific(out: &mut String) {
 
     for (ctx, key, desc) in LUA_CONTEXT_BINDS {
         out.push_str(&format!("| {ctx} | {key} | {desc} |\n"));
+    }
+
+    out.push_str("\n## Built-in Plugin Keys\n\n");
+    out.push_str("Built-in plugins register these themselves, and your own plugins can add more with `craft.keymap.set`.\n\n");
+    out.push_str("| Key | Action |\n|-----|--------|\n");
+    for (key, desc) in PLUGIN_BINDS {
+        out.push_str(&format!("| {key} | {desc} |\n"));
     }
 }
 

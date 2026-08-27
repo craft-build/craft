@@ -129,7 +129,6 @@ Remappable actions:
 | `file_picker` |
 | `open_editor` |
 | `plan_toggle` |
-| `tasks` |
 | `suspend` |
 | `delete` |
 | `kill_line` |
