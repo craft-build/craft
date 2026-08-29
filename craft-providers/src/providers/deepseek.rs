@@ -47,7 +47,7 @@ inventory::submit!(craft_config::providers::BuiltInProvider {
 /// ones. The weekend stays off-peak around the clock.
 /// <https://api-docs.deepseek.com/quick_start/pricing/>
 pub(crate) const PEAK_HOURS: PricingSchedule =
-PricingSchedule::new(PEAK_WINDOWS, PEAK_MULTIPLIER).weekdays_only();
+    PricingSchedule::new(PEAK_WINDOWS, PEAK_MULTIPLIER).weekdays_only();
 
 const PEAK_WINDOWS: &[PricingWindow] = &[PricingWindow::hours(1, 4), PricingWindow::hours(6, 10)];
 const PEAK_MULTIPLIER: f64 = 2.0;
