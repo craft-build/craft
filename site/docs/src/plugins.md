@@ -65,6 +65,8 @@ The builtin `plugin-dev` skill carries the same guide, so asking Craft to write 
 
 A Lua package adds tools, commands, keybindings, and event handlers without copying its code into `init.lua`. You can clone one into a Neovim-style package directory under the data directory yourself, or let Craft install it from a Git repository and lock it to one commit.
 
+A package directory holds sorted `plugin/*.lua` entry files, modules at `lua/<module>.lua` or `lua/<module>/init.lua`, and a `plugin.toml` manifest. The entry files share one environment and use the API this guide describes.
+
 ### Install from Git
 
 Declare managed packages in the global `init.lua`, normally `~/.config/craft/init.lua`:
@@ -79,11 +81,13 @@ craft.pack.add({
 })
 ```
 
-Craft shows all new packages in one install prompt. It writes the selected Git commit to `pack-lock.json` in your config directory. Commit this file if you want another machine to install the same revisions.
+Each entry is a source string, or a table with `src`, `version`, `name`, and `data`. Craft derives the directory and owner name from `src`, and `name` overrides it when two sources end in the same repository name.
 
-Package installation is global. A project `.craft/init.lua` cannot add packages, because all projects share the same lockfile and package directory. Project config and packages can inspect installed state with `craft.pack.get` and can activate an installed package with `craft.packadd`.
+Craft shows all new packages in one install prompt, on the terminal, before the UI starts. It writes the selected Git commit to `pack-lock.json` in your config directory. Commit this file if you want another machine to install the same revisions.
 
-Craft restores a missing checkout only when the global config still declares the package and its source matches the lockfile entry. Package and approval changes use one process lock. The kernel releases this lock when the process exits, including after a crash or forced termination.
+Every project shares one lockfile and package directory, so a project `.craft/init.lua` cannot add packages. It can still read state with `craft.pack.get` and activate a package with `craft.packadd`.
+
+Craft refuses a package name that matches a builtin plugin or a package you placed by hand, and reports the conflict at startup.
 
 Set `confirm = false` only when the package source is already trusted and Craft must run without a terminal:
 
@@ -93,7 +97,7 @@ craft.pack.add({ "https://github.com/example/craft-goal" }, {
 })
 ```
 
-This option skips the install prompt. It does not approve package permissions. Craft rejects an HTTP source that contains a username, password, or token, because Git and the lockfile would store it. Use a Git credential helper or an SSH agent instead.
+This option skips the install prompt. It does not approve package permissions. Craft rejects an HTTP source carrying a username, password, or token, since Git and the lockfile would store it. Use a credential helper or an SSH agent.
 
 Set `load = false` to install a package without loading it at startup. Set `load` to a function when the package needs a custom entry point:
 
@@ -112,6 +116,16 @@ craft.pack.add({
 
 The function runs as the package owner. It receives the package `spec` and its installed `path`. The `data` field can contain any Lua value.
 
+See `craft.pack.add` and `craft.pack.get` below for the full signatures.
+
+### Pinned revisions
+
+A lockfile entry wins over `version`: once Craft records a commit, it installs that commit everywhere, and a later `version` in `init.lua` changes nothing. To move a package, delete its entry from `pack-lock.json` and start Craft again. Craft resolves `version` and records the commit it picked.
+
+A changed `src` makes the recorded revision meaningless, so Craft installs the new source and records it. That is also a new trust decision, so the install and permission prompts come back.
+
+Removing a `craft.pack.add` entry stops the package from loading. Its lockfile entry and its checkout stay on disk until you delete them.
+
 ### Package permissions
 
 A managed package can ask for guarded APIs in `plugin.toml`:
@@ -125,7 +139,11 @@ run = true
 env = true
 ```
 
-The file is a request, not an approval. Craft asks about new permissions in a separate prompt. An approval applies only to the same package name and source. Craft keeps approvals in `<craft-data>/site/pack-approvals.json`. They describe trust on this machine and must not be committed with `pack-lock.json`. Non-interactive modes report the package as unavailable until the install and permission decisions are made in an interactive terminal.
+The manifest states what the package wants, and Craft asks about new permissions in a separate prompt. A package with no `plugin.toml` asks for nothing, and every guarded call it makes fails.
+
+An approval applies only to the same package name and source. Craft keeps approvals in `<craft-data>/site/pack-approvals.json`, where `<craft-data>` is the data directory from the directory layout in the configuration docs. Approvals describe trust on this machine and must not be committed with `pack-lock.json`.
+
+Only the interactive UI can ask. `--print`, SDK mode, the ACP server, and the other subcommands never prompt, so a package waiting for a decision comes back as a startup warning instead of loading.
 
 ### Install by hand
 
@@ -136,22 +154,34 @@ Clone a package into a Neovim-style package directory under the data directory:
 <craft-data>/site/pack/<group>/opt/<name>/
 ```
 
-A `start` package loads at startup. An `opt` package stays installed until something activates it. The `pack/core` group is reserved for packages Craft manages itself, so keep your clones in another group.
+A `start` package loads at startup. An `opt` package stays installed until something activates it.
 
-A package directory can hold sorted `plugin/*.lua` entry files, plus modules at `lua/<module>.lua` or `lua/<module>/init.lua`. All the entry files share one owner and one environment, so what one registers the next can use.
+Pick any `<group>` name except `core`, which Craft reserves for its own installs and never scans.
 
-Placing a package by hand means you trust its code the way you trust your own `init.lua`. Craft grants such a package exactly the permissions its `plugin.toml` requests, with no approval step:
+Placing a package by hand means you trust its code the way you trust your own `init.lua`. Craft grants it exactly the permissions its `plugin.toml` requests, with no approval step:
 
 ```toml
 [permissions]
 net = true
 ```
 
-Read the code before you copy it in, and keep manual placement for the packages you develop yourself. A managed install is the opposite: Craft asks before it clones a source and again before it grants the permissions. A package with no `plugin.toml` gets no guarded API at all.
+### Activate an installed package
+
+An `opt` directory, or a managed package declared with `load = false`, starts with `craft.packadd`. Call it from `init.lua` or from another package:
+
+```lua
+craft.packadd("my-package")
+```
+
+Craft loads the named package after the calling Lua task returns, so it works from `init.lua` and from another package. A package activated this way can activate another in turn. Craft reports a name no installed package matches, and refuses a package that `plugins.<name>.enabled = false` disabled.
 
 A package name also works in `craft.setup`: `plugins.<name>` can pass options to it, and `plugins.<name>.enabled = false` keeps it from loading.
 
-Managed packages use immutable revision directories under `<craft-data>/site/pack/core/<name>/<commit>/`. A new revision creates a new directory. A running package holds a shared lock on its revision. At startup, Craft removes each stale revision only when it can take the matching exclusive lock. Revisions used by another Craft process stay on disk.
+### Managed checkouts
+
+Craft restores a missing checkout only when the global config still declares the package and its source matches the lockfile entry. Installs and approval writes share one file lock, so two Craft processes cannot interleave them. The kernel releases that lock when the process exits, so a crash leaves nothing to clean up.
+
+Each revision gets its own directory under `<craft-data>/site/pack/core/<name>/<commit>/`. At startup Craft deletes stale revisions, skipping any that a running process still holds.
 
 ### `craft.pack.add()`
 
@@ -181,13 +211,7 @@ Each record has `spec`, `path`, `rev`, and `active`.
 
 ### `craft.packadd()`
 
-Activate an installed `opt` package, like `:packadd`:
-
-```lua
-craft.packadd("my-package")
-```
-
-Craft loads the named package after the calling Lua task returns, so it works from `init.lua` and from another package. A package activated this way can activate another in turn. Craft reports a name no installed package matches, and refuses a package that `plugins.<name>.enabled = false` disabled.
+Activate an installed `opt` package, like `:packadd`. See [Activate an installed package](#activate-an-installed-package).
 
 ## `craft.api`
 
