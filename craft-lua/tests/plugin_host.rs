@@ -1552,6 +1552,94 @@ craft.api.register_tool({{
 
 #[cfg(unix)]
 #[tokio::test]
+async fn job_names_are_unique_per_plugin_and_outlive_a_reload() {
+    const JOB_NAME: &str = "log-tail";
+    const DUPLICATE_ERR: &str = "already held by live job";
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let _mailbox = craft_agent::SessionMailbox::register(session);
+    let sid = session.to_string();
+    let src = format!(
+        r#"
+craft.api.register_tool({{
+    name = "start_named",
+    description = "starts a named session job twice",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local opts = {{ session = "{sid}", name = "{JOB_NAME}" }}
+        local id = craft.fn.jobstart("exec sleep 30", opts)
+        local ok, err = pcall(craft.fn.jobstart, "exec sleep 30", opts)
+        return tostring(id) .. "|" .. tostring(err)
+    end,
+}})
+"#
+    );
+    host.load_source("named", &src).unwrap();
+    let started = exec_tool(&reg, "start_named", serde_json::json!({}))
+        .await
+        .unwrap();
+    let (id, dup_err) = started.split_once('|').expect("id and duplicate error");
+    assert!(
+        dup_err.contains(DUPLICATE_ERR),
+        "a second live job under the same name must be refused, got {dup_err}"
+    );
+
+    let rediscover = format!(
+        r#"
+craft.api.register_tool({{
+    name = "find_named",
+    description = "finds the surviving job by name",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local found = craft.fn.jobfind("{JOB_NAME}")
+        local listed = "none"
+        for _, row in ipairs(craft.fn.joblist("{sid}")) do
+            if row.id == {id} then listed = tostring(row.name) .. ":" .. row.status end
+        end
+        return tostring(found) .. "|" .. listed
+    end,
+}})
+craft.api.register_tool({{
+    name = "stop_named",
+    description = "stops the named job",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        craft.fn.jobstop({id})
+        return "stopped"
+    end,
+}})
+"#
+    );
+    host.load_source("named", &rediscover).unwrap();
+    assert_eq!(
+        exec_tool(&reg, "find_named", serde_json::json!({}))
+            .await
+            .unwrap(),
+        format!("{id}|{JOB_NAME}:running"),
+        "a name must survive the reload that dropped the callbacks"
+    );
+
+    exec_tool(&reg, "stop_named", serde_json::json!({}))
+        .await
+        .unwrap();
+    let exited = format!("nil|{JOB_NAME}:exited");
+    poll_exec_tool(
+        &reg,
+        "find_named",
+        "the stopped job kept holding its name",
+        |out| out == exited,
+    )
+    .await;
+
+    host.event_handle().end_sessions_blocking([session]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn session_end_handler_sees_jobs_before_they_are_reaped() {
     use rustix::process::{Pid, test_kill_process_group};
 

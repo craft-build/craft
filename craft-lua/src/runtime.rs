@@ -3810,6 +3810,7 @@ mod tests {
                     id,
                     handle,
                     DISPATCH_TEST_JOB.into(),
+                    None,
                     Arc::from(DISPATCH_TEST_PLUGIN),
                     None,
                     None,

@@ -26,6 +26,7 @@ const MAX_TAIL_LINES: usize = 1024;
 const MAX_COMPLETED_SESSION_JOBS: usize = 256;
 const DEFAULT_WAIT_MS: u64 = 30_000;
 const JOB_NOT_FOUND_ERR: &str = "job: not found";
+const BLANK_NAME_ERR: &str = "jobstart: name must be non-blank";
 /// How often a parked `jobwait` re-checks whether its job's session ended:
 /// session jobs can live inside the waiting task's own store, where the
 /// SessionEnd reap cannot reach them.
@@ -104,6 +105,9 @@ pub(crate) struct JobMeta {
     pub(crate) background: bool,
     plugin: Arc<str>,
     command: String,
+    /// Per-plugin handle, so a reloaded plugin can find this job again
+    /// without matching on the command string. Only live jobs hold it.
+    name: Option<Arc<str>>,
     pid: u32,
     started: Instant,
     on_stdout: Option<RegistryKey>,
@@ -168,6 +172,7 @@ pub(crate) struct CallbackUpdates {
 pub(crate) struct JobSnapshot {
     pub id: u32,
     pub command: String,
+    pub name: Option<Arc<str>>,
     pub session: Option<CraftId>,
     pub pid: u32,
     pub elapsed_secs: u64,
@@ -181,6 +186,7 @@ impl JobSnapshot {
         Self {
             id,
             command: job.command.clone(),
+            name: job.name.clone(),
             session: job.session,
             pid: job.pid,
             elapsed_secs: job
@@ -256,6 +262,7 @@ impl JobStore {
         id: u32,
         handle: TerminalHandle,
         command: String,
+        name: Option<Arc<str>>,
         plugin: Arc<str>,
         session: Option<CraftId>,
         on_stdout: Option<RegistryKey>,
@@ -271,6 +278,7 @@ impl JobStore {
                 plugin,
                 session,
                 command,
+                name,
                 pid: handle.pid,
                 started: Instant::now(),
                 on_stdout,
@@ -441,6 +449,18 @@ impl JobStore {
     pub fn session_of(&self, job_id: u32, plugin: &str) -> Option<CraftId> {
         let job = self.jobs.get(&job_id)?;
         job.owned_by(plugin).then_some(job.session)?
+    }
+
+    /// Id of the **live** job this plugin can see holding {name}. Exited jobs
+    /// keep their name for display but stop answering here, so a plugin that
+    /// adopts by name restarts a dead job instead of adopting a corpse.
+    pub fn find_named(&self, name: &str, plugin: &str) -> Option<u32> {
+        self.jobs
+            .iter()
+            .find(|(_, job)| {
+                job.exit_code.is_none() && job.name.as_deref() == Some(name) && job.owned_by(plugin)
+            })
+            .map(|(&id, _)| id)
     }
 
     fn visible(&self, job_id: u32, plugin: &str) -> bool {
@@ -719,6 +739,7 @@ pub(crate) fn create_fn_table(
                 let (
                     cwd,
                     env,
+                    name,
                     on_stdout,
                     on_stderr,
                     on_exit,
@@ -750,6 +771,7 @@ pub(crate) fn create_fn_table(
                             .map(|f| lua.create_registry_value(f))
                             .transpose()?;
                         let want_sandbox: bool = opts.get("sandbox").unwrap_or(false);
+                        let name = job_name(opts)?;
                         let background: bool = opts.get("background").unwrap_or(false);
                         let session: Option<String> = opts.get("session").ok();
                         let session = session
@@ -773,6 +795,7 @@ pub(crate) fn create_fn_table(
                         (
                             cwd,
                             env,
+                            name,
                             on_stdout,
                             on_stderr,
                             on_exit,
@@ -783,8 +806,18 @@ pub(crate) fn create_fn_table(
                             tail,
                         )
                     }
-                    None => (None, None, None, None, None, false, false, None, None, None),
+                    None => (
+                        None, None, None, None, None, None, false, false, None, None, None,
+                    ),
                 };
+
+                if let Some(ref name) = name
+                    && let Some(held) = with_task_jobs(&lua, |store| store.find_named(name, &owner))
+                {
+                    return Err(mlua::Error::runtime(format!(
+                        "jobstart: name {name:?} is already held by live job {held}"
+                    )));
+                }
 
                 let (backend, id) =
                     with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
@@ -811,7 +844,8 @@ pub(crate) fn create_fn_table(
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
                     store.register(
-                        id, handle, cmd, owner, session, on_stdout, on_stderr, on_exit, background,
+                        id, handle, cmd, name, owner, session, on_stdout, on_stderr, on_exit,
+                        background,
                     );
                     store.configure(id, notify, tail);
                 });
@@ -989,6 +1023,21 @@ pub(crate) fn create_fn_table(
         })?,
     )?;
 
+    let p = perms.clone();
+    let owner = plugin.clone();
+    t.set(
+        "jobfind",
+        lua.create_function(move |lua, name: String| {
+            if !p.is_allowed(Run) {
+                return Err(crate::plugin_permissions::denied_error(Run));
+            }
+            match with_task_jobs(lua, |store| store.find_named(&name, &owner)) {
+                Some(id) => Ok((Some(id), None)),
+                None => Ok(err_pair(JOB_NOT_FOUND_ERR)),
+            }
+        })?,
+    )?;
+
     let p = perms;
     t.set(
         "executable",
@@ -1072,6 +1121,16 @@ fn parse_notify(opts: &Table, session: Option<CraftId>) -> LuaResult<Option<JobN
     }
 }
 
+fn job_name(opts: &Table) -> LuaResult<Option<Arc<str>>> {
+    let Some(name) = opts.get::<Option<String>>("name")? else {
+        return Ok(None);
+    };
+    if name.trim().is_empty() {
+        return Err(mlua::Error::runtime(BLANK_NAME_ERR));
+    }
+    Ok(Some(Arc::from(name)))
+}
+
 fn callback_update(lua: &Lua, opts: &Table, key: &str) -> LuaResult<CallbackUpdate> {
     match opts.get::<Value>(key)? {
         Value::Nil => Ok(CallbackUpdate::Keep),
@@ -1087,6 +1146,7 @@ fn snapshot_table(lua: &Lua, snap: &JobSnapshot, tails: bool) -> LuaResult<Table
     let row = lua.create_table()?;
     row.set("id", snap.id)?;
     row.set("command", snap.command.as_str())?;
+    row.set("name", snap.name.as_deref())?;
     row.set("pid", snap.pid)?;
     row.set("session", snap.session.map(|s| s.to_string()))?;
     row.set("elapsed_secs", snap.elapsed_secs)?;
@@ -1178,6 +1238,7 @@ mod tests {
             id,
             handle,
             "echo hello".into(),
+            None,
             owner(),
             None,
             None,
@@ -1261,6 +1322,7 @@ mod tests {
             id,
             handle,
             "echo hello".into(),
+            None,
             owner(),
             None,
             None,
@@ -1384,6 +1446,7 @@ mod tests {
             id,
             handle,
             cmd.into(),
+            None,
             owner(),
             Some(session),
             None,
@@ -1530,6 +1593,7 @@ mod tests {
             background: false,
             plugin: owner(),
             command: "stub".into(),
+            name: None,
             pid: 0,
             started: Instant::now(),
             on_stdout: None,
@@ -1653,6 +1717,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_name_is_held_by_the_live_job_only() {
+        const NAME: &str = "log-tail";
+        let lua = Lua::new();
+        let mut store = make_store();
+        let mut job = stub_job();
+        job.session = Some(CraftId::generate());
+        job.name = Some(Arc::from(NAME));
+        store.jobs.insert(1, job);
+
+        assert_eq!(store.find_named(NAME, TEST_PLUGIN), Some(1));
+        assert_eq!(store.find_named(NAME, "other-plugin"), None);
+        assert_eq!(store.find_named("absent", TEST_PLUGIN), None);
+
+        store.record_event(1, &JobEvent::Exit(0));
+        store.complete(&lua, 1, 0);
+
+        assert_eq!(
+            store.find_named(NAME, TEST_PLUGIN),
+            None,
+            "an exited job must release its name so the next start is not blocked"
+        );
+        assert_eq!(
+            store.snapshot(1, TEST_PLUGIN).unwrap().name.as_deref(),
+            Some(NAME),
+            "the name stays on the row that explains the exit"
+        );
+    }
+
+    #[tokio::test]
     async fn next_event_round_robins_so_a_chatty_job_cannot_starve_its_sibling() {
         const QUEUED_PER_JOB: usize = 2;
         let mut store = make_store();
@@ -1763,6 +1856,7 @@ mod tests {
             id,
             handle,
             "echo hello".into(),
+            None,
             owner(),
             None,
             None,
