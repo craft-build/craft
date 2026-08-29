@@ -13,7 +13,7 @@ use std::mem;
 
 use craft_providers::ImageSource;
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph};
@@ -25,6 +25,7 @@ use crate::selection::LineBreaks;
 const CHEVRON: &str = super::CHEVRON;
 const NEWLINE_PAD: &str = "  ";
 const PREFIX_WIDTH: u16 = 2;
+const INPUT_LEFT_PAD: u16 = 2;
 const PLACEHOLDER_SUGGESTIONS: &[&str] = &[
     "research how something works",
     "fix a bug",
@@ -303,26 +304,17 @@ impl InputBox {
         }
     }
 
+    /// The row the cursor is drawn on, counted from the top of the buffer, so
+    /// the scroll can bring exactly that row into view.
     fn visual_cursor_y(&self, ew: usize) -> u16 {
-        let lines_above: u16 = self
-            .buffer
-            .lines()
+        let lines = self.buffer.lines();
+        let lines_above: usize = lines
             .iter()
             .take(self.buffer.y())
-            .map(|line| visual_line_count(line.width(), ew) as u16)
+            .map(|line| wrapped_row_count(line, ew, false))
             .sum();
-
-        let wrap_row = {
-            let line = &self.buffer.lines()[self.buffer.y()];
-            let cursor_col: usize = line
-                .chars()
-                .take(self.buffer.x())
-                .map(|c| c.width().unwrap_or(1))
-                .sum();
-            cursor_col.checked_div(ew).unwrap_or(0) as u16
-        };
-
-        lines_above + wrap_row
+        let row = lines_above + wrapped_cursor_row(&lines[self.buffer.y()], ew, self.buffer.x());
+        u16::try_from(row).unwrap_or(u16::MAX)
     }
 
     pub fn view(
@@ -355,6 +347,7 @@ impl InputBox {
         self.scroll_y = self.scroll_y.min(max_scroll);
 
         let is_empty = self.buffer.value().is_empty();
+        let mut cursor_cell: Option<Position> = None;
         let mut styled_lines: Vec<Line> = if is_empty && self.pending_images.is_empty() {
             let placeholder_base = theme::current().input_placeholder;
             if streaming {
@@ -386,28 +379,34 @@ impl InputBox {
         } else {
             let cursor_y = self.buffer.y();
             let cursor_x = self.buffer.x();
-            self.buffer
-                .lines()
-                .iter()
-                .enumerate()
-                .flat_map(|(i, line)| {
-                    let is_cursor_line = i == cursor_y && focused;
-                    let shell_spans = if i == 0 {
-                        shell_highlight_spans(line)
-                    } else {
-                        None
-                    };
-                    wrap_line(
-                        line,
-                        ew,
-                        is_cursor_line,
-                        cursor_x,
-                        i == 0,
-                        shell_spans.as_deref(),
-                    )
-                })
-                .collect()
+            let mut lines: Vec<Line> = Vec::new();
+            for (i, line) in self.buffer.lines().iter().enumerate() {
+                let is_cursor_line = i == cursor_y && focused;
+                let shell_spans = if i == 0 {
+                    shell_highlight_spans(line)
+                } else {
+                    None
+                };
+                let (rows, cursor) = wrap_line(
+                    line,
+                    ew,
+                    is_cursor_line,
+                    cursor_x,
+                    i == 0,
+                    shell_spans.as_deref(),
+                );
+                if let Some(cell) = cursor
+                    && let Ok(row) = u16::try_from(lines.len() + usize::from(cell.y))
+                {
+                    cursor_cell = Some(Position::new(INPUT_LEFT_PAD + cell.x, row));
+                }
+                lines.extend(rows);
+            }
+            lines
         };
+        if focused && is_empty && self.pending_images.is_empty() {
+            cursor_cell = Some(Position::new(INPUT_LEFT_PAD + PREFIX_WIDTH, 0));
+        }
 
         if !self.pending_images.is_empty() {
             let n = self.pending_images.len();
@@ -423,7 +422,7 @@ impl InputBox {
 
         let text = Text::from(styled_lines);
         let block = Block::default()
-            .padding(ratatui::widgets::Padding::new(2, 1, 1, 0))
+            .padding(ratatui::widgets::Padding::new(INPUT_LEFT_PAD, 1, 1, 0))
             .style(Style::new().bg(theme::current().layer01));
         let paragraph = Paragraph::new(text)
             .style(Style::new().fg(theme::current().foreground))
@@ -441,6 +440,16 @@ impl InputBox {
                 Paragraph::new(hint).alignment(ratatui::layout::Alignment::Right),
                 hint_area,
             );
+        }
+
+        // macOS anchors IME preedit text to the real terminal cursor, and
+        // ratatui only moves it when asked, so park it on the cell we reversed.
+        if let Some(cell) = cursor_cell
+            && let Some(y) = cell.y.checked_sub(self.scroll_y)
+            && y < content_height
+            && cell.x < area.width
+        {
+            frame.set_cursor_position(Position::new(area.x + cell.x, area.y + 1 + y));
         }
 
         if max_scroll > 0 {
@@ -498,7 +507,7 @@ impl InputBox {
 
         for (buf_line_idx, line) in self.buffer.lines().iter().enumerate() {
             let chars: Vec<char> = line.chars().collect();
-            let widths: Vec<usize> = chars.iter().map(|c| c.width().unwrap_or(1)).collect();
+            let widths: Vec<usize> = chars.iter().copied().map(char_width).collect();
 
             let is_cursor_line = buf_line_idx == cursor_line && focused;
             let ranges = wrap_ranges(&widths, ew, is_cursor_line);
@@ -548,10 +557,14 @@ fn random_placeholder_hint() -> &'static str {
     PLACEHOLDER_SUGGESTIONS[idx]
 }
 
-fn effective_width(content_width: usize) -> usize {
+const fn effective_width(content_width: usize) -> usize {
     content_width.saturating_sub(PREFIX_WIDTH as usize)
 }
 
+/// Wraps one buffer line into rendered rows. When the line holds the cursor it
+/// also reports the cell it reversed, `y` rows down from the start of the line
+/// and `x` columns into that row. Only this function knows where the cursor was
+/// drawn, so a terminal cursor placed from it can never drift off that cell.
 fn wrap_line(
     line: &str,
     ew: usize,
@@ -559,11 +572,14 @@ fn wrap_line(
     cursor_x: usize,
     is_first_line: bool,
     shell_spans: Option<&[Span<'static>]>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Option<Position>) {
     let chars: Vec<char> = line.chars().collect();
     let widths: Vec<usize> = chars.iter().map(|c| c.width().unwrap_or(1)).collect();
 
-    wrap_ranges(&widths, ew, is_cursor_line)
+    let ranges = wrap_ranges(&widths, ew, is_cursor_line);
+    let row_count = ranges.len();
+    let mut cursor_cell = None;
+    let rows = ranges
         .into_iter()
         .enumerate()
         .map(|(row, (start, end))| {
@@ -574,6 +590,7 @@ fn wrap_line(
             } else {
                 Span::raw("")
             };
+            let prefix_width = prefix_span.width() as u16;
             let mut spans = vec![prefix_span];
 
             let chunk_spans = if let Some(styled) = &shell_spans {
@@ -583,41 +600,92 @@ fn wrap_line(
                 vec![Span::raw(chunk_text)]
             };
 
-            if is_cursor_line && cursor_x >= start && cursor_x <= end {
-                let local_cursor = cursor_x.saturating_sub(start);
-                spans.extend(overlay_cursor(chunk_spans, local_cursor));
+            // A cursor sitting on a wrap boundary belongs to the row that
+            // starts there, otherwise both rows would draw it.
+            let owns_cursor =
+                is_cursor_line && cursor_x >= start && (cursor_x < end || row + 1 == row_count);
+            if owns_cursor {
+                let (with_cursor, col) = overlay_cursor(chunk_spans, cursor_x - start);
+                cursor_cell = Some(Position::new(prefix_width + col, row as u16));
+                spans.extend(with_cursor);
             } else {
                 spans.extend(chunk_spans);
             }
 
             Line::from(spans)
         })
-        .collect()
+        .collect();
+    (rows, cursor_cell)
 }
 
-/// Split a line (given per-char display widths) into wrapped row ranges of
-/// char indices, exactly as it is rendered: an extra empty row is appended
-/// when the cursor sits past a completely full last row.
-fn wrap_ranges(widths: &[usize], ew: usize, is_cursor_line: bool) -> Vec<(usize, usize)> {
+fn char_width(c: char) -> usize {
+    c.width().unwrap_or(1)
+}
+
+/// The one place that knows how a line breaks into rows: greedy wrapping, where
+/// a char that no longer fits moves to the next row and leaves the gap behind.
+/// Calls `emit` with the char range of every row, and appends an empty row when
+/// the cursor sits just past a completely full last row.
+///
+/// Everything that needs row numbers goes through here. Dividing the cursor
+/// column by the width instead looks close enough for plain text, but it cannot
+/// see those gaps, so with wide chars it lands on the wrong row.
+fn walk_wrap_rows(
+    widths: impl IntoIterator<Item = usize>,
+    ew: usize,
+    is_cursor_line: bool,
+    mut emit: impl FnMut(usize, usize),
+) {
     let row_width = ew.max(1);
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut char_count = 0;
     let mut row_start = 0;
     let mut row_col = 0;
-    for (i, &w) in widths.iter().enumerate() {
+    for (i, w) in widths.into_iter().enumerate() {
         if row_col + w > row_width && row_col > 0 {
-            ranges.push((row_start, i));
+            emit(row_start, i);
             row_start = i;
             row_col = 0;
         }
         row_col += w;
+        char_count = i + 1;
     }
-    if row_start < widths.len() || ranges.is_empty() {
-        ranges.push((row_start, widths.len()));
-    }
+    emit(row_start, char_count);
     if is_cursor_line && row_col + 1 > row_width {
-        ranges.push((widths.len(), widths.len()));
+        emit(char_count, char_count);
     }
+}
+
+/// Row ranges of char indices, for the callers that need to slice the text.
+fn wrap_ranges(widths: &[usize], ew: usize, is_cursor_line: bool) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    walk_wrap_rows(widths.iter().copied(), ew, is_cursor_line, |start, end| {
+        ranges.push((start, end));
+    });
     ranges
+}
+
+/// How many rows a line takes once wrapped. Counting instead of collecting
+/// keeps this allocation free, which matters because it runs per line per frame.
+fn wrapped_row_count(line: &str, ew: usize, is_cursor_line: bool) -> usize {
+    let mut rows = 0;
+    walk_wrap_rows(line.chars().map(char_width), ew, is_cursor_line, |_, _| {
+        rows += 1;
+    });
+    rows
+}
+
+/// Which row of the wrapped line holds `cursor_x`, that is the last row that
+/// starts at or before it. Rows are contiguous, so this picks the same row the
+/// renderer reverses a cell on, including on a wrap boundary.
+fn wrapped_cursor_row(line: &str, ew: usize, cursor_x: usize) -> usize {
+    let (mut row, mut owner) = (0, 0);
+    walk_wrap_rows(line.chars().map(char_width), ew, true, |start, _| {
+        if start <= cursor_x {
+            owner = row;
+        }
+        row += 1;
+    });
+    owner
 }
 
 fn shell_highlight_spans(line: &str) -> Option<Vec<Span<'static>>> {
@@ -661,13 +729,19 @@ fn slice_styled_spans(
     result
 }
 
-fn overlay_cursor(spans: Vec<Span<'static>>, cursor_char_pos: usize) -> Vec<Span<'static>> {
+fn display_width(spans: &[Span<'_>]) -> u16 {
+    spans.iter().map(Span::width).sum::<usize>() as u16
+}
+
+/// Reverses the cell under the cursor and reports its display column, measured
+/// from the spans actually emitted before it so wide chars cannot throw it off.
+fn overlay_cursor(spans: Vec<Span<'static>>, cursor_char_pos: usize) -> (Vec<Span<'static>>, u16) {
     let mut result = Vec::new();
     let mut pos = 0;
-    let mut cursor_placed = false;
+    let mut cursor_col = None;
     for span in spans {
         let span_len = span.content.chars().count();
-        if !cursor_placed && cursor_char_pos >= pos && cursor_char_pos < pos + span_len {
+        if cursor_col.is_none() && cursor_char_pos >= pos && cursor_char_pos < pos + span_len {
             let local = cursor_char_pos - pos;
             let byte_pos = TextBuffer::char_to_byte(&span.content, local);
             let (before, after) = span.content.split_at(byte_pos);
@@ -678,21 +752,23 @@ fn overlay_cursor(spans: Vec<Span<'static>>, cursor_char_pos: usize) -> Vec<Span
             let Some(cursor_char) = cs.next() else {
                 break;
             };
+            cursor_col = Some(display_width(&result));
             result.push(Span::styled(cursor_char.to_string(), span.style.reversed()));
             let rest: String = cs.collect();
             if !rest.is_empty() {
                 result.push(Span::styled(rest.to_string(), span.style));
             }
-            cursor_placed = true;
         } else {
             result.push(span);
         }
         pos += span_len;
     }
-    if !cursor_placed {
-        result.push(Span::styled(" ", Style::new().reversed()));
+    if let Some(col) = cursor_col {
+        return (result, col);
     }
-    result
+    let col = display_width(&result);
+    result.push(Span::styled(" ", Style::new().reversed()));
+    (result, col)
 }
 
 fn total_visual_lines(buffer: &TextBuffer, ew: usize, cursor_visible: bool) -> usize {
@@ -701,13 +777,7 @@ fn total_visual_lines(buffer: &TextBuffer, ew: usize, cursor_visible: bool) -> u
         .lines()
         .iter()
         .enumerate()
-        .map(|(i, line)| {
-            let mut text_len = line.width();
-            if cursor_visible && i == cursor_y {
-                text_len += 1;
-            }
-            visual_line_count(text_len, ew)
-        })
+        .map(|(i, line)| wrapped_row_count(line, ew, cursor_visible && i == cursor_y))
         .sum()
 }
 
@@ -715,7 +785,7 @@ fn total_visual_lines(buffer: &TextBuffer, ew: usize, cursor_visible: bool) -> u
 mod tests {
     use super::*;
     use crate::components::scrollbar::SCROLLBAR_THUMB;
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
     use test_case::test_case;
 
     fn type_text(input: &mut InputBox, text: &str) {
@@ -1242,5 +1312,150 @@ mod tests {
         type_text(&mut input, "xy");
         input.buffer.set_cursor(0, 8);
         input.click_position(area(10), row, col, focused)
+    }
+
+    fn draw_input(
+        input: &mut InputBox,
+        width: u16,
+        height: u16,
+        focused: bool,
+    ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect::new(0, 0, width, height);
+                input.view(frame, area, false, focused, None);
+            })
+            .unwrap();
+        terminal
+    }
+
+    // Width 12 leaves 10 text columns after the 2 cell prefix, height 6 leaves
+    // 4 content rows between the borders.
+    const CURSOR_WIDTH: u16 = 12;
+    const CURSOR_HEIGHT: u16 = 6;
+    const CURSOR_EW: usize = effective_width(CURSOR_WIDTH as usize);
+
+    fn reversed_cells(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) -> Vec<Position> {
+        let buf = terminal.backend().buffer();
+        buf.area
+            .positions()
+            .filter(|&p| {
+                buf.cell(p)
+                    .is_some_and(|c| c.modifier.contains(ratatui::style::Modifier::REVERSED))
+            })
+            .collect()
+    }
+
+    /// An IME anchors its preedit text to the terminal cursor, so the cursor
+    /// has to sit on the very cell the input box reversed, and on no other.
+    fn assert_cursor_at(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        expected: Position,
+    ) {
+        assert!(terminal.backend().cursor_visible());
+        assert_eq!(terminal.backend().cursor_position(), expected);
+        assert_eq!(reversed_cells(terminal), vec![expected]);
+    }
+
+    fn assert_no_cursor(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) {
+        assert!(!terminal.backend().cursor_visible());
+        assert!(reversed_cells(terminal).is_empty());
+    }
+
+    fn render_with_cursor_left(
+        text: &str,
+        left: usize,
+    ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+        let mut input = single_line(text);
+        for _ in 0..left {
+            input.buffer.move_left();
+        }
+        render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT)
+    }
+
+    #[test_case("hello", 0, Position::new(9, 1) ; "ascii_at_end_of_line")]
+    #[test_case("hello", 2, Position::new(7, 1) ; "ascii_in_the_middle")]
+    #[test_case("a漢b", 0, Position::new(8, 1)  ; "wide_char_advances_two_columns")]
+    #[test_case("a漢b", 1, Position::new(7, 1)  ; "after_a_wide_char")]
+    #[test_case("a漢b", 2, Position::new(5, 1)  ; "on_a_wide_char")]
+    fn terminal_cursor_tracks_the_software_cursor(text: &str, left: usize, expected: Position) {
+        assert_cursor_at(&render_with_cursor_left(text, left), expected);
+    }
+
+    #[test_case(CURSOR_EW, 0, Position::new(2, 2)         ; "at_the_boundary_it_starts_the_next_row")]
+    #[test_case(CURSOR_EW + 1, 0, Position::new(3, 2)     ; "past_the_boundary_it_trails_the_text")]
+    #[test_case(CURSOR_EW + 2, 2, Position::new(2, 2)     ; "inside_the_text_at_the_boundary")]
+    #[test_case(CURSOR_EW * 2 + 2, 2, Position::new(2, 3) ; "at_a_continuation_row_boundary")]
+    fn terminal_cursor_at_wrap_boundary(chars: usize, left: usize, expected: Position) {
+        assert_cursor_at(&render_with_cursor_left(&"x".repeat(chars), left), expected);
+    }
+
+    #[test]
+    fn terminal_cursor_on_second_buffer_line() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        input.handle_paste("aaa\nbb");
+        let terminal = render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
+        assert_cursor_at(&terminal, Position::new(PREFIX_WIDTH * 2 + 2, 2));
+    }
+
+    #[test]
+    fn terminal_cursor_on_empty_input_sits_after_the_chevron() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        let terminal = render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
+        assert_cursor_at(&terminal, Position::new(INPUT_LEFT_PAD + PREFIX_WIDTH, 1));
+    }
+
+    #[test]
+    fn terminal_cursor_follows_vertical_scroll() {
+        const LINES: usize = 10;
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        input.handle_paste(&["a"; LINES].join("\n"));
+
+        let terminal = render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
+        assert!(input.scroll_y() > 0, "input should have scrolled");
+        assert_cursor_at(
+            &terminal,
+            Position::new(INPUT_LEFT_PAD + PREFIX_WIDTH + 1, CURSOR_HEIGHT - 2),
+        );
+
+        input.scroll(LINES as i32);
+        assert_eq!(input.scroll_y(), 0, "should be back at the top");
+        assert_no_cursor(&render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT));
+    }
+
+    // `a` plus five wide chars is 11 columns, so the last one does not fit in
+    // the 10 column row and starts a second row while leaving a hole behind.
+    // With only one content row the viewport has to scroll down to that second
+    // row, or the reversed cell and the IME with it end up off screen.
+    const WIDE_WRAP_LINE: &str = "a漢漢漢漢漢";
+    const WIDE_WRAP_HEIGHT: u16 = 3;
+    const WIDE_WRAP_SCROLL: u16 = 1;
+    const SHOULD_FOLLOW_WIDE_WRAP: &str = "scroll should follow the cursor onto the wrapped row";
+
+    #[test_case(0, Position::new(4, 1) ; "past_the_wide_char_that_wrapped")]
+    #[test_case(1, Position::new(2, 1) ; "on_the_wide_char_that_wrapped")]
+    fn terminal_cursor_follows_a_wide_char_onto_the_next_row(left: usize, expected: Position) {
+        let mut input = single_line(WIDE_WRAP_LINE);
+        for _ in 0..left {
+            input.buffer.move_left();
+        }
+        let terminal = render_input(&mut input, CURSOR_WIDTH, WIDE_WRAP_HEIGHT);
+        assert_eq!(
+            input.scroll_y(),
+            WIDE_WRAP_SCROLL,
+            "{SHOULD_FOLLOW_WIDE_WRAP}"
+        );
+        assert_cursor_at(&terminal, expected);
+    }
+
+    #[test]
+    fn unfocused_input_leaves_the_terminal_cursor_alone() {
+        let mut input = single_line("hello");
+        let terminal = draw_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT, false);
+        assert_no_cursor(&terminal);
     }
 }
