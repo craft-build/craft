@@ -371,11 +371,13 @@ craft.ui.set_window_title("")
 
 Plugins can run background processes with `craft.fn.jobstart` and inspect them later.
 
-- `craft.fn.jobstart(cmd, opts)` starts a shell command. Options include `on_stdout`, `on_stderr`, `on_exit` callbacks, `cwd`, `env`, `sandbox`, `background` (survives the tool call), and `tail` (trailing lines per stream kept for `jobinfo`, default 20, 0 disables, max 1024). Returns a job id.
-- `craft.fn.jobinfo(job_id)` snapshots a job this plugin can see: `{ id, command, pid, status, exit_code, elapsed_secs, stdout_lines, stderr_lines }`. `status` is `"running"` or `"exited"`. Answers `(nil, err)` when the job is gone.
-- `craft.fn.joblist()` lists live jobs this plugin can see, same fields as above.
-- `craft.fn.jobwait(job_id, timeout_ms)` waits for a job and returns `{ stdout, stderr, exit_code, truncated }`. `truncated` is false when the collected lines are the full output. Returns nil on timeout.
+- `craft.fn.jobstart(cmd, opts)` starts a shell command. Options include `on_stdout`, `on_stderr`, `on_exit` callbacks, `cwd`, `env`, `sandbox`, `background` (survives the tool call), `tail` (trailing lines per stream kept for `jobinfo`, default 20, 0 disables, max 1024), and `session` (a session id). Passing `session` makes the job session-owned: it survives plugin reload and lives until that session ends, and the plugin that started it can still inspect and stop it. `notify` (only with `session`) posts a mailbox observation when the process exits: `true` means `{ wake = true, on_success = true }`, or pass a table with `wake` and `on_success` (both default true). Returns a job id.
+- `craft.fn.jobinfo(job_id)` snapshots a job this plugin can see: `{ id, command, pid, session, status, exit_code, elapsed_secs, stdout_lines, stderr_lines }`. `status` is `"running"` or `"exited"`. Session-owned jobs still answer after they exit; every other job is gone once it exits. Answers `(nil, err)` when the job is gone.
+- `craft.fn.joblist(session?)` lists jobs this plugin can see, including exited session-owned jobs, same fields as above. Pass a session id to restrict session-owned jobs to that session.
+- `craft.fn.jobwait(job_id, timeout_ms)` waits for a job and returns `{ stdout, stderr, exit_code, truncated }`. `truncated` is false when the collected lines are the full output; a job that already exited answers from its captured tail with `truncated = true`. Returns nil on timeout.
 - `craft.fn.jobstop(job_id)` kills a running job. Safe on unknown or already exited ids.
+
+When a session ends, the `SessionEnd` autocmd fires first so handlers can inspect or stop those jobs, then the host reaps them.
 
 Jobs need the `run` plugin permission.
 

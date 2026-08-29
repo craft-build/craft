@@ -1253,6 +1253,197 @@ craft.api.register_tool({
         .unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn session_owned_job_survives_plugin_reload() {
+    use rustix::process::{Pid, test_kill_process_group};
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let _mailbox = craft_agent::SessionMailbox::register(session);
+    let sid = session.to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_path = dir.path().join("job.pid");
+    let src = format!(
+        r#"craft.api.register_tool({{
+            name = "start_session_job",
+            description = "starts a session-owned job",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function()
+                local id = craft.fn.jobstart("printf %s $$ > '{pid}'; exec sleep 30", {{
+                    session = "{sid}",
+                }})
+                return tostring(id)
+            end,
+        }})"#,
+        pid = pid_path.display(),
+        sid = sid,
+    );
+    host.load_source("session_job", &src).unwrap();
+    let id = exec_tool(&reg, "start_session_job", serde_json::json!({}))
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_path)
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session job did not publish its process id"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let pid = Pid::from_raw(pid).unwrap();
+    assert!(test_kill_process_group(pid).is_ok());
+
+    host.unload("session_job").unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        test_kill_process_group(pid).is_ok(),
+        "session-owned job must survive plugin unload"
+    );
+
+    let inspect = format!(
+        r#"craft.api.register_tool({{
+            name = "inspect_session_job",
+            description = "lists session jobs after reload",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function()
+                local info = craft.fn.jobinfo({id})
+                if not info then return "missing" end
+                return info.status .. ":" .. tostring(info.pid)
+            end,
+        }})"#
+    );
+    host.load_source("session_job", &inspect).unwrap();
+    let state = exec_tool(&reg, "inspect_session_job", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(
+        state.starts_with("running:"),
+        "reloaded plugin should see the live session job, got {state}"
+    );
+
+    host.event_handle().end_session(session);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while test_kill_process_group(pid).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "end_session must kill the session job"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_end_handler_sees_jobs_before_they_are_reaped() {
+    use rustix::process::{Pid, test_kill_process_group};
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let _mailbox = craft_agent::SessionMailbox::register(session);
+    let sid = session.to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_path = dir.path().join("job.pid");
+    let src = format!(
+        r#"craft.api.register_tool({{
+            name = "start_order_job",
+            description = "starts a session-owned job",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function()
+                job_id = craft.fn.jobstart("printf %s $$ > '{pid}'; exec sleep 30", {{
+                    session = "{sid}",
+                }})
+                return tostring(job_id)
+            end,
+        }})
+        craft.api.register_tool({{
+            name = "probe_order_job",
+            description = "reports what the SessionEnd handler saw",
+            schema = {MINIMAL_SCHEMA},
+            audiences = {{ "main" }},
+            handler = function()
+                return seen or "not-yet"
+            end,
+        }})
+        craft.api.create_autocmd("SessionEnd", {{
+            callback = function(ev)
+                if tostring(ev.data and ev.data.session_id) ~= "{sid}" then return end
+                local ok, info = pcall(craft.fn.jobinfo, job_id)
+                if not ok then
+                    seen = "err:" .. tostring(info)
+                    return
+                end
+                seen = info and (info.status .. ":" .. tostring(info.pid)) or "missing"
+            end,
+        }})
+        local seen"#,
+        pid = pid_path.display(),
+        sid = sid,
+    );
+    host.load_source("order_probe", &src).unwrap();
+    exec_tool(&reg, "start_order_job", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_path)
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session job did not publish its process id"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let pid = Pid::from_raw(pid).unwrap();
+    assert!(test_kill_process_group(pid).is_ok());
+
+    host.event_handle().end_session(session);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let seen = loop {
+        let seen = exec_tool(&reg, "probe_order_job", serde_json::json!({}))
+            .await
+            .unwrap();
+        if !seen.starts_with("not-yet") {
+            break seen;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "SessionEnd handler never ran"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(
+        seen.starts_with("running:"),
+        "SessionEnd handler should see the live job, got {seen}"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while test_kill_process_group(pid).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "end_session must reap the job after dispatching SessionEnd"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[tokio::test]
 async fn vm_recovers_after_async_job_tool() {
     let reg = fresh_registry();

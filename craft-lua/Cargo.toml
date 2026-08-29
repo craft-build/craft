@@ -89,6 +89,7 @@ base64 = { workspace = true }
 criterion = { workspace = true }
 image = { workspace = true }
 craft-agent = { workspace = true }
+craft-storage = { workspace = true }
 tempfile = { workspace = true }
 semver = { workspace = true }
 test-case = { workspace = true }

@@ -928,9 +928,10 @@ impl EventHandle {
         });
     }
 
-    /// Fire `SessionEnd` for a session that is going away. Call from every
-    /// session-end path (reset, load, delete, shutdown, ACP, headless);
-    /// paths can overlap, so each id fires at most once per handle graph.
+    /// Fire `SessionEnd` and reap that session's jobs. Call from every
+    /// session-end path (reset, load, delete, shutdown, ACP, headless) so a
+    /// Lua monitor can stay a plugin; paths can overlap, so each id fires at
+    /// most once per handle graph.
     pub fn end_session(&self, session: CraftId) {
         let mut ended = self.ended.lock().unwrap_or_else(|e| e.into_inner());
         if ended.len() >= END_SESSION_DEDUPE_CAP {
@@ -940,7 +941,7 @@ impl EventHandle {
             return;
         }
         drop(ended);
-        self.fire_autocmd("SessionEnd", serde_json::json!({ "session_id": session }));
+        let _ = self.tx.try_send(Request::EndSession { session });
     }
 
     pub fn run_keybind_callback(&self, id: u64) -> bool {

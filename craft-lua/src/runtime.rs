@@ -21,6 +21,7 @@ use craft_agent::tools::{
     HeaderResult, PermissionScopes, RegistryError, Tool, ToolRegistry, ToolSource,
 };
 use craft_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
+use craft_storage::id::CraftId;
 use include_dir::Dir;
 use mlua::{
     Function, Lua, RegistryKey, Table, Value as LuaValue, chunk::Chunk, chunk::ChunkMode,
@@ -33,7 +34,9 @@ use craft_config::RawConfig;
 
 use crate::api::autocmd::AutocmdStore;
 use crate::api::create_craft_global;
-use crate::api::r#fn::{JobMeta, JobStore, deliver_job_event, kill_plugin_jobs};
+use crate::api::r#fn::{
+    JobMeta, JobStore, deliver_job_event, kill_plugin_jobs, kill_session_jobs, pump_session_jobs,
+};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
@@ -223,6 +226,10 @@ pub enum Request {
     FireAutocmd {
         event: String,
         data: Value,
+    },
+    /// Fire `SessionEnd`, then reap that session's jobs.
+    EndSession {
+        session: CraftId,
     },
     RunKeybindCallback {
         id: u64,
@@ -2653,6 +2660,9 @@ pub fn spawn(
                         Ok(m) => m,
                         Err(_) => break,
                     };
+                    if let Some(bg) = rt.lua.app_data_ref::<RefCell<BgJobMap>>() {
+                        pump_session_jobs(&rt.lua, &mut bg.borrow_mut());
+                    }
                     match msg {
                         Request::Shutdown => break,
                         Request::WarmJit => codegen_armed = true,
@@ -2890,6 +2900,22 @@ pub fn spawn(
                         .await;
                         drain_spawn_queue(&rt.lua, &gate);
                         let _ = reply.send(result);
+                    }
+                    Request::EndSession { session } => {
+                        // Handlers may still inspect or stop the jobs, so
+                        // the event fires before the reap.
+                        let data = json_to_lua(
+                            &rt.lua,
+                            &serde_json::json!({ "session_id": session.to_string() }),
+                        )
+                        .unwrap_or(LuaValue::Nil);
+                        crate::api::autocmd::dispatch(&rt.lua, "SessionEnd", None, data);
+                        drain_spawn_queue(&rt.lua, &gate);
+                        if let Some(bg) = rt.lua.app_data_ref::<RefCell<BgJobMap>>() {
+                            let mut bg = bg.borrow_mut();
+                            pump_session_jobs(&rt.lua, &mut bg);
+                            kill_session_jobs(&rt.lua, &mut bg, session);
+                        }
                     }
                     Request::FireAutocmd { event, data } => {
                         let is_turn_end = event == TURN_END_EVENT;
@@ -3672,6 +3698,7 @@ mod tests {
                     handle,
                     DISPATCH_TEST_JOB.into(),
                     Arc::from(DISPATCH_TEST_PLUGIN),
+                    None,
                     None,
                     None,
                     None,
