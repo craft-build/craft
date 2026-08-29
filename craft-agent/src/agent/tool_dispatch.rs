@@ -33,7 +33,6 @@ pub enum Emit {
 
 const DOOM_LOOP_THRESHOLD: usize = 3;
 const DOOM_LOOP_MESSAGE: &str = "You have called this tool with identical input 3 times in a row. This call was NOT executed. You are stuck in a loop. Retrying the same input will be blocked again. Stop, summarize what you have tried, and take a different approach (different arguments, a different tool, or report the blocker to the user).";
-const MCP_BLOCKED_IN_PLAN: &str = "MCP tools are not available in plan mode";
 const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
 const MCP_SCOPE_PREVIEW_BYTES: usize = 200;
 const NULL_VALUE: Value = Value::Null;
@@ -733,11 +732,6 @@ async fn execute_mcp_tool(
         annotation: None,
         written_path: None,
     };
-
-    if ctx.mode.plan_path().is_some() {
-        warn!(tool = %tool_name, "mcp tool blocked in plan mode");
-        return done(MCP_BLOCKED_IN_PLAN.into(), true);
-    }
 
     let perm_tool = match ToolKey::parse(tool_name) {
         Ok(k) => k,
@@ -1513,17 +1507,90 @@ mod tests {
         assert!(text.contains("nonexistent.tool"));
     }
 
+    fn tool_names(tools: &serde_json::Value) -> Vec<String> {
+        tools
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[tokio::test]
-    async fn mcp_tool_blocked_in_plan_mode() {
-        let result = dispatch_mcp(
-            &crate::tools::test_support::stub_ctx(&AgentMode::Plan(PathBuf::from("/tmp/plan.md"))),
-            "t1",
-            "myserver.mytool",
+    async fn mcp_tool_allowed_in_plan_mode() {
+        let mut ctx = mcp_ctx(&[(PROBE_QUALIFIED, "")]);
+        ctx.mode = AgentMode::Plan(PathBuf::from("/tmp/plan.md"));
+        let done = run(
+            &ctx.registry,
+            ctx.mcp.as_ref(),
+            "t1".into(),
+            PROBE_WIRE,
             &serde_json::json!({}),
+            &ctx,
+            Emit::Silent,
         )
         .await;
-        assert!(result.is_error);
-        assert_eq!(result.output.as_text(), MCP_BLOCKED_IN_PLAN);
+        // The stub transport fails every call, so a successful run surfaces
+        // its error: the proof the call was neither plan-blocked nor
+        // permission-denied and actually reached MCP.
+        assert_eq!(done.tool.as_ref(), PROBE_QUALIFIED, "must route to MCP");
+        let text = done.output.as_text();
+        assert!(
+            !text.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX)
+                && text != crate::tools::PLAN_WRITE_RESTRICTED,
+            "plan mode must not block or deny the call, got: {text}"
+        );
+        let mut tools = serde_json::json!([]);
+        ctx.mcp.as_ref().unwrap().extend_tools(&mut tools);
+        assert!(
+            tool_names(&tools).contains(&PROBE_WIRE.to_owned()),
+            "a permitted plan-mode call must load the definition"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_denied_by_rule_in_plan_mode() {
+        use craft_config::{Effect, PermissionRule, PermissionsConfig, ToolKey};
+
+        let config = PermissionsConfig {
+            rules: vec![PermissionRule {
+                tool: ToolKey::parse(PROBE_QUALIFIED).unwrap(),
+                scope: None,
+                effect: Effect::Deny,
+            }],
+            ..Default::default()
+        };
+        let permissions = Arc::new(crate::permissions::PermissionManager::new(
+            config,
+            PathBuf::from("/tmp"),
+            Arc::default(),
+        ));
+        let mut ctx = crate::tools::test_support::stub_ctx_with_permissions(
+            &AgentMode::Plan(PathBuf::from("/tmp/plan.md")),
+            permissions,
+        );
+        ctx.mcp = Some(stub_handle(&[(PROBE_QUALIFIED, "")]));
+        let done = run(
+            &ctx.registry,
+            ctx.mcp.as_ref(),
+            "t1".into(),
+            PROBE_WIRE,
+            &serde_json::json!({}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(done.is_error, "plan mode must not bypass deny rules");
+        assert!(
+            done.output
+                .as_text()
+                .starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "got: {}",
+            done.output.as_text()
+        );
     }
 
     #[tokio::test]
