@@ -552,6 +552,7 @@ impl PluginHost {
         permissions: PluginPermissions,
         opts: PluginOpts,
     ) -> Result<(), PluginError> {
+        check_plugin_compatibility(&package.name, Some(&package.dir))?;
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.inner
             .tx
@@ -611,6 +612,9 @@ impl PluginHost {
             path: dir.to_path_buf(),
             source: e,
         })?;
+        // Gated next to the bundled-name refusal and before any chunk is read,
+        // so a package that outran this craft registers nothing at all.
+        check_plugin_compatibility(name, Some(&root))?;
         let files = package_entrypoints(&root)?;
         if files.is_empty() {
             return Err(PluginError::PackageEmpty {
@@ -737,6 +741,16 @@ impl PluginHost {
                     ),
                 };
                 if let Err(e) = result {
+                    if e.is_version_floor() {
+                        tracing::warn!(
+                            package = %pkg.name,
+                            path = %pkg.dir.display(),
+                            error = %e,
+                            "{SKIPPED_PLUGIN_WARNING}"
+                        );
+                        failures.push(format!("{SKIPPED_PLUGIN_WARNING}: {e}"));
+                        continue;
+                    }
                     tracing::error!(
                         package = %pkg.name,
                         path = %pkg.dir.display(),

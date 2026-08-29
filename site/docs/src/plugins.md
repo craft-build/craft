@@ -57,7 +57,7 @@ min_craft_version = "0.4.12"
 net = true
 ```
 
-`min_craft_version` is optional and takes a plain semantic version as a lower bound, so ranges do not work. When the field is invalid or the running version is older, Craft skips the Lua in that directory and warns at startup instead of failing. `--no-plugins` still skips every user plugin at once.
+`min_craft_version` is optional and takes a plain semantic version as a lower bound, so ranges do not work. When the field is invalid or the running version is older, Craft skips the Lua in that directory and warns at startup instead of failing. The same floor applies to an installed package, which is skipped while the rest keep loading. `--no-plugins` still skips every user plugin at once.
 
 The builtin `plugin-dev` skill carries the same guide, so asking Craft to write a plugin for you works without pasting any of this.
 

@@ -2616,6 +2616,94 @@ fn package_failure_discards_its_packadd_requests() {
     );
 }
 
+/// The version floor covers installed packages, not just `init.lua`: a package
+/// asking for a newer craft is skipped with a warning, registers nothing, and
+/// leaves the packages loading beside it alone.
+#[test]
+fn incompatible_package_is_skipped_and_its_sibling_still_loads() {
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let required = format!("{}.0.0", running.major + 1);
+    let manifest = format!("min_craft_version = {required:?}\n");
+    let expected = required.as_str();
+    let site = site_with_package(
+        "start",
+        "future_pack",
+        &[(
+            "init.lua",
+            r#"
+craft.api.register_command({ name = "/future", handler = function() end })
+craft.api.register_tool({
+  name = "future_tool",
+  description = "must never register",
+  schema = { type = "object", properties = {} },
+  handler = function() return "x" end,
+})
+"#,
+        )],
+    );
+    let start = site.path().join("pack").join("vendor").join("start");
+    std::fs::write(start.join("future_pack").join("plugin.toml"), manifest).unwrap();
+    let sibling = start.join("sibling_pack").join("plugin");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(
+        sibling.join("init.lua"),
+        r#"craft.api.register_command({ name = "/sibling", handler = function() end })"#,
+    )
+    .unwrap();
+
+    let found = craft_lua::discover(site.path());
+    let (_, config) = discovered_config(&found);
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let failures = host.load_packages(&found.packages, &config);
+
+    let warning = failures
+        .iter()
+        .find(|w| w.contains(SKIPPED_PLUGIN_WARNING))
+        .unwrap_or_else(|| panic!("no skip warning in {failures:?}"));
+    assert!(warning.contains(expected), "{warning}");
+    assert_eq!(failures.len(), 1, "got: {failures:?}");
+    assert!(!reg.has("future_tool"));
+
+    let snap = host.command_reader().load();
+    let names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
+    assert_eq!(names, vec!["/sibling"]);
+}
+
+/// Invalid floor metadata is not a skippable floor: the load fails instead.
+#[test]
+fn malformed_package_floor_fails_the_load() {
+    const MALFORMED_FLOOR: &str = "min_craft_version = 12\n";
+    const NON_STRING_ERR: &str = "has a non-string min_craft_version";
+    let site = site_with_package(
+        "start",
+        "future_pack",
+        &[(
+            "init.lua",
+            r#"craft.api.register_command({ name = "/future", handler = function() end })"#,
+        )],
+    );
+    let start = site.path().join("pack").join("vendor").join("start");
+    std::fs::write(
+        start.join("future_pack").join("plugin.toml"),
+        MALFORMED_FLOOR,
+    )
+    .unwrap();
+
+    let found = craft_lua::discover(site.path());
+    let (_, config) = discovered_config(&found);
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    let failures = host.load_packages(&found.packages, &config);
+
+    assert_eq!(failures.len(), 1, "got: {failures:?}");
+    assert!(
+        !failures[0].contains(SKIPPED_PLUGIN_WARNING),
+        "{failures:?}"
+    );
+    assert!(failures[0].contains(NON_STRING_ERR), "{failures:?}");
+    assert!(host.command_reader().load().commands.is_empty());
+}
+
 #[cfg(unix)]
 #[test]
 fn package_entrypoint_symlink_escape_blocked() {

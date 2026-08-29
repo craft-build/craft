@@ -69,3 +69,15 @@ pub enum PluginError {
         second: PathBuf,
     },
 }
+
+impl PluginError {
+    /// Whether the `min_craft_version` floor is what refused the plugin.
+    ///
+    /// A floor is not a broken plugin, it is one that says this craft is too
+    /// old, so callers that can keep going skip it with a warning instead of
+    /// reporting a load failure. Invalid metadata is deliberately excluded:
+    /// that stays a load failure.
+    pub(crate) const fn is_version_floor(&self) -> bool {
+        matches!(self, Self::CraftVersionTooOld { .. })
+    }
+}
