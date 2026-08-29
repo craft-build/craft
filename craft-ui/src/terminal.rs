@@ -119,10 +119,6 @@ impl TerminalNotifier {
         self.notifier
     }
 
-    pub(crate) fn supports_focus_reporting(&self) -> bool {
-        self.mux != TerminalMux::Screen
-    }
-
     pub(crate) fn notify(&self, message: &str) -> std::io::Result<()> {
         let sequence = notification_sequence(self.notifier, self.mux, message);
         write_and_flush(&sequence)
@@ -626,19 +622,6 @@ mod tests {
             resolve_notifier(NotificationMethod::Auto, || false),
             Some(ResolvedNotifier::Bell)
         );
-    }
-
-    #[test]
-    fn screen_is_the_only_mux_without_focus_reporting() {
-        let notifier = |mux| TerminalNotifier {
-            notifier: ResolvedNotifier::Osc9,
-            mux,
-        };
-
-        assert!(!notifier(TerminalMux::Screen).supports_focus_reporting());
-        for mux in [TerminalMux::None, TerminalMux::Tmux, TerminalMux::Zellij] {
-            assert!(notifier(mux).supports_focus_reporting());
-        }
     }
 
     #[test]
