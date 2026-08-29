@@ -1288,11 +1288,7 @@ impl<'t> EventLoop<'t> {
                 let _ = reply_tx.send(Ok(json!(self.sessions[self.focused].id())));
             }
             SessionRequest::New { prompt, focus } => {
-                let session = {
-                    let slot = self.ctx.model_slot.load();
-                    let cwd = self.focused_app().state.session.cwd.clone();
-                    AppSession::new(&slot.model.spec(), &cwd)
-                };
+                let session = self.focused_app().blank_session();
                 let idx = self.push_runtime(self.ctx.spawn_runtime(session));
                 let id = self.sessions[idx].id();
                 if let Some(prompt) = prompt {
