@@ -1093,6 +1093,7 @@ async fn run_host_hook(lua: &Lua, gate: &Rc<InflightGate>, hook: HostHook) {
             }
         }
         HostHook::EndSession { session, reply } => {
+            crate::api::r#fn::EndedSessions::mark(lua, session);
             // Handlers may still inspect or stop the jobs, so the event fires
             // before the reap.
             let data = json_to_lua(
@@ -1611,6 +1612,7 @@ impl LuaRuntime {
         )));
         lua.set_app_data::<Arc<dyn TerminalBackend>>(Arc::clone(&terminal_backend));
         lua.set_app_data::<RefCell<BgJobMap>>(RefCell::new(BgJobMap::new()));
+        lua.set_app_data(crate::api::r#fn::EndedSessions::default());
 
         Ok(Self {
             _watchdog: watchdog,

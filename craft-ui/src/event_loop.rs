@@ -1939,6 +1939,12 @@ impl<'t> EventLoop<'t> {
         if let Some(ref h) = mcp_handle {
             craft_agent::mcp::kill_process_groups(&h.reader().load().pids);
         }
+        // The loop already stopped draining `UiAction`. Drop the receiver
+        // before the handlers run, or one that touches the UI parks forever
+        // and only the teardown deadline gets us out of it.
+        let (dead_tx, dead_rx) = flume::unbounded::<UiAction>();
+        drop(dead_tx);
+        self.ui_action_rx = dead_rx;
         self.ctx
             .lua_event_handle
             .end_sessions_blocking(self.sessions.iter().map(SessionRuntime::id));

@@ -3902,3 +3902,65 @@ craft.api.register_tool({{
         "VM must stay usable, got: {again}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn jobwait_returns_after_session_end_kill() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let dir = tempfile::tempdir().unwrap();
+    let parked_path = dir.path().join("parked");
+    let src = format!(
+        r#"
+craft.api.register_tool({{
+    name = "wait_long_job",
+    description = "parks in jobwait until the session ends",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        -- jobwait checks the job's output channel out of the store, so only
+        -- a parked jobwait can run this callback. The marker is proof the
+        -- wait is really parked, where a sleep would just be a guess.
+        local id = craft.fn.jobstart("echo parked; exec sleep 30", {{
+            session = "{session}",
+            on_stdout = function() craft.fs.write("{parked}", "parked") end,
+        }})
+        local ok, res = pcall(craft.fn.jobwait, id, 25000)
+        if not ok then
+            return {{ llm_output = "error: " .. tostring(res), is_error = true }}
+        end
+        if res == nil then
+            return {{ llm_output = "error: jobwait timed out", is_error = true }}
+        end
+        return "exit:" .. tostring(res.exit_code)
+    end,
+}})
+"#,
+        session = session,
+        parked = parked_path.display(),
+    );
+    host.load_source("endkill", &src).unwrap();
+
+    let reg2 = Arc::clone(&reg);
+    let wait_handle = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                exec_tool(&reg2, "wait_long_job", serde_json::json!({}))
+                    .await
+                    .unwrap()
+            })
+    });
+    poll_until("jobwait never parked", || {
+        parked_path.exists().then_some(())
+    });
+    host.event_handle().end_sessions_blocking([session]);
+    let out = wait_handle.join().expect("wait thread must not panic");
+    assert!(
+        out.starts_with("exit:"),
+        "parked jobwait must collect the exit of the killed job, got: {out}"
+    );
+}

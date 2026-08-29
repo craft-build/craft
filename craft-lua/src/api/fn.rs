@@ -24,6 +24,42 @@ const DEFAULT_TAIL: usize = 20;
 const MAX_TAIL_LINES: usize = 1024;
 const MAX_COMPLETED_SESSION_JOBS: usize = 256;
 const DEFAULT_WAIT_MS: u64 = 30_000;
+/// How often a parked `jobwait` re-checks whether its job's session ended:
+/// session jobs can live inside the waiting task's own store, where the
+/// SessionEnd reap cannot reach them.
+const JOBWAIT_SESSION_POLL: Duration = Duration::from_millis(50);
+
+/// Sessions the host ended. A `jobwait` parked on a session job inside the
+/// task that started it polls this, because the SessionEnd reap only walks
+/// the background map while that task is still alive.
+#[derive(Default)]
+pub(crate) struct EndedSessions(std::cell::RefCell<std::collections::HashSet<CraftId>>);
+
+impl EndedSessions {
+    pub(crate) fn mark(lua: &Lua, session: CraftId) {
+        if let Some(store) = lua.app_data_ref::<EndedSessions>() {
+            store.0.borrow_mut().insert(session);
+        }
+    }
+
+    fn contains(lua: &Lua, session: CraftId) -> bool {
+        lua.app_data_ref::<EndedSessions>()
+            .is_some_and(|store| store.0.borrow().contains(&session))
+    }
+}
+
+/// Kill the job when the host ended its session, so a parked `jobwait`
+/// returns instead of waiting out its timeout.
+fn kill_if_session_ended(lua: &Lua, job_id: u32, plugin: &str) {
+    let ended = with_task_jobs(lua, |store| {
+        store
+            .session_of(job_id, plugin)
+            .is_some_and(|session| EndedSessions::contains(lua, session))
+    });
+    if ended {
+        with_task_jobs(lua, |store| store.kill(job_id, plugin));
+    }
+}
 
 #[derive(Clone)]
 struct JobNotify {
@@ -334,6 +370,11 @@ impl JobStore {
         }
         remove_job_from(lua, &mut self.jobs, job_id);
         self.completed_order.retain(|&id| id != job_id);
+    }
+
+    pub fn session_of(&self, job_id: u32, plugin: &str) -> Option<CraftId> {
+        let job = self.jobs.get(&job_id)?;
+        job.owned_by(plugin).then_some(job.session)?
     }
 
     pub fn kill(&mut self, job_id: u32, plugin: &str) {
@@ -713,7 +754,8 @@ pub(crate) fn create_fn_table(
                 let rx = with_task_jobs(&lua, |store| store.take_receiver(job_id, &owner))
                     .ok_or_else(|| mlua::Error::runtime("unknown job id or already waited"))?;
 
-                let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_WAIT_MS));
+                let deadline = tokio::time::Instant::now()
+                    + Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_WAIT_MS));
 
                 let mut stdout_lines = Vec::new();
                 let mut stderr_lines = Vec::new();
@@ -722,7 +764,11 @@ pub(crate) fn create_fn_table(
                     let event = tokio::select! {
                         biased;
                         event = rx.recv_async() => event.ok(),
-                        _ = tokio::time::sleep(timeout) => None,
+                        _ = tokio::time::sleep_until(deadline) => None,
+                        _ = tokio::time::sleep(JOBWAIT_SESSION_POLL) => {
+                            kill_if_session_ended(&lua, job_id, &owner);
+                            continue;
+                        }
                     };
 
                     let Some(event) = event else {
