@@ -621,6 +621,11 @@ fn session_reset_names_the_session_that_ended() {
 
     let (event, data) = probe
         .try_recv_autocmd()
+        .expect("SessionEnd fired with session_id");
+    assert_eq!(event, "SessionEnd");
+    assert_eq!(data["session_id"], serde_json::json!(ended));
+    let (event, data) = probe
+        .try_recv_autocmd()
         .expect("SessionReset fired with session_id");
     assert_eq!(event, "SessionReset");
     assert_eq!(data["session_id"], serde_json::json!(ended));

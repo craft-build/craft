@@ -396,6 +396,7 @@ pub(crate) struct Server {
     client_caps: Arc<ClientCaps>,
     next_request_id: Arc<AtomicI64>,
     session: Option<SessionState>,
+    lua: craft_lua::EventHandle,
 }
 
 impl Server {
@@ -502,6 +503,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         client_caps,
         next_request_id,
         session: None,
+        lua: params.plugin_host.event_handle(),
     };
 
     let acp_terminal: Arc<dyn TerminalBackend> = Arc::new(AcpTerminal {
@@ -557,7 +559,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
     // host threads, watchers) can otherwise keep the process alive and orphan
     // it. Session history is persisted continuously, so this is safe mid-turn.
     if let Some(session) = server.session.take() {
-        teardown_session(&server.out_tx, session).await;
+        teardown_session(&server.out_tx, &server.lua, session).await;
     }
     drop(server);
     let _ = writer_task.await;
@@ -879,7 +881,7 @@ async fn install_session(
     initial_cost: Option<f64>,
 ) {
     if let Some(prev) = srv.session.take() {
-        teardown_session(&srv.out_tx, prev).await;
+        teardown_session(&srv.out_tx, &srv.lua, prev).await;
     }
     let session_id = handle.session_id.to_string();
     let pending = PendingState::default();
@@ -927,7 +929,12 @@ fn resolve_pending_cancelled(out_tx: &Sender<Value>, pending: PendingState) {
     }
 }
 
-async fn teardown_session(out_tx: &Sender<Value>, session: SessionState) {
+async fn teardown_session(
+    out_tx: &Sender<Value>,
+    lua: &craft_lua::EventHandle,
+    session: SessionState,
+) {
+    lua.end_session(session.handle.session_id.id());
     resolve_pending_cancelled(out_tx, Arc::clone(&session.pending));
     let _ = session.handle.cancel_tx.try_send(());
     session.handle.task.abort();
@@ -1277,7 +1284,7 @@ async fn handle_close_session(srv: &mut Server, raw: &Value) -> Result<AgentResp
         .is_some_and(|s| s.handle.session_id.as_str() == req.session_id.0.as_ref())
     {
         if let Some(session) = srv.session.take() {
-            teardown_session(&srv.out_tx, session).await;
+            teardown_session(&srv.out_tx, &srv.lua, session).await;
         }
         *srv.shared_session.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -1842,6 +1849,7 @@ mod tests {
                 title_sent: false,
                 cwd: PathBuf::from("/project"),
             }),
+            lua: craft_lua::EventHandle::disconnected_for_test(),
         };
         (server, answer_rx)
     }

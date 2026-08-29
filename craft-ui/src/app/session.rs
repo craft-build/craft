@@ -353,7 +353,8 @@ impl App {
     pub(super) fn reset_session(&mut self) -> Vec<Action> {
         self.checkpoint_now();
         self.reset_ui_chrome();
-        let ended = self.state.session.id.clone();
+        let ended = self.state.session.id.id();
+        self.lua_event_handle.end_session(ended);
         self.lua_event_handle
             .fire_autocmd("SessionReset", serde_json::json!({ "session_id": ended }));
         self.state.token_usage = TokenUsage::default();
@@ -423,10 +424,14 @@ impl App {
         session: AppSession,
         fallback_model: &Model,
     ) -> LoadedSession {
+        let previous = self.state.session.id.id();
         self.checkpoint_now();
         self.apply_stored_permissions(&session.meta);
         self.state =
             SessionState::from_session(session, fallback_model, &self.storage, &self.model_policy);
+        if previous != self.state.session.id.id() {
+            self.lua_event_handle.end_session(previous);
+        }
         for w in self.state.warnings.drain(..) {
             self.status_bar.flash(w);
         }

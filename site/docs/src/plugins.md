@@ -353,6 +353,10 @@ craft.create_autocmd("ModelChanged", {
 })
 ```
 
+### `SessionEnd`
+
+`craft.create_autocmd("SessionEnd", { callback = ... })` fires whenever a session goes away: a `/reset`, loading or opening another session, deleting a tab, quitting the TUI, closing an ACP session, and the end of a headless run. The payload carries `data.session_id` naming the session that ended. Use it to drop caches or state tied to that session. The session that replaces it announces itself with `SessionStart`.
+
 ## `craft.ui`
 
 - `craft.ui.set_window_title(title)` sets the terminal emulator's window title. Pass an empty string to clear it. The title passes through tmux, GNU screen, and zellij untouched, and control characters are stripped, so model text cannot inject escape sequences into the terminal. On exit Craft hands the title back to the shell, on terminals that support the title stack.

@@ -233,6 +233,28 @@ end }})
 }
 
 #[tokio::test]
+async fn host_end_session_fires_session_end() {
+    let (reg, host) = host();
+    let listener = format!(
+        r#"
+local log = {{}}
+craft.api.create_autocmd("SessionEnd", {{ callback = function(ev)
+    log[#log + 1] = string.format("%s|%s", ev.event, tostring(ev.data and ev.data.session_id))
+end }})
+{}
+"#,
+        probe_tool("probe_session_end", "return table.concat(log, \";\")")
+    );
+    load(&host, "listener", &listener);
+    let session = craft_storage::id::CraftId::generate();
+    host.event_handle().end_session(session);
+    assert_eq!(
+        exec_tool(&reg, "probe_session_end").await,
+        format!("SessionEnd|{session}")
+    );
+}
+
+#[tokio::test]
 async fn unload_clears_autocmds_but_keeps_others() {
     let (reg, host) = host();
     let listener = |tool: &str| {

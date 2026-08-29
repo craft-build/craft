@@ -1286,6 +1286,7 @@ impl<'t> EventLoop<'t> {
                         return;
                     }
                     let rt = self.remove_runtime(i);
+                    rt.app.lua_event_handle.end_session(rt.id());
                     // Tear down on a background task so deleting a mid-flight
                     // agent never wedges the UI thread: cancel the run, save
                     // whatever is on disk, drop the App, then await the agent
@@ -1939,6 +1940,7 @@ impl<'t> EventLoop<'t> {
             craft_agent::mcp::kill_process_groups(&h.reader().load().pids);
         }
         for rt in &mut self.sessions {
+            rt.app.lua_event_handle.end_session(rt.id());
             let _ = rt.handles.cmd_tx.try_send(AgentCommand::CancelAll);
             rt.app.checkpoint_now();
             rt.app.cmd_tx = None;

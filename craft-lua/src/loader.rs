@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use craft_agent::permissions::PluginRuleStore;
@@ -20,8 +20,10 @@ use crate::plugin_permissions::{
 };
 use crate::runtime::{self, ConfigScope, LoadChunk, LoadContext, LuaThread, Request, RestoreItem};
 use crate::terminal_backend::{LocalTerminal, TerminalBackend};
+use craft_storage::id::CraftId;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const END_SESSION_DEDUPE_CAP: usize = 1024;
 const USER_PLUGIN: &str = "user";
 pub const SKIPPED_PLUGIN_WARNING: &str = "skipping plugin lua";
 
@@ -813,6 +815,7 @@ impl PluginHost {
     pub fn event_handle(&self) -> EventHandle {
         EventHandle {
             tx: self.inner.tx.clone(),
+            ended: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -836,6 +839,7 @@ impl PluginHost {
 #[derive(Clone)]
 pub struct EventHandle {
     tx: flume::Sender<Request>,
+    ended: Arc<Mutex<HashSet<CraftId>>>,
 }
 
 impl EventHandle {
@@ -845,14 +849,20 @@ impl EventHandle {
 
     /// Test constructor that wraps an arbitrary request channel.
     pub(crate) fn from_tx(tx: flume::Sender<Request>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            ended: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     /// Test handle whose every dispatch fails, simulating a dead lua host.
     pub fn disconnected_for_test() -> Self {
         let (tx, rx) = flume::bounded(0);
         drop(rx);
-        Self { tx }
+        Self {
+            tx,
+            ended: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     /// True when no runtime is draining requests. Production handles stay
@@ -916,6 +926,21 @@ impl EventHandle {
             event: event.to_owned(),
             data,
         });
+    }
+
+    /// Fire `SessionEnd` for a session that is going away. Call from every
+    /// session-end path (reset, load, delete, shutdown, ACP, headless);
+    /// paths can overlap, so each id fires at most once per handle graph.
+    pub fn end_session(&self, session: CraftId) {
+        let mut ended = self.ended.lock().unwrap_or_else(|e| e.into_inner());
+        if ended.len() >= END_SESSION_DEDUPE_CAP {
+            ended.clear();
+        }
+        if !ended.insert(session) {
+            return;
+        }
+        drop(ended);
+        self.fire_autocmd("SessionEnd", serde_json::json!({ "session_id": session }));
     }
 
     pub fn run_keybind_callback(&self, id: u64) -> bool {
@@ -1091,7 +1116,7 @@ mod tests {
     #[test]
     fn run_command_sends_correct_request() {
         let (tx, rx) = flume::bounded(8);
-        let handle = EventHandle { tx };
+        let handle = EventHandle::from_tx(tx);
         handle.run_command(
             Arc::from("myplugin"),
             Arc::from("/greet"),
