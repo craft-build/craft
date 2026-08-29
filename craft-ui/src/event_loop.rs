@@ -1049,6 +1049,7 @@ impl<'t> EventLoop<'t> {
                 rt.app.update_model(&expected);
                 dirty = Dirty::YES;
             }
+            rt.app.emit_model_change();
         }
         drop(slot_model);
 

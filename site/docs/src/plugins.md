@@ -317,6 +317,18 @@ craft.model.set({ spec = "zai/glm-5", thinking = "high" })
 craft.keymap.set("n", "<M-t>", function() craft.model.set({ thinking = "" }) end)
 ```
 
+### `ModelChanged`
+
+`craft.create_autocmd("ModelChanged", { callback = ... })` fires whenever the session switches model, whoever asked for it: the picker, `/model`, `craft.model.set`, a provider fallback, or loading another session. The payload carries `data.model` in the shape `craft.model.get()` returns, plus `data.previous_spec`. Picking the model already in use stays quiet, and so does startup.
+
+```lua
+craft.create_autocmd("ModelChanged", {
+    callback = function(ev)
+        craft.ui.set_window_title("craft: " .. ev.data.model.spec)
+    end,
+})
+```
+
 ## `craft.ui`
 
 - `craft.ui.set_window_title(title)` sets the terminal emulator's window title. Pass an empty string to clear it. The title passes through tmux, GNU screen, and zellij untouched, and control characters are stripped, so model text cannot inject escape sequences into the terminal. On exit Craft hands the title back to the shell, on terminals that support the title stack.

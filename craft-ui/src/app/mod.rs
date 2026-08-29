@@ -273,6 +273,10 @@ pub struct App {
     /// Background tasks (wiki ingest, model fetch) post human-readable
     /// messages here so they surface as flashes on the owning session.
     pub(crate) warn_tx: Option<flume::Sender<String>>,
+    /// The spec Lua was last told about. Seeded with the live model rather
+    /// than the session's stored one: a restored session may name another
+    /// model, and the event loop swaps the live one in on the first tick.
+    announced_model_spec: String,
 }
 
 macro_rules! define_overlays {
@@ -395,6 +399,7 @@ impl App {
             repomap_enabled: Arc::new(std::sync::atomic::AtomicBool::new(repomap_enabled)),
             watch_enabled,
             warn_tx: None,
+            announced_model_spec: model.spec(),
         };
         app.theme_picker.set_keybindings(app.keybindings.clone());
         app.thinking_picker.set_keybindings(app.keybindings.clone());
@@ -540,6 +545,28 @@ impl App {
     pub(crate) fn update_model(&mut self, model: &Model) {
         self.state.update_model(model);
         persist_model(&self.storage, &self.state.session.model).ok();
+    }
+
+    /// One diff per frame covers every way a model can change (the picker,
+    /// `/model`, `craft.model.set`, the provider fallback, loading another
+    /// session, which swaps `state` wholesale), so no path has to remember to
+    /// speak up. The spec alone decides: the background catalog fetch
+    /// re-stores the running model once it learns its context window, and a
+    /// hint has nothing new to draw for that.
+    pub(crate) fn emit_model_change(&mut self) {
+        let spec = self.state.model.spec();
+        if spec == self.announced_model_spec {
+            return;
+        }
+        let previous_spec = std::mem::replace(&mut self.announced_model_spec, spec);
+        self.lua_event_handle.fire_autocmd(
+            "ModelChanged",
+            serde_json::json!({
+                "session_id": self.state.session.id.to_string(),
+                "model": self.model_state(),
+                "previous_spec": previous_spec,
+            }),
+        );
     }
 
     pub(crate) fn flash(&mut self, msg: String) {
