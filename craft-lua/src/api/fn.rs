@@ -792,8 +792,8 @@ pub(crate) fn create_fn_table(
                     on_stdout,
                     on_stderr,
                     on_exit,
-                    stdout,
-                    stderr,
+                    mut stdout,
+                    mut stderr,
                     want_sandbox,
                     background,
                     session,
@@ -913,6 +913,14 @@ pub(crate) fn create_fn_table(
                 } else {
                     None
                 };
+                for redirect in [&mut stdout, &mut stderr] {
+                    if let Redirect::File(path) = redirect
+                        && path.is_relative()
+                        && let Some(dir) = cwd.as_deref()
+                    {
+                        *path = dir.join(&path);
+                    }
+                }
                 let spec = TerminalSpec {
                     cmd,
                     cwd: cwd.map(|p| p.to_string_lossy().into_owned()),

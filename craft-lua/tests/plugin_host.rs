@@ -1086,6 +1086,13 @@ craft.api.register_tool({{
         }})
         local redirected_result = craft.fn.jobwait(redirected, 5000)
 
+        local rel = craft.fn.jobstart("echo rel", {{
+            background = true,
+            cwd = "{dir}",
+            stdout = "relative.log",
+        }})
+        craft.fn.jobwait(rel, 5000)
+
         local quiet = craft.fn.jobstart("echo dropped", {{ background = true, stdout = false }})
         local quiet_result = craft.fn.jobwait(quiet, 5000)
 
@@ -1105,6 +1112,7 @@ craft.api.register_tool({{
 }})
 "#,
         log = log.display(),
+        dir = dir.path().display(),
     );
     host.load_source("argv_jobs", &src).unwrap();
 
@@ -1125,6 +1133,11 @@ craft.api.register_tool({{
         "redirect plus on_stdout must be refused, got {conflict}"
     );
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "to-file\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("relative.log")).unwrap(),
+        "rel\n",
+        "a relative redirect must land in the job cwd, not the host cwd"
+    );
 }
 
 #[tokio::test]
