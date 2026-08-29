@@ -48,6 +48,40 @@ Run `/reload` to pick up changes. If something fails to load, read `craft.log` i
 
 The builtin `plugin-dev` skill carries the same guide, so asking Craft to write a plugin for you works without pasting any of this.
 
+## Packages
+
+A Lua package adds tools, commands, keybindings, and event handlers without copying its code into `init.lua`. Clone it into a Neovim-style package directory under the data directory:
+
+```text
+<craft-data>/site/pack/<group>/start/<name>/
+<craft-data>/site/pack/<group>/opt/<name>/
+```
+
+A `start` package loads at startup. An `opt` package stays installed until something activates it. The `pack/core` group is reserved for packages Craft manages itself, so keep your clones in another group.
+
+A package directory can hold sorted `plugin/*.lua` entry files, plus modules at `lua/<module>.lua` or `lua/<module>/init.lua`. All the entry files share one owner and one environment, so what one registers the next can use.
+
+Placing a package by hand means you trust its code the way you trust your own `init.lua`. Craft grants such a package exactly the permissions its `plugin.toml` requests, with no approval step:
+
+```toml
+[permissions]
+net = true
+```
+
+Read the code before you copy it in, and keep manual placement for the packages you develop yourself. A package with no `plugin.toml` gets no guarded API at all.
+
+A package name also works in `craft.setup`: `plugins.<name>` can pass options to it, and `plugins.<name>.enabled = false` keeps it from loading.
+
+### `craft.packadd()`
+
+Activate an installed `opt` package, like `:packadd`:
+
+```lua
+craft.packadd("my-package")
+```
+
+Craft loads the named package after the calling Lua task returns, so it works from `init.lua` and from another package. A package activated this way can activate another in turn. Craft reports a name no installed package matches, and refuses a package that `plugins.<name>.enabled = false` disabled.
+
 ## `craft.api`
 
 | Function | Registers |

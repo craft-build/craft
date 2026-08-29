@@ -12,7 +12,7 @@ use craft_config::providers::{
     ProviderDef, ProvidersConfig, all_builtins, builtin_provider, resolve_api_key_env,
     resolve_base_url, resolve_default_model, resolve_display_name, resolve_login_url, slugify,
 };
-use craft_config::{load_env_files, load_permissions};
+use craft_config::{Config, load_env_files, load_permissions};
 use craft_lua::PluginHost;
 use craft_providers::model::Model;
 use craft_providers::provider::fetch_all_models;
@@ -581,12 +581,13 @@ fn load_provider_model_policy(
     let reg = ToolRegistry::native_arc();
     let host = PluginHost::with_jit(Arc::clone(reg), None, !no_jit)
         .context("initialize lua plugin host")?;
+    let discovery = craft_lua::discover_installed(no_plugins);
     let raw = host
         .load_init_files_or_skip(no_plugins, cwd)
         .context("load init.lua files")?;
     let config = raw
         .unwrap_or_default()
-        .into_config()
+        .into_config(&discovery.known_names())
         .context("invalid config")?;
     Ok(config.provider.model_policy)
 }
@@ -647,6 +648,19 @@ pub fn completions(shell: crate::cli::CompletionShell) -> Result<()> {
     Ok(())
 }
 
+fn load_effective_config(
+    host: &PluginHost,
+    no_plugins: bool,
+    cwd: &Path,
+    names: &[String],
+) -> Result<Config> {
+    host.load_init_files_or_skip(no_plugins, cwd)
+        .context("load init.lua files")?
+        .unwrap_or_default()
+        .into_config(names)
+        .context("invalid config")
+}
+
 pub async fn outline(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
@@ -654,19 +668,18 @@ pub async fn outline(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let mut host = PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !no_jit)
         .context("initialize lua plugin host")?;
 
-    let raw_config = host
-        .load_init_files_or_skip(no_plugins, &cwd)
-        .context("load init.lua files")?;
-
-    let mut config = raw_config
-        .unwrap_or_default()
-        .into_config()
-        .context("invalid config")?;
-    config.validate()?;
-    config.permissions = load_permissions(&cwd);
-
-    host.load_builtins(&config.plugins)
-        .context("load builtin plugins")?;
+    let (_, warnings) = super::load_plugins(
+        &mut host,
+        no_plugins,
+        super::BuiltinFailure::Fatal,
+        |host, names, _| {
+            let mut config = load_effective_config(host, no_plugins, &cwd, names)?;
+            config.validate()?;
+            config.permissions = load_permissions(&cwd);
+            Ok(config)
+        },
+    )?;
+    super::report_warnings(warnings);
 
     let abs_path = Path::new(path)
         .canonicalize()
@@ -749,15 +762,13 @@ pub fn prompt(
     let reg = ToolRegistry::native_arc();
     let mut host = PluginHost::with_jit(Arc::clone(reg), None, !no_jit)
         .context("initialize lua plugin host")?;
-    let raw_config = host
-        .load_init_files_or_skip(no_plugins, &cwd)
-        .context("load init.lua files")?;
-    let config = raw_config
-        .unwrap_or_default()
-        .into_config()
-        .context("invalid config")?;
-    host.load_builtins(&config.plugins)
-        .context("load builtin plugins")?;
+    let (_, warnings) = super::load_plugins(
+        &mut host,
+        no_plugins,
+        super::BuiltinFailure::Fatal,
+        |host, names, _| load_effective_config(host, no_plugins, &cwd, names),
+    )?;
+    super::report_warnings(warnings);
 
     if tools {
         let ctx = DescriptionContext {

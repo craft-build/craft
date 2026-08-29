@@ -2299,3 +2299,724 @@ fn unknown_plugin_name_fails_load_builtins() {
         "got: {err}"
     );
 }
+
+/// Neovim resolves `lua/foo/init.lua` as well as `lua/foo.lua`, and an
+/// external package laid out the Neovim way relies on it.
+#[test]
+fn require_resolves_directory_init_form() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mod_dir = tmp.path().join("lua").join("pkg");
+    std::fs::create_dir_all(&mod_dir).unwrap();
+
+    std::fs::write(mod_dir.join("init.lua"), "return { value = 7 }\n").unwrap();
+
+    std::fs::write(
+        tmp.path().join("init.lua"),
+        r#"
+local pkg = require("pkg")
+assert(pkg.value == 7, "expected lua/pkg/init.lua to resolve")
+"#,
+    )
+    .unwrap();
+
+    let init_path = tmp.path().join("init.lua");
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_plugin_file(&init_path).unwrap();
+}
+
+/// `<mod>.lua` wins over `<mod>/init.lua`, matching Neovim's order.
+#[test]
+fn require_prefers_flat_module_over_directory_init() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let lua_dir = tmp.path().join("lua");
+    std::fs::create_dir_all(lua_dir.join("pkg")).unwrap();
+
+    std::fs::write(lua_dir.join("pkg.lua"), "return { which = \"flat\" }\n").unwrap();
+    std::fs::write(
+        lua_dir.join("pkg").join("init.lua"),
+        "return { which = \"dir\" }\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        tmp.path().join("init.lua"),
+        r#"
+local pkg = require("pkg")
+assert(pkg.which == "flat", "expected pkg.lua to win, got " .. tostring(pkg.which))
+"#,
+    )
+    .unwrap();
+
+    let init_path = tmp.path().join("init.lua");
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_plugin_file(&init_path).unwrap();
+}
+
+/// A git repository can commit a symlink, so the lexical `..` check is not
+/// enough on its own: the resolved path has to be re-checked.
+#[cfg(unix)]
+#[test]
+fn require_symlink_out_of_package_blocked() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let lua_dir = tmp.path().join("lua");
+    std::fs::create_dir_all(&lua_dir).unwrap();
+
+    let outside = tmp.path().join("outside.lua");
+    std::fs::write(&outside, "return { secret = true }\n").unwrap();
+    std::os::unix::fs::symlink(&outside, lua_dir.join("leak.lua")).unwrap();
+
+    std::fs::write(tmp.path().join("init.lua"), "require(\"leak\")\n").unwrap();
+
+    let init_path = tmp.path().join("init.lua");
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_plugin_file(&init_path)
+        .expect_err("symlink pointing out of the package must not load");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("sandbox") || msg.contains("outside"),
+        "got: {msg}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn global_init_can_require_a_symlinked_module() {
+    let config = tempfile::TempDir::new().unwrap();
+    let modules = config.path().join("lua");
+    std::fs::create_dir_all(&modules).unwrap();
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let target = elsewhere.path().join("shared.lua");
+    std::fs::write(&target, "return { value = 42 }\n").unwrap();
+    std::os::unix::fs::symlink(&target, modules.join("shared.lua")).unwrap();
+
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    let _ = host
+        .send_run_init_lua(
+            "assert(require('shared').value == 42)".to_owned(),
+            "global/init.lua".to_owned(),
+            Some(config.path().to_path_buf()),
+        )
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn global_init_can_use_a_symlinked_lua_directory() {
+    let config = tempfile::TempDir::new().unwrap();
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    std::fs::write(elsewhere.path().join("shared.lua"), "return true\n").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), config.path().join("lua")).unwrap();
+
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    let _ = host
+        .send_run_init_lua(
+            "assert(require('shared'))".to_owned(),
+            "global/init.lua".to_owned(),
+            Some(config.path().to_path_buf()),
+        )
+        .unwrap();
+}
+
+/// A disabled package keeps its options in `opts` but leaves `packages`, which
+/// is exactly the shape `into_config` produces. Treating that as an unknown
+/// name stopped craft from booting over options it was already ignoring, and
+/// only for packages: a disabled builtin in the same state just warned.
+#[test]
+fn opts_for_a_disabled_package_do_not_stop_the_load() {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let config = PluginsConfig {
+        names: vec!["grep".to_owned()],
+        packages: Vec::new(),
+        opts: HashMap::from([(
+            "my_pack".to_owned(),
+            json_obj(serde_json::json!({ "timeout_secs": 5 })),
+        )]),
+    };
+    host.load_builtins(&config)
+        .expect("a disabled package must not stop the builtins from loading");
+    assert!(reg.get("grep").is_some(), "enabled plugin still loads");
+}
+
+/// Builds a package directory with the given `plugin/*.lua` files.
+fn package_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let plugin_dir = tmp.path().join("plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    for (name, source) in files {
+        std::fs::write(plugin_dir.join(name), source).unwrap();
+    }
+    tmp
+}
+
+#[test]
+fn package_loads_every_entrypoint_under_one_owner() {
+    let pkg = package_dir(&[
+        (
+            "01_first.lua",
+            r#"craft.api.register_command({ name = "/one", handler = function() end })"#,
+        ),
+        (
+            "02_second.lua",
+            r#"craft.api.register_command({ name = "/two", handler = function() end })"#,
+        ),
+    ]);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_package(
+        "demo",
+        pkg.path(),
+        PluginPermissions::trusted(),
+        Default::default(),
+    )
+    .unwrap();
+
+    let snap = host.command_reader().load();
+    let mut names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
+    names.sort();
+    assert_eq!(names, vec!["/one", "/two"]);
+    assert!(
+        snap.commands.iter().all(|c| c.plugin.as_ref() == "demo"),
+        "every entrypoint must register under the package owner"
+    );
+}
+
+/// One environment across the chunks, so an earlier file can set something up
+/// for a later one. This is why the chunks are not separate loads.
+#[test]
+fn package_entrypoints_share_one_environment() {
+    let pkg = package_dir(&[
+        ("01_first.lua", "shared_value = 11\n"),
+        (
+            "02_second.lua",
+            r#"
+assert(shared_value == 11, "second chunk should see the first chunk's global")
+craft.api.register_command({ name = "/ok", handler = function() end })
+"#,
+        ),
+    ]);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_package(
+        "shared",
+        pkg.path(),
+        PluginPermissions::trusted(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(host.command_reader().load().commands.len(), 1);
+}
+
+/// A package commits or it does not. `drop_plugin_keys` alone would leave the
+/// keymap and the hint behind, so this is what proves the stronger unwind.
+#[test]
+fn package_failure_leaves_nothing_from_earlier_chunks() {
+    let pkg = package_dir(&[
+        (
+            "01_first.lua",
+            r#"
+craft.api.register_command({ name = "/ghost", handler = function() end })
+craft.keymap.set("n", "<C-g>", function() end, { desc = "ghost" })
+craft.api.register_tool({
+  name = "ghost_tool",
+  description = "should not survive",
+  schema = { type = "object", properties = {} },
+  handler = function() return "x" end,
+})
+"#,
+        ),
+        ("02_second.lua", r#"error("boom")"#),
+    ]);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_package(
+            "ghost",
+            pkg.path(),
+            PluginPermissions::trusted(),
+            Default::default(),
+        )
+        .expect_err("a failing chunk must fail the whole package");
+    assert!(err.to_string().contains("boom"), "got: {err}");
+
+    assert_eq!(
+        host.command_reader().load().commands.len(),
+        0,
+        "command from the first chunk survived a failed load"
+    );
+    assert_eq!(
+        host.keymap_reader().load().entries.len(),
+        0,
+        "keymap from the first chunk survived a failed load"
+    );
+    assert!(
+        !reg.has("ghost_tool"),
+        "tool from the first chunk survived a failed load"
+    );
+}
+
+#[test]
+fn package_failure_discards_its_packadd_requests() {
+    let site = site_with_two(
+        (
+            "broken_pack",
+            "craft.packadd('lazy_pack')\nerror('stop this package')",
+        ),
+        (
+            "lazy_pack",
+            r#"craft.api.register_command({ name = "/lazy", handler = function() end })"#,
+        ),
+    );
+    let found = craft_lua::discover(site.path());
+    let (_, config) = discovered_config(&found);
+
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    let failures = host.load_packages(&found.packages, &config);
+
+    assert_eq!(failures.len(), 1, "got: {failures:?}");
+    assert!(
+        host.command_reader().load().commands.is_empty(),
+        "a failed package must not activate another package"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn package_entrypoint_symlink_escape_blocked() {
+    let pkg = package_dir(&[]);
+    // Deliberately in a different directory tree, so the link really leaves
+    // the package rather than pointing at a sibling inside it.
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let outside = elsewhere.path().join("outside.lua");
+    std::fs::write(&outside, "return {}\n").unwrap();
+    std::os::unix::fs::symlink(&outside, pkg.path().join("plugin").join("leak.lua")).unwrap();
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_package(
+            "leaky",
+            pkg.path(),
+            PluginPermissions::trusted(),
+            Default::default(),
+        )
+        .expect_err("an entrypoint linking out of the package must not load");
+    assert!(
+        matches!(err, PluginError::PackageEscape { .. }),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn package_without_entrypoints_errors() {
+    let pkg = package_dir(&[]);
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_package(
+            "empty",
+            pkg.path(),
+            PluginPermissions::trusted(),
+            Default::default(),
+        )
+        .expect_err("a package with no entrypoint is a configuration error");
+    assert!(
+        matches!(err, PluginError::PackageEmpty { .. }),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn unreadable_entrypoint_directory_is_reported() {
+    let pkg = tempfile::TempDir::new().unwrap();
+    std::fs::write(pkg.path().join("plugin"), "not a directory").unwrap();
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+
+    let err = host
+        .load_package(
+            "unreadable",
+            pkg.path(),
+            PluginPermissions::trusted(),
+            Default::default(),
+        )
+        .expect_err("an unreadable entrypoint directory must not look empty");
+
+    assert!(matches!(err, PluginError::Io { .. }), "got: {err}");
+}
+
+/// Builds a site tree holding one package, the way a user cloning a repository
+/// into the package directory would.
+fn site_with_package(sub: &str, name: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("pack").join("vendor").join(sub).join(name);
+    std::fs::create_dir_all(dir.join("plugin")).unwrap();
+    for (file, source) in files {
+        std::fs::write(dir.join("plugin").join(file), source).unwrap();
+    }
+    tmp
+}
+
+/// The whole layer-1 path: find a package on disk, then load it.
+#[test]
+fn discovered_start_package_is_found_and_loaded() {
+    let site = site_with_package(
+        "start",
+        "demo_pack",
+        &[(
+            "init.lua",
+            r#"craft.api.register_command({ name = "/demo", handler = function() end })"#,
+        )],
+    );
+
+    let found = craft_lua::discover(site.path());
+    assert!(found.problems.is_empty(), "{:?}", found.problems);
+    let names: Vec<String> = found.packages.iter().map(|p| p.name.clone()).collect();
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &names);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    assert!(host.load_packages(&found.packages, &config).is_empty());
+
+    let snap = host.command_reader().load();
+    assert_eq!(snap.commands.len(), 1);
+    assert_eq!(snap.commands[0].name.as_ref(), "/demo");
+    assert_eq!(snap.commands[0].plugin.as_ref(), "demo_pack");
+}
+
+/// Builtins must still load when a package is installed. Packages once shared
+/// the builtin name list, which made `load_builtins` reject every one of them
+/// by name and fail startup outright.
+#[test]
+fn installed_package_does_not_break_builtin_loading() {
+    let site = site_with_package(
+        "start",
+        "demo_pack",
+        &[(
+            "init.lua",
+            r#"craft.api.register_command({ name = "/demo", handler = function() end })"#,
+        )],
+    );
+
+    let found = craft_lua::discover(site.path());
+    let names: Vec<String> = found.packages.iter().map(|p| p.name.clone()).collect();
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &names);
+
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_builtins(&config)
+        .expect("an installed package must not stop the builtins from loading");
+    assert!(host.load_packages(&found.packages, &config).is_empty());
+
+    assert!(
+        reg.get("grep").is_some(),
+        "builtin tools should still be registered"
+    );
+    let names: Vec<String> = host
+        .command_reader()
+        .load()
+        .commands
+        .iter()
+        .map(|c| c.name.to_string())
+        .collect();
+    assert!(names.iter().any(|n| n == "/demo"), "got: {names:?}");
+}
+
+/// Options for an installed package must reach the package, not be rejected as
+/// options for a plugin that does not exist.
+#[test]
+fn installed_package_may_take_options() {
+    let site = site_with_package(
+        "start",
+        "opt_pack",
+        &[(
+            "init.lua",
+            r#"
+local opts = craft.api.register_options({
+  depth = { type = "integer", desc = "Depth." },
+})
+if opts.depth == 3 then
+  craft.api.register_command({ name = "/depth", handler = function() end })
+end
+"#,
+        )],
+    );
+    let found = craft_lua::discover(site.path());
+
+    let mut plugins: HashMap<String, craft_config::PluginFileConfig> = HashMap::new();
+    let mut cfg = craft_config::PluginFileConfig::default();
+    cfg.opts.insert("depth".to_owned(), serde_json::json!(3));
+    plugins.insert("opt_pack".to_owned(), cfg);
+
+    let config = PluginsConfig::from_plugins_and_packages(plugins, &["opt_pack".to_owned()]);
+
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_builtins(&config)
+        .expect("package options must not be rejected as unknown plugin options");
+    assert!(host.load_packages(&found.packages, &config).is_empty());
+
+    assert!(
+        host.command_reader()
+            .load()
+            .commands
+            .iter()
+            .any(|command| command.name.as_ref() == "/depth")
+    );
+}
+
+/// If `lua/` itself links out of the package, its target must not become the
+/// sandbox root; otherwise everything under that target would be requireable.
+#[cfg(unix)]
+#[test]
+fn symlinked_lua_directory_is_not_used_as_the_module_root() {
+    let pkg = package_dir(&[("init.lua", r#"require("escaped")"#)]);
+
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    std::fs::write(elsewhere.path().join("escaped.lua"), "return {}\n").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), pkg.path().join("lua")).unwrap();
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let err = host
+        .load_package(
+            "linky",
+            pkg.path(),
+            PluginPermissions::trusted(),
+            Default::default(),
+        )
+        .expect_err("a lua/ directory pointing out of the package must not resolve modules");
+    assert!(err.to_string().contains("module not found"), "got: {err}");
+}
+
+/// An `opt/` package waits to be activated, so startup alone must not run it.
+#[test]
+fn discovered_opt_package_is_not_loaded_at_startup() {
+    let site = site_with_package(
+        "opt",
+        "lazy_pack",
+        &[(
+            "init.lua",
+            r#"craft.api.register_command({ name = "/lazy", handler = function() end })"#,
+        )],
+    );
+
+    let found = craft_lua::discover(site.path());
+    let names: Vec<String> = found.packages.iter().map(|p| p.name.clone()).collect();
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &names);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    assert!(host.load_packages(&found.packages, &config).is_empty());
+
+    assert_eq!(host.command_reader().load().commands.len(), 0);
+}
+
+/// Adds one `start` and one `opt` package to a site tree.
+fn site_with_two(start: (&str, &str), opt: (&str, &str)) -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for (sub, name, source) in [("start", start.0, start.1), ("opt", opt.0, opt.1)] {
+        let dir = tmp.path().join("pack").join("vendor").join(sub).join(name);
+        std::fs::create_dir_all(dir.join("plugin")).unwrap();
+        std::fs::write(dir.join("plugin").join("init.lua"), source).unwrap();
+    }
+    tmp
+}
+
+fn discovered_config(found: &craft_lua::Discovery) -> (Vec<String>, PluginsConfig) {
+    let names: Vec<String> = found.packages.iter().map(|p| p.name.clone()).collect();
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &names);
+    (names, config)
+}
+
+/// `craft.packadd` is the activation path for an `opt/` package. A `start`
+/// package that calls it must get the named package loaded in the same
+/// startup, not the next one, or its registrations never appear.
+#[test]
+fn packadd_from_a_start_package_activates_an_opt_package() {
+    let site = site_with_two(
+        ("waker_pack", r#"craft.packadd("lazy_pack")"#),
+        (
+            "lazy_pack",
+            r#"craft.api.register_command({ name = "/lazy", handler = function() end })"#,
+        ),
+    );
+
+    let found = craft_lua::discover(site.path());
+    let (_, config) = discovered_config(&found);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    assert!(
+        host.load_packages(&found.packages, &config).is_empty(),
+        "both packages must load without a failure"
+    );
+
+    let snap = host.command_reader().load();
+    assert_eq!(
+        snap.commands.len(),
+        1,
+        "the activated package must have registered its command"
+    );
+    assert_eq!(snap.commands[0].name.as_ref(), "/lazy");
+}
+
+/// `craft.packadd` is on the craft table for every plugin, but only the startup
+/// drain reads what it records. A call after that drain would sit in the queue
+/// for the rest of the session with no error and no log, so it is refused.
+#[test]
+fn packadd_after_startup_reports_rather_than_queueing() {
+    let site = site_with_two(("waker_pack", ""), ("lazy_pack", ""));
+    let found = craft_lua::discover(site.path());
+    let (_, config) = discovered_config(&found);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    assert!(
+        host.load_packages(&found.packages, &config).is_empty(),
+        "the start package must load"
+    );
+
+    let err = host
+        .load_source("late_plugin", r#"craft.packadd("lazy_pack")"#)
+        .expect_err("packadd must report once the startup drain is over");
+    assert!(
+        err.to_string().contains("already been loaded"),
+        "got: {err}"
+    );
+}
+
+/// A name that matches no installed package is reported. Doing nothing would
+/// leave the user with a package that never loads and no reason why.
+#[test]
+fn packadd_reports_a_name_that_is_not_installed() {
+    let site = site_with_two(
+        ("waker_pack", r#"craft.packadd("absent_pack")"#),
+        ("lazy_pack", ""),
+    );
+
+    let found = craft_lua::discover(site.path());
+    let (_, config) = discovered_config(&found);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let failures = host.load_packages(&found.packages, &config);
+    assert_eq!(failures.len(), 1, "got: {failures:?}");
+    assert!(failures[0].contains("absent_pack"), "got: {failures:?}");
+}
+
+/// A package the config disabled stays disabled. `packadd` must not be a way
+/// around `plugins.<name>.enabled = false`.
+#[test]
+fn packadd_cannot_activate_a_disabled_package() {
+    let site = site_with_two(
+        ("waker_pack", r#"craft.packadd("lazy_pack")"#),
+        (
+            "lazy_pack",
+            r#"craft.api.register_command({ name = "/lazy", handler = function() end })"#,
+        ),
+    );
+
+    let found = craft_lua::discover(site.path());
+    let names: Vec<String> = found.packages.iter().map(|p| p.name.clone()).collect();
+    let mut plugins: HashMap<String, craft_config::PluginFileConfig> = HashMap::new();
+    plugins.insert(
+        "lazy_pack".to_owned(),
+        craft_config::PluginFileConfig {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    let config = PluginsConfig::from_plugins_and_packages(plugins, &names);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let failures = host.load_packages(&found.packages, &config);
+    assert_eq!(failures.len(), 1, "got: {failures:?}");
+    assert_eq!(
+        host.command_reader().load().commands.len(),
+        0,
+        "a disabled package must not register anything"
+    );
+}
+
+/// A package that asks for nothing gets nothing. Without a `plugin.toml` the
+/// guarded APIs must refuse, so a downloaded package cannot reach the network
+/// or the environment just by being installed.
+#[test]
+fn package_without_manifest_cannot_use_guarded_apis() {
+    let site = site_with_package(
+        "start",
+        "greedy_pack",
+        &[(
+            "init.lua",
+            r#"
+local ok = pcall(function() return craft.env.config_dir() end)
+craft.api.register_command({
+  name = ok and "/allowed" or "/denied",
+  handler = function() end,
+})
+"#,
+        )],
+    );
+
+    let found = craft_lua::discover(site.path());
+    let names: Vec<String> = found.packages.iter().map(|p| p.name.clone()).collect();
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &names);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    assert!(host.load_packages(&found.packages, &config).is_empty());
+
+    let snap = host.command_reader().load();
+    assert_eq!(snap.commands.len(), 1);
+    assert_eq!(
+        snap.commands[0].name.as_ref(),
+        "/denied",
+        "a package requesting nothing must not reach craft.env"
+    );
+}
+
+/// The manifest is what a manual install is granted, so a package that asks
+/// for `env` gets it without any further approval.
+#[test]
+fn manual_package_is_granted_what_its_manifest_requests() {
+    let site = site_with_package(
+        "start",
+        "asking_pack",
+        &[(
+            "init.lua",
+            r#"
+local ok = pcall(function() return craft.env.config_dir() end)
+craft.api.register_command({
+  name = ok and "/allowed" or "/denied",
+  handler = function() end,
+})
+"#,
+        )],
+    );
+    let pkg_dir = site
+        .path()
+        .join("pack")
+        .join("vendor")
+        .join("start")
+        .join("asking_pack");
+    std::fs::write(pkg_dir.join("plugin.toml"), "[permissions]\nenv = true\n").unwrap();
+
+    let found = craft_lua::discover(site.path());
+    let names: Vec<String> = found.packages.iter().map(|p| p.name.clone()).collect();
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &names);
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    assert!(host.load_packages(&found.packages, &config).is_empty());
+
+    let snap = host.command_reader().load();
+    assert_eq!(snap.commands[0].name.as_ref(), "/allowed");
+}

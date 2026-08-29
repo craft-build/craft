@@ -12,6 +12,7 @@ pub(crate) mod log;
 pub(crate) mod model;
 pub(crate) mod net;
 pub(crate) mod options;
+pub(crate) mod pack;
 pub(crate) mod session;
 pub(crate) mod slot;
 pub(crate) mod split;
@@ -109,6 +110,7 @@ pub(crate) fn create_craft_global(
         "keymap",
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
     )?;
+    pack::add_packadd(lua, &craft)?;
 
     if let Some(tx) = embed_tx {
         craft.set("embed", crate::api::embed::create_embed_table(lua, tx)?)?;

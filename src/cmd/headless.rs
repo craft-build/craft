@@ -66,17 +66,25 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
+    let mut plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
         .context("initialize lua plugin host")?;
 
-    let raw_config = plugin_host
-        .load_init_files_or_skip(opts.no_plugins, &cwd)
-        .context("load init.lua files")?;
-    let mut config = raw_config
-        .unwrap_or_default()
-        .into_config()
-        .context("invalid config")?;
-    config.permissions = load_permissions(&cwd);
+    let (mut config, warnings) = super::load_plugins(
+        &mut plugin_host,
+        opts.no_plugins,
+        super::BuiltinFailure::Fatal,
+        |host, names, _| {
+            let mut config = host
+                .load_init_files_or_skip(opts.no_plugins, &cwd)
+                .context("load init.lua files")?
+                .unwrap_or_default()
+                .into_config(names)
+                .context("invalid config")?;
+            config.permissions = load_permissions(&cwd);
+            Ok(config)
+        },
+    )?;
+    super::report_warnings(warnings);
 
     if opts.yolo || config.always_yolo {
         config.permissions.yolo = true;

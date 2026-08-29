@@ -84,13 +84,14 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
     let plugin_host = PluginHost::new(Arc::clone(ToolRegistry::native_arc()), None)
         .context("initialize lua plugin host")?;
 
+    let discovery = craft_lua::discover_installed(args.no_plugins);
     let raw_config = plugin_host
         .load_init_files_or_skip(args.no_plugins, &cwd)
         .context("load init.lua files")?;
 
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config()
+        .into_config(&discovery.known_names())
         .context("invalid config")?;
     config.permissions = load_permissions(&cwd);
 

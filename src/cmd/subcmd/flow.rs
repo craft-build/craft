@@ -73,9 +73,10 @@ async fn run_flow(
     let raw_config = plugin_host
         .load_init_files(&cwd)
         .context("load init.lua files")?;
+    let discovery = craft_lua::discover_installed(false);
     let config = raw_config
         .unwrap_or_default()
-        .into_config()
+        .into_config(&discovery.known_names())
         .context("invalid config")?;
     let _ = load_permissions(&cwd);
 

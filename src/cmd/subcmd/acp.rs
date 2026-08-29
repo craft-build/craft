@@ -36,29 +36,32 @@ pub async fn run(
         PluginHost::with_jit(Arc::clone(ToolRegistry::native_arc()), None, !no_jit)
             .context("initialize lua plugin host")?;
 
-    let raw_config = plugin_host
-        .load_init_files_or_skip(no_plugins, &cwd)
-        .context("load init.lua files")?;
+    let (config, warnings) = super::super::load_plugins(
+        &mut plugin_host,
+        no_plugins,
+        super::super::BuiltinFailure::Fatal,
+        |host, names, _| {
+            let mut config = host
+                .load_init_files_or_skip(no_plugins, &cwd)
+                .context("load init.lua files")?
+                .unwrap_or_default()
+                .into_config(names)
+                .context("invalid config")?;
+            config.permissions = load_permissions(&cwd);
 
-    let mut config = raw_config
-        .unwrap_or_default()
-        .into_config()
-        .context("invalid config")?;
-    config.permissions = load_permissions(&cwd);
-
-    if yolo || config.always_yolo {
-        config.permissions.yolo = true;
-        config.sandbox.mode = craft_config::SandboxMode::Off;
-        config.sandbox.enabled = false;
-    }
-    if auto_review || config.always_auto_review {
-        config.permissions.auto_review = true;
-    }
-    config.validate()?;
-
-    plugin_host
-        .load_builtins(&config.plugins)
-        .context("load builtin plugins")?;
+            if yolo || config.always_yolo {
+                config.permissions.yolo = true;
+                config.sandbox.mode = craft_config::SandboxMode::Off;
+                config.sandbox.enabled = false;
+            }
+            if auto_review || config.always_auto_review {
+                config.permissions.auto_review = true;
+            }
+            config.validate()?;
+            Ok(config)
+        },
+    )?;
+    super::super::report_warnings(warnings);
 
     plugin_host
         .event_handle()

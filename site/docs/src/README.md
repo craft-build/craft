@@ -16,7 +16,7 @@ It is a fork of [maki](https://github.com/tontinton/maki) by Tony Solomonik, wri
 - **Session persistence.** Pick up where you left off, context and permissions intact. See [Sessions](./sessions.md).
 - **Python sandbox.** A minimal interpreter for running Python snippets safely inside the agent loop.
 - **Code indexing.** Tree-sitter powered file skeletons for 15+ languages, so the model can understand structure without reading every line.
-- **Skills & plugins.** Reusable workflows as Markdown skills, and a Lua plugin API that mirrors Neovim. See [Skills](./skills.md) and [Plugins](./plugins.md).
+- **Skills & plugins.** Reusable workflows as Markdown skills, a Lua plugin API that mirrors Neovim, and Neovim-style Lua package directories. See [Skills](./skills.md) and [Plugins](./plugins.md).
 - **Headless mode.** Run non-interactively with `--print` for scripts and CI. Output is Claude Code-compatible. See [Headless Mode](./headless.md).
 - **ACP server.** Use Craft from your editor (e.g. [Zed](https://zed.dev/)) over the Agent Client Protocol with `craft acp`. See [ACP](./acp.md).
 
