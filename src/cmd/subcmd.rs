@@ -652,12 +652,14 @@ fn load_effective_config(
     host: &PluginHost,
     no_plugins: bool,
     cwd: &Path,
-    names: &[String],
+    names: &super::KnownNames<'_>,
 ) -> Result<Config> {
-    host.load_init_files_or_skip(no_plugins, cwd)
-        .context("load init.lua files")?
+    let raw_config = host
+        .load_init_files_or_skip(no_plugins, cwd)
+        .context("load init.lua files")?;
+    raw_config
         .unwrap_or_default()
-        .into_config(names)
+        .into_config(&names(host)?)
         .context("invalid config")
 }
 
@@ -672,6 +674,7 @@ pub async fn outline(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
         &mut host,
         no_plugins,
         super::BuiltinFailure::Fatal,
+        craft_lua::Interaction::None,
         |host, names, _| {
             let mut config = load_effective_config(host, no_plugins, &cwd, names)?;
             config.validate()?;
@@ -766,6 +769,7 @@ pub fn prompt(
         &mut host,
         no_plugins,
         super::BuiltinFailure::Fatal,
+        craft_lua::Interaction::None,
         |host, names, _| load_effective_config(host, no_plugins, &cwd, names),
     )?;
     super::report_warnings(warnings);

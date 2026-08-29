@@ -73,12 +73,13 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         &mut plugin_host,
         opts.no_plugins,
         super::BuiltinFailure::Fatal,
+        craft_lua::Interaction::None,
         |host, names, _| {
             let mut config = host
                 .load_init_files_or_skip(opts.no_plugins, &cwd)
                 .context("load init.lua files")?
                 .unwrap_or_default()
-                .into_config(names)
+                .into_config(&names(host)?)
                 .context("invalid config")?;
             config.permissions = load_permissions(&cwd);
             Ok(config)

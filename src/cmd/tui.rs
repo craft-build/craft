@@ -11,7 +11,7 @@ use color_eyre::eyre::Context;
 use craft_agent::command::{self, CustomCommand};
 use craft_agent::tools::ToolRegistry;
 use craft_config::{Config, load_env_files, load_permissions};
-use craft_lua::PluginHost;
+use craft_lua::{Interaction, PluginHost};
 use craft_providers::model::Model;
 use craft_providers::{Timeouts, provider};
 use craft_storage::StateDir;
@@ -87,7 +87,7 @@ fn load_config(
     plugin_host: &PluginHost,
     cli: &Cli,
     cwd: &Path,
-    names: &[String],
+    names: &super::KnownNames<'_>,
 ) -> Result<Config> {
     let raw_config = plugin_host
         .load_init_files_or_skip(cli.no_plugins, cwd)
@@ -95,7 +95,7 @@ fn load_config(
 
     let mut config = raw_config
         .unwrap_or_default()
-        .into_config(names)
+        .into_config(&names(plugin_host)?)
         .context("invalid config")?;
     config.permissions = load_permissions(cwd);
 
@@ -140,6 +140,7 @@ async fn build_stack(
     cli: &Cli,
     cwd: &Path,
     storage: &StateDir,
+    interaction: Interaction,
     fallback: Option<(Config, Model)>,
 ) -> Result<(Stack, Vec<String>)> {
     let mut plugin_host =
@@ -166,6 +167,7 @@ async fn build_stack(
         } else {
             super::BuiltinFailure::Fatal
         },
+        interaction,
         |host, names, warnings| {
             config_or_fallback(
                 load_config(host, cli, cwd, names),
@@ -256,7 +258,15 @@ pub async fn run(mut cli: Cli) -> Result<()> {
     load_env_files(&cwd);
     warn_stale_config_toml(&cwd);
 
-    let (mut stack, startup_warnings) = build_stack(&cli, &cwd, &storage, None).await?;
+    // Only the interactive UI can answer an install confirmation, so the other
+    // modes refuse the install with its reason even when a terminal is attached.
+    let interaction = if cli.print || cli.is_sdk_mode() {
+        Interaction::None
+    } else {
+        Interaction::Tty
+    };
+    let (mut stack, startup_warnings) =
+        build_stack(&cli, &cwd, &storage, interaction, None).await?;
 
     setup::init_logging(&stack.config.storage);
     setup::install_panic_log_hook();
@@ -440,7 +450,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
                 ToolRegistry::native().clear_lua();
                 teardown.defer(move || drop(stack));
                 let (new_stack, new_warnings) =
-                    build_stack(&cli, &cwd, &storage, Some(last_good)).await?;
+                    build_stack(&cli, &cwd, &storage, interaction, Some(last_good)).await?;
                 tabs = reloaded;
                 if tabs.is_empty() {
                     tabs.push(AppSession::new(&new_stack.model.spec(), &cwd_str));
@@ -482,6 +492,10 @@ mod tests {
     use super::*;
     use color_eyre::eyre::eyre;
     use craft_config::RawConfig;
+
+    fn no_names(_: &PluginHost) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 
     fn test_config() -> Config {
         RawConfig::default()
@@ -578,7 +592,7 @@ mod tests {
         let mut plugin_host = PluginHost::with_jit(Arc::new(ToolRegistry::new()), None, true)
             .expect("live host boots under --no-plugins");
 
-        let config = load_config(&plugin_host, &cli, dir.path(), &[])
+        let config = load_config(&plugin_host, &cli, dir.path(), &no_names)
             .expect("no-plugins must skip the broken init.lua and still load defaults");
         assert!(
             !config.plugins.names.is_empty(),
@@ -616,7 +630,7 @@ mod tests {
         let mut plugin_host = PluginHost::with_jit(Arc::new(ToolRegistry::new()), None, true)
             .expect("live host boots");
 
-        match load_config(&plugin_host, &cli, dir.path(), &[]) {
+        match load_config(&plugin_host, &cli, dir.path(), &no_names) {
             Err(_) => {}
             Ok(_) => panic!("broken init.lua must error without --no-plugins"),
         }

@@ -111,6 +111,7 @@ pub(crate) fn create_craft_global(
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
     )?;
     pack::add_packadd(lua, &craft)?;
+    craft.set("pack", pack::create_pack_read_table(lua)?)?;
 
     if let Some(tx) = embed_tx {
         craft.set("embed", crate::api::embed::create_embed_table(lua, tx)?)?;

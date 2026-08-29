@@ -58,6 +58,7 @@ members = [
   "craft-interpreter",
   "craft-lua",
   "craft-markdown",
+  "craft-pack",
   "craft-providers",
   "craft-repomap",
   "craft-sandbox",
@@ -90,6 +91,7 @@ craft-tool-macro = { path = "craft-tool-macro" }
 craft-config-macro = { path = "craft-config-macro" }
 craft-highlight = { path = "craft-highlight" }
 craft-markdown = { path = "craft-markdown" }
+craft-pack = { path = "craft-pack" }
 craft-repomap = { path = "craft-repomap" }
 craft-sandbox = { path = "craft-sandbox" }
 dioxus = "0.7"
@@ -141,6 +143,8 @@ keyring = "4"
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 flume = { version = "0.12", default-features = false, features = ["async", "select"] }
+fs4 = "1"
+smol = "2"
 humantime = "2"
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 toml = "1"

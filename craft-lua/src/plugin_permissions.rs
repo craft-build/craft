@@ -41,6 +41,21 @@ impl PluginPermissions {
         self.allowed[perm as usize] = val;
     }
 
+    /// Builds a set from the names an approval records.
+    ///
+    /// A name this build does not know is ignored rather than treated as a
+    /// grant, so an approval file written by a newer craft cannot widen what an
+    /// older one allows.
+    pub fn from_approved<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut out = Self::denied();
+        for name in names {
+            if let Some(perm) = Permission::from_key(name) {
+                out.set(perm, true);
+            }
+        }
+        out
+    }
+
     pub fn from_manifest(manifest: &toml::Value) -> Self {
         let table = manifest.get("permissions").and_then(|v| v.as_table());
         let Some(table) = table else {
@@ -101,6 +116,18 @@ impl Permission {
     pub fn manifest_key(&self) -> &'static str {
         PERM_KEYS[*self as usize]
     }
+
+    /// Parses the name used in `plugin.toml` and in the approval store.
+    ///
+    /// Both use one spelling on purpose. If an approval were recorded under a
+    /// different name from the request, `intersect` would silently never
+    /// match, and every managed package would run with nothing granted.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Permission::ALL
+            .iter()
+            .copied()
+            .find(|p| p.manifest_key() == key)
+    }
 }
 
 /// What a package's `plugin.toml` asks for.
@@ -130,6 +157,15 @@ impl Requested {
 
     pub fn is_requested(&self, perm: Permission) -> bool {
         self.0.is_allowed(perm)
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        Permission::ALL
+            .iter()
+            .copied()
+            .filter(|permission| self.is_requested(*permission))
+            .map(|permission| permission.manifest_key().to_owned())
+            .collect()
     }
 
     /// A package the user installed by hand gets what it asks for. They placed
@@ -219,6 +255,23 @@ pub fn load_plugin_permissions(plugin_dir: Option<&Path>) -> PluginPermissions {
 #[cfg(test)]
 mod tests {
     use super::{Permission, PluginPermissions, Requested};
+
+    #[test]
+    fn requested_names_are_the_approval_keys() {
+        let value: toml::Value = toml::from_str(
+            r#"
+            [permissions]
+            fs_read = true
+            run = true
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            Requested::from_manifest(&value).names(),
+            ["fs_read".to_owned(), "run".to_owned()]
+        );
+    }
 
     #[test]
     fn requested_denies_omitted_keys() {

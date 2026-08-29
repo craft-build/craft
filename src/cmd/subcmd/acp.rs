@@ -40,12 +40,13 @@ pub async fn run(
         &mut plugin_host,
         no_plugins,
         super::super::BuiltinFailure::Fatal,
+        craft_lua::Interaction::None,
         |host, names, _| {
             let mut config = host
                 .load_init_files_or_skip(no_plugins, &cwd)
                 .context("load init.lua files")?
                 .unwrap_or_default()
-                .into_config(names)
+                .into_config(&names(host)?)
                 .context("invalid config")?;
             config.permissions = load_permissions(&cwd);
 

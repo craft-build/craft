@@ -2231,6 +2231,7 @@ dependencies = [
  "craft-config",
  "craft-highlight",
  "craft-markdown",
+ "craft-pack",
  "craft-sandbox",
  "craft-storage",
  "criterion",
@@ -2247,6 +2248,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rustix 1.1.4",
  "serde_json",
+ "smol",
  "strum 0.28.0",
  "tempfile",
  "test-case",
@@ -2308,6 +2310,20 @@ dependencies = [
  "syntect",
  "test-case",
  "unicode-width",
+]
+
+[[package]]
+name = "craft-pack"
+version = "0.13.3"
+dependencies = [
+ "fs4",
+ "serde",
+ "serde_json",
+ "smol",
+ "tempfile",
+ "test-case",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -4020,6 +4036,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9597,6 +9623,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "smol"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a33bd3e260892199c3ccfc487c88b2da2265080acb316cd920da72fdfd7c599f"
+dependencies = [
+ "async-channel",
+ "async-executor",
+ "async-fs",
+ "async-io",
+ "async-lock",
+ "async-net",
+ "async-process",
+ "blocking",
+ "futures-lite",
 ]
 
 [[package]]

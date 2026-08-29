@@ -1,0 +1,20 @@
+[package]
+name = "craft-pack"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fs4 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+test-case = { workspace = true }

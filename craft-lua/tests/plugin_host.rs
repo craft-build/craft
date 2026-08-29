@@ -7,6 +7,7 @@ use craft_config::{AlwaysThinking, Effect, PluginsConfig, ToolKey, ToolOutputLin
 use craft_lua::{Permission, PluginError, PluginHost, PluginPermissions};
 
 const NARGS_ERR: &str = r#"'nargs' must be 0, 1, "?", "*", or "+""#;
+const GLOBAL_PACK_ONLY_ERR: &str = "only available in the global init.lua";
 
 fn fresh_registry() -> Arc<ToolRegistry> {
     Arc::new(ToolRegistry::new())
@@ -2690,6 +2691,196 @@ fn discovered_start_package_is_found_and_loaded() {
     assert_eq!(snap.commands[0].plugin.as_ref(), "demo_pack");
 }
 
+#[tokio::test]
+async fn custom_loader_runs_as_the_package_owner_with_spec_data() {
+    let package = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(package.path().join("lua")).unwrap();
+    std::fs::write(
+        package.path().join("lua").join("entry.lua"),
+        r#"
+return {
+  setup = function(command)
+    craft.api.register_command({ name = command, handler = function() end })
+    craft.api.register_tool({
+      name = "custom_state",
+      description = "Package state.",
+      schema = { type = "object", properties = {} },
+      audiences = { "main" },
+      handler = function()
+        return tostring(craft.pack.get({ "custom" })[1].active)
+      end,
+    })
+  end,
+}
+"#,
+    )
+    .unwrap();
+
+    let registry = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&registry), None).unwrap();
+    host.send_run_init_lua(
+        r#"
+craft.pack.add({
+  {
+    src = "https://example.com/custom",
+    name = "custom",
+    data = { module = "entry", command = "/custom" },
+  },
+}, {
+  load = function(package)
+    require(package.spec.data.module).setup(package.spec.data.command)
+  end,
+})
+"#
+        .to_owned(),
+        "global/init.lua".to_owned(),
+        None,
+    )
+    .unwrap();
+    let declared = host.declared_packages().unwrap();
+    let packages = vec![craft_lua::DiscoveredPackage {
+        name: "custom".to_owned(),
+        dir: package.path().to_path_buf(),
+        eager: true,
+        requested: craft_lua::Requested::none(),
+        origin: craft_lua::Origin::Fetched {
+            src: "https://example.com/custom".to_owned(),
+        },
+        revision_guard: None,
+    }];
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &["custom".into()]);
+
+    let failures = host.load_declared_packages(&packages, &declared, &config);
+    assert!(failures.is_empty(), "got: {failures:?}");
+
+    let commands = host.command_reader().load();
+    assert_eq!(commands.commands.len(), 1);
+    assert_eq!(commands.commands[0].name.as_ref(), "/custom");
+    assert_eq!(commands.commands[0].plugin.as_ref(), "custom");
+    assert_eq!(
+        exec_tool(&registry, "custom_state", serde_json::json!({}))
+            .await
+            .unwrap(),
+        "true"
+    );
+}
+
+#[test]
+fn managed_custom_loader_does_not_capture_a_manual_name_conflict() {
+    let site = site_with_package(
+        "start",
+        "manual",
+        &[(
+            "init.lua",
+            r#"craft.api.register_command({ name = "/manual", handler = function() end })"#,
+        )],
+    );
+    let packages = craft_lua::discover(site.path()).packages;
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+    host.send_run_init_lua(
+        r#"
+craft.pack.add({
+  { src = "https://example.com/manual", name = "manual" },
+}, {
+  load = function() error("managed custom loader ran") end,
+})
+"#
+        .to_owned(),
+        "global/init.lua".to_owned(),
+        None,
+    )
+    .unwrap();
+    let declared = host.declared_packages().unwrap();
+    let config = PluginsConfig::from_plugins_and_packages(Default::default(), &["manual".into()]);
+
+    let failures = host.load_declared_packages(&packages, &declared, &config);
+
+    assert!(failures.is_empty(), "got: {failures:?}");
+    let commands = host.command_reader().load();
+    assert_eq!(commands.commands.len(), 1);
+    assert_eq!(commands.commands[0].name.as_ref(), "/manual");
+}
+
+#[tokio::test]
+async fn loaded_revision_lock_protects_modules_read_after_startup() {
+    const CURRENT: &str = "1111111111111111111111111111111111111111";
+    const STALE: &str = "2222222222222222222222222222222222222222";
+
+    let site = tempfile::TempDir::new().unwrap();
+    let stale_dir = craft_pack::paths::revision_dir(site.path(), "late_pack", STALE);
+    std::fs::create_dir_all(stale_dir.join("plugin")).unwrap();
+    std::fs::create_dir_all(stale_dir.join("lua")).unwrap();
+    std::fs::write(
+        stale_dir.join("plugin").join("init.lua"),
+        format!(
+            r#"
+craft.api.register_tool({{
+  name = "late_pack",
+  description = "Late module read.",
+  schema = {MINIMAL_SCHEMA},
+  audiences = {{ "main" }},
+  handler = function() return require("late").value end,
+}})
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        stale_dir.join("lua").join("late.lua"),
+        "return { value = 'late ok' }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(craft_pack::paths::revision_dir(
+        site.path(),
+        "late_pack",
+        CURRENT,
+    ))
+    .unwrap();
+    let mut lockfile = craft_pack::lockfile::Lockfile::default();
+    lockfile.record("late_pack", "https://example.com/late", CURRENT);
+    let revision_guard = Arc::new(
+        craft_pack::lock::Lock::acquire_shared(&craft_pack::paths::revision_lock(
+            site.path(),
+            "late_pack",
+            STALE,
+        ))
+        .unwrap(),
+    );
+    let packages = vec![craft_lua::DiscoveredPackage {
+        name: "late_pack".to_owned(),
+        dir: stale_dir.clone(),
+        eager: true,
+        requested: craft_lua::Requested::none(),
+        origin: craft_lua::Origin::Fetched {
+            src: "https://example.com/late".to_owned(),
+        },
+        revision_guard: Some(revision_guard),
+    }];
+    let config =
+        PluginsConfig::from_plugins_and_packages(Default::default(), &["late_pack".into()]);
+    let registry = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&registry), None).unwrap();
+
+    assert!(host.load_packages(&packages, &config).is_empty());
+    drop(packages);
+    let manager = craft_pack::manager::Manager::new(site.path());
+    assert!(manager.prune(&lockfile).is_empty());
+    assert!(stale_dir.is_dir(), "a loaded revision must not be pruned");
+    assert_eq!(
+        exec_tool(&registry, "late_pack", serde_json::json!({}))
+            .await
+            .unwrap(),
+        "late ok"
+    );
+
+    host.unload("late_pack").unwrap();
+    assert!(manager.prune(&lockfile).is_empty());
+    assert!(
+        !stale_dir.exists(),
+        "an unloaded stale revision can be pruned"
+    );
+}
+
 /// Builtins must still load when a package is installed. Packages once shared
 /// the builtin name list, which made `load_builtins` reject every one of them
 /// by name and fail startup outright.
@@ -2835,6 +3026,89 @@ fn discovered_config(found: &craft_lua::Discovery) -> (Vec<String>, PluginsConfi
     (names, config)
 }
 
+/// The whole startup order: load what starts eagerly, then apply whatever
+/// those loads recorded. `craft.packadd` only takes effect at the second step.
+fn activate_all(
+    host: &PluginHost,
+    found: &craft_lua::Discovery,
+    config: &PluginsConfig,
+) -> Vec<String> {
+    host.load_packages(&found.packages, config)
+}
+
+#[test]
+fn project_init_cannot_declare_global_packages() {
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+
+    let error = host
+        .send_run_init_lua(
+            r#"craft.pack.add({ "https://example.com/demo" })"#.to_owned(),
+            "project/init.lua".to_owned(),
+            None,
+        )
+        .expect_err("project config must not change global packages");
+
+    assert!(
+        error.to_string().contains(GLOBAL_PACK_ONLY_ERR),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn a_named_config_cannot_change_global_packages() {
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+
+    let error = host
+        .send_run_init_lua(
+            r#"craft.pack.add({ "https://example.com/demo" })"#.to_owned(),
+            "test_init.lua".to_owned(),
+            None,
+        )
+        .expect_err("only the global config may change packages");
+
+    assert!(
+        error.to_string().contains(GLOBAL_PACK_ONLY_ERR),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn global_init_can_declare_managed_packages() {
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+
+    let _ = host
+        .send_run_init_lua(
+            r#"craft.pack.add({ "https://example.com/demo" })"#.to_owned(),
+            "global/init.lua".to_owned(),
+            None,
+        )
+        .unwrap();
+
+    let declared = host.declared_packages().unwrap();
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].spec.name, "demo");
+}
+
+#[test]
+fn project_init_can_activate_an_installed_global_package() {
+    let host = PluginHost::new(fresh_registry(), None).unwrap();
+
+    let _ = host
+        .send_run_init_lua(
+            r#"craft.packadd("demo")"#.to_owned(),
+            "project/init.lua".to_owned(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        host.seal_pack_ops().unwrap(),
+        [craft_lua::PackOp::Activate {
+            name: "demo".to_owned()
+        }]
+    );
+}
+
 /// `craft.packadd` is the activation path for an `opt/` package. A `start`
 /// package that calls it must get the named package loaded in the same
 /// startup, not the next one, or its registrations never appear.
@@ -2853,10 +3127,8 @@ fn packadd_from_a_start_package_activates_an_opt_package() {
 
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    assert!(
-        host.load_packages(&found.packages, &config).is_empty(),
-        "both packages must load without a failure"
-    );
+    let failures = activate_all(&host, &found, &config);
+    assert!(failures.is_empty(), "got: {failures:?}");
 
     let snap = host.command_reader().load();
     assert_eq!(
@@ -2906,7 +3178,7 @@ fn packadd_reports_a_name_that_is_not_installed() {
 
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    let failures = host.load_packages(&found.packages, &config);
+    let failures = activate_all(&host, &found, &config);
     assert_eq!(failures.len(), 1, "got: {failures:?}");
     assert!(failures[0].contains("absent_pack"), "got: {failures:?}");
 }
@@ -2937,7 +3209,7 @@ fn packadd_cannot_activate_a_disabled_package() {
 
     let reg = fresh_registry();
     let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    let failures = host.load_packages(&found.packages, &config);
+    let failures = activate_all(&host, &found, &config);
     assert_eq!(failures.len(), 1, "got: {failures:?}");
     assert_eq!(
         host.command_reader().load().commands.len(),
