@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use crate::plugin_permissions::{
     Permission::{Env, Run},
     PluginPermissions,
 };
-use crate::runtime::{SharedSandboxConfig, with_task_jobs};
+use crate::runtime::{SharedSandboxConfig, with_bg_jobs, with_task_jobs};
 #[cfg(test)]
 use crate::terminal_backend::LocalTerminal;
 use crate::terminal_backend::{JobEvent, TerminalBackend, TerminalHandle, TerminalSpec};
@@ -24,6 +25,7 @@ const DEFAULT_TAIL: usize = 20;
 const MAX_TAIL_LINES: usize = 1024;
 const MAX_COMPLETED_SESSION_JOBS: usize = 256;
 const DEFAULT_WAIT_MS: u64 = 30_000;
+const JOB_NOT_FOUND_ERR: &str = "job: not found";
 /// How often a parked `jobwait` re-checks whether its job's session ended:
 /// session jobs can live inside the waiting task's own store, where the
 /// SessionEnd reap cannot reach them.
@@ -117,10 +119,16 @@ pub(crate) struct JobMeta {
     exit_code: Option<i32>,
     /// Frozen at exit so elapsed time stops counting once the process is gone.
     elapsed_secs: Option<u64>,
+    /// Exit code owed to a callback attached after the process already died,
+    /// served by [`JobStore::next_event`] as a synthetic event.
+    replay_exit: Option<i32>,
+    /// Set by the first [`JobStore::complete`], so a replayed exit does not
+    /// run the completion bookkeeping twice.
+    completed: bool,
 }
 
 impl JobMeta {
-    fn owned_by(&self, plugin: &str) -> bool {
+    pub(crate) fn owned_by(&self, plugin: &str) -> bool {
         self.plugin.as_ref() == plugin
     }
 
@@ -138,6 +146,23 @@ impl JobMeta {
         }
         tail.push_back(line.to_string());
     }
+
+    fn has_pending(&self) -> bool {
+        self.replay_exit.is_some() || self.event_rx.as_ref().is_some_and(|rx| !rx.is_empty())
+    }
+}
+
+/// What a `jobattach` opts table says about one callback slot.
+enum CallbackUpdate {
+    Keep,
+    Clear,
+    Set(RegistryKey),
+}
+
+pub(crate) struct CallbackUpdates {
+    on_stdout: CallbackUpdate,
+    on_stderr: CallbackUpdate,
+    on_exit: CallbackUpdate,
 }
 
 pub(crate) struct JobSnapshot {
@@ -184,6 +209,19 @@ pub(crate) struct JobStore {
     /// Id served by the last [`JobStore::next_event`], so the next scan
     /// starts past it.
     scan_cursor: u32,
+}
+
+fn list_jobs(
+    jobs: &HashMap<u32, JobMeta>,
+    session: Option<CraftId>,
+    plugin: &str,
+) -> Vec<JobSnapshot> {
+    jobs.iter()
+        .filter(|(_, job)| job.owned_by(plugin))
+        .filter(|(_, job)| session.is_none_or(|s| job.session == Some(s)))
+        .filter(|(_, job)| job.session.is_some() || job.exit_code.is_none())
+        .map(|(&id, job)| JobSnapshot::from_job(id, job, false))
+        .collect()
 }
 
 impl JobStore {
@@ -246,6 +284,8 @@ impl JobStore {
                 notify: None,
                 exit_code: None,
                 elapsed_secs: None,
+                replay_exit: None,
+                completed: false,
             },
         );
     }
@@ -287,7 +327,7 @@ impl JobStore {
         let mut past_cursor = None;
         let mut lowest = None;
         for (&id, meta) in &self.jobs {
-            if !meta.event_rx.as_ref().is_some_and(|rx| !rx.is_empty()) {
+            if !meta.has_pending() {
                 continue;
             }
             if id > self.scan_cursor {
@@ -297,7 +337,11 @@ impl JobStore {
         }
         let id = past_cursor.or(lowest)?;
         self.scan_cursor = id;
-        Some((id, self.jobs.get(&id)?.event_rx.as_ref()?.try_recv().ok()?))
+        let job = self.jobs.get_mut(&id)?;
+        if let Some(code) = job.replay_exit.take() {
+            return Some((id, JobEvent::Exit(code)));
+        }
+        Some((id, job.event_rx.as_ref()?.try_recv().ok()?))
     }
 
     /// Removes a finished job and frees its callback registry values.
@@ -325,7 +369,8 @@ impl JobStore {
             JobEvent::Stderr(line) => job.record_line(false, line),
             JobEvent::Exit(code) => {
                 job.exit_code = Some(*code);
-                job.elapsed_secs = Some(job.started.elapsed().as_secs());
+                job.elapsed_secs
+                    .get_or_insert_with(|| job.started.elapsed().as_secs());
             }
         }
     }
@@ -341,6 +386,33 @@ impl JobStore {
         kill_session_jobs(lua, &mut self.jobs, session);
     }
 
+    /// Re-arm callbacks on an existing job, the way a reloaded plugin picks up
+    /// a session job it started before. An `on_exit` attached to an already
+    /// exited job is owed a replay, queued rather than fired inline so the
+    /// attaching plugin finishes its own setup first.
+    pub fn attach(
+        &mut self,
+        lua: &Lua,
+        job_id: u32,
+        plugin: &str,
+        updates: CallbackUpdates,
+    ) -> bool {
+        let Some(job) = self.jobs.get_mut(&job_id) else {
+            return false;
+        };
+        if !job.owned_by(plugin) {
+            return false;
+        }
+        let attaching_exit = matches!(updates.on_exit, CallbackUpdate::Set(_));
+        apply_update(lua, &mut job.on_stdout, updates.on_stdout);
+        apply_update(lua, &mut job.on_stderr, updates.on_stderr);
+        apply_update(lua, &mut job.on_exit, updates.on_exit);
+        if attaching_exit && let Some(code) = job.exit_code {
+            job.replay_exit = Some(code);
+        }
+        true
+    }
+
     pub fn snapshot(&self, job_id: u32, plugin: &str) -> Option<JobSnapshot> {
         let job = self.jobs.get(&job_id)?;
         job.owned_by(plugin)
@@ -351,13 +423,7 @@ impl JobStore {
     /// exit; session-owned jobs stay so exited ids stay findable. Tails live
     /// on `snapshot` / `jobinfo`.
     pub fn list(&self, session: Option<CraftId>, plugin: &str) -> Vec<JobSnapshot> {
-        self.jobs
-            .iter()
-            .filter(|(_, job)| job.owned_by(plugin))
-            .filter(|(_, job)| session.is_none_or(|s| job.session == Some(s)))
-            .filter(|(_, job)| job.session.is_some() || job.exit_code.is_none())
-            .map(|(&id, job)| JobSnapshot::from_job(id, job, false))
-            .collect()
+        list_jobs(&self.jobs, session, plugin)
     }
 
     /// Drop an exited job this plugin can see. Running jobs are left alone.
@@ -375,6 +441,12 @@ impl JobStore {
     pub fn session_of(&self, job_id: u32, plugin: &str) -> Option<CraftId> {
         let job = self.jobs.get(&job_id)?;
         job.owned_by(plugin).then_some(job.session)?
+    }
+
+    fn visible(&self, job_id: u32, plugin: &str) -> bool {
+        self.jobs
+            .get(&job_id)
+            .is_some_and(|job| job.owned_by(plugin))
     }
 
     pub fn kill(&mut self, job_id: u32, plugin: &str) {
@@ -516,6 +588,29 @@ fn drop_callbacks(lua: &Lua, job: &mut JobMeta) {
     }
 }
 
+fn apply_update(lua: &Lua, slot: &mut Option<RegistryKey>, update: CallbackUpdate) {
+    let replacement = match update {
+        CallbackUpdate::Keep => return,
+        CallbackUpdate::Clear => None,
+        CallbackUpdate::Set(key) => Some(key),
+    };
+    if let Some(old) = mem::replace(slot, replacement) {
+        lua.remove_registry_value(old).ok();
+    }
+}
+
+/// Attach to a job wherever it lives: the current task store first, then the
+/// background map an exited session job retired to when its task ended. A
+/// job adopted from the background map moves into the task store so this
+/// task's pump serves its replayed exit.
+fn attach_job(lua: &Lua, job_id: u32, plugin: &str, updates: CallbackUpdates) -> bool {
+    if with_task_jobs(lua, |store| store.visible(job_id, plugin)) {
+        return with_task_jobs(lua, |store| store.attach(lua, job_id, plugin, updates));
+    }
+    crate::runtime::adopt_bg_job(lua, job_id, plugin)
+        && with_task_jobs(lua, |store| store.attach(lua, job_id, plugin, updates))
+}
+
 /// Exit path shared by the task store and the background map. Posts the
 /// mailbox notify for session jobs, then keeps them inspectable (capped)
 /// while every other job is removed as before.
@@ -529,8 +624,16 @@ pub(crate) fn complete_job(
     let Some(job) = jobs.get_mut(&job_id) else {
         return;
     };
+    // A replayed exit reaches here a second time; only the callbacks the
+    // replay just used still need releasing.
+    if job.completed {
+        drop_callbacks(lua, job);
+        return;
+    }
+    job.completed = true;
     job.exit_code = Some(code);
-    job.elapsed_secs = Some(job.started.elapsed().as_secs());
+    job.elapsed_secs
+        .get_or_insert_with(|| job.started.elapsed().as_secs());
     if let Some(notify) = job.notify.clone()
         && (code != 0 || notify.on_success)
     {
@@ -811,9 +914,38 @@ pub(crate) fn create_fn_table(
             if !p.is_allowed(Run) {
                 return Err(crate::plugin_permissions::denied_error(Run));
             }
-            match with_task_jobs(lua, |store| store.snapshot(job_id, &owner)) {
+            let snap = with_task_jobs(lua, |store| store.snapshot(job_id, &owner)).or_else(|| {
+                with_bg_jobs(lua, |jobs| {
+                    jobs.get(&job_id)
+                        .filter(|job| job.owned_by(&owner))
+                        .map(|job| JobSnapshot::from_job(job_id, job, true))
+                })
+                .flatten()
+            });
+            match snap {
                 Some(snap) => Ok((Some(snapshot_table(lua, &snap, true)?), None)),
-                None => Ok(err_pair("job: not found")),
+                None => Ok(err_pair(JOB_NOT_FOUND_ERR)),
+            }
+        })?,
+    )?;
+
+    let p = perms.clone();
+    let owner = plugin.clone();
+    t.set(
+        "jobattach",
+        lua.create_function(move |lua, (job_id, opts): (u32, Table)| {
+            if !p.is_allowed(Run) {
+                return Err(crate::plugin_permissions::denied_error(Run));
+            }
+            let updates = CallbackUpdates {
+                on_stdout: callback_update(lua, &opts, "on_stdout")?,
+                on_stderr: callback_update(lua, &opts, "on_stderr")?,
+                on_exit: callback_update(lua, &opts, "on_exit")?,
+            };
+            if attach_job(lua, job_id, &owner, updates) {
+                Ok((Some(true), None))
+            } else {
+                Ok(err_pair(JOB_NOT_FOUND_ERR))
             }
         })?,
     )?;
@@ -831,7 +963,11 @@ pub(crate) fn create_fn_table(
                 Some(Err(e)) => return Ok(err_pair(e.to_string())),
                 None => None,
             };
-            let snaps = with_task_jobs(lua, |store| store.list(filter, &owner));
+            let mut snaps = with_task_jobs(lua, |store| store.list(filter, &owner));
+            if let Some(bg) = with_bg_jobs(lua, |jobs| list_jobs(jobs, filter, &owner)) {
+                snaps.extend(bg);
+            }
+            snaps.sort_unstable_by_key(|snap| snap.id);
             let result = lua.create_table()?;
             for (i, snap) in snaps.iter().enumerate() {
                 result.set(i + 1, snapshot_table(lua, snap, false)?)?;
@@ -933,6 +1069,17 @@ fn parse_notify(opts: &Table, session: Option<CraftId>) -> LuaResult<Option<JobN
         _ => Err(mlua::Error::runtime(
             "jobstart: notify must be a boolean or table",
         )),
+    }
+}
+
+fn callback_update(lua: &Lua, opts: &Table, key: &str) -> LuaResult<CallbackUpdate> {
+    match opts.get::<Value>(key)? {
+        Value::Nil => Ok(CallbackUpdate::Keep),
+        Value::Boolean(false) => Ok(CallbackUpdate::Clear),
+        Value::Function(callback) => Ok(CallbackUpdate::Set(lua.create_registry_value(callback)?)),
+        _ => Err(mlua::Error::runtime(format!(
+            "jobattach: {key} must be a function or false"
+        ))),
     }
 }
 
@@ -1397,7 +1544,112 @@ mod tests {
             notify: None,
             exit_code: None,
             elapsed_secs: None,
+            replay_exit: None,
+            completed: false,
         }
+    }
+
+    fn exit_updates(key: RegistryKey) -> CallbackUpdates {
+        CallbackUpdates {
+            on_stdout: CallbackUpdate::Keep,
+            on_stderr: CallbackUpdate::Keep,
+            on_exit: CallbackUpdate::Set(key),
+        }
+    }
+
+    fn noop_key(lua: &Lua) -> RegistryKey {
+        let noop = lua.create_function(|_, ()| Ok(())).unwrap();
+        lua.create_registry_value(noop).unwrap()
+    }
+
+    fn exited_session_job(lua: &Lua, store: &mut JobStore, session: CraftId, code: i32) {
+        let mut job = stub_job();
+        job.session = Some(session);
+        store.jobs.insert(1, job);
+        store.record_event(1, &JobEvent::Exit(code));
+        store.complete(lua, 1, code);
+    }
+
+    #[tokio::test]
+    async fn attaching_on_exit_after_the_exit_replays_it_once() {
+        const CODE: i32 = 5;
+        let lua = Lua::new();
+        let mut store = make_store();
+        exited_session_job(&lua, &mut store, CraftId::generate(), CODE);
+        let elapsed = store.jobs[&1].elapsed_secs;
+
+        assert!(store.attach(&lua, 1, TEST_PLUGIN, exit_updates(noop_key(&lua))));
+
+        let (id, event) = store.next_event().expect("replayed exit");
+        assert_eq!(id, 1);
+        assert!(matches!(event, JobEvent::Exit(CODE)));
+        assert!(
+            store.next_event().is_none(),
+            "the replay must be served once"
+        );
+
+        store.record_event(1, &event);
+        store.complete(&lua, 1, CODE);
+        assert_eq!(
+            store.completed_order.len(),
+            1,
+            "a replayed exit must not re-push the job onto the completed list"
+        );
+        assert_eq!(store.jobs[&1].elapsed_secs, elapsed);
+        assert!(
+            store.callback_key(1, &JobEvent::Exit(CODE)).is_none(),
+            "completing again must still release the replayed callback"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_is_refused_for_jobs_this_plugin_cannot_see() {
+        let lua = Lua::new();
+        let mut store = make_store();
+        exited_session_job(&lua, &mut store, CraftId::generate(), 0);
+
+        assert!(!store.attach(&lua, 1, "other-plugin", exit_updates(noop_key(&lua))));
+        assert!(!store.attach(&lua, 999, TEST_PLUGIN, exit_updates(noop_key(&lua))));
+        assert!(
+            store.next_event().is_none(),
+            "a refused attach must not queue a replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_keeps_absent_callbacks_and_clears_on_false() {
+        let lua = Lua::new();
+        let mut store = make_store();
+        let mut job = stub_job();
+        job.on_stdout = Some(noop_key(&lua));
+        store.jobs.insert(1, job);
+
+        assert!(store.attach(
+            &lua,
+            1,
+            TEST_PLUGIN,
+            CallbackUpdates {
+                on_stdout: CallbackUpdate::Clear,
+                on_stderr: CallbackUpdate::Set(noop_key(&lua)),
+                on_exit: CallbackUpdate::Keep,
+            },
+        ));
+        assert!(
+            store
+                .callback_key(1, &JobEvent::Stdout(String::new()))
+                .is_none(),
+            "false must clear the current callback"
+        );
+        assert!(
+            store
+                .callback_key(1, &JobEvent::Stderr(String::new()))
+                .is_some(),
+            "a function must replace the current callback"
+        );
+        assert!(
+            store.callback_key(1, &JobEvent::Exit(0)).is_none(),
+            "an absent key must leave the (missing) callback alone"
+        );
     }
 
     #[tokio::test]

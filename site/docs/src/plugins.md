@@ -374,6 +374,7 @@ Plugins can run background processes with `craft.fn.jobstart` and inspect them l
 - `craft.fn.jobstart(cmd, opts)` starts a shell command. Options include `on_stdout`, `on_stderr`, `on_exit` callbacks, `cwd`, `env`, `sandbox`, `background` (survives the tool call), `tail` (trailing lines per stream kept for `jobinfo`, default 20, 0 disables, max 1024), and `session` (a session id). Passing `session` makes the job session-owned: it survives plugin reload and lives until that session ends, and the plugin that started it can still inspect and stop it. `notify` (only with `session`) posts a mailbox observation when the process exits: `true` means `{ wake = true, on_success = true }`, or pass a table with `wake` and `on_success` (both default true). Returns a job id.
 - `craft.fn.jobinfo(job_id)` snapshots a job this plugin can see: `{ id, command, pid, session, status, exit_code, elapsed_secs, stdout_lines, stderr_lines }`. `status` is `"running"` or `"exited"`. Session-owned jobs still answer after they exit; every other job is gone once it exits. Answers `(nil, err)` when the job is gone.
 - `craft.fn.joblist(session?)` lists jobs this plugin can see, including exited session-owned jobs. Rows identify the job (`{ id, command, pid, session, status, exit_code, elapsed_secs }`); call `jobinfo` for the trailing output. Pass a session id to list only session-owned jobs for that session; plugin and task jobs are omitted.
+- `craft.fn.jobattach(job_id, opts)` attaches (or replaces) callbacks on a job this plugin can see. This is how a plugin picks its jobs back up after a reload: unloading drops the Lua callbacks of its session-owned jobs, but the processes keep running. Keys absent from `opts` leave the current callback alone; pass `false` to clear one. Attaching `on_exit` to a job that already exited still fires it once, with the recorded exit code, so a reload racing the exit cannot lose it. Answers `(true, nil)` on success or `(nil, err)`.
 - `craft.fn.jobwait(job_id, timeout_ms)` waits for a job and returns `{ stdout, stderr, exit_code, truncated }`. `truncated` is false when the collected lines are the full output; an already-exited session-owned job answers from its captured tail with `truncated = true` and fires no callbacks. Task and plugin jobs leave the store on exit, so waiting after that is an error. Returns nil on timeout. While waiting, the job's `on_stdout`, `on_stderr`, and `on_exit` callbacks fire as events arrive, and a failing callback does not end the wait: the exit code is still collected.
 - `craft.fn.jobstop(job_id)` kills a running job. Safe on unknown or already exited ids.
 - `craft.fn.jobforget(job_id)` drops an exited session-owned job from the store. Running jobs are left alone (use `jobstop` for those), and unknown ids are a no-op.
@@ -385,6 +386,15 @@ Jobs need the `run` plugin permission.
 ```lua
 local id = craft.fn.jobstart("npm run build", { background = true, tail = 50 })
 local info = craft.fn.jobinfo(id)
+```
+
+After a reload, re-arm the session job this plugin started:
+
+```lua
+craft.fn.jobattach(id, {
+  on_stdout = function(_, line) print(line) end,
+  on_exit = function(_, code) print("exit " .. code) end,
+})
 ```
 
 ## Prompt slots

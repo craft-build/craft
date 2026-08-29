@@ -1342,6 +1342,214 @@ async fn session_owned_job_survives_plugin_reload() {
     }
 }
 
+async fn poll_exec_tool(reg: &ToolRegistry, name: &str, what: &str, check: impl Fn(&str) -> bool) {
+    const TIMEOUT: Duration = Duration::from_secs(30);
+    const POLL: Duration = Duration::from_millis(10);
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        let out = exec_tool(reg, name, serde_json::json!({})).await.unwrap();
+        if check(&out) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn jobattach_resumes_streaming_after_reload_and_refuses_foreign_jobs() {
+    const ATTACHED: &str = "attached";
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let _mailbox = craft_agent::SessionMailbox::register(session);
+    let sid = session.to_string();
+    let src = format!(
+        r#"
+craft.api.register_tool({{
+    name = "start_ticker",
+    description = "starts a chatty session-owned job",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        return tostring(craft.fn.jobstart("while true; do echo tick; sleep 0.05; done", {{
+            session = "{sid}",
+        }}))
+    end,
+}})
+"#
+    );
+    host.load_source("ticker", &src).unwrap();
+    let id = exec_tool(&reg, "start_ticker", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let reattach = format!(
+        r#"
+local seen = 0
+craft.api.register_tool({{
+    name = "attach_ticker",
+    description = "re-arms the surviving job",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local ok, err = craft.fn.jobattach({id}, {{
+            on_stdout = function(_, line) seen = seen + 1 end,
+        }})
+        if not ok then return "error: " .. err end
+        return "{ATTACHED}"
+    end,
+}})
+craft.api.register_tool({{
+    name = "ticker_seen",
+    description = "lines seen since the attach",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function() return tostring(seen) end,
+}})
+"#
+    );
+    host.load_source("ticker", &reattach).unwrap();
+    assert_eq!(
+        exec_tool(&reg, "attach_ticker", serde_json::json!({}))
+            .await
+            .unwrap(),
+        ATTACHED
+    );
+    poll_exec_tool(
+        &reg,
+        "ticker_seen",
+        "jobattach did not resume stdout after reload",
+        |out| out != "0",
+    )
+    .await;
+
+    let spy = format!(
+        r#"
+craft.api.register_tool({{
+    name = "spy_attach",
+    description = "attaches to another plugin's job",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local ok, err = craft.fn.jobattach({id}, {{ on_stdout = function() end }})
+        if ok then return "{ATTACHED}" end
+        return "error: " .. err
+    end,
+}})
+"#
+    );
+    host.load_source("spy", &spy).unwrap();
+    assert_eq!(
+        exec_tool(&reg, "spy_attach", serde_json::json!({}))
+            .await
+            .unwrap(),
+        "error: job: not found"
+    );
+
+    host.event_handle().end_sessions_blocking([session]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn jobattach_replays_the_exit_of_an_already_exited_job() {
+    const EXIT_CODE: i32 = 3;
+    const SETTLED_ROUNDS: usize = 3;
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let _mailbox = craft_agent::SessionMailbox::register(session);
+    let sid = session.to_string();
+    let src = format!(
+        r#"
+craft.api.register_tool({{
+    name = "start_doomed",
+    description = "starts a session job that exits at once",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        return tostring(craft.fn.jobstart("exit {EXIT_CODE}", {{
+            session = "{sid}",
+        }}))
+    end,
+}})
+"#
+    );
+    host.load_source("doomed", &src).unwrap();
+    let id = exec_tool(&reg, "start_doomed", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let watcher = format!(
+        r#"
+local exits = {{}}
+craft.api.register_tool({{
+    name = "status_doomed",
+    description = "reports the recorded status",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local info = craft.fn.jobinfo({id})
+        return info and info.status or "missing"
+    end,
+}})
+craft.api.register_tool({{
+    name = "attach_doomed",
+    description = "attaches on_exit after the exit",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local ok, err = craft.fn.jobattach({id}, {{
+            on_exit = function(_, code) exits[#exits + 1] = code end,
+        }})
+        return ok and "attached" or ("error: " .. err)
+    end,
+}})
+craft.api.register_tool({{
+    name = "report_doomed",
+    description = "codes seen, then the session job count",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        return table.concat(exits, ",") .. "|" .. tostring(#craft.fn.joblist("{sid}"))
+    end,
+}})
+"#
+    );
+    host.load_source("doomed", &watcher).unwrap();
+    poll_exec_tool(
+        &reg,
+        "status_doomed",
+        "the doomed job never reported its exit",
+        |out| out == "exited",
+    )
+    .await;
+    exec_tool(&reg, "attach_doomed", serde_json::json!({}))
+        .await
+        .unwrap();
+
+    let expected = format!("{EXIT_CODE}|1");
+    poll_exec_tool(
+        &reg,
+        "report_doomed",
+        "attaching on_exit after the exit never fired it",
+        |out| out == expected,
+    )
+    .await;
+    for _ in 0..SETTLED_ROUNDS {
+        assert_eq!(
+            exec_tool(&reg, "report_doomed", serde_json::json!({}))
+                .await
+                .unwrap(),
+            expected,
+            "a replayed exit must fire once and leave the job listed once"
+        );
+    }
+
+    host.event_handle().end_sessions_blocking([session]);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn session_end_handler_sees_jobs_before_they_are_reaped() {

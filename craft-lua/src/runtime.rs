@@ -1218,6 +1218,31 @@ pub(crate) fn with_task_jobs<R>(lua: &Lua, f: impl FnOnce(&mut JobStore) -> R) -
     f(&mut guard.jobs)
 }
 
+/// Read-only access to the background job map, where session jobs ride
+/// between tasks. Absent in bare test Lua states.
+pub(crate) fn with_bg_jobs<R>(lua: &Lua, f: impl FnOnce(&BgJobMap) -> R) -> Option<R> {
+    lua.app_data_ref::<RefCell<BgJobMap>>()
+        .map(|bg| f(&bg.borrow()))
+}
+
+/// Move a background job this plugin owns into the current task store, so the
+/// task's pump serves its events again. Used by `jobattach` to pick up an
+/// exited session job that retired to the background map.
+pub(crate) fn adopt_bg_job(lua: &Lua, job_id: u32, plugin: &str) -> bool {
+    let Some(bg) = lua.app_data_ref::<RefCell<BgJobMap>>() else {
+        return false;
+    };
+    let mut bg = bg.borrow_mut();
+    if !bg.get(&job_id).is_some_and(|job| job.owned_by(plugin)) {
+        return false;
+    }
+    let Some(job) = bg.remove(&job_id) else {
+        return false;
+    };
+    with_task_jobs(lua, |store| store.absorb(HashMap::from([(job_id, job)])));
+    true
+}
+
 pub(crate) fn active_terminal_backend(lua: &Lua) -> Arc<dyn TerminalBackend> {
     lua.app_data_ref::<Arc<dyn TerminalBackend>>()
         .map(|b| Arc::clone(&*b))
