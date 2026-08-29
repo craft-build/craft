@@ -1939,8 +1939,10 @@ impl<'t> EventLoop<'t> {
         if let Some(ref h) = mcp_handle {
             craft_agent::mcp::kill_process_groups(&h.reader().load().pids);
         }
+        self.ctx
+            .lua_event_handle
+            .end_sessions_blocking(self.sessions.iter().map(SessionRuntime::id));
         for rt in &mut self.sessions {
-            rt.app.lua_event_handle.end_session(rt.id());
             let _ = rt.handles.cmd_tx.try_send(AgentCommand::CancelAll);
             rt.app.checkpoint_now();
             rt.app.cmd_tx = None;

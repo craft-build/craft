@@ -54,6 +54,7 @@ use crate::api::util::ctx::LuaCtx;
 use crate::api::util::setup::ConfigStore;
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
+use crate::terminal_backend::JobEvent;
 use crate::terminal_backend::TerminalBackend;
 
 const INTERRUPT_SHUTDOWN_MSG: &str = "plugin interrupted: host shutting down";
@@ -93,8 +94,13 @@ const RESTORE_SPAWN_ROUNDS: usize = 8;
 /// Keeps a buggy plugin's restore task from freezing the lua loop.
 const RESTORE_ASYNC_DEADLINE: Duration = Duration::from_secs(10);
 const TURN_END_EVENT: &str = "TurnEnd";
+const SESSION_END_EVENT: &str = "SessionEnd";
+/// Cap on the last delivery pass a scope makes before it reaps its jobs. A job
+/// printing faster than we deliver always has another event queued, so an
+/// unbounded pass would never reach the reap.
+const FINAL_DRAIN_BUDGET: usize = 256;
 
-fn strip_traceback(err: &mlua::Error) -> String {
+pub(crate) fn strip_traceback(err: &mlua::Error) -> String {
     match err {
         mlua::Error::CallbackError { cause, .. } => strip_traceback(cause),
         other => other.to_string(),
@@ -227,9 +233,11 @@ pub enum Request {
         event: String,
         data: Value,
     },
-    /// Fire `SessionEnd`, then reap that session's jobs.
+    /// Fire `SessionEnd`, then reap that session's jobs. `reply` settles once
+    /// both ran, so process-exit paths can bound their wait.
     EndSession {
         session: CraftId,
+        reply: Option<flume::Sender<()>>,
     },
     RunKeybindCallback {
         id: u64,
@@ -249,6 +257,21 @@ pub enum Request {
 
 /// Everything needed to re-run a lua restore callback. Used by session
 /// restore and theme re-bake so both paths share a single struct.
+/// Host-fired hooks, taken off the request loop. Their handlers can suspend
+/// (job and `craft.fs` awaits), and awaiting one inline would stop the loop
+/// from serving anything else. One consumer keeps them in the order the host
+/// fired them.
+enum HostHook {
+    Autocmd {
+        event: String,
+        data: Value,
+    },
+    EndSession {
+        session: CraftId,
+        reply: Option<flume::Sender<()>>,
+    },
+}
+
 pub struct RestoreItem {
     pub tool: Arc<str>,
     pub tool_use_id: String,
@@ -1013,14 +1036,8 @@ pub(crate) async fn run_command_scoped<F: Future>(lua: &Lua, depth: u8, fut: F) 
 async fn run_scoped<F: Future>(lua: &Lua, scope: TaskScope, fut: F) -> F::Output {
     let handle = Arc::clone(scope.handle());
     let pump = async {
-        let mut event_buf = Vec::new();
         loop {
-            lock_cell(&handle).jobs.drain_events(&mut event_buf);
-            for (job_id, event) in event_buf.drain(..) {
-                if let Err(e) = deliver_job_event(lua, job_id, &event) {
-                    tracing::warn!(error = %strip_traceback(&e), "detached job callback failed");
-                }
-            }
+            deliver_pending(lua, usize::MAX, || lock_cell(&handle).jobs.next_event()).await;
             tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
         }
     };
@@ -1029,8 +1046,73 @@ async fn run_scoped<F: Future>(lua: &Lua, scope: TaskScope, fut: F) -> F::Output
         out = scope.scope_future(fut) => out,
         _ = pump => unreachable!("pump never completes"),
     };
+    // `select` drops the pump the moment {fut} wins, so one last pass under
+    // the same scope delivers whatever arrived in between; the scope teardown
+    // right after reaps any task job. Only a callback caught mid-suspend at
+    // that instant is lost, never a whole event: `deliver_pending` leaves
+    // events in the channel until the delivery that records them starts.
+    scope
+        .scope_future(deliver_pending(lua, FINAL_DRAIN_BUDGET, || {
+            lock_cell(&handle).jobs.next_event()
+        }))
+        .await;
     drop(scope);
     out
+}
+
+/// Fire job callbacks for up to {budget} queued events, one at a time so a
+/// dropped caller cannot strand a batch. Failures are logged and the drain
+/// continues: the event is already recorded and the next one still needs
+/// delivering.
+async fn deliver_pending(
+    lua: &Lua,
+    budget: usize,
+    mut next: impl FnMut() -> Option<(u32, JobEvent)>,
+) {
+    for _ in 0..budget {
+        let Some((job_id, event)) = next() else {
+            return;
+        };
+        if let Err(e) = deliver_job_event(lua, job_id, &event).await {
+            tracing::warn!(job_id, error = %strip_traceback(&e), "job callback failed");
+        }
+        // A callback with nothing to await never yields, so a job printing
+        // faster than we deliver would hold the executor here forever.
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn run_host_hook(lua: &Lua, gate: &Rc<InflightGate>, hook: HostHook) {
+    match hook {
+        HostHook::Autocmd { event, data } => {
+            let data = json_to_lua(lua, &data).unwrap_or(LuaValue::Nil);
+            let is_turn_end = event == TURN_END_EVENT;
+            crate::api::autocmd::dispatch(lua.clone(), event, None, data).await;
+            if is_turn_end {
+                lua.gc_collect().ok();
+            }
+        }
+        HostHook::EndSession { session, reply } => {
+            // Handlers may still inspect or stop the jobs, so the event fires
+            // before the reap.
+            let data = json_to_lua(
+                lua,
+                &serde_json::json!({ "session_id": session.to_string() }),
+            )
+            .unwrap_or(LuaValue::Nil);
+            crate::api::autocmd::dispatch(lua.clone(), SESSION_END_EVENT.to_owned(), None, data)
+                .await;
+            if let Some(bg) = lua.app_data_ref::<RefCell<BgJobMap>>() {
+                let mut bg = bg.borrow_mut();
+                pump_session_jobs(lua, &mut bg);
+                kill_session_jobs(lua, &mut bg, session);
+            }
+            if let Some(reply) = reply {
+                let _ = reply.send(());
+            }
+        }
+    }
+    drain_spawn_queue(lua, gate);
 }
 
 impl Drop for TaskScope {
@@ -1071,7 +1153,10 @@ pin_project_lite::pin_project! {
         // fired. Without it nothing would poll us while the handler sits parked
         // in an await, and the hooks would wait on a child event that may
         // never come. Already `Box::pin`ned, so no structural pinning needed.
-        cancel_wait: Option<Pin<Box<dyn Future<Output = ()>>>>,
+        // `+ Send` keeps every ScopedFuture usable under mlua's `send`
+        // feature, including ones awaited inside `create_async_function`
+        // bodies.
+        cancel_wait: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
         #[pin]
         inner: F,
     }
@@ -2330,16 +2415,10 @@ fn extract_restore_reply(ret: &LuaValue) -> Option<RestoreReply> {
 }
 
 /// Drains pending events from background jobs and fires their Lua
-/// callbacks synchronously. Called before each tool handler starts so
-/// that `output_parts` / `bg_jobs` are up-to-date.
-fn drain_bg_job_events(lua: &Lua, handle: &TaskHandle) {
-    let mut event_buf = Vec::new();
-    lock_cell(handle).jobs.drain_events(&mut event_buf);
-    for (job_id, event) in event_buf {
-        if let Err(e) = deliver_job_event(lua, job_id, &event) {
-            tracing::warn!(job_id, error = %strip_traceback(&e), "bg job callback error");
-        }
-    }
+/// callbacks. Called before each tool handler starts so that
+/// `output_parts` / `bg_jobs` are up-to-date.
+async fn drain_bg_job_events(lua: &Lua, handle: &TaskHandle) {
+    deliver_pending(lua, usize::MAX, || lock_cell(handle).jobs.next_event()).await;
 }
 
 /// The last slice a doomed handler gets: its cancel hooks run (firing twice
@@ -2374,8 +2453,6 @@ async fn dispatch_async(
         };
     }
 
-    let mut event_buf = Vec::new();
-
     loop {
         // No grace here: the handler already returned, so there is no Lua
         // frame left to unwind. Bound before the match so the guard drops
@@ -2399,26 +2476,24 @@ async fn dispatch_async(
             Err(flume::TryRecvError::Empty) => {}
         }
 
-        lock_cell(&handle).jobs.drain_events(&mut event_buf);
-
-        if event_buf.is_empty() {
-            let has_alive = lock_cell(&handle).jobs.has_alive_jobs();
-            if !has_alive {
-                tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
-                return match finish_rx.try_recv() {
-                    Ok(reply) => reply,
-                    _ => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
-                };
+        let next = lock_cell(&handle).jobs.next_event();
+        if let Some((job_id, event)) = next {
+            if let Err(e) = deliver_job_event(lua, job_id, &event).await {
+                return ToolCallReply::err(format!("job callback error: {}", strip_traceback(&e)));
             }
-            tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
+            tokio::task::yield_now().await;
             continue;
         }
 
-        for (job_id, event) in event_buf.drain(..) {
-            if let Err(e) = deliver_job_event(lua, job_id, &event) {
-                return ToolCallReply::err(format!("job callback error: {}", strip_traceback(&e)));
-            }
+        let has_alive = lock_cell(&handle).jobs.has_alive_jobs();
+        if !has_alive {
+            tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
+            return match finish_rx.try_recv() {
+                Ok(reply) => reply,
+                _ => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
+            };
         }
+        tokio::time::sleep(DISPATCH_POLL_INTERVAL).await;
     }
 }
 
@@ -2515,7 +2590,7 @@ async fn run_tool_call(
     );
     let handle = Arc::clone(scope.handle());
 
-    drain_bg_job_events(&lua, &handle);
+    drain_bg_job_events(&lua, &handle).await;
 
     let async_thread = match thread.into_async::<LuaValue>((input_lua, ctx_ud)) {
         Ok(at) => at,
@@ -2646,6 +2721,19 @@ pub fn spawn(
             // LocalSet::block_on is the idiomatic tokio pattern for !Send types (Lua uses Rc/RefCell).
             // This dedicated thread exists precisely because Lua state cannot be sent across threads.
             local.block_on(&tokio_rt, async {
+                let (hook_tx, hook_rx) = flume::unbounded::<HostHook>();
+                {
+                    let lua = rt.lua.clone();
+                    let gate = Rc::clone(&gate);
+                    tokio::task::spawn_local(async move {
+                        while let Ok(hook) = hook_rx.recv_async().await {
+                            // Counted as in-flight so a plugin reload waiting
+                            // on `drain_barrier` cannot land mid-handler.
+                            let _guard = GateGuard::new(&gate);
+                            run_host_hook(&lua, &gate, hook).await;
+                        }
+                    });
+                }
                 let mut codegen_armed = false;
                 loop {
                     // Nothing to serve, so spend the lull on native
@@ -2901,30 +2989,11 @@ pub fn spawn(
                         drain_spawn_queue(&rt.lua, &gate);
                         let _ = reply.send(result);
                     }
-                    Request::EndSession { session } => {
-                        // Handlers may still inspect or stop the jobs, so
-                        // the event fires before the reap.
-                        let data = json_to_lua(
-                            &rt.lua,
-                            &serde_json::json!({ "session_id": session.to_string() }),
-                        )
-                        .unwrap_or(LuaValue::Nil);
-                        crate::api::autocmd::dispatch(&rt.lua, "SessionEnd", None, data);
-                        drain_spawn_queue(&rt.lua, &gate);
-                        if let Some(bg) = rt.lua.app_data_ref::<RefCell<BgJobMap>>() {
-                            let mut bg = bg.borrow_mut();
-                            pump_session_jobs(&rt.lua, &mut bg);
-                            kill_session_jobs(&rt.lua, &mut bg, session);
-                        }
+                    Request::EndSession { session, reply } => {
+                        let _ = hook_tx.send(HostHook::EndSession { session, reply });
                     }
                     Request::FireAutocmd { event, data } => {
-                        let is_turn_end = event == TURN_END_EVENT;
-                        let data = json_to_lua(&rt.lua, &data).unwrap_or(LuaValue::Nil);
-                        crate::api::autocmd::dispatch(&rt.lua, &event, None, data);
-                        drain_spawn_queue(&rt.lua, &gate);
-                        if is_turn_end {
-                            rt.lua.gc_collect().ok();
-                        }
+                        let _ = hook_tx.send(HostHook::Autocmd { event, data });
                     }
                     Request::RunKeybindCallback { id } => {
                         let func = rt.lua.app_data_ref::<KeymapStore>().and_then(|store| {
@@ -3012,6 +3081,23 @@ mod tests {
         let lua = Lua::new();
         lua.set_app_data(BufferStore::new());
         lua
+    }
+
+    /// A job printing faster than we deliver never runs its channel dry, so
+    /// the last pass a scope makes before reaping it has to stop on its own.
+    #[tokio::test]
+    async fn the_bounded_drain_stops_on_an_endless_stream() {
+        let lua = test_lua();
+        let scope = TaskScope::detached(&lua);
+        let mut offered = 0usize;
+        scope
+            .scope_future(deliver_pending(&lua, FINAL_DRAIN_BUDGET, || {
+                offered += 1;
+                (offered <= FINAL_DRAIN_BUDGET * 2).then(|| (1, JobEvent::Stdout("spam".into())))
+            }))
+            .await;
+        drop(scope);
+        assert_eq!(offered, FINAL_DRAIN_BUDGET);
     }
 
     #[test]

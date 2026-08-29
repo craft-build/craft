@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mlua::{Function, Lua, Result as LuaResult, Table, Value};
 
-use crate::api::util::dispatch::{DepthGuard, call_isolated};
+use crate::api::util::dispatch::DepthGuard;
+use crate::runtime::{run_detached, strip_traceback};
 
 static NEXT_AUTOCMD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -53,8 +54,19 @@ fn pattern_matches(patterns: Option<&[String]>, fired: Option<&str>) -> bool {
     }
 }
 
-pub(crate) fn dispatch(lua: &Lua, event: &str, pattern: Option<&str>, data: Value) {
-    let Ok(_guard) = DepthGuard::enter(lua, "autocmd", event) else {
+/// One dispatch path for host-fired and plugin-fired events. Never throws.
+///
+/// Each callback runs in its own coroutine under a detached task scope, so
+/// it may suspend (the `craft.fs.*` helpers park on blocking IO); an inline
+/// resume would die with "attempt to yield across metamethod / C-call
+/// boundary". The per-callback scope also means jobs a handler starts die
+/// with that handler instead of outliving it to the end of the batch.
+///
+/// The snapshot below looks racy but is not: all Lua runs on the runtime
+/// thread and plugin unloads arrive through the request channel, so nothing
+/// can unload between the snapshot and the calls.
+pub(crate) async fn dispatch(lua: Lua, event: String, pattern: Option<String>, data: Value) {
+    let Ok(_guard) = DepthGuard::enter(&lua, "autocmd", &event) else {
         tracing::warn!(event, "autocmd dispatch exceeded max depth, skipping");
         return;
     };
@@ -62,12 +74,14 @@ pub(crate) fn dispatch(lua: &Lua, event: &str, pattern: Option<&str>, data: Valu
         let Some(mut store) = lua.app_data_mut::<AutocmdStore>() else {
             return;
         };
-        let Some(entries) = store.listeners.get_mut(event) else {
+        let Some(entries) = store.listeners.get_mut(&event) else {
             return;
         };
         let mut snapshot = Vec::new();
+        // Drop `once` entries now, at snapshot time: if a callback refires
+        // the same event they are already gone, so they stay exactly-once.
         entries.retain(|e| {
-            let fires = pattern_matches(e.patterns.as_deref(), pattern);
+            let fires = pattern_matches(e.patterns.as_deref(), pattern.as_deref());
             if fires {
                 snapshot.push((e.id, Arc::clone(&e.plugin), e.callback.clone()));
             }
@@ -76,14 +90,26 @@ pub(crate) fn dispatch(lua: &Lua, event: &str, pattern: Option<&str>, data: Valu
         snapshot
     };
     for (id, plugin, callback) in snapshot {
-        let ev = match make_ev_table(lua, id, event, pattern, &data) {
+        let ev = match make_ev_table(&lua, id, &event, pattern.as_deref(), &data) {
             Ok(ev) => ev,
             Err(e) => {
                 tracing::warn!(event, error = %e, "failed to build autocmd ev table");
                 return;
             }
         };
-        call_isolated::<()>(lua, &callback, ev, event, &plugin);
+        if let Err(e) = run_detached(&lua, async {
+            let thread = lua.create_thread(callback)?;
+            thread.into_async::<()>(ev)?.await
+        })
+        .await
+        {
+            tracing::warn!(
+                event,
+                plugin = &*plugin,
+                error = %strip_traceback(&e),
+                "plugin callback failed"
+            );
+        }
     }
 }
 
@@ -156,24 +182,26 @@ pub(crate) fn add_autocmd_methods(api_table: &Table, lua: &Lua, plugin: Arc<str>
 
     api_table.set(
         "exec_autocmds",
-        lua.create_function(|lua, (event, opts): (Value, Option<Table>)| {
-            let events = parse_string_or_seq(event, "event")?;
-            let (pattern, data) = match opts {
-                Some(opts) => {
-                    let pattern = match opts.get::<Value>("pattern")? {
-                        Value::Nil => None,
-                        Value::String(s) => Some(s.to_str()?.to_owned()),
-                        _ => return Err(mlua::Error::runtime("pattern must be a string")),
-                    };
-                    (pattern, opts.get::<Value>("data")?)
+        lua.create_async_function(
+            |lua: Lua, (event, opts): (Value, Option<Table>)| async move {
+                let events = parse_string_or_seq(event, "event")?;
+                let (pattern, data) = match opts {
+                    Some(opts) => {
+                        let pattern = match opts.get::<Value>("pattern")? {
+                            Value::Nil => None,
+                            Value::String(s) => Some(s.to_str()?.to_owned()),
+                            _ => return Err(mlua::Error::runtime("pattern must be a string")),
+                        };
+                        (pattern, opts.get::<Value>("data")?)
+                    }
+                    None => (None, Value::Nil),
+                };
+                for event in events {
+                    dispatch(lua.clone(), event, pattern.clone(), data.clone()).await;
                 }
-                None => (None, Value::Nil),
-            };
-            for event in events {
-                dispatch(lua, &event, pattern.as_deref(), data.clone());
-            }
-            Ok(())
-        })?,
+                Ok(())
+            },
+        )?,
     )?;
 
     Ok(())

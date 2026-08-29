@@ -1331,7 +1331,7 @@ async fn session_owned_job_survives_plugin_reload() {
         "reloaded plugin should see the live session job, got {state}"
     );
 
-    host.event_handle().end_session(session);
+    host.event_handle().end_sessions_blocking([session]);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while test_kill_process_group(pid).is_ok() {
         assert!(
@@ -1413,22 +1413,13 @@ async fn session_end_handler_sees_jobs_before_they_are_reaped() {
     let pid = Pid::from_raw(pid).unwrap();
     assert!(test_kill_process_group(pid).is_ok());
 
-    host.event_handle().end_session(session);
+    host.event_handle().end_sessions_blocking([session]);
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let seen = loop {
-        let seen = exec_tool(&reg, "probe_order_job", serde_json::json!({}))
-            .await
-            .unwrap();
-        if !seen.starts_with("not-yet") {
-            break seen;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "SessionEnd handler never ran"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
+    // `end_sessions_blocking` answers only once the handlers ran and the jobs
+    // were reaped, so what the handler saw is settled.
+    let seen = exec_tool(&reg, "probe_order_job", serde_json::json!({}))
+        .await
+        .unwrap();
     assert!(
         seen.starts_with("running:"),
         "SessionEnd handler should see the live job, got {seen}"
@@ -3675,4 +3666,239 @@ craft.api.register_command({
 
     let snap = host.command_reader().load();
     assert_eq!(snap.commands[0].name.as_ref(), "/allowed");
+}
+
+#[tokio::test]
+async fn autocmd_jobs_die_with_their_own_callback() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    const GONE: &str = "gone";
+    let src = format!(
+        r#"
+local job
+seen = "unset"
+craft.api.create_autocmd("ProbeIsolation", {{
+    callback = function()
+        job = craft.fn.jobstart("sleep 30")
+    end,
+}})
+craft.api.create_autocmd("ProbeIsolation", {{
+    callback = function()
+        local info = job and craft.fn.jobinfo(job) or nil
+        seen = info and ("alive:" .. info.status) or "{GONE}"
+    end,
+}})
+craft.api.register_tool({{
+    name = "probe_isolation",
+    description = "reports what the second handler saw",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        return seen
+    end,
+}})
+"#
+    );
+    host.load_source("isolation_probe", &src).unwrap();
+
+    host.event_handle()
+        .fire_autocmd("ProbeIsolation", serde_json::json!({}));
+
+    // Each callback runs in its own scope, so the job the first handler
+    // started dies with it; a shared batch scope would report it alive.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let seen = loop {
+        let seen = exec_tool(&reg, "probe_isolation", serde_json::json!({}))
+            .await
+            .unwrap();
+        if seen != "unset" {
+            break seen;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "isolation probe never settled, got: {seen}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(seen, GONE);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_end_autocmds_may_suspend() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker.txt");
+    std::fs::write(&marker, "x").unwrap();
+
+    const RM_FAILED: &str = "err:";
+    let src = format!(
+        r#"
+local rm_result
+craft.api.create_autocmd("SessionEnd", {{
+    callback = function(ev)
+        local ok, res = pcall(craft.fs.rm, ev.data.dir, {{ recursive = true, force = true }})
+        rm_result = ok and "ok" or "{RM_FAILED}" .. tostring(res)
+    end,
+}})
+craft.api.register_tool({{
+    name = "rm_probe",
+    description = "reports what the SessionEnd handler saw",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        return rm_result or "unset"
+    end,
+}})
+"#
+    );
+    host.load_source("sessionend_suspend", &src).unwrap();
+
+    host.event_handle().fire_autocmd(
+        "SessionEnd",
+        serde_json::json!({ "dir": dir.path().display().to_string() }),
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let seen = loop {
+        match exec_tool(&reg, "rm_probe", serde_json::json!({})).await {
+            Ok(seen) if seen != "unset" => break seen,
+            _ if std::time::Instant::now() < deadline => {}
+            other => panic!("SessionEnd probe never settled: {other:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(seen, "ok", "fs.rm must not die on a yield boundary");
+    assert!(!marker.exists(), "fs.rm should have removed the tree");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn jobwait_streams_events_to_suspending_callbacks() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let meta = dir.path().join("meta.json");
+
+    let session = craft_storage::id::CraftId::generate();
+    // The process must still run when wait_suspending_job calls jobwait:
+    // an already-exited job answers from its snapshot without delivering
+    // on_exit, which would make the assertion below race the event pump.
+    const EXIT_CB_FAILED: &str = "exit_cb_failed";
+    let src = format!(
+        r#"
+local job_id
+local exit_cb_result
+craft.api.register_tool({{
+    name = "start_suspending_job",
+    description = "starts a session-owned job whose on_exit writes a file",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        job_id = craft.fn.jobstart("sleep 2", {{
+            session = "{session}",
+            on_exit = function(_, code)
+                local ok, res = pcall(craft.fs.atomic_write, "{meta}", tostring(code))
+                exit_cb_result = ok and "ok" or "{EXIT_CB_FAILED}:" .. tostring(res)
+            end,
+        }})
+        return tostring(job_id)
+    end,
+}})
+craft.api.register_tool({{
+    name = "wait_suspending_job",
+    description = "waits like a monitor does",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local ok, res = pcall(craft.fn.jobwait, job_id, 10000)
+        if not ok then
+            return {{ llm_output = "error: " .. tostring(res), is_error = true }}
+        end
+        return "exit:" .. tostring(res and res.exit_code) .. "|exit_cb:" .. tostring(exit_cb_result)
+    end,
+}})
+"#,
+        session = session,
+        meta = meta.display(),
+    );
+    host.load_source("jobwait_suspend", &src).unwrap();
+
+    exec_tool(&reg, "start_suspending_job", serde_json::json!({}))
+        .await
+        .unwrap();
+    let waited = exec_tool(&reg, "wait_suspending_job", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        waited, "exit:0|exit_cb:ok",
+        "jobwait must report the exit and on_exit must survive suspending fs calls"
+    );
+    assert!(meta.exists(), "on_exit should have written the meta file");
+}
+
+#[tokio::test]
+async fn jobwait_callback_error_still_delivers_exit() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let src = format!(
+        r#"
+local job_id
+craft.api.register_tool({{
+    name = "start_boom_job",
+    description = "job whose on_stdout raises",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        job_id = craft.fn.jobstart("echo one; echo two; echo three", {{
+            session = "{session}",
+            on_stdout = function(_, line)
+                if line == "two" then
+                    error("boom on stdout")
+                end
+            end,
+        }})
+        return tostring(job_id)
+    end,
+}})
+craft.api.register_tool({{
+    name = "wait_boom_job",
+    description = "waits past the failing callback",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local ok, res = pcall(craft.fn.jobwait, job_id, 10000)
+        if not ok then
+            return {{ llm_output = "error: " .. tostring(res), is_error = true }}
+        end
+        if res == nil then
+            return {{ llm_output = "error: timed out", is_error = true }}
+        end
+        return "exit:" .. tostring(res.exit_code) .. "|stdout:" .. tostring(res.stdout)
+    end,
+}})
+"#
+    );
+    host.load_source("boomjob", &src).unwrap();
+    exec_tool(&reg, "start_boom_job", serde_json::json!({}))
+        .await
+        .unwrap();
+    let out = exec_tool(&reg, "wait_boom_job", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(
+        out.starts_with("exit:0"),
+        "a failing on_stdout must not swallow the exit, got: {out}"
+    );
+    let again = exec_tool(&reg, "wait_boom_job", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(
+        again.starts_with("exit:"),
+        "VM must stay usable, got: {again}"
+    );
 }

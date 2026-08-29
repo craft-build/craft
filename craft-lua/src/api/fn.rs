@@ -115,11 +115,39 @@ pub(crate) struct JobSnapshot {
     pub stderr_lines: Vec<String>,
 }
 
+impl JobSnapshot {
+    fn from_job(id: u32, job: &JobMeta, tails: bool) -> Self {
+        Self {
+            id,
+            command: job.command.clone(),
+            session: job.session,
+            pid: job.pid,
+            elapsed_secs: job
+                .elapsed_secs
+                .unwrap_or_else(|| job.started.elapsed().as_secs()),
+            exit_code: job.exit_code,
+            stdout_lines: if tails {
+                job.stdout_tail.iter().cloned().collect()
+            } else {
+                Vec::new()
+            },
+            stderr_lines: if tails {
+                job.stderr_tail.iter().cloned().collect()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
 pub(crate) struct JobStore {
     jobs: HashMap<u32, JobMeta>,
     next_id: u32,
     backend: Arc<dyn TerminalBackend>,
     completed_order: VecDeque<u32>,
+    /// Id served by the last [`JobStore::next_event`], so the next scan
+    /// starts past it.
+    scan_cursor: u32,
 }
 
 impl JobStore {
@@ -134,6 +162,7 @@ impl JobStore {
             next_id: 1,
             backend,
             completed_order: VecDeque::new(),
+            scan_cursor: 0,
         }
     }
 
@@ -211,15 +240,28 @@ impl JobStore {
         meta.owned_by(plugin).then(|| meta.event_rx.take())?
     }
 
-    pub fn drain_events(&self, buf: &mut Vec<(u32, JobEvent)>) {
-        buf.clear();
+    /// Pop one queued event. Deliberately one at a time: a batch pulled into
+    /// a caller-owned buffer is lost if that caller is dropped mid-delivery,
+    /// and with it the tail and exit code the event carries.
+    ///
+    /// Round-robins over the jobs holding events: taking the first match
+    /// every time would let a job printing faster than we deliver starve the
+    /// rest.
+    pub fn next_event(&mut self) -> Option<(u32, JobEvent)> {
+        let mut past_cursor = None;
+        let mut lowest = None;
         for (&id, meta) in &self.jobs {
-            if let Some(ref rx) = meta.event_rx {
-                while let Ok(event) = rx.try_recv() {
-                    buf.push((id, event));
-                }
+            if !meta.event_rx.as_ref().is_some_and(|rx| !rx.is_empty()) {
+                continue;
             }
+            if id > self.scan_cursor {
+                past_cursor = Some(past_cursor.map_or(id, |seen: u32| seen.min(id)));
+            }
+            lowest = Some(lowest.map_or(id, |seen: u32| seen.min(id)));
         }
+        let id = past_cursor.or(lowest)?;
+        self.scan_cursor = id;
+        Some((id, self.jobs.get(&id)?.event_rx.as_ref()?.try_recv().ok()?))
     }
 
     /// Removes a finished job and frees its callback registry values.
@@ -265,42 +307,33 @@ impl JobStore {
 
     pub fn snapshot(&self, job_id: u32, plugin: &str) -> Option<JobSnapshot> {
         let job = self.jobs.get(&job_id)?;
-        job.owned_by(plugin).then(|| JobSnapshot {
-            id: job_id,
-            command: job.command.clone(),
-            session: job.session,
-            pid: job.pid,
-            elapsed_secs: job
-                .elapsed_secs
-                .unwrap_or_else(|| job.started.elapsed().as_secs()),
-            exit_code: job.exit_code,
-            stdout_lines: job.stdout_tail.iter().cloned().collect(),
-            stderr_lines: job.stderr_tail.iter().cloned().collect(),
-        })
+        job.owned_by(plugin)
+            .then(|| JobSnapshot::from_job(job_id, job, true))
     }
 
     /// List jobs this plugin can see. Task and plugin jobs leave the map on
-    /// exit; session-owned jobs stay, so exited ones show up here with their
-    /// final tail and exit code.
+    /// exit; session-owned jobs stay so exited ids stay findable. Tails live
+    /// on `snapshot` / `jobinfo`.
     pub fn list(&self, session: Option<CraftId>, plugin: &str) -> Vec<JobSnapshot> {
         self.jobs
             .iter()
             .filter(|(_, job)| job.owned_by(plugin))
             .filter(|(_, job)| session.is_none_or(|s| job.session == Some(s)))
             .filter(|(_, job)| job.session.is_some() || job.exit_code.is_none())
-            .map(|(&id, job)| JobSnapshot {
-                id,
-                command: job.command.clone(),
-                session: job.session,
-                pid: job.pid,
-                elapsed_secs: job
-                    .elapsed_secs
-                    .unwrap_or_else(|| job.started.elapsed().as_secs()),
-                exit_code: job.exit_code,
-                stdout_lines: job.stdout_tail.iter().cloned().collect(),
-                stderr_lines: job.stderr_tail.iter().cloned().collect(),
-            })
+            .map(|(&id, job)| JobSnapshot::from_job(id, job, false))
             .collect()
+    }
+
+    /// Drop an exited job this plugin can see. Running jobs are left alone.
+    pub fn forget(&mut self, lua: &Lua, job_id: u32, plugin: &str) {
+        let Some(job) = self.jobs.get(&job_id) else {
+            return;
+        };
+        if !job.owned_by(plugin) || job.exit_code.is_none() {
+            return;
+        }
+        remove_job_from(lua, &mut self.jobs, job_id);
+        self.completed_order.retain(|&id| id != job_id);
     }
 
     pub fn kill(&mut self, job_id: u32, plugin: &str) {
@@ -696,7 +729,15 @@ pub(crate) fn create_fn_table(
                         with_task_jobs(&lua, |store| store.put_receiver(job_id, rx));
                         return Ok(mlua::Value::Nil);
                     };
-                    deliver_job_event(&lua, job_id, &event)?;
+                    // A failing callback must not abort the wait: the event is
+                    // already recorded and the exit still needs collecting.
+                    if let Err(e) = deliver_job_event(&lua, job_id, &event).await {
+                        tracing::warn!(
+                            job_id,
+                            error = %crate::runtime::strip_traceback(&e),
+                            "jobwait callback failed"
+                        );
+                    }
                     match event {
                         JobEvent::Stdout(line) => stdout_lines.push(line),
                         JobEvent::Stderr(line) => stderr_lines.push(line),
@@ -725,7 +766,7 @@ pub(crate) fn create_fn_table(
                 return Err(crate::plugin_permissions::denied_error(Run));
             }
             match with_task_jobs(lua, |store| store.snapshot(job_id, &owner)) {
-                Some(snap) => Ok((Some(snapshot_table(lua, &snap)?), None)),
+                Some(snap) => Ok((Some(snapshot_table(lua, &snap, true)?), None)),
                 None => Ok(err_pair("job: not found")),
             }
         })?,
@@ -747,9 +788,22 @@ pub(crate) fn create_fn_table(
             let snaps = with_task_jobs(lua, |store| store.list(filter, &owner));
             let result = lua.create_table()?;
             for (i, snap) in snaps.iter().enumerate() {
-                result.set(i + 1, snapshot_table(lua, snap)?)?;
+                result.set(i + 1, snapshot_table(lua, snap, false)?)?;
             }
             Ok((Some(Value::Table(result)), None::<String>))
+        })?,
+    )?;
+
+    let p = perms.clone();
+    let owner = plugin.clone();
+    t.set(
+        "jobforget",
+        lua.create_function(move |lua, job_id: u32| {
+            if !p.is_allowed(Run) {
+                return Err(crate::plugin_permissions::denied_error(Run));
+            }
+            with_task_jobs(lua, |store| store.forget(lua, job_id, &owner));
+            Ok(())
         })?,
     )?;
 
@@ -836,7 +890,7 @@ fn parse_notify(opts: &Table, session: Option<CraftId>) -> LuaResult<Option<JobN
     }
 }
 
-fn snapshot_table(lua: &Lua, snap: &JobSnapshot) -> LuaResult<Table> {
+fn snapshot_table(lua: &Lua, snap: &JobSnapshot, tails: bool) -> LuaResult<Table> {
     let row = lua.create_table()?;
     row.set("id", snap.id)?;
     row.set("command", snap.command.as_str())?;
@@ -852,16 +906,18 @@ fn snapshot_table(lua: &Lua, snap: &JobSnapshot) -> LuaResult<Table> {
         },
     )?;
     row.set("exit_code", snap.exit_code)?;
-    let stdout = lua.create_table()?;
-    for (i, line) in snap.stdout_lines.iter().enumerate() {
-        stdout.set(i + 1, line.as_str())?;
+    if tails {
+        let stdout = lua.create_table()?;
+        for (i, line) in snap.stdout_lines.iter().enumerate() {
+            stdout.set(i + 1, line.as_str())?;
+        }
+        row.set("stdout_lines", stdout)?;
+        let stderr = lua.create_table()?;
+        for (i, line) in snap.stderr_lines.iter().enumerate() {
+            stderr.set(i + 1, line.as_str())?;
+        }
+        row.set("stderr_lines", stderr)?;
     }
-    row.set("stdout_lines", stdout)?;
-    let stderr = lua.create_table()?;
-    for (i, line) in snap.stderr_lines.iter().enumerate() {
-        stderr.set(i + 1, line.as_str())?;
-    }
-    row.set("stderr_lines", stderr)?;
     Ok(row)
 }
 
@@ -869,7 +925,12 @@ fn snapshot_table(lua: &Lua, snap: &JobSnapshot) -> LuaResult<Table> {
 /// on exit before invoking a callback that may raise. Shared by
 /// `jobwait` and the async dispatch loop so both deliver events
 /// identically.
-pub(crate) fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> LuaResult<()> {
+///
+/// The callback runs in a coroutine so it may suspend (the `craft.fs.*`
+/// helpers park on blocking IO); resumed inline from a poll loop it would
+/// die with "attempt to yield across metamethod / C-call boundary" on its
+/// first suspension.
+pub(crate) async fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> LuaResult<()> {
     let callback = with_task_jobs(lua, |store| {
         store.record_event(job_id, event);
         store
@@ -886,7 +947,7 @@ pub(crate) fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> Lua
             }
             JobEvent::Exit(code) => Value::Integer(*code as i64),
         };
-        callback.call::<()>((job_id, arg))?;
+        callback.call_async::<()>((job_id, arg)).await?;
     }
     Ok(())
 }
@@ -1059,25 +1120,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_events_collects_from_all_jobs() {
+    async fn next_event_collects_from_all_jobs() {
         let mut store = make_store();
         let id = start_echo(&mut store).await;
 
-        let mut buf = Vec::new();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            store.drain_events(&mut buf);
-            if buf
-                .iter()
-                .any(|(jid, e)| *jid == id && matches!(e, JobEvent::Exit(_)))
-            {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                panic!("should receive exit event for completed job");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let events = collect_until_exit(id, || store.next_event());
+        assert!(
+            events.iter().any(|(jid, _)| *jid == id),
+            "should receive events for the started job"
+        );
     }
 
     #[tokio::test]
@@ -1150,22 +1201,36 @@ mod tests {
         id
     }
 
-    async fn wait_for_exit(store: &mut JobStore, id: u32) {
-        let mut buf = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
+    const JOB_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+    const JOB_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    const NEVER_EXITED: &str = "job never reported its exit";
+
+    /// Pull events until {id} reports its exit, so assertions run against a
+    /// job that is certainly done.
+    fn collect_until_exit(
+        id: u32,
+        mut next: impl FnMut() -> Option<(u32, JobEvent)>,
+    ) -> Vec<(u32, JobEvent)> {
+        let deadline = Instant::now() + JOB_EXIT_TIMEOUT;
+        let mut events = Vec::new();
         loop {
-            store.drain_events(&mut buf);
-            for (_, event) in &buf {
-                store.record_event(id, event);
+            while let Some(event) = next() {
+                events.push(event);
             }
-            if buf
+            if events
                 .iter()
-                .any(|(jid, e)| *jid == id && matches!(e, JobEvent::Exit(_)))
+                .any(|(job_id, event)| *job_id == id && matches!(event, JobEvent::Exit(_)))
             {
-                return;
+                return events;
             }
-            assert!(Instant::now() < deadline, "session job never exited");
-            std::thread::sleep(Duration::from_millis(20));
+            assert!(Instant::now() < deadline, "{NEVER_EXITED}");
+            std::thread::sleep(JOB_POLL_INTERVAL);
+        }
+    }
+
+    async fn wait_for_exit(store: &mut JobStore, id: u32) {
+        for (_, event) in collect_until_exit(id, || store.next_event()) {
+            store.record_event(id, &event);
         }
     }
 
@@ -1248,6 +1313,103 @@ mod tests {
         store.kill_session(&lua, session);
     }
 
+    #[tokio::test]
+    async fn list_omits_tails() {
+        let mut store = make_store();
+        let id = start_echo(&mut store).await;
+        store.record_event(id, &JobEvent::Stdout("hello".into()));
+        let listed = store.list(None, TEST_PLUGIN);
+        assert!(
+            listed
+                .iter()
+                .any(|s| s.id == id && s.stdout_lines.is_empty() && s.stderr_lines.is_empty()),
+            "joblist must not clone tails"
+        );
+        assert_eq!(
+            store.snapshot(id, TEST_PLUGIN).unwrap().stdout_lines,
+            ["hello"]
+        );
+    }
+
+    fn stub_job() -> JobMeta {
+        JobMeta {
+            alive: false,
+            background: false,
+            plugin: owner(),
+            command: "stub".into(),
+            pid: 0,
+            started: Instant::now(),
+            on_stdout: None,
+            on_stderr: None,
+            on_exit: None,
+            event_rx: None,
+            kill: None,
+            stdout_tail: VecDeque::new(),
+            stderr_tail: VecDeque::new(),
+            tail_cap: DEFAULT_TAIL,
+            session: None,
+            notify: None,
+            exit_code: None,
+            elapsed_secs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn next_event_round_robins_so_a_chatty_job_cannot_starve_its_sibling() {
+        const QUEUED_PER_JOB: usize = 2;
+        let mut store = make_store();
+        for id in [1, 2] {
+            let (tx, rx) = flume::unbounded();
+            for _ in 0..QUEUED_PER_JOB {
+                tx.send(JobEvent::Stdout("spam".into())).unwrap();
+            }
+            let mut job = stub_job();
+            job.event_rx = Some(rx);
+            store.jobs.insert(id, job);
+        }
+
+        let served: Vec<u32> = std::iter::from_fn(|| store.next_event())
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(served, [1, 2, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn forget_drops_exited_session_jobs_only() {
+        let lua = Lua::new();
+        let session = CraftId::generate();
+        let mut store = make_store();
+        let mut job = stub_job();
+        job.session = Some(session);
+        store.jobs.insert(1, job);
+
+        store.forget(&lua, 1, TEST_PLUGIN);
+        assert!(
+            store.snapshot(1, TEST_PLUGIN).is_some(),
+            "running job must stay"
+        );
+
+        store.record_event(1, &JobEvent::Exit(0));
+        store.complete(&lua, 1, 0);
+        assert!(
+            store
+                .list(Some(session), TEST_PLUGIN)
+                .iter()
+                .any(|s| s.id == 1)
+        );
+
+        store.forget(&lua, 1, "other-plugin");
+        assert!(
+            store.snapshot(1, TEST_PLUGIN).is_some(),
+            "other plugin cannot forget"
+        );
+
+        store.forget(&lua, 1, TEST_PLUGIN);
+        assert!(store.snapshot(1, TEST_PLUGIN).is_none());
+        assert!(store.list(Some(session), TEST_PLUGIN).is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn exited_session_job_stays_listed_and_kill_is_a_noop() {
@@ -1273,16 +1435,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_events_empty_after_take() {
+    async fn next_event_is_empty_after_take() {
         let mut store = make_store();
         let id = start_echo(&mut store).await;
         let _rx = store.take_receiver(id, TEST_PLUGIN).unwrap();
 
-        let mut buf = Vec::new();
-        store.drain_events(&mut buf);
         assert!(
-            buf.is_empty(),
-            "drained receiver yields no events via drain_events"
+            store.next_event().is_none(),
+            "a checked out receiver yields no events to the pump"
         );
     }
 

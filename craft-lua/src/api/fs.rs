@@ -386,6 +386,31 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
 
     let p = perms.clone();
     t.set(
+        "append",
+        lua.create_async_function(move |_lua, (path, content): (String, String)| {
+            let p = p.clone();
+            async move {
+                if !p.is_allowed(FsWrite) {
+                    return Err(crate::plugin_permissions::denied_error(FsWrite));
+                }
+                let abs = make_absolute(&path)?;
+                let result = tokio::task::spawn_blocking(move || {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&abs)
+                        .and_then(|mut f| f.write_all(content.as_bytes()))
+                })
+                .await
+                .map_err(|e| mlua::Error::runtime(format!("join error: {e}")))?;
+                Ok(pair(result.map(|()| true)))
+            }
+        })?,
+    )?;
+
+    let p = perms.clone();
+    t.set(
         "atomic_write",
         lua.create_async_function(move |_lua, (path, content): (String, String)| {
             let p = p.clone();
@@ -929,6 +954,46 @@ mod tests {
             matches!(err, mlua::Value::String(_)),
             "should return error string"
         );
+    }
+
+    #[tokio::test]
+    async fn append_creates_then_appends_to_file() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("out.log");
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let append: mlua::Function = tbl.get("append").unwrap();
+
+        for content in [FIRST_CONTENT, REPLACEMENT_CONTENT] {
+            let (ok, err): (mlua::Value, mlua::Value) = append
+                .call_async((file.to_str().unwrap(), content))
+                .await
+                .unwrap();
+            assert!(matches!(ok, mlua::Value::Boolean(true)), "should succeed");
+            assert!(matches!(err, mlua::Value::Nil), "no error expected");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!("{FIRST_CONTENT}{REPLACEMENT_CONTENT}")
+        );
+    }
+
+    #[tokio::test]
+    async fn append_to_nonexistent_parent_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("missing/out.log");
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let append: mlua::Function = tbl.get("append").unwrap();
+        let (ok, err): (mlua::Value, mlua::Value) = append
+            .call_async((file.to_str().unwrap(), FIRST_CONTENT))
+            .await
+            .unwrap();
+        assert!(matches!(ok, mlua::Value::Nil), "should fail");
+        assert!(matches!(err, mlua::Value::String(_)), "error expected");
+        assert!(!file.exists());
     }
 
     #[tokio::test]

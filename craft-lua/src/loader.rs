@@ -928,20 +928,64 @@ impl EventHandle {
         });
     }
 
-    /// Fire `SessionEnd` and reap that session's jobs. Call from every
-    /// session-end path (reset, load, delete, shutdown, ACP, headless) so a
-    /// Lua monitor can stay a plugin; paths can overlap, so each id fires at
-    /// most once per handle graph.
+    /// Queue the `SessionEnd` dispatch and the reap of that session's jobs,
+    /// then return. Call from every session-end path (reset, load, delete,
+    /// shutdown, ACP, headless) so a Lua monitor can stay a plugin; paths can
+    /// overlap, so each id fires at most once per handle graph. Process exit
+    /// wants [`Self::end_sessions_blocking`].
     pub fn end_session(&self, session: CraftId) {
+        if !self.mark_ended(session) {
+            return;
+        }
+        let _ = self.tx.try_send(Request::EndSession {
+            session,
+            reply: None,
+        });
+    }
+
+    /// [`Self::end_session`] for process exit: block until the handlers ran
+    /// and the jobs were reaped, so the `Shutdown` that follows cannot skip
+    /// ahead of them.
+    ///
+    /// Every session is queued first and the deadline is shared, so quitting
+    /// with many tabs open costs one `SHUTDOWN_TIMEOUT`, not one per tab.
+    pub fn end_sessions_blocking(&self, sessions: impl IntoIterator<Item = CraftId>) {
+        let waits: Vec<_> = sessions
+            .into_iter()
+            .filter_map(|session| Some((session, self.send_end_session(session)?)))
+            .collect();
+        let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        for (session, reply_rx) in waits {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if reply_rx.recv_timeout(left).is_err() {
+                tracing::warn!(
+                    session = %session,
+                    "SessionEnd did not finish within timeout, continuing teardown"
+                );
+            }
+        }
+    }
+
+    fn send_end_session(&self, session: CraftId) -> Option<flume::Receiver<()>> {
+        if !self.mark_ended(session) {
+            return None;
+        }
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Request::EndSession {
+                session,
+                reply: Some(reply_tx),
+            })
+            .ok()?;
+        Some(reply_rx)
+    }
+
+    fn mark_ended(&self, session: CraftId) -> bool {
         let mut ended = self.ended.lock().unwrap_or_else(|e| e.into_inner());
         if ended.len() >= END_SESSION_DEDUPE_CAP {
             ended.clear();
         }
-        if !ended.insert(session) {
-            return;
-        }
-        drop(ended);
-        let _ = self.tx.try_send(Request::EndSession { session });
+        ended.insert(session)
     }
 
     pub fn run_keybind_callback(&self, id: u64) -> bool {

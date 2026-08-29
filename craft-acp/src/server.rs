@@ -935,7 +935,7 @@ async fn teardown_session(
     lua: &craft_lua::EventHandle,
     session: SessionState,
 ) {
-    lua.end_session(session.handle.session_id.id());
+    lua.end_sessions_blocking([session.handle.session_id.id()]);
     resolve_pending_cancelled(out_tx, Arc::clone(&session.pending));
     let _ = session.handle.cancel_tx.try_send(());
     session.handle.task.abort();

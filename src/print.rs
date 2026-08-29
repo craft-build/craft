@@ -333,7 +333,7 @@ pub async fn run(
         _ = tokio::time::sleep(AGENT_SHUTDOWN_TIMEOUT) => {},
     }
 
-    lua_handle.end_session(session_id.id());
+    lua_handle.end_sessions_blocking([session_id.id()]);
 
     let duration_ms = start.elapsed().as_millis();
     // Zero on an unpriced model, which is what its turns reported too.
