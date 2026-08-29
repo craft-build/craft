@@ -371,7 +371,8 @@ craft.ui.set_window_title("")
 
 Plugins can run background processes with `craft.fn.jobstart` and inspect them later.
 
-- `craft.fn.jobstart(cmd, opts)` starts a shell command. Options include `on_stdout`, `on_stderr`, `on_exit` callbacks, `cwd`, `env`, `sandbox`, `background` (survives the tool call), `tail` (trailing lines per stream kept for `jobinfo`, default 20, 0 disables, max 1024), `name` (a handle for `jobfind`, unique among the live jobs this plugin can see; starting a second job under a live name is an error), and `session` (a session id). Passing `session` makes the job session-owned: it survives plugin reload and lives until that session ends, and the plugin that started it can still inspect and stop it. `notify` (only with `session`) posts a mailbox observation when the process exits: `true` means `{ wake = true, on_success = true }`, or pass a table with `wake` and `on_success` (both default true). Returns a job id.
+- `craft.fn.jobstart(cmd, opts)` starts a job. `cmd` is a shell command string (run through `bash -c` on Unix, `cmd /C` on Windows) or an argv table like `{ "tail", "-F", path }`, spawned with no shell in between, so nothing in it can be read as a redirect, a pipe, or `$(...)`. Options include `on_stdout`, `on_stderr`, `on_exit` callbacks, `cwd`, `env`, `sandbox`, `background` (survives the tool call), `tail` (trailing lines per stream kept for `jobinfo`, default 20, 0 disables, max 1024), `name` (a handle for `jobfind`, unique among the live jobs this plugin can see; starting a second job under a live name is an error), and `session` (a session id). Passing `session` makes the job session-owned: it survives plugin reload and lives until that session ends, and the plugin that started it can still inspect and stop it. `notify` (only with `session`) posts a mailbox observation when the process exits: `true` means `{ wake = true, on_success = true }`, or pass a table with `wake` and `on_success` (both default true). Returns a job id.
+  `stdout` and `stderr` route a stream to a file instead of into craft. A path is opened for append and handed to the child, so nothing is buffered here: no callback, no tail, no events for that stream. That makes them mutually exclusive with `on_stdout` / `on_stderr` for the same stream, and a path additionally needs the `fs_write` permission. `false` discards the stream. To both persist and react, run one job writing the file and a second one tailing it. An argv job shows up in `jobinfo` and `joblist` as the shell-quoted line that would have produced it.
 - `craft.fn.jobinfo(job_id)` snapshots a job this plugin can see: `{ id, command, name, pid, session, status, exit_code, elapsed_secs, stdout_lines, stderr_lines }`. `status` is `"running"` or `"exited"`. Session-owned jobs still answer after they exit; every other job is gone once it exits. Answers `(nil, err)` when the job is gone.
 - `craft.fn.joblist(session?)` lists jobs this plugin can see, including exited session-owned jobs. Rows identify the job (`{ id, command, name, pid, session, status, exit_code, elapsed_secs }`); call `jobinfo` for the trailing output. Pass a session id to list only session-owned jobs for that session; plugin and task jobs are omitted.
 - `craft.fn.jobattach(job_id, opts)` attaches (or replaces) callbacks on a job this plugin can see. This is how a plugin picks its jobs back up after a reload: unloading drops the Lua callbacks of its session-owned jobs, but the processes keep running. Keys absent from `opts` leave the current callback alone; pass `false` to clear one. Attaching `on_exit` to a job that already exited still fires it once, with the recorded exit code, so a reload racing the exit cannot lose it. Answers `(true, nil)` on success or `(nil, err)`.
@@ -385,7 +386,10 @@ When a session ends, the `SessionEnd` autocmd fires first so handlers can inspec
 Jobs need the `run` plugin permission.
 
 ```lua
-local id = craft.fn.jobstart("npm run build", { background = true, tail = 50 })
+local id = craft.fn.jobstart({ "rg", "--json", pattern, dir }, {
+  on_stdout = function(_, line) print(line) end,
+  on_exit = function(_, code) print("exit " .. code) end,
+})
 local info = craft.fn.jobinfo(id)
 ```
 
@@ -401,10 +405,18 @@ craft.fn.jobattach(id, {
 Adopt a job by name, restarting it when it died:
 
 ```lua
+local sid = craft.session.current()
 local id = craft.fn.jobfind("log-tail")
 if not id then
-  id = craft.fn.jobstart("tail -F /tmp/log", { name = "log-tail", background = true })
+  id = craft.fn.jobstart({ "tail", "-F", "/tmp/log" }, {
+    name = "log-tail",
+    session = sid,
+  })
 end
+craft.fn.jobattach(id, {
+  on_stdout = function(_, line) craft.session.notify(line, { session = sid }) end,
+  on_exit = function(_, code) craft.session.notify("tail died: " .. code, { session = sid }) end,
+})
 ```
 
 ## Prompt slots

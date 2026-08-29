@@ -3803,6 +3803,8 @@ mod tests {
                         cwd: None,
                         env: None,
                         sandbox: None,
+                        stdout: crate::terminal_backend::Redirect::Capture,
+                        stderr: crate::terminal_backend::Redirect::Capture,
                     })
                     .await
                     .unwrap();

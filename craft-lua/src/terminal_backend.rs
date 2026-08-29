@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::future::Future;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -17,11 +19,76 @@ pub enum JobEvent {
     Exit(i32),
 }
 
+/// How the process is spawned: through a shell, or straight from an argv the
+/// plugin built itself (no quoting rules to get wrong).
+pub enum JobCommand {
+    Shell(String),
+    Argv(Vec<String>),
+}
+
+impl From<&str> for JobCommand {
+    fn from(cmd: &str) -> Self {
+        Self::Shell(cmd.to_string())
+    }
+}
+
+impl JobCommand {
+    fn build(&self) -> Command {
+        match self {
+            Self::Shell(cmd) => shell_command(cmd),
+            Self::Argv(argv) => {
+                let mut command = Command::new(&argv[0]);
+                command.args(&argv[1..]);
+                command
+            }
+        }
+    }
+
+    /// Printable form for `jobinfo` / `joblist` rows.
+    pub fn display(&self) -> String {
+        match self {
+            Self::Shell(cmd) => cmd.clone(),
+            Self::Argv(argv) => argv
+                .iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+}
+
+/// Where one of the job's streams goes.
+pub enum Redirect {
+    /// Piped to a reader thread, so callbacks and tails see the lines.
+    Capture,
+    Discard,
+    /// Appended to a file by the child itself: no reader thread, no events,
+    /// no tail. Durability instead of reaction.
+    File(PathBuf),
+}
+
+impl Redirect {
+    fn stdio(&self) -> Result<Stdio, String> {
+        match self {
+            Self::Capture => Ok(Stdio::piped()),
+            Self::Discard => Ok(Stdio::null()),
+            Self::File(path) => File::options()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map(Stdio::from)
+                .map_err(|e| format!("cannot open {}: {e}", path.display())),
+        }
+    }
+}
+
 pub struct TerminalSpec {
-    pub cmd: String,
+    pub cmd: JobCommand,
     pub cwd: Option<String>,
     pub env: Option<HashMap<String, String>>,
     pub sandbox: Option<craft_sandbox::SandboxProfile>,
+    pub stdout: Redirect,
+    pub stderr: Redirect,
 }
 
 pub struct TerminalHandle {
@@ -50,7 +117,7 @@ pub fn local_backend() -> Arc<dyn TerminalBackend> {
 }
 
 fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
-    let mut command = shell_command(&spec.cmd);
+    let mut command = spec.cmd.build();
 
     if let Some(ref profile) = spec.sandbox
         && profile.mode != craft_sandbox::SandboxMode::Off
@@ -66,8 +133,8 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
     }
 
     command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(spec.stdout.stdio()?)
+        .stderr(spec.stderr.stdio()?)
         .stdin(Stdio::null());
 
     #[cfg(unix)]
@@ -94,12 +161,19 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
     let (event_tx, event_rx) = flume::unbounded();
-
-    let stdout_handle = spawn_reader(stdout, "job-stdout", JobEvent::Stdout, &event_tx)?;
-    let stderr_handle = spawn_reader(stderr, "job-stderr", JobEvent::Stderr, &event_tx)?;
+    let stdout_handle = spawn_reader(
+        child.stdout.take(),
+        "job-stdout",
+        JobEvent::Stdout,
+        &event_tx,
+    )?;
+    let stderr_handle = spawn_reader(
+        child.stderr.take(),
+        "job-stderr",
+        JobEvent::Stderr,
+        &event_tx,
+    )?;
 
     let exit_tx = event_tx;
     thread::Builder::new()
@@ -155,6 +229,20 @@ where
     Ok(Some(handle))
 }
 
+/// Single-quote {arg} unless it is plainly safe, so an argv job's `command`
+/// row reads back as the shell line that would have produced it. Display
+/// only: nothing re-parses this.
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c))
+    {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
+
 fn shell_command(cmd: &str) -> Command {
     #[cfg(unix)]
     {
@@ -206,6 +294,8 @@ mod tests {
             cwd: None,
             env: None,
             sandbox: None,
+            stdout: Redirect::Capture,
+            stderr: Redirect::Capture,
         };
         let handle = backend.start(spec).await.unwrap();
 
@@ -234,7 +324,17 @@ mod tests {
             cwd: Some("/nonexistent_dir_abc_xyz_123".into()),
             env: None,
             sandbox: None,
+            stdout: Redirect::Capture,
+            stderr: Redirect::Capture,
         };
         assert!(backend.start(spec).await.is_err());
+    }
+
+    #[test_case::test_case("plain", "plain" ; "safe_argument_is_bare")]
+    #[test_case::test_case("a b", "'a b'" ; "space_is_quoted")]
+    #[test_case::test_case("it's", r"'it'\''s'" ; "quote_is_escaped")]
+    #[test_case::test_case("", "''" ; "empty_argument_stays_visible")]
+    fn shell_quote_renders_argv_rows(arg: &str, expected: &str) {
+        assert_eq!(shell_quote(arg), expected);
     }
 }

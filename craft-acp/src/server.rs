@@ -29,6 +29,7 @@ use craft_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
 use craft_config::ModelPolicy;
 use craft_lua::{
     LocalTerminal, TerminalBackend, TerminalEvent, TerminalFuture, TerminalHandle, TerminalSpec,
+    terminal_backend::{JobCommand, Redirect},
 };
 use craft_providers::model::Model;
 use craft_providers::{Message, TokenUsage, add_cost, settle_session};
@@ -213,7 +214,12 @@ impl AcpTerminal {
 
 impl TerminalBackend for AcpTerminal {
     fn start<'a>(&'a self, spec: TerminalSpec) -> TerminalFuture<'a> {
-        if !self.caps.terminal.load(Ordering::Relaxed) {
+        if !self.caps.terminal.load(Ordering::Relaxed)
+            || !matches!(
+                (&spec.stdout, &spec.stderr),
+                (Redirect::Capture, Redirect::Capture)
+            )
+        {
             return LocalTerminal.start(spec);
         }
         Box::pin(async move {
@@ -228,8 +234,15 @@ impl TerminalBackend for AcpTerminal {
                 })
                 .unwrap_or_default();
 
-            let mut create = CreateTerminalRequest::new(sid.clone(), shell_program());
-            create.args = vec![shell_arg().to_string(), spec.cmd.clone()];
+            let (program, args) = match &spec.cmd {
+                JobCommand::Shell(cmd) => (
+                    shell_program().to_string(),
+                    vec![shell_arg().to_string(), cmd.clone()],
+                ),
+                JobCommand::Argv(argv) => (argv[0].clone(), argv[1..].to_vec()),
+            };
+            let mut create = CreateTerminalRequest::new(sid.clone(), program);
+            create.args = args;
             create.env = env;
             create.cwd = spec.cwd.clone().map(PathBuf::from);
 

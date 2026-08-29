@@ -13,13 +13,15 @@ use crate::api::fs::expand_tilde;
 use crate::api::util::command::{UiAction, ui_roundtrip, ui_send};
 use crate::api::util::pair::{err_pair, try_pair};
 use crate::plugin_permissions::{
-    Permission::{Env, Run},
+    Permission::{Env, FsWrite, Run},
     PluginPermissions,
 };
 use crate::runtime::{SharedSandboxConfig, with_bg_jobs, with_task_jobs};
 #[cfg(test)]
 use crate::terminal_backend::LocalTerminal;
-use crate::terminal_backend::{JobEvent, TerminalBackend, TerminalHandle, TerminalSpec};
+use crate::terminal_backend::{
+    JobCommand, JobEvent, Redirect, TerminalBackend, TerminalHandle, TerminalSpec,
+};
 
 const DEFAULT_TAIL: usize = 20;
 const MAX_TAIL_LINES: usize = 1024;
@@ -27,6 +29,8 @@ const MAX_COMPLETED_SESSION_JOBS: usize = 256;
 const DEFAULT_WAIT_MS: u64 = 30_000;
 const JOB_NOT_FOUND_ERR: &str = "job: not found";
 const BLANK_NAME_ERR: &str = "jobstart: name must be non-blank";
+const EMPTY_ARGV_ERR: &str = "jobstart: argv table must not be empty";
+const CMD_TYPE_ERR: &str = "jobstart: cmd must be a shell string or an argv table";
 /// How often a parked `jobwait` re-checks whether its job's session ended:
 /// session jobs can live inside the waiting task's own store, where the
 /// SessionEnd reap cannot reach them.
@@ -773,13 +777,14 @@ pub(crate) fn create_fn_table(
     let owner = plugin.clone();
     t.set(
         "jobstart",
-        lua.create_async_function(move |lua, (cmd, opts): (String, Option<Table>)| {
+        lua.create_async_function(move |lua, (cmd, opts): (Value, Option<Table>)| {
             let p = p.clone();
             let owner = owner.clone();
             async move {
                 if !p.is_allowed(Run) {
                     return Err(crate::plugin_permissions::denied_error(Run));
                 }
+                let cmd = parse_command(cmd)?;
                 let (
                     cwd,
                     env,
@@ -787,6 +792,8 @@ pub(crate) fn create_fn_table(
                     on_stdout,
                     on_stderr,
                     on_exit,
+                    stdout,
+                    stderr,
                     want_sandbox,
                     background,
                     session,
@@ -814,6 +821,18 @@ pub(crate) fn create_fn_table(
                             .ok()
                             .map(|f| lua.create_registry_value(f))
                             .transpose()?;
+                        let stdout = parse_redirect(
+                            opts,
+                            "stdout",
+                            on_stdout.is_some(),
+                            p.is_allowed(FsWrite),
+                        )?;
+                        let stderr = parse_redirect(
+                            opts,
+                            "stderr",
+                            on_stderr.is_some(),
+                            p.is_allowed(FsWrite),
+                        )?;
                         let want_sandbox: bool = opts.get("sandbox").unwrap_or(false);
                         let name = job_name(opts)?;
                         let background: bool = opts.get("background").unwrap_or(false);
@@ -843,6 +862,8 @@ pub(crate) fn create_fn_table(
                             on_stdout,
                             on_stderr,
                             on_exit,
+                            stdout,
+                            stderr,
                             want_sandbox,
                             background || session.is_some(),
                             session,
@@ -851,7 +872,19 @@ pub(crate) fn create_fn_table(
                         )
                     }
                     None => (
-                        None, None, None, None, None, None, false, false, None, None, None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Redirect::Capture,
+                        Redirect::Capture,
+                        false,
+                        false,
+                        None,
+                        None,
+                        None,
                     ),
                 };
 
@@ -865,6 +898,7 @@ pub(crate) fn create_fn_table(
 
                 let (backend, id) =
                     with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
+                let display = cmd.display();
                 let cwd = cwd.as_deref().map(expand_tilde);
                 if let Some(ref dir) = cwd
                     && !dir.is_dir()
@@ -880,15 +914,17 @@ pub(crate) fn create_fn_table(
                     None
                 };
                 let spec = TerminalSpec {
-                    cmd: cmd.clone(),
+                    cmd,
                     cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
                     env,
                     sandbox,
+                    stdout,
+                    stderr,
                 };
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
                     store.register(
-                        id, handle, cmd, name, owner, session, on_stdout, on_stderr, on_exit,
+                        id, handle, display, name, owner, session, on_stdout, on_stderr, on_exit,
                         background,
                     );
                     store.configure(id, notify, tail);
@@ -1175,6 +1211,49 @@ fn job_name(opts: &Table) -> LuaResult<Option<Arc<str>>> {
     Ok(Some(Arc::from(name)))
 }
 
+fn parse_command(cmd: Value) -> LuaResult<JobCommand> {
+    match cmd {
+        Value::String(cmd) => Ok(JobCommand::Shell(cmd.to_str()?.to_string())),
+        Value::Table(argv) => {
+            let argv: Vec<String> = argv.sequence_values().collect::<LuaResult<_>>()?;
+            if argv.is_empty() {
+                return Err(mlua::Error::runtime(EMPTY_ARGV_ERR));
+            }
+            Ok(JobCommand::Argv(argv))
+        }
+        _ => Err(mlua::Error::runtime(CMD_TYPE_ERR)),
+    }
+}
+
+fn parse_redirect(
+    opts: &Table,
+    key: &str,
+    has_callback: bool,
+    fs_write: bool,
+) -> LuaResult<Redirect> {
+    let redirect = match opts.get::<Value>(key)? {
+        Value::Nil => return Ok(Redirect::Capture),
+        Value::Boolean(false) => Redirect::Discard,
+        Value::String(path) => {
+            if !fs_write {
+                return Err(crate::plugin_permissions::denied_error(FsWrite));
+            }
+            Redirect::File(expand_tilde(&path.to_str()?))
+        }
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "jobstart: {key} must be a path string or false"
+            )));
+        }
+    };
+    if has_callback {
+        return Err(mlua::Error::runtime(format!(
+            "jobstart: {key} and on_{key} are mutually exclusive; tail the file from a second job to get both"
+        )));
+    }
+    Ok(redirect)
+}
+
 fn callback_update(lua: &Lua, opts: &Table, key: &str) -> LuaResult<CallbackUpdate> {
     match opts.get::<Value>(key)? {
         Value::Nil => Ok(CallbackUpdate::Keep),
@@ -1275,6 +1354,8 @@ mod tests {
                 cwd: None,
                 env: None,
                 sandbox: None,
+                stdout: crate::terminal_backend::Redirect::Capture,
+                stderr: crate::terminal_backend::Redirect::Capture,
             })
             .await
             .unwrap();
@@ -1302,6 +1383,8 @@ mod tests {
                 cwd: Some("/nonexistent_dir_abc_xyz_123".into()),
                 env: None,
                 sandbox: None,
+                stdout: crate::terminal_backend::Redirect::Capture,
+                stderr: crate::terminal_backend::Redirect::Capture,
             })
             .await;
         assert!(result.is_err());
@@ -1359,6 +1442,8 @@ mod tests {
                 cwd: None,
                 env: None,
                 sandbox: None,
+                stdout: crate::terminal_backend::Redirect::Capture,
+                stderr: crate::terminal_backend::Redirect::Capture,
             })
             .await
             .unwrap();
@@ -1483,6 +1568,8 @@ mod tests {
                 cwd: None,
                 env: None,
                 sandbox: None,
+                stdout: crate::terminal_backend::Redirect::Capture,
+                stderr: crate::terminal_backend::Redirect::Capture,
             })
             .await
             .unwrap();
@@ -1760,6 +1847,104 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_argv_job_takes_shell_metacharacters_literally() {
+        const LITERAL: &str = "a; echo pwned $(id)";
+        let argv = vec!["echo".into(), LITERAL.into()];
+        let cmd = JobCommand::Argv(argv.clone());
+        let mut store = make_store();
+        let backend = store.backend();
+        let id = store.next_id();
+        let handle = backend
+            .start(TerminalSpec {
+                cmd: JobCommand::Argv(argv),
+                cwd: None,
+                env: None,
+                sandbox: None,
+                stdout: Redirect::Capture,
+                stderr: Redirect::Capture,
+            })
+            .await
+            .unwrap();
+        store.register(
+            id,
+            handle,
+            cmd.display(),
+            None,
+            owner(),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        let printed: Vec<String> = collect_until_exit(id, || store.next_event())
+            .into_iter()
+            .filter_map(|(_, event)| match event {
+                JobEvent::Stdout(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(printed, [LITERAL]);
+        assert_eq!(
+            store.snapshot(id, TEST_PLUGIN).unwrap().command,
+            format!("echo '{LITERAL}'"),
+            "argv rows must stay printable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn redirected_streams_append_to_the_file_and_keep_no_tail() {
+        const EXISTING: &str = "older\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job.log");
+        std::fs::write(&path, EXISTING).unwrap();
+        let mut store = make_store();
+        let backend = store.backend();
+        let id = store.next_id();
+        let handle = backend
+            .start(TerminalSpec {
+                cmd: "echo hi; echo err >&2".into(),
+                cwd: None,
+                env: None,
+                sandbox: None,
+                stdout: Redirect::File(path.clone()),
+                stderr: Redirect::Discard,
+            })
+            .await
+            .unwrap();
+        store.register(
+            id,
+            handle,
+            "echo hi; echo err >&2".into(),
+            None,
+            owner(),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        for (_, event) in collect_until_exit(id, || store.next_event()) {
+            store.record_event(id, &event);
+        }
+
+        let snap = store.snapshot(id, TEST_PLUGIN).unwrap();
+        assert!(
+            snap.stdout_lines.is_empty() && snap.stderr_lines.is_empty(),
+            "a redirected stream must not be buffered here"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{EXISTING}hi\n")
+        );
+    }
+
     #[tokio::test]
     async fn a_name_is_held_by_the_live_job_only() {
         const NAME: &str = "log-tail";
@@ -1893,6 +2078,8 @@ mod tests {
                 cwd: None,
                 env: None,
                 sandbox: None,
+                stdout: crate::terminal_backend::Redirect::Capture,
+                stderr: crate::terminal_backend::Redirect::Capture,
             })
             .await
             .expect("job started");

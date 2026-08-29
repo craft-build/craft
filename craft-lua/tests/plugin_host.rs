@@ -1056,6 +1056,98 @@ async fn jobstop_kills_running_job() {
     assert_eq!(out, "killed=true");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn argv_jobs_and_stream_redirects() {
+    const LITERAL_ARG: &str = "a; echo pwned";
+    const REDIRECT_ERR: &str = "mutually exclusive";
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("job.log");
+    let src = format!(
+        r#"
+craft.api.register_tool({{
+    name = "argv_and_redirect",
+    description = "argv spawning plus stdout redirect",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        local seen = {{}}
+        local argv = craft.fn.jobstart({{ "echo", "{LITERAL_ARG}" }}, {{
+            background = true,
+            on_stdout = function(_, line) seen[#seen + 1] = line end,
+        }})
+        craft.fn.jobwait(argv, 5000)
+
+        local redirected = craft.fn.jobstart({{ "echo", "to-file" }}, {{
+            background = true,
+            stdout = "{log}",
+        }})
+        local redirected_result = craft.fn.jobwait(redirected, 5000)
+
+        local quiet = craft.fn.jobstart("echo dropped", {{ background = true, stdout = false }})
+        local quiet_result = craft.fn.jobwait(quiet, 5000)
+
+        local _, err = pcall(craft.fn.jobstart, "echo both", {{
+            background = true,
+            stdout = "{log}",
+            on_stdout = function() end,
+        }})
+
+        return table.concat({{
+            table.concat(seen, ","),
+            redirected_result.stdout,
+            quiet_result.stdout,
+            tostring(err),
+        }}, "|")
+    end,
+}})
+"#,
+        log = log.display(),
+    );
+    host.load_source("argv_jobs", &src).unwrap();
+
+    let out = exec_tool(&reg, "argv_and_redirect", serde_json::json!({}))
+        .await
+        .unwrap();
+    let [printed, redirected, discarded, conflict] = out.split('|').collect::<Vec<_>>()[..] else {
+        panic!("handler must return four fields, got {out}");
+    };
+    assert_eq!(
+        printed, LITERAL_ARG,
+        "argv must reach the program without a shell in between"
+    );
+    assert_eq!(redirected, "", "a redirected stream is not also captured");
+    assert_eq!(discarded, "", "a discarded stream produces no events");
+    assert!(
+        conflict.contains(REDIRECT_ERR),
+        "redirect plus on_stdout must be refused, got {conflict}"
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "to-file\n");
+}
+
+#[tokio::test]
+async fn stream_redirect_to_a_path_needs_fs_write() {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let mut perms = PluginPermissions::denied();
+    perms.set(Permission::Run, true);
+    let src = perm_tool_src(
+        r#"local ok, err = pcall(craft.fn.jobstart, "echo hi", { background = true, stdout = "/tmp/craft_redirect_test.log" })
+        if not ok then error(err) end"#,
+    );
+    host.load_source_with_permissions("redirect_deny", &src, perms)
+        .unwrap();
+
+    let err = exec_tool_with_perms(&reg, "perm_test", serde_json::json!({}))
+        .await
+        .unwrap_err();
+
+    assert!(err.contains(PERMISSION_DENIED_PREFIX), "got: {err}");
+    assert!(err.contains("fs_write"), "got: {err}");
+}
+
 #[tokio::test]
 async fn background_job_outlives_its_starting_tool() {
     let reg = fresh_registry();
