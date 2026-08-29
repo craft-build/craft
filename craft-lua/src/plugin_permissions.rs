@@ -223,11 +223,9 @@ pub(crate) fn load_requested_permissions(
 }
 
 pub fn load_plugin_permissions(plugin_dir: Option<&Path>) -> PluginPermissions {
-    if plugin_dir.is_none() {
-        return PluginPermissions::trusted();
-    }
-    load_plugin_manifest(plugin_dir)
-        .map_or_else(PluginPermissions::denied, |manifest| PluginPermissions::from_manifest(&manifest))
+    load_plugin_manifest(plugin_dir).map_or_else(PluginPermissions::denied, |manifest| {
+        PluginPermissions::from_manifest(&manifest)
+    })
 }
 
 /// Host-side gate, run before any Lua from `plugin_dir` reaches the runtime.
@@ -470,7 +468,8 @@ mod tests {
 
     #[test]
     fn missing_valid_and_malformed_manifests_keep_existing_defaults() {
-        assert!(load_plugin_permissions(None).is_allowed(Permission::FsRead));
+        // A missing plugin dir fails closed: nothing is granted.
+        assert_denied(&load_plugin_permissions(None));
 
         let dir = tempfile::tempdir().unwrap();
         assert_denied(&load_plugin_permissions(Some(dir.path())));
