@@ -14,16 +14,16 @@ use craft_storage::StateDir;
 use crate::cli::{AuthAction, Cli, Command, McpAction, MigrateAction};
 use crate::update;
 
-fn sanitize_warning(message: impl std::fmt::Display) -> String {
-    craft_lua::sanitize_message(&message.to_string())
-}
-
-fn sanitize_warnings(warnings: Vec<String>) -> Vec<String> {
-    warnings.into_iter().map(sanitize_warning).collect()
+fn sanitize_warnings(warnings: &[String]) -> Vec<String> {
+    warnings
+        .iter()
+        .map(String::as_str)
+        .map(craft_lua::sanitize_message)
+        .collect()
 }
 
 fn report_warnings(warnings: Vec<String>) {
-    for warning in sanitize_warnings(warnings) {
+    for warning in sanitize_warnings(&warnings) {
         eprintln!("warning: {warning}");
     }
 }
@@ -103,7 +103,7 @@ pub(crate) fn load_plugins(
         .collect();
     warnings.extend(host.load_declared_packages(&available, &declared, &config.plugins));
 
-    Ok((config, sanitize_warnings(warnings)))
+    Ok((config, sanitize_warnings(&warnings)))
 }
 
 fn declared_packages(host: &PluginHost) -> Result<Vec<craft_lua::Declared>> {

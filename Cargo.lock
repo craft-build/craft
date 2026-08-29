@@ -2248,6 +2248,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rustix 1.1.4",
  "semver",
+ "serde",
  "serde_json",
  "smol",
  "strum 0.28.0",

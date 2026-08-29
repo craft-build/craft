@@ -55,19 +55,15 @@ impl Lockfile {
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
-
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-
-    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(text)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn json(lock: &Lockfile) -> String {
+        serde_json::to_string_pretty(lock).unwrap()
+    }
 
     fn filled() -> Lockfile {
         let mut lock = Lockfile::default();
@@ -90,7 +86,7 @@ mod tests {
     #[test]
     fn round_trips_through_json() {
         let lock = filled();
-        let back = Lockfile::from_json(&lock.to_json().unwrap()).unwrap();
+        let back: Lockfile = serde_json::from_str(&json(&lock)).unwrap();
         assert_eq!(back, lock);
     }
 
@@ -102,14 +98,12 @@ mod tests {
         other.record("alpha", "https://x/alpha", "aaa");
         other.record("mid", "https://x/mid", "bbb");
         other.record("zebra", "https://x/zebra", "ccc");
-        assert_eq!(other.to_json().unwrap(), filled().to_json().unwrap());
+        assert_eq!(json(&other), json(&filled()));
     }
 
     #[test]
     fn missing_packages_key_reads_as_empty() {
-        assert_eq!(
-            Lockfile::from_json("{}").unwrap().install_order().count(),
-            0
-        );
+        let empty: Lockfile = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.install_order().count(), 0);
     }
 }

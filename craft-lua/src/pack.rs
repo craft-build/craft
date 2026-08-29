@@ -4,6 +4,7 @@
 //! themselves, laid out the way Neovim lays packages out. Packages that craft
 //! installs are resolved from recorded state instead, and never appear here.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -107,10 +108,7 @@ pub fn approvals_path() -> Option<PathBuf> {
 /// failure mode is then a package that loads with nothing granted, which is
 /// visible and recoverable, instead of one that loads with everything granted.
 pub fn read_approvals() -> craft_pack::approvals::Approvals {
-    let Some(path) = approvals_path() else {
-        return craft_pack::approvals::Approvals::default();
-    };
-    read_approvals_file(&path).unwrap_or_default()
+    try_read_approvals().unwrap_or_default()
 }
 
 fn read_approvals_file(path: &Path) -> Option<craft_pack::approvals::Approvals> {
@@ -141,10 +139,15 @@ fn read_approvals_file(path: &Path) -> Option<craft_pack::approvals::Approvals> 
     }
 }
 
-fn read_approvals_for_write() -> Option<craft_pack::approvals::Approvals> {
-    approvals_path()
-        .map(|path| read_approvals_file(&path))
-        .unwrap_or_else(|| Some(craft_pack::approvals::Approvals::default()))
+/// The approval store, or `None` when one exists but cannot be trusted.
+///
+/// Granting is the caller's decision to make: approving on top of a store that
+/// failed to parse would write back a file missing everyone else's entries.
+fn try_read_approvals() -> Option<craft_pack::approvals::Approvals> {
+    match approvals_path() {
+        Some(path) => read_approvals_file(&path),
+        None => Some(craft_pack::approvals::Approvals::default()),
+    }
 }
 
 /// Effective permissions for a package about to load.
@@ -230,12 +233,75 @@ fn installed_from_declared_source(
         && manager.resolve(lock, &spec.name).is_some()
 }
 
-/// The declared packages that are already installed at the source and revision
-/// the lockfile records.
+/// A declared package that recorded state says is on disk, together with the
+/// approval facts needed to decide whether it may load.
+struct Resolved {
+    package: DiscoveredPackage,
+    key: craft_pack::approvals::ApprovalKey,
+    /// Permissions the manifest asks for that the store has not approved.
+    missing: Vec<String>,
+}
+
+/// Resolves one declared package from recorded state alone: no git, no lock on
+/// the lockfile, no network.
 ///
-/// Reads only: no git, no lock, no network. This is what a session still has
-/// when it cannot install, so one held lock does not take away the packages
-/// the user already had.
+/// `None` without a failure means the package is simply not installed from the
+/// source it names. A package that is installed but unusable pushes a reason,
+/// because otherwise it would vanish with nothing said about why.
+///
+/// Shared by the install path and the read-only fallback so the two cannot
+/// drift: both must take the same revision guard and read the same manifest,
+/// and a guard missed on one side would let a live revision be pruned.
+fn resolve_declared(
+    declared: &crate::api::pack::Declared,
+    site: &Path,
+    manager: &craft_pack::manager::Manager,
+    lock: &craft_pack::lockfile::Lockfile,
+    approvals: &craft_pack::approvals::Approvals,
+    failures: &mut Vec<String>,
+) -> Option<Resolved> {
+    let spec = &declared.spec;
+    let entry = lock.get(&spec.name).filter(|entry| entry.src == spec.src)?;
+    let dir = manager.resolve(lock, &spec.name)?;
+    let revision_guard = match craft_pack::lock::Lock::acquire_shared(
+        &craft_pack::paths::revision_lock(site, &spec.name, &entry.rev),
+    ) {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            failures.push(format!("{}: {}", spec.name, redact_error(&error)));
+            return None;
+        }
+    };
+    let requested = match load_requested_permissions(&dir) {
+        Ok(requested) => requested,
+        Err(problem) => {
+            failures.push(format!("{}: {problem}", spec.name));
+            return None;
+        }
+    };
+    let key = craft_pack::approvals::ApprovalKey::new(spec.name.clone(), &spec.src);
+    let missing = missing_permissions(&requested, approvals.get(&key).unwrap_or(&[]));
+    Some(Resolved {
+        package: DiscoveredPackage {
+            name: spec.name.clone(),
+            dir,
+            eager: declared.load.is_eager(),
+            requested,
+            origin: Origin::Fetched {
+                src: spec.src.clone(),
+            },
+            revision_guard: Some(revision_guard),
+        },
+        key,
+        missing,
+    })
+}
+
+/// The declared packages that are already installed, at the source and
+/// revision the lockfile records, with everything they ask for approved.
+///
+/// This is what a session still has when it cannot install, so one held lock
+/// does not take away the packages the user already had.
 fn resolved_on_disk(
     specs: &[crate::api::pack::Declared],
     site: &Path,
@@ -246,62 +312,25 @@ fn resolved_on_disk(
     let approvals = read_approvals();
     let mut found = Vec::new();
     for declared in specs {
-        let spec = &declared.spec;
-        if !installed_from_declared_source(declared, lock, &manager) {
+        let Some(resolved) = resolve_declared(declared, site, &manager, lock, &approvals, failures)
+        else {
             continue;
+        };
+        if resolved.missing.is_empty() {
+            found.push(resolved.package);
+        } else {
+            failures.push(approval_required(&resolved));
         }
-        let Some(dir) = manager.resolve(lock, &spec.name) else {
-            continue;
-        };
-        let revision = lock
-            .get(&spec.name)
-            .expect("resolved lock entry")
-            .rev
-            .as_str();
-        let revision_guard = match craft_pack::lock::Lock::acquire_shared(
-            &craft_pack::paths::revision_lock(site, &spec.name, revision),
-        ) {
-            Ok(guard) => Arc::new(guard),
-            Err(error) => {
-                failures.push(format!("{}: {}", spec.name, redact_error(&error)));
-                continue;
-            }
-        };
-        let requested = match load_requested_permissions(&dir) {
-            Ok(requested) => requested,
-            Err(problem) => {
-                // Named here, because the caller only reports why installing
-                // stopped. Dropping this would make the package vanish with
-                // the lock error as the only clue.
-                failures.push(format!("{}: {problem}", spec.name));
-                continue;
-            }
-        };
-        let key = craft_pack::approvals::ApprovalKey::new(spec.name.clone(), &spec.src);
-        let missing = missing_permissions(&requested, approvals.get(&key).unwrap_or(&[]));
-        if !missing.is_empty() {
-            failures.push(format!(
-                "{}: permission approval is required for {}",
-                spec.name,
-                missing.join(", ")
-            ));
-            continue;
-        }
-        found.push(DiscoveredPackage {
-            name: spec.name.clone(),
-            requested,
-            origin: Origin::Fetched {
-                src: spec.src.clone(),
-            },
-            dir,
-            eager: matches!(
-                declared.load,
-                crate::api::pack::LoadMode::Eager | crate::api::pack::LoadMode::Custom(_)
-            ),
-            revision_guard: Some(revision_guard),
-        });
     }
     found
+}
+
+fn approval_required(resolved: &Resolved) -> String {
+    format!(
+        "{}: permission approval is required for {}",
+        resolved.package.name,
+        resolved.missing.join(", ")
+    )
 }
 
 fn missing_permissions(requested: &Requested, approved: &[String]) -> Vec<String> {
@@ -312,18 +341,24 @@ fn missing_permissions(requested: &Requested, approved: &[String]) -> Vec<String
         .collect()
 }
 
+/// The declarations that may be installed: the rest name something that
+/// already has an owner, and two owners for one name is not resolvable.
 fn runnable_declarations<'a>(
     specs: &'a [crate::api::pack::Declared],
     manual: &Discovery,
     report: &mut InstallReport,
 ) -> Vec<&'a crate::api::pack::Declared> {
+    // Includes names discovery refused, so a manual package craft could not
+    // read still owns its name rather than being silently overwritten.
     let manual_names = manual.known_names();
     specs
         .iter()
         .filter(|declared| {
             let name = &declared.spec.name;
-            if let Some(error) = owner_conflict(name) {
-                report.failures.push(error);
+            if is_bundled(name) {
+                report.failures.push(format!(
+                    "{name}: managed package name conflicts with a builtin plugin"
+                ));
                 return false;
             }
             if manual_names.iter().any(|manual| manual == name) {
@@ -343,6 +378,8 @@ fn runnable_declarations<'a>(
         .collect()
 }
 
+/// Decides which installed packages may load, prompting for any permission the
+/// store has not already approved.
 fn grant_installed(
     specs: &[&crate::api::pack::Declared],
     site: &Path,
@@ -351,86 +388,45 @@ fn grant_installed(
     interaction: Interaction,
     report: &mut InstallReport,
 ) {
-    let Some(mut approvals) = read_approvals_for_write() else {
+    let Some(mut approvals) = try_read_approvals() else {
         report
             .failures
             .push("the package approval store is unreadable, so no package was loaded".to_owned());
         return;
     };
     let mut approvals_changed = false;
-    let mut newly_approved = std::collections::BTreeSet::new();
+    let mut newly_approved = BTreeSet::new();
 
     for declared in specs.iter().copied() {
-        let spec = &declared.spec;
-        if lock
-            .get(&spec.name)
-            .is_none_or(|entry| entry.src != spec.src)
-        {
+        let Some(resolved) = resolve_declared(
+            declared,
+            site,
+            manager,
+            lock,
+            &approvals,
+            &mut report.failures,
+        ) else {
             continue;
+        };
+        let name = &resolved.package.name;
+        // An entry under this name that the key did not match belongs to some
+        // other source, so it is dropped rather than left to be inherited.
+        if approvals.get(&resolved.key).is_none() {
+            approvals_changed |= approvals.revoke(name);
         }
-        let Some(dir) = manager.resolve(lock, &spec.name) else {
-            continue;
-        };
-        let revision = lock
-            .get(&spec.name)
-            .expect("resolved lock entry")
-            .rev
-            .as_str();
-        let revision_guard = match craft_pack::lock::Lock::acquire_shared(
-            &craft_pack::paths::revision_lock(site, &spec.name, revision),
-        ) {
-            Ok(guard) => Arc::new(guard),
-            Err(error) => {
-                report
-                    .failures
-                    .push(format!("{}: {}", spec.name, redact_error(&error)));
-                continue;
-            }
-        };
-        let requested = match load_requested_permissions(&dir) {
-            Ok(requested) => requested,
-            Err(problem) => {
-                report.failures.push(format!("{}: {problem}", spec.name));
-                continue;
-            }
-        };
-        let key = craft_pack::approvals::ApprovalKey::new(spec.name.clone(), &spec.src);
-        let requested_names = requested.names();
-        let missing = missing_permissions(&requested, approvals.get(&key).unwrap_or(&[]));
-
-        if approvals.get(&key).is_none() {
-            approvals_changed |= approvals.revoke(&spec.name);
-        }
-        if !missing.is_empty() {
+        if !resolved.missing.is_empty() {
             if !interaction.confirm(&format!(
-                "Allow package {} these permissions: {}?",
-                spec.name,
-                missing.join(", ")
+                "Allow package {name} these permissions: {}?",
+                resolved.missing.join(", ")
             )) {
-                report.failures.push(format!(
-                    "{}: permission approval is required for {}",
-                    spec.name,
-                    missing.join(", ")
-                ));
+                report.failures.push(approval_required(&resolved));
                 continue;
             }
-            approvals.approve(&key, requested_names);
+            approvals.approve(&resolved.key, resolved.package.requested.names());
             approvals_changed = true;
-            newly_approved.insert(spec.name.clone());
+            newly_approved.insert(name.clone());
         }
-        report.packages.push(DiscoveredPackage {
-            name: spec.name.clone(),
-            requested,
-            origin: Origin::Fetched {
-                src: spec.src.clone(),
-            },
-            dir,
-            eager: matches!(
-                declared.load,
-                crate::api::pack::LoadMode::Eager | crate::api::pack::LoadMode::Custom(_)
-            ),
-            revision_guard: Some(revision_guard),
-        });
+        report.packages.push(resolved.package);
     }
 
     if approvals_changed && !write_approvals(&approvals) {
@@ -572,10 +568,7 @@ pub fn install_declared(
 
     // Written once, after the installs, and only when something moved.
     if changed {
-        let recorded = match lock_path {
-            Some(path) => write_lockfile(&path, &lock),
-            None => false,
-        };
+        let recorded = lock_path.is_some_and(|path| write_json(&path, &lock, "pack lockfile"));
         if !recorded {
             // The packages are on disk but nothing records where. The next
             // start reads the old lockfile and would not find them, so they
@@ -590,11 +583,6 @@ pub fn install_declared(
 
     grant_installed(&runnable, &site, &manager, &lock, interaction, &mut report);
     report
-}
-
-fn owner_conflict(name: &str) -> Option<String> {
-    is_bundled(name)
-        .then(|| format!("{name}: managed package name conflicts with a builtin plugin"))
 }
 
 fn redact_error(error: &impl std::fmt::Display) -> String {
@@ -615,55 +603,40 @@ pub(crate) fn read_lockfile(path: Option<&Path>) -> Option<craft_pack::lockfile:
             return None;
         }
     };
-    match craft_pack::lockfile::Lockfile::from_json(&text) {
+    match serde_json::from_str(&text) {
         Ok(lock) => Some(lock),
-        Err(e) => {
-            tracing::error!(error = %e, "pack lockfile is unreadable; refusing to change packages");
+        Err(error) => {
+            tracing::error!(%error, "pack lockfile is unreadable; refusing to change packages");
             None
         }
     }
 }
 
 fn write_approvals(approvals: &craft_pack::approvals::Approvals) -> bool {
-    let Some(path) = approvals_path() else {
-        return false;
-    };
-    match serde_json::to_string_pretty(approvals) {
-        Ok(text) => match write_atomically(&path, &text) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::error!(path = %path.display(), %error, "failed to write pack approvals");
-                false
+    approvals_path().is_some_and(|path| write_json(&path, approvals, "pack approvals"))
+}
+
+/// Replaces a shared JSON file in one step.
+///
+/// Returns whether the write landed rather than an error: every caller has to
+/// keep going either way, and the reason belongs in the log, not in a message
+/// each of them would have to format again.
+fn write_json(path: &Path, value: &impl serde::Serialize, what: &str) -> bool {
+    let written = serde_json::to_string_pretty(value)
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
-        },
+            craft_storage::atomic_write(path, text.as_bytes()).map_err(|error| error.to_string())
+        });
+    match written {
+        Ok(()) => true,
         Err(error) => {
-            tracing::error!(%error, "failed to serialize pack approvals");
+            tracing::error!(path = %path.display(), %error, "failed to write {what}");
             false
         }
     }
-}
-
-fn write_lockfile(path: &Path, lock: &craft_pack::lockfile::Lockfile) -> bool {
-    match lock.to_json() {
-        Ok(text) => match write_atomically(path, &text) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!(path = %path.display(), error = %e, "failed to write pack lockfile");
-                false
-            }
-        },
-        Err(e) => {
-            tracing::error!(error = %e, "failed to serialize pack lockfile");
-            false
-        }
-    }
-}
-
-fn write_atomically(path: &Path, text: &str) -> Result<(), craft_storage::StorageError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    craft_storage::atomic_write(path, text.as_bytes())
 }
 
 /// Something the walk could not use, and the name it had for it.

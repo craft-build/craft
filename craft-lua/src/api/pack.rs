@@ -21,6 +21,20 @@ pub enum LoadMode {
     Custom(Arc<RegistryKey>),
 }
 
+impl LoadMode {
+    /// Whether the package loads at startup. `load = false` keeps it installed
+    /// but dormant until `craft.packadd` names it.
+    ///
+    /// Matched exhaustively so a new mode has to state which side it is on
+    /// rather than silently defaulting to loading downloaded code.
+    pub fn is_eager(&self) -> bool {
+        match self {
+            Self::Eager | Self::Custom(_) => true,
+            Self::Dormant => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Declared {
     pub spec: Spec,

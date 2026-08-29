@@ -85,71 +85,75 @@ impl Manager {
     pub fn prune(&self, lock: &Lockfile) -> Vec<ManagerError> {
         let mut failures = Vec::new();
         for name in lock.install_order() {
-            if !crate::spec::name_is_safe(name) {
-                continue;
-            }
-            let Some(current) = lock.get(name).map(|entry| entry.rev.as_str()) else {
+            let Some(entry) = lock.get(name) else {
                 continue;
             };
-            if !revision_is_prunable(current) {
-                continue;
+            // Both halves become path components. A hand-edited lockfile is
+            // input, and an unusable value here would point a recursive delete
+            // outside the site directory.
+            if crate::spec::name_is_safe(name) && revision_is_safe_component(&entry.rev) {
+                self.prune_package(name, &entry.rev, &mut failures);
             }
-            let root = paths::package_root(&self.site, name);
-            let entries = match fs::read_dir(&root) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+        }
+        failures
+    }
+
+    /// Removes every revision directory of one package except the recorded one.
+    ///
+    /// A revision another process is reading keeps its shared lock, and the
+    /// exclusive lock here fails rather than waits, so a live session's
+    /// directory is skipped instead of deleted out from under it.
+    fn prune_package(&self, name: &str, current: &str, failures: &mut Vec<ManagerError>) {
+        let root = paths::package_root(&self.site, name);
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(source) => {
+                failures.push(ManagerError::Io { path: root, source });
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
                 Err(source) => {
-                    failures.push(ManagerError::Io { path: root, source });
+                    failures.push(ManagerError::Io {
+                        path: root.clone(),
+                        source,
+                    });
                     continue;
                 }
             };
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(source) => {
-                        failures.push(ManagerError::Io {
-                            path: root.clone(),
-                            source,
-                        });
-                        continue;
-                    }
-                };
-                let revision = entry.file_name().to_string_lossy().into_owned();
-                let file_type = match entry.file_type() {
-                    Ok(file_type) => file_type,
-                    Err(source) => {
-                        failures.push(ManagerError::Io {
-                            path: entry.path(),
-                            source,
-                        });
-                        continue;
-                    }
-                };
-                if !file_type.is_dir() || revision == current || !revision_is_prunable(&revision) {
-                    continue;
-                }
-                let guard = match Lock::acquire(&paths::revision_lock(&self.site, name, &revision))
-                {
-                    Ok(guard) => guard,
-                    Err(LockError::Held { .. }) => {
-                        tracing::debug!(package = name, %revision, "stale package revision is in use");
-                        continue;
-                    }
-                    Err(error) => {
-                        failures.push(error.into());
-                        continue;
-                    }
-                };
-                if let Err(source) = fs::remove_dir_all(entry.path()) {
+            let revision = entry.file_name().to_string_lossy().into_owned();
+            if revision == current || !revision_is_safe_component(&revision) {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => {}
+                Ok(_) => continue,
+                Err(source) => {
                     failures.push(ManagerError::Io {
                         path: entry.path(),
                         source,
                     });
+                    continue;
                 }
-                drop(guard);
+            }
+            match Lock::acquire(&paths::revision_lock(&self.site, name, &revision)) {
+                Ok(_guard) => {
+                    if let Err(source) = fs::remove_dir_all(entry.path()) {
+                        failures.push(ManagerError::Io {
+                            path: entry.path(),
+                            source,
+                        });
+                    }
+                }
+                Err(LockError::Held { .. }) => {
+                    tracing::debug!(package = name, %revision, "stale package revision is in use");
+                }
+                Err(error) => failures.push(error.into()),
             }
         }
-        failures
     }
 
     /// Makes sure a package is on disk, cloning and checking out if needed.
@@ -387,10 +391,6 @@ fn remote_branch_ref(rev: &str) -> Option<String> {
 /// real one is a hex object id; anything else came from a hand-edited lockfile.
 fn revision_is_safe_component(rev: &str) -> bool {
     matches!(rev.len(), 40 | 64) && rev.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn revision_is_prunable(rev: &str) -> bool {
-    revision_is_safe_component(rev)
 }
 
 /// Copies a checkout without its `.git` directory, so a revision holds only the

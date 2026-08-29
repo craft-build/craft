@@ -2426,9 +2426,8 @@ fn global_init_can_require_a_symlinked_module() {
 
     let host = PluginHost::new(fresh_registry(), None).unwrap();
     let _ = host
-        .send_run_init_lua(
+        .send_global_init_lua(
             "assert(require('shared').value == 42)".to_owned(),
-            "global/init.lua".to_owned(),
             Some(config.path().to_path_buf()),
         )
         .unwrap();
@@ -2444,9 +2443,8 @@ fn global_init_can_use_a_symlinked_lua_directory() {
 
     let host = PluginHost::new(fresh_registry(), None).unwrap();
     let _ = host
-        .send_run_init_lua(
+        .send_global_init_lua(
             "assert(require('shared'))".to_owned(),
-            "global/init.lua".to_owned(),
             Some(config.path().to_path_buf()),
         )
         .unwrap();
@@ -2748,7 +2746,7 @@ return {
 
     let registry = fresh_registry();
     let host = PluginHost::new(Arc::clone(&registry), None).unwrap();
-    host.send_run_init_lua(
+    host.send_global_init_lua(
         r#"
 craft.pack.add({
   {
@@ -2763,7 +2761,6 @@ craft.pack.add({
 })
 "#
         .to_owned(),
-        "global/init.lua".to_owned(),
         None,
     )
     .unwrap();
@@ -2807,7 +2804,7 @@ fn managed_custom_loader_does_not_capture_a_manual_name_conflict() {
     );
     let packages = craft_lua::discover(site.path()).packages;
     let host = PluginHost::new(fresh_registry(), None).unwrap();
-    host.send_run_init_lua(
+    host.send_global_init_lua(
         r#"
 craft.pack.add({
   { src = "https://example.com/manual", name = "manual" },
@@ -2816,7 +2813,6 @@ craft.pack.add({
 })
 "#
         .to_owned(),
-        "global/init.lua".to_owned(),
         None,
     )
     .unwrap();
@@ -3107,9 +3103,8 @@ fn global_init_can_declare_managed_packages() {
     let host = PluginHost::new(fresh_registry(), None).unwrap();
 
     let _ = host
-        .send_run_init_lua(
+        .send_global_init_lua(
             r#"craft.pack.add({ "https://example.com/demo" })"#.to_owned(),
-            "global/init.lua".to_owned(),
             None,
         )
         .unwrap();
