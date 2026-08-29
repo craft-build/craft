@@ -8,6 +8,11 @@ use std::time::UNIX_EPOCH;
 use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::api::util::pair::{err_pair, pair, try_pair};
+
+/// Serializes `append` calls so concurrent writers land in call order
+/// instead of whatever order the blocking pool schedules them.
+static APPEND_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 use crate::plugin_permissions::{
     Permission::{FsRead, FsWrite},
     PluginPermissions,
@@ -394,6 +399,7 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                     return Err(crate::plugin_permissions::denied_error(FsWrite));
                 }
                 let abs = make_absolute(&path)?;
+                let _guard = APPEND_LOCK.lock().await;
                 let result = tokio::task::spawn_blocking(move || {
                     use std::io::Write;
                     std::fs::OpenOptions::new()
