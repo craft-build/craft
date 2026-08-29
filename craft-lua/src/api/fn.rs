@@ -679,7 +679,11 @@ pub(crate) fn complete_job(
 /// Drain pending events from session-owned jobs living in a raw job map
 /// (the background map between tasks), so exit codes, tails, and mailbox
 /// notifies settle without a task to pump them.
-pub(crate) fn pump_session_jobs(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>) {
+pub(crate) fn pump_session_jobs(
+    lua: &Lua,
+    jobs: &mut HashMap<u32, JobMeta>,
+    deliveries: &mut Vec<(Function, u32, JobEvent)>,
+) {
     let ids: Vec<u32> = jobs
         .iter()
         .filter(|(_, m)| m.session.is_some())
@@ -691,10 +695,19 @@ pub(crate) fn pump_session_jobs(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>) {
         };
         let mut exited = None;
         while let Some(event) = meta.event_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            match event {
-                JobEvent::Stdout(line) => meta.record_line(true, &line),
-                JobEvent::Stderr(line) => meta.record_line(false, &line),
-                JobEvent::Exit(code) => exited = Some(code),
+            let callback = match &event {
+                JobEvent::Stdout(_) => meta.on_stdout.as_ref(),
+                JobEvent::Stderr(_) => meta.on_stderr.as_ref(),
+                JobEvent::Exit(_) => meta.on_exit.as_ref(),
+            }
+            .and_then(|key| lua.registry_value::<Function>(key).ok());
+            match &event {
+                JobEvent::Stdout(line) => meta.record_line(true, line),
+                JobEvent::Stderr(line) => meta.record_line(false, line),
+                JobEvent::Exit(code) => exited = Some(*code),
+            }
+            if let Some(callback) = callback {
+                deliveries.push((callback, id, event));
             }
         }
         if let Some(code) = exited {
@@ -712,6 +725,37 @@ pub(crate) fn pump_session_jobs(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>) {
         let excess = exited.len() - MAX_COMPLETED_SESSION_JOBS;
         for id in exited.into_iter().take(excess) {
             remove_job_from(lua, jobs, id);
+        }
+    }
+}
+
+/// `pump_session_jobs` over the background map, then the collected callbacks:
+/// a `jobattach` that re-armed a session job's callbacks owes them a delivery
+/// path even while no task owns the job, and the runtime loop is it. The map
+/// is released before any callback runs, so a callback may call `jobinfo` or
+/// `joblist` without re-entering the borrow.
+pub(crate) async fn pump_bg_session_jobs(lua: &Lua) {
+    let Some(deliveries) = crate::runtime::with_bg_jobs_mut(lua, |jobs| {
+        let mut deliveries = Vec::new();
+        pump_session_jobs(lua, jobs, &mut deliveries);
+        deliveries
+    }) else {
+        return;
+    };
+    for (callback, job_id, event) in deliveries {
+        let arg = match &event {
+            JobEvent::Stdout(line) | JobEvent::Stderr(line) => match lua.create_string(line) {
+                Ok(s) => Value::String(s),
+                Err(_) => continue,
+            },
+            JobEvent::Exit(code) => Value::Integer(i64::from(*code)),
+        };
+        if let Err(e) = callback.call_async::<()>((job_id, arg)).await {
+            tracing::warn!(
+                job_id,
+                error = %crate::runtime::strip_traceback(&e),
+                "session job callback failed"
+            );
         }
     }
 }
