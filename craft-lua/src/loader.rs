@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use craft_agent::SessionEndReason;
 use craft_agent::permissions::PluginRuleStore;
 use craft_agent::tools::ToolRegistry;
 use craft_config::{PluginsConfig, RawConfig};
@@ -18,7 +19,9 @@ use crate::pack::DiscoveredPackage;
 use crate::plugin_permissions::{
     PluginPermissions, check_plugin_compatibility, load_plugin_permissions,
 };
-use crate::runtime::{self, ConfigScope, LoadChunk, LoadContext, LuaThread, Request, RestoreItem};
+use crate::runtime::{
+    self, ConfigScope, EndSession, LoadChunk, LoadContext, LuaThread, Request, RestoreItem,
+};
 use crate::terminal_backend::{LocalTerminal, TerminalBackend};
 use craft_storage::id::CraftId;
 
@@ -929,18 +932,20 @@ impl EventHandle {
     }
 
     /// Queue the `SessionEnd` dispatch and the reap of that session's jobs,
-    /// then return. Call from every session-end path (reset, load, delete,
-    /// shutdown, ACP, headless) so a Lua monitor can stay a plugin; paths can
-    /// overlap, so each id fires at most once per handle graph. Process exit
-    /// wants [`Self::end_sessions_blocking`].
-    pub fn end_session(&self, session: CraftId) {
+    /// then return. Nothing waits here, so handlers get no deadline and the
+    /// UI is still there to answer them. Call from every queued session-end
+    /// path (reset, load, delete) so a Lua monitor can stay a plugin; paths
+    /// can overlap, so each id fires at most once per handle graph. Process
+    /// exit wants [`Self::end_sessions_blocking`].
+    pub fn end_session(&self, session: CraftId, reason: SessionEndReason) {
         if !self.mark_ended(session) {
             return;
         }
-        let _ = self.tx.try_send(Request::EndSession {
+        let _ = self.tx.try_send(Request::EndSession(EndSession {
             session,
-            reply: None,
-        });
+            reason,
+            wait: None,
+        }));
     }
 
     /// [`Self::end_session`] for process exit: block until the handlers ran
@@ -949,12 +954,18 @@ impl EventHandle {
     ///
     /// Every session is queued first and the deadline is shared, so quitting
     /// with many tabs open costs one `SHUTDOWN_TIMEOUT`, not one per tab.
-    pub fn end_sessions_blocking(&self, sessions: impl IntoIterator<Item = CraftId>) {
+    pub fn end_sessions_blocking(
+        &self,
+        sessions: impl IntoIterator<Item = CraftId>,
+        reason: SessionEndReason,
+    ) {
+        let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
         let waits: Vec<_> = sessions
             .into_iter()
-            .filter_map(|session| Some((session, self.send_end_session(session)?)))
+            .filter_map(|session| {
+                Some((session, self.send_end_session(session, reason, deadline)?))
+            })
             .collect();
-        let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
         for (session, reply_rx) in waits {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if reply_rx.recv_timeout(left).is_err() {
@@ -969,23 +980,29 @@ impl EventHandle {
     /// [`Self::end_sessions_blocking`] parked on a blocking thread. ACP calls
     /// this from its executor, where blocking would freeze stdin for the
     /// whole grace period.
-    pub async fn end_session_async(&self, session: CraftId) {
+    pub async fn end_session_async(&self, session: CraftId, reason: SessionEndReason) {
         let handle = self.clone();
-        tokio::task::spawn_blocking(move || handle.end_sessions_blocking([session]))
+        tokio::task::spawn_blocking(move || handle.end_sessions_blocking([session], reason))
             .await
             .ok();
     }
 
-    fn send_end_session(&self, session: CraftId) -> Option<flume::Receiver<()>> {
+    fn send_end_session(
+        &self,
+        session: CraftId,
+        reason: SessionEndReason,
+        deadline: std::time::Instant,
+    ) -> Option<flume::Receiver<()>> {
         if !self.mark_ended(session) {
             return None;
         }
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.tx
-            .send(Request::EndSession {
+            .send(Request::EndSession(EndSession {
                 session,
-                reply: Some(reply_tx),
-            })
+                reason,
+                wait: Some((deadline, reply_tx)),
+            }))
             .ok()?;
         Some(reply_rx)
     }

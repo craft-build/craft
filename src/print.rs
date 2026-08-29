@@ -20,7 +20,7 @@ use craft_agent::permissions::PluginRuleStore;
 use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{AgentConfig, AgentEvent, DoneReason, Envelope, ImageSource, PermissionsConfig};
 use craft_config::ModelPolicy;
-use craft_lua::EventHandle;
+use craft_lua::{EventHandle, SessionEndReason};
 use craft_providers::model::Model;
 use craft_providers::{TokenUsage, add_cost};
 use craft_storage::id::SessionRef;
@@ -333,7 +333,7 @@ pub async fn run(
         _ = tokio::time::sleep(AGENT_SHUTDOWN_TIMEOUT) => {},
     }
 
-    lua_handle.end_sessions_blocking([session_id.id()]);
+    lua_handle.end_sessions_blocking([session_id.id()], SessionEndReason::Completed);
 
     let duration_ms = start.elapsed().as_millis();
     // Zero on an unpriced model, which is what its turns reported too.

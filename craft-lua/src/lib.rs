@@ -17,6 +17,7 @@ pub use api::util::command::{
     HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest, SessionRequest,
     Split, TaskRequest, TitlePos, UiAction, UiReply, WinCommand, WinEvent, WinView,
 };
+pub use craft_agent::SessionEndReason;
 pub use error::PluginError;
 pub use loader::{EventHandle, LuaRecencySource, PluginHost, SKIPPED_PLUGIN_WARNING};
 pub use pack::{
@@ -32,6 +33,7 @@ pub use terminal_backend::{
 
 pub mod test_support {
     use crate::KeymapReader;
+    use crate::SessionEndReason;
     use crate::api::keymap::{KeymapEntry, KeymapWriter};
     use crate::api::util::command::{
         HintEntries, HintReader, HintWriter, LuaCommandInfo, LuaCommandReader, LuaCommandWriter,
@@ -103,6 +105,18 @@ pub mod test_support {
                 } = req
                 {
                     return Some((command.to_string(), args, depth));
+                }
+            }
+            None
+        }
+
+        /// Next `SessionEnd` request as the session being left behind and why.
+        pub fn try_recv_end_session(
+            &self,
+        ) -> Option<(craft_storage::id::CraftId, SessionEndReason)> {
+            while let Ok(req) = self.0.try_recv() {
+                if let Request::EndSession(end) = req {
+                    return Some((end.session, end.reason));
                 }
             }
             None

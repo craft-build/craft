@@ -51,8 +51,8 @@ pub use craft_providers::{EMPTY_RESPONSE_MARKER, ImageMediaType, ImageSource, Th
 pub use types::{
     AgentEvent, BatchProgressEvent, BatchToolEntry, BatchToolStatus, BufferSnapshot, DoneReason,
     Envelope, EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock,
-    NO_FILES_FOUND, Priority, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle, SubagentInfo,
-    ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
+    NO_FILES_FOUND, Priority, SessionEndReason, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle,
+    SubagentInfo, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

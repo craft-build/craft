@@ -7,6 +7,7 @@ use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::rewind_picker::RewindEntry;
 use crate::components::{Action, LoadedSession};
 use craft_agent::agent::estimate_message_tokens;
+use craft_lua::SessionEndReason;
 use craft_providers::{Model, TokenUsage};
 use craft_storage::id::CraftId;
 use craft_storage::sessions::{SessionMeta, StoredSubagent};
@@ -354,7 +355,8 @@ impl App {
         self.checkpoint_now();
         self.reset_ui_chrome();
         let ended = self.state.session.id.id();
-        self.lua_event_handle.end_session(ended);
+        self.lua_event_handle
+            .end_session(ended, SessionEndReason::Reset);
         self.lua_event_handle
             .fire_autocmd("SessionReset", serde_json::json!({ "session_id": ended }));
         self.state.token_usage = TokenUsage::default();
@@ -430,7 +432,8 @@ impl App {
         self.state =
             SessionState::from_session(session, fallback_model, &self.storage, &self.model_policy);
         if previous != self.state.session.id.id() {
-            self.lua_event_handle.end_session(previous);
+            self.lua_event_handle
+                .end_session(previous, SessionEndReason::Load);
         }
         for w in self.state.warnings.drain(..) {
             self.status_bar.flash(w);

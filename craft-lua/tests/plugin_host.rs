@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use craft_agent::tools::{ToolRegistry, ToolSource};
 use craft_config::{AlwaysThinking, Effect, PluginsConfig, ToolKey, ToolOutputLines};
-use craft_lua::{Permission, PluginError, PluginHost, PluginPermissions, SKIPPED_PLUGIN_WARNING};
+use craft_lua::{
+    Permission, PluginError, PluginHost, PluginPermissions, SKIPPED_PLUGIN_WARNING,
+    SessionEndReason,
+};
 
 const NARGS_ERR: &str = r#"'nargs' must be 0, 1, "?", "*", or "+""#;
 const GLOBAL_PACK_ONLY_ERR: &str = "only available in the global init.lua";
@@ -1436,7 +1439,8 @@ async fn session_owned_job_survives_plugin_reload() {
         "reloaded plugin should see the live session job, got {state}"
     );
 
-    host.event_handle().end_sessions_blocking([session]);
+    host.event_handle()
+        .end_sessions_blocking([session], SessionEndReason::Shutdown);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while test_kill_process_group(pid).is_ok() {
         assert!(
@@ -1553,7 +1557,8 @@ craft.api.register_tool({{
         "error: job: not found"
     );
 
-    host.event_handle().end_sessions_blocking([session]);
+    host.event_handle()
+        .end_sessions_blocking([session], SessionEndReason::Shutdown);
 }
 
 #[cfg(unix)]
@@ -1652,7 +1657,8 @@ craft.api.register_tool({{
         );
     }
 
-    host.event_handle().end_sessions_blocking([session]);
+    host.event_handle()
+        .end_sessions_blocking([session], SessionEndReason::Shutdown);
 }
 
 #[cfg(unix)]
@@ -1740,7 +1746,8 @@ craft.api.register_tool({{
     )
     .await;
 
-    host.event_handle().end_sessions_blocking([session]);
+    host.event_handle()
+        .end_sessions_blocking([session], SessionEndReason::Shutdown);
 }
 
 #[cfg(unix)]
@@ -1814,7 +1821,8 @@ async fn session_end_handler_sees_jobs_before_they_are_reaped() {
     let pid = Pid::from_raw(pid).unwrap();
     assert!(test_kill_process_group(pid).is_ok());
 
-    host.event_handle().end_sessions_blocking([session]);
+    host.event_handle()
+        .end_sessions_blocking([session], SessionEndReason::Shutdown);
 
     // `end_sessions_blocking` answers only once the handlers ran and the jobs
     // were reaped, so what the handler saw is settled.
@@ -4358,7 +4366,8 @@ craft.api.register_tool({{
     poll_until("jobwait never parked", || {
         parked_path.exists().then_some(())
     });
-    host.event_handle().end_sessions_blocking([session]);
+    host.event_handle()
+        .end_sessions_blocking([session], SessionEndReason::Shutdown);
     let out = wait_handle.join().expect("wait thread must not panic");
     assert!(
         out.starts_with("exit:"),

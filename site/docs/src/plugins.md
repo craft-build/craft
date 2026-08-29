@@ -355,7 +355,9 @@ craft.create_autocmd("ModelChanged", {
 
 ### `SessionEnd`
 
-`craft.create_autocmd("SessionEnd", { callback = ... })` fires whenever a session goes away: a `/reset`, loading or opening another session, deleting a tab, quitting the TUI, closing an ACP session, and the end of a headless run. The payload carries `data.session_id` naming the session that ended. Use it to drop caches or state tied to that session. The session that replaces it announces itself with `SessionStart`.
+`craft.create_autocmd("SessionEnd", { callback = ... })` fires whenever a session goes away: a `/reset`, loading or opening another session, deleting a tab, quitting the TUI, closing an ACP session, and the end of a headless run. The payload carries `data.session_id` naming the session that ended, `data.reason` naming the path, and `data.deadline_ms`. `reason` is one of `"reset"` (TUI `/new`), `"load"`, `"delete"` (the tab was closed), `"shutdown"` (the process is exiting), `"replaced"` (an ACP client took the session's place), or `"completed"` (a headless run finished). Use it to drop caches or state tied to that session. The session that replaces it announces itself with `SessionStart`.
+
+The last three reasons are exit paths: the host is already tearing down, so the UI is gone (`craft.fn` roundtrips fail right away) and every handler shares one grace period. `data.deadline_ms` says how much of it is left when the handler runs; write state out with `craft.fs` and do not park. On the other paths nothing waits and `data.deadline_ms` is nil.
 
 ## `craft.ui`
 
@@ -381,7 +383,7 @@ Plugins can run background processes with `craft.fn.jobstart` and inspect them l
 - `craft.fn.jobstop(job_id)` kills a running job. Safe on unknown or already exited ids.
 - `craft.fn.jobforget(job_id)` drops an exited session-owned job from the store. Running jobs are left alone (use `jobstop` for those), and unknown ids are a no-op.
 
-When a session ends, the `SessionEnd` autocmd fires first so handlers can inspect or stop those jobs, then the host reaps them. On the exit paths (TUI shutdown, ACP EOF, headless completion) the host is already tearing down, so handlers get a short grace period and the UI is gone: `craft.fn` roundtrips fail right away. Write state out with `craft.fs` instead, for example `craft.fs.append` to grow a log. Autocmd and job callbacks may suspend (await `craft.fs` calls freely): each runs in its own coroutine. Jobs started inside a callback die with that callback unless you await them there (`jobwait`) or hand them to a session (`session = ...`).
+When a session ends, the `SessionEnd` autocmd fires first so handlers can inspect or stop those jobs, then the host reaps them. On the exit paths (TUI shutdown, ACP EOF, headless completion) the host is already tearing down, so handlers get a short grace period and the UI is gone: `craft.fn` roundtrips fail right away, and `data.deadline_ms` on the `SessionEnd` payload says how much of the grace period is left. Write state out with `craft.fs` instead, for example `craft.fs.append` to grow a log. Autocmd and job callbacks may suspend (await `craft.fs` calls freely): each runs in its own coroutine. Jobs started inside a callback die with that callback unless you await them there (`jobwait`) or hand them to a session (`session = ...`).
 
 Jobs need the `run` plugin permission.
 

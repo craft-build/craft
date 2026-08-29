@@ -20,7 +20,7 @@ use craft_agent::{
 };
 use craft_config::{Effect, PermissionRule, PermissionsConfig, ToolKey, UiConfig};
 use craft_lua::test_support::{HintWriterHandle, hint_writer_pair};
-use craft_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
+use craft_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader, SessionEndReason};
 use craft_providers::{ContentBlock, Effort, Message, Role, THINKING_USAGE, TokenUsage};
 use craft_storage::sessions::{SessionMeta, StoredMode, StoredThinking};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
@@ -619,11 +619,9 @@ fn session_reset_names_the_session_that_ended() {
 
     app.reset_session();
 
-    let (event, data) = probe
-        .try_recv_autocmd()
-        .expect("SessionEnd fired with session_id");
-    assert_eq!(event, "SessionEnd");
-    assert_eq!(data["session_id"], serde_json::json!(ended));
+    let (ended_id, reason) = probe.try_recv_end_session().expect("SessionEnd queued");
+    assert_eq!(ended_id.to_string(), ended);
+    assert_eq!(reason, SessionEndReason::Reset);
     let (event, data) = probe
         .try_recv_autocmd()
         .expect("SessionReset fired with session_id");

@@ -24,8 +24,8 @@ use craft_agent::{
 };
 use craft_config::UiConfig;
 use craft_lua::{
-    EventHandle, HintReader, KeymapReader, LuaCommandReader, ModelRequest, SessionRequest,
-    TaskRequest, UiAction, UiReply,
+    EventHandle, HintReader, KeymapReader, LuaCommandReader, ModelRequest, SessionEndReason,
+    SessionRequest, TaskRequest, UiAction, UiReply,
 };
 use craft_providers::Timeouts;
 use craft_providers::provider::{Provider, fetch_all_models, from_model};
@@ -1286,7 +1286,9 @@ impl<'t> EventLoop<'t> {
                         return;
                     }
                     let rt = self.remove_runtime(i);
-                    rt.app.lua_event_handle.end_session(rt.id());
+                    rt.app
+                        .lua_event_handle
+                        .end_session(rt.id(), SessionEndReason::Delete);
                     // Tear down on a background task so deleting a mid-flight
                     // agent never wedges the UI thread: cancel the run, save
                     // whatever is on disk, drop the App, then await the agent
@@ -1945,9 +1947,10 @@ impl<'t> EventLoop<'t> {
         let (dead_tx, dead_rx) = flume::unbounded::<UiAction>();
         drop(dead_tx);
         self.ui_action_rx = dead_rx;
-        self.ctx
-            .lua_event_handle
-            .end_sessions_blocking(self.sessions.iter().map(SessionRuntime::id));
+        self.ctx.lua_event_handle.end_sessions_blocking(
+            self.sessions.iter().map(SessionRuntime::id),
+            SessionEndReason::Shutdown,
+        );
         for rt in &mut self.sessions {
             let _ = rt.handles.cmd_tx.try_send(AgentCommand::CancelAll);
             rt.app.checkpoint_now();

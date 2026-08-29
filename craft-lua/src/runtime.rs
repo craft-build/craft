@@ -20,7 +20,9 @@ use craft_agent::cancel::CancelToken;
 use craft_agent::tools::{
     HeaderResult, PermissionScopes, RegistryError, Tool, ToolRegistry, ToolSource,
 };
-use craft_agent::{BufferSnapshot, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
+use craft_agent::{
+    BufferSnapshot, SessionEndReason, SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle,
+};
 use craft_storage::id::CraftId;
 use include_dir::Dir;
 use mlua::{
@@ -233,12 +235,9 @@ pub enum Request {
         event: String,
         data: Value,
     },
-    /// Fire `SessionEnd`, then reap that session's jobs. `reply` settles once
+    /// Fire `SessionEnd`, then reap that session's jobs. `wait` settles once
     /// both ran, so process-exit paths can bound their wait.
-    EndSession {
-        session: CraftId,
-        reply: Option<flume::Sender<()>>,
-    },
+    EndSession(EndSession),
     RunKeybindCallback {
         id: u64,
     },
@@ -262,14 +261,17 @@ pub enum Request {
 /// from serving anything else. One consumer keeps them in the order the host
 /// fired them.
 enum HostHook {
-    Autocmd {
-        event: String,
-        data: Value,
-    },
-    EndSession {
-        session: CraftId,
-        reply: Option<flume::Sender<()>>,
-    },
+    Autocmd { event: String, data: Value },
+    EndSession(EndSession),
+}
+
+/// Fire `SessionEnd`, then reap that session's jobs.
+pub struct EndSession {
+    pub session: CraftId,
+    pub reason: SessionEndReason,
+    /// Set on the paths that block on the dispatch: the instant the caller
+    /// stops waiting, and where to answer it. Absent on the queued paths.
+    pub wait: Option<(Instant, flume::Sender<()>)>,
 }
 
 pub struct RestoreItem {
@@ -1092,22 +1094,32 @@ async fn run_host_hook(lua: &Lua, gate: &Rc<InflightGate>, hook: HostHook) {
                 lua.gc_collect().ok();
             }
         }
-        HostHook::EndSession { session, reply } => {
-            crate::api::r#fn::EndedSessions::mark(lua, session);
+        HostHook::EndSession(end) => {
+            crate::api::r#fn::EndedSessions::mark(lua, end.session);
+            // Measured at dispatch, not when the request was queued, so a
+            // handler is told what is left rather than what was promised.
+            let deadline_ms = end
+                .wait
+                .as_ref()
+                .map(|(at, _)| at.saturating_duration_since(Instant::now()).as_millis() as u64);
             // Handlers may still inspect or stop the jobs, so the event fires
             // before the reap.
             let data = json_to_lua(
                 lua,
-                &serde_json::json!({ "session_id": session.to_string() }),
+                &serde_json::json!({
+                    "session_id": end.session.to_string(),
+                    "reason": end.reason.to_string(),
+                    "deadline_ms": deadline_ms,
+                }),
             )
             .unwrap_or(LuaValue::Nil);
             crate::api::autocmd::dispatch(lua.clone(), SESSION_END_EVENT.to_owned(), None, data)
                 .await;
             pump_bg_session_jobs(lua).await;
             if let Some(bg) = lua.app_data_ref::<RefCell<BgJobMap>>() {
-                kill_session_jobs(lua, &mut bg.borrow_mut(), session);
+                kill_session_jobs(lua, &mut bg.borrow_mut(), end.session);
             }
-            if let Some(reply) = reply {
+            if let Some((_, reply)) = end.wait {
                 let _ = reply.send(());
             }
         }
@@ -3018,8 +3030,8 @@ pub fn spawn(
                         drain_spawn_queue(&rt.lua, &gate);
                         let _ = reply.send(result);
                     }
-                    Request::EndSession { session, reply } => {
-                        let _ = hook_tx.send(HostHook::EndSession { session, reply });
+                    Request::EndSession(end) => {
+                        let _ = hook_tx.send(HostHook::EndSession(end));
                     }
                     Request::FireAutocmd { event, data } => {
                         let _ = hook_tx.send(HostHook::Autocmd { event, data });
