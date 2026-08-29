@@ -46,6 +46,19 @@ require("hello")
 
 Run `/reload` to pick up changes. If something fails to load, read `craft.log` in the directory `craft.env.logs_dir()` returns (Linux: `~/.local/logs/craft/`); `craft.log.info(...)` calls from your plugin land there too. Keep a plugin's settings in a local table or export a `setup(opts)` function for `init.lua` to call, rather than using `craft.api.register_options`: a `plugins.<name>` table for a plugin Craft does not ship fails startup with an unknown-plugin error.
 
+### Minimum version
+
+A plugin that needs a newer Lua API can say so with `min_craft_version` in the `plugin.toml` next to its Lua:
+
+```toml
+min_craft_version = "0.4.12"
+
+[permissions]
+net = true
+```
+
+`min_craft_version` is optional and takes a plain semantic version as a lower bound, so ranges do not work. When the field is invalid or the running version is older, Craft skips the Lua in that directory and warns at startup instead of failing. `--no-plugins` still skips every user plugin at once.
+
 The builtin `plugin-dev` skill carries the same guide, so asking Craft to write a plugin for you works without pasting any of this.
 
 ## Packages

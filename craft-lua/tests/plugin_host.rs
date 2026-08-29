@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use craft_agent::tools::{ToolRegistry, ToolSource};
 use craft_config::{AlwaysThinking, Effect, PluginsConfig, ToolKey, ToolOutputLines};
-use craft_lua::{Permission, PluginError, PluginHost, PluginPermissions};
+use craft_lua::{Permission, PluginError, PluginHost, PluginPermissions, SKIPPED_PLUGIN_WARNING};
 
 const NARGS_ERR: &str = r#"'nargs' must be 0, 1, "?", "*", or "+""#;
 const GLOBAL_PACK_ONLY_ERR: &str = "only available in the global init.lua";
@@ -106,6 +106,36 @@ fn dangerous_globals_blocked() {
         host.load_source(&format!("sandbox_check_{global}"), &source)
             .unwrap_or_else(|e| panic!("sandbox check for {global} failed: {e}"));
     }
+}
+
+/// An incompatible `plugin.toml` must cost that directory its Lua, not the
+/// whole startup: `load_init_files` keeps going and reports a warning.
+#[test]
+fn incompatible_plugin_warns_instead_of_aborting_startup() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let craft_dir = tmp.path().join(".craft");
+    std::fs::create_dir_all(&craft_dir).unwrap();
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let required = format!("{}.0.0", running.major + 1);
+    std::fs::write(
+        craft_dir.join("plugin.toml"),
+        format!("min_craft_version = {required:?}\n"),
+    )
+    .unwrap();
+    std::fs::write(craft_dir.join("init.lua"), ECHO_PLUGIN).unwrap();
+
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let mut warnings = Vec::new();
+    host.load_init_files_or_skip(false, tmp.path(), &mut warnings)
+        .expect("an incompatible plugin must not abort startup");
+
+    assert!(reg.get("echo_").is_none());
+    let warning = warnings
+        .iter()
+        .find(|w| w.contains(SKIPPED_PLUGIN_WARNING))
+        .unwrap_or_else(|| panic!("no skip warning in {warnings:?}"));
+    assert!(warning.contains(&required), "{warning}");
 }
 
 #[tokio::test]

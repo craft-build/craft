@@ -18,7 +18,7 @@ pub use api::util::command::{
     Split, TaskRequest, TitlePos, UiAction, UiReply, WinCommand, WinEvent, WinView,
 };
 pub use error::PluginError;
-pub use loader::{EventHandle, LuaRecencySource, PluginHost};
+pub use loader::{EventHandle, LuaRecencySource, PluginHost, SKIPPED_PLUGIN_WARNING};
 pub use pack::{
     DiscoveredPackage, Discovery, InstallReport, Interaction, MANAGED_GROUP, Origin, discover,
     discover_installed, install_declared, lockfile_path, sanitize_message, site_dir,

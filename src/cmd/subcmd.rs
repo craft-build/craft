@@ -583,7 +583,7 @@ fn load_provider_model_policy(
         .context("initialize lua plugin host")?;
     let discovery = craft_lua::discover_installed(no_plugins);
     let raw = host
-        .load_init_files_or_skip(no_plugins, cwd)
+        .load_init_files_or_skip(no_plugins, cwd, &mut Vec::new())
         .context("load init.lua files")?;
     let config = raw
         .unwrap_or_default()
@@ -653,9 +653,10 @@ fn load_effective_config(
     no_plugins: bool,
     cwd: &Path,
     names: &super::KnownNames<'_>,
+    warnings: &mut Vec<String>,
 ) -> Result<Config> {
     let raw_config = host
-        .load_init_files_or_skip(no_plugins, cwd)
+        .load_init_files_or_skip(no_plugins, cwd, warnings)
         .context("load init.lua files")?;
     raw_config
         .unwrap_or_default()
@@ -675,8 +676,8 @@ pub async fn outline(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
         no_plugins,
         super::BuiltinFailure::Fatal,
         craft_lua::Interaction::None,
-        |host, names, _| {
-            let mut config = load_effective_config(host, no_plugins, &cwd, names)?;
+        |host, names, warnings| {
+            let mut config = load_effective_config(host, no_plugins, &cwd, names, warnings)?;
             config.validate()?;
             config.permissions = load_permissions(&cwd);
             Ok(config)
@@ -770,7 +771,7 @@ pub fn prompt(
         no_plugins,
         super::BuiltinFailure::Fatal,
         craft_lua::Interaction::None,
-        |host, names, _| load_effective_config(host, no_plugins, &cwd, names),
+        |host, names, warnings| load_effective_config(host, no_plugins, &cwd, names, warnings),
     )?;
     super::report_warnings(warnings);
 

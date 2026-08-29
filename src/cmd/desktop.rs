@@ -85,9 +85,11 @@ pub async fn run(args: DesktopArgs) -> Result<()> {
         .context("initialize lua plugin host")?;
 
     let discovery = craft_lua::discover_installed(args.no_plugins);
+    let mut warnings = Vec::new();
     let raw_config = plugin_host
-        .load_init_files_or_skip(args.no_plugins, &cwd)
+        .load_init_files_or_skip(args.no_plugins, &cwd, &mut warnings)
         .context("load init.lua files")?;
+    super::report_warnings(warnings);
 
     let mut config = raw_config
         .unwrap_or_default()

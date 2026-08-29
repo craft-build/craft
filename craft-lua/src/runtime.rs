@@ -570,7 +570,7 @@ pub(crate) enum ConfigScope {
 }
 
 impl ConfigScope {
-    fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             Self::Global => "global/init.lua",
             Self::Project => "project/init.lua",

@@ -69,9 +69,11 @@ async fn ingest(source: PathBuf, model_spec: Option<String>) -> Result<()> {
         None,
     )
     .context("initialize lua plugin host")?;
+    let mut warnings = Vec::new();
     let raw_config = plugin_host
-        .load_init_files(&cwd)
+        .load_init_files(&cwd, &mut warnings)
         .context("load init.lua files")?;
+    super::super::report_warnings(warnings);
     let discovery = craft_lua::discover_installed(false);
     let config = raw_config
         .unwrap_or_default()

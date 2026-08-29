@@ -74,9 +74,9 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         opts.no_plugins,
         super::BuiltinFailure::Fatal,
         craft_lua::Interaction::None,
-        |host, names, _| {
+        |host, names, warnings| {
             let mut config = host
-                .load_init_files_or_skip(opts.no_plugins, &cwd)
+                .load_init_files_or_skip(opts.no_plugins, &cwd, warnings)
                 .context("load init.lua files")?
                 .unwrap_or_default()
                 .into_config(&names(host)?)

@@ -41,9 +41,9 @@ pub async fn run(
         no_plugins,
         super::super::BuiltinFailure::Fatal,
         craft_lua::Interaction::None,
-        |host, names, _| {
+        |host, names, warnings| {
             let mut config = host
-                .load_init_files_or_skip(no_plugins, &cwd)
+                .load_init_files_or_skip(no_plugins, &cwd, warnings)
                 .context("load init.lua files")?
                 .unwrap_or_default()
                 .into_config(&names(host)?)

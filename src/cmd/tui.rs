@@ -88,9 +88,10 @@ fn load_config(
     cli: &Cli,
     cwd: &Path,
     names: &super::KnownNames<'_>,
+    warnings: &mut Vec<String>,
 ) -> Result<Config> {
     let raw_config = plugin_host
-        .load_init_files_or_skip(cli.no_plugins, cwd)
+        .load_init_files_or_skip(cli.no_plugins, cwd, warnings)
         .context("load init.lua files")?;
 
     let mut config = raw_config
@@ -169,11 +170,8 @@ async fn build_stack(
         },
         interaction,
         |host, names, warnings| {
-            config_or_fallback(
-                load_config(host, cli, cwd, names),
-                fallback_config,
-                warnings,
-            )
+            let loaded = load_config(host, cli, cwd, names, warnings);
+            config_or_fallback(loaded, fallback_config, warnings)
         },
     )?;
 
@@ -592,7 +590,7 @@ mod tests {
         let mut plugin_host = PluginHost::with_jit(Arc::new(ToolRegistry::new()), None, true)
             .expect("live host boots under --no-plugins");
 
-        let config = load_config(&plugin_host, &cli, dir.path(), &no_names)
+        let config = load_config(&plugin_host, &cli, dir.path(), &no_names, &mut Vec::new())
             .expect("no-plugins must skip the broken init.lua and still load defaults");
         assert!(
             !config.plugins.names.is_empty(),
@@ -630,7 +628,7 @@ mod tests {
         let mut plugin_host = PluginHost::with_jit(Arc::new(ToolRegistry::new()), None, true)
             .expect("live host boots");
 
-        match load_config(&plugin_host, &cli, dir.path(), &no_names) {
+        match load_config(&plugin_host, &cli, dir.path(), &no_names, &mut Vec::new()) {
             Err(_) => {}
             Ok(_) => panic!("broken init.lua must error without --no-plugins"),
         }
