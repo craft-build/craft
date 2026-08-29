@@ -35,8 +35,7 @@ use craft_config::RawConfig;
 use crate::api::autocmd::AutocmdStore;
 use crate::api::create_craft_global;
 use crate::api::r#fn::{
-    JobMeta, JobStore, deliver_job_event, kill_plugin_jobs, kill_session_jobs,
-    pump_bg_session_jobs, pump_session_jobs,
+    JobMeta, JobStore, deliver_job_event, kill_plugin_jobs, kill_session_jobs, pump_bg_session_jobs,
 };
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
@@ -1104,10 +1103,9 @@ async fn run_host_hook(lua: &Lua, gate: &Rc<InflightGate>, hook: HostHook) {
             .unwrap_or(LuaValue::Nil);
             crate::api::autocmd::dispatch(lua.clone(), SESSION_END_EVENT.to_owned(), None, data)
                 .await;
+            pump_bg_session_jobs(lua).await;
             if let Some(bg) = lua.app_data_ref::<RefCell<BgJobMap>>() {
-                let mut bg = bg.borrow_mut();
-                pump_session_jobs(lua, &mut bg, &mut Vec::new());
-                kill_session_jobs(lua, &mut bg, session);
+                kill_session_jobs(lua, &mut bg.borrow_mut(), session);
             }
             if let Some(reply) = reply {
                 let _ = reply.send(());
