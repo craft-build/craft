@@ -271,6 +271,7 @@ impl TerminalBackend for AcpTerminal {
             });
 
             Ok(TerminalHandle {
+                pid: 0,
                 events: event_rx,
                 kill,
             })

@@ -3670,6 +3670,7 @@ mod tests {
                 cell.jobs.register(
                     id,
                     handle,
+                    DISPATCH_TEST_JOB.into(),
                     Arc::from(DISPATCH_TEST_PLUGIN),
                     None,
                     None,

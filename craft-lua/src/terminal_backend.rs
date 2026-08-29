@@ -25,6 +25,7 @@ pub struct TerminalSpec {
 }
 
 pub struct TerminalHandle {
+    pub pid: u32,
     pub events: Receiver<JobEvent>,
     pub kill: Box<dyn FnOnce() + Send>,
 }
@@ -118,6 +119,7 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
     let kill: Box<dyn FnOnce() + Send> = Box::new(move || kill_process(pid));
 
     Ok(TerminalHandle {
+        pid,
         events: event_rx,
         kill,
     })

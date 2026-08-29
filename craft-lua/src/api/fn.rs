@@ -1,14 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table, Value};
 
 use crate::api::fs::expand_tilde;
 use crate::api::util::command::{UiAction, ui_roundtrip, ui_send};
-use crate::api::util::pair::try_pair;
+use crate::api::util::pair::{err_pair, try_pair};
 use crate::plugin_permissions::{
     Permission::{Env, Run},
     PluginPermissions,
@@ -17,6 +17,10 @@ use crate::runtime::{SharedSandboxConfig, with_task_jobs};
 #[cfg(test)]
 use crate::terminal_backend::LocalTerminal;
 use crate::terminal_backend::{JobEvent, TerminalBackend, TerminalHandle, TerminalSpec};
+
+const DEFAULT_TAIL: usize = 20;
+const MAX_TAIL_LINES: usize = 1024;
+const DEFAULT_WAIT_MS: u64 = 30_000;
 
 fn build_sandbox_profile(lua: &Lua, cwd: Option<&Path>) -> Option<craft_sandbox::SandboxProfile> {
     let shared = lua.app_data_ref::<SharedSandboxConfig>()?;
@@ -51,17 +55,49 @@ pub(crate) struct JobMeta {
     pub(crate) alive: bool,
     pub(crate) background: bool,
     plugin: Arc<str>,
+    command: String,
+    pid: u32,
+    started: Instant,
     on_stdout: Option<RegistryKey>,
     on_stderr: Option<RegistryKey>,
     on_exit: Option<RegistryKey>,
     pub(crate) event_rx: Option<flume::Receiver<JobEvent>>,
     kill: Option<Box<dyn FnOnce() + Send>>,
+    stdout_tail: VecDeque<String>,
+    stderr_tail: VecDeque<String>,
+    tail_cap: usize,
+    exit_code: Option<i32>,
 }
 
 impl JobMeta {
     fn owned_by(&self, plugin: &str) -> bool {
         self.plugin.as_ref() == plugin
     }
+
+    fn record_line(&mut self, stdout: bool, line: &str) {
+        if self.tail_cap == 0 {
+            return;
+        }
+        let tail = if stdout {
+            &mut self.stdout_tail
+        } else {
+            &mut self.stderr_tail
+        };
+        if tail.len() >= self.tail_cap {
+            tail.pop_front();
+        }
+        tail.push_back(line.to_string());
+    }
+}
+
+pub(crate) struct JobSnapshot {
+    pub id: u32,
+    pub command: String,
+    pub pid: u32,
+    pub elapsed_secs: u64,
+    pub exit_code: Option<i32>,
+    pub stdout_lines: Vec<String>,
+    pub stderr_lines: Vec<String>,
 }
 
 pub(crate) struct JobStore {
@@ -99,6 +135,7 @@ impl JobStore {
         &mut self,
         id: u32,
         handle: TerminalHandle,
+        command: String,
         plugin: Arc<str>,
         on_stdout: Option<RegistryKey>,
         on_stderr: Option<RegistryKey>,
@@ -111,11 +148,18 @@ impl JobStore {
                 alive: true,
                 background,
                 plugin,
+                command,
+                pid: handle.pid,
+                started: Instant::now(),
                 on_stdout,
                 on_stderr,
                 on_exit,
                 event_rx: Some(handle.events),
                 kill: Some(handle.kill),
+                stdout_tail: VecDeque::new(),
+                stderr_tail: VecDeque::new(),
+                tail_cap: DEFAULT_TAIL,
+                exit_code: None,
             },
         );
     }
@@ -162,6 +206,56 @@ impl JobStore {
     /// raises still leaves the job cleaned up.
     pub fn finish(&mut self, lua: &Lua, job_id: u32) {
         self.remove(lua, job_id);
+    }
+
+    fn configure(&mut self, id: u32, tail: Option<usize>) {
+        let Some(job) = self.jobs.get_mut(&id) else {
+            return;
+        };
+        if let Some(cap) = tail {
+            job.tail_cap = cap.min(MAX_TAIL_LINES);
+        }
+    }
+
+    pub fn record_event(&mut self, job_id: u32, event: &JobEvent) {
+        let Some(job) = self.jobs.get_mut(&job_id) else {
+            return;
+        };
+        match event {
+            JobEvent::Stdout(line) => job.record_line(true, line),
+            JobEvent::Stderr(line) => job.record_line(false, line),
+            JobEvent::Exit(code) => job.exit_code = Some(*code),
+        }
+    }
+
+    pub fn snapshot(&self, job_id: u32, plugin: &str) -> Option<JobSnapshot> {
+        let job = self.jobs.get(&job_id)?;
+        job.owned_by(plugin).then(|| JobSnapshot {
+            id: job_id,
+            command: job.command.clone(),
+            pid: job.pid,
+            elapsed_secs: job.started.elapsed().as_secs(),
+            exit_code: job.exit_code,
+            stdout_lines: job.stdout_tail.iter().cloned().collect(),
+            stderr_lines: job.stderr_tail.iter().cloned().collect(),
+        })
+    }
+
+    pub fn list(&self, plugin: &str) -> Vec<JobSnapshot> {
+        self.jobs
+            .iter()
+            .filter(|(_, job)| job.owned_by(plugin))
+            .filter(|(_, job)| job.exit_code.is_none())
+            .map(|(&id, job)| JobSnapshot {
+                id,
+                command: job.command.clone(),
+                pid: job.pid,
+                elapsed_secs: job.started.elapsed().as_secs(),
+                exit_code: None,
+                stdout_lines: Vec::new(),
+                stderr_lines: Vec::new(),
+            })
+            .collect()
     }
 
     pub fn kill(&mut self, job_id: u32, plugin: &str) {
@@ -285,43 +379,52 @@ pub(crate) fn create_fn_table(
                 if !p.is_allowed(Run) {
                     return Err(crate::plugin_permissions::denied_error(Run));
                 }
-                let (cwd, env, on_stdout, on_stderr, on_exit, want_sandbox, background) = match opts
-                {
-                    Some(ref opts) => {
-                        let cwd: Option<String> = opts.get("cwd").ok();
-                        let env: Option<HashMap<String, String>> = opts
-                            .get::<Table>("env")
-                            .ok()
-                            .map(|t| t.pairs::<String, String>().filter_map(Result::ok).collect());
-                        let on_stdout = opts
-                            .get::<Function>("on_stdout")
-                            .ok()
-                            .map(|f| lua.create_registry_value(f))
-                            .transpose()?;
-                        let on_stderr = opts
-                            .get::<Function>("on_stderr")
-                            .ok()
-                            .map(|f| lua.create_registry_value(f))
-                            .transpose()?;
-                        let on_exit = opts
-                            .get::<Function>("on_exit")
-                            .ok()
-                            .map(|f| lua.create_registry_value(f))
-                            .transpose()?;
-                        let want_sandbox: bool = opts.get("sandbox").unwrap_or(false);
-                        let background: bool = opts.get("background").unwrap_or(false);
-                        (
-                            cwd,
-                            env,
-                            on_stdout,
-                            on_stderr,
-                            on_exit,
-                            want_sandbox,
-                            background,
-                        )
-                    }
-                    None => (None, None, None, None, None, false, false),
-                };
+                let (cwd, env, on_stdout, on_stderr, on_exit, want_sandbox, background, tail) =
+                    match opts {
+                        Some(ref opts) => {
+                            let cwd: Option<String> = opts.get("cwd").ok();
+                            let env: Option<HashMap<String, String>> =
+                                opts.get::<Table>("env").ok().map(|t| {
+                                    t.pairs::<String, String>().filter_map(Result::ok).collect()
+                                });
+                            let on_stdout = opts
+                                .get::<Function>("on_stdout")
+                                .ok()
+                                .map(|f| lua.create_registry_value(f))
+                                .transpose()?;
+                            let on_stderr = opts
+                                .get::<Function>("on_stderr")
+                                .ok()
+                                .map(|f| lua.create_registry_value(f))
+                                .transpose()?;
+                            let on_exit = opts
+                                .get::<Function>("on_exit")
+                                .ok()
+                                .map(|f| lua.create_registry_value(f))
+                                .transpose()?;
+                            let want_sandbox: bool = opts.get("sandbox").unwrap_or(false);
+                            let background: bool = opts.get("background").unwrap_or(false);
+                            let tail: Option<usize> = opts.get("tail").ok();
+                            if let Some(n) = tail
+                                && n > MAX_TAIL_LINES
+                            {
+                                return Err(mlua::Error::runtime(format!(
+                                    "jobstart: tail must be in 0..={MAX_TAIL_LINES}"
+                                )));
+                            }
+                            (
+                                cwd,
+                                env,
+                                on_stdout,
+                                on_stderr,
+                                on_exit,
+                                want_sandbox,
+                                background,
+                                tail,
+                            )
+                        }
+                        None => (None, None, None, None, None, false, false, None),
+                    };
 
                 let (backend, id) =
                     with_task_jobs(&lua, |store| (store.backend(), store.next_id()));
@@ -340,14 +443,17 @@ pub(crate) fn create_fn_table(
                     None
                 };
                 let spec = TerminalSpec {
-                    cmd,
+                    cmd: cmd.clone(),
                     cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
                     env,
                     sandbox,
                 };
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
-                    store.register(id, handle, owner, on_stdout, on_stderr, on_exit, background);
+                    store.register(
+                        id, handle, cmd, owner, on_stdout, on_stderr, on_exit, background,
+                    );
+                    store.configure(id, tail);
                 });
                 Ok(id)
             }
@@ -381,7 +487,7 @@ pub(crate) fn create_fn_table(
                 let rx = with_task_jobs(&lua, |store| store.take_receiver(job_id, &owner))
                     .ok_or_else(|| mlua::Error::runtime("unknown job id or already waited"))?;
 
-                let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
+                let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_WAIT_MS));
 
                 let mut stdout_lines = Vec::new();
                 let mut stderr_lines = Vec::new();
@@ -411,8 +517,41 @@ pub(crate) fn create_fn_table(
                 result.set("stdout", stdout_lines.join("\n"))?;
                 result.set("stderr", stderr_lines.join("\n"))?;
                 result.set("exit_code", exit_code)?;
+                result.set("truncated", false)?;
                 Ok(mlua::Value::Table(result))
             }
+        })?,
+    )?;
+
+    let p = perms.clone();
+    let owner = plugin.clone();
+    t.set(
+        "jobinfo",
+        lua.create_function(move |lua, job_id: u32| {
+            if !p.is_allowed(Run) {
+                return Err(crate::plugin_permissions::denied_error(Run));
+            }
+            match with_task_jobs(lua, |store| store.snapshot(job_id, &owner)) {
+                Some(snap) => Ok((Some(snapshot_table(lua, &snap)?), None)),
+                None => Ok(err_pair("job: not found")),
+            }
+        })?,
+    )?;
+
+    let p = perms.clone();
+    let owner = plugin.clone();
+    t.set(
+        "joblist",
+        lua.create_function(move |lua, ()| {
+            if !p.is_allowed(Run) {
+                return Err(crate::plugin_permissions::denied_error(Run));
+            }
+            let snaps = with_task_jobs(lua, |store| store.list(&owner));
+            let result = lua.create_table()?;
+            for (i, snap) in snaps.iter().enumerate() {
+                result.set(i + 1, snapshot_table(lua, snap)?)?;
+            }
+            Ok((Some(Value::Table(result)), None::<String>))
         })?,
     )?;
 
@@ -473,12 +612,41 @@ pub(crate) fn create_fn_table(
     Ok(t)
 }
 
+fn snapshot_table(lua: &Lua, snap: &JobSnapshot) -> LuaResult<Table> {
+    let row = lua.create_table()?;
+    row.set("id", snap.id)?;
+    row.set("command", snap.command.as_str())?;
+    row.set("pid", snap.pid)?;
+    row.set("elapsed_secs", snap.elapsed_secs)?;
+    row.set(
+        "status",
+        if snap.exit_code.is_some() {
+            "exited"
+        } else {
+            "running"
+        },
+    )?;
+    row.set("exit_code", snap.exit_code)?;
+    let stdout = lua.create_table()?;
+    for (i, line) in snap.stdout_lines.iter().enumerate() {
+        stdout.set(i + 1, line.as_str())?;
+    }
+    row.set("stdout_lines", stdout)?;
+    let stderr = lua.create_table()?;
+    for (i, line) in snap.stderr_lines.iter().enumerate() {
+        stderr.set(i + 1, line.as_str())?;
+    }
+    row.set("stderr_lines", stderr)?;
+    Ok(row)
+}
+
 /// Fire the job's Lua callback for {event} (if any), finishing the job
 /// on exit before invoking a callback that may raise. Shared by
 /// `jobwait` and the async dispatch loop so both deliver events
 /// identically.
 pub(crate) fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) -> LuaResult<()> {
     let callback = with_task_jobs(lua, |store| {
+        store.record_event(job_id, event);
         store
             .callback_key(job_id, event)
             .and_then(|key| lua.registry_value::<Function>(key).ok())
@@ -527,7 +695,16 @@ mod tests {
             })
             .await
             .unwrap();
-        store.register(id, handle, owner(), None, None, None, false);
+        store.register(
+            id,
+            handle,
+            "echo hello".into(),
+            owner(),
+            None,
+            None,
+            None,
+            false,
+        );
         id
     }
 
@@ -600,7 +777,16 @@ mod tests {
             })
             .await
             .unwrap();
-        store.register(id, handle, owner(), None, None, None, false);
+        store.register(
+            id,
+            handle,
+            "echo hello".into(),
+            owner(),
+            None,
+            None,
+            None,
+            false,
+        );
 
         assert!(store.take_receiver(id, "other-plugin").is_none());
         assert!(store.take_receiver(id, TEST_PLUGIN).is_some());
@@ -668,6 +854,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_reports_live_tails_and_hides_inaccessible_jobs() {
+        let mut store = make_store();
+        let id = start_echo(&mut store).await;
+        store.record_event(id, &JobEvent::Stdout("hello".into()));
+        store.record_event(id, &JobEvent::Stderr("warn".into()));
+
+        let snap = store.snapshot(id, TEST_PLUGIN).unwrap();
+        assert_eq!(snap.command, "echo hello");
+        assert_eq!(snap.stdout_lines, ["hello"]);
+        assert_eq!(snap.stderr_lines, ["warn"]);
+        assert!(snap.exit_code.is_none());
+        assert!(store.snapshot(id, "other-plugin").is_none());
+        assert!(store.snapshot(999, TEST_PLUGIN).is_none());
+    }
+
+    #[tokio::test]
+    async fn tail_cap_drops_oldest_lines() {
+        let mut store = make_store();
+        let id = start_echo(&mut store).await;
+        store.configure(id, Some(2));
+        store.record_event(id, &JobEvent::Stdout("a".into()));
+        store.record_event(id, &JobEvent::Stdout("b".into()));
+        store.record_event(id, &JobEvent::Stdout("c".into()));
+        let snap = store.snapshot(id, TEST_PLUGIN).unwrap();
+        assert_eq!(snap.stdout_lines, ["b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn list_is_live_and_plugin_scoped() {
+        let lua = Lua::new();
+        let mut store = make_store();
+        let id = start_echo(&mut store).await;
+
+        let listed: Vec<u32> = store.list(TEST_PLUGIN).iter().map(|s| s.id).collect();
+        assert_eq!(listed, [id]);
+        assert!(store.list("other-plugin").is_empty());
+
+        store.record_event(id, &JobEvent::Exit(0));
+        store.finish(&lua, id);
+        assert!(store.list(TEST_PLUGIN).is_empty());
+        assert!(store.snapshot(id, TEST_PLUGIN).is_none());
+    }
+
+    #[tokio::test]
     async fn drain_events_empty_after_take() {
         let mut store = make_store();
         let id = start_echo(&mut store).await;
@@ -696,7 +926,16 @@ mod tests {
             })
             .await
             .expect("job started");
-        store.register(id, handle, owner(), None, None, None, false);
+        store.register(
+            id,
+            handle,
+            "echo hello".into(),
+            owner(),
+            None,
+            None,
+            None,
+            false,
+        );
         assert!(
             store.has_alive_jobs(),
             "job should be alive before the drop"

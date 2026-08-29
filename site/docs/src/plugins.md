@@ -367,6 +367,23 @@ craft.ui.set_window_title("craft: " .. session_name)
 craft.ui.set_window_title("")
 ```
 
+## Jobs
+
+Plugins can run background processes with `craft.fn.jobstart` and inspect them later.
+
+- `craft.fn.jobstart(cmd, opts)` starts a shell command. Options include `on_stdout`, `on_stderr`, `on_exit` callbacks, `cwd`, `env`, `sandbox`, `background` (survives the tool call), and `tail` (trailing lines per stream kept for `jobinfo`, default 20, 0 disables, max 1024). Returns a job id.
+- `craft.fn.jobinfo(job_id)` snapshots a job this plugin can see: `{ id, command, pid, status, exit_code, elapsed_secs, stdout_lines, stderr_lines }`. `status` is `"running"` or `"exited"`. Answers `(nil, err)` when the job is gone.
+- `craft.fn.joblist()` lists live jobs this plugin can see, same fields as above.
+- `craft.fn.jobwait(job_id, timeout_ms)` waits for a job and returns `{ stdout, stderr, exit_code, truncated }`. `truncated` is false when the collected lines are the full output. Returns nil on timeout.
+- `craft.fn.jobstop(job_id)` kills a running job. Safe on unknown or already exited ids.
+
+Jobs need the `run` plugin permission.
+
+```lua
+local id = craft.fn.jobstart("npm run build", { background = true, tail = 50 })
+local info = craft.fn.jobinfo(id)
+```
+
 ## Prompt slots
 
 The system prompt is assembled from named slots. Two kinds exist:
