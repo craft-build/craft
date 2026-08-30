@@ -83,6 +83,61 @@ pub struct ToolBuild {
     pub mcp: Option<McpHandle>,
 }
 
+/// The tool array one run sends to the model, paired with the filter that
+/// produced it. A run context carries the pair, never a loose array, so the
+/// names dispatch offers in-process (`tool_dispatch::callable`, and through it
+/// the `code_execution` sandbox) cannot drift from what the model was shown.
+#[derive(Clone, Default)]
+pub struct RequestTools {
+    definitions: Value,
+    filter: Arc<ToolFilter>,
+}
+
+impl RequestTools {
+    /// The one place a run's tool array is built. Host exclusions (a client
+    /// that cannot service `question`) go through here and nowhere else, so
+    /// the array and the filter always agree on them.
+    pub fn build(
+        build: &ToolBuild,
+        model: &Model,
+        config: &AgentConfig,
+        dynamic: &DynamicContext,
+        promoted: &PromotedTools,
+    ) -> Self {
+        let filter = ToolFilter::from_config(config, model, &build.excluded);
+        let ctx = DescriptionContext {
+            filter: &filter,
+            mcp: build.mcp.is_some(),
+        };
+        let mut tools =
+            ToolRegistry::native().definitions(&build.vars, &ctx, model.supports_tool_examples());
+        let mcp_names = build
+            .mcp
+            .as_ref()
+            .map(|h| h.tool_names())
+            .unwrap_or_default();
+        if let Some(handle) = &build.mcp {
+            handle.extend_tools(&mut tools);
+        }
+        if dynamic.enabled {
+            let promoted_snap = promoted.snapshot();
+            tools = filter_to_active(&tools, &mcp_names, &promoted_snap);
+        }
+        Self {
+            definitions: tools,
+            filter: Arc::new(filter),
+        }
+    }
+
+    pub fn definitions(&self) -> &Value {
+        &self.definitions
+    }
+
+    pub fn filter(&self) -> &Arc<ToolFilter> {
+        &self.filter
+    }
+}
+
 /// Build the tool definitions sent to the provider this turn. When dynamic discovery
 /// is on, MCP tools are filtered to the promoted set; all builtins are always kept.
 /// Otherwise the full toolset is returned unchanged.
@@ -93,26 +148,9 @@ pub fn build_active_tools(
     dynamic: &DynamicContext,
     promoted: &PromotedTools,
 ) -> Value {
-    let filter = ToolFilter::from_config(config, model, &build.excluded);
-    let ctx = DescriptionContext {
-        filter: &filter,
-        mcp: build.mcp.is_some(),
-    };
-    let mut tools =
-        ToolRegistry::native().definitions(&build.vars, &ctx, model.supports_tool_examples());
-    let mcp_names = build
-        .mcp
-        .as_ref()
-        .map(|h| h.tool_names())
-        .unwrap_or_default();
-    if let Some(handle) = &build.mcp {
-        handle.extend_tools(&mut tools);
-    }
-    if dynamic.enabled {
-        let promoted_snap = promoted.snapshot();
-        tools = filter_to_active(&tools, &mcp_names, &promoted_snap);
-    }
-    tools
+    RequestTools::build(build, model, config, dynamic, promoted)
+        .definitions()
+        .clone()
 }
 
 /// Keep a tool definition iff it is a builtin (not MCP), already promoted, or the

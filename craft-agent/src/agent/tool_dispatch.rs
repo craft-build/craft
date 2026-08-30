@@ -14,7 +14,7 @@ use crate::mcp::{McpHandle, UNKNOWN_MCP, wire_tool_name};
 use crate::permissions::{ASK_TIMEOUT, DEFAULT_DENY_GUIDANCE};
 use crate::task_set::TaskSet;
 use crate::tools::registry::{ToolInvocation, ToolRegistry};
-use crate::tools::{ToolAudience, ToolContext, ToolFilter, truncate_bytes};
+use crate::tools::{ToolAudience, ToolContext, truncate_bytes};
 use crate::{
     AgentError, AgentEvent, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent,
 };
@@ -305,14 +305,14 @@ pub struct Callable {
 /// the sandbox may not call still owns its name, or an MCP server publishing
 /// the same wire name becomes a way around the gate.
 ///
-/// Filtered like the request's tool array is: the config's `disabled_tools`
-/// and the model's capabilities. The caller reads its own policy off
-/// `audience` (a sandbox wants `ToolAudience::INTERPRETER`, which is also the
-/// gate here).
+/// Filtered by the same filter that built the request's tool array, so a name
+/// the model never saw is not one a script can reach either. What is left is
+/// the caller's own policy, read off `audience` (a sandbox wants
+/// `ToolAudience::INTERPRETER`, which is also the gate here).
 ///
 /// Recompute per call: the MCP index changes whenever a server comes or goes.
 pub fn callable(ctx: &ToolContext) -> Vec<Callable> {
-    let filter = ToolFilter::from_config(&ctx.config, &ctx.model, &[]);
+    let filter = &ctx.tool_filter;
     let mut out: Vec<Callable> = Vec::new();
     let mut claimed: HashSet<String> = HashSet::new();
     let mut claim = |name: &str, audience: ToolAudience| {
@@ -1435,12 +1435,19 @@ mod tests {
         assert!(names.contains(&OTHER_WIRE.to_owned()), "got: {names:?}");
     }
 
-    /// The sandbox gets the same tools the request's array does, so a tool the
-    /// user disabled is not reachable by writing a script instead.
-    #[tokio::test]
-    async fn callable_drops_what_the_config_disabled() {
+    /// The sandbox gets the same tools the request's array does. Otherwise a
+    /// tool the user disabled, or one the host cannot service (ACP without
+    /// form elicitation drops `question`), comes back through a script.
+    #[test_case(&["read"], &[]          ; "config_disabled")]
+    #[test_case(&[],       &["read"]    ; "host_excluded")]
+    fn callable_drops_what_the_requests_filter_dropped(disabled: &[&str], excluded: &[&str]) {
         let mut ctx = crate::tools::test_support::stub_ctx(&AgentMode::Build);
-        ctx.config.disabled_tools = vec!["read".to_owned()];
+        ctx.config.disabled_tools = disabled.iter().map(|n| (*n).to_owned()).collect();
+        ctx.tool_filter = std::sync::Arc::new(crate::tools::ToolFilter::from_config(
+            &ctx.config,
+            &ctx.model,
+            excluded,
+        ));
         assert!(!callable_names(&ctx).contains(&"read".to_owned()));
     }
 

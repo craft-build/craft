@@ -52,7 +52,9 @@ pub mod worktree;
 mod write;
 mod zoom;
 
-pub use dynamic::{DynamicContext, PromotedTools, ToolBuild, build_active_tools, filter_to_active};
+pub use dynamic::{
+    DynamicContext, PromotedTools, RequestTools, ToolBuild, build_active_tools, filter_to_active,
+};
 pub use file_tracker::FileReadTracker;
 pub use fs_backend::{FsBackend, FsFuture, LocalFs};
 pub use registry::{
@@ -279,6 +281,10 @@ pub struct ToolContext {
     pub mcp: Option<McpHandle>,
     pub deadline: Deadline,
     pub config: AgentConfig,
+    /// The filter that built this run's tool array, so in-process dispatch
+    /// (`tool_dispatch::callable`) answers to the same exclusions the model's
+    /// tool list already carries.
+    pub tool_filter: Arc<ToolFilter>,
     pub tool_output_lines: ToolOutputLines,
     pub permissions: Arc<PermissionManager>,
     pub model_policy: Arc<craft_config::ModelPolicy>,
@@ -935,6 +941,7 @@ pub(crate) fn providerless_ctx(
         mcp: None,
         deadline: Deadline::None,
         config: AgentConfig::default(),
+        tool_filter: Arc::default(),
         tool_output_lines: ToolOutputLines::default(),
         permissions,
         model_policy: Arc::new(craft_config::ModelPolicy::default()),
@@ -1002,6 +1009,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         mcp: None,
         deadline: Deadline::None,
         config: env.config.clone(),
+        tool_filter: Arc::new(ToolFilter::from_config(&env.config, &env.model, &[])),
         tool_output_lines: ToolOutputLines::default(),
         permissions: Arc::clone(&env.permissions),
         model_policy: Arc::new(craft_config::ModelPolicy::default()),

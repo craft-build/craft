@@ -103,6 +103,7 @@ pub struct Agent<'h> {
     history: &'h mut History,
     system: String,
     tools: Value,
+    tool_filter: Arc<crate::tools::ToolFilter>,
     loaded_instructions: LoadedInstructions,
     config: AgentConfig,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
@@ -138,6 +139,16 @@ impl<'h> Agent<'h> {
             history: run.history,
             system: run.system,
             tools: run.tools,
+            tool_filter: Arc::new(match &run.tool_build {
+                Some(build) => crate::tools::ToolFilter::from_config(
+                    &params.config,
+                    &params.model,
+                    &build.excluded,
+                ),
+                // The array is the host's own, so dispatch answers to the
+                // config's filter alone, with no host exclusions to honor.
+                None => crate::tools::ToolFilter::from_config(&params.config, &params.model, &[]),
+            }),
             loaded_instructions: LoadedInstructions::new(),
             config: params.config,
             prompt_slots: params.prompt_slots,

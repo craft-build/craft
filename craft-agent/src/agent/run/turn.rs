@@ -36,13 +36,15 @@ impl<'h> Agent<'h> {
         }
 
         if let Some(build) = &self.tool_state.tool_build {
-            self.tools = crate::tools::build_active_tools(
+            let tools = crate::tools::RequestTools::build(
                 build,
                 &self.io.model,
                 &self.config,
                 &self.tool_state.dynamic,
                 &self.tool_state.promoted,
             );
+            self.tools = tools.definitions().clone();
+            self.tool_filter = Arc::clone(tools.filter());
             if !matches!(self.flow.mode, AgentMode::Flow(_)) {
                 self.tools = crate::tools::strip_flow_only_tools(&self.tools);
             }
@@ -390,6 +392,7 @@ impl<'h> Agent<'h> {
             mcp: self.tool_state.mcp.clone(),
             deadline: Deadline::None,
             config: self.config.clone(),
+            tool_filter: Arc::clone(&self.tool_filter),
             tool_output_lines: self.tool_state.tool_output_lines,
             permissions: Arc::clone(&self.tool_state.permissions),
             model_policy: Arc::clone(&self.model_policy),
