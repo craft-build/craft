@@ -85,7 +85,7 @@ impl MultiEdit {
         ctx.check_before_edit(p)?;
 
         let before = ctx.fs.read_text_file(p).await?;
-        let after = self.apply_edits(&before)?;
+        let after = super::edit_helpers::preserve_line_endings(&before, |lf| self.apply_edits(lf))?;
 
         let validation = super::validation::validate_edit(p, &before, &after);
         if validation.introduced_errors {

@@ -40,15 +40,22 @@ impl Edit {
 
         let before = ctx.fs.read_text_file(p).await?;
 
-        let result = super::fuzzy_replace::replace(
-            &before,
-            &self.old_string,
-            &self.new_string,
-            self.replace_all.unwrap_or(false),
-            self.occurrence,
-        )?;
+        let mut pass = fuzzy_replace::Pass::Exact;
+        let after = super::edit_helpers::preserve_line_endings(&before, |lf| {
+            super::fuzzy_replace::replace(
+                lf,
+                &self.old_string,
+                &self.new_string,
+                self.replace_all.unwrap_or(false),
+                self.occurrence,
+            )
+            .map(|r| {
+                pass = r.pass;
+                r.content
+            })
+        })?;
 
-        let validation = super::validation::validate_edit(p, &before, &result.content);
+        let validation = super::validation::validate_edit(p, &before, &after);
 
         if validation.introduced_errors {
             ctx.fs.write_text_file(p, &before).await?;
@@ -58,14 +65,14 @@ impl Edit {
             ));
         }
 
-        ctx.fs.write_text_file(p, &result.content).await?;
+        ctx.fs.write_text_file(p, &after).await?;
 
         ctx.file_tracker.record_read(p);
 
-        let pass_label = if result.pass == fuzzy_replace::Pass::Exact {
+        let pass_label = if pass == fuzzy_replace::Pass::Exact {
             String::new()
         } else {
-            format!(" (fuzzy match pass {})", result.pass.number())
+            format!(" (fuzzy match pass {})", pass.number())
         };
 
         let warn = if !validation.syntax_valid {
@@ -78,7 +85,7 @@ impl Edit {
             summary: format!("edited {}{}{}", relative_path(&path), pass_label, warn),
             path,
             before,
-            after: result.content,
+            after,
         })
     }
 
@@ -141,6 +148,28 @@ mod tests {
         let path = dir.path().join(name);
         fs::write(&path, content).unwrap();
         path.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn edit_keeps_crlf_line_endings() {
+        let dir = TempDir::new().unwrap();
+        let ctx = stub_ctx(&AgentMode::Build);
+        let path = temp_file(&dir, "f.rs", "fn f() {\r\n    a();\r\n}\r\n");
+        pre_read(&ctx, &path);
+        Edit {
+            path: path.clone(),
+            old_string: "    a();".into(),
+            new_string: "    b();\n    c();".into(),
+            replace_all: None,
+            occurrence: None,
+        }
+        .execute(&ctx)
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "fn f() {\r\n    b();\r\n    c();\r\n}\r\n"
+        );
     }
 
     #[tokio::test]

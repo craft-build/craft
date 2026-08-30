@@ -17,6 +17,7 @@ mod conflicts;
 mod delete;
 mod dynamic;
 mod edit;
+mod edit_helpers;
 mod edit_lines;
 mod file_tracker;
 pub mod flow_search;

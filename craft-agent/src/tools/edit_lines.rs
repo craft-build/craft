@@ -213,7 +213,9 @@ impl InsertLines {
         ctx.check_before_edit(p)?;
 
         let before = ctx.fs.read_text_file(p).await?;
-        let after = Self::insert_lines(&before, self.line, &self.new_string)?;
+        let after = super::edit_helpers::preserve_line_endings(&before, |lf| {
+            Self::insert_lines(lf, self.line, &self.new_string)
+        })?;
 
         let validation = super::validation::validate_edit(p, &before, &after);
         if validation.introduced_errors {
