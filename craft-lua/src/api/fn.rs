@@ -119,6 +119,9 @@ pub(crate) struct JobMeta {
     on_exit: Option<RegistryKey>,
     pub(crate) event_rx: Option<flume::Receiver<JobEvent>>,
     kill: Option<Box<dyn FnOnce() + Send>>,
+    /// Set by the wait thread the moment the process is reaped, well before
+    /// `exit_code`, which only lands when the `Exit` event reaches the pump.
+    pub(crate) reaped: Arc<std::sync::atomic::AtomicBool>,
     stdout_tail: VecDeque<String>,
     stderr_tail: VecDeque<String>,
     tail_cap: usize,
@@ -290,6 +293,7 @@ impl JobStore {
                 on_exit,
                 event_rx: Some(handle.events),
                 kill: Some(handle.kill),
+                reaped: handle.reaped,
                 stdout_tail: VecDeque::new(),
                 stderr_tail: VecDeque::new(),
                 tail_cap: DEFAULT_TAIL,
@@ -477,7 +481,7 @@ impl JobStore {
         if let Some(meta) = self.jobs.get_mut(&job_id)
             && meta.owned_by(plugin)
             && meta.alive
-            && meta.exit_code.is_none()
+            && !meta.reaped.load(std::sync::atomic::Ordering::Acquire)
             && let Some(kill) = meta.kill.take()
         {
             kill();
@@ -548,9 +552,9 @@ impl Drop for JobStore {
 
 /// Kills and removes a single job from a raw job map, freeing its
 /// callback registry values. Shared by [`JobStore::remove`] and the
-/// plugin-unload cleanup over the global background map. The kill is
-/// skipped for jobs that already exited: the wait thread reaped the
-/// process, so its pid may have been recycled.
+/// plugin-unload cleanup over the global background map. The kill closure
+/// itself refuses a job the wait thread already reaped, so a recycled pid
+/// is never signalled.
 pub(crate) fn remove_job_from(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>, job_id: u32) {
     if let Some(mut meta) = jobs.remove(&job_id) {
         if meta.exit_code.is_none()
@@ -1740,6 +1744,7 @@ mod tests {
             on_exit: None,
             event_rx: None,
             kill: None,
+            reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stdout_tail: VecDeque::new(),
             stderr_tail: VecDeque::new(),
             tail_cap: DEFAULT_TAIL,

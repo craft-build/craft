@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use flume::Receiver;
@@ -95,6 +96,11 @@ pub struct TerminalHandle {
     pub pid: u32,
     pub events: Receiver<JobEvent>,
     pub kill: Box<dyn FnOnce() + Send>,
+    /// Flipped by the wait thread the moment the process is reaped, so the
+    /// kill closure stops signalling a pid the kernel may have handed out
+    /// again. Narrower than an exit code, which is only observable once the
+    /// `Exit` event reaches the pump.
+    pub reaped: Arc<AtomicBool>,
 }
 
 pub type TerminalFuture<'a> =
@@ -176,10 +182,13 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
     )?;
 
     let exit_tx = event_tx;
+    let reaped = Arc::new(AtomicBool::new(false));
+    let wait_reaped = Arc::clone(&reaped);
     thread::Builder::new()
         .name("job-wait".into())
         .spawn(move || {
             let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+            wait_reaped.store(true, Ordering::Release);
             if let Some(h) = stdout_handle {
                 let _ = h.join();
             }
@@ -190,12 +199,23 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
         })
         .map_err(|e| e.to_string())?;
 
-    let kill: Box<dyn FnOnce() + Send> = Box::new(move || kill_process(pid));
+    let kill_reaped = Arc::clone(&reaped);
+    let kill: Box<dyn FnOnce() + Send> = Box::new(move || {
+        // Once the process is reaped its pid can be handed to someone else,
+        // and signalling it would hit a stranger's process group. The flag is
+        // set by the wait thread right after `wait` returns, which narrows
+        // that window to a few instructions but does not close it: only a
+        // pidfd would, and a pidfd cannot express `killpg`.
+        if !kill_reaped.load(Ordering::Acquire) {
+            kill_process(pid);
+        }
+    });
 
     Ok(TerminalHandle {
         pid,
         events: event_rx,
         kill,
+        reaped,
     })
 }
 
