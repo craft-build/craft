@@ -268,13 +268,14 @@ fn rebase(drift: &HashMap<&str, &str>, indent: &str) -> String {
 // drift is a widening of the inner levels, which the column test still catches
 // and reindent has to correct otherwise.
 fn written_in_file_frame(drift: &HashMap<&str, &str>, replacement: &str) -> bool {
-    let mut base: Option<(&str, &str)> = None;
-    for (&model_indent, &file_indent) in drift {
-        if base.is_none_or(|(m, _)| model_indent.len() < m.len()) {
-            base = Some((model_indent, file_indent));
-        }
-    }
-    let (model_base, file_base) = base.unwrap_or(("", ""));
+    // `HashMap` iteration order is arbitrary, so two columns of equal width,
+    // easy to hit once tabs and spaces mix, used to leave that order deciding
+    // how the file gets reindented. Shallowest first, then by content so a tie
+    // always falls the same way.
+    let (model_base, file_base) = drift
+        .iter()
+        .min_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+        .map_or(("", ""), |(&m, &f)| (m, f));
 
     let mut every_column_known = true;
     let mut replacement_base: Option<&str> = None;
@@ -803,6 +804,22 @@ mod tests {
             replace_simple(content, search, "x").unwrap_err(),
             expected_err
         );
+    }
+
+    // Two model columns of the same width can map to different file columns, so
+    // the base is a real tie. Without a stable order the same edit can reindent
+    // one way on one run and another way on the next, hence the repeat.
+    #[test]
+    fn reindent_base_is_deterministic_when_indent_widths_tie() {
+        let content = "if x:\n    a()\n        b()\n";
+        let old = "\ta()\n b()";
+        let new = "    a()\n      c()";
+        for _ in 0..8 {
+            assert_eq!(
+                replace_simple(content, old, new).unwrap(),
+                "if x:\n    a()\n      c()\n"
+            );
+        }
     }
 
     #[test]
