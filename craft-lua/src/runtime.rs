@@ -67,7 +67,7 @@ const NIL_WITHOUT_FINISH_MSG: &str =
     "handler returned nil without calling ctx:finish() or starting jobs";
 pub(crate) const CANCELLED_MSG: &str = "cancelled";
 const HANDLER_TIMEOUT_MSG: &str = "timeout";
-const MAX_INFLIGHT_TOOLS: usize = 64;
+pub const MAX_INFLIGHT_TOOLS: usize = 64;
 const GC_STEP_INTERVAL: usize = 4;
 /// Only sets how fast the one-shot interrupt is re-armed after it fires, so
 /// the kill still lands within a poll of [`KILL_GRACE`]. The thread ticks even
@@ -170,6 +170,9 @@ pub enum Request {
         deadline: Option<Instant>,
         reply: flume::Sender<ToolCallReply>,
         live: Option<LiveCtx>,
+        /// Runs on the caller's slot instead of taking one of its own.
+        /// See [`under_inflight_slot`].
+        nested: bool,
     },
     ComputeHeader {
         plugin: Arc<str>,
@@ -1389,6 +1392,81 @@ impl Drop for GateGuard<'_> {
     }
 }
 
+impl InflightGate {
+    /// [`Self::wait_below`] for a call the host cannot interrupt yet. A call
+    /// still queued here has no [`TaskCell`], so the watchdog and
+    /// [`until_abandoned`] have nothing to end. The wait ends itself once
+    /// nobody is left waiting for the reply, and reports what the handler
+    /// would have reported.
+    async fn wait_below_or_abandoned(
+        &self,
+        limit: usize,
+        cancel: &CancelToken,
+        deadline: Option<Instant>,
+    ) -> Result<(), &'static str> {
+        let lapsed = async {
+            match deadline {
+                Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                None => std::future::pending::<()>().await,
+            }
+            HANDLER_TIMEOUT_MSG
+        };
+        let cancelled = async {
+            cancel.cancelled().await;
+            CANCELLED_MSG
+        };
+        tokio::select! {
+            biased;
+            _ = self.wait_below(limit) => Ok(()),
+            msg = async { tokio::select! { biased; msg = cancelled => msg, msg = lapsed => msg } } => Err(msg),
+        }
+    }
+}
+
+thread_local! {
+    static SLOT_COVERED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the caller already runs under an in-flight slot.
+///
+/// A tool call made from there cannot finish before its caller does, and the
+/// caller holds its slot all that time. Charge the child a slot of its own and
+/// the gate deadlocks against itself: park as many callers as there are slots
+/// and no child is ever admitted, so no caller ever returns. The child rides
+/// the caller's slot instead, which also keeps the drain barrier honest, since
+/// that slot outlives the whole subtree.
+pub(crate) fn under_inflight_slot() -> bool {
+    SLOT_COVERED.get()
+}
+
+pin_project_lite::pin_project! {
+    /// `slot` is `None` when an ancestor holds the slot for this work. The
+    /// flag goes up on every poll and back down after, because other tasks on
+    /// the same executor run in between and must not inherit the cover.
+    struct SlotCovered<'a, F> {
+        _slot: Option<GateGuard<'a>>,
+        #[pin]
+        inner: F,
+    }
+}
+
+impl<F: Future> Future for SlotCovered<'_, F> {
+    type Output = F::Output;
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let prev = SLOT_COVERED.replace(true);
+        let result = self.project().inner.poll(cx);
+        SLOT_COVERED.set(prev);
+        result
+    }
+}
+
+fn covered<'a, F: Future>(slot: Option<GateGuard<'a>>, inner: F) -> SlotCovered<'a, F> {
+    SlotCovered { _slot: slot, inner }
+}
+
 pub(crate) struct PendingAsyncTask {
     pub work_fn: RegistryKey,
     pub cancel: CancelToken,
@@ -1501,7 +1579,7 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
         let g = Rc::clone(gate);
 
         tokio::task::spawn_local(async move {
-            let _gate_guard = GateGuard::new(&g);
+            let slot = Some(GateGuard::new(&g));
 
             let mut cell = TaskCell::new(
                 task.cancel.clone(),
@@ -1513,7 +1591,7 @@ fn drain_spawn_queue(lua: &Lua, gate: &Rc<InflightGate>) {
             let scope = TaskScope::new(&lua, cell);
             let run = scope.scope_future(run_work_fn(&lua, &task.work_fn, scope.handle()));
 
-            let result = run.await;
+            let result = covered(slot, run).await;
             if let Err(e) = &result {
                 let tool_id = task.live_ctx.as_ref().map(|l| l.tool_use_id.as_str());
                 tracing::debug!(error = %e, tool_id, "async.run: task failed");
@@ -2763,8 +2841,8 @@ pub fn spawn(
                         while let Ok(hook) = hook_rx.recv_async().await {
                             // Counted as in-flight so a plugin reload waiting
                             // on `drain_barrier` cannot land mid-handler.
-                            let _guard = GateGuard::new(&gate);
-                            run_host_hook(&lua, &gate, hook).await;
+                            let slot = Some(GateGuard::new(&gate));
+                            covered(slot, run_host_hook(&lua, &gate, hook)).await;
                         }
                     });
                 }
@@ -2823,25 +2901,46 @@ pub fn spawn(
                             deadline,
                             reply,
                             live,
+                            nested,
                         } => {
-                            gate.wait_below(MAX_INFLIGHT_TOOLS).await;
                             let lua = rt.lua.clone();
                             let plugins = Rc::clone(&rt.plugins);
                             let shutdown_ref = Arc::clone(&rt.shutdown);
                             let g = Rc::clone(&gate);
+                            let cancel = ctx.cancel.clone();
 
                             tokio::task::spawn_local(async move {
-                                let _gate_guard = GateGuard::new(&g);
-                                let res = run_tool_call(
-                                    lua.clone(),
-                                    plugin,
-                                    tool,
-                                    input,
-                                    ctx,
-                                    deadline,
-                                    live,
-                                    plugins,
-                                    shutdown_ref,
+                                let slot = if nested {
+                                    None
+                                } else {
+                                    match g
+                                        .wait_below_or_abandoned(
+                                            MAX_INFLIGHT_TOOLS,
+                                            &cancel,
+                                            deadline,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => Some(GateGuard::new(&g)),
+                                        Err(msg) => {
+                                            let _ = reply.send(ToolCallReply::err(msg));
+                                            return;
+                                        }
+                                    }
+                                };
+                                let res = covered(
+                                    slot,
+                                    run_tool_call(
+                                        lua.clone(),
+                                        plugin,
+                                        tool,
+                                        input,
+                                        ctx,
+                                        deadline,
+                                        live,
+                                        plugins,
+                                        shutdown_ref,
+                                    ),
                                 )
                                 .await;
                                 drain_spawn_queue(&lua, &g);
@@ -4039,6 +4138,57 @@ mod tests {
 
     fn gate() -> InflightGate {
         InflightGate::new(Lua::new())
+    }
+
+    /// The cover belongs to the polls of the covered work, not to the thread.
+    /// A sibling that runs while that work is parked is a call of its own and
+    /// still owes a slot.
+    #[tokio::test]
+    async fn slot_cover_does_not_leak_into_a_sibling_task() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (release_tx, release_rx) = flume::unbounded::<()>();
+                let holder = tokio::task::spawn_local(covered(None, async move {
+                    let entered = under_inflight_slot();
+                    release_rx.recv_async().await.ok();
+                    (entered, under_inflight_slot())
+                }));
+                tokio::task::yield_now().await;
+                assert!(
+                    !tokio::task::spawn_local(async { under_inflight_slot() })
+                        .await
+                        .unwrap()
+                );
+                drop(release_tx);
+                assert_eq!(holder.await.unwrap(), (true, true));
+                assert!(!under_inflight_slot());
+            })
+            .await;
+    }
+
+    #[test_case(true, false, HANDLER_TIMEOUT_MSG ; "lapsed_deadline")]
+    #[test_case(false, true, CANCELLED_MSG ; "cancelled")]
+    #[test_case(true, true, CANCELLED_MSG ; "cancel_outranks_deadline")]
+    #[tokio::test]
+    async fn admission_gives_up_once_nobody_waits_for_the_reply(
+        lapsed: bool,
+        cancelled: bool,
+        expected: &str,
+    ) {
+        let g = gate();
+        for _ in 0..MAX_INFLIGHT_TOOLS {
+            g.increment();
+        }
+        let (trigger, token) = CancelToken::new();
+        if cancelled {
+            trigger.cancel();
+        }
+        let deadline = lapsed.then(|| Instant::now() - Duration::from_secs(1));
+        let admitted = g
+            .wait_below_or_abandoned(MAX_INFLIGHT_TOOLS, &token, deadline)
+            .await;
+        assert_eq!(admitted.err(), Some(expected));
+        assert_eq!(g.count.get(), MAX_INFLIGHT_TOOLS);
     }
 
     #[tokio::test]
