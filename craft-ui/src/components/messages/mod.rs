@@ -477,18 +477,15 @@ impl MessagesPanel {
         self.update_tool(tool_id, |msg| msg.turn_usage = Some(usage), |_| {});
     }
 
-    fn upsert_instruction_segment(
-        &mut self,
-        parent_id: &str,
-        blocks: &[InstructionBlock],
-        parent_idx: usize,
-        msg_index: Option<usize>,
-    ) {
+    fn upsert_instruction_segment(&mut self, parent_id: &str, blocks: &[InstructionBlock]) {
         if blocks.is_empty() {
             return;
         }
         let inst_id = segment::instruction_id(parent_id);
         let batch_index = parse_batch_inner_id(parent_id).map(|(_, idx)| idx + 1);
+        let Some(seg_idx) = self.cache.find_by_tool_id(&inst_id) else {
+            return;
+        };
         let exp = self
             .expanded_tools
             .get(&inst_id)
@@ -496,32 +493,17 @@ impl MessagesPanel {
             .unwrap_or_default();
         let tl = build_instructions_lines(blocks, self.viewport_width, exp.output, batch_index);
 
-        if let Some(seg_idx) = self.cache.find_by_tool_id(&inst_id) {
-            let seg = self.cache.get_mut(seg_idx).unwrap();
-            seg.search_text = tl.search_text.clone();
-            seg.update_with_reuse(tl, &self.hl_worker);
-        } else {
-            let mut seg = Segment::with_tool(inst_id, msg_index);
-            seg.search_text = tl.search_text.clone();
-            seg.apply_highlight(tl, &self.hl_worker);
-            // Instructions and images arrive with the tool's output, so a
-            // tool finishing beside slower siblings inserts above segments
-            // that already exist. The scroll position names one by index, and
-            // left alone it would quietly start naming a segment further down.
-            let at = parent_idx + 1;
-            if batch_index.is_some() {
-                self.cache.insert(at, seg);
-                if self.scroll.seg >= at {
-                    self.scroll.seg += 1;
-                }
-            } else {
-                self.cache.insert(at, Segment::spacer());
-                self.cache.insert(at + 1, seg);
-                if self.scroll.seg >= at {
-                    self.scroll.seg += PAIR_SEGMENTS;
-                }
-            }
+        // The spacer gets its line only now. Empty means no rows, so a tool
+        // that never sends instructions leaves no gap behind.
+        if batch_index.is_none()
+            && let Some(spacer) = self.cache.get_mut(seg_idx - 1)
+            && spacer.lines().is_empty()
+        {
+            spacer.set_lines(vec![Line::default()]);
         }
+        let seg = self.cache.get_mut(seg_idx).unwrap();
+        seg.search_text = tl.search_text.clone();
+        seg.update_with_reuse(tl, &self.hl_worker);
     }
 
     const IMG_SUFFIX: &'static str = "__img";
@@ -922,10 +904,9 @@ impl MessagesPanel {
     fn rebuild_expanded_tool(&mut self, tool_id: &str) {
         if segment::is_instruction_segment(tool_id) {
             if let Some(parent_id) = segment::instruction_parent(tool_id)
-                && let Some(parent_idx) = self.cache.find_by_tool_id(parent_id)
                 && let Some(blocks) = self.get_instructions_for_tool(parent_id)
             {
-                self.upsert_instruction_segment(parent_id, &blocks, parent_idx, None);
+                self.upsert_instruction_segment(parent_id, &blocks);
             }
         } else {
             let rebuild_id =
@@ -1575,7 +1556,7 @@ impl MessagesPanel {
         self.build_and_upsert_batch_children(seg_idx, tool_id);
 
         if let Some(blocks) = instructions {
-            self.upsert_instruction_segment(tool_id, &blocks, seg_idx, None);
+            self.upsert_instruction_segment(tool_id, &blocks);
         }
         self.upsert_image_segment(tool_id, image_output.as_ref(), None);
     }
@@ -1617,11 +1598,10 @@ impl MessagesPanel {
         let child_prefix = format!("{tool_id}__");
         let msg_index = self.cache.get(parent_idx).and_then(|s| s.msg_index);
         for (child_id, search, tl, instructions) in children {
-            let child_seg_idx = if let Some(cseg_idx) = self.cache.find_by_tool_id(&child_id) {
+            if let Some(cseg_idx) = self.cache.find_by_tool_id(&child_id) {
                 let cseg = self.cache.get_mut(cseg_idx).unwrap();
                 cseg.search_text = search;
                 cseg.update_with_reuse(tl, &self.hl_worker);
-                cseg_idx
             } else {
                 let mut seg = Segment::with_tool(child_id.clone(), msg_index);
                 seg.search_text = search;
@@ -1637,10 +1617,15 @@ impl MessagesPanel {
                     })
                     .map_or(parent_idx + 1, |p| p + 1);
                 self.cache.insert(insert_pos, seg);
-                insert_pos
-            };
+                if instructions.is_some() {
+                    self.cache.insert(
+                        insert_pos + 1,
+                        Segment::with_tool(segment::instruction_id(&child_id), msg_index),
+                    );
+                }
+            }
             if let Some(blocks) = instructions {
-                self.upsert_instruction_segment(&child_id, &blocks, child_seg_idx, msg_index);
+                self.upsert_instruction_segment(&child_id, &blocks);
             }
         }
     }
@@ -1663,6 +1648,7 @@ impl MessagesPanel {
                 seg.search_text = search_text;
                 seg.apply_highlight(tl, &self.hl_worker);
                 self.cache.push(seg);
+                self.cache.reserve_instructions(&id, Some(i));
 
                 if let Some(ToolOutput::Batch { entries, .. }) = msg.tool_output.as_deref() {
                     let inst_data: Vec<_> = entries
@@ -1691,9 +1677,12 @@ impl MessagesPanel {
                         seg.search_text = tl.search_text.clone();
                         seg.apply_highlight(tl, &self.hl_worker);
                         self.cache.push(seg);
+                        self.cache.push(Segment::with_tool(
+                            segment::instruction_id(&child_id),
+                            Some(i),
+                        ));
                         if let Some(blocks) = blocks {
-                            let last_idx = self.cache.len().saturating_sub(1);
-                            self.upsert_instruction_segment(&child_id, &blocks, last_idx, Some(i));
+                            self.upsert_instruction_segment(&child_id, &blocks);
                         }
                     }
                 } else {
@@ -1706,8 +1695,7 @@ impl MessagesPanel {
                         _ => None,
                     });
                     if let Some(blocks) = blocks {
-                        let last_idx = self.cache.len().saturating_sub(1);
-                        self.upsert_instruction_segment(&id, &blocks, last_idx, Some(i));
+                        self.upsert_instruction_segment(&id, &blocks);
                     }
                     self.upsert_image_segment(&id, image_output.as_ref(), Some(i));
                 }

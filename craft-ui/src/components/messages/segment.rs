@@ -264,6 +264,18 @@ impl SegmentCache {
         self.segments.push(seg);
     }
 
+    /// Books the spacer and instruction slots a tool fills in later, when its
+    /// output finally arrives. Splicing them in at that point would shift
+    /// every segment after them, and plenty of things hold a segment index by
+    /// then: the scroll position, the search highlight, the scroll a search
+    /// restores, the anchors of a live selection. Empty segments take no rows,
+    /// so a pair nobody fills stays invisible.
+    pub fn reserve_instructions(&mut self, tool_id: &str, msg_index: Option<usize>) {
+        self.segments.push(Segment::default());
+        self.segments
+            .push(Segment::with_tool(instruction_id(tool_id), msg_index));
+    }
+
     pub fn insert(&mut self, pos: usize, seg: Segment) {
         self.segments.insert(pos, seg);
     }

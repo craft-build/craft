@@ -2314,10 +2314,8 @@ fn scrolled_tool(panel: &MessagesPanel) -> Option<&str> {
     panel.cache.get(panel.scroll.seg)?.tool_id.as_deref()
 }
 
-/// Instructions arrive with a tool's output, so a tool finishing beside slower
-/// siblings inserts two segments above segments that already exist. The scroll
-/// position names a segment by index, and a renumbering it does not follow
-/// leaves it naming the pair that got shoved down instead.
+/// Without this, a tool finishing beside slower siblings pulls the scroll off
+/// the segment the user parked it on.
 #[test]
 fn a_late_instruction_segment_keeps_the_scroll_on_its_segment() {
     const HEIGHT: u16 = 10;
@@ -2342,6 +2340,37 @@ fn a_late_instruction_segment_keeps_the_scroll_on_its_segment() {
     render(&mut panel, 80, HEIGHT);
 
     assert_eq!(scrolled_tool(&panel), Some(SLOW_TOOL));
+}
+
+/// The scroll can be nudged back after the fact, the search highlight and the
+/// selection anchors cannot. This fails the day the cache stops growing only
+/// at the end.
+#[test]
+fn a_late_instruction_segment_moves_no_index() {
+    const SLOW_TOOL: &str = "t2";
+
+    let mut panel = MessagesPanel::new(UiConfig::default(), EventHandle::disconnected_for_test());
+    panel.tool_start(start("t1", "read"));
+    panel.tool_start(start(SLOW_TOOL, BASH_TOOL_NAME));
+    push_tail_msgs(&mut panel);
+    render(&mut panel, 80, 10);
+
+    let before_len = panel.cache.len();
+    let before_idx = panel.cache.find_by_tool_id(SLOW_TOOL).unwrap();
+
+    panel.tool_done(done_with_instructions("t1"));
+    render(&mut panel, 80, 10);
+
+    assert_eq!(before_len, panel.cache.len(), "the cache must not grow");
+    assert_eq!(
+        Some(before_idx),
+        panel.cache.find_by_tool_id(SLOW_TOOL),
+        "a later segment must keep its index"
+    );
+    assert!(prev_segment_is_spacer(
+        &panel,
+        &segment::instruction_id("t1")
+    ));
 }
 
 /// Walks the viewport the way `view` does: from the scroll position, not from
