@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use flume::Receiver;
+use shell_words::join as shell_join;
 
 const READER_BUF_SIZE: usize = 8 * 1024;
 
@@ -45,15 +46,12 @@ impl JobCommand {
         }
     }
 
-    /// Printable form for `jobinfo` / `joblist` rows.
+    /// Only for `jobinfo` / `joblist` rows: an argv job spawns from the vec,
+    /// so nothing ever re-parses this.
     pub fn display(&self) -> String {
         match self {
             Self::Shell(cmd) => cmd.clone(),
-            Self::Argv(argv) => argv
-                .iter()
-                .map(|arg| shell_quote(arg))
-                .collect::<Vec<_>>()
-                .join(" "),
+            Self::Argv(argv) => shell_join(argv),
         }
     }
 }
@@ -188,7 +186,7 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
         .name("job-wait".into())
         .spawn(move || {
             let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-            wait_reaped.store(true, Ordering::Release);
+            wait_reaped.store(true, Ordering::Relaxed);
             if let Some(h) = stdout_handle {
                 let _ = h.join();
             }
@@ -247,20 +245,6 @@ where
         })
         .map_err(|e| e.to_string())?;
     Ok(Some(handle))
-}
-
-/// Single-quote {arg} unless it is plainly safe, so an argv job's `command`
-/// row reads back as the shell line that would have produced it. Display
-/// only: nothing re-parses this.
-fn shell_quote(arg: &str) -> String {
-    if !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c))
-    {
-        return arg.to_string();
-    }
-    format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
 fn shell_command(cmd: &str) -> Command {
@@ -350,11 +334,14 @@ mod tests {
         assert!(backend.start(spec).await.is_err());
     }
 
-    #[test_case::test_case("plain", "plain" ; "safe_argument_is_bare")]
-    #[test_case::test_case("a b", "'a b'" ; "space_is_quoted")]
-    #[test_case::test_case("it's", r"'it'\''s'" ; "quote_is_escaped")]
-    #[test_case::test_case("", "''" ; "empty_argument_stays_visible")]
-    fn shell_quote_renders_argv_rows(arg: &str, expected: &str) {
-        assert_eq!(shell_quote(arg), expected);
+    #[test]
+    fn an_argv_row_reads_back_as_the_same_argv() {
+        const ARGV: [&str; 2] = ["echo", "a; echo pwned"];
+        let row = JobCommand::Argv(ARGV.map(String::from).to_vec()).display();
+        assert_eq!(
+            shell_words::split(&row).unwrap(),
+            ARGV,
+            "the row a user reads must quote what the shell would have eaten"
+        );
     }
 }

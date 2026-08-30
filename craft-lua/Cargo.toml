@@ -80,6 +80,7 @@ tree-sitter-containerfile = { workspace = true }
 tree-sitter-hcl = { workspace = true }
 tree-sitter-json = { workspace = true }
 tree-sitter-make = { workspace = true }
+shell-words = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }

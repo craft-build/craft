@@ -1143,6 +1143,56 @@ craft.api.register_tool({{
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn jobwait_on_an_exited_job_reports_whether_its_tail_is_complete() {
+    const WHOLE: &str = "one\ntwo:false";
+    const CLIPPED: &str = "two:true";
+    const DISCARDED: &str = ":true";
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    let session = craft_storage::id::CraftId::generate();
+    let sid = session.to_string();
+    let src = format!(
+        r#"
+craft.api.register_tool({{
+    name = "wait_twice",
+    description = "the tail three exited session jobs read back",
+    schema = {MINIMAL_SCHEMA},
+    audiences = {{ "main" }},
+    handler = function()
+        -- The first wait parks until the exit and fills the tail, the second
+        -- one answers from that tail, which is the path under test.
+        local function tail_of(opts)
+            opts.session = "{sid}"
+            local id = craft.fn.jobstart("echo one; echo two", opts)
+            craft.fn.jobwait(id)
+            local got = craft.fn.jobwait(id)
+            return got.stdout .. ":" .. tostring(got.truncated)
+        end
+        return table.concat({{
+            tail_of({{ tail = 8 }}),
+            tail_of({{ tail = 1 }}),
+            tail_of({{ stdout = false }}),
+        }}, "|")
+    end,
+}})
+"#
+    );
+    host.load_source("chatty", &src).unwrap();
+
+    assert_eq!(
+        exec_tool(&reg, "wait_twice", serde_json::json!({}))
+            .await
+            .unwrap(),
+        format!("{WHOLE}|{CLIPPED}|{DISCARDED}"),
+        "a tail that held everything is not truncated, an empty one we never filled is"
+    );
+
+    host.event_handle()
+        .end_sessions_blocking([session], SessionEndReason::Shutdown);
+}
+
 #[tokio::test]
 async fn stream_redirect_to_a_path_needs_fs_write() {
     let reg = fresh_registry();

@@ -3833,6 +3833,7 @@ mod tests {
                     None,
                     None,
                     false,
+                    false,
                 );
             });
             let (finish_tx, finish_rx) = flume::bounded(1);

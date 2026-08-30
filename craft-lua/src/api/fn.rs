@@ -125,6 +125,11 @@ pub(crate) struct JobMeta {
     stdout_tail: VecDeque<String>,
     stderr_tail: VecDeque<String>,
     tail_cap: usize,
+    /// Whether the tails ever lost a line, which is what `truncated`
+    /// answers. True from the start for a stream sent to a file or dropped,
+    /// since nothing ever reaches the tail there and an empty tail is no
+    /// evidence the job stayed quiet.
+    dropped_output: bool,
     session: Option<CraftId>,
     notify: Option<JobNotify>,
     exit_code: Option<i32>,
@@ -133,9 +138,6 @@ pub(crate) struct JobMeta {
     /// Exit code owed to a callback attached after the process already died,
     /// served by [`JobStore::next_event`] as a synthetic event.
     replay_exit: Option<i32>,
-    /// Set by the first [`JobStore::complete`], so a replayed exit does not
-    /// run the completion bookkeeping twice.
-    completed: bool,
 }
 
 impl JobMeta {
@@ -144,7 +146,9 @@ impl JobMeta {
     }
 
     fn record_line(&mut self, stdout: bool, line: &str) {
-        if self.tail_cap == 0 {
+        let cap = self.tail_cap;
+        if cap == 0 {
+            self.dropped_output = true;
             return;
         }
         let tail = if stdout {
@@ -152,10 +156,12 @@ impl JobMeta {
         } else {
             &mut self.stderr_tail
         };
-        if tail.len() >= self.tail_cap {
+        let evicting = tail.len() >= cap;
+        if evicting {
             tail.pop_front();
         }
         tail.push_back(line.to_string());
+        self.dropped_output |= evicting;
     }
 
     fn has_pending(&self) -> bool {
@@ -186,6 +192,9 @@ pub(crate) struct JobSnapshot {
     pub exit_code: Option<i32>,
     pub stdout_lines: Vec<String>,
     pub stderr_lines: Vec<String>,
+    /// Some output never reached the tails, so what they hold is a window
+    /// onto a longer stream.
+    pub dropped_output: bool,
 }
 
 impl JobSnapshot {
@@ -210,6 +219,7 @@ impl JobSnapshot {
             } else {
                 Vec::new()
             },
+            dropped_output: job.dropped_output,
         }
     }
 }
@@ -218,9 +228,6 @@ pub(crate) struct JobStore {
     jobs: HashMap<u32, JobMeta>,
     next_id: u32,
     backend: Arc<dyn TerminalBackend>,
-    /// Exited session jobs per owning plugin, oldest first. Keyed by plugin
-    /// so a chatty one evicts only its own history.
-    completed_order: HashMap<Arc<str>, VecDeque<u32>>,
     /// Id served by the last [`JobStore::next_event`], so the next scan
     /// starts past it.
     scan_cursor: u32,
@@ -250,7 +257,6 @@ impl JobStore {
             jobs: HashMap::new(),
             next_id: 1,
             backend,
-            completed_order: HashMap::new(),
             scan_cursor: 0,
         }
     }
@@ -278,6 +284,7 @@ impl JobStore {
         on_stderr: Option<RegistryKey>,
         on_exit: Option<RegistryKey>,
         background: bool,
+        dropped_output: bool,
     ) {
         self.jobs.insert(
             id,
@@ -299,11 +306,11 @@ impl JobStore {
                 stdout_tail: VecDeque::new(),
                 stderr_tail: VecDeque::new(),
                 tail_cap: DEFAULT_TAIL,
+                dropped_output,
                 notify: None,
                 exit_code: None,
                 elapsed_secs: None,
                 replay_exit: None,
-                completed: false,
             },
         );
     }
@@ -385,18 +392,16 @@ impl JobStore {
         match event {
             JobEvent::Stdout(line) => job.record_line(true, line),
             JobEvent::Stderr(line) => job.record_line(false, line),
-            JobEvent::Exit(code) => {
-                job.exit_code = Some(*code);
-                job.elapsed_secs
-                    .get_or_insert_with(|| job.started.elapsed().as_secs());
-            }
+            // Termination is [`complete_job`]'s business: it owns
+            // `exit_code` and runs once per job.
+            JobEvent::Exit(_) => {}
         }
     }
 
     /// Session-owned jobs stay inspectable after exit; every other job is
     /// removed the way it always was.
     pub fn complete(&mut self, lua: &Lua, job_id: u32, code: i32) {
-        complete_job(lua, &mut self.jobs, &mut self.completed_order, job_id, code);
+        complete_job(lua, &mut self.jobs, job_id, code);
     }
 
     #[cfg(test)]
@@ -453,9 +458,6 @@ impl JobStore {
             return;
         }
         remove_job_from(lua, &mut self.jobs, job_id);
-        if let Some(history) = self.completed_order.get_mut(plugin) {
-            history.retain(|&id| id != job_id);
-        }
     }
 
     pub fn session_of(&self, job_id: u32, plugin: &str) -> Option<CraftId> {
@@ -485,7 +487,7 @@ impl JobStore {
         if let Some(meta) = self.jobs.get_mut(&job_id)
             && meta.owned_by(plugin)
             && meta.alive
-            && !meta.reaped.load(std::sync::atomic::Ordering::Acquire)
+            && !meta.reaped.load(std::sync::atomic::Ordering::Relaxed)
             && let Some(kill) = meta.kill.take()
         {
             kill();
@@ -646,26 +648,18 @@ fn attach_job(lua: &Lua, job_id: u32, plugin: &str, updates: CallbackUpdates) ->
 /// Exit path shared by the task store and the background map. Posts the
 /// mailbox notify for session jobs, then keeps them inspectable (capped)
 /// while every other job is removed as before.
-pub(crate) fn complete_job(
-    lua: &Lua,
-    jobs: &mut HashMap<u32, JobMeta>,
-    completed_order: &mut HashMap<Arc<str>, VecDeque<u32>>,
-    job_id: u32,
-    code: i32,
-) {
+pub(crate) fn complete_job(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>, job_id: u32, code: i32) {
     let Some(job) = jobs.get_mut(&job_id) else {
         return;
     };
-    // A replayed exit reaches here a second time; only the callbacks the
-    // replay just used still need releasing.
-    if job.completed {
+    // A replayed exit reaches here a second time: the job is already
+    // booked, only the callbacks the replay just used need releasing.
+    if job.exit_code.is_some() {
         drop_callbacks(lua, job);
         return;
     }
-    job.completed = true;
     job.exit_code = Some(code);
-    job.elapsed_secs
-        .get_or_insert_with(|| job.started.elapsed().as_secs());
+    job.elapsed_secs = Some(job.started.elapsed().as_secs());
     if let Some(notify) = job.notify.clone()
         && (code != 0 || notify.on_success)
     {
@@ -674,26 +668,30 @@ pub(crate) fn complete_job(
             tracing::warn!(error = %e, job_id, "session job notify failed");
         }
     }
-    if job.session.is_some() {
-        let plugin = Arc::clone(&job.plugin);
-        drop_callbacks(lua, job);
-        let history = completed_order.entry(plugin).or_default();
-        history.push_back(job_id);
-        let evicted: Vec<u32> = if history.len() > MAX_COMPLETED_SESSION_JOBS {
-            history
-                .drain(..history.len() - MAX_COMPLETED_SESSION_JOBS)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for oldest in evicted {
-            if jobs.get(&oldest).is_some_and(|j| j.exit_code.is_some()) {
-                remove_job_from(lua, jobs, oldest);
-            }
-        }
+    let session_plugin = job.session.is_some().then(|| Arc::clone(&job.plugin));
+    drop_callbacks(lua, job);
+    match session_plugin {
+        Some(plugin) => evict_completed(lua, jobs, &plugin),
+        None => remove_job_from(lua, jobs, job_id),
+    }
+}
+
+/// Cap the exited session jobs {plugin} keeps, dropping the oldest ids
+/// first, so a chatty plugin only ever evicts its own history. Scanning
+/// `jobs` beats keeping a second list in sync with it.
+fn evict_completed(lua: &Lua, jobs: &mut HashMap<u32, JobMeta>, plugin: &str) {
+    let mut exited: Vec<u32> = jobs
+        .iter()
+        .filter(|(_, job)| job.exit_code.is_some() && job.session.is_some() && job.owned_by(plugin))
+        .map(|(&id, _)| id)
+        .collect();
+    if exited.len() <= MAX_COMPLETED_SESSION_JOBS {
         return;
     }
-    remove_job_from(lua, jobs, job_id);
+    exited.sort_unstable();
+    for oldest in &exited[..exited.len() - MAX_COMPLETED_SESSION_JOBS] {
+        remove_job_from(lua, jobs, *oldest);
+    }
 }
 
 /// Drain pending events from session-owned jobs living in a raw job map
@@ -731,20 +729,7 @@ pub(crate) fn pump_session_jobs(
             }
         }
         if let Some(code) = exited {
-            let mut completed = HashMap::new();
-            complete_job(lua, jobs, &mut completed, id, code);
-        }
-    }
-    let mut exited: Vec<u32> = jobs
-        .iter()
-        .filter(|(_, m)| m.session.is_some() && m.exit_code.is_some())
-        .map(|(&id, _)| id)
-        .collect();
-    exited.sort_unstable();
-    if exited.len() > MAX_COMPLETED_SESSION_JOBS {
-        let excess = exited.len() - MAX_COMPLETED_SESSION_JOBS;
-        for id in exited.into_iter().take(excess) {
-            remove_job_from(lua, jobs, id);
+            complete_job(lua, jobs, id, code);
         }
     }
 }
@@ -937,6 +922,8 @@ pub(crate) fn create_fn_table(
                         *path = dir.join(&path);
                     }
                 }
+                let dropped_output =
+                    !matches!((&stdout, &stderr), (Redirect::Capture, Redirect::Capture));
                 let spec = TerminalSpec {
                     cmd,
                     cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
@@ -948,8 +935,17 @@ pub(crate) fn create_fn_table(
                 let handle = backend.start(spec).await.map_err(mlua::Error::runtime)?;
                 with_task_jobs(&lua, |store| {
                     store.register(
-                        id, handle, display, name, owner, session, on_stdout, on_stderr, on_exit,
+                        id,
+                        handle,
+                        display,
+                        name,
+                        owner,
+                        session,
+                        on_stdout,
+                        on_stderr,
+                        on_exit,
                         background,
+                        dropped_output,
                     );
                     store.configure(id, notify, tail);
                 });
@@ -971,6 +967,10 @@ pub(crate) fn create_fn_table(
         })?,
     )?;
 
+    // Waiting parks the caller, so a slot chain cannot call it: slot dispatch
+    // runs synchronously and dies on the first suspension. From a slot, start
+    // the job with an `on_exit` that stashes the result in plugin state and
+    // pick it back up with `jobfind` next time.
     let p = perms.clone();
     let owner = plugin.clone();
     t.set(
@@ -985,12 +985,13 @@ pub(crate) fn create_fn_table(
                 if let Some(snap) = with_task_jobs(&lua, |store| store.snapshot(job_id, &owner))
                     && let Some(code) = snap.exit_code
                 {
-                    let result = lua.create_table()?;
-                    result.set("stdout", snap.stdout_lines.join("\n"))?;
-                    result.set("stderr", snap.stderr_lines.join("\n"))?;
-                    result.set("exit_code", code)?;
-                    result.set("truncated", true)?;
-                    return Ok(mlua::Value::Table(result));
+                    return wait_result(
+                        &lua,
+                        &snap.stdout_lines,
+                        &snap.stderr_lines,
+                        code,
+                        snap.dropped_output,
+                    );
                 }
                 let rx = with_task_jobs(&lua, |store| store.take_receiver(job_id, &owner))
                     .ok_or_else(|| mlua::Error::runtime("unknown job id or already waited"))?;
@@ -1034,12 +1035,7 @@ pub(crate) fn create_fn_table(
 
                 with_task_jobs(&lua, |store| store.put_receiver(job_id, rx));
 
-                let result = lua.create_table()?;
-                result.set("stdout", stdout_lines.join("\n"))?;
-                result.set("stderr", stderr_lines.join("\n"))?;
-                result.set("exit_code", exit_code)?;
-                result.set("truncated", false)?;
-                Ok(mlua::Value::Table(result))
+                wait_result(&lua, &stdout_lines, &stderr_lines, exit_code, false)
             }
         })?,
     )?;
@@ -1289,6 +1285,23 @@ fn callback_update(lua: &Lua, opts: &Table, key: &str) -> LuaResult<CallbackUpda
     }
 }
 
+/// The single shape `jobwait` answers with, so its two paths cannot drift
+/// apart from the documented keys.
+fn wait_result(
+    lua: &Lua,
+    stdout: &[String],
+    stderr: &[String],
+    exit_code: i32,
+    truncated: bool,
+) -> LuaResult<Value> {
+    let result = lua.create_table()?;
+    result.set("stdout", stdout.join("\n"))?;
+    result.set("stderr", stderr.join("\n"))?;
+    result.set("exit_code", exit_code)?;
+    result.set("truncated", truncated)?;
+    Ok(Value::Table(result))
+}
+
 fn snapshot_table(lua: &Lua, snap: &JobSnapshot, tails: bool) -> LuaResult<Table> {
     let row = lua.create_table()?;
     row.set("id", snap.id)?;
@@ -1394,6 +1407,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         );
         id
     }
@@ -1481,6 +1495,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
         );
 
@@ -1577,7 +1592,6 @@ mod tests {
         assert_eq!(listed, [id]);
         assert!(store.list(None, "other-plugin").is_empty());
 
-        store.record_event(id, &JobEvent::Exit(0));
         store.finish(&lua, id);
         assert!(store.list(None, TEST_PLUGIN).is_empty());
         assert!(store.snapshot(id, TEST_PLUGIN).is_none());
@@ -1608,6 +1622,7 @@ mod tests {
             None,
             None,
             true,
+            false,
         );
         id
     }
@@ -1765,7 +1780,7 @@ mod tests {
             exit_code: None,
             elapsed_secs: None,
             replay_exit: None,
-            completed: false,
+            dropped_output: false,
         }
     }
 
@@ -1786,17 +1801,17 @@ mod tests {
         let mut job = stub_job();
         job.session = Some(session);
         store.jobs.insert(1, job);
-        store.record_event(1, &JobEvent::Exit(code));
         store.complete(lua, 1, code);
     }
 
     #[tokio::test]
     async fn attaching_on_exit_after_the_exit_replays_it_once() {
         const CODE: i32 = 5;
+        const REWIND: Duration = Duration::from_secs(60);
         let lua = Lua::new();
         let mut store = make_store();
         exited_session_job(&lua, &mut store, CraftId::generate(), CODE);
-        let elapsed = store.jobs[&1].elapsed_secs;
+        let at_exit = store.jobs[&1].elapsed_secs;
 
         assert!(store.attach(&lua, 1, TEST_PLUGIN, exit_updates(noop_key(&lua))));
 
@@ -1808,17 +1823,17 @@ mod tests {
             "the replay must be served once"
         );
 
-        store.record_event(1, &event);
+        // Rewind the start so a second round of bookkeeping would show up in
+        // the elapsed time instead of hiding in the same second.
+        store.jobs.get_mut(&1).unwrap().started = Instant::now() - REWIND;
         store.complete(&lua, 1, CODE);
         assert_eq!(
-            store.completed_order.len(),
-            1,
-            "a replayed exit must not re-push the job onto the completed list"
+            store.jobs[&1].elapsed_secs, at_exit,
+            "a replayed exit must not restate when the job died"
         );
-        assert_eq!(store.jobs[&1].elapsed_secs, elapsed);
         assert!(
             store.callback_key(1, &JobEvent::Exit(CODE)).is_none(),
-            "completing again must still release the replayed callback"
+            "completing on the replay must release the callback it used"
         );
     }
 
@@ -1903,6 +1918,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         );
 
         let printed: Vec<String> = collect_until_exit(id, || store.next_event())
@@ -1952,6 +1968,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
         );
 
@@ -2020,6 +2037,37 @@ mod tests {
         assert_eq!(served, [1, 2, 1, 2]);
     }
 
+    #[test_case::test_case(3, false ; "tail_holds_every_line")]
+    #[test_case::test_case(2, true ; "tail_evicted_a_line")]
+    #[test_case::test_case(0, true ; "tail_disabled")]
+    fn dropped_says_whether_the_tail_is_the_whole_output(cap: usize, expected: bool) {
+        let mut store = make_store();
+        store.jobs.insert(1, stub_job());
+        store.configure(1, None, Some(cap));
+
+        for line in ["a", "b", "c"] {
+            store.record_event(1, &JobEvent::Stdout(line.into()));
+        }
+
+        assert_eq!(
+            store.snapshot(1, TEST_PLUGIN).unwrap().dropped_output,
+            expected
+        );
+    }
+
+    #[test]
+    fn a_redirected_stream_counts_as_dropped_output() {
+        let mut store = make_store();
+        let mut job = stub_job();
+        job.dropped_output = true;
+        store.jobs.insert(1, job);
+
+        assert!(
+            store.snapshot(1, TEST_PLUGIN).unwrap().dropped_output,
+            "an empty tail on a redirected stream must not read as the whole output"
+        );
+    }
+
     #[tokio::test]
     async fn forget_drops_exited_session_jobs_only() {
         let lua = Lua::new();
@@ -2035,7 +2083,6 @@ mod tests {
             "running job must stay"
         );
 
-        store.record_event(1, &JobEvent::Exit(0));
         store.complete(&lua, 1, 0);
         assert!(
             store
@@ -2084,8 +2131,9 @@ mod tests {
             "the chatty plugin evicts its own oldest job"
         );
         assert_eq!(
-            store.completed_order[TEST_PLUGIN].len(),
-            MAX_COMPLETED_SESSION_JOBS
+            store.list(None, TEST_PLUGIN).len(),
+            MAX_COMPLETED_SESSION_JOBS,
+            "the cap counts only this plugin's exited jobs"
         );
     }
 
@@ -2097,6 +2145,12 @@ mod tests {
         let mut store = make_store();
         let id = start_session_job(&mut store, "sleep 0.1", session).await;
         wait_for_exit(&mut store, id).await;
+        assert!(
+            store.jobs[&id]
+                .reaped
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "an exit event must mean the child was reaped, or a later kill can signal a recycled pid"
+        );
         store.complete(&lua, id, 0);
         store.kill(id, TEST_PLUGIN);
         let snap = store
@@ -2152,6 +2206,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
         );
         assert!(

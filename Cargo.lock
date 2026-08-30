@@ -2250,6 +2250,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "shell-words",
  "smol",
  "strum 0.28.0",
  "tempfile",
