@@ -289,13 +289,12 @@ impl ToolInvocation for LuaToolInvocation {
         let input = self.input;
         let tx = self.tx;
         let tool_timeout = self.timeout;
+        // Read here on the caller's stack, not inside the future: a call a Lua
+        // tool dispatched is built while its parent is being polled, and that
+        // is the only moment we can tell it runs under the parent's slot.
+        let nested = crate::runtime::under_inflight_slot();
 
         Box::pin(async move {
-            // Read here on the caller's stack, not inside the future: a call a
-            // Lua tool dispatched is built while its parent is being polled,
-            // and that is the only moment we can tell it runs under the
-            // parent's slot.
-            let nested = crate::runtime::under_inflight_slot();
             let effective_secs: Option<u64> = match tool_timeout {
                 Some(d) => match deadline.cap_timeout(d.as_secs()) {
                     Ok(s) => Some(s),
