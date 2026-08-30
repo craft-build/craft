@@ -303,7 +303,7 @@ fn resolve_declared(
 /// This is what a session still has when it cannot install, so one held lock
 /// does not take away the packages the user already had.
 fn resolved_on_disk(
-    specs: &[crate::api::pack::Declared],
+    specs: &[&crate::api::pack::Declared],
     site: &Path,
     lock: &craft_pack::lockfile::Lockfile,
     failures: &mut Vec<String>,
@@ -311,7 +311,7 @@ fn resolved_on_disk(
     let manager = craft_pack::manager::Manager::new(site);
     let approvals = read_approvals();
     let mut found = Vec::new();
-    for declared in specs {
+    for declared in specs.iter().copied() {
         let Some(resolved) = resolve_declared(declared, site, &manager, lock, &approvals, failures)
         else {
             continue;
@@ -486,7 +486,10 @@ pub fn install_declared(
                 // managed group, so a second craft started during a clone
                 // would come up with every package the user has missing.
                 if let Some(lock) = read_lockfile(lock_path.as_deref()) {
-                    report.packages = resolved_on_disk(specs, &site, &lock, &mut report.failures);
+                    let manual = discover(&site);
+                    let runnable = runnable_declarations(specs, &manual, &mut report);
+                    report.packages =
+                        resolved_on_disk(&runnable, &site, &lock, &mut report.failures);
                 }
                 return report;
             }
@@ -1064,7 +1067,7 @@ mod tests {
 
         let mut failures = Vec::new();
         let found = resolved_on_disk(
-            &[declared_pack("demo", src)],
+            &[&declared_pack("demo", src)],
             site.path(),
             &lock,
             &mut failures,
@@ -1077,7 +1080,7 @@ mod tests {
         );
 
         let moved = resolved_on_disk(
-            &[declared_pack("demo", "https://elsewhere.example/demo")],
+            &[&declared_pack("demo", "https://elsewhere.example/demo")],
             site.path(),
             &lock,
             &mut failures,
