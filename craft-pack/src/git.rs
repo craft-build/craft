@@ -68,6 +68,31 @@ pub fn http_source_has_userinfo(src: &str) -> bool {
     authority.contains('@')
 }
 
+/// `--tags` is explicit because a version names a tag as often as a branch, and
+/// a plain fetch only brings in the tags reachable from the branches it
+/// fetched. `--prune` drops the remote-tracking refs of branches that are gone,
+/// so a deleted one cannot keep resolving here long after it went away.
+pub fn fetch_args(empty_hooks_dir: &Path) -> Vec<String> {
+    let mut args = hardening_args(empty_hooks_dir);
+    args.extend([
+        "fetch".to_owned(),
+        "--tags".to_owned(),
+        "--prune".to_owned(),
+        "origin".to_owned(),
+    ]);
+    args
+}
+
+pub fn has_commit_args(empty_hooks_dir: &Path, rev: &str) -> Vec<String> {
+    let mut args = hardening_args(empty_hooks_dir);
+    args.extend([
+        "cat-file".to_owned(),
+        "-e".to_owned(),
+        format!("{rev}{COMMIT_PEEL}"),
+    ]);
+    args
+}
+
 pub fn checkout_args(empty_hooks_dir: &Path, rev: &str) -> Vec<String> {
     let mut args = hardening_args(empty_hooks_dir);
     args.extend(["checkout".to_owned(), "--detach".to_owned(), rev.to_owned()]);

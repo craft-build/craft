@@ -46,6 +46,11 @@ pub struct Installed {
     pub changed: bool,
 }
 
+enum Want<'a> {
+    Commit(&'a str),
+    Ref,
+}
+
 /// Where a clone keeps the refs that `git fetch` actually moves.
 const REMOTE_PREFIX: &str = "refs/remotes/origin/";
 /// What the default branch resolves against. See `resolve_revision`.
@@ -195,20 +200,6 @@ impl Manager {
 
         let _guard = Lock::acquire(&paths::package_lock(&self.site, &spec.name))?;
         let hooks = self.hooks_dir()?;
-        let work = self.work_dir(&spec.name);
-
-        // A cached working copy is only reusable if it is a copy of the source
-        // being asked for. Reusing one by name alone would materialize the old
-        // repository's code while recording the new source.
-        if work.join(".git").is_dir() && !self.work_matches_source(&work, &spec.src).await {
-            fs::remove_dir_all(&work).map_err(|source| ManagerError::Io {
-                path: work.clone(),
-                source,
-            })?;
-        }
-        if !work.join(".git").is_dir() {
-            self.clone_into(&hooks, &spec.src, &work).await?;
-        }
 
         // A recorded revision wins over `version`, even when nothing is on disk
         // yet. That is the case a lockfile exists for: a fresh machine must get
@@ -229,6 +220,8 @@ impl Manager {
             })
             .transpose()?;
 
+        let want = recorded.as_deref().map_or(Want::Ref, Want::Commit);
+        let work = self.ensure_work(&hooks, spec, want).await?;
         let rev = match recorded {
             Some(rev) => rev,
             None => self.resolve_revision(&hooks, &work, spec).await?,
@@ -260,6 +253,50 @@ impl Manager {
                 src: git::redact(src),
             })
         }
+    }
+
+    /// Hands back a working copy that can answer for `want`.
+    ///
+    /// The clone is kept between runs, and on its own it never learns anything
+    /// new. `refs/remotes/origin/*` move only on a fetch, so without this a
+    /// `version` naming a branch stayed pinned to whatever that branch pointed
+    /// at on the day of the first clone, and a tag pushed later never resolved
+    /// at all. A commit is different. Objects do not move, so a clone that
+    /// already has the one the lockfile names is current enough to skip the
+    /// fetch.
+    async fn ensure_work(
+        &self,
+        hooks: &Path,
+        spec: &Spec,
+        want: Want<'_>,
+    ) -> Result<PathBuf, ManagerError> {
+        let work = self.work_dir(&spec.name);
+
+        // A cached working copy is only reusable if it is a copy of the source
+        // being asked for. Reusing one by name alone would materialize the old
+        // repository's code while recording the new source.
+        if work.join(".git").is_dir() && !self.work_matches_source(&work, &spec.src).await {
+            fs::remove_dir_all(&work).map_err(|source| ManagerError::Io {
+                path: work.clone(),
+                source,
+            })?;
+        }
+        if !work.join(".git").is_dir() {
+            // A fresh clone already has everything a fetch would have brought.
+            self.clone_into(hooks, &spec.src, &work).await?;
+            return Ok(work);
+        }
+
+        let have = match want {
+            Want::Commit(rev) => git::run(git::has_commit_args(hooks, rev), Some(work.clone()))
+                .await
+                .is_ok(),
+            Want::Ref => false,
+        };
+        if !have {
+            git::run(git::fetch_args(hooks), Some(work.clone())).await?;
+        }
+        Ok(work)
     }
 
     /// Whether a cached working copy points at the source being asked for.
@@ -779,6 +816,48 @@ mod tests {
             !second.dir.join("plugin").join("extra.lua").exists(),
             "the later commit must not be installed"
         );
+    }
+
+    /// Dropping the entry from the lockfile is how a user asks for an update,
+    /// and the clone left over from the last run is the one that has to learn
+    /// about the new commit and the new tag.
+    #[test]
+    fn dropping_the_lock_entry_picks_up_what_landed_upstream() {
+        let dir = site();
+        let origin = origin_repo(dir.path(), None);
+        let git = |args: Vec<&str>| {
+            smol::block_on(git::run(
+                args.iter().map(|a| (*a).to_owned()).collect(),
+                Some(origin.clone()),
+            ))
+            .unwrap()
+        };
+
+        let mgr = Manager::new(dir.path().join("site"));
+        let mut lock = Lockfile::default();
+        let spec = Spec::new(origin.display().to_string()).with_name("demo");
+        let first = smol::block_on(mgr.ensure_installed(&spec, &mut lock)).unwrap();
+
+        fs::write(origin.join("plugin").join("extra.lua"), "-- later\n").unwrap();
+        git(vec!["add", "."]);
+        git(vec!["commit", "--quiet", "-m", "later"]);
+        git(vec!["tag", "v3.0.0"]);
+
+        // Deleting the entry is what the docs tell a user to do; the clone
+        // that survives it is what has to learn about the new commit.
+        let mut lock = Lockfile::default();
+        let updated = smol::block_on(mgr.ensure_installed(&spec, &mut lock))
+            .expect("the default branch should resolve to the new commit");
+        assert_ne!(
+            updated.rev, first.rev,
+            "the reused clone must fetch before resolving a branch"
+        );
+        assert!(updated.dir.join("plugin").join("extra.lua").is_file());
+
+        let mut lock = Lockfile::default();
+        let tagged = spec.clone().with_version("v3.0.0");
+        smol::block_on(mgr.ensure_installed(&tagged, &mut lock))
+            .expect("a tag pushed after the clone should resolve");
     }
 
     /// A changed source makes the old revision meaningless, so it must not be
