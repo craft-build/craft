@@ -185,26 +185,30 @@ fn spawn_local_process(spec: TerminalSpec) -> Result<TerminalHandle, String> {
     thread::Builder::new()
         .name("job-wait".into())
         .spawn(move || {
-            let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-            wait_reaped.store(true, Ordering::Relaxed);
+            // Reaping frees the pid, and that pid is the process group the
+            // kill closure signals. The readers only return once every
+            // descendant dropped the pipes, so joining them first keeps a
+            // kill target around for as long as the job is really alive.
             if let Some(h) = stdout_handle {
                 let _ = h.join();
             }
             if let Some(h) = stderr_handle {
                 let _ = h.join();
             }
+            let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+            wait_reaped.store(true, Ordering::Relaxed);
             let _ = exit_tx.send(JobEvent::Exit(code));
         })
         .map_err(|e| e.to_string())?;
 
     let kill_reaped = Arc::clone(&reaped);
     let kill: Box<dyn FnOnce() + Send> = Box::new(move || {
-        // Once the process is reaped its pid can be handed to someone else,
-        // and signalling it would hit a stranger's process group. The flag is
-        // set by the wait thread right after `wait` returns, which narrows
-        // that window to a few instructions but does not close it: only a
-        // pidfd would, and a pidfd cannot express `killpg`.
-        if !kill_reaped.load(Ordering::Acquire) {
+        // Signalling a reaped pid would hit whoever the kernel handed it to
+        // next, so stop at the flag. Until then the child is a zombie, and a
+        // zombie group leader keeps its pid and pgid off the free list, so
+        // the group is still the right target. The flag carries no data of
+        // its own, hence Relaxed.
+        if !kill_reaped.load(Ordering::Relaxed) {
             kill_process(pid);
         }
     });

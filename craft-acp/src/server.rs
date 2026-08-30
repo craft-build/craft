@@ -288,6 +288,9 @@ impl TerminalBackend for AcpTerminal {
                 pid: 0,
                 events: event_rx,
                 kill,
+                // The kill above is delegated to the ACP client, so there is
+                // no local child to reap and the closure must always fire.
+                reaped: Arc::new(AtomicBool::new(false)),
             })
         })
     }
