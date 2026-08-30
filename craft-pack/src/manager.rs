@@ -337,12 +337,19 @@ impl Manager {
                 source,
             })?;
         }
+        // A clone killed halfway leaves a directory behind with no `.git` in
+        // it, and git refuses to clone into a directory that is not empty. So
+        // every attempt starts from nothing, not just the retry below.
+        let clear = || {
+            let _ = fs::remove_dir_all(work);
+        };
         // A blobless clone is much smaller, but an older server refuses the
         // filter outright, so fall back to a full clone rather than failing.
+        clear();
         match git::run(git::clone_args(hooks, src, work, true), None).await {
             Ok(_) => Ok(()),
             Err(_) => {
-                let _ = fs::remove_dir_all(work);
+                clear();
                 git::run(git::clone_args(hooks, src, work, false), None).await?;
                 Ok(())
             }
@@ -858,6 +865,24 @@ mod tests {
         let tagged = spec.clone().with_version("v3.0.0");
         smol::block_on(mgr.ensure_installed(&tagged, &mut lock))
             .expect("a tag pushed after the clone should resolve");
+    }
+
+    #[test]
+    fn an_interrupted_clone_does_not_wedge_the_package() {
+        let dir = site();
+        let origin = origin_repo(dir.path(), None);
+        let site_dir = dir.path().join("site");
+
+        let work = paths::package_root(&site_dir, "demo").join(".work");
+        fs::create_dir_all(work.join("half")).unwrap();
+        fs::write(work.join("half").join("leftover"), "partial\n").unwrap();
+
+        let mgr = Manager::new(&site_dir);
+        let mut lock = Lockfile::default();
+        let spec = Spec::new(origin.display().to_string()).with_name("demo");
+
+        smol::block_on(mgr.ensure_installed(&spec, &mut lock))
+            .expect("a leftover working copy should be replaced, not fatal");
     }
 
     /// A changed source makes the old revision meaningless, so it must not be
