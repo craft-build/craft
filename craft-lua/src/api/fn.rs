@@ -218,7 +218,9 @@ pub(crate) struct JobStore {
     jobs: HashMap<u32, JobMeta>,
     next_id: u32,
     backend: Arc<dyn TerminalBackend>,
-    completed_order: VecDeque<u32>,
+    /// Exited session jobs per owning plugin, oldest first. Keyed by plugin
+    /// so a chatty one evicts only its own history.
+    completed_order: HashMap<Arc<str>, VecDeque<u32>>,
     /// Id served by the last [`JobStore::next_event`], so the next scan
     /// starts past it.
     scan_cursor: u32,
@@ -248,7 +250,7 @@ impl JobStore {
             jobs: HashMap::new(),
             next_id: 1,
             backend,
-            completed_order: VecDeque::new(),
+            completed_order: HashMap::new(),
             scan_cursor: 0,
         }
     }
@@ -451,7 +453,9 @@ impl JobStore {
             return;
         }
         remove_job_from(lua, &mut self.jobs, job_id);
-        self.completed_order.retain(|&id| id != job_id);
+        if let Some(history) = self.completed_order.get_mut(plugin) {
+            history.retain(|&id| id != job_id);
+        }
     }
 
     pub fn session_of(&self, job_id: u32, plugin: &str) -> Option<CraftId> {
@@ -645,7 +649,7 @@ fn attach_job(lua: &Lua, job_id: u32, plugin: &str, updates: CallbackUpdates) ->
 pub(crate) fn complete_job(
     lua: &Lua,
     jobs: &mut HashMap<u32, JobMeta>,
-    completed_order: &mut VecDeque<u32>,
+    completed_order: &mut HashMap<Arc<str>, VecDeque<u32>>,
     job_id: u32,
     code: i32,
 ) {
@@ -671,10 +675,18 @@ pub(crate) fn complete_job(
         }
     }
     if job.session.is_some() {
+        let plugin = Arc::clone(&job.plugin);
         drop_callbacks(lua, job);
-        completed_order.push_back(job_id);
-        while completed_order.len() > MAX_COMPLETED_SESSION_JOBS {
-            let oldest = completed_order.pop_front().unwrap();
+        let history = completed_order.entry(plugin).or_default();
+        history.push_back(job_id);
+        let evicted: Vec<u32> = if history.len() > MAX_COMPLETED_SESSION_JOBS {
+            history
+                .drain(..history.len() - MAX_COMPLETED_SESSION_JOBS)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for oldest in evicted {
             if jobs.get(&oldest).is_some_and(|j| j.exit_code.is_some()) {
                 remove_job_from(lua, jobs, oldest);
             }
@@ -719,7 +731,7 @@ pub(crate) fn pump_session_jobs(
             }
         }
         if let Some(code) = exited {
-            let mut completed = VecDeque::new();
+            let mut completed = HashMap::new();
             complete_job(lua, jobs, &mut completed, id, code);
         }
     }
@@ -2041,6 +2053,40 @@ mod tests {
         store.forget(&lua, 1, TEST_PLUGIN);
         assert!(store.snapshot(1, TEST_PLUGIN).is_none());
         assert!(store.list(Some(session), TEST_PLUGIN).is_empty());
+    }
+
+    #[test]
+    fn completed_history_is_evicted_per_plugin() {
+        const QUIET_PLUGIN: &str = "quiet-plugin";
+        let lua = Lua::new();
+        let session = CraftId::generate();
+        let mut store = make_store();
+        let mut job = stub_job();
+        job.session = Some(session);
+        job.plugin = Arc::from(QUIET_PLUGIN);
+        store.jobs.insert(1, job);
+        store.complete(&lua, 1, 0);
+
+        let chatty = 2..=(MAX_COMPLETED_SESSION_JOBS as u32 + 2);
+        for id in chatty {
+            let mut job = stub_job();
+            job.session = Some(session);
+            store.jobs.insert(id, job);
+            store.complete(&lua, id, 0);
+        }
+
+        assert!(
+            store.snapshot(1, QUIET_PLUGIN).is_some(),
+            "a chatty plugin must not evict another plugin's history"
+        );
+        assert!(
+            store.snapshot(2, TEST_PLUGIN).is_none(),
+            "the chatty plugin evicts its own oldest job"
+        );
+        assert_eq!(
+            store.completed_order[TEST_PLUGIN].len(),
+            MAX_COMPLETED_SESSION_JOBS
+        );
     }
 
     #[cfg(unix)]
