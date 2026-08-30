@@ -280,6 +280,10 @@ impl PermissionManager {
         })
     }
 
+    /// The order of the checks below is the policy itself, not an accident of
+    /// how it was written: denies and explicit allows first in the scope loop,
+    /// then plan mode's hold on MCP tools, then yolo, the plan file write, and
+    /// last the defaults. Moving one moves the rules.
     fn check_inner(
         &self,
         tool: &ToolKey,
@@ -326,7 +330,15 @@ impl PermissionManager {
             // force_prompt: all scopes will be prompted anyway
         }
 
-        if self.yolo.load(Ordering::Relaxed) {
+        // An MCP tool is opaque. Nothing here can tell a repo search from a
+        // commit, so plan mode stays read-only only if such a call is never
+        // approved for the user. Blanket approvals (yolo, `default = "allow"`)
+        // are held back and the user is asked instead. A rule written for the
+        // tool is the user's own answer and still decides. Native tools are
+        // known quantities and keep their approvals.
+        let plan_withholds_approval = plan_path.is_some() && tool.is_mcp();
+
+        if self.yolo.load(Ordering::Relaxed) && !plan_withholds_approval {
             return PermissionCheck::Allowed;
         }
 
@@ -376,8 +388,8 @@ impl PermissionManager {
                 info!(tool = %tool, "denied by default");
                 PermissionCheck::Denied
             }
-            DefaultEffect::Allow => PermissionCheck::Allowed,
-            DefaultEffect::Prompt => PermissionCheck::NeedsPrompt {
+            DefaultEffect::Allow if !plan_withholds_approval => PermissionCheck::Allowed,
+            DefaultEffect::Allow | DefaultEffect::Prompt => PermissionCheck::NeedsPrompt {
                 tool: tool.clone(),
                 scopes: pending.into_iter().map(|s| s.to_string()).collect(),
                 force_prompt,
@@ -1597,6 +1609,75 @@ mod tests {
                 PermissionCheck::Allowed
             ),
             expect_allowed,
+        );
+    }
+
+    const PLAN_FILE: &str = "/home/user/.local/state/craft/plans/test.md";
+    const MCP_TOOL: &str = "deepwiki.search";
+    const MCP_ARGS: &str = "{\"q\":\"craft\"}";
+    const READ_TOOL: &str = "read";
+    const READ_SCOPE: &str = "/home/user/project/src/main.rs";
+
+    const ALLOWED: &str = "allowed";
+    const DENIED: &str = "denied";
+    const PROMPTS: &str = "prompts";
+
+    fn outcome(check: PermissionCheck) -> &'static str {
+        match check {
+            PermissionCheck::Allowed => ALLOWED,
+            PermissionCheck::Denied => DENIED,
+            PermissionCheck::NeedsPrompt { .. } => PROMPTS,
+        }
+    }
+
+    /// Plan mode is read-only and an MCP server can write without saying so,
+    /// so approving one for the user would break that. Native tools are known,
+    /// and the ones plan mode does not block stay automatic.
+    #[test_case(MCP_TOOL,  MCP_ARGS,   DefaultEffect::Prompt, true  => PROMPTS ; "yolo_plan_mode_prompts_for_mcp")]
+    #[test_case(MCP_TOOL,  MCP_ARGS,   DefaultEffect::Allow,  true  => PROMPTS ; "default_allow_plan_mode_prompts_for_mcp")]
+    #[test_case(MCP_TOOL,  MCP_ARGS,   DefaultEffect::Prompt, false => ALLOWED ; "yolo_build_mode_allows_mcp")]
+    #[test_case(READ_TOOL, READ_SCOPE, DefaultEffect::Prompt, true  => ALLOWED ; "yolo_plan_mode_allows_native_read")]
+    fn plan_mode_outranks_blanket_approval_for_mcp_tools(
+        tool: &str,
+        scope: &str,
+        default: DefaultEffect,
+        plan_mode: bool,
+    ) -> &'static str {
+        let mgr = mgr_with(
+            PermissionsConfig {
+                yolo: true,
+                default,
+                ..Default::default()
+            },
+            PathBuf::from("/tmp"),
+        );
+        let plan_path = Path::new(PLAN_FILE);
+        outcome(mgr.check(
+            &ToolKey::parse(tool).expect("test tool key parses"),
+            scope,
+            plan_mode.then_some(plan_path),
+        ))
+    }
+
+    /// A rule is the user's own decision about this exact tool, so plan mode
+    /// leaves it alone. Only automatic approval is held back.
+    #[test]
+    fn plan_mode_keeps_an_explicit_allow_rule_for_an_mcp_tool() {
+        let mgr = mgr_with(
+            make_config(vec![PermissionRule {
+                tool: ToolKey::parse(MCP_TOOL).expect("test tool key parses"),
+                scope: Some("*".into()),
+                effect: Effect::Allow,
+            }]),
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(
+            outcome(mgr.check(
+                &ToolKey::parse(MCP_TOOL).expect("test tool key parses"),
+                MCP_ARGS,
+                Some(Path::new(PLAN_FILE)),
+            )),
+            ALLOWED
         );
     }
 

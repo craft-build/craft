@@ -1519,10 +1519,30 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Plan mode puts MCP behind the user, it does not block it outright. An
+    /// allow rule is the user's answer already, so the call goes through.
     #[tokio::test]
-    async fn mcp_tool_allowed_in_plan_mode() {
-        let mut ctx = mcp_ctx(&[(PROBE_QUALIFIED, "")]);
-        ctx.mode = AgentMode::Plan(PathBuf::from("/tmp/plan.md"));
+    async fn mcp_tool_allowed_by_rule_in_plan_mode() {
+        use craft_config::{Effect, PermissionRule, PermissionsConfig, ToolKey};
+
+        let config = PermissionsConfig {
+            rules: vec![PermissionRule {
+                tool: ToolKey::parse(PROBE_QUALIFIED).unwrap(),
+                scope: None,
+                effect: Effect::Allow,
+            }],
+            ..Default::default()
+        };
+        let permissions = Arc::new(crate::permissions::PermissionManager::new(
+            config,
+            PathBuf::from("/tmp"),
+            Arc::default(),
+        ));
+        let mut ctx = crate::tools::test_support::stub_ctx_with_permissions(
+            &AgentMode::Plan(PathBuf::from("/tmp/plan.md")),
+            permissions,
+        );
+        ctx.mcp = Some(stub_handle(&[(PROBE_QUALIFIED, "")]));
         let done = run(
             &ctx.registry,
             ctx.mcp.as_ref(),
@@ -1549,6 +1569,34 @@ mod tests {
             tool_names(&tools).contains(&PROBE_WIRE.to_owned()),
             "a permitted plan-mode call must load the definition"
         );
+    }
+
+    /// An MCP server can write without announcing it, so a plan-mode session
+    /// asks first even where everything else is approved automatically. The
+    /// stub has no channel to ask on, hence the denial below.
+    #[tokio::test]
+    async fn mcp_tool_in_plan_mode_is_never_auto_approved() {
+        let mut ctx = mcp_ctx(&[(PROBE_QUALIFIED, "")]);
+        ctx.mode = AgentMode::Plan(PathBuf::from("/tmp/plan.md"));
+        let done = run(
+            &ctx.registry,
+            ctx.mcp.as_ref(),
+            "t1".into(),
+            PROBE_WIRE,
+            &serde_json::json!({}),
+            &ctx,
+            Emit::Silent,
+        )
+        .await;
+        assert!(done.is_error);
+        assert!(
+            done.output
+                .as_text()
+                .starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "got: {}",
+            done.output.as_text()
+        );
+        assert_eq!(done.tool.as_ref(), PROBE_QUALIFIED, "must route to MCP");
     }
 
     #[tokio::test]
