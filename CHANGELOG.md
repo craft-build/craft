@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-30
+
+### Added
+
+- **lua**: session-owned jobs that survive plugin reload (`54f1849b`), `jobinfo` and `joblist` for live jobs (`5cb33866`), named jobs with `jobfind` (`a09ce241`), `jobattach` with sticky exit replay (`daf64670`), argv jobs with stream redirects to files (`5baacb9b`), suspending plugin callbacks with log file appends (`e75c9581`), SessionEnd fired on every teardown with a reason and duration (`4c9d2bc9`, `605ecc30`), and a `ModelChanged` autocmd (`33d1f75a`)
+- **lua**: managed package state (`1e02d2c6`), external package directories (`4a218bad`), and a craft version floor for packages (`ee7c3be4`, `b30a1ca7`)
+- **agent**: MCP tool calls in plan mode (`cbdb6488`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (hkdf 0.13, mlua 0.12.1, luau0-src 0.21, notify 9.0.0-rc.5)
+- **pack**: one path onto disk, one place that unlocks it (`bf6a5638`)
+- **ui**: reserve the instruction slots instead of inserting them (`774a05ca`)
+
+### Fixed
+
+- **agent**: give the sandbox the request's own tool filter (`c976be4b`), keep plan mode ahead of yolo for MCP tools (`075d175b`), and read a universal scope the way the matcher reads it (`59efd57f`)
+- **edit**: write a file back with the line endings it came with (`307e8418`), and pick the reindent base in a stable order (`95051cb4`)
+- **lua**: run a nested tool call under its caller's inflight slot (`56adb8ee`), read the slot cover on the caller's stack (`6734ea2a`), pre-approve only what a plugin was granted (`e2d6d49d`), fire background session job callbacks from the runtime loop (`d6ba0c95`), deliver armed callbacks before the session-end reap (`611e931f`), reap a job last so a kill always has a target (`b33c170a`), stop jobwait calling a complete tail truncated (`e967e740`), scope the completed job history per plugin (`b2730a88`), stop signalling a pid the kernel may have reused (`b7263da4`), resolve relative job redirects against the job cwd (`c1be5a43`), serialize `craft.fs.append` writes (`24155e13`), bound UI roundtrips and await ACP SessionEnd (`ffa4c96b`), filter conflicting names when the pack lock is held (`6fbe26f8`), and deny permissions when the plugin dir is absent (`911dc055`)
+- **pack**: start every clone from an empty directory (`a62f0e29`), and fetch a reused clone before resolving a version (`fdaeeb38`)
+- **providers**: keep DeepSeek's peak surcharge off the weekend (`aee872a0`)
+- **ui**: ring the bell for prompts even when the terminal has focus (`531c00ad`), clip a selection to the buffer before reading cells (`04f4fe0b`), keep the yolo label visible while an error is up (`1c3a5fcd`), let `/new` keep the yolo toggle (`9f34417e`), put the terminal cursor where the input box drew it (`50e2c7cd`), and keep a blank tab's settings after `/new` (`44fb6f14`)
+
 ## [0.13.3] - 2026-08-27
 
 ### Added
