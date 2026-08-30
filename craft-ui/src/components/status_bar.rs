@@ -183,9 +183,20 @@ impl StatusBar {
 
         let mut right_spans = Vec::new();
 
+        // An error takes the whole bar over. The label saying the agent
+        // approves everything has to survive that, so it is built out here
+        // and both arms place it.
+        let yolo_span = ctx.yolo.then(|| {
+            Span::styled(
+                YOLO_LABEL,
+                theme::dim_style(theme::current().error, YOLO_DIM_FACTOR),
+            )
+        });
+
         match ctx.status {
             Status::Error { message: e, .. } => {
                 left_spans.push(Span::styled(format!(" {e}"), theme::current().error));
+                right_spans.extend(yolo_span);
             }
             _ => {
                 let left_width = left_spans.iter().map(Span::width).sum::<usize>() as u16;
@@ -549,6 +560,50 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>()
             .contains(YOLO_LABEL.trim())
+    }
+
+    /// The error arm of the bottom bar owns the whole line while an error is
+    /// up, and the model row above blanks itself, so that arm is the only
+    /// place left to say the agent approves everything.
+    #[test]
+    fn an_error_does_not_hide_yolo() {
+        const BAR_WIDTH: u16 = 80;
+        let status = Status::Error {
+            message: "something went wrong".into(),
+            since: Instant::now(),
+        };
+        let ctx = StatusBarContext {
+            status: &status,
+            mode_label: "normal".into(),
+            mode_style: Style::new(),
+            model_id: "test-model",
+            stats: UsageStats {
+                context_size: 100,
+                cost: None,
+                global_cost: None,
+                context_window: 1000,
+                show_global: false,
+            },
+            auto_scroll: true,
+            chat_name: None,
+            retry_info: None,
+            thinking_label: None,
+            fast: false,
+            yolo: true,
+            restoring: false,
+        };
+        let bar = StatusBar::new(FLASH_TTL);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(BAR_WIDTH, 1)).unwrap();
+        terminal.draw(|f| bar.view(f, f.area(), &ctx)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains(YOLO_LABEL.trim()), "{text}");
     }
 
     #[test_case("~/projects/craft:main", 30, "~/projects/craft:main" ; "fits_untouched")]
