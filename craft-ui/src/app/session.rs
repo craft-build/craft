@@ -345,6 +345,7 @@ impl App {
             mode: Some(self.state.mode.into()),
             thinking: Some(self.state.thinking.into()),
             fast: self.state.fast,
+            yolo: self.permissions.persisted_yolo(),
             context_window_overrides: self.state.context_window_overrides.clone(),
             ..Default::default()
         };

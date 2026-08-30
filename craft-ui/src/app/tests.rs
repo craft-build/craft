@@ -727,6 +727,7 @@ fn blank_session_carries_the_settings_that_outlive_a_turn() {
                 level: Effort::High
             }),
             fast: true,
+            yolo: Some(true),
             ..Default::default()
         }
     );
@@ -2524,11 +2525,12 @@ fn loading_a_session_applies_stored_yolo(seed: bool, stored: Option<bool>) -> (b
 }
 
 /// A tab keeps one permission manager for its whole life, so without an
-/// explicit reset `/new` would inherit both answers the last session got, the
-/// stored bypass and the rules the user allowed during it, and checkpoint them
-/// into a session nobody granted them for.
-#[test_case(false => (false, None) ; "a_fresh_session_drops_a_stored_bypass")]
-#[test_case(true  => (true,  None) ; "a_fresh_session_returns_to_the_flag")]
+/// explicit reset `/new` would carry the rules the user allowed last time
+/// into a session nobody granted them for. The yolo toggle is not one of
+/// those. The user set it, like the mode, so it rides along and only the
+/// grants go.
+#[test_case(false => (true,  Some(true))  ; "a_fresh_session_keeps_the_toggle_on")]
+#[test_case(true  => (false, Some(false)) ; "a_fresh_session_keeps_the_toggle_off")]
 fn resetting_the_session_drops_what_the_last_one_was_granted(seed: bool) -> (bool, Option<bool>) {
     let (mut app, session) = app_and_session_with_yolo(seed, Some(!seed));
     app.state.session = Arc::new(session);
