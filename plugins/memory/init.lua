@@ -34,7 +34,12 @@ local function register_write_rules()
   end
   for _, dir in ipairs(dirs) do
     for _, tool in ipairs(WRITE_TOOLS) do
-      craft.api.register_permission_rule({ tool = tool, scope = dir .. "/**" })
+      -- The edit sub-tools are opt-in, and a rule naming an unregistered tool
+      -- is dropped with a warning. Ask first, or a default config logs that
+      -- warning at every startup.
+      if craft.api.has_tool(tool) then
+        craft.api.register_permission_rule({ tool = tool, scope = dir .. "/**" })
+      end
     end
   end
 end

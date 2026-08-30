@@ -44,8 +44,8 @@ use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{
-    LuaOutputFormat, LuaTool, PendingRules, PendingTool, PendingTools, PermissionScopeSpec,
-    ToolCallReply,
+    LuaOutputFormat, LuaTool, PendingRules, PendingTool, PendingTools, ToolCallReply,
+    ToolPermission, resolve_rules,
 };
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
@@ -1654,6 +1654,7 @@ impl LuaRuntime {
         lua.set_app_data::<Arc<dyn TerminalBackend>>(Arc::clone(&terminal_backend));
         lua.set_app_data::<RefCell<BgJobMap>>(RefCell::new(BgJobMap::new()));
         lua.set_app_data(crate::api::r#fn::EndedSessions::default());
+        lua.set_app_data(Arc::clone(&registry));
 
         Ok(Self {
             _watchdog: watchdog,
@@ -1928,19 +1929,9 @@ impl LuaRuntime {
     }
 
     fn discard_pending(&mut self, tools: Vec<PendingTool>) {
-        for t in tools {
-            if let Err(e) = self.lua.remove_registry_value(t.handler_key) {
-                tracing::warn!(error = %e, "failed to drop lua handler key on rollback");
-            }
-            if let Some(sk) = t.header_key
-                && let Err(e) = self.lua.remove_registry_value(sk)
-            {
-                tracing::warn!(error = %e, "failed to drop lua header key on rollback");
-            }
-            if let Some(PermissionScopeSpec::Callback(sk)) = t.permission_scopes
-                && let Err(e) = self.lua.remove_registry_value(sk)
-            {
-                tracing::warn!(error = %e, "failed to drop lua permission_scopes key on rollback");
+        for key in tools.into_iter().flat_map(PendingTool::registry_keys) {
+            if let Err(e) = self.lua.remove_registry_value(key) {
+                tracing::warn!(error = %e, "failed to drop lua registry key on rollback");
             }
         }
     }
@@ -2103,12 +2094,7 @@ impl LuaRuntime {
         // reads must not be reported as unused by an earlier one.
         let exec_result = exec_result.and_then(|()| self.check_opts_consumed(&name, &opts));
         if let Err(e) = exec_result {
-            let stale = self.drain_pending();
-            self.discard_pending(stale);
-            with_packs(&self.lua, |packs| {
-                packs.pending.truncate(pack_ops_checkpoint)
-            });
-            self.clear_plugin(&name);
+            self.rollback_load(&name, self.drain_pending(), pack_ops_checkpoint);
             return Err(map_err(e));
         }
 
@@ -2125,10 +2111,7 @@ impl LuaRuntime {
                     tx: self.tx.clone(),
                     plugin: Arc::clone(&name),
                     has_header_fn: t.header_key.is_some(),
-                    permission_scope_kind: t
-                        .permission_scopes
-                        .as_ref()
-                        .map(PermissionScopeSpec::kind),
+                    permission: t.permission.as_ref().map(ToolPermission::kind),
                     mutable_path_field: t.mutable_path_field.clone(),
                     timeout: t.timeout,
                     kind: t.kind.clone(),
@@ -2143,10 +2126,7 @@ impl LuaRuntime {
             .collect();
 
         if let Err(e) = self.registry.replace_plugin(&name, registry_entries) {
-            self.discard_pending(pending);
-            with_packs(&self.lua, |packs| {
-                packs.pending.truncate(pack_ops_checkpoint)
-            });
+            self.rollback_load(&name, pending, pack_ops_checkpoint);
             return Err(match e {
                 RegistryError::NameConflict { name: n, .. } => PluginError::NameConflict {
                     plugin: name.to_string(),
@@ -2154,6 +2134,12 @@ impl LuaRuntime {
                 },
             });
         }
+
+        // After `replace_plugin`, so a rule may name a tool this very load
+        // registered.
+        let declared =
+            std::mem::take(&mut *pending_rules.lock().unwrap_or_else(|e| e.into_inner()));
+        let rules = resolve_rules(&self.registry, &name, &permissions, declared);
 
         let keys: HashMap<Arc<str>, ToolKeys> = pending
             .into_iter()
@@ -2164,15 +2150,11 @@ impl LuaRuntime {
                         handler: t.handler_key,
                         header: t.header_key,
                         restore: t.restore_key,
-                        permission_scopes: match t.permission_scopes {
-                            Some(PermissionScopeSpec::Callback(k)) => Some(k),
-                            _ => None,
-                        },
+                        permission_scopes: t.permission.and_then(|p| p.scopes.callback_key()),
                     },
                 )
             })
             .collect();
-        let rules = std::mem::take(&mut *pending_rules.lock().unwrap_or_else(|e| e.into_inner()));
         self.plugin_rules.replace(&name, rules);
         self.plugins.borrow_mut().insert(
             Arc::clone(&name),
@@ -2186,6 +2168,15 @@ impl LuaRuntime {
         }
 
         Ok(())
+    }
+
+    /// Undoes a load that failed after its chunks ran: the tools it was about
+    /// to register, the package operations it queued, and the commands,
+    /// keymaps, hints and slots it published on the way.
+    fn rollback_load(&mut self, plugin: &str, pending: Vec<PendingTool>, pack_ops: usize) {
+        self.discard_pending(pending);
+        with_packs(&self.lua, |packs| packs.pending.truncate(pack_ops));
+        self.clear_plugin(plugin);
     }
 
     fn clear_plugin(&mut self, plugin: &str) {

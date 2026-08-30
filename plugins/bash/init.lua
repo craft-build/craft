@@ -339,6 +339,7 @@ craft.api.register_tool({
       background = { type = "boolean", description = "Run in background, return task_id for later polling" },
     },
   },
+  permission = "run",
   permission_scopes = function(input)
     local command = input.command
     if not command or command:match("^%s*$") then
@@ -582,6 +583,7 @@ craft.api.register_tool({
       task_id = { type = "string", description = "The task_id returned by bash", required = true },
     },
   },
+  permission = "run",
   permission_scopes = function()
     return { scopes = { "bash_status" }, force_prompt = false }
   end,
@@ -633,6 +635,7 @@ craft.api.register_tool({
       timeout = { type = "integer", description = "Max seconds to wait (default 60)" },
     },
   },
+  permission = "run",
   permission_scopes = function()
     return { scopes = { "bash_watch" }, force_prompt = false }
   end,
@@ -740,6 +743,7 @@ craft.api.register_tool({
       task_id = { type = "string", description = "The task_id returned by bash", required = true },
     },
   },
+  permission = "run",
   permission_scopes = function()
     return { scopes = { "bash_kill" }, force_prompt = true }
   end,

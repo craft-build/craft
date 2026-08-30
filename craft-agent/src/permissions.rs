@@ -661,11 +661,20 @@ fn rule_matches_scope(rule: &PermissionRule, scope: &str) -> bool {
     }
 }
 
+/// A pattern with nothing left once its trailing glob is taken off covers
+/// every scope: `*` and `**`, but also `/*` and `/**`, which reduce to a
+/// prefix every absolute path starts with. [`scope_matches`] short-circuits on
+/// these and a plugin allow is refused for them, off the same answer.
+pub fn is_universal_scope(pattern: &str) -> bool {
+    let stem = pattern.trim_end_matches('*');
+    stem.len() < pattern.len() && matches!(stem, "" | "/")
+}
+
 /// For the `/**` path pattern, `Path::starts_with` is used to compare
-/// components rather than characters, which handles both `/` and `\`
+/// components rather than characters, which handles both `/` and `\\`
 /// transparently on all platforms.
 pub fn scope_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" || pattern == "**" {
+    if is_universal_scope(pattern) {
         return true;
     }
     if let Some(prefix) = pattern.strip_suffix("/**") {
@@ -853,6 +862,19 @@ mod tests {
     #[test_case("src/**", "other/src/main.rs" => false ; "glob_no_inner_match")]
     fn scope_match(pattern: &str, value: &str) -> bool {
         scope_matches(pattern, value)
+    }
+
+    /// A pattern is universal only when the trailing glob is all it says.
+    #[test_case("*" => true ; "star")]
+    #[test_case("**" => true ; "double_star")]
+    #[test_case("/*" => true ; "root_star")]
+    #[test_case("/**" => true ; "root_double_star")]
+    #[test_case("/tmp/**" => false ; "directory_subtree")]
+    #[test_case("cargo *" => false ; "bash_command")]
+    #[test_case("/" => false ; "root_without_glob")]
+    #[test_case("" => false ; "empty")]
+    fn universal_scope(pattern: &str) -> bool {
+        is_universal_scope(pattern)
     }
 
     #[test_case(vec!["cd /tmp", "cargo test"], vec!["cd *", "cargo *"], true ; "all_allowed")]

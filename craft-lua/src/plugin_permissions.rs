@@ -3,38 +3,30 @@ use std::path::Path;
 
 use mlua::Lua;
 use semver::Version;
-use strum::EnumIter;
 
 use crate::error::PluginError;
 
-const MANIFEST_FILE: &str = "plugin.toml";
+pub use craft_config::Permission;
+
+pub(crate) const MANIFEST_FILE: &str = "plugin.toml";
 const MIN_CRAFT_VERSION: &str = "min_craft_version";
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter)]
-pub enum Permission {
-    FsRead,
-    FsWrite,
-    Net,
-    Run,
-    Env,
-}
-
-const PERM_KEYS: [&str; 5] = ["fs_read", "fs_write", "net", "run", "env"];
-
 #[derive(Debug, Clone)]
 pub struct PluginPermissions {
-    allowed: [bool; 5],
+    allowed: [bool; Permission::COUNT],
 }
 
 impl PluginPermissions {
     pub fn trusted() -> Self {
-        Self { allowed: [true; 5] }
+        Self {
+            allowed: [true; Permission::COUNT],
+        }
     }
 
     pub fn denied() -> Self {
         Self {
-            allowed: [false; 5],
+            allowed: [false; Permission::COUNT],
         }
     }
 
@@ -67,9 +59,9 @@ impl PluginPermissions {
             return Self::denied();
         };
         let mut perms = Self::denied();
-        for (i, key) in PERM_KEYS.iter().enumerate() {
-            if let Some(enabled) = table.get(*key).and_then(|v| v.as_bool()) {
-                perms.allowed[i] = enabled;
+        for perm in Permission::ALL {
+            if let Some(enabled) = table.get(perm.manifest_key()).and_then(|v| v.as_bool()) {
+                perms.allowed[*perm as usize] = enabled;
             }
         }
         perms
@@ -101,38 +93,12 @@ impl PluginPermissions {
 }
 
 pub fn denied_error(perm: Permission) -> mlua::Error {
-    let perm_key = PERM_KEYS[perm as usize];
+    let perm_key = perm.manifest_key();
     let msg = format!(
         "Permission denied: {perm:?}. Add '{perm_key}' to [permissions] in {MANIFEST_FILE}"
     );
     tracing::warn!(permission = perm_key, "{msg}");
     mlua::Error::RuntimeError(msg)
-}
-
-impl Permission {
-    pub const ALL: &[Permission] = &[
-        Permission::FsRead,
-        Permission::FsWrite,
-        Permission::Net,
-        Permission::Run,
-        Permission::Env,
-    ];
-
-    pub fn manifest_key(&self) -> &'static str {
-        PERM_KEYS[*self as usize]
-    }
-
-    /// Parses the name used in `plugin.toml` and in the approval store.
-    ///
-    /// Both use one spelling on purpose. If an approval were recorded under a
-    /// different name from the request, `intersect` would silently never
-    /// match, and every managed package would run with nothing granted.
-    pub fn from_key(key: &str) -> Option<Self> {
-        Permission::ALL
-            .iter()
-            .copied()
-            .find(|p| p.manifest_key() == key)
-    }
 }
 
 /// What a package's `plugin.toml` asks for.
@@ -150,9 +116,9 @@ impl Requested {
 
     pub fn from_manifest(manifest: &toml::Value) -> Self {
         let perms = manifest.get("permissions");
-        let mut allowed = [false; 5];
-        for perm in Permission::ALL {
-            allowed[*perm as usize] = perms
+        let mut allowed = [false; Permission::COUNT];
+        for &perm in Permission::ALL {
+            allowed[perm as usize] = perms
                 .and_then(|p| p.get(perm.manifest_key()))
                 .and_then(toml::Value::as_bool)
                 .unwrap_or(false);
@@ -173,10 +139,10 @@ impl Requested {
             .collect()
     }
 
-    /// A package the user installed by hand gets what it asks for. They placed
-    /// the files, which is the same trust already given to a local `init.lua`.
-    /// Only a package craft fetched has to be intersected with an approval.
-    pub fn granted_for_manual_install(self) -> PluginPermissions {
+    /// Code whose files nobody fetched gets what it asks for: a package the
+    /// user installed by hand, or a plugin bundled into the binary. Only a
+    /// package craft downloaded has to be intersected with an approval.
+    pub fn granted(self) -> PluginPermissions {
         self.0
     }
 
@@ -397,7 +363,7 @@ mod tests {
     #[test]
     fn manual_install_grants_what_it_requests() {
         let val: toml::Value = toml::from_str("[permissions]\nfs_read = true\n").unwrap();
-        let granted = Requested::from_manifest(&val).granted_for_manual_install();
+        let granted = Requested::from_manifest(&val).granted();
         assert!(granted.is_allowed(Permission::FsRead));
         assert!(!granted.is_allowed(Permission::Net));
     }

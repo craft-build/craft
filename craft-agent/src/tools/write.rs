@@ -60,6 +60,7 @@ super::impl_tool!(
         | super::ToolAudience::INTERPRETER,
     kind = "edit",
     tier = super::ToolTier::Core,
+    permission = craft_config::Permission::FsWrite,
 );
 
 impl super::ToolInvocation for Write {

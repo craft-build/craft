@@ -170,7 +170,7 @@ pub fn granted(
     approvals: &craft_pack::approvals::Approvals,
 ) -> crate::plugin_permissions::PluginPermissions {
     match &pkg.origin {
-        Origin::Manual => pkg.requested.clone().granted_for_manual_install(),
+        Origin::Manual => pkg.requested.clone().granted(),
         Origin::Fetched { src } => {
             let key = craft_pack::approvals::ApprovalKey::new(pkg.name.clone(), src);
             let approved = crate::plugin_permissions::PluginPermissions::from_approved(
@@ -914,9 +914,9 @@ mod tests {
         let pkg = greedy("demo", Origin::Manual);
         let effective = granted(&pkg, &craft_pack::approvals::Approvals::default());
 
-        for perm in Permission::ALL {
+        for &perm in Permission::ALL {
             assert!(
-                effective.is_allowed(*perm),
+                effective.is_allowed(perm),
                 "{} should be granted to a manually installed package",
                 perm.manifest_key()
             );
@@ -936,9 +936,9 @@ mod tests {
         );
         let effective = granted(&pkg, &craft_pack::approvals::Approvals::default());
 
-        for perm in Permission::ALL {
+        for &perm in Permission::ALL {
             assert!(
-                !effective.is_allowed(*perm),
+                !effective.is_allowed(perm),
                 "{} must not be granted to fetched code with no approval",
                 perm.manifest_key()
             );

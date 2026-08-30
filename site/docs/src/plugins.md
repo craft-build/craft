@@ -139,7 +139,17 @@ run = true
 env = true
 ```
 
+What each permission covers:
+
+- `fs_read`: reading files, and locating the directories Craft keeps them in
+- `fs_write`: creating, changing, and removing files
+- `net`: outbound network requests
+- `run`: starting processes
+- `env`: reading the process environment, where secrets live
+
 The manifest states what the package wants, and Craft asks about new permissions in a separate prompt. A package with no `plugin.toml` asks for nothing, and every guarded call it makes fails.
+
+A package, or a plugin Craft ships, is read the other way round: a key it does not name is not requested, so its `plugin.toml` lists everything it uses. Only a `plugin.toml` you wrote yourself defaults to granted.
 
 An approval applies only to the same package name and source. Craft keeps approvals in `<craft-data>/site/pack-approvals.json`, where `<craft-data>` is the data directory from the directory layout in the configuration docs. Approvals describe trust on this machine and must not be committed with `pack-lock.json`.
 
@@ -224,6 +234,7 @@ Activate an installed `opt` package, like `:packadd`. See [Activate an installed
 | `register_options({ ... })` | Declare the options your plugin accepts under `plugins.<name>` in `craft.setup`. Returns the user's values merged with your defaults |
 | `set_prompt({ ... })` | Override a singleton prompt slot (`identity` or `tone`). Takes `slot`, `content` (string or callback), and optional `prompt` |
 | `register_permission_rule({ ... })` | Declare an agent permission rule for a native tool, so paths your plugin owns do not prompt |
+| `has_tool(name)` | Whether a tool with that name is registered right now, so a plugin can skip rules naming tools that are turned off |
 
 Slash commands accept an `nargs` option that controls how many whitespace-separated arguments they take, spelled like Neovim's `nargs`: `0` (the default), `1`, `"?"` (zero or one), `"*"` (any number), or `"+"` (one or more). Type more than allowed and the command quietly stops matching, sending the input to the model as a normal message. Only the upper bound is checked, so with `"+"` you still handle an empty `opts.args` yourself. The handler receives one `opts` table: `opts.args` is the raw argument string (whitespace kept, may be empty) and `opts.fargs` is the same string split into words.
 
@@ -265,13 +276,17 @@ craft.api.register_permission_rule({spec})
 
 Declare an agent permission rule for a native tool. Use it to pre-allow (or pre-deny) tool calls on paths your plugin owns, like a storage directory outside the working dir, so the user is not prompted for them.
 
+An allow is delegation, not escalation: it needs the `permission` the target tool declares, so a plugin can only pre-approve what it could already do itself. A deny needs no permission.
+
+Allows are checked once the plugin finishes loading, so a plugin may pre-approve a tool it registers itself. One that does not hold up (no such tool, a tool with no `permission_scopes` that is never checked, or a permission the plugin lacks) is dropped with a warning in the log while the rest of the plugin loads. Without the rule the call simply prompts.
+
 Rules live as long as the plugin is loaded: a reload replaces them, and a reload that registers none clears the old ones. User config and session deny rules always win over a plugin allow.
 
 **Parameters:**
 
 - `{spec}` (`table`) Rule specification:
   - `tool` (`string`) Required. Native tool name (e.g. "edit", "write"). MCP tools and the "*" wildcard are not allowed.
-  - `scope` (`string`) Required. Scope pattern the rule applies to, e.g. "/abs/dir/**" for a directory subtree.
+  - `scope` (`string`) Required. Scope pattern the rule applies to, e.g. "/abs/dir/**" for a directory subtree. An allow whose pattern matches every scope ("*", "**", "/*", "/**") is refused: name the paths or commands it covers. A deny may cover everything.
   - `effect` (`string`) Optional. "allow" (default) or "deny".
 
 **Example:**
@@ -284,6 +299,8 @@ craft.api.register_permission_rule({
 ```
 
 A minimal custom tool:
+
+When a tool touches something the permission manager checks, declare `permission_scopes` next to it, and pair it with `permission`: the capability the tool exposes to the model, one of `fs_read`, `fs_write`, `net`, `run`, or `env`. Declaring `permission_scopes` is what puts the tool in front of the permission prompt, and it requires `permission`. Your plugin must hold that permission, and so must any plugin that pre-approves your tool with `register_permission_rule`.
 
 ```lua
 craft.api.register_tool({

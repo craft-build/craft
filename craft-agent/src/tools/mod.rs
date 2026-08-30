@@ -675,11 +675,14 @@ macro_rules! impl_tool {
     (@kind_body $kind:expr) => { Some($kind) };
     (@tier_body) => { $crate::tools::registry::ToolTier::Extended };
     (@tier_body $tier:expr) => { $tier };
+    (@perm_body) => { None };
+    (@perm_body $perm:expr) => { Some($perm) };
     (
         $ty:ty
         $(, audience = $aud:expr)?
         $(, kind = $kind:expr)?
         $(, tier = $tier:expr)?
+        $(, permission = $perm:expr)?
         $(, augment = $augment:expr)?
         $(,)?
     ) => {
@@ -715,6 +718,10 @@ macro_rules! impl_tool {
 
             fn tier(&self) -> $crate::tools::registry::ToolTier {
                 $crate::tools::impl_tool!(@tier_body $($tier)?)
+            }
+
+            fn required_permission(&self) -> Option<craft_config::Permission> {
+                $crate::tools::impl_tool!(@perm_body $($perm)?)
             }
 
             fn parse(&self, input: &serde_json::Value)

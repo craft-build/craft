@@ -2138,6 +2138,7 @@ dependencies = [
  "inventory",
  "serde",
  "serde_json",
+ "strum 0.28.0",
  "tempfile",
  "test-case",
  "thiserror 2.0.20",

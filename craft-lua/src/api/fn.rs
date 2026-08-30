@@ -13,7 +13,7 @@ use crate::api::fs::expand_tilde;
 use crate::api::util::command::{UiAction, ui_roundtrip, ui_send};
 use crate::api::util::pair::{err_pair, try_pair};
 use crate::plugin_permissions::{
-    Permission::{Env, FsWrite, Run},
+    Permission::{FsRead, FsWrite, Run},
     PluginPermissions,
 };
 use crate::runtime::{SharedSandboxConfig, with_bg_jobs, with_task_jobs};
@@ -1141,9 +1141,11 @@ pub(crate) fn create_fn_table(
     let p = perms;
     t.set(
         "executable",
+        // A file probe over `$PATH`: it answers whether a file exists, never
+        // what the environment holds, so `fs_read` covers it.
         lua.create_function(move |_, name: String| {
-            if !p.is_allowed(Env) {
-                return Err(crate::plugin_permissions::denied_error(Env));
+            if !p.is_allowed(FsRead) {
+                return Err(crate::plugin_permissions::denied_error(FsRead));
             }
             let found = env::var_os("PATH")
                 .map(|paths| env::split_paths(&paths).any(|dir| dir.join(&name).is_file()))

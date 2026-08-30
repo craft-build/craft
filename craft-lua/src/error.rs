@@ -62,6 +62,8 @@ pub enum PluginError {
         #[source]
         source: io::Error,
     },
+    #[error("bundled plugin {plugin} has an unusable plugin.toml: {message}")]
+    BundledManifest { plugin: String, message: String },
     #[error("two packages are both named \"{name}\": {first} and {second}")]
     DuplicatePackage {
         name: String,

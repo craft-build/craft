@@ -38,6 +38,7 @@ craft.api.register_tool({
       num_results = { type = "integer", description = "Number of results to return (default 8)" },
     },
   },
+  permission = "net",
   permission_scopes = "query",
   audiences = { "main", "interpreter" },
 
