@@ -180,6 +180,10 @@ pub(crate) fn add_autocmd_methods(api_table: &Table, lua: &Lua, plugin: Arc<str>
         })?,
     )?;
 
+    // A handler may suspend, so this call may too. That rules it out inside
+    // a slot chain, which runs synchronously (see `declare_slot`): the first
+    // handler to park dies with "attempt to yield across metamethod/C-call
+    // boundary". Fire the event from the code that calls the slot instead.
     api_table.set(
         "exec_autocmds",
         lua.create_async_function(

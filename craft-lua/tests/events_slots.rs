@@ -235,69 +235,62 @@ end }})
     assert_eq!(exec_tool(&reg, "probe_turn_end").await, "TurnEnd|nil|v");
 }
 
+/// A handler has to tell the teardown paths apart, so every reason arrives
+/// naming the session it left behind. Only the paths someone waits on carry a
+/// deadline, and by the time `end_sessions_blocking` is back the handler has
+/// already had its say.
 #[tokio::test]
-async fn host_end_session_fires_session_end() {
+async fn session_end_carries_session_reason_and_deadline() {
     let (reg, host) = host();
     let listener = format!(
         r#"
 local log = {{}}
 craft.api.create_autocmd("SessionEnd", {{ callback = function(ev)
-    log[#log + 1] = string.format("%s|%s", ev.event, tostring(ev.data and ev.data.session_id))
+    log[#log + 1] = string.format("%s|%s|%s", ev.data.session_id, ev.data.reason,
+        type(ev.data.deadline_ms))
 end }})
 {}
 "#,
         probe_tool("probe_session_end", "return table.concat(log, \";\")")
     );
     load(&host, "listener", &listener);
-    let session = craft_storage::id::CraftId::generate();
-    host.event_handle()
-        .end_sessions_blocking([session], SessionEndReason::Shutdown);
+
+    let mut expected = Vec::new();
+    for reason in [
+        SessionEndReason::Shutdown,
+        SessionEndReason::Replaced,
+        SessionEndReason::Completed,
+    ] {
+        let session = craft_storage::id::CraftId::generate();
+        host.event_handle().end_sessions_blocking([session], reason);
+        expected.push(format!("{session}|{reason}|number"));
+    }
     assert_eq!(
         exec_tool(&reg, "probe_session_end").await,
-        format!("SessionEnd|{session}")
+        expected.join(";"),
+        "end_sessions_blocking must only return once the handler ran"
     );
-}
 
-/// Every reason reaches the handler, and only the blocking paths advertise a
-/// deadline: on the queued ones nothing is waiting for the handler at all.
-#[test_case::test_case(SessionEndReason::Reset, false ; "reset_is_queued")]
-#[test_case::test_case(SessionEndReason::Load, false ; "load_is_queued")]
-#[test_case::test_case(SessionEndReason::Delete, false ; "delete_is_queued")]
-#[test_case::test_case(SessionEndReason::Shutdown, true ; "shutdown_blocks")]
-#[test_case::test_case(SessionEndReason::Replaced, true ; "replaced_blocks")]
-#[test_case::test_case(SessionEndReason::Completed, true ; "completed_blocks")]
-#[tokio::test]
-async fn session_end_carries_its_reason_and_deadline(reason: SessionEndReason, blocking: bool) {
-    let (reg, host) = host();
-    let listener = format!(
-        r#"
-local seen = "none"
-craft.api.create_autocmd("SessionEnd", {{ callback = function(ev)
-    seen = string.format("%s|%s", ev.data.reason, type(ev.data.deadline_ms))
-end }})
-{}
-"#,
-        probe_tool("probe_reason", "return seen")
-    );
-    load(&host, "listener", &listener);
-    let session = craft_storage::id::CraftId::generate();
-
-    if blocking {
-        host.event_handle().end_sessions_blocking([session], reason);
-    } else {
+    for reason in [
+        SessionEndReason::Reset,
+        SessionEndReason::Load,
+        SessionEndReason::Delete,
+    ] {
+        let session = craft_storage::id::CraftId::generate();
         host.event_handle().end_session(session, reason);
+        expected.push(format!("{session}|{reason}|nil"));
     }
 
-    // The queued paths answer before the handler runs, so poll for it.
-    let expected = format!("{reason}|{}", if blocking { "number" } else { "nil" });
-    let deadline = Instant::now() + DISPATCH_TIMEOUT;
+    // Nobody waits on the queued paths, so the log fills in behind our back.
+    let expected = expected.join(";");
+    let give_up = Instant::now() + DISPATCH_TIMEOUT;
     loop {
-        let seen = exec_tool(&reg, "probe_reason").await;
+        let seen = exec_tool(&reg, "probe_session_end").await;
         if seen == expected {
             return;
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < give_up,
             "SessionEnd handler saw {seen}, expected {expected}"
         );
         std::thread::sleep(DISPATCH_POLL);
@@ -375,6 +368,29 @@ local s = craft.api.declare_slot("pb", function(x) runs = runs + 1; return x end
 craft.api.set_slot("pb", function(prev, x) error("early boom") end)
 assert(s("v") == "v", "pass-through degradation keeps the chain working")
 assert(runs == 1, "rest of chain ran exactly once: " .. runs)
+"#,
+    );
+}
+
+/// Slot dispatch is a plain synchronous call, so `craft.fs.read` parks on the
+/// C-call boundary long before it reaches the filesystem. From the default
+/// that error travels to the caller, from a layer it costs only the layer and
+/// the chain still answers.
+#[tokio::test]
+async fn slot_chain_must_not_suspend() {
+    let (_reg, host) = host();
+    load(
+        &host,
+        "slot_suspends",
+        r#"
+local d = craft.api.declare_slot("sd", function() return craft.fs.read("/nope") end)
+local ok, err = pcall(d)
+assert(not ok, "a suspending default must fail the call")
+assert(tostring(err):find("yield"), tostring(err))
+
+local l = craft.api.declare_slot("sl", function() return "base" end)
+craft.api.set_slot("sl", function(prev) return craft.fs.read("/nope") end)
+assert(l() == "base", "a suspending layer is skipped, chain keeps working")
 "#,
     );
 }

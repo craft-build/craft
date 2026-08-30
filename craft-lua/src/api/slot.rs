@@ -142,6 +142,12 @@ fn make_callable(lua: &Lua, name: String) -> LuaResult<Function> {
 
 pub(crate) fn add_slot_methods(api_table: &Table, lua: &Lua, plugin: Arc<str>) -> LuaResult<()> {
     let p = Arc::clone(&plugin);
+    // The chain runs synchronously, so neither the default nor a layer may
+    // call a suspending API (`craft.fs.*`, `craft.fn.jobwait`,
+    // `craft.api.exec_autocmds`, ...). Parking raises "attempt to yield
+    // across metamethod/C-call boundary": from the default that error
+    // reaches your caller, from a layer it only drops that layer. Do the
+    // waiting outside the chain and pass the result in.
     api_table.set(
         "declare_slot",
         lua.create_function(move |lua, (name, default): (String, Function)| {
@@ -161,6 +167,8 @@ pub(crate) fn add_slot_methods(api_table: &Table, lua: &Lua, plugin: Arc<str>) -
     )?;
 
     let p = Arc::clone(&plugin);
+    // Layers run synchronously, so one that calls a suspending API is
+    // dropped and the chain continues without it, see `declare_slot`.
     api_table.set(
         "set_slot",
         lua.create_function(move |lua, (name, wrapper): (String, Function)| {
