@@ -197,6 +197,7 @@ fn write(store: &ArgosyStore, path: &str, content: &str) -> Result<ToolOutput, S
         store
             .write_document(path, content)
             .map_err(|e| e.to_string())?;
+        let _ = store.delete_memory(path);
     } else {
         store
             .write_memory(path, content)
@@ -207,7 +208,9 @@ fn write(store: &ArgosyStore, path: &str, content: &str) -> Result<ToolOutput, S
 
 fn delete(store: &ArgosyStore, path: &str) -> Result<ToolOutput, String> {
     let result = if is_document(path) {
-        store.delete_document(path)
+        store
+            .delete_document(path)
+            .or_else(|_| store.delete_memory(path))
     } else {
         store.delete_memory(path)
     };
@@ -351,6 +354,21 @@ mod tests {
         }
         delete(&s, "docs/summary").unwrap();
         assert!(delete(&s, "docs/summary").is_err());
+    }
+
+    #[test]
+    fn stale_memory_copy_of_docs_name_is_cleaned_up() {
+        let s = store();
+        s.write_memory("docs/summary", "misplaced").unwrap();
+        write(&s, "docs/summary", "orientation doc").unwrap();
+        assert!(
+            s.list(argosy::bundle::Namespace::Memory)
+                .unwrap()
+                .is_empty()
+        );
+        s.write_memory("docs/stale", "misplaced").unwrap();
+        delete(&s, "docs/stale").unwrap();
+        assert!(delete(&s, "docs/stale").is_err());
     }
 
     #[test_case("goal.md" ; "md_suffix_normalized")]
