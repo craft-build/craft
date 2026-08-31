@@ -14,6 +14,7 @@ use super::ToolContext;
 use crate::tools::ToolInvocation;
 use crate::types::ToolOutput;
 
+const DOCS_PREFIX: &str = "docs/";
 const MAX_LINES_PER_NOTE: usize = 200;
 const MAX_DIR_BYTES: usize = 50 * 1024;
 const SEARCH_TOP_K: usize = 5;
@@ -35,7 +36,7 @@ gotchas across sessions.\n\n\
 proactively save non-obvious project gotchas and architecture decisions.\n\
 - Keep entries concise and current. Delete outdated information.\n\
 - `view` with a search query (not a note name) recalls notes by keyword rank.\n\
-- Notes are stored as concepts; `view` without a name lists them all.";
+- Names starting with `docs/` are project documents; `view` without a name lists\ndocuments and memories together.";
 
 impl Memory {
     pub const NAME: &str = "memory";
@@ -93,14 +94,42 @@ fn project_root(cwd: &std::path::Path) -> PathBuf {
     cwd.to_path_buf()
 }
 
+/// `docs/`-prefixed names are project documents (argosy document namespace);
+/// everything else is a memory concept.
+fn is_document(path: &str) -> bool {
+    path.starts_with(DOCS_PREFIX)
+}
+
+/// Memory names plus `docs/`-prefixed documents; flow workstream documents
+/// share the document namespace but are not memory-tool entries.
+fn list_entries(store: &ArgosyStore) -> Result<Vec<String>, String> {
+    let mut names = store
+        .list(argosy::bundle::Namespace::Memory)
+        .map_err(|e| e.to_string())?;
+    names.extend(
+        store
+            .list(argosy::bundle::Namespace::Document)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|n| is_document(n)),
+    );
+    Ok(names)
+}
+
+fn read_entry(store: &ArgosyStore, name: &str) -> Result<String, String> {
+    if is_document(name) {
+        store.read_document(name).map_err(|e| e.to_string())
+    } else {
+        store.read_memory(name).map_err(|e| e.to_string())
+    }
+}
+
 fn normalize(path: &str) -> &str {
     path.trim_end_matches(".md")
 }
 
 fn view(store: &ArgosyStore, path: Option<&str>) -> Result<ToolOutput, String> {
-    let names = store
-        .list(argosy::bundle::Namespace::Memory)
-        .map_err(|e| e.to_string())?;
+    let names = list_entries(store)?;
     let path = path.map(normalize);
     let Some(path) = path else {
         if names.is_empty() {
@@ -109,7 +138,7 @@ fn view(store: &ArgosyStore, path: Option<&str>) -> Result<ToolOutput, String> {
         let mut out = String::new();
         let mut total = 0usize;
         for name in &names {
-            let size = store.read_memory(name).map(|b| b.len()).unwrap_or(0);
+            let size = read_entry(store, name).map(|b| b.len()).unwrap_or(0);
             total += size;
             out.push_str(&format!("- {name} ({size} bytes)\n"));
         }
@@ -117,8 +146,7 @@ fn view(store: &ArgosyStore, path: Option<&str>) -> Result<ToolOutput, String> {
         return Ok(ToolOutput::Plain(out));
     };
     if names.iter().any(|n| n == path) {
-        let body = store.read_memory(path).map_err(|e| e.to_string())?;
-        return Ok(ToolOutput::Plain(body));
+        return Ok(ToolOutput::Plain(read_entry(store, path)?));
     }
     search(store, path, &names)
 }
@@ -127,7 +155,7 @@ fn search(store: &ArgosyStore, query: &str, names: &[String]) -> Result<ToolOutp
     let terms = tokenize(query);
     let mut scored = Vec::new();
     for name in names {
-        let body = store.read_memory(name).map_err(|e| e.to_string())?;
+        let body = read_entry(store, name)?;
         let score = score(&body, &terms);
         if score > 0.0 {
             scored.push((score, name.clone(), body));
@@ -152,29 +180,38 @@ fn write(store: &ArgosyStore, path: &str, content: &str) -> Result<ToolOutput, S
             "content exceeds {MAX_LINES_PER_NOTE} lines ({lines} lines); reduce content size"
         ));
     }
-    let names = store
-        .list(argosy::bundle::Namespace::Memory)
-        .map_err(|e| e.to_string())?;
+    let names = list_entries(store)?;
     let mut total = 0usize;
     for name in &names {
         if name == path {
             continue;
         }
-        total += store.read_memory(name).map(|b| b.len()).unwrap_or(0);
+        total += read_entry(store, name).map(|b| b.len()).unwrap_or(0);
     }
     if total + content.len() > MAX_DIR_BYTES {
         return Err(format!(
             "memory would exceed {MAX_DIR_BYTES} byte limit; delete stale entries first"
         ));
     }
-    store
-        .write_memory(path, content)
-        .map_err(|e| e.to_string())?;
+    if is_document(path) {
+        store
+            .write_document(path, content)
+            .map_err(|e| e.to_string())?;
+    } else {
+        store
+            .write_memory(path, content)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(ToolOutput::Plain(format!("wrote {path} ({lines} lines)")))
 }
 
 fn delete(store: &ArgosyStore, path: &str) -> Result<ToolOutput, String> {
-    match store.delete_memory(path) {
+    let result = if is_document(path) {
+        store.delete_document(path)
+    } else {
+        store.delete_memory(path)
+    };
+    match result {
         Ok(()) => Ok(ToolOutput::Plain(format!("deleted {path}"))),
         Err(craft_storage::argosy_store::ArgosyError::NotFound(_)) => {
             Err(format!("'{path}' does not exist"))
@@ -289,6 +326,31 @@ mod tests {
         let s = store();
         let err = write(&s, "big", &"x".repeat(MAX_DIR_BYTES + 1)).unwrap_err();
         assert!(err.contains("byte limit"), "got: {err}");
+    }
+
+    #[test]
+    fn docs_prefix_routes_to_document_namespace() {
+        let s = store();
+        write(&s, "docs/summary", "orientation doc").unwrap();
+        assert!(
+            s.list(argosy::bundle::Namespace::Memory)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            s.list(argosy::bundle::Namespace::Document).unwrap(),
+            vec!["docs/summary".to_string()]
+        );
+        match view(&s, Some("docs/summary")).unwrap() {
+            ToolOutput::Plain(text) => assert_eq!(text, "orientation doc"),
+            other => panic!("expected plain output, got {other:?}"),
+        }
+        match view(&s, None).unwrap() {
+            ToolOutput::Plain(text) => assert!(text.contains("docs/summary"), "got: {text}"),
+            other => panic!("expected plain output, got {other:?}"),
+        }
+        delete(&s, "docs/summary").unwrap();
+        assert!(delete(&s, "docs/summary").is_err());
     }
 
     #[test_case("goal.md" ; "md_suffix_normalized")]
