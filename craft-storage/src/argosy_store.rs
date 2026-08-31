@@ -135,8 +135,10 @@ impl ArgosyStore {
 
     fn delete_concept(&self, namespace: Namespace, id: &ConceptId) -> Result<(), ArgosyError> {
         let argosy = self.argosy.lock().unwrap_or_else(|e| e.into_inner());
-        argosy.delete_concept(namespace, id)?;
-        Ok(())
+        argosy.delete_concept(namespace, id).map_err(|e| match e {
+            argosy::Error::ConceptNotFound { .. } => ArgosyError::NotFound(id.as_str().to_string()),
+            other => other.into(),
+        })
     }
 }
 

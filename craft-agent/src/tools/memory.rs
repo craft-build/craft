@@ -208,9 +208,10 @@ fn write(store: &ArgosyStore, path: &str, content: &str) -> Result<ToolOutput, S
 
 fn delete(store: &ArgosyStore, path: &str) -> Result<ToolOutput, String> {
     let result = if is_document(path) {
-        store
-            .delete_document(path)
-            .or_else(|_| store.delete_memory(path))
+        store.delete_document(path).or_else(|e| match e {
+            craft_storage::argosy_store::ArgosyError::NotFound(_) => store.delete_memory(path),
+            err => Err(err),
+        })
     } else {
         store.delete_memory(path)
     };
