@@ -77,7 +77,6 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
     "glob",
     "grep",
-    "memory",
     "question",
     "sessions",
     "skill",

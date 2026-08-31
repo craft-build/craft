@@ -192,6 +192,7 @@ impl<'h> Agent<'h> {
                     craft_config::FormatConfig::default(),
                 ),
                 file_tracker: params.file_tracker,
+                code_tools: Arc::new(argosy::codetools::CodeTools::default()),
                 tool_output_lines: params.tool_output_lines,
                 host_question_routing: false,
                 subagent_cancels: params.subagent_cancels,

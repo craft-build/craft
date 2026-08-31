@@ -3,14 +3,13 @@
 //! After a run ends (the `TurnOutcome::Done` boundary in `run.rs`), this module
 //! runs a cheap keyword pre-filter on the user's message for that run. If it
 //! fires, one weak-tier side-completion extracts up to `MAX_FACTS` durable facts
-//! as strict JSON; each fact is written as a markdown note into the per-project
-//! memory directory the Lua `memory` plugin owns (`<state>/projects/<id>/memories`),
-//! and any superseded note is deleted. Extraction is best-effort: every error is
-//! logged and swallowed, and the host calls it via a detached `tokio::spawn` so
-//! it never delays the run's return.
+//! as strict JSON; each fact is written as a memory concept (type `Note`) into
+//! the per-project argosy (`<state>/projects/<id>/argosy`), and any superseded
+//! note is deleted. Extraction is best-effort: every error is logged and
+//! swallowed, and the host calls it via a detached `tokio::spawn` so it never
+//! delays the run's return.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use flume::unbounded;
@@ -22,11 +21,11 @@ use craft_config::model_roles::ModelRole;
 use craft_providers::provider::Provider;
 use craft_providers::roles::resolve_role;
 use craft_providers::{Message, Model, RequestOptions, Timeouts};
+use craft_storage::argosy_store::{ArgosyError, ArgosyStore};
 use craft_storage::id::SessionRef;
 
 const MAX_FACTS: usize = 4;
 const MAX_USER_TEXT_CHARS: usize = 12_000;
-const VECTORS_FILE: &str = ".vectors.json";
 
 /// Cue phrases that signal a durable, extractable fact. Lowercase; matched as
 /// substrings against the lowercased user message. Conservative on purpose: a
@@ -87,7 +86,7 @@ const PROVENANCE_SUFFIX: &str = "\n\n<!-- source: user-stated -->";
 /// so the spawned future borrows nothing from the `Agent`.
 pub struct ExtractionCtx {
     pub project_root: PathBuf,
-    pub memory_dir: PathBuf,
+    pub argosy_dir: PathBuf,
     pub user_text: String,
     pub provider: Arc<dyn Provider>,
     pub model: Model,
@@ -112,20 +111,9 @@ struct Extraction {
     facts: Vec<Fact>,
 }
 
-/// Project id mirroring the Lua `memory_helpers.project_id`: non-lowercased
-/// basename of the root, a dash, then the FNV-1a-64 hash of the full root path.
-/// Must match the plugin exactly or extraction writes to a different directory.
-pub(crate) fn project_id_for(root: &Path) -> String {
-    let basename = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "root".to_string());
-    format!("{basename}-{}", fnv1a_64(root.to_string_lossy().as_bytes()))
-}
-
-/// Resolve the project root the way the Lua memory plugin does: the nearest
-/// ancestor containing a `.git` marker, or the current directory when none is
-/// found. Falls back to the cwd on any error.
+/// Resolve the project root: the nearest ancestor containing a `.git` marker,
+/// or the current directory when none is found. Falls back to the cwd on any
+/// error. The memory tool resolves roots the same way.
 pub(crate) fn memory_project_root() -> PathBuf {
     let Ok(cwd) = std::env::current_dir() else {
         return PathBuf::from(".");
@@ -136,18 +124,6 @@ pub(crate) fn memory_project_root() -> PathBuf {
         }
     }
     cwd
-}
-
-/// FNV-1a 64-bit as 16 lowercase hex chars, matching `memory_helpers.fnv1a_64`.
-fn fnv1a_64(data: &[u8]) -> String {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET;
-    for &b in data {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("{hash:016x}")
 }
 
 /// Cheap keyword gate: true when the (lowercased) user message contains a
@@ -178,8 +154,7 @@ fn parse_extraction(reply: &str) -> Option<Extraction> {
     serde_json::from_str(&body[start..=end]).ok()
 }
 
-/// Turn a fact title into a stable, filesystem-safe `.md` filename. Matches the
-/// plugin's listing expectation (a flat dir of `.md` files keyed by stem).
+/// Turn a fact title into a stable concept name.
 fn slugify(title: &str) -> String {
     let stripped = title.trim().trim_end_matches(".md");
     let slug: String = stripped
@@ -189,35 +164,17 @@ fn slugify(title: &str) -> String {
         .collect();
     let trimmed = slug.trim_matches('-');
     if trimmed.is_empty() {
-        "untitled.md".to_string()
+        "untitled".to_string()
     } else {
-        format!("{trimmed}.md")
+        trimmed.to_string()
     }
 }
 
-/// Existing memory note titles (file stems) in `dir`, used for supersession.
-fn list_titles(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut titles = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        if name == VECTORS_FILE || !name.ends_with(".md") {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            titles.push(stem.to_string());
-        }
-    }
-    titles
+/// Existing memory note names, used for supersession.
+fn list_titles(argosy: &ArgosyStore) -> Vec<String> {
+    argosy
+        .list(argosy::bundle::Namespace::Memory)
+        .unwrap_or_default()
 }
 
 /// Resolve the weak-tier provider/model for extraction: the configured
@@ -288,7 +245,9 @@ pub async fn extract_and_store(ctx: ExtractionCtx) {
 }
 
 async fn run_extraction(ctx: &ExtractionCtx) -> Result<(), String> {
-    let titles = list_titles(&ctx.memory_dir);
+    let store = ArgosyStore::open_or_init(&ctx.argosy_dir, "memory-extraction")
+        .map_err(|e| e.to_string())?;
+    let titles = list_titles(&store);
     let system = build_system_prompt(&titles);
     let user_text = truncate_chars(&ctx.user_text, MAX_USER_TEXT_CHARS);
     let messages = vec![Message::user(user_text)];
@@ -315,11 +274,6 @@ async fn run_extraction(ctx: &ExtractionCtx) -> Result<(), String> {
         return Ok(());
     }
 
-    if let Some(parent) = ctx.memory_dir.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-    fs::create_dir_all(&ctx.memory_dir).ok();
-
     let mut written = 0usize;
     for fact in extraction.facts.into_iter().take(MAX_FACTS) {
         let title = fact.title.trim();
@@ -327,18 +281,20 @@ async fn run_extraction(ctx: &ExtractionCtx) -> Result<(), String> {
         if title.is_empty() || content.is_empty() {
             continue;
         }
-        let filename = slugify(title);
-        let path = ctx.memory_dir.join(&filename);
+        let name = slugify(title);
         let body = format!("# {title}\n\n{content}{PROVENANCE_SUFFIX}");
-        if let Err(e) = fs::write(&path, body) {
-            warn!(error = %e, path = %path.display(), "failed to write memory note");
+        if let Err(e) = store.write_memory(&name, &body) {
+            warn!(error = %e, name = %name, "failed to write memory note");
             continue;
         }
         written += 1;
-        if !fact.supersedes.trim().is_empty() {
-            let old = ctx.memory_dir.join(slugify(fact.supersedes.trim()));
-            if old != path {
-                let _ = fs::remove_file(&old);
+        let supersedes = slugify(fact.supersedes.trim());
+        if !fact.supersedes.trim().is_empty() && supersedes != name {
+            match store.delete_memory(&supersedes) {
+                Ok(()) | Err(ArgosyError::NotFound(_)) => {}
+                Err(e) => {
+                    warn!(error = %e, name = %supersedes, "failed to delete superseded note")
+                }
             }
         }
     }
@@ -388,57 +344,26 @@ mod tests {
         }
     }
 
-    #[test_case("Rebrand Plan", "rebrand-plan.md" ; "spaces_and_case")]
-    #[test_case("api_v2 !!!", "api-v2.md" ; "symbols")]
-    #[test_case("...___...", "untitled.md" ; "only_separators")]
-    #[test_case("note.md", "note.md" ; "already_md_no_double_ext")]
+    #[test_case("Rebrand Plan", "rebrand-plan" ; "spaces_and_case")]
+    #[test_case("api_v2 !!!", "api-v2" ; "symbols")]
+    #[test_case("...___...", "untitled" ; "only_separators")]
+    #[test_case("note.md", "note" ; "md_suffix_stripped")]
     fn slugify_cases(title: &str, expected: &str) {
         assert_eq!(slugify(title), expected);
     }
 
-    #[test]
-    fn project_id_matches_lua_convention_non_lowercase_basename() {
-        let root = Path::new("/home/user/MyRepo");
-        let id = project_id_for(root);
-        assert!(
-            id.starts_with("MyRepo-"),
-            "basename must not be lowercased; got {id}"
-        );
-        let hash = &id["MyRepo-".len()..];
-        assert_eq!(hash.len(), 16, "fnv1a-64 must be 16 hex chars; got {hash}");
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    fn tmp_store() -> (tempfile::TempDir, ArgosyStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArgosyStore::open_or_init(&dir.path().join("argosy"), "test").unwrap();
+        (dir, store)
     }
 
     #[test]
-    fn project_id_matches_recomputed_hash() {
-        let root = Path::new("/x/Repo");
-        let expected = format!("Repo-{}", fnv1a_64(b"/x/Repo"));
-        assert_eq!(project_id_for(root), expected);
-    }
-
-    #[test_case("" , "cbf29ce484222325" ; "empty")]
-    #[test_case("a", "af63dc4c8601ec8c" ; "a")]
-    #[test_case("/home/user/my-project", "fc6e8b528feefa1c" ; "project_path")]
-    fn fnv1a_64_matches_lua_memory_helpers(input: &str, expected: &str) {
-        assert_eq!(fnv1a_64(input.as_bytes()), expected);
-    }
-
-    #[test]
-    fn project_id_uses_lua_basename_and_hash_for_mixed_case() {
-        let id = project_id_for(Path::new("/home/user/MyProject"));
-        assert_eq!(id, "MyProject-44f570701bbef79d");
-    }
-
-    #[test]
-    fn list_titles_skips_vectors_and_non_markdown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        fs::write(dir.join("rebrand.md"), "x").unwrap();
-        fs::write(dir.join(VECTORS_FILE), "{}").unwrap();
-        fs::write(dir.join("notes.txt"), "x").unwrap();
-        let mut titles = list_titles(dir);
-        titles.sort();
-        assert_eq!(titles, vec!["rebrand".to_string()]);
+    fn list_titles_reports_memory_concepts() {
+        let (_guard, store) = tmp_store();
+        store.write_memory("rebrand", "x").unwrap();
+        store.write_document("goal", "not a memory").unwrap();
+        assert_eq!(list_titles(&store), vec!["rebrand".to_string()]);
     }
 
     #[tokio::test]
@@ -447,13 +372,15 @@ mod tests {
             r#"{"facts":[{"title":"rebrand","content":"we are acme","supersedes":"old-brand"}]}"#,
         );
         let dir = tempfile::tempdir().unwrap();
-        let memory_dir = dir.path().join("memories");
-        fs::create_dir_all(&memory_dir).unwrap();
-        fs::write(memory_dir.join("old-brand.md"), "stale").unwrap();
+        let argosy_dir = dir.path().join("argosy");
+        {
+            let seed = ArgosyStore::open_or_init(&argosy_dir, "test").unwrap();
+            seed.write_memory("old-brand", "stale").unwrap();
+        }
 
         let ctx = ExtractionCtx {
             project_root: PathBuf::from("/tmp/repo"),
-            memory_dir: memory_dir.clone(),
+            argosy_dir: argosy_dir.clone(),
             user_text: "we're rebranding to acme".into(),
             provider,
             model: extraction_model(),
@@ -462,11 +389,12 @@ mod tests {
         };
         extract_and_store(ctx).await;
 
-        let new_note = memory_dir.join("rebrand.md");
-        let old_note = memory_dir.join("old-brand.md");
-        assert!(new_note.exists(), "new note should be written");
-        assert!(!old_note.exists(), "superseded note should be deleted");
-        let body = fs::read_to_string(&new_note).unwrap();
+        let store = ArgosyStore::open_or_init(&argosy_dir, "test").unwrap();
+        assert!(matches!(
+            store.read_memory("old-brand"),
+            Err(ArgosyError::NotFound(_))
+        ));
+        let body = store.read_memory("rebrand").unwrap();
         assert!(body.contains("we are acme"));
         assert!(body.contains("source: user-stated"));
     }
@@ -476,10 +404,10 @@ mod tests {
         let provider =
             scripted_provider(r#"{"facts":[{"title":"x","content":"y","supersedes":""}]}"#);
         let dir = tempfile::tempdir().unwrap();
-        let memory_dir = dir.path().join("memories");
+        let argosy_dir = dir.path().join("argosy");
         let ctx = ExtractionCtx {
             project_root: PathBuf::from("/tmp/repo"),
-            memory_dir: memory_dir.clone(),
+            argosy_dir,
             user_text: "just run the tests".into(),
             provider,
             model: extraction_model(),
@@ -487,7 +415,7 @@ mod tests {
             session_id: None,
         };
         extract_and_store(ctx).await;
-        assert!(!memory_dir.exists() || fs::read_dir(&memory_dir).unwrap().count() == 0);
+        assert!(!dir.path().join("argosy").join("memory").exists());
     }
 
     fn scripted_provider(reply: &str) -> Arc<dyn Provider> {

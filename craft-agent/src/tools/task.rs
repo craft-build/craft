@@ -750,6 +750,7 @@ mod tests {
             (super::super::MOVE_TOOL_NAME, MAIN | GEN | INT),
             (super::super::RESOLVE_TOOL_NAME, MAIN),
             (super::super::SAFETY_TOOL_NAME, MAIN),
+            (super::super::MEMORY_TOOL_NAME, all),
             (super::super::WIKI_READ_TOOL_NAME, all),
             (super::super::WIKI_APPEND_TOOL_NAME, all),
             (super::super::SHIFT_TOOL_NAME, MAIN),

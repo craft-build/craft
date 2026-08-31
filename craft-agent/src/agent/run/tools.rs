@@ -28,6 +28,7 @@ pub(super) struct AgentTools {
     pub(super) validator: Validator,
     pub(super) formatter: Formatter,
     pub(super) file_tracker: Arc<FileReadTracker>,
+    pub(super) code_tools: Arc<argosy::codetools::CodeTools>,
     pub(super) tool_output_lines: ToolOutputLines,
     pub(super) host_question_routing: bool,
     pub(super) subagent_cancels: Arc<CancelMap<String>>,

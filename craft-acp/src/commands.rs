@@ -599,6 +599,7 @@ fn recipe_list(cwd: &Path) -> Value {
                 Scope::Project(_) => "project",
                 Scope::Global => "global",
                 Scope::Builtin => "builtin",
+                Scope::Argosy => "argosy",
             };
             json!({
                 "name": f.path.file_stem().map(|s| s.to_string_lossy().into_owned()),

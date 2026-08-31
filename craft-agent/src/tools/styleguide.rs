@@ -21,7 +21,9 @@ impl StyleguideList {
     }
 
     pub async fn execute(&self, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        let store = crate::tools::memory::open_project_store()?;
         Ok(ToolOutput::Plain(styleguide::list_categories(
+            &store,
             &self.language,
         )))
     }
@@ -64,7 +66,9 @@ impl StyleguideSearch {
     }
 
     pub async fn execute(&self, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        let store = crate::tools::memory::open_project_store()?;
         Ok(ToolOutput::Plain(styleguide::search_rules(
+            &store,
             &self.query,
             self.language.as_deref(),
             self.category.as_deref(),
@@ -118,7 +122,9 @@ impl StyleguideGet {
     }
 
     pub async fn execute(&self, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        let store = crate::tools::memory::open_project_store()?;
         styleguide::get_rules(
+            &store,
             &self.language,
             self.category.as_deref(),
             self.rule_ids.as_ref(),

@@ -157,13 +157,13 @@ impl<'h> Agent<'h> {
         }
 
         let project_root = memory_extraction::memory_project_root();
-        let id = memory_extraction::project_id_for(&project_root);
+        let id = craft_storage::flow::project_id(&project_root);
         let state_dir = craft_storage::paths::state_dir().ok()?;
-        let memory_dir = state_dir.join("projects").join(id).join("memories");
+        let argosy_dir = state_dir.join("projects").join(id).join("argosy");
 
         Some(ExtractionCtx {
             project_root,
-            memory_dir,
+            argosy_dir,
             user_text,
             provider: Arc::clone(&self.io.provider),
             model: self.io.model.as_ref().clone(),

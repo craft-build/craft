@@ -360,9 +360,10 @@ impl<'h> Agent<'h> {
         let flow_search = if let Some(handle) = self.flow.flow_search.clone() {
             Some(handle)
         } else if let Some(hist) = self.flow.thread_history.clone() {
-            let (project_id, workstream_id, root) = {
+            let (store, project_id, workstream_id, root) = {
                 let h = hist.lock().unwrap_or_else(|e| e.into_inner());
                 (
+                    Arc::clone(h.store()),
                     h.project_id().to_string(),
                     h.root_thread_id().as_str().to_string(),
                     h.root_thread_id().clone(),
@@ -371,6 +372,7 @@ impl<'h> Agent<'h> {
             Some(Arc::new(
                 crate::tools::flow_search_backend::HistorySearchBackend::new(
                     hist,
+                    store,
                     project_id,
                     workstream_id,
                     root,
@@ -398,6 +400,7 @@ impl<'h> Agent<'h> {
             model_policy: Arc::clone(&self.model_policy),
             timeouts: self.io.timeouts,
             file_tracker: Arc::clone(&self.tool_state.file_tracker),
+            code_tools: Arc::clone(&self.tool_state.code_tools),
             prompt_slots: Arc::clone(&self.prompt_slots),
             subagent_cancels: Arc::clone(&self.tool_state.subagent_cancels),
             opts: self.io.opts,

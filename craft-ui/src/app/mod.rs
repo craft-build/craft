@@ -1771,6 +1771,7 @@ impl App {
                 vec![]
             }
             "/dream" => self.run_meta_prompt("/dream", craft_agent::prompt::DREAM_PROMPT),
+            "/scan" => self.run_meta_prompt("/scan", craft_agent::prompt::SCAN_PROMPT),
             "/distill" => self.run_meta_prompt("/distill", craft_agent::prompt::DISTILL_PROMPT),
             "/checkpoint" => {
                 self.run_meta_prompt("/checkpoint", craft_agent::prompt::CHECKPOINT_PROMPT)

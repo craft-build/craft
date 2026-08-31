@@ -22,6 +22,7 @@ craft-acp = { workspace = true }
 craft-config = { workspace = true }
 craft-providers = { workspace = true, features = ["bedrock"] }
 craft-storage = { workspace = true }
+argosy = { workspace = true }
 craft-lua = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
@@ -122,6 +123,7 @@ fastrand = "2"
 filetime = "0.2"
 test-case = "3"
 ignore = "0.4"
+argosy = { version = "0.2.1", default-features = false, features = ["code-tools"] }
 memchr = "2"
 strum = { version = "0.28", features = ["derive"] }
 htmd = "0.5"

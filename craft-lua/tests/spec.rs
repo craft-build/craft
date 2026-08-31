@@ -6,7 +6,6 @@ use test_case::test_case;
 
 #[test_case("lib", include_str!("../../plugins/lib/tests/spec.lua") ; "lib_spec")]
 #[test_case("bash", include_str!("../../plugins/bash/tests/spec.lua") ; "bash_plugin_spec")]
-#[test_case("memory", include_str!("../../plugins/memory/tests/spec.lua") ; "memory_plugin_spec")]
 #[test_case("question", include_str!("../../plugins/question/tests/spec.lua") ; "question_plugin_spec")]
 #[test_case("skill", include_str!("../../plugins/skill/tests/spec.lua") ; "skill_plugin_spec")]
 #[test_case("task", include_str!("../../plugins/task/tests/spec.lua") ; "task_plugin_spec")]

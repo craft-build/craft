@@ -3,9 +3,6 @@
 //! tool.
 //!
 //! Migrated from the former `craft-flow/src/search.rs`. Two layers:
-//! - [`reindex`] / [`search_docs`] are pure async functions over a `FlowStore`
-//!   doc-level index (the former `craft-flow` search). Kept so the `flow://`
-//!   internal-URL read path and workstream-level listing keep working.
 //! - [`FlowSearchBackendImpl`] backs the agent's `flow_search` tool. In Phase 2
 //!   it searches the [`super::typed_log::ThreadHistory`]'s current-state
 //!   projections **within an explicit [`Scope`]**, so a narrow turn type's
@@ -13,12 +10,6 @@
 //!   (design §4: "semantic search inside that scope, never outside it").
 //!
 //! Design ref: `turn-type-agent-loop-design.md` §4 (Reading history).
-
-use std::sync::Arc;
-
-use tracing::warn;
-
-use craft_storage::flow::{FlowStore, SEMANTIC_INDEX_MIN_DOCS};
 
 use super::typed_log::{EntryType, LogEntry, ThreadHistory, ThreadId};
 
@@ -129,121 +120,6 @@ impl Scope {
     }
 }
 
-/// Embed every persisted doc that lacks an embedding, persisting the updated
-/// index. Returns the number of newly embedded docs. A no-op (returns 0) when
-/// the workstream is below the activation threshold. Migrated from
-/// `craft-flow::search::reindex`.
-pub async fn reindex(
-    store: &FlowStore,
-    embedder: &dyn Embedder,
-    project_id: &str,
-    workstream_id: &str,
-) -> Result<usize, EmbedError> {
-    let live = store
-        .list(project_id, workstream_id)
-        .map_err(|e| EmbedError::Other(e.to_string()))?;
-    if live.len() <= SEMANTIC_INDEX_MIN_DOCS {
-        return Ok(0);
-    }
-    let mut index = store
-        .read_index(project_id, workstream_id)
-        .map_err(|e| EmbedError::Other(e.to_string()))?;
-    let missing = index.reconcile(live.iter().map(String::as_str));
-    if missing.is_empty() {
-        return Ok(0);
-    }
-    let contents: Vec<String> = missing
-        .iter()
-        .map(|p| match store.read(project_id, workstream_id, p) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(path = %p, error = %e, "flow: failed to read doc for reindex");
-                String::new()
-            }
-        })
-        .collect();
-    let embeddings = embedder.embed(contents).await?;
-    for (path, emb) in missing.into_iter().zip(embeddings) {
-        index.upsert(path, emb);
-    }
-    let added = index.len();
-    store
-        .write_index(project_id, workstream_id, &index)
-        .map_err(|e| EmbedError::Other(e.to_string()))?;
-    Ok(added)
-}
-
-/// Rank a workstream's documents against `query` (doc-level, migrated from
-/// `craft-flow::search::search`). Used by the workstream-level index; the
-/// scope-enforced projection search lives in [`search_projections`].
-pub async fn search_docs(
-    store: &FlowStore,
-    embedder: &dyn Embedder,
-    project_id: &str,
-    workstream_id: &str,
-    query: &str,
-    k: usize,
-) -> Result<Vec<DocHit>, EmbedError> {
-    let live = store
-        .list(project_id, workstream_id)
-        .map_err(|e| EmbedError::Other(e.to_string()))?;
-    if live.is_empty() {
-        return Ok(Vec::new());
-    }
-    let k = k.max(1);
-    let query_emb = embed_query(embedder, query).await?;
-    let index = store
-        .read_index(project_id, workstream_id)
-        .map_err(|e| EmbedError::Other(e.to_string()))?;
-    let use_index = live.len() > SEMANTIC_INDEX_MIN_DOCS
-        && !index.is_empty()
-        && live.iter().all(|p| index.get(p).is_some());
-    let mut scored: Vec<DocHit> = if use_index {
-        live.iter()
-            .filter_map(|p| {
-                index.get(p).map(|emb| DocHit {
-                    path: p.clone(),
-                    score: crate::agent::cosine_similarity(&query_emb, emb),
-                })
-            })
-            .collect()
-    } else {
-        let contents: Vec<String> = live
-            .iter()
-            .map(|p| match store.read(project_id, workstream_id, p) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(path = %p, error = %e, "flow: failed to read doc for search");
-                    String::new()
-                }
-            })
-            .collect();
-        let embs = embedder.embed(contents).await?;
-        live.iter()
-            .zip(embs)
-            .map(|(p, emb)| DocHit {
-                path: p.clone(),
-                score: crate::agent::cosine_similarity(&query_emb, &emb),
-            })
-            .collect()
-    };
-    scored.retain(|h| h.score >= MIN_RESULT_SCORE);
-    scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    scored.truncate(k);
-    Ok(scored)
-}
-
-/// One ranked doc-level result.
-#[derive(Debug, Clone)]
-pub struct DocHit {
-    pub path: String,
-    pub score: f32,
-}
-
 /// One ranked projection-level result (a current-state entry in the typed log).
 #[derive(Debug, Clone)]
 pub struct ProjectionHit {
@@ -323,100 +199,12 @@ async fn embed_query(embedder: &dyn Embedder, query: &str) -> Result<Vec<f32>, E
         .ok_or(EmbedError::NoResult)
 }
 
-/// `FlowSearchBackend` impl backed by the typed log's projections + scope.
-/// `search` ranks in-scope projections; `read_document`/`list_documents`
-/// delegate to the `FlowStore` so the `flow://<path>` read path keeps working.
-pub struct FlowSearchBackendImpl {
-    store: Arc<FlowStore>,
-    embedder: Arc<dyn Embedder>,
-    history: Arc<std::sync::Mutex<ThreadHistory>>,
-    scope: Scope,
-    project_id: String,
-    workstream_id: String,
-}
-
-impl FlowSearchBackendImpl {
-    pub fn new(
-        store: Arc<FlowStore>,
-        embedder: Arc<dyn Embedder>,
-        history: Arc<std::sync::Mutex<ThreadHistory>>,
-        scope: Scope,
-        project_id: impl Into<String>,
-        workstream_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            store,
-            embedder,
-            history,
-            scope,
-            project_id: project_id.into(),
-            workstream_id: workstream_id.into(),
-        }
-    }
-}
-
-impl crate::tools::flow_search::FlowSearchBackend for FlowSearchBackendImpl {
-    fn workstream(&self) -> Option<(String, String)> {
-        Some((self.project_id.clone(), self.workstream_id.clone()))
-    }
-
-    fn search<'a>(
-        &'a self,
-        _project_id: &'a str,
-        _workstream_id: &'a str,
-        query: &'a str,
-        k: usize,
-    ) -> crate::tools::flow_search::SearchFuture<'a> {
-        let embedder = Arc::clone(&self.embedder);
-        let history = Arc::clone(&self.history);
-        let scope = self.scope.clone();
-        Box::pin(async move {
-            let candidates = {
-                let hist = history.lock().unwrap_or_else(|e| e.into_inner());
-                collect_candidates(&hist, &scope)
-            };
-            let hits = rank_candidates(candidates, embedder.as_ref(), query, k)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(hits
-                .into_iter()
-                .map(|h| crate::tools::flow_search::FlowSearchHit {
-                    path: format!("{}@{}", h.entry_type.as_str(), h.thread_id),
-                    score: h.score,
-                })
-                .collect())
-        })
-    }
-
-    fn read_document<'a>(
-        &'a self,
-        project_id: &'a str,
-        workstream_id: &'a str,
-        rel_path: &'a str,
-    ) -> crate::tools::flow_search::ReadFuture<'a> {
-        Box::pin(async move {
-            self.store
-                .read(project_id, workstream_id, rel_path)
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    fn list_documents<'a>(
-        &'a self,
-        project_id: &'a str,
-        workstream_id: &'a str,
-    ) -> crate::tools::flow_search::ListFuture<'a> {
-        Box::pin(async move {
-            self.store
-                .list(project_id, workstream_id)
-                .map_err(|e| e.to_string())
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use craft_storage::flow::FlowStore;
     use std::collections::HashMap;
     use std::sync::Mutex;
 

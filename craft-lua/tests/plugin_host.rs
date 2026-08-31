@@ -2775,54 +2775,6 @@ async fn bash_timeout_round_trip() {
     );
 }
 
-#[tokio::test]
-async fn memory_write_restore_rebuilds_body_from_input_content() {
-    let reg = fresh_registry();
-    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
-        .unwrap();
-
-    let summary = "wrote n.md (1 lines)";
-    let input = serde_json::json!({"command": "write", "path": "n.md", "content": "gamma"});
-
-    let handle = host.event_handle();
-    let (tx, rx) = flume::unbounded();
-    handle.request_restore(
-        craft_lua::RestoreItem {
-            tool: Arc::from("memory"),
-            tool_use_id: "restore_id".to_owned(),
-            output: summary.to_owned(),
-            input,
-            is_error: false,
-            tool_output_lines: ToolOutputLines::default(),
-            theme_gen: None,
-            expanded: true,
-        },
-        craft_agent::EventSender::new(tx, 0),
-    );
-    let _ = handle.collect_prompt_slots_async().await;
-
-    let mut text = String::new();
-    for env in rx.drain() {
-        if let craft_agent::AgentEvent::ToolSnapshot { snapshot, .. } = env.event {
-            for line in snapshot.lines.iter() {
-                for span in &line.spans {
-                    text.push_str(&span.text);
-                }
-            }
-        }
-    }
-
-    assert!(
-        text.contains("gamma"),
-        "restored memory body should show saved content, got: {text}"
-    );
-    assert!(
-        !text.contains(summary),
-        "restored memory body should not show the summary, got: {text}"
-    );
-}
-
 async fn restore_snapshot_text(src: &str, tool: &str, expanded: bool) -> String {
     let host = PluginHost::new(fresh_registry(), None).unwrap();
     host.load_source("restore_plugin", src).unwrap();
@@ -3029,8 +2981,6 @@ async fn location_queries_cost_fs_read(call: &str) {
 
 const FILE_WRITE_TOOLS_DRIFT: &str = "fs_write tool declarations drifted from FILE_WRITE_TOOLS, update the const or the \
      required_permission declaration";
-const MEMORY_RULES_DROPPED: &str = "memory pre-approved tools nobody had registered yet, so it must load after the plugins owning them";
-
 /// Pins `FILE_WRITE_TOOLS` to the actual `required_permission` declarations,
 /// so a new fs_write tool cannot quietly slip past the file write policies
 /// keyed off that list (plan mode, cwd allow rules).
@@ -3049,33 +2999,6 @@ fn fs_write_tools_match_file_write_tools() {
     expected.sort_unstable();
 
     assert_eq!(declared, expected, "{FILE_WRITE_TOOLS_DRIFT}");
-}
-
-/// `memory` pre-approves the file-write tools for the notes directory it owns,
-/// and a rule can only name a registered tool. That turns `BUNDLED_PLUGINS`
-/// order into load order: put `memory` above the plugins owning those tools
-/// and its rules vanish with only a log line to show for it.
-#[test]
-fn builtins_load_in_an_order_that_keeps_every_plugin_rule() {
-    let reg = Arc::new(ToolRegistry::with_natives());
-    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
-    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
-        .unwrap();
-
-    let rules = host.plugin_rules().snapshot();
-    let allowed: Vec<&str> = rules
-        .iter()
-        .filter(|rule| rule.effect == Effect::Allow)
-        .filter_map(|rule| match &rule.tool {
-            ToolKey::Native(name) => Some(name.as_ref()),
-            _ => None,
-        })
-        .collect();
-    let dropped: Vec<&&str> = craft_config::FILE_WRITE_TOOLS
-        .iter()
-        .filter(|tool| !allowed.contains(tool))
-        .collect();
-    assert!(dropped.is_empty(), "{MEMORY_RULES_DROPPED}: {dropped:?}");
 }
 
 #[tokio::test]

@@ -188,6 +188,9 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Wiki(args)) => {
             subcmd::wiki::run(args.action).await?;
         }
+        Some(Command::Argosy(args)) => {
+            subcmd::argosy::run(args.action).await?;
+        }
         Some(Command::Term { action }) => {
             subcmd::term::run(action).await?;
         }

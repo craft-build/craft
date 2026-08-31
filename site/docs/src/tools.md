@@ -421,15 +421,15 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 | `output_schema` | string | no | Optional JSON Schema (object) describing the structured object the subagent must return as its final message. When set, the subagent is told to emit a final JSON object matching the schema; that object is validated and returned to you as structured data instead of prose. On validation failure the subagent is re-prompted (bounded), then a clean error is surfaced. |
 | `isolation` | string | no | Isolation mode for a general subagent:<br>- "none" (default): run in the current working tree.<br>- "worktree": run inside a fresh linked git worktree so file mutations do not touch the parent tree (sibling subagents cannot clobber each other). Requires a git repo; falls back to none otherwise. |
 
-### `memory` *(lua plugin)*
+### `memory` *(native)*
 
 Persistent, project-scoped scratchpad for learnings, patterns, decisions, and gotchas across sessions.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `command` | string | yes | Command: view, write, delete |
-| `path` | string | no | Relative path (e.g. 'architecture.md'). Omit to list all. |
-| `content` | string | no | File content for 'write' |
+| `path` | string | no | Note name (e.g. 'architecture'). Omit on view to list all. |
+| `content` | string | no | Note content for 'write' |
 
 ### `skill` *(lua plugin)*
 

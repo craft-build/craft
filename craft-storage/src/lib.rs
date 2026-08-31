@@ -2,6 +2,8 @@
 //! directory then persists (atomic rename) for crash safety.
 //! `atomic_write_permissions` sets file mode before persist (for auth keys at 0600).
 
+pub mod argosy_index;
+pub mod argosy_store;
 pub mod auth;
 pub mod flow;
 pub mod id;

@@ -286,6 +286,8 @@ pub enum Command {
         #[command(subcommand)]
         action: TermAction,
     },
+    /// Manage the project's argosy: the local bundle plus pulled imports
+    Argosy(ArgosyCommand),
     /// Diagnose and self-heal provider configuration
     Doctor {
         /// Export a JSON diagnostics report instead of running self-heal
@@ -523,6 +525,60 @@ pub enum ShellKind {
     Bash,
     Zsh,
     Fish,
+}
+
+#[derive(Subcommand)]
+pub enum ArgosyAction {
+    /// Initialize (or open) the project's local argosy bundle
+    Init,
+    /// Clone an argosy git repository into the project's (or global) store
+    Pull {
+        /// Git URL or local path of the argosy repository
+        source: String,
+        /// Checkout name under the project's argosy store
+        name: String,
+        /// Install into the user-wide global argosy store instead of this project's
+        #[arg(long)]
+        global: bool,
+    },
+    /// Validate a bundle's structure and print the findings
+    Validate {
+        /// Bundle path (defaults to the project's local argosy)
+        #[arg(value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Manage the semantic index over the project's argosys
+    Index {
+        #[command(subcommand)]
+        verb: ArgosyIndexAction,
+    },
+    /// Import styleguide YAML rules into the project's local argosy
+    Convert {
+        /// Directory holding .yaml/.yml styleguide rule files
+        yaml_dir: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ArgosyIndexAction {
+    /// Show the index location, model, and unit counts
+    Status,
+    /// Reconcile the index against the filesystem (embeds new or changed concepts)
+    Build,
+    /// Semantic search over the index
+    Query {
+        /// Query text
+        text: String,
+        /// Number of hits to return
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+    },
+}
+
+#[derive(Parser)]
+pub struct ArgosyCommand {
+    #[command(subcommand)]
+    pub action: ArgosyAction,
 }
 
 #[derive(Subcommand)]

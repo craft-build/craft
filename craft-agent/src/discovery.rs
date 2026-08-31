@@ -15,6 +15,9 @@ pub enum Scope {
     /// A skill shipped inside the craft binary itself. Lowest priority: any
     /// project or global skill of the same name shadows it.
     Builtin,
+    /// A skill packaged in the project's argosy store (local bundle or an
+    /// imported one). Shadowed by project and global skills, shadows builtins.
+    Argosy,
 }
 
 impl Scope {
@@ -24,6 +27,10 @@ impl Scope {
 
     pub fn is_builtin(self) -> bool {
         matches!(self, Scope::Builtin)
+    }
+
+    pub fn is_argosy(self) -> bool {
+        matches!(self, Scope::Argosy)
     }
 }
 
@@ -46,6 +53,7 @@ pub struct Discovery {
     cwd: PathBuf,
     home: Option<PathBuf>,
     xdg_config: Option<PathBuf>,
+    state: Option<PathBuf>,
 }
 
 impl Discovery {
@@ -54,6 +62,7 @@ impl Discovery {
             cwd,
             home,
             xdg_config,
+            state: None,
         }
     }
 
@@ -62,7 +71,18 @@ impl Discovery {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let home = paths::home();
         let xdg_config = paths::config_dir().ok();
-        Self::new(cwd, home, xdg_config)
+        Self {
+            cwd,
+            home,
+            xdg_config,
+            state: paths::state_dir().ok(),
+        }
+    }
+
+    /// Overrides the craft state root used to find the project's argosy store.
+    pub fn with_state(mut self, state: Option<PathBuf>) -> Self {
+        self.state = state;
+        self
     }
 
     /// The working directory discovery is rooted at.
@@ -117,9 +137,68 @@ impl Discovery {
             self.collect_dirs(&dir, marker, Scope::Global, &mut ordered);
         }
         if kind == "skills" && marker == "SKILL.md" {
+            self.collect_argosy_skills(&mut ordered);
             self.collect_builtins(&mut ordered);
         }
         dedupe_by_name(ordered)
+    }
+
+    /// Skills packaged in the project's argosys: the local bundle at
+    /// `<state>/projects/<project-id>/argosy` plus imported bundles beside it
+    /// and in the global store. Best-effort: a missing or broken argosy yields
+    /// no skills rather than an error.
+    fn collect_argosy_skills(&self, out: &mut Vec<DiscoveredFile>) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let local = state
+            .join("projects")
+            .join(craft_storage::flow::project_id(&self.project_root()))
+            .join("argosy");
+        if !local.join("argosy.md").is_file() {
+            return;
+        }
+        let mut imported =
+            crate::styleguide::bundle_dirs(local.parent().unwrap_or(&local), Some(&local));
+        for ancestor in local.ancestors().skip(2).take(2) {
+            imported.extend(crate::styleguide::bundle_dirs(
+                &ancestor.join("global"),
+                None,
+            ));
+        }
+        let Ok(context) = argosy::context::ProjectContext::open(&local, imported) else {
+            return;
+        };
+        let Ok(listings) = context.list_skills() else {
+            return;
+        };
+        for listing in listings {
+            if listing.shadowed {
+                continue;
+            }
+            let qid = argosy::context::QualifiedConceptId {
+                argosy: listing.argosy.clone(),
+                namespace: argosy::bundle::Namespace::Skill,
+                id: listing.skill.entry_point.clone(),
+            };
+            let Ok(concept) = context.resolve(&qid) else {
+                continue;
+            };
+            let rel = listing
+                .skill
+                .entry_point
+                .as_str()
+                .strip_prefix("skill/")
+                .unwrap_or_else(|| listing.skill.entry_point.as_str());
+            let mut entry_path = listing.skill.namespace_dir.join(rel);
+            entry_path.set_extension("md");
+            out.push(DiscoveredFile {
+                name: listing.skill.name.clone(),
+                path: entry_path,
+                scope: Scope::Argosy,
+                content: concept.body().to_string(),
+            });
+        }
     }
 
     fn collect_builtins(&self, out: &mut Vec<DiscoveredFile>) {
@@ -429,5 +508,66 @@ mod tests {
         let discovery = Discovery::new(tmp.path().to_path_buf(), None, None);
         assert!(discovery.discover_dirs("recipes", "SKILL.md").is_empty());
         assert!(discovery.discover_dirs("skills", "RECIPE.md").is_empty());
+    }
+
+    fn argosy_state_with_skill(project: &Path) -> PathBuf {
+        let state = project.parent().unwrap().join("state");
+        let local = state
+            .join("projects")
+            .join(craft_storage::flow::project_id(project))
+            .join("argosy");
+        craft_storage::argosy_store::ArgosyStore::open_or_init(&local, "proj").unwrap();
+        write(
+            &local.join("skill/deploy.md"),
+            "---\ntype: Skill\ndescription: deploys the app\n---\nDeploy steps\n",
+        );
+        state
+    }
+
+    #[test]
+    fn argosy_packaged_skill_is_listed() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let state = argosy_state_with_skill(&project);
+
+        let discovery = Discovery::new(project, None, None).with_state(Some(state));
+        let found = discovery.discover_dirs("skills", "SKILL.md");
+        let deploy = found
+            .iter()
+            .find(|f| f.name == "deploy")
+            .expect("argosy skill listed");
+        assert!(deploy.scope.is_argosy());
+        assert!(deploy.path.ends_with("skill/deploy.md"));
+        assert_eq!(deploy.content, "Deploy steps\n");
+    }
+
+    #[test]
+    fn project_skill_shadows_argosy_skill() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let state = argosy_state_with_skill(&project);
+        write(
+            &project.join(".craft/skills/deploy/SKILL.md"),
+            "name: deploy\ndescription: project override\n---\nproject body",
+        );
+
+        let discovery = Discovery::new(project, None, None).with_state(Some(state));
+        let found = discovery.discover_dirs("skills", "SKILL.md");
+        let deploy = found.iter().find(|f| f.name == "deploy").unwrap();
+        assert!(!deploy.scope.is_argosy());
+        assert_eq!(found.iter().filter(|f| f.name == "deploy").count(), 1);
+    }
+
+    #[test]
+    fn missing_argosy_state_yields_no_skills() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let discovery =
+            Discovery::new(project, None, None).with_state(Some(tmp.path().join("state")));
+        let found = discovery.discover_dirs("skills", "SKILL.md");
+        assert!(found.iter().all(|f| f.scope.is_builtin()));
     }
 }

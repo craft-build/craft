@@ -34,6 +34,7 @@ pub const COMPACTION_SYSTEM: &str = include_str!("prompts/compaction.md");
 pub const COMPACTION_USER: &str = include_str!("prompts/compaction_user.md");
 pub const COMPACTION_TARGETED_USER: &str = include_str!("prompts/compaction_targeted_user.md");
 pub const DREAM_PROMPT: &str = include_str!("prompts/dream.md");
+pub const SCAN_PROMPT: &str = include_str!("prompts/scan.md");
 pub const DISTILL_PROMPT: &str = include_str!("prompts/distill.md");
 pub const CHECKPOINT_PROMPT: &str = include_str!("prompts/checkpoint.md");
 pub const WIKI_INIT_PROMPT: &str = include_str!("prompts/wiki_init.md");
@@ -583,6 +584,18 @@ mod tests {
         let mut facts = RecencyFacts::new();
         facts.push(String::new());
         assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn dream_and_scan_prompts_name_real_tools_only() {
+        for prompt in [DREAM_PROMPT, SCAN_PROMPT] {
+            assert!(!prompt.to_lowercase().contains("mcp"), "no mcp references");
+            assert!(prompt.contains("memory"), "expected the memory tool named");
+        }
+        assert!(DREAM_PROMPT.contains("`memory delete`"));
+        for tool in ["`read`", "`grep`", "`glob`", "`outline`"] {
+            assert!(SCAN_PROMPT.contains(tool), "scan must name {tool}");
+        }
     }
 
     #[test]

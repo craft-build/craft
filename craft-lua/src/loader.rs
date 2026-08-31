@@ -63,14 +63,6 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         name: "skill",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/skill"),
     },
-    // Below the tools it pre-approves: `memory` allows writes into its own
-    // state dir, and a rule can only name a registered tool. The write tools
-    // it names are native, so they are registered before any builtin loads,
-    // but the order keeps that reasoning local.
-    BundledPlugin {
-        name: "memory",
-        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/memory"),
-    },
     BundledPlugin {
         name: "question",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/question"),
@@ -1188,23 +1180,6 @@ mod tests {
         let snap = reader.load();
         assert_eq!(snap.commands.len(), 1);
         assert!(snap.generation > 0);
-    }
-
-    #[test]
-    fn memory_builtin_registers_command() {
-        let reg = Arc::new(ToolRegistry::new());
-        let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
-        let reader = host.command_reader();
-        let snap = reader.load();
-        let found = snap.commands.iter().any(|c| c.name.as_ref() == "/memory");
-        assert!(
-            found,
-            "Expected /memory command, found: {:?}",
-            snap.commands
-                .iter()
-                .map(|c| c.name.as_ref())
-                .collect::<Vec<_>>()
-        );
     }
 
     /// `/tasks` and `/sessions` used to be Rust commands. The plugins that took

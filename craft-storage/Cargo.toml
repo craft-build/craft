@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+argosy = { workspace = true }
+fastembed = { workspace = true }
 craft-markdown = { workspace = true }
 getrandom = { workspace = true }
 reqwest = { workspace = true }

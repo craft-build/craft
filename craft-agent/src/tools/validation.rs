@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::outline::LangId;
+use argosy::codetools::outline::LangId;
 
 pub(super) struct ValidationResult {
     pub syntax_valid: bool,

@@ -27,6 +27,7 @@ Type `/` in the input box to open the command palette.
 | `/goal` | Set a goal the agent must meet before stopping (blank to clear) |
 | `/recipe` | Browse and run a recipe |
 | `/dream` | Consolidate and curate project memory |
+| `/scan` | Document the project into durable memory (summary, architecture, tech, development) |
 | `/distill` | Discover reusable workflows and propose skills |
 | `/checkpoint` | Write a session checkpoint for smooth resume |
 | `/set-context-window` | Override a model's context window (tokens) |
@@ -36,7 +37,6 @@ Type `/` in the input box to open the command palette.
 | `/map-refresh` | Force rebuild the repo map cache |
 | `/map-toggle` | Toggle repo map injection on/off |
 | `/watch` | Toggle watch mode (AI comments in editor drive the agent) |
-| `/memory` | View, edit, and delete memory files |
 | `/rename` | Rename the current session |
 | `/sessions` | Browse and switch sessions |
 | `/tasks` | Browse and search tasks |

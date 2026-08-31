@@ -1,21 +1,33 @@
 //! `ThreadHistory`-backed implementation of [`FlowSearchBackend`].
 //!
-//! Keyword-based for this cut: substring + simple term-frequency scoring over
-//! each typed-log entry's content. The semantic embedding index is deferred
-//! (plan out of scope). The backend copies entries out under the lock and
-//! scores them without holding it, so the mutex is never held across `.await`.
+//! Two corpora: the typed log's entries (thread-history domain, keyword-scored
+//! here; the scoped semantic ranking lives in `flow_index.rs`) and the
+//! workstream's persisted documents, searched through the argosy [`Index`]
+//! with a fastembed provider and a file-backed vector store. When the
+//! embedding model is unavailable (offline first run), document search falls
+//! back to the same keyword scoring. The backend copies entries out under the
+//! lock and scores them without holding it, so the mutex is never held across
+//! `.await`.
 
 use std::sync::Arc;
+
+use argosy::bundle::Namespace;
+use argosy::context::ProjectContext;
+use argosy::index::{Filter, Index, Query};
+use craft_storage::argosy_index::{CraftEmbeddingProvider, FileVecStore, model_cache_present};
+use craft_storage::flow::FlowStore;
 
 use super::flow_search::{FlowSearchBackend, FlowSearchHit, ListFuture, ReadFuture, SearchFuture};
 use crate::agent::typed_log::{EntryType, ThreadHistory, ThreadId};
 
-/// Backend built from a shared typed log. `project_id`/`workstream_id` are
-/// captured so the tool can resolve the active workstream, and `root` scopes
-/// the default projection reads (the root thread's writes are the workstream's
-/// main documents: goal, plan, etc.).
+/// Backend built from a shared typed log and the workstream's document store.
+/// `project_id`/`workstream_id` are captured so the tool can resolve the
+/// active workstream, and `root` scopes the default projection reads (the
+/// root thread's writes are the workstream's main documents: goal, plan,
+/// etc.).
 pub(crate) struct HistorySearchBackend {
     history: Arc<std::sync::Mutex<ThreadHistory>>,
+    store: Arc<FlowStore>,
     project_id: String,
     workstream_id: String,
     root: ThreadId,
@@ -24,12 +36,14 @@ pub(crate) struct HistorySearchBackend {
 impl HistorySearchBackend {
     pub(crate) fn new(
         history: Arc<std::sync::Mutex<ThreadHistory>>,
+        store: Arc<FlowStore>,
         project_id: impl Into<String>,
         workstream_id: impl Into<String>,
         root: ThreadId,
     ) -> Self {
         Self {
             history,
+            store,
             project_id: project_id.into(),
             workstream_id: workstream_id.into(),
             root,
@@ -76,6 +90,9 @@ impl FlowSearchBackend for HistorySearchBackend {
     ) -> SearchFuture<'a> {
         let terms = tokenize(query);
         let entries = self.snapshot_entries();
+        let store = Arc::clone(&self.store);
+        let project_id = self.project_id.clone();
+        let workstream_id = self.workstream_id.clone();
         Box::pin(async move {
             let mut scored: Vec<FlowSearchHit> = entries
                 .into_iter()
@@ -88,31 +105,55 @@ impl FlowSearchBackend for HistorySearchBackend {
                 })
                 .filter(|h| h.score > 0.0)
                 .collect();
+            // Projection and document scores live on different scales
+            // (keyword term-frequency vs embedding cosine), so they are not
+            // merged by score: the typed log's current state comes first, and
+            // documents fill the remaining slots.
             scored.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            scored.truncate(k.max(1));
+            if scored.len() < k {
+                scored.extend(
+                    search_documents(
+                        store,
+                        &project_id,
+                        &workstream_id,
+                        query,
+                        &terms,
+                        k - scored.len(),
+                    )
+                    .await
+                    .unwrap_or_default(),
+                );
+            }
             Ok(scored)
         })
     }
 
     fn read_document<'a>(
         &'a self,
-        _project_id: &'a str,
-        _workstream_id: &'a str,
+        project_id: &'a str,
+        workstream_id: &'a str,
         rel_path: &'a str,
     ) -> ReadFuture<'a> {
-        let body = read_path(&self.history, rel_path);
-        Box::pin(async move { body.ok_or_else(|| format!("flow document not found: {rel_path}")) })
+        let projection = read_path(&self.history, rel_path);
+        let store = Arc::clone(&self.store);
+        let project_id = project_id.to_string();
+        let workstream_id = workstream_id.to_string();
+        let rel_path = rel_path.to_string();
+        Box::pin(async move {
+            if let Some(body) = projection {
+                return Ok(body);
+            }
+            store
+                .read(&project_id, &workstream_id, &rel_path)
+                .map_err(|_| format!("flow document not found: {rel_path}"))
+        })
     }
 
-    fn list_documents<'a>(
-        &'a self,
-        _project_id: &'a str,
-        _workstream_id: &'a str,
-    ) -> ListFuture<'a> {
+    fn list_documents<'a>(&'a self, project_id: &'a str, workstream_id: &'a str) -> ListFuture<'a> {
         let hist = self.history.lock().unwrap_or_else(|e| e.into_inner());
         let mut paths: Vec<String> = ENTRY_TYPES
             .iter()
@@ -122,9 +163,117 @@ impl FlowSearchBackend for HistorySearchBackend {
             })
             .collect();
         drop(hist);
-        paths.sort();
-        Box::pin(async move { Ok(paths) })
+        let store = Arc::clone(&self.store);
+        let project_id = project_id.to_string();
+        let workstream_id = workstream_id.to_string();
+        Box::pin(async move {
+            paths.extend(
+                store
+                    .list(&project_id, &workstream_id)
+                    .map_err(|e| e.to_string())?,
+            );
+            paths.sort();
+            Ok(paths)
+        })
     }
+}
+
+/// Over-fetch factor for the semantic pass: namespace-filtered hits include
+/// every workstream, so fetch enough to survive the workstream post-filter.
+const SEMANTIC_OVERFETCH: usize = 4;
+
+/// Rank the workstream's persisted documents against `query` through the
+/// argosy index (embedding model downloads on first use). Falls back to
+/// keyword scoring when the index cannot be built or searched.
+async fn search_documents(
+    store: Arc<FlowStore>,
+    project_id: &str,
+    workstream_id: &str,
+    query: &str,
+    terms: &[String],
+    k: usize,
+) -> Result<Vec<FlowSearchHit>, String> {
+    if !model_cache_present() {
+        return keyword_document_hits(&store, project_id, workstream_id, terms, k);
+    }
+    let argosy_dir = store.argosy_dir(project_id);
+    let index_path = argosy_dir.join(".argosy").join("index.json");
+    let project_id = project_id.to_string();
+    let workstream_id = workstream_id.to_string();
+    let query = query.to_string();
+    let semantic = tokio::task::spawn_blocking(move || {
+        let context =
+            ProjectContext::open(&argosy_dir, []).map_err(|e| format!("argosy open: {e}"))?;
+        let provider = CraftEmbeddingProvider::new().map_err(|e| format!("embedder init: {e}"))?;
+        let vec_store =
+            FileVecStore::open(&index_path).map_err(|e| format!("vector store: {e}"))?;
+        let mut index = Index::new(provider, vec_store);
+        index
+            .reconcile(&context)
+            .map_err(|e| format!("index reconcile: {e}"))?;
+        let search = Query {
+            filter: Filter {
+                namespaces: Some(vec![Namespace::Document]),
+                ..Default::default()
+            },
+            ..Query::unscoped(query, k * SEMANTIC_OVERFETCH)
+        };
+        index
+            .search(&context, &search)
+            .map_err(|e| format!("index search: {e}"))
+    })
+    .await
+    .map_err(|e| format!("index task: {e}"))?;
+
+    let prefix = format!("document/{workstream_id}/");
+    match semantic {
+        Ok(hits) => Ok(hits
+            .into_iter()
+            .filter(|h| h.concept.id.as_str().starts_with(&prefix))
+            .filter(|h| h.score > 0.0)
+            .map(|h| FlowSearchHit {
+                path: h
+                    .concept
+                    .id
+                    .as_str()
+                    .strip_prefix(&prefix)
+                    .unwrap_or(h.concept.id.as_str())
+                    .to_string(),
+                score: h.score,
+            })
+            .take(k)
+            .collect()),
+        Err(_) => keyword_document_hits(&store, &project_id, &workstream_id, terms, k),
+    }
+}
+
+fn keyword_document_hits(
+    store: &FlowStore,
+    project_id: &str,
+    workstream_id: &str,
+    terms: &[String],
+    k: usize,
+) -> Result<Vec<FlowSearchHit>, String> {
+    let mut hits = Vec::new();
+    for path in store
+        .list(project_id, workstream_id)
+        .map_err(|e| e.to_string())?
+    {
+        let content = store
+            .read(project_id, workstream_id, &path)
+            .map_err(|e| e.to_string())?;
+        let score = score_entry(&content, terms);
+        if score > 0.0 {
+            hits.push(FlowSearchHit { path, score });
+        }
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    hits.truncate(k);
+    Ok(hits)
 }
 
 fn read_path(history: &Arc<std::sync::Mutex<ThreadHistory>>, rel_path: &str) -> Option<String> {
@@ -191,7 +340,9 @@ mod tests {
     async fn search_ranks_goal_for_goal_query() {
         let (_guard, store) = tmp_store();
         let hist = Arc::new(std::sync::Mutex::new(ThreadHistory::open(
-            store, "proj", "ws",
+            Arc::clone(&store),
+            "proj",
+            "ws",
         )));
         {
             let mut h = hist.lock().unwrap();
@@ -202,7 +353,7 @@ mod tests {
                 "unrelated notes about docker",
             );
         }
-        let backend = HistorySearchBackend::new(hist, "proj", "ws", ThreadId::new("ws"));
+        let backend = HistorySearchBackend::new(hist, store, "proj", "ws", ThreadId::new("ws"));
         let hits = backend.search("proj", "ws", "login goal", 5).await.unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].path.starts_with("goal:"), "got: {:?}", hits[0].path);
@@ -212,13 +363,15 @@ mod tests {
     async fn read_document_returns_projection_body() {
         let (_guard, store) = tmp_store();
         let hist = Arc::new(std::sync::Mutex::new(ThreadHistory::open(
-            store, "proj", "ws",
+            Arc::clone(&store),
+            "proj",
+            "ws",
         )));
         {
             let mut h = hist.lock().unwrap();
             h.append(ThreadId::new("ws"), EntryType::Goal, "the goal body");
         }
-        let backend = HistorySearchBackend::new(hist, "proj", "ws", ThreadId::new("ws"));
+        let backend = HistorySearchBackend::new(hist, store, "proj", "ws", ThreadId::new("ws"));
         let body = backend
             .read_document("proj", "ws", "goal:ws")
             .await
@@ -230,9 +383,11 @@ mod tests {
     async fn read_document_errors_on_unknown_path() {
         let (_guard, store) = tmp_store();
         let hist = Arc::new(std::sync::Mutex::new(ThreadHistory::open(
-            store, "proj", "ws",
+            Arc::clone(&store),
+            "proj",
+            "ws",
         )));
-        let backend = HistorySearchBackend::new(hist, "proj", "ws", ThreadId::new("ws"));
+        let backend = HistorySearchBackend::new(hist, store, "proj", "ws", ThreadId::new("ws"));
         let err = backend
             .read_document("proj", "ws", "goal:nope")
             .await
@@ -244,14 +399,16 @@ mod tests {
     async fn list_documents_enumerates_root_projections() {
         let (_guard, store) = tmp_store();
         let hist = Arc::new(std::sync::Mutex::new(ThreadHistory::open(
-            store, "proj", "ws",
+            Arc::clone(&store),
+            "proj",
+            "ws",
         )));
         {
             let mut h = hist.lock().unwrap();
             h.append(ThreadId::new("ws"), EntryType::Goal, "g");
             h.append(ThreadId::new("ws"), EntryType::Plan, "p");
         }
-        let backend = HistorySearchBackend::new(hist, "proj", "ws", ThreadId::new("ws"));
+        let backend = HistorySearchBackend::new(hist, store, "proj", "ws", ThreadId::new("ws"));
         let docs = backend.list_documents("proj", "ws").await.unwrap();
         assert!(docs.contains(&"goal:ws".to_string()));
         assert!(docs.contains(&"plan:ws".to_string()));

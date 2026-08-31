@@ -30,6 +30,7 @@ mod internal_urls;
 pub(crate) mod interpreter_bridge;
 mod list;
 mod list_tools;
+mod memory;
 mod move_file;
 mod multiedit;
 mod outline;
@@ -214,6 +215,7 @@ pub const INSPECT_TOOL_NAME: &str = inspect::Inspect::NAME;
 pub const MOVE_TOOL_NAME: &str = move_file::MoveFile::NAME;
 pub const OUTLINE_TOOL_NAME: &str = outline::Outline::NAME;
 pub const SAFETY_TOOL_NAME: &str = safety::Safety::NAME;
+pub const MEMORY_TOOL_NAME: &str = memory::Memory::NAME;
 pub const WIKI_READ_TOOL_NAME: &str = wiki::WikiRead::NAME;
 pub const WIKI_APPEND_TOOL_NAME: &str = wiki::WikiAppend::NAME;
 pub const ZOOM_TOOL_NAME: &str = zoom::Zoom::NAME;
@@ -290,6 +292,9 @@ pub struct ToolContext {
     pub model_policy: Arc<craft_config::ModelPolicy>,
     pub timeouts: craft_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
+    /// Shared codetools state (stale-read guard, repomap cache) backing the
+    /// native code-intelligence tools. One per agent run.
+    pub code_tools: Arc<argosy::codetools::CodeTools>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub opts: RequestOptions,
     pub subagent_cancels: Arc<CancelMap<String>>,
@@ -815,6 +820,7 @@ register_tools! {
     move_file::MoveFile,
     wiki::WikiRead,
     wiki::WikiAppend,
+    memory::Memory,
     shift::Shift,
 }
 
@@ -947,6 +953,7 @@ pub(crate) fn providerless_ctx(
         model_policy: Arc::new(craft_config::ModelPolicy::default()),
         timeouts: craft_providers::Timeouts::default(),
         file_tracker,
+        code_tools: Arc::new(argosy::codetools::CodeTools::default()),
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
         opts: RequestOptions::default(),
         subagent_cancels: Arc::new(CancelMap::new()),
@@ -1015,6 +1022,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         model_policy: Arc::new(craft_config::ModelPolicy::default()),
         timeouts: env.timeouts,
         file_tracker: Arc::new(FileReadTracker::new()),
+        code_tools: Arc::new(argosy::codetools::CodeTools::default()),
         prompt_slots: Arc::clone(&env.prompt_slots),
         opts: RequestOptions::default(),
         subagent_cancels: Arc::new(CancelMap::new()),

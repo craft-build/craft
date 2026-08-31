@@ -184,6 +184,10 @@ impl ThreadHistory {
         &self.root_thread_id
     }
 
+    pub fn store(&self) -> &Arc<FlowStore> {
+        &self.store
+    }
+
     pub fn project_id(&self) -> &str {
         &self.project_id
     }

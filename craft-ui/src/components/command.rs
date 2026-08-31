@@ -130,6 +130,11 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         max_args: 0,
     },
     BuiltinCommand {
+        name: "/scan",
+        description: "Document the project into durable memory (summary, architecture, tech, development)",
+        max_args: 0,
+    },
+    BuiltinCommand {
         name: "/distill",
         description: "Discover reusable workflows and propose skills",
         max_args: 0,
