@@ -1,7 +1,7 @@
 use crate::theme;
 
 use craft_highlight::StyledSegment;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
 pub use craft_highlight::TAB_SPACES;
@@ -48,15 +48,11 @@ pub fn fallback_span(text: &str) -> Span<'static> {
 pub fn highlight_ansi(lang: &str, code: &str) -> String {
     let theme = theme::current();
     craft_highlight::set_theme(theme.syntax.clone());
-    let bg = match theme.background {
-        Color::Rgb(r, g, b) => (r, g, b),
-        _ => (0, 0, 0),
-    };
-    craft_highlight::highlight_ansi(lang, code, bg)
+    craft_highlight::highlight_ansi(lang, code, theme::segment_color(theme.background))
 }
 
 fn convert_segment(seg: &StyledSegment) -> Style {
-    let mut style = Style::new().fg(Color::Rgb(seg.fg.0, seg.fg.1, seg.fg.2));
+    let mut style = theme::segment_style(seg.fg);
     if seg.bold {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -72,12 +68,14 @@ fn convert_segment(seg: &StyledSegment) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use craft_highlight::SegmentColor;
+    use ratatui::style::Color;
 
     #[test]
     fn convert_segment_modifiers() {
         let all_mods = StyledSegment {
             text: "x".into(),
-            fg: (255, 0, 128),
+            fg: SegmentColor::Rgb((255, 0, 128)),
             bold: true,
             italic: true,
             underline: true,
@@ -90,7 +88,7 @@ mod tests {
 
         let no_mods = StyledSegment {
             text: "plain".into(),
-            fg: (100, 100, 100),
+            fg: SegmentColor::Rgb((100, 100, 100)),
             bold: false,
             italic: false,
             underline: false,

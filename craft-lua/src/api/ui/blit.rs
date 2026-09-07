@@ -1,4 +1,4 @@
-use craft_agent::types::InlineStyle;
+use craft_agent::types::{InlineStyle, SpanColor};
 use craft_agent::{SnapshotLine, SnapshotSpan, SpanStyle};
 use thiserror::Error;
 use unicode_width::UnicodeWidthStr;
@@ -130,8 +130,8 @@ fn run_span((fg, bg, count): Run, cell: &str) -> SnapshotSpan {
     SnapshotSpan {
         text: cell.repeat(count),
         style: SpanStyle::Inline(InlineStyle {
-            fg: Some(fg),
-            bg,
+            fg: Some(SpanColor::Rgb(fg)),
+            bg: bg.map(SpanColor::Rgb),
             ..InlineStyle::default()
         }),
     }
@@ -159,9 +159,18 @@ mod tests {
         }
     }
 
-    fn style(span: &SnapshotSpan) -> (Option<Rgb>, Option<Rgb>) {
+    type RgbPair = (Option<Rgb>, Option<Rgb>);
+
+    fn unwrap_rgb(c: SpanColor) -> Rgb {
+        match c {
+            SpanColor::Rgb(rgb) => rgb,
+            other => panic!("expected rgb, got {other:?}"),
+        }
+    }
+
+    fn style(span: &SnapshotSpan) -> RgbPair {
         match &span.style {
-            SpanStyle::Inline(i) => (i.fg, i.bg),
+            SpanStyle::Inline(i) => (i.fg.map(unwrap_rgb), i.bg.map(unwrap_rgb)),
             other => panic!("expected inline style, got {other:?}"),
         }
     }

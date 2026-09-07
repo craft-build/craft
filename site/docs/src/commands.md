@@ -36,6 +36,8 @@ Type `/` in the input box to open the command palette.
 | `/map` | Show the current repo map (ranked symbol context) |
 | `/map-refresh` | Force rebuild the repo map cache |
 | `/map-toggle` | Toggle repo map injection on/off |
+| `/packupdate` | Update packages (++lockfile, ! skips review) |
+| `/packdel` | Remove undeclared packages (++all, or a name) |
 | `/watch` | Toggle watch mode (AI comments in editor drive the agent) |
 | `/rename` | Rename the current session |
 | `/sessions` | Browse and switch sessions |

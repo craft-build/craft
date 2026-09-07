@@ -15,8 +15,8 @@ function M.lerp(from, to, t)
 end
 
 function M.dim(color, factor)
-  local bg = craft.ui.theme_color("background") or "#000000"
-  return M.lerp(color, bg, factor)
+  local bg = craft.ui.theme_color("background")
+  return bg and M.lerp(color, bg, factor)
 end
 
 return M

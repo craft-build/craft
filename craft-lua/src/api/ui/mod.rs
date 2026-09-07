@@ -90,11 +90,11 @@ pub(crate) fn create_ui_table(
     t.set(
         "theme_color",
         lua.create_function(|lua, name: String| {
-            let Some((r, g, b)) = craft_highlight::theme_color(&name) else {
+            let Some(color) = craft_highlight::theme_color(&name) else {
                 return Ok(mlua::Value::Nil);
             };
             Ok(mlua::Value::String(
-                lua.create_string(format!("#{r:02x}{g:02x}{b:02x}"))?,
+                lua.create_string(segment_color_to_lua(color))?,
             ))
         })?,
     )?;
@@ -422,6 +422,18 @@ fn parse_split(tbl: &Table) -> Split {
         .unwrap_or_default()
 }
 
+/// Palette colors stay symbolic (`"4"`, `"12"`, `"default"`) so the terminal
+/// picks the actual shade; only true RGB is written as hex. Every spelling
+/// here round-trips back through a span's `fg`/`bg`.
+pub(crate) fn segment_color_to_lua(c: craft_highlight::SegmentColor) -> String {
+    use craft_highlight::SegmentColor;
+    match c {
+        SegmentColor::Rgb((r, g, b)) => format!("#{r:02x}{g:02x}{b:02x}"),
+        SegmentColor::Ansi(i) => i.to_string(),
+        SegmentColor::Default => craft_highlight::DEFAULT_COLOR_NAME.to_owned(),
+    }
+}
+
 fn segments_to_lua_lines(
     lua: &Lua,
     lines: &[Vec<craft_highlight::StyledSegment>],
@@ -433,8 +445,7 @@ fn segments_to_lua_lines(
             let span = lua.create_table_with_capacity(2, 0)?;
             span.raw_set(1, seg.text.as_str())?;
             let style = lua.create_table_with_capacity(0, 4)?;
-            let (r, g, b) = seg.fg;
-            style.raw_set("fg", format!("#{r:02x}{g:02x}{b:02x}"))?;
+            style.raw_set("fg", segment_color_to_lua(seg.fg))?;
             if seg.bold {
                 style.raw_set("bold", true)?;
             }
@@ -473,7 +484,7 @@ fn span_style_to_lua(lua: &Lua, span: &craft_markdown::render::Span) -> LuaResul
             underline,
         } => {
             let tbl = lua.create_table()?;
-            tbl.set("fg", format!("#{:02x}{:02x}{:02x}", fg.0, fg.1, fg.2))?;
+            tbl.set("fg", segment_color_to_lua(*fg))?;
             if *bold {
                 tbl.set("bold", true)?;
             }
@@ -531,7 +542,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use craft_highlight::StyledSegment;
+    use craft_highlight::{SegmentColor, StyledSegment};
     use mlua::Lua;
     use test_case::test_case;
 
@@ -719,7 +730,7 @@ mod tests {
     fn seg(text: &str, bold: bool) -> StyledSegment {
         StyledSegment {
             text: text.into(),
-            fg: (255, 128, 0),
+            fg: SegmentColor::Rgb((255, 128, 0)),
             bold,
             italic: false,
             underline: false,
@@ -979,7 +990,7 @@ mod tests {
     fn seg_full(text: &str, bold: bool, italic: bool, underline: bool) -> StyledSegment {
         StyledSegment {
             text: text.into(),
-            fg: (255, 128, 0),
+            fg: SegmentColor::Rgb((255, 128, 0)),
             bold,
             italic,
             underline,
@@ -1104,7 +1115,7 @@ mod tests {
             let span = craft_markdown::render::Span {
                 text: "tok".into(),
                 style: craft_markdown::render::StyleToken::Highlight {
-                    fg: (255, 128, 0),
+                    fg: SegmentColor::Rgb((255, 128, 0)),
                     bold,
                     italic,
                     underline,

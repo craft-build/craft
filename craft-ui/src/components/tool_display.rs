@@ -20,8 +20,8 @@ use jiff::tz::TimeZone;
 
 use crate::markdown::{Keep, should_truncate, text_to_lines, truncate_output, truncation_notice};
 use craft_agent::{
-    BatchToolEntry, BatchToolStatus, BufferSnapshot, InstructionBlock, SpanStyle, ToolInput,
-    ToolOutput,
+    BatchToolEntry, BatchToolStatus, BufferSnapshot, InstructionBlock, SpanColor, SpanStyle,
+    ToolInput, ToolOutput,
 };
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -865,17 +865,21 @@ fn snapshot_to_lines_range(
         .collect()
 }
 
+fn span_color(c: SpanColor) -> Option<Color> {
+    theme::segment_slot(theme::segment_color_from_span(c))
+}
+
 pub(crate) fn resolve_span_style(style: &SpanStyle) -> Style {
     match style {
         SpanStyle::Default => theme::current().tool,
         SpanStyle::Named(name) => theme::style_by_name(name),
         SpanStyle::Inline(inline) => {
             let mut s = Style::default();
-            if let Some((r, g, b)) = inline.fg {
-                s = s.fg(Color::Rgb(r, g, b));
+            if let Some(fg) = inline.fg.and_then(span_color) {
+                s = s.fg(fg);
             }
-            if let Some((r, g, b)) = inline.bg {
-                s = s.bg(Color::Rgb(r, g, b));
+            if let Some(bg) = inline.bg.and_then(span_color) {
+                s = s.bg(bg);
             }
             if inline.bold {
                 s = s.bold();
@@ -1115,7 +1119,7 @@ mod tests {
     use craft_agent::tools::{BASH_TOOL_NAME, READ_TOOL_NAME, TASK_TOOL_NAME};
     use craft_agent::{
         BatchToolEntry, BatchToolStatus, GrepFileEntry, GrepMatchGroup, SnapshotLine, SnapshotSpan,
-        ToolInput, ToolOutput,
+        SpanColor, ToolInput, ToolOutput,
     };
     use test_case::test_case;
 
@@ -2195,8 +2199,8 @@ mod tests {
     fn resolve_span_style_inline_all_modifiers() {
         use craft_agent::types::InlineStyle;
         let style = SpanStyle::Inline(InlineStyle {
-            fg: Some((10, 20, 30)),
-            bg: Some((40, 50, 60)),
+            fg: Some(SpanColor::Rgb((10, 20, 30))),
+            bg: Some(SpanColor::Rgb((40, 50, 60))),
             bold: true,
             italic: true,
             underline: true,
@@ -2224,6 +2228,26 @@ mod tests {
         assert_eq!(resolved.fg, None);
         assert_eq!(resolved.bg, None);
         assert_eq!(resolved, Style::default());
+    }
+
+    /// A span asking for the terminal default has to leave the slot empty.
+    /// Setting `Color::Reset` would win over the line style underneath it, and
+    /// the selected row of a plugin float would lose its highlight.
+    #[test_case(SpanColor::Ansi(4), Some(Color::Blue) ; "palette index")]
+    #[test_case(
+        SpanColor::Default(craft_agent::types::DefaultColor::Default),
+        None ;
+        "terminal default"
+    )]
+    fn resolve_span_style_inline_colors(color: SpanColor, expected: Option<Color>) {
+        use craft_agent::types::InlineStyle;
+        let style = SpanStyle::Inline(InlineStyle {
+            fg: Some(color),
+            bg: Some(color),
+            ..InlineStyle::default()
+        });
+        let resolved = resolve_span_style(&style);
+        assert_eq!((resolved.fg, resolved.bg), (expected, expected));
     }
 
     #[test]

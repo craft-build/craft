@@ -52,8 +52,8 @@ pub use types::{
     AgentEvent, BatchProgressEvent, BatchToolEntry, BatchToolStatus, BufferSnapshot, DoneReason,
     Envelope, EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock,
     NO_FILES_FOUND, Priority, RunLedger, RunTotals, SessionEndReason, SharedBuf, SnapshotLine,
-    SnapshotSpan, SpanStyle, SubagentInfo, ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent,
-    TurnCompleteEvent,
+    SnapshotSpan, SpanColor, SpanStyle, SubagentInfo, ToolDoneEvent, ToolInput, ToolOutput,
+    ToolStartEvent, TurnCompleteEvent,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

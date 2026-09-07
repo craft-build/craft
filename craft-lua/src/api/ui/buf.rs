@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use craft_agent::types::InlineStyle;
+use craft_agent::types::{DefaultColor, InlineStyle, SpanColor};
 use craft_agent::{SharedBuf, SnapshotLine, SnapshotSpan, SpanStyle};
 use mlua::{Function, Result as LuaResult, Table, UserData, UserDataMethods, Value as LuaValue};
 
@@ -199,10 +199,10 @@ fn parse_style(val: &LuaValue) -> LuaResult<SpanStyle> {
         LuaValue::Table(t) => {
             let mut inline = InlineStyle::default();
             if let Ok(LuaValue::String(s)) = t.raw_get::<LuaValue>("fg") {
-                inline.fg = parse_hex_color(&s.to_str().map_err(mlua::Error::external)?);
+                inline.fg = parse_span_color(&s.to_str().map_err(mlua::Error::external)?);
             }
             if let Ok(LuaValue::String(s)) = t.raw_get::<LuaValue>("bg") {
-                inline.bg = parse_hex_color(&s.to_str().map_err(mlua::Error::external)?);
+                inline.bg = parse_span_color(&s.to_str().map_err(mlua::Error::external)?);
             }
             inline.bold = t.raw_get::<bool>("bold").unwrap_or(false);
             inline.italic = t.raw_get::<bool>("italic").unwrap_or(false);
@@ -218,15 +218,15 @@ fn parse_style(val: &LuaValue) -> LuaResult<SpanStyle> {
     }
 }
 
-fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
-    let s = s.strip_prefix('#')?;
-    if s.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some((r, g, b))
+/// Plugins speak the same `#rrggbb | index | name | default` grammar as
+/// themes, so both directions go through [`SegmentColor`] and cannot drift.
+/// The orphan rule rules out `From`, both types are foreign here.
+fn parse_span_color(s: &str) -> Option<SpanColor> {
+    Some(match craft_highlight::SegmentColor::parse(s)? {
+        craft_highlight::SegmentColor::Rgb(rgb) => SpanColor::Rgb(rgb),
+        craft_highlight::SegmentColor::Ansi(i) => SpanColor::Ansi(i),
+        craft_highlight::SegmentColor::Default => SpanColor::Default(DefaultColor::Default),
+    })
 }
 
 #[cfg(test)]
@@ -298,7 +298,7 @@ mod tests {
     #[test_case("#ff000000", None               ; "too_long_8_digits")]
     #[test_case("",        None                 ; "empty_string")]
     fn hex_color_parsing(input: &str, expected: Option<(u8, u8, u8)>) {
-        assert_eq!(parse_hex_color(input), expected);
+        assert_eq!(parse_span_color(input), expected.map(SpanColor::Rgb));
     }
 
     fn test_lua() -> mlua::Lua {
@@ -373,7 +373,7 @@ mod tests {
         let style = parse_style(&LuaValue::Table(t)).unwrap();
         match style {
             SpanStyle::Inline(ref i) => {
-                assert_eq!(i.fg, Some((255, 128, 0)));
+                assert_eq!(i.fg, Some(SpanColor::Rgb((255, 128, 0))));
                 assert!(i.bold);
                 assert!(i.dim);
                 assert!(!i.italic);
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(snap.lines[0].spans[0].text, "ERROR");
         match &snap.lines[0].spans[0].style {
             SpanStyle::Inline(i) => {
-                assert_eq!(i.fg, Some((255, 0, 0)));
+                assert_eq!(i.fg, Some(SpanColor::Rgb((255, 0, 0))));
                 assert!(i.bold);
             }
             other => panic!("expected inline style, got {other:?}"),
@@ -643,5 +643,48 @@ mod tests {
 
         let err = lua.load(code).exec().unwrap_err().to_string();
         assert!(err.contains(expected), "expected {expected:?} in: {err}");
+    }
+}
+
+#[cfg(test)]
+mod palette_roundtrip {
+    use super::*;
+    use craft_highlight::SegmentColor;
+    use test_case::test_case;
+
+    #[test_case("light-blue", SpanColor::Ansi(12); "name")]
+    #[test_case("4", SpanColor::Ansi(4); "index")]
+    #[test_case(
+        "default",
+        SpanColor::Default(DefaultColor::Default) ;
+        "terminal default"
+    )]
+    #[test_case("#6fb3d2", SpanColor::Rgb((0x6f, 0xb3, 0xd2)); "hex")]
+    fn accepted_color_spellings(input: &str, expected: SpanColor) {
+        assert_eq!(parse_span_color(input), Some(expected));
+    }
+
+    #[test_case("lightgray"; "missing separator")]
+    #[test_case("LIGHT-GRAY"; "uppercase")]
+    #[test_case("+4"; "signed index")]
+    #[test_case("256"; "index out of range")]
+    fn rejected_color_spellings(name: &str) {
+        assert_eq!(parse_span_color(name), None);
+    }
+
+    fn segment_color_from_span(c: SpanColor) -> SegmentColor {
+        match c {
+            SpanColor::Rgb(rgb) => SegmentColor::Rgb(rgb),
+            SpanColor::Ansi(i) => SegmentColor::Ansi(i),
+            SpanColor::Default(_) => SegmentColor::Default,
+        }
+    }
+
+    #[test_case(SpanColor::Ansi(4); "palette index")]
+    #[test_case(SpanColor::Default(DefaultColor::Default); "terminal default")]
+    #[test_case(SpanColor::Rgb((0x6f, 0xb3, 0xd2)); "rgb")]
+    fn colors_survive_the_lua_round_trip(color: SpanColor) {
+        let text = super::super::segment_color_to_lua(segment_color_from_span(color));
+        assert_eq!(parse_span_color(&text), Some(color));
     }
 }
