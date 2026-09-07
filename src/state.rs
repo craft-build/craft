@@ -28,6 +28,23 @@ pub struct Session {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub acp_session_id: Option<String>,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+
+    #[test]
+    fn sessions_saved_before_archiving_default_to_active() {
+        let session: Session = serde_json::from_str(
+            r#"{"id":"session-1","name":"Old session","messages":[],"acp_session_id":null}"#,
+        )
+        .expect("older persisted sessions should still load");
+
+        assert!(!session.archived);
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

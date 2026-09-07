@@ -166,6 +166,17 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .get(&p.id)
                 .cloned()
                 .unwrap_or_default();
+            let active_sessions = sessions
+                .iter()
+                .filter(|session| !session.archived)
+                .cloned()
+                .collect::<Vec<_>>();
+            let archived_sessions = sessions
+                .into_iter()
+                .filter(|session| session.archived)
+                .collect::<Vec<_>>();
+            let archives_expanded = app.expanded_archives.contains(&p.id);
+            let pending_delete = app.pending_session_delete.clone();
             let toggle_id = p.id.clone();
             let add_id = p.id.clone();
 
@@ -203,16 +214,20 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         })),
                 )
                 .when(expanded, |d| {
-                    d.child(div().children(sessions.into_iter().map(|s| {
+                    d.child(div().children(active_sessions.into_iter().map(|s| {
                         let session_active =
                             is_active && active_session_id.as_deref() == Some(s.id.as_str());
                         let project_id = p.id.clone();
+                        let archive_project_id = p.id.clone();
                         let session_id = s.id.clone();
+                        let archive_session_id = s.id.clone();
                         div()
                             .id(SharedString::from(format!("sess-{}-{}", p.id, s.id)))
+                            .flex()
+                            .items_center()
                             .py(px(5.))
                             .pl(px(28.))
-                            .pr(px(12.))
+                            .pr(px(8.))
                             .cursor_pointer()
                             .text_size(px(12.))
                             .text_color(rgb(if session_active {
@@ -222,7 +237,34 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                             }))
                             .when(session_active, |d| d.bg(rgb(theme::INPUT_BG)))
                             .hover(|s| s.bg(rgb(theme::HOVER_BG)))
-                            .child(s.name.clone())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(s.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("archive-session-{}", s.id)))
+                                    .flex_shrink_0()
+                                    .px(px(4.))
+                                    .text_size(px(10.))
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(rgb(theme::ACCENT)))
+                                    .child("archive")
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        cx.stop_propagation();
+                                        app.archive_session(
+                                            &archive_project_id,
+                                            &archive_session_id,
+                                            cx,
+                                        )
+                                    })),
+                            )
                             .on_click(cx.listener(move |app, _, _, cx| {
                                 app.open_session(&project_id, &session_id, cx)
                             }))
@@ -242,6 +284,94 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                                 app.add_session_to_project(&add_id, cx)
                             })),
                     )
+                    .when(!archived_sessions.is_empty(), |d| {
+                        let archive_toggle_id = p.id.clone();
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("archived-sessions-{}", p.id)))
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .py(px(5.))
+                                .pl(px(28.))
+                                .pr(px(8.))
+                                .text_size(px(11.))
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(rgb(theme::TEXT_SECONDARY)))
+                                .child(if archives_expanded { "▾" } else { "▸" })
+                                .child(format!("Archived ({})", archived_sessions.len()))
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.toggle_archived_sessions(&archive_toggle_id, cx)
+                                })),
+                        )
+                        .when(archives_expanded, |d| {
+                            d.children(archived_sessions.into_iter().map(|session| {
+                                let restore_project_id = p.id.clone();
+                                let delete_project_id = p.id.clone();
+                                let restore_session_id = session.id.clone();
+                                let delete_session_id = session.id.clone();
+                                let delete_armed =
+                                    pending_delete.as_deref() == Some(session.id.as_str());
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .py(px(5.))
+                                    .pl(px(34.))
+                                    .pr(px(8.))
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(session.name),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "restore-session-{}",
+                                                session.id
+                                            )))
+                                            .cursor_pointer()
+                                            .text_color(rgb(theme::ACCENT))
+                                            .child("restore")
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.restore_session(
+                                                    &restore_project_id,
+                                                    &restore_session_id,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "delete-session-{}",
+                                                session.id
+                                            )))
+                                            .cursor_pointer()
+                                            .text_color(rgb(if delete_armed {
+                                                theme::DIFF_DEL_TEXT
+                                            } else {
+                                                theme::TEXT_MUTED
+                                            }))
+                                            .child(if delete_armed { "confirm" } else { "×" })
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                app.request_delete_session(
+                                                    &delete_project_id,
+                                                    &delete_session_id,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
+                            }))
+                        })
+                    })
                 })
         }))
 }
@@ -251,7 +381,6 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
 fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
     let messages = app.active_messages();
     let last_index = messages.len().saturating_sub(1);
-    app.thread_scroll.scroll_to_item(last_index);
     let scroll_handle = app.thread_scroll.clone();
 
     div()

@@ -61,6 +61,8 @@ pub struct App {
     pub sidebar_visible: bool,
     pub file_tree_visible: bool,
     pub collapsed_projects: HashSet<String>,
+    pub expanded_archives: HashSet<String>,
+    pub pending_session_delete: Option<String>,
 
     pub active_diff_file: Option<String>,
     pub file_diffs: HashMap<String, Diff>,
@@ -134,6 +136,8 @@ impl App {
             sidebar_visible: true,
             file_tree_visible: true,
             collapsed_projects: HashSet::new(),
+            expanded_archives: HashSet::new(),
+            pending_session_delete: None,
             active_diff_file: None,
             file_diffs: HashMap::new(),
             changed_files: vec![],
@@ -231,6 +235,7 @@ impl App {
                 name: "New session".into(),
                 messages: vec![],
                 acp_session_id: None,
+                archived: false,
             }],
         );
         self.persist_state();
@@ -258,10 +263,11 @@ impl App {
         let session_id = self
             .sessions_by_project
             .get(id)
-            .and_then(|s| s.first())
+            .and_then(|sessions| sessions.iter().find(|session| !session.archived))
             .map(|s| s.id.clone());
         self.active_project = Some(project);
         self.active_session_id = session_id;
+        self.thread_scroll.scroll_to_bottom();
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
@@ -277,8 +283,20 @@ impl App {
         let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() else {
             return;
         };
+        let is_available = self
+            .sessions_by_project
+            .get(project_id)
+            .is_some_and(|sessions| {
+                sessions
+                    .iter()
+                    .any(|session| session.id == session_id && !session.archived)
+            });
+        if !is_available {
+            return;
+        }
         self.active_project = Some(project);
         self.active_session_id = Some(session_id.to_string());
+        self.thread_scroll.scroll_to_bottom();
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
@@ -300,14 +318,102 @@ impl App {
             name: "New session".into(),
             messages: vec![],
             acp_session_id: None,
+            archived: false,
         });
         self.active_project = Some(project);
         self.active_session_id = Some(new_id);
+        self.thread_scroll.scroll_to_bottom();
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
         self.persist_state();
         self.connect_project(cx);
+        cx.notify();
+    }
+
+    pub fn toggle_archived_sessions(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if !self.expanded_archives.insert(project_id.to_string()) {
+            self.expanded_archives.remove(project_id);
+        }
+        self.pending_session_delete = None;
+        cx.notify();
+    }
+
+    pub fn archive_session(&mut self, project_id: &str, session_id: &str, cx: &mut Context<Self>) {
+        let was_active = self
+            .active_project
+            .as_ref()
+            .map(|project| project.id.as_str())
+            == Some(project_id)
+            && self.active_session_id.as_deref() == Some(session_id);
+        if was_active && self.thinking {
+            self.toast = Some("Stop the running turn before archiving this session".into());
+            cx.notify();
+            return;
+        }
+        let Some(sessions) = self.sessions_by_project.get_mut(project_id) else {
+            return;
+        };
+        let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
+            return;
+        };
+        session.archived = true;
+
+        if was_active {
+            let next_id = sessions
+                .iter()
+                .find(|session| !session.archived)
+                .map(|session| session.id.clone())
+                .unwrap_or_else(|| {
+                    let id = format!("s{}", now_ms());
+                    sessions.push(Session {
+                        id: id.clone(),
+                        name: "New session".into(),
+                        messages: vec![],
+                        acp_session_id: None,
+                        archived: false,
+                    });
+                    id
+                });
+            self.active_session_id = Some(next_id);
+            self.context_chips.clear();
+            self.connect_project(cx);
+        }
+        self.pending_session_delete = None;
+        self.persist_state();
+        cx.notify();
+    }
+
+    pub fn restore_session(&mut self, project_id: &str, session_id: &str, cx: &mut Context<Self>) {
+        if let Some(session) = self
+            .sessions_by_project
+            .get_mut(project_id)
+            .and_then(|sessions| sessions.iter_mut().find(|session| session.id == session_id))
+        {
+            session.archived = false;
+            self.pending_session_delete = None;
+            self.persist_state();
+            cx.notify();
+        }
+    }
+
+    pub fn request_delete_session(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_session_delete.as_deref() != Some(session_id) {
+            self.pending_session_delete = Some(session_id.to_string());
+            cx.notify();
+            return;
+        }
+
+        if let Some(sessions) = self.sessions_by_project.get_mut(project_id) {
+            sessions.retain(|session| session.id != session_id || !session.archived);
+        }
+        self.pending_session_delete = None;
+        self.persist_state();
         cx.notify();
     }
 
@@ -747,6 +853,7 @@ impl App {
             terminal: None,
         });
         self.update_active_messages(thread);
+        self.thread_scroll.scroll_to_bottom();
         let session_title: String = self
             .active_messages()
             .last()
@@ -854,6 +961,7 @@ impl App {
                     terminal: None,
                 });
                 self.update_active_messages(thread);
+                self.thread_scroll.scroll_to_bottom();
             }
             AcpEvent::Update(update) => {
                 self.apply_session_update(update);
