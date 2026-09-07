@@ -4,6 +4,7 @@
 //! `AcpEvent`s and never parses JSON-RPC method names itself.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,8 +15,9 @@ use agent_client_protocol::schema::v1::{
     ElicitationAction, ElicitationCapabilities, ElicitationContentValue,
     ElicitationFormCapabilities, Implementation, InitializeRequest, NewSessionRequest,
     PermissionOption, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome, SessionConfigValueId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason, TextContent,
+    RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome, SessionConfigOption,
+    SessionConfigValueId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Error, Responder};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -113,7 +115,8 @@ pub enum AcpEvent {
     Connecting,
     Connected { agent_name: Option<String> },
     Reconnecting { attempt: u32, reason: String },
-    SessionReady,
+    SessionReady { session_id: String },
+    ConfigOptions(Vec<SessionConfigOption>),
     TurnStarted,
     Update(SessionUpdate),
     Permission(PendingPermission),
@@ -136,11 +139,21 @@ pub struct AcpClient {
 }
 
 impl AcpClient {
-    pub fn connect(config: ProjectAgentConfig) -> (Self, mpsc::UnboundedReceiver<AcpEvent>) {
+    pub fn connect(
+        config: ProjectAgentConfig,
+        local_workspace: PathBuf,
+        resume_session: Option<String>,
+    ) -> (Self, mpsc::UnboundedReceiver<AcpEvent>) {
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
         let command_rx = Arc::new(Mutex::new(command_rx));
-        async_runtime::spawn(run_with_reconnect(config, command_rx, events));
+        async_runtime::spawn(run_with_reconnect(
+            config,
+            local_workspace,
+            resume_session,
+            command_rx,
+            events,
+        ));
         (Self { commands }, event_rx)
     }
 
@@ -165,6 +178,8 @@ impl AcpClient {
 
 async fn run_with_reconnect(
     config: ProjectAgentConfig,
+    local_workspace: PathBuf,
+    resume_session: Option<String>,
     commands: Arc<Mutex<mpsc::UnboundedReceiver<AcpCommand>>>,
     events: mpsc::UnboundedSender<AcpEvent>,
 ) {
@@ -179,7 +194,14 @@ async fn run_with_reconnect(
             }
         });
 
-        let result = run_connection(config.clone(), commands.clone(), events.clone()).await;
+        let result = run_connection(
+            config.clone(),
+            local_workspace.clone(),
+            resume_session.clone(),
+            commands.clone(),
+            events.clone(),
+        )
+        .await;
         let reason = result
             .err()
             .map(|error| error.to_string())
@@ -198,6 +220,8 @@ async fn run_with_reconnect(
 
 async fn run_connection(
     config: ProjectAgentConfig,
+    local_workspace: PathBuf,
+    resume_session: Option<String>,
     commands: Arc<Mutex<mpsc::UnboundedReceiver<AcpCommand>>>,
     events: mpsc::UnboundedSender<AcpEvent>,
 ) -> Result<(), Error> {
@@ -293,14 +317,37 @@ async fn run_connection(
                 .block_task()
                 .await?;
             let _ = events.send(AcpEvent::Connected {
-                agent_name: initialized.agent_info.map(|info| info.name),
+                agent_name: initialized
+                    .agent_info
+                    .as_ref()
+                    .map(|info| info.name.clone()),
             });
-            let opened = connection
-                .send_request(NewSessionRequest::new(config.workspace))
-                .block_task()
-                .await?;
-            let session_id = opened.session_id;
-            let _ = events.send(AcpEvent::SessionReady);
+            let workspace = config.workspace_for(&local_workspace);
+            let (session_id, config_options) = if let Some(session_id) =
+                resume_session.filter(|_| initialized.agent_capabilities.load_session)
+            {
+                let session_id = agent_client_protocol::schema::v1::SessionId::new(session_id);
+                let loaded = connection
+                    .send_request(agent_client_protocol::schema::v1::LoadSessionRequest::new(
+                        session_id.clone(),
+                        workspace,
+                    ))
+                    .block_task()
+                    .await?;
+                (session_id, loaded.config_options)
+            } else {
+                let opened = connection
+                    .send_request(NewSessionRequest::new(workspace))
+                    .block_task()
+                    .await?;
+                (opened.session_id, opened.config_options)
+            };
+            if let Some(config_options) = config_options {
+                let _ = events.send(AcpEvent::ConfigOptions(config_options));
+            }
+            let _ = events.send(AcpEvent::SessionReady {
+                session_id: session_id.to_string(),
+            });
 
             while let Some(command) = commands.lock().await.recv().await {
                 match command {

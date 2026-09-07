@@ -22,6 +22,10 @@ pub enum TransportConfig {
         user: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity_file: Option<PathBuf>,
+        /// Workspace path as seen by the remote agent. Local projects always
+        /// use the path selected by the native workspace picker.
+        #[serde(default)]
+        remote_workspace: PathBuf,
     },
 }
 
@@ -30,8 +34,17 @@ pub struct ProjectAgentConfig {
     /// A shell-like command line parsed locally into executable and arguments.
     pub agent_command: String,
     pub transport: TransportConfig,
-    /// The source-of-truth workspace path as seen by the agent.
-    pub workspace: PathBuf,
+}
+
+impl ProjectAgentConfig {
+    pub fn workspace_for(&self, local_workspace: &Path) -> PathBuf {
+        match &self.transport {
+            TransportConfig::Local => local_workspace.to_path_buf(),
+            TransportConfig::Ssh {
+                remote_workspace, ..
+            } => remote_workspace.clone(),
+        }
+    }
 }
 
 impl ProjectAgentConfig {
@@ -48,6 +61,7 @@ impl ProjectAgentConfig {
                 host,
                 user,
                 identity_file,
+                ..
             } => {
                 if host.trim().is_empty() {
                     return Err("SSH host is empty".into());
@@ -143,8 +157,8 @@ mod tests {
                 host: "build.example".into(),
                 user: Some("dev".into()),
                 identity_file: None,
+                remote_workspace: "/srv/project".into(),
             },
-            workspace: "/srv/project".into(),
         };
         let agent = config.agent().unwrap();
         assert_eq!(agent.config().command(), Path::new("ssh"));
@@ -156,5 +170,17 @@ mod tests {
                 .any(|arg| arg == "dev@build.example")
         );
         assert!(agent.config().arguments().iter().any(|arg| arg == "gemini"));
+    }
+
+    #[test]
+    fn local_agent_uses_the_selected_project_workspace() {
+        let config = ProjectAgentConfig {
+            agent_command: "agent --acp".into(),
+            transport: TransportConfig::Local,
+        };
+        assert_eq!(
+            config.workspace_for(Path::new("/selected/project")),
+            PathBuf::from("/selected/project")
+        );
     }
 }

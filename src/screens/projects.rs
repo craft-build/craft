@@ -29,8 +29,19 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                             div()
                                 .text_size(px(11.))
                                 .text_color(rgb(theme::TEXT_MUTED))
-                                .child("RECENT SESSIONS"),
+                                .child("WORKSPACES"),
                         )
+                        .when(app.projects.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .border_1()
+                                    .border_color(rgb(theme::BORDER))
+                                    .p(px(20.))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child("No workspaces yet. Open a local folder to begin."),
+                            )
+                        })
                         .children(
                             app.projects
                                 .clone()
@@ -82,7 +93,7 @@ fn top_bar(window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::ACCENT_DARK_TEXT))
                     .cursor_pointer()
-                    .child("+ New session")
+                    .child("+ Open workspace")
                     .on_click(cx.listener(|app, _, _, cx| app.new_session(cx))),
             )
             .child(
@@ -116,22 +127,12 @@ fn project_card(p: crate::state::Project, cx: &mut Context<App>) -> gpui::AnyEle
         .cursor_pointer()
         .hover(|s| s.border_color(rgb(theme::ACCENT)))
         .child(
-            div()
-                .flex()
-                .justify_between()
-                .items_baseline()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(p.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_MUTED))
-                        .child(p.updated.clone()),
-                ),
+            div().flex().items_baseline().child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(p.name.clone()),
+            ),
         )
         .child(
             div()
@@ -141,20 +142,12 @@ fn project_card(p: crate::state::Project, cx: &mut Context<App>) -> gpui::AnyEle
         )
         .child(
             div()
-                .mt(px(2.))
-                .text_size(px(12.))
-                .text_color(rgb(theme::TEXT_SECONDARY))
-                .child(p.desc.clone()),
-        )
-        .child(
-            div()
                 .mt(px(6.))
                 .flex()
                 .gap(px(14.))
                 .text_size(px(11.))
                 .text_color(rgb(theme::TEXT_MUTED))
-                .child(p.checkpoint_label.clone())
-                .child(p.model.clone()),
+                .child(p.checkpoint_label.clone()),
         )
         .on_click(cx.listener(move |app, _, _, cx| app.open_project(&id, cx)))
         .into_any_element()

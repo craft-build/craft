@@ -4,6 +4,7 @@ mod async_runtime;
 mod checkpoint;
 mod chrome;
 mod config;
+mod persistence;
 mod screens;
 mod state;
 mod text_input;

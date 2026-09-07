@@ -71,8 +71,8 @@ pub fn render(_app: &mut App, window: &mut Window, cx: &mut Context<App>) -> imp
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ACCENT_DARK_TEXT))
                         .cursor_pointer()
-                        .child("Set up local workspace →")
-                        .on_click(cx.listener(|app, _, _, cx| app.go_projects(cx))),
+                        .child("Open local workspace →")
+                        .on_click(cx.listener(|app, _, _, cx| app.select_workspace(cx))),
                 )
                 .child(
                     div()

@@ -4,9 +4,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::{ProjectAgentConfig, TransportConfig};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub label: String,
     pub commit: String,
@@ -14,11 +16,15 @@ pub struct Checkpoint {
 
 pub struct CheckpointManager {
     config: ProjectAgentConfig,
+    local_workspace: PathBuf,
 }
 
 impl CheckpointManager {
-    pub fn new(config: ProjectAgentConfig) -> Self {
-        Self { config }
+    pub fn new(config: ProjectAgentConfig, local_workspace: PathBuf) -> Self {
+        Self {
+            config,
+            local_workspace,
+        }
     }
 
     /// Snapshot tracked and untracked, non-ignored files through a temporary
@@ -63,6 +69,46 @@ impl CheckpointManager {
         Ok(())
     }
 
+    pub fn changed_files(&self) -> Result<Vec<(String, String)>, String> {
+        let status = self.run_git(&["status", "--porcelain=v1"])?;
+        Ok(status
+            .lines()
+            .filter_map(|line| {
+                if line.len() < 4 {
+                    return None;
+                }
+                let code = &line[..2];
+                let path = line[3..]
+                    .rsplit_once(" -> ")
+                    .map(|(_, new_path)| new_path)
+                    .unwrap_or(&line[3..])
+                    .trim_matches('"')
+                    .to_string();
+                let status = if code == "??" {
+                    "added"
+                } else if code.contains('D') {
+                    "deleted"
+                } else if code.contains('R') {
+                    "renamed"
+                } else if code.contains('A') {
+                    "added"
+                } else {
+                    "modified"
+                };
+                Some((path, status.to_string()))
+            })
+            .collect())
+    }
+
+    pub fn file_snapshot(&self, path: &str) -> Result<(Option<String>, String), String> {
+        let quoted = shell_words::quote(path);
+        let old = self.run_shell(&format!(
+            "git cat-file -e HEAD:{quoted} 2>/dev/null && git show HEAD:{quoted} || true"
+        ))?;
+        let new = self.run_shell(&format!("if [ -f {quoted} ]; then cat -- {quoted}; fi"))?;
+        Ok(((!old.is_empty()).then_some(old), new))
+    }
+
     fn run_git(&self, args: &[&str]) -> Result<String, String> {
         let command = format!(
             "git {}",
@@ -79,12 +125,13 @@ impl CheckpointManager {
             TransportConfig::Local => Command::new("sh")
                 .arg("-lc")
                 .arg(script)
-                .current_dir(expand_home(&self.config.workspace))
+                .current_dir(expand_home(&self.local_workspace))
                 .output(),
             TransportConfig::Ssh {
                 host,
                 user,
                 identity_file,
+                remote_workspace,
             } => {
                 let destination = user
                     .as_deref()
@@ -93,7 +140,7 @@ impl CheckpointManager {
                     .unwrap_or_else(|| host.clone());
                 let remote = format!(
                     "cd {} && sh -lc {}",
-                    shell_words::quote(&self.config.workspace.to_string_lossy()),
+                    shell_words::quote(&remote_workspace.to_string_lossy()),
                     shell_words::quote(script)
                 );
                 let mut command = Command::new("ssh");

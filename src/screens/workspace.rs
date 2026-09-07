@@ -27,7 +27,6 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
         .when(app.show_checkpoints, |d| {
             d.child(checkpoints_overlay(app, cx))
         })
-        .when(app.toast.is_some(), |d| d.child(toast_view(app)))
 }
 
 // ---------------------------------------------------------------- top bar
@@ -62,6 +61,9 @@ fn top_bar(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl In
             .flex()
             .items_center()
             .gap(px(12.))
+            .child(icon_button("all-workspaces", "←", cx, |app, cx| {
+                app.go_projects(cx)
+            }))
             .child(icon_button("toggle-sidebar", "☰", cx, |app, cx| {
                 app.toggle_sidebar(cx)
             }))
@@ -964,7 +966,7 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
 
 fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let active_diff = app.active_diff_file.clone();
-    let files = app.changed_files();
+    let files = app.changed_files().to_vec();
 
     div()
         .flex()
@@ -1048,16 +1050,27 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .pb(px(8.))
                         .child("CHANGED FILES"),
                 )
+                .when(files.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .px(px(12.))
+                            .py(px(6.))
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child("Working tree clean"),
+                    )
+                })
                 .children(files.iter().map(|f| {
-                    let path = f.path.to_string();
-                    let is_active = active_diff.as_deref() == Some(f.path);
-                    let dot = if f.status == Some("added") {
+                    let path = f.path.clone();
+                    let is_active = active_diff.as_deref() == Some(f.path.as_str());
+                    let dot = if f.status.as_deref() == Some("added") {
                         theme::DIFF_ADD_TEXT
                     } else {
                         theme::ACCENT
                     };
-                    let label = f.path.rsplit('/').next().unwrap_or(f.path).to_string();
+                    let label = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
                     let click_path = path.clone();
+                    let attach_path = path.clone();
                     div()
                         .id(SharedString::from(format!("changed-file-{path}")))
                         .flex()
@@ -1077,6 +1090,19 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .child(label),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("attach-file-{path}")))
+                                .ml_auto()
+                                .text_size(px(11.))
+                                .text_color(rgb(theme::ACCENT))
+                                .cursor_pointer()
+                                .child("+")
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    cx.stop_propagation();
+                                    app.add_context_file(&attach_path, cx);
+                                })),
                         )
                         .on_click(
                             cx.listener(move |app, _, _, cx| app.toggle_diff_file(&click_path, cx)),
@@ -1281,19 +1307,4 @@ fn checkpoints_overlay(app: &mut App, cx: &mut Context<App>) -> impl IntoElement
                         )
                 })),
         )
-}
-
-fn toast_view(app: &App) -> impl IntoElement {
-    div()
-        .absolute()
-        .bottom(px(16.))
-        .right(px(16.))
-        .bg(rgb(theme::INPUT_BG))
-        .border_1()
-        .border_color(rgb(theme::SELECTION))
-        .text_color(rgb(theme::TEXT_PRIMARY))
-        .text_size(px(12.))
-        .px(px(12.))
-        .py(px(8.))
-        .child(app.toast.clone().unwrap_or_default())
 }

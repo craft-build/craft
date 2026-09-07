@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate, ToolCallContent};
 use gpui::prelude::*;
-use gpui::{Context, Entity, ScrollHandle, Window, div, px, rgb};
+use gpui::{Context, Entity, PathPromptOptions, ScrollHandle, Window, div, px, rgb};
 
 use crate::acp::{
     AcpClient, AcpEvent, AnchoredComment, ElicitationDecision, PendingElicitation,
@@ -12,6 +12,7 @@ use crate::acp::{
 use crate::async_runtime;
 use crate::checkpoint::{Checkpoint, CheckpointManager};
 use crate::config::{ConfigStore, ProjectAgentConfig, TransportConfig};
+use crate::persistence::{PersistedState, StateStore};
 use crate::screens;
 use crate::state::*;
 use crate::text_input::TextInput;
@@ -22,6 +23,12 @@ pub struct PendingComment {
     pub idx: usize,
     pub text: String,
     pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceFile {
+    pub path: String,
+    pub status: Option<String>,
 }
 
 pub struct App {
@@ -42,6 +49,7 @@ pub struct App {
 
     pub active_diff_file: Option<String>,
     pub file_diffs: HashMap<String, Diff>,
+    pub changed_files: Vec<WorkspaceFile>,
 
     pub composer: Entity<TextInput>,
     pub context_chips: Vec<String>,
@@ -64,11 +72,11 @@ pub struct App {
     pub comments: HashMap<String, Vec<Comment>>,
 
     pub thread_scroll: ScrollHandle,
-    pub checkpoints: Vec<Checkpoint>,
+    pub checkpoints_by_project: HashMap<String, Vec<Checkpoint>>,
 
     pub config_remote: bool,
     pub agent_command_input: Entity<TextInput>,
-    pub workspace_input: Entity<TextInput>,
+    pub remote_workspace_input: Entity<TextInput>,
     pub ssh_host_input: Entity<TextInput>,
     pub ssh_user_input: Entity<TextInput>,
     pub ssh_key_input: Entity<TextInput>,
@@ -87,17 +95,23 @@ impl App {
                 })
         });
         let agent_command_input = cx.new(|cx| TextInput::new(cx, "e.g. gemini --experimental-acp"));
-        let workspace_input = cx.new(|cx| TextInput::new(cx, "/path/to/project"));
+        let remote_workspace_input = cx.new(|cx| TextInput::new(cx, "/path/on/remote/machine"));
         let ssh_host_input = cx.new(|cx| TextInput::new(cx, "host from ~/.ssh/config"));
         let ssh_user_input = cx.new(|cx| TextInput::new(cx, "optional SSH user"));
         let ssh_key_input = cx.new(|cx| TextInput::new(cx, "optional identity file"));
         let elicitation_input =
             cx.new(|cx| TextInput::new(cx, r#"JSON object, e.g. {"answer":"yes"}"#));
+        let persisted = StateStore::for_user().load().unwrap_or_default();
+        let screen = if persisted.projects.is_empty() {
+            Screen::Onboarding
+        } else {
+            Screen::Projects
+        };
 
         App {
-            screen: Screen::Onboarding,
-            projects: seed_projects(),
-            sessions_by_project: seed_sessions(),
+            screen,
+            projects: persisted.projects,
+            sessions_by_project: persisted.sessions_by_project,
             active_project: None,
             active_session_id: None,
             selected_model: String::new(),
@@ -108,7 +122,8 @@ impl App {
             file_tree_visible: true,
             collapsed_projects: HashSet::new(),
             active_diff_file: None,
-            file_diffs: seed_file_diffs(),
+            file_diffs: HashMap::new(),
+            changed_files: vec![],
             composer,
             context_chips: vec![],
             thinking: false,
@@ -125,12 +140,12 @@ impl App {
             expanded_steps: HashSet::new(),
             open_comment_boxes: HashSet::new(),
             comment_inputs: HashMap::new(),
-            comments: seed_comments(),
+            comments: persisted.comments,
             thread_scroll: ScrollHandle::new(),
-            checkpoints: vec![],
+            checkpoints_by_project: persisted.checkpoints_by_project,
             config_remote: false,
             agent_command_input,
-            workspace_input,
+            remote_workspace_input,
             ssh_host_input,
             ssh_user_input,
             ssh_key_input,
@@ -143,6 +158,70 @@ impl App {
     pub fn go_projects(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Projects;
         cx.notify();
+    }
+
+    pub fn select_workspace(&mut self, cx: &mut Context<Self>) {
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open workspace".into()),
+        });
+        cx.spawn(async move |this, cx| match selection.await {
+            Ok(Ok(Some(paths))) => {
+                if let Some(path) = paths.into_iter().next() {
+                    this.update(cx, |app, cx| app.add_workspace(path, cx)).ok();
+                }
+            }
+            Ok(Err(error)) => {
+                this.update(cx, |app, cx| {
+                    app.toast = Some(format!("Could not open workspace picker: {error}"));
+                    cx.notify();
+                })
+                .ok();
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
+    fn add_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if let Some(project_id) = self
+            .projects
+            .iter()
+            .find(|project| PathBuf::from(&project.path) == path)
+            .map(|project| project.id.clone())
+        {
+            self.open_project(&project_id, cx);
+            return;
+        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
+            .to_string();
+        self.projects.push(Project {
+            id: id.clone(),
+            name,
+            path: path.to_string_lossy().into_owned(),
+            desc: "Local workspace".into(),
+            updated: "Just added".into(),
+            checkpoint_label: "No checkpoints".into(),
+            model: "Agent not configured".into(),
+        });
+        self.sessions_by_project.insert(
+            id.clone(),
+            vec![Session {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                name: "New session".into(),
+                messages: vec![],
+                acp_session_id: None,
+            }],
+        );
+        self.persist_state();
+        self.open_project(&id, cx);
     }
 
     pub fn go_settings(&mut self, cx: &mut Context<Self>) {
@@ -173,6 +252,10 @@ impl App {
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
+        self.file_diffs.clear();
+        self.changed_files.clear();
+        self.agent_config = None;
+        self.refresh_workspace(cx);
         self.connect_project(cx);
         cx.notify();
     }
@@ -203,40 +286,20 @@ impl App {
             id: new_id.clone(),
             name: "New session".into(),
             messages: vec![],
+            acp_session_id: None,
         });
         self.active_project = Some(project);
         self.active_session_id = Some(new_id);
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
+        self.persist_state();
         self.connect_project(cx);
         cx.notify();
     }
 
     pub fn new_session(&mut self, cx: &mut Context<Self>) {
-        let project = Project {
-            id: "untitled".into(),
-            name: "untitled-session".into(),
-            path: "~/dev/untitled-session".into(),
-            desc: String::new(),
-            updated: String::new(),
-            checkpoint_label: String::new(),
-            model: self.selected_model.clone(),
-        };
-        self.sessions_by_project.insert(
-            "untitled".to_string(),
-            vec![Session {
-                id: "s1".into(),
-                name: "New session".into(),
-                messages: vec![],
-            }],
-        );
-        self.active_project = Some(project);
-        self.active_session_id = Some("s1".into());
-        self.show_checkpoints = false;
-        self.context_chips.clear();
-        self.screen = Screen::Workspace;
-        cx.notify();
+        self.select_workspace(cx);
     }
 
     // ---- workspace chrome ----
@@ -290,15 +353,31 @@ impl App {
         };
         let project_id = project.id.clone();
         let command = self.agent_command_input.read(cx).content.trim().to_string();
-        let workspace = self.workspace_input.read(cx).content.trim().to_string();
+        let remote_workspace = self
+            .remote_workspace_input
+            .read(cx)
+            .content
+            .trim()
+            .to_string();
         let host = self.ssh_host_input.read(cx).content.trim().to_string();
         let user = self.ssh_user_input.read(cx).content.trim().to_string();
         let key = self.ssh_key_input.read(cx).content.trim().to_string();
+        if command.is_empty() {
+            self.toast = Some("Agent command is required".into());
+            cx.notify();
+            return;
+        }
+        if self.config_remote && (host.is_empty() || remote_workspace.is_empty()) {
+            self.toast = Some("SSH host and remote workspace are required".into());
+            cx.notify();
+            return;
+        }
         let transport = if self.config_remote {
             TransportConfig::Ssh {
                 host,
                 user: (!user.is_empty()).then_some(user),
                 identity_file: (!key.is_empty()).then(|| PathBuf::from(key)),
+                remote_workspace: PathBuf::from(remote_workspace),
             }
         } else {
             TransportConfig::Local
@@ -306,7 +385,6 @@ impl App {
         let config = ProjectAgentConfig {
             agent_command: command,
             transport,
-            workspace: PathBuf::from(workspace),
         };
         match ConfigStore::for_user().save(&project_id, &config) {
             Ok(()) => {
@@ -326,7 +404,7 @@ impl App {
         self.context_usage = None;
         self.available_models.clear();
         self.model_options.clear();
-        let Some(project) = self.active_project.as_ref() else {
+        let Some(project) = self.active_project.clone() else {
             return;
         };
         let config = match ConfigStore::for_user().load(&project.id) {
@@ -340,17 +418,27 @@ impl App {
                 return;
             }
         };
+        if matches!(
+            &config.transport,
+            TransportConfig::Ssh {
+                remote_workspace,
+                ..
+            } if remote_workspace.as_os_str().is_empty()
+        ) {
+            self.connection_status =
+                "SSH agent needs a remote workspace mapping in Settings".into();
+            self.agent_config = Some(config);
+            return;
+        }
         self.config_remote = matches!(config.transport, TransportConfig::Ssh { .. });
         self.agent_command_input.update(cx, |input, _| {
             input.set_content(config.agent_command.clone())
-        });
-        self.workspace_input.update(cx, |input, _| {
-            input.set_content(config.workspace.to_string_lossy())
         });
         if let TransportConfig::Ssh {
             host,
             user,
             identity_file,
+            remote_workspace,
         } = &config.transport
         {
             self.ssh_host_input
@@ -366,9 +454,23 @@ impl App {
                         .unwrap_or_default(),
                 )
             });
+            self.remote_workspace_input.update(cx, |input, _| {
+                input.set_content(remote_workspace.to_string_lossy())
+            });
         }
         self.agent_config = Some(config.clone());
-        let (client, mut events) = AcpClient::connect(config);
+        self.refresh_workspace(cx);
+        let local_workspace = PathBuf::from(&project.path);
+        let resume_session = self
+            .sessions_by_project
+            .get(&project.id)
+            .and_then(|sessions| {
+                sessions
+                    .iter()
+                    .find(|session| Some(&session.id) == self.active_session_id.as_ref())
+            })
+            .and_then(|session| session.acp_session_id.clone());
+        let (client, mut events) = AcpClient::connect(config, local_workspace, resume_session);
         self.acp_client = Some(client);
         self.connection_status = "Connecting".into();
         cx.spawn(async move |this, cx| {
@@ -390,11 +492,76 @@ impl App {
     }
 
     pub fn toggle_diff_file(&mut self, path: &str, cx: &mut Context<Self>) {
-        self.active_diff_file = if self.active_diff_file.as_deref() == Some(path) {
-            None
-        } else {
-            Some(path.to_string())
+        if self.active_diff_file.as_deref() == Some(path) {
+            self.active_diff_file = None;
+            cx.notify();
+            return;
+        }
+        self.active_diff_file = Some(path.to_string());
+        if self.file_diffs.contains_key(path) {
+            cx.notify();
+            return;
+        }
+        let Some(project) = self.active_project.clone() else {
+            return;
         };
+        let config = self.agent_config.clone().unwrap_or(ProjectAgentConfig {
+            agent_command: String::new(),
+            transport: TransportConfig::Local,
+        });
+        let local_workspace = PathBuf::from(project.path);
+        let diff_path = path.to_string();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        async_runtime::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                CheckpointManager::new(config, local_workspace)
+                    .file_snapshot(&diff_path)
+                    .map(|(old_text, new_text)| {
+                        render_acp_diff(
+                            agent_client_protocol::schema::v1::Diff::new(&diff_path, new_text)
+                                .old_text(old_text),
+                        )
+                    })
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("diff task failed: {error}")));
+            let _ = sender.send(result);
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = receiver.await {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(diff) => {
+                            app.file_diffs.insert(diff.file.clone(), diff);
+                        }
+                        Err(error) => app.toast = Some(error),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn add_context_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        let workspace_path = self
+            .active_project
+            .as_ref()
+            .map(|project| {
+                let local = PathBuf::from(&project.path);
+                self.agent_config
+                    .as_ref()
+                    .map(|config| config.workspace_for(&local))
+                    .unwrap_or(local)
+                    .join(path)
+            })
+            .unwrap_or_else(|| PathBuf::from(path));
+        let path = workspace_path.to_string_lossy().into_owned();
+        if !self.context_chips.contains(&path) {
+            self.context_chips.push(path);
+        }
         cx.notify();
     }
 
@@ -448,6 +615,7 @@ impl App {
         });
         self.open_comment_boxes.remove(&key);
         self.comment_inputs.remove(&key);
+        self.persist_state();
         cx.notify();
     }
 
@@ -475,6 +643,7 @@ impl App {
                 list.remove(idx);
             }
         }
+        self.persist_state();
         cx.notify();
     }
 
@@ -510,12 +679,29 @@ impl App {
         }
     }
 
+    fn persist_state(&mut self) {
+        let state = PersistedState {
+            projects: self.projects.clone(),
+            sessions_by_project: self.sessions_by_project.clone(),
+            comments: self.comments.clone(),
+            checkpoints_by_project: self.checkpoints_by_project.clone(),
+        };
+        if let Err(error) = StateStore::for_user().save(&state) {
+            self.toast = Some(format!("Could not save Forge state: {error}"));
+        }
+    }
+
     pub fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
         if self.thinking {
             self.toast = Some("Stop the running turn before sending another message".into());
             cx.notify();
             return;
         }
+        let Some(client) = self.acp_client.clone() else {
+            self.toast = Some("Configure and connect an ACP agent before sending a message".into());
+            cx.notify();
+            return;
+        };
         let pending = self.pending_comments();
         let text = text.trim().to_string();
         if text.is_empty() && pending.is_empty() {
@@ -541,6 +727,27 @@ impl App {
             terminal: None,
         });
         self.update_active_messages(thread);
+        let session_title: String = self
+            .active_messages()
+            .last()
+            .map(|message| message.text.trim())
+            .unwrap_or("Session")
+            .chars()
+            .take(48)
+            .collect();
+        let project_id = self.current_thread_key();
+        if let Some(session) = self
+            .sessions_by_project
+            .get_mut(&project_id)
+            .and_then(|sessions| {
+                sessions
+                    .iter_mut()
+                    .find(|session| Some(&session.id) == self.active_session_id.as_ref())
+            })
+            && session.name == "New session"
+        {
+            session.name = session_title;
+        }
 
         for p in &pending {
             if let Some(list) = self.comments.get_mut(&p.key) {
@@ -571,17 +778,10 @@ impl App {
                 })
                 .collect(),
         };
-        match self.acp_client.as_ref() {
-            Some(client) => {
-                if let Err(error) = client.prompt(turn) {
-                    self.connection_status = error;
-                }
-            }
-            None => {
-                self.connection_status =
-                    "No ACP agent configured; open Settings to connect one".into();
-            }
+        if let Err(error) = client.prompt(turn) {
+            self.connection_status = error;
         }
+        self.persist_state();
 
         cx.notify();
     }
@@ -598,7 +798,26 @@ impl App {
                 self.thinking = false;
                 self.connection_status = format!("Reconnecting ({attempt}) · {reason}");
             }
-            AcpEvent::SessionReady => self.connection_status = "Idle".into(),
+            AcpEvent::SessionReady { session_id } => {
+                self.connection_status = "Idle".into();
+                let project_id = self.current_thread_key();
+                if let Some(session) =
+                    self.sessions_by_project
+                        .get_mut(&project_id)
+                        .and_then(|sessions| {
+                            sessions.iter_mut().find(|session| {
+                                Some(&session.id) == self.active_session_id.as_ref()
+                            })
+                        })
+                {
+                    session.acp_session_id = Some(session_id);
+                }
+                self.persist_state();
+            }
+            AcpEvent::ConfigOptions(options) => {
+                let value = serde_json::to_value(options).unwrap_or_default();
+                self.set_model_options(extract_model_options(&value));
+            }
             AcpEvent::TurnStarted => {
                 self.thinking = true;
                 self.connection_status = "Running".into();
@@ -617,13 +836,17 @@ impl App {
                 });
                 self.update_active_messages(thread);
             }
-            AcpEvent::Update(update) => self.apply_session_update(update),
+            AcpEvent::Update(update) => {
+                self.apply_session_update(update);
+            }
             AcpEvent::Permission(permission) => self.pending_permission = Some(permission),
             AcpEvent::Elicitation(elicitation) => self.pending_elicitation = Some(elicitation),
             AcpEvent::TurnFinished => {
                 self.thinking = false;
                 self.connection_status = "Idle".into();
+                self.persist_state();
                 self.create_turn_checkpoint(cx);
+                self.refresh_workspace(cx);
             }
             AcpEvent::TurnCancelled => {
                 self.thinking = false;
@@ -634,6 +857,7 @@ impl App {
                 if let Some(elicitation) = self.pending_elicitation.take() {
                     elicitation.respond(ElicitationDecision::Cancel);
                 }
+                self.persist_state();
             }
             AcpEvent::Error(error) | AcpEvent::Disconnected(error) => {
                 self.thinking = false;
@@ -677,18 +901,20 @@ impl App {
             }
             SessionUpdate::ConfigOptionUpdate(options) => {
                 let value = serde_json::to_value(options).unwrap_or_default();
-                let options = extract_model_options(&value);
-                self.available_models = options.iter().map(|(name, _, _)| name.clone()).collect();
-                self.model_options = options
-                    .into_iter()
-                    .map(|(name, id, value)| (name, (id, value)))
-                    .collect();
-                if self.selected_model.is_empty() {
-                    self.selected_model =
-                        self.available_models.first().cloned().unwrap_or_default();
-                }
+                self.set_model_options(extract_model_options(&value));
             }
             _ => {}
+        }
+    }
+
+    fn set_model_options(&mut self, options: Vec<(String, String, String)>) {
+        self.available_models = options.iter().map(|(name, _, _)| name.clone()).collect();
+        self.model_options = options
+            .into_iter()
+            .map(|(name, id, value)| (name, (id, value)))
+            .collect();
+        if self.selected_model.is_empty() {
+            self.selected_model = self.available_models.first().cloned().unwrap_or_default();
         }
     }
 
@@ -760,6 +986,48 @@ impl App {
         cx.notify();
     }
 
+    fn refresh_workspace(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.active_project.clone() else {
+            self.changed_files.clear();
+            return;
+        };
+        let config = self.agent_config.clone().unwrap_or(ProjectAgentConfig {
+            agent_command: String::new(),
+            transport: TransportConfig::Local,
+        });
+        let local_workspace = PathBuf::from(project.path);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        async_runtime::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                CheckpointManager::new(config, local_workspace).changed_files()
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("workspace refresh failed: {error}")));
+            let _ = sender.send(result);
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = receiver.await {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(files) => {
+                            app.changed_files = files
+                                .into_iter()
+                                .map(|(path, status)| WorkspaceFile {
+                                    path,
+                                    status: Some(status),
+                                })
+                                .collect();
+                        }
+                        Err(error) => app.toast = Some(error),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     pub fn accept_elicitation(&mut self, cx: &mut Context<Self>) {
         let raw = self.elicitation_input.read(cx).content.clone();
         let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
@@ -795,13 +1063,24 @@ impl App {
         let Some(config) = self.agent_config.clone() else {
             return;
         };
-        let label = format!("Checkpoint {}", self.checkpoints.len() + 1);
+        let Some(project) = self.active_project.clone() else {
+            return;
+        };
+        let project_id = project.id.clone();
+        let local_workspace = PathBuf::from(&project.path);
+        let label = format!(
+            "Checkpoint {}",
+            self.checkpoints_by_project
+                .get(&project_id)
+                .map_or(1, |checkpoints| checkpoints.len() + 1)
+        );
         let (sender, receiver) = tokio::sync::oneshot::channel();
         async_runtime::spawn(async move {
-            let result =
-                tokio::task::spawn_blocking(move || CheckpointManager::new(config).create(&label))
-                    .await
-                    .unwrap_or_else(|error| Err(format!("checkpoint task failed: {error}")));
+            let result = tokio::task::spawn_blocking(move || {
+                CheckpointManager::new(config, local_workspace).create(&label)
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("checkpoint task failed: {error}")));
             let _ = sender.send(result);
         });
         cx.spawn(async move |this, cx| {
@@ -818,7 +1097,25 @@ impl App {
                                 message.checkpoint_label = Some(checkpoint.label.clone());
                             }
                             app.update_active_messages(thread);
-                            app.checkpoints.push(checkpoint);
+                            app.checkpoints_by_project
+                                .entry(project_id.clone())
+                                .or_default()
+                                .push(checkpoint);
+                            let count = app
+                                .checkpoints_by_project
+                                .get(&project_id)
+                                .map_or(0, Vec::len);
+                            if let Some(project) = app
+                                .projects
+                                .iter_mut()
+                                .find(|project| project.id == project_id)
+                            {
+                                project.checkpoint_label = format!(
+                                    "{count} checkpoint{}",
+                                    if count == 1 { "" } else { "s" }
+                                );
+                            }
+                            app.persist_state();
                         }
                         Err(error) => app.toast = Some(error),
                     }
@@ -842,11 +1139,16 @@ impl App {
     }
 
     pub fn restore_checkpoint(&mut self, label: &str, cx: &mut Context<Self>) {
+        let project_id = self.current_thread_key();
         let Some(checkpoint) = self
-            .checkpoints
-            .iter()
-            .rev()
-            .find(|checkpoint| checkpoint.label == label)
+            .checkpoints_by_project
+            .get(&project_id)
+            .and_then(|checkpoints| {
+                checkpoints
+                    .iter()
+                    .rev()
+                    .find(|checkpoint| checkpoint.label == label)
+            })
             .cloned()
         else {
             self.toast = Some(format!("Checkpoint data is unavailable for {label}"));
@@ -858,6 +1160,10 @@ impl App {
             cx.notify();
             return;
         };
+        let Some(project) = self.active_project.as_ref() else {
+            return;
+        };
+        let local_workspace = PathBuf::from(&project.path);
         self.toast = Some(format!("Restoring {label}…"));
         let restored_label = label.to_string();
         self.show_checkpoints = false;
@@ -866,7 +1172,7 @@ impl App {
         let (sender, rx) = tokio::sync::oneshot::channel();
         async_runtime::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                CheckpointManager::new(config).restore(&checkpoint)
+                CheckpointManager::new(config, local_workspace).restore(&checkpoint)
             })
             .await
             .unwrap_or_else(|error| Err(format!("restore task failed: {error}")));
@@ -893,8 +1199,8 @@ impl App {
 
     // ---- diff / files ----
 
-    pub fn changed_files(&self) -> &'static [FileEntry] {
-        CHANGED_FILES
+    pub fn changed_files(&self) -> &[WorkspaceFile] {
+        &self.changed_files
     }
 }
 
@@ -902,6 +1208,7 @@ impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
+            .relative()
             .bg(rgb(theme::BG))
             .text_color(rgb(theme::TEXT_PRIMARY))
             .font_family(theme::FONT_FAMILY)
@@ -916,6 +1223,27 @@ impl Render for App {
                     screens::workspace::render(self, window, cx).into_any_element()
                 }
                 Screen::Settings => screens::settings::render(self, window, cx).into_any_element(),
+            })
+            .when_some(self.toast.clone(), |root, message| {
+                root.child(
+                    div()
+                        .id("global-toast")
+                        .absolute()
+                        .bottom(px(16.))
+                        .right(px(16.))
+                        .bg(rgb(theme::INPUT_BG))
+                        .border_1()
+                        .border_color(rgb(theme::SELECTION))
+                        .text_size(px(12.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .cursor_pointer()
+                        .child(message)
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            app.toast = None;
+                            cx.notify();
+                        })),
+                )
             })
     }
 }

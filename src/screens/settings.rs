@@ -61,10 +61,18 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                         .flex()
                         .flex_col()
                         .gap(px(28.))
-                        .child(agent_section(app, cx))
-                        .child(model_section(app, cx))
-                        .child(editor_section())
-                        .child(shortcuts_section())
+                        .when(app.active_project.is_some(), |d| {
+                            d.child(agent_section(app, cx))
+                                .child(model_section(app, cx))
+                        })
+                        .when(app.active_project.is_none(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child("Open a workspace to configure its ACP agent."),
+                            )
+                        })
                         .child(about_section()),
                 ),
         )
@@ -136,7 +144,6 @@ fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .gap(px(8.))
         .child(section_label("ACP AGENT"))
         .child(input_row("Agent command", app.agent_command_input.clone()))
-        .child(input_row("Workspace", app.workspace_input.clone()))
         .child(
             div()
                 .id("transport-toggle")
@@ -157,9 +164,13 @@ fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .on_click(cx.listener(|app, _, _, cx| app.toggle_config_remote(cx))),
         )
         .when(remote, |d| {
-            d.child(input_row("SSH host", app.ssh_host_input.clone()))
-                .child(input_row("SSH user", app.ssh_user_input.clone()))
-                .child(input_row("Identity file", app.ssh_key_input.clone()))
+            d.child(input_row(
+                "Remote workspace",
+                app.remote_workspace_input.clone(),
+            ))
+            .child(input_row("SSH host", app.ssh_host_input.clone()))
+            .child(input_row("SSH user", app.ssh_user_input.clone()))
+            .child(input_row("Identity file", app.ssh_key_input.clone()))
         })
         .child(
             div()
@@ -200,81 +211,11 @@ fn input_row(label: &'static str, input: gpui::Entity<TextInput>) -> impl IntoEl
         )
 }
 
-fn settings_row(label: &'static str, value: &'static str) -> impl IntoElement {
-    div()
-        .flex()
-        .justify_between()
-        .px(px(10.))
-        .py(px(8.))
-        .border_1()
-        .border_color(rgb(theme::BORDER))
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(theme::TEXT_SECONDARY))
-                .child(label),
-        )
-        .child(div().text_size(px(12.)).child(value))
-}
-
-fn editor_section() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .child(section_label("EDITOR"))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(settings_row("Font size", "13px"))
-                .child(settings_row("Theme", "Charcoal / Cyan"))
-                .child(settings_row("Diff style", "Inline")),
-        )
-}
-
-fn shortcut_row(label: &'static str, keys: &'static str) -> impl IntoElement {
-    div()
-        .flex()
-        .justify_between()
-        .px(px(10.))
-        .py(px(6.))
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(theme::TEXT_SECONDARY))
-                .child(label),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(theme::TEXT_MUTED))
-                .child(keys),
-        )
-}
-
-fn shortcuts_section() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .child(section_label("KEYBOARD SHORTCUTS"))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(shortcut_row("Send message", "Enter"))
-                .child(shortcut_row("Checkpoint history", "⌘ H"))
-                .child(shortcut_row("Switch model", "⌘ M"))
-                .child(shortcut_row("Toggle file tree", "⌘ B")),
-        )
-}
-
 fn about_section() -> impl IntoElement {
     div().flex().flex_col().child(section_label("ABOUT")).child(
         div()
             .text_size(px(12.))
             .text_color(rgb(theme::TEXT_SECONDARY))
-            .child("Forge 0.9.2 · build 2026.09.04"),
+            .child(format!("Forge {}", env!("CARGO_PKG_VERSION"))),
     )
 }
