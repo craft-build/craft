@@ -21,6 +21,7 @@ use super::local::{LLAMACPP, LocalEndpoint, OLLAMA};
 use super::mistral::Mistral;
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::openrouter::OpenRouter;
+use super::regolo::Regolo;
 use super::synthetic::Synthetic;
 use super::tensorx::TensorX;
 use super::{ResolvedAuth, Timeouts};
@@ -125,6 +126,7 @@ fn compat_kind(kind: ProviderKind) -> Option<ProviderKind> {
         | ProviderKind::DeepSeek
         | ProviderKind::OpenRouter
         | ProviderKind::Synthetic
+        | ProviderKind::Regolo
         | ProviderKind::TensorX => Some(kind),
         _ => None,
     }
@@ -175,6 +177,7 @@ fn default_path_prefix(kind: Option<ProviderKind>) -> &'static str {
             | ProviderKind::DeepSeek
             | ProviderKind::OpenRouter
             | ProviderKind::Synthetic
+            | ProviderKind::Regolo
             | ProviderKind::TensorX
             | ProviderKind::OpenAi
             | ProviderKind::Copilot
@@ -238,11 +241,22 @@ fn build_routed_provider(
         ProviderKind::TensorX => {
             Box::new(TensorX::with_auth(auth, timeouts)?.with_system_prefix(system_prefix))
         }
+        ProviderKind::Regolo => {
+            Box::new(Regolo::with_auth(auth, timeouts)?.with_system_prefix(system_prefix))
+        }
         ProviderKind::Anthropic => {
             Box::new(Anthropic::with_auth(auth, timeouts)?.with_system_prefix(system_prefix))
         }
         ProviderKind::Google => Box::new(Google::with_auth(auth, timeouts)?),
-        _ => unreachable!("routed_kind only returns the variants matched above"),
+        // Excluded by `compat_kind`: routing to native OpenAI would bypass the
+        // gateway for codex models, and the rest have no clean proxy story. A
+        // new kind must pick a side here.
+        ProviderKind::OpenAi
+        | ProviderKind::Copilot
+        | ProviderKind::Opencode
+        | ProviderKind::Xai
+        | ProviderKind::Bedrock
+        | ProviderKind::Aperture => unreachable!("excluded by compat_kind"),
     })
 }
 

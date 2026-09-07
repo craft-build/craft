@@ -24,6 +24,7 @@ use crate::providers::mistral::Mistral;
 use crate::providers::openai::OpenAi;
 use crate::providers::opencode::Opencode;
 use crate::providers::openrouter::OpenRouter;
+use crate::providers::regolo::Regolo;
 use crate::providers::synthetic::Synthetic;
 use crate::providers::tensorx::TensorX;
 use crate::providers::xai::Xai;
@@ -46,6 +47,8 @@ pub enum ProviderKind {
     #[strum(serialize = "openrouter")]
     OpenRouter,
     Synthetic,
+    #[strum(serialize = "regolo")]
+    Regolo,
     #[strum(serialize = "tensorx")]
     TensorX,
     #[strum(serialize = "opencode")]
@@ -69,6 +72,7 @@ impl ProviderKind {
             Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
             Self::Synthetic => "Synthetic",
+            Self::Regolo => "Regolo",
             Self::TensorX => "TensorX",
             Self::Opencode => "Opencode Zen",
             Self::Xai => "xAI",
@@ -89,6 +93,7 @@ impl ProviderKind {
             Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::Synthetic => "SYNTHETIC_API_KEY",
+            Self::Regolo => "REGOLO_API_KEY",
             Self::TensorX => "TENSORX_API_KEY",
             Self::Opencode => "OPENCODE_API_KEY",
             Self::Xai => "XAI_API_KEY",
@@ -113,6 +118,7 @@ impl ProviderKind {
             Self::DeepSeek => "https://api.deepseek.com",
             Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
+            Self::Regolo => "https://api.regolo.ai/v1",
             Self::TensorX => "https://api.tensorx.ai/v1",
             Self::Opencode => "https://opencode.ai/zen/v1",
             Self::Xai => "https://api.x.ai/v1",
@@ -129,6 +135,7 @@ impl ProviderKind {
                 | Self::Mistral
                 | Self::DeepSeek
                 | Self::Synthetic
+                | Self::Regolo
                 | Self::OpenAi
                 | Self::OpenRouter
                 | Self::LlamaCpp
@@ -156,6 +163,9 @@ impl ProviderKind {
                 Some("Reasoning effort support (low/medium/high), open-weight models")
             }
             Self::TensorX => Some("Open-weight models, zero data retention, prompt caching"),
+            Self::Regolo => Some(
+                "EU-hosted open-weight models with tool calling. The catalogue and prices are listed live from the API",
+            ),
             Self::DeepSeek => Some("Thinking mode toggle (on/off), open-weight models"),
             Self::OpenRouter => {
                 Some("300+ models from all providers, prompt caching, provider routing")
@@ -188,6 +198,7 @@ impl ProviderKind {
             Self::DeepSeek => ModelFamily::Generic,
             Self::OpenRouter => ModelFamily::Generic,
             Self::Synthetic => ModelFamily::Synthetic,
+            Self::Regolo => ModelFamily::Generic,
             Self::TensorX => ModelFamily::Generic,
             Self::Opencode => ModelFamily::Generic,
             Self::Xai => ModelFamily::Generic,
@@ -229,6 +240,7 @@ impl ProviderKind {
             Self::DeepSeek => Some(384_000),
             Self::OpenRouter => Some(128_000),
             Self::Synthetic => Some(32_000),
+            Self::Regolo => Some(120_000),
             Self::TensorX => Some(32_000),
             Self::Opencode => Some(128_000),
             Self::Xai => Some(131_072),
@@ -249,6 +261,7 @@ impl ProviderKind {
             Self::DeepSeek => 1_000_000,
             Self::OpenRouter => 200_000,
             Self::Synthetic => 128_000,
+            Self::Regolo => 120_000,
             Self::TensorX => 200_000,
             Self::Opencode => 256_000,
             Self::Xai => 500_000,
@@ -275,6 +288,7 @@ impl ProviderKind {
             Self::DeepSeek => Ok(Box::new(DeepSeek::new(timeouts)?)),
             Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
+            Self::Regolo => Ok(Box::new(Regolo::new(timeouts)?)),
             Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
             Self::Opencode => Ok(Box::new(Opencode::new(timeouts)?)),
             Self::Xai => Ok(Box::new(Xai::new(timeouts).await?)),

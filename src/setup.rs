@@ -18,6 +18,7 @@ const PROVIDER_PRIORITY: &[&str] = &[
     "copilot",
     "synthetic",
     "deepseek",
+    "regolo",
 ];
 
 pub async fn resolve_model(

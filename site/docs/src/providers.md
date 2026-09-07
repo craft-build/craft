@@ -242,6 +242,20 @@ OpenRouter aggregates models from many providers behind a single API. Craft asks
 
 Defaults: hf:MiniMaxAI/MiniMax-M3 (medium), syn:large:vision (strong), syn:small:text (weak)
 
+### Regolo
+
+- **Env var**: `REGOLO_API_KEY`
+- **API**: `https://api.regolo.ai/v1`
+- **Features**: EU-hosted open-weight models with tool calling. The catalogue and prices are listed live from the API
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **qwen3.5-9b** (default) | $0.07 / $0.35 | 80K ctx / 80K out |
+| Medium | **qwen3-coder-next** (default) | $0.50 / $2.00 | 120K ctx / 120K out |
+| Strong | **qwen3.5-122b** (default) | $1.00 / $4.20 | 120K ctx / 120K out |
+
+Defaults: qwen3.5-122b (strong), qwen3-coder-next (medium), qwen3.5-9b (weak)
+
 ### TensorX
 
 - **Env var**: `TENSORX_API_KEY`
@@ -416,7 +430,7 @@ To add a provider proxy via an executable script, drop it into `~/.config/craft/
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `deepseek`, `openrouter`, `synthetic`, `tensorx`, `opencode`, `xai`, `bedrock`, `aperture`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `deepseek`, `openrouter`, `synthetic`, `regolo`, `tensorx`, `opencode`, `xai`, `bedrock`, `aperture`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 
