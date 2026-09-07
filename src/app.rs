@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionUpdate, ToolCallContent,
+    ContentBlock, ElicitationMode, ElicitationPropertySchema, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions, SessionUpdate,
+    ToolCallContent,
 };
 use gpui::prelude::*;
 use gpui::{Context, Entity, PathPromptOptions, ScrollHandle, Window, div, px, rgb};
@@ -77,6 +78,8 @@ pub struct App {
     pub agent_config: Option<ProjectAgentConfig>,
     pub pending_permission: Option<PendingPermission>,
     pub pending_elicitation: Option<PendingElicitation>,
+    pub elicitation_inputs: HashMap<String, Entity<TextInput>>,
+    pub elicitation_values: HashMap<String, serde_json::Value>,
     pub sent_count: usize,
 
     pub show_checkpoints: bool,
@@ -97,7 +100,6 @@ pub struct App {
     pub ssh_host_input: Entity<TextInput>,
     pub ssh_user_input: Entity<TextInput>,
     pub ssh_key_input: Entity<TextInput>,
-    pub elicitation_input: Entity<TextInput>,
 }
 
 impl App {
@@ -116,8 +118,6 @@ impl App {
         let ssh_host_input = cx.new(|cx| TextInput::new(cx, "host from ~/.ssh/config"));
         let ssh_user_input = cx.new(|cx| TextInput::new(cx, "optional SSH user"));
         let ssh_key_input = cx.new(|cx| TextInput::new(cx, "optional identity file"));
-        let elicitation_input =
-            cx.new(|cx| TextInput::new(cx, r#"JSON object, e.g. {"answer":"yes"}"#));
         let persisted = StateStore::for_user().load().unwrap_or_default();
         let screen = if persisted.projects.is_empty() {
             Screen::Onboarding
@@ -150,6 +150,8 @@ impl App {
             agent_config: None,
             pending_permission: None,
             pending_elicitation: None,
+            elicitation_inputs: HashMap::new(),
+            elicitation_values: HashMap::new(),
             sent_count: 0,
             show_checkpoints: false,
             toast: None,
@@ -166,7 +168,6 @@ impl App {
             ssh_host_input,
             ssh_user_input,
             ssh_key_input,
-            elicitation_input,
         }
     }
 
@@ -527,6 +528,8 @@ impl App {
         self.acp_client = None;
         self.pending_permission = None;
         self.pending_elicitation = None;
+        self.elicitation_inputs.clear();
+        self.elicitation_values.clear();
         self.context_usage = None;
         self.session_config_controls.clear();
         self.open_config_menu = None;
@@ -967,7 +970,10 @@ impl App {
                 self.apply_session_update(update);
             }
             AcpEvent::Permission(permission) => self.pending_permission = Some(permission),
-            AcpEvent::Elicitation(elicitation) => self.pending_elicitation = Some(elicitation),
+            AcpEvent::Elicitation(elicitation) => {
+                self.prepare_elicitation_form(&elicitation, cx);
+                self.pending_elicitation = Some(elicitation);
+            }
             AcpEvent::TurnFinished => {
                 self.thinking = false;
                 self.connection_status = "Idle".into();
@@ -984,6 +990,8 @@ impl App {
                 if let Some(elicitation) = self.pending_elicitation.take() {
                     elicitation.respond(ElicitationDecision::Cancel);
                 }
+                self.elicitation_inputs.clear();
+                self.elicitation_values.clear();
                 self.persist_state();
             }
             AcpEvent::Error(error) | AcpEvent::Disconnected(error) => {
@@ -1110,6 +1118,116 @@ impl App {
         if let Some(elicitation) = self.pending_elicitation.take() {
             elicitation.respond(ElicitationDecision::Decline);
         }
+        self.elicitation_inputs.clear();
+        self.elicitation_values.clear();
+        cx.notify();
+    }
+
+    fn prepare_elicitation_form(
+        &mut self,
+        elicitation: &PendingElicitation,
+        cx: &mut Context<Self>,
+    ) {
+        self.elicitation_inputs.clear();
+        self.elicitation_values.clear();
+        let ElicitationMode::Form(form) = &elicitation.request.mode else {
+            return;
+        };
+
+        for (key, property) in &form.requested_schema.properties {
+            match property {
+                ElicitationPropertySchema::String(schema)
+                    if schema.enum_values.is_none() && schema.one_of.is_none() =>
+                {
+                    let default = schema.default.clone().unwrap_or_default();
+                    let input = cx.new(|cx| {
+                        let mut input = TextInput::new(cx, "Enter a response");
+                        input.set_content(default);
+                        input
+                    });
+                    self.elicitation_inputs.insert(key.clone(), input);
+                }
+                ElicitationPropertySchema::String(schema) => {
+                    if let Some(default) = &schema.default {
+                        self.elicitation_values
+                            .insert(key.clone(), serde_json::Value::String(default.clone()));
+                    }
+                }
+                ElicitationPropertySchema::Number(schema) => {
+                    let default = schema
+                        .default
+                        .map(|value| value.to_string())
+                        .unwrap_or_default();
+                    let input = cx.new(|cx| {
+                        let mut input = TextInput::new(cx, "Enter a number");
+                        input.set_content(default);
+                        input
+                    });
+                    self.elicitation_inputs.insert(key.clone(), input);
+                }
+                ElicitationPropertySchema::Integer(schema) => {
+                    let default = schema
+                        .default
+                        .map(|value| value.to_string())
+                        .unwrap_or_default();
+                    let input = cx.new(|cx| {
+                        let mut input = TextInput::new(cx, "Enter a whole number");
+                        input.set_content(default);
+                        input
+                    });
+                    self.elicitation_inputs.insert(key.clone(), input);
+                }
+                ElicitationPropertySchema::Boolean(schema) => {
+                    if let Some(default) = schema.default {
+                        self.elicitation_values
+                            .insert(key.clone(), serde_json::Value::Bool(default));
+                    }
+                }
+                ElicitationPropertySchema::Array(schema) => {
+                    if let Some(default) = &schema.default {
+                        self.elicitation_values.insert(
+                            key.clone(),
+                            serde_json::Value::Array(
+                                default
+                                    .iter()
+                                    .cloned()
+                                    .map(serde_json::Value::String)
+                                    .collect(),
+                            ),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn set_elicitation_value(
+        &mut self,
+        key: String,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.elicitation_values.insert(key, value);
+        cx.notify();
+    }
+
+    pub fn toggle_elicitation_value(&mut self, key: String, value: String, cx: &mut Context<Self>) {
+        let selected = self
+            .elicitation_values
+            .entry(key)
+            .or_insert_with(|| serde_json::Value::Array(vec![]));
+        let serde_json::Value::Array(values) = selected else {
+            return;
+        };
+        if let Some(index) = values
+            .iter()
+            .position(|selected| selected.as_str() == Some(value.as_str()))
+        {
+            values.remove(index);
+        } else {
+            values.push(serde_json::Value::String(value));
+        }
         cx.notify();
     }
 
@@ -1156,33 +1274,106 @@ impl App {
     }
 
     pub fn accept_elicitation(&mut self, cx: &mut Context<Self>) {
-        let raw = self.elicitation_input.read(cx).content.clone();
-        let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
-        let content = match parsed {
-            Ok(object) => {
-                let mut content = std::collections::BTreeMap::new();
-                for (key, value) in object {
-                    let Some(value) = json_elicitation_value(value) else {
-                        self.toast = Some(format!(
-                            "Unsupported elicitation value for {key}; use strings, numbers, booleans, or string arrays"
-                        ));
-                        cx.notify();
-                        return;
-                    };
-                    content.insert(key, value);
+        let Some(elicitation) = self.pending_elicitation.as_ref() else {
+            return;
+        };
+        let ElicitationMode::Form(form) = &elicitation.request.mode else {
+            self.toast = Some("This elicitation mode is not supported".into());
+            cx.notify();
+            return;
+        };
+        let schema = form.requested_schema.clone();
+        let required = schema.required.unwrap_or_default();
+        let mut content = std::collections::BTreeMap::new();
+
+        for (key, property) in schema.properties {
+            let value = match property {
+                ElicitationPropertySchema::String(schema)
+                    if schema.enum_values.is_none() && schema.one_of.is_none() =>
+                {
+                    let value = self
+                        .elicitation_inputs
+                        .get(&key)
+                        .map(|input| input.read(cx).content.trim().to_string())
+                        .unwrap_or_default();
+                    if value.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::String(value))
+                    }
                 }
-                content
-            }
-            Err(error) => {
-                self.toast = Some(format!("Invalid elicitation response: {error}"));
+                ElicitationPropertySchema::Number(_) => {
+                    let raw = self
+                        .elicitation_inputs
+                        .get(&key)
+                        .map(|input| input.read(cx).content.trim().to_string())
+                        .unwrap_or_default();
+                    if raw.is_empty() {
+                        None
+                    } else {
+                        match raw.parse::<f64>() {
+                            Ok(value) => {
+                                serde_json::Number::from_f64(value).map(serde_json::Value::Number)
+                            }
+                            Err(_) => {
+                                self.toast = Some(format!("{key} must be a number"));
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    }
+                }
+                ElicitationPropertySchema::Integer(_) => {
+                    let raw = self
+                        .elicitation_inputs
+                        .get(&key)
+                        .map(|input| input.read(cx).content.trim().to_string())
+                        .unwrap_or_default();
+                    if raw.is_empty() {
+                        None
+                    } else {
+                        match raw.parse::<i64>() {
+                            Ok(value) => Some(serde_json::Value::Number(value.into())),
+                            Err(_) => {
+                                self.toast = Some(format!("{key} must be a whole number"));
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    }
+                }
+                ElicitationPropertySchema::Other(_) => {
+                    self.toast = Some(format!("{key} uses an unsupported field type"));
+                    cx.notify();
+                    return;
+                }
+                _ => self.elicitation_values.get(&key).cloned(),
+            };
+
+            let missing = value.as_ref().is_none_or(|value| {
+                value.as_str().is_some_and(str::is_empty)
+                    || value.as_array().is_some_and(Vec::is_empty)
+            });
+            if required.contains(&key) && missing {
+                self.toast = Some(format!("{key} is required"));
                 cx.notify();
                 return;
             }
-        };
+            if let Some(value) = value {
+                let Some(value) = json_elicitation_value(value) else {
+                    self.toast = Some(format!("{key} has an unsupported value"));
+                    cx.notify();
+                    return;
+                };
+                content.insert(key, value);
+            }
+        }
+
         if let Some(elicitation) = self.pending_elicitation.take() {
             elicitation.respond(ElicitationDecision::Accept(content));
-            self.elicitation_input.update(cx, |input, _| input.clear());
         }
+        self.elicitation_inputs.clear();
+        self.elicitation_values.clear();
         cx.notify();
     }
 
