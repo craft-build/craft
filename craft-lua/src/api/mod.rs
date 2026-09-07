@@ -19,6 +19,7 @@ pub(crate) mod split;
 pub(crate) mod task;
 pub(crate) mod text;
 pub(crate) mod tool;
+pub(crate) mod top;
 pub(crate) mod treesitter;
 pub(crate) mod ui;
 pub(crate) mod util;
@@ -29,7 +30,7 @@ pub(crate) mod embed;
 
 use std::sync::Arc;
 
-use mlua::{Lua, Result as LuaResult, Table};
+use mlua::{Lua, Result as LuaResult, Table, Value};
 
 use crate::api::options::PluginOpts;
 use crate::api::tool::{PendingRules, PendingTools};
@@ -87,9 +88,10 @@ pub(crate) fn create_craft_global(
     )?;
     craft.set(
         "fn",
-        r#fn::create_fn_table(lua, Arc::clone(&plugin), permissions, ui_action_tx)?,
+        r#fn::create_fn_table(lua, Arc::clone(&plugin), permissions, ui_action_tx.clone())?,
     )?;
     split::register(&craft, lua)?;
+    top::add_top_methods(&craft, lua, Arc::clone(&plugin))?;
     craft.set("async", r#async::create_async_table(lua)?)?;
     craft.set(
         "builtin_skills",
@@ -117,6 +119,28 @@ pub(crate) fn create_craft_global(
     if let Some(tx) = embed_tx {
         craft.set("embed", crate::api::embed::create_embed_table(lua, tx)?)?;
     }
+
+    // `notify` sits on the metatable's `__index` rather than on the table
+    // itself, because Lua only fires `__newindex` for keys missing from the
+    // raw table. That is what gives `craft.notify = fn` somewhere to be caught
+    // and routed into the one shared slot, instead of quietly shadowing notify
+    // for the assigning plugin alone.
+    let index = lua.create_table()?;
+    index.set(
+        "notify",
+        top::notify_function(lua, ui_action_tx, Arc::clone(&plugin))?,
+    )?;
+    let notify_owner = Arc::clone(&plugin);
+    let notify_router = lua.create_function(
+        move |lua, (t, k, v): (Table, String, Value)| match k.as_str() {
+            "notify" => top::install_notify_handler(lua, Arc::clone(&notify_owner), v),
+            _ => t.raw_set(k, v),
+        },
+    )?;
+    let meta = lua.create_table()?;
+    meta.set("__index", index)?;
+    meta.set("__newindex", notify_router)?;
+    craft.set_metatable(Some(meta))?;
 
     Ok(craft)
 }

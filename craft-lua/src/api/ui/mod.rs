@@ -85,7 +85,24 @@ pub(crate) fn create_ui_table(
     let t = lua.create_table()?;
     t.set(
         "buf",
-        lua.create_function(|lua, ()| Ok(with_task_bufs(lua, |store| store.create_live())))?,
+        lua.create_function(|lua, opts: Option<Table>| {
+            // The first buffer created in a task becomes the "live" buffer,
+            // streamed to the UI while the tool runs. A float that opens
+            // during a tool call would take that spot away, so create its
+            // buffer with `{ scratch = true }`, nvim's
+            // `nvim_create_buf(false, true)` analog.
+            let scratch = match opts {
+                Some(t) => t.get::<Option<bool>>("scratch")?.unwrap_or(false),
+                None => false,
+            };
+            Ok(with_task_bufs(lua, |store| {
+                if scratch {
+                    store.create()
+                } else {
+                    store.create_live()
+                }
+            }))
+        })?,
     )?;
     t.set(
         "theme_color",
@@ -274,6 +291,7 @@ pub(crate) fn create_ui_table(
                     let order: u16 = opts_tbl.get("order").unwrap_or(DEFAULT_ORDER);
                     let visible: bool = opts_tbl.get("visible").unwrap_or(true);
                     let needs_input: bool = opts_tbl.get("needs_input").unwrap_or(false);
+                    let stack: bool = opts_tbl.get("stack").unwrap_or(false);
 
                     let width = parse_dimension(&opts_tbl, "width", Dimension::Percent(60));
                     let height = parse_dimension(&opts_tbl, "height", Dimension::Percent(70));
@@ -302,6 +320,7 @@ pub(crate) fn create_ui_table(
                         order,
                         visible,
                         needs_input,
+                        stack,
                     };
 
                     let (term_cols, term_rows) = crossterm::terminal::size()

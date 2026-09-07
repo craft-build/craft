@@ -1719,6 +1719,110 @@ async fn drain_barrier(lua: &Lua, gate: &Rc<InflightGate>) {
     }
 }
 
+/// Fire-and-forget callback queued from Lua. Runs on the Lua thread's
+/// executor after `delay`, outside any TaskScope: no cancel token, no
+/// script deadline. Meant for UI intent that must outlive the caller
+/// (a toast dismissing itself, a debounced repaint).
+///
+/// `cancel` is what the `Timer` handed back to Lua flips, and what
+/// [`DeferQueue::cancel_plugin`] flips on unload.
+pub(crate) struct DeferredCallback {
+    pub func: RegistryKey,
+    pub delay: Duration,
+    pub plugin: Arc<str>,
+    pub cancel: Arc<AtomicBool>,
+}
+
+pub(crate) struct DeferQueue {
+    tx: flume::Sender<DeferredCallback>,
+    pub(crate) rx: flume::Receiver<DeferredCallback>,
+    /// Timers that have not fired yet, by owner. A sleeping timer holds no
+    /// [`GateGuard`], so [`drain_barrier`] walks straight past it and a reload
+    /// would leave the callback to wake up against a torn down env. Cancelling
+    /// the doomed plugin's timers in [`LuaRuntime::clear_plugin`] closes that
+    /// window: whatever is left is either cancelled or already gated.
+    timers: Mutex<Vec<(Arc<str>, Arc<AtomicBool>)>>,
+}
+
+impl DeferQueue {
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = flume::unbounded();
+        Self {
+            tx,
+            rx,
+            timers: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn locked(&self) -> std::sync::MutexGuard<'_, Vec<(Arc<str>, Arc<AtomicBool>)>> {
+        self.timers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hands the callback to the dispatcher and remembers it as pending, so
+    /// the two can never drift apart.
+    pub(crate) fn push(&self, cb: DeferredCallback) -> Result<(), DeferredCallback> {
+        let pending = (Arc::clone(&cb.plugin), Arc::clone(&cb.cancel));
+        self.tx.try_send(cb).map_err(|e| e.into_inner())?;
+        self.locked().push(pending);
+        Ok(())
+    }
+
+    fn forget(&self, cancel: &Arc<AtomicBool>) {
+        self.locked().retain(|(_, c)| !Arc::ptr_eq(c, cancel));
+    }
+
+    fn cancel_plugin(&self, plugin: &str) {
+        self.locked().retain(|(owner, cancel)| {
+            let doomed = &**owner == plugin;
+            if doomed {
+                cancel.store(true, Ordering::Release);
+            }
+            !doomed
+        });
+    }
+}
+
+/// Fire a `craft.defer_fn` callback: sleep, then run the Function once.
+///
+/// The detached scope matters twice over. It keeps the callback from
+/// inheriting whatever `TaskHandle` the previous task left in app_data, which
+/// a cancelled parent would otherwise use to shoot it at its first safepoint,
+/// and it pumps job events so a `craft.system` started in the callback still
+/// gets its `on_stdout` and `on_exit`.
+///
+/// The gate guard comes after the sleep: pending timers should pile up
+/// cheaply, but the bodies compete for the `MAX_INFLIGHT_TOOLS` budget so
+/// `for i=1,10000 do craft.defer_fn(f, 0) end` can't run 10k coroutines at
+/// once. Errors are logged and dropped, nobody is awaiting a result.
+fn spawn_deferred_callback(lua: &Lua, gate: &Rc<InflightGate>, cb: DeferredCallback) {
+    let lua = lua.clone();
+    let gate = Rc::clone(gate);
+    tokio::task::spawn_local(async move {
+        tokio::time::sleep(cb.delay).await;
+        gate.wait_below(MAX_INFLIGHT_TOOLS).await;
+        let _guard = GateGuard::new(&gate);
+        // Only now stop advertising the timer as pending: up to here a
+        // `clear_plugin` can still flip the flag we read below, and from here
+        // on the drain barrier waits for the guard instead.
+        if let Some(queue) = lua.app_data_ref::<DeferQueue>() {
+            queue.forget(&cb.cancel);
+        }
+        if cb.cancel.load(Ordering::Acquire) {
+            let _ = lua.remove_registry_value(cb.func);
+            return;
+        }
+        let run = async {
+            let func: Function = lua.registry_value(&cb.func)?;
+            let thread = lua.create_thread(func)?;
+            thread.into_async::<LuaValue>(())?.await
+        };
+        if let Err(e) = run_detached(&lua, run).await {
+            tracing::warn!(plugin = %cb.plugin, error = %strip_traceback(&e), "defer_fn callback failed");
+        }
+        let _ = lua.remove_registry_value(cb.func);
+    });
+}
+
 struct ToolKeys {
     handler: RegistryKey,
     header: Option<RegistryKey>,
@@ -1796,6 +1900,8 @@ impl LuaRuntime {
         lua.set_app_data(CommandHandlerMap::new());
         lua.set_app_data(crate::api::pack::PackStore::default());
         lua.set_app_data(SpawnQueue::default());
+        lua.set_app_data(DeferQueue::new());
+        lua.set_app_data(crate::api::top::NotifyHandler::default());
         lua.set_app_data(command_writer);
         lua.set_app_data(PromptHintCallbacks::default());
         lua.set_app_data(RecencySourceCallbacks::default());
@@ -2347,6 +2453,10 @@ impl LuaRuntime {
     fn clear_plugin(&mut self, plugin: &str) {
         self.registry.clear_plugin(plugin);
         self.plugin_rules.remove(plugin);
+        if let Some(queue) = self.lua.app_data_ref::<DeferQueue>() {
+            queue.cancel_plugin(plugin);
+        }
+        crate::api::top::clear_notify_handler(&self.lua, plugin);
         let revision_guard = self.drop_plugin_keys(plugin);
         with_packs(&self.lua, |packs| packs.active.remove(plugin));
         if let Some(mut store) = self.lua.app_data_mut::<KeymapStore>() {
@@ -3046,6 +3156,14 @@ pub fn spawn(
                     });
                 }
                 let mut codegen_armed = false;
+                // Selected on so a queued `craft.defer_fn` wakes the loop
+                // instead of stalling behind the next unrelated request.
+                let defer_rx = rt
+                    .lua
+                    .app_data_ref::<DeferQueue>()
+                    .expect("defer queue installed at init")
+                    .rx
+                    .clone();
                 loop {
                     // Nothing to serve, so spend the lull on native
                     // codegen. One chunk per pass with a yield in
@@ -3055,9 +3173,21 @@ pub fn spawn(
                         tokio::task::yield_now().await;
                         continue;
                     }
-                    let msg = match rx.recv_async().await {
-                        Ok(m) => m,
-                        Err(_) => break,
+                    while let Ok(cb) = defer_rx.try_recv() {
+                        spawn_deferred_callback(&rt.lua, &gate, cb);
+                    }
+                    let msg = tokio::select! {
+                        biased;
+                        res = defer_rx.recv_async() => {
+                            if let Ok(cb) = res {
+                                spawn_deferred_callback(&rt.lua, &gate, cb);
+                            }
+                            continue;
+                        }
+                        res = rx.recv_async() => match res {
+                            Ok(m) => m,
+                            Err(_) => break,
+                        },
                     };
                     pump_bg_session_jobs(&rt.lua).await;
                     match msg {
@@ -4353,6 +4483,36 @@ mod tests {
         assert_eq!(
             with_live_ctx(&lua, |ctx| ctx.tool_use_id.clone()).unwrap(),
             "tool_abc"
+        );
+    }
+
+    #[test]
+    fn defer_queue_cancels_only_the_doomed_plugins_timers() {
+        let lua = Lua::new();
+        let queue = DeferQueue::new();
+        let timer = |plugin: &str| {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let queued = queue.push(DeferredCallback {
+                func: lua.create_registry_value(true).unwrap(),
+                delay: Duration::ZERO,
+                plugin: Arc::from(plugin),
+                cancel: Arc::clone(&cancel),
+            });
+            assert!(queued.is_ok(), "the queue is unbounded");
+            cancel
+        };
+        let doomed = timer("sessions");
+        let bystander = timer("other");
+
+        queue.cancel_plugin("sessions");
+        assert!(doomed.load(Ordering::Acquire));
+        assert!(!bystander.load(Ordering::Acquire));
+
+        queue.forget(&bystander);
+        queue.cancel_plugin("other");
+        assert!(
+            !bystander.load(Ordering::Acquire),
+            "a timer past the gate is running, not pending"
         );
     }
 

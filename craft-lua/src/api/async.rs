@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use mlua::{Function, Lua, MultiValue, Result as LuaResult, Table, Value};
 
 use crate::runtime::{enqueue_async_task, register_cancel_hook};
@@ -138,6 +140,19 @@ pub(crate) fn create_async_table(lua: &Lua) -> LuaResult<Table> {
     // fires at most once, immediately if the task is already cancelled. An
     // error inside it is logged and never reaches your handler, and the
     // other hooks still run.
+    tbl.set(
+        "sleep",
+        lua.create_async_function(|_, ms: u64| async move {
+            // Suspend the calling task for {ms} milliseconds. The plugin
+            // thread is never blocked, so other tasks and the UI keep running,
+            // and a cancel still lands while you sleep. For a timer that has
+            // to outlive the tool call that started it, such as a toast
+            // dismissing itself, use `craft.defer_fn`.
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok(())
+        })?,
+    )?;
+
     tbl.set(
         "on_cancel",
         lua.create_function(|lua, f: Function| register_cancel_hook(lua, f))?,
