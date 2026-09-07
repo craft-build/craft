@@ -53,6 +53,9 @@ const WALK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Stands in for a size the provider measured, baseline included.
 const MEASURED_CONTEXT: u32 = 100_000;
 const MODEL_CHANGED_EVENT: &str = "ModelChanged";
+const TEST_MODEL_SPEC: &str = "test-model";
+const TEST_CWD: &str = "/tmp/test";
+const PERMISSIONS_CWD: &str = "/tmp";
 /// The rewind fixture holds a few dozen bytes of chat, far below this, so it
 /// doubles as the window the gauge is allowed to land in.
 const SMALL_HISTORY: u32 = 1_000;
@@ -94,19 +97,41 @@ fn app_with_hints() -> (App, HintWriterHandle) {
 }
 
 fn test_app_with_lua(lua_commands: LuaCommandReader) -> App {
-    let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir()), None).unwrap());
-    let permissions = Arc::new(PermissionManager::new(
+    build_app_with_session(
+        AppSession::new(TEST_MODEL_SPEC, TEST_CWD),
+        test_permissions(false),
+        lua_commands,
+    )
+}
+
+fn test_permissions(yolo: bool) -> Arc<PermissionManager> {
+    Arc::new(PermissionManager::new(
         PermissionsConfig {
-            rules: vec![],
+            yolo,
             ..Default::default()
         },
-        PathBuf::from("/tmp"),
+        PathBuf::from(PERMISSIONS_CWD),
         Arc::default(),
-    ));
+    ))
+}
+
+/// A tab the way `Ctrl-N` and a resume build one. `App::new` takes the session
+/// plus a fork of the prototype manager, and everything the permissions do has
+/// to come back out of that meta.
+fn spawned_app(session: AppSession, permissions: Arc<PermissionManager>) -> App {
+    build_app_with_session(session, permissions, LuaCommandReader::empty())
+}
+
+fn build_app_with_session(
+    session: AppSession,
+    permissions: Arc<PermissionManager>,
+    lua_commands: LuaCommandReader,
+) -> App {
+    let writer = Arc::new(StorageWriter::new(StateDir::from_path(env::temp_dir()), None).unwrap());
     let model = test_model();
     let mut app = App::new(
         &model,
-        AppSession::new("test-model", "/tmp/test"),
+        session,
         StateDir::from_path(env::temp_dir()),
         Arc::new(ArcSwapOption::empty()),
         McpSnapshotReader::empty(),
@@ -737,30 +762,55 @@ fn blank_session_carries_the_settings_that_outlive_a_turn() {
 }
 
 /// A setting written into the meta but never read back still opens the tab
-/// wrong, so only the round trip through `SessionState` proves `Ctrl-N` works.
+/// wrong, so only the round trip through a whole `App` proves `Ctrl-N` works.
+/// Yolo rides in the permission manager rather than in `SessionState`, which
+/// is how it stayed unchecked while the rest was covered.
 #[test]
 fn a_spawned_tab_opens_on_the_settings_it_was_started_with() {
-    let tmp = TempDir::new().unwrap();
-    let storage = StateDir::from_path(tmp.path().to_path_buf());
     let mut app = test_app();
     set_opus_model(&mut app);
     app.state.thinking = ThinkingConfig::Effort(Effort::High);
     app.state.fast = true;
     app.state.mode = Mode::Plan;
+    app.permissions.toggle_yolo();
 
-    let spawned = SessionState::from_session(
-        app.blank_session(),
-        &test_model(),
-        &storage,
-        &craft_config::ModelPolicy::default(),
-    );
+    let spawned = spawned_app(app.blank_session(), test_permissions(false));
 
-    assert_eq!(spawned.thinking, app.state.thinking);
-    assert_eq!(spawned.fast, app.state.fast);
-    assert_eq!(spawned.mode, app.state.mode);
+    assert_eq!(spawned.state.thinking, app.state.thinking);
+    assert_eq!(spawned.state.fast, app.state.fast);
+    assert_eq!(spawned.state.mode, app.state.mode);
     assert!(
-        spawned.plan.path().is_some(),
+        spawned.permissions.is_yolo(),
+        "the toggle is the user's, so it opens the next tab too"
+    );
+    assert!(
+        spawned.state.plan.path().is_some(),
         "a plan-mode tab owes itself a plan file"
+    );
+}
+
+/// `--yolo` seeds the prototype every tab forks from, and `/yolo` off only ever
+/// reaches the fork the tab holds. A new tab that trusts its fork reopens
+/// auto-approving everything, so the meta `blank_session` just wrote is the one
+/// place that answer survives.
+#[test]
+fn a_spawned_tab_honours_the_yolo_turned_off_under_the_flag() {
+    let prototype = test_permissions(true);
+    let app = spawned_app(
+        AppSession::new(TEST_MODEL_SPEC, TEST_CWD),
+        Arc::new(prototype.fork()),
+    );
+    assert!(app.permissions.is_yolo(), "--yolo seeds the first tab");
+
+    app.permissions.toggle_yolo();
+    let session = app.blank_session();
+    assert_eq!(session.meta.yolo, Some(false));
+
+    let spawned = spawned_app(session, Arc::new(prototype.fork()));
+
+    assert!(
+        !spawned.permissions.is_yolo(),
+        "forking the prototype must not bring the flag back"
     );
 }
 
@@ -2471,22 +2521,11 @@ fn checkpoint_mirrors_the_yolo_toggle_into_meta() {
     assert_eq!(app.state.session.meta.yolo, Some(false));
 }
 
-fn app_and_session_with_yolo(seed: bool, stored: Option<bool>) -> (App, AppSession) {
-    let mut app = test_app();
-    if seed {
-        app.permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig {
-                yolo: true,
-                ..Default::default()
-            },
-            PathBuf::from("/tmp"),
-            Arc::default(),
-        ));
-    }
-    let mut session = AppSession::new("test-model", "/tmp/test");
+fn session_with_yolo(stored: Option<bool>) -> AppSession {
+    let mut session = AppSession::new(TEST_MODEL_SPEC, TEST_CWD);
     session.meta.yolo = stored;
     session.push_message(Message::user(RESUMED_PROMPT.into()));
-    (app, session)
+    session
 }
 
 /// The restored permissions, then what the next checkpoint writes back. Both
@@ -2499,8 +2538,7 @@ fn app_and_session_with_yolo(seed: bool, stored: Option<bool>) -> (App, AppSessi
 #[test_case(true,  Some(true)  => (true,  Some(true))  ; "the_flag_does_not_wipe_stored_on")]
 #[test_case(true,  Some(false) => (false, Some(false)) ; "stored_off_overrides_the_flag")]
 fn resume_applies_stored_yolo(seed: bool, stored: Option<bool>) -> (bool, Option<bool>) {
-    let (mut app, session) = app_and_session_with_yolo(seed, stored);
-    app.state.session = Arc::new(session);
+    let mut app = spawned_app(session_with_yolo(stored), test_permissions(seed));
 
     app.restore_resumed_session();
     app.checkpoint();
@@ -2516,10 +2554,13 @@ fn resume_applies_stored_yolo(seed: bool, stored: Option<bool>) -> (bool, Option
 #[test_case(true,  Some(true)  => (true,  Some(true))  ; "the_flag_does_not_wipe_stored_on")]
 #[test_case(true,  Some(false) => (false, Some(false)) ; "stored_off_overrides_the_flag")]
 fn loading_a_session_applies_stored_yolo(seed: bool, stored: Option<bool>) -> (bool, Option<bool>) {
-    let (mut app, session) = app_and_session_with_yolo(seed, stored);
+    let mut app = spawned_app(
+        AppSession::new(TEST_MODEL_SPEC, TEST_CWD),
+        test_permissions(seed),
+    );
     let model = app.state.model.clone();
 
-    app.apply_loaded_session(session, &model);
+    app.apply_loaded_session(session_with_yolo(stored), &model);
     app.checkpoint();
     (app.permissions.is_yolo(), app.state.session.meta.yolo)
 }
@@ -2532,8 +2573,7 @@ fn loading_a_session_applies_stored_yolo(seed: bool, stored: Option<bool>) -> (b
 #[test_case(false => (true,  Some(true))  ; "a_fresh_session_keeps_the_toggle_on")]
 #[test_case(true  => (false, Some(false)) ; "a_fresh_session_keeps_the_toggle_off")]
 fn resetting_the_session_drops_what_the_last_one_was_granted(seed: bool) -> (bool, Option<bool>) {
-    let (mut app, session) = app_and_session_with_yolo(seed, Some(!seed));
-    app.state.session = Arc::new(session);
+    let mut app = spawned_app(session_with_yolo(Some(!seed)), test_permissions(seed));
     app.restore_resumed_session();
     app.permissions.load_session_rules(vec![session_rule()]);
     assert_eq!(app.permissions.is_yolo(), !seed);

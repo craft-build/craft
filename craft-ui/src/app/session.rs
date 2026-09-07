@@ -291,7 +291,6 @@ impl App {
     /// history, so no respawn follows and the restored queue must be
     /// flushed here.
     pub(crate) fn restore_resumed_session(&mut self) {
-        self.apply_stored_permissions(&self.state.session.meta);
         self.restore_display();
         self.flush_restored_queue();
         for w in self.state.warnings.drain(..) {
@@ -323,11 +322,13 @@ impl App {
         }
     }
 
-    /// A tab keeps one permission manager while sessions come and go under it,
-    /// so a swap has to state the new session's answer in full, rules and yolo
-    /// both, or the session inherits what the last one was granted. A session
-    /// that stored no yolo falls back to `--yolo` / `always_yolo`.
-    fn apply_stored_permissions(&self, meta: &SessionMeta) {
+    /// The one funnel from a session's meta to the manager that enforces it,
+    /// `App::new` included. A tab keeps one manager while sessions come and go
+    /// under it, and a new tab forks the prototype the process started with, so
+    /// whoever takes a session has to state its answer in full, rules and yolo
+    /// both, or it runs on what the last one was granted. A session that stored
+    /// no yolo falls back to `--yolo` and `always_yolo`.
+    pub(super) fn apply_stored_permissions(&self, meta: &SessionMeta) {
         self.permissions
             .load_session_rules(stored_to_rules(&meta.session_rules));
         self.permissions.set_session_yolo(meta.yolo);

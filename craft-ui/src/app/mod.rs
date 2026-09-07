@@ -416,6 +416,10 @@ impl App {
         app.mcp_picker.set_keybindings(app.keybindings.clone());
         app.plan_form.set_keybindings(app.keybindings.clone());
         app.flow_goal_form.set_keybindings(app.keybindings.clone());
+        // The manager arrives forked from the prototype the process was
+        // started with, so a tab that resumes or spawns blank runs on
+        // `--yolo` until its own meta is read back here.
+        app.apply_stored_permissions(&app.state.session.meta);
         app
     }
 
