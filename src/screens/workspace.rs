@@ -629,11 +629,16 @@ fn assistant_message(
     if let Some(cp) = &m.checkpoint_label {
         col = col.child(
             div()
+                .min_h(px(25.))
+                .flex()
+                .items_end()
                 .text_size(px(11.))
+                .line_height(px(16.))
                 .text_color(rgb(theme::TEXT_MUTED))
                 .border_t_1()
                 .border_color(rgb(theme::TERMINAL_BORDER))
-                .pt(px(6.))
+                .pt(px(7.))
+                .pb(px(2.))
                 .child(cp.clone()),
         );
     }
