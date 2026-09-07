@@ -27,7 +27,7 @@ use crate::theme;
 /// controls: on macOS that's clearance for the native traffic lights, on
 /// other platforms just a normal inset (their controls go on the right).
 pub const fn leading_inset() -> f32 {
-    if cfg!(target_os = "macos") { 71. } else { 12. }
+    if cfg!(target_os = "macos") { 88. } else { 12. }
 }
 
 /// Double-click-to-zoom on a drag area, matching native titlebar behavior

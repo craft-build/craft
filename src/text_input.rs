@@ -184,6 +184,15 @@ impl Render for TextInput {
             .flex_row()
             .items_center()
             .w_full()
+            .when(empty && focused, |d| {
+                d.child(
+                    div()
+                        .w(px(1.5))
+                        .h(px(14.))
+                        .flex_shrink_0()
+                        .bg(rgb(theme::ACCENT)),
+                )
+            })
             .when(empty, |d| {
                 d.child(
                     div()
@@ -197,9 +206,6 @@ impl Render for TextInput {
                         d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(theme::ACCENT)))
                     })
                     .child(after.to_string())
-            })
-            .when(empty && focused, |d| {
-                d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(theme::ACCENT)))
             })
     }
 }

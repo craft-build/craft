@@ -272,8 +272,12 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
                 .flex()
                 .flex_col()
                 .gap(px(14.))
-                .children(messages.into_iter().map(|m| message_view(m, app, cx)))
-                .when(app.thinking, |d| d.child(thinking_view(cx)))
+                .children(messages.into_iter().enumerate().map(|(index, message)| {
+                    let is_streaming = app.thinking
+                        && index == last_index
+                        && matches!(message.role, Role::Assistant);
+                    message_view(message, is_streaming, app, cx)
+                }))
                 .when(app.pending_permission.is_some(), |d| {
                     d.child(permission_view(app, cx))
                 })
@@ -418,49 +422,61 @@ fn action_button(
         .on_click(cx.listener(move |app, _, _, cx| action(app, cx)))
 }
 
-fn thinking_view(cx: &mut Context<App>) -> impl IntoElement {
-    div().max_w(px(760.)).child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::TEXT_SECONDARY))
-                    .child("assistant"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(4.))
-                    .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::TEXT_SECONDARY)))
-                    .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::TEXT_SECONDARY)))
-                    .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::TEXT_SECONDARY)))
-                    .child(
-                        div()
-                            .id("cancel-turn")
-                            .ml(px(8.))
-                            .text_size(px(11.))
-                            .text_color(rgb(theme::ACCENT))
-                            .cursor_pointer()
-                            .child("Stop")
-                            .on_click(cx.listener(|app, _, _, cx| app.cancel_turn(cx))),
-                    ),
-            ),
-    )
+fn running_indicator(cx: &mut Context<App>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_t_1()
+        .border_color(rgb(theme::TERMINAL_BORDER))
+        .pt(px(8.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::ACCENT)))
+                .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::ACCENT)))
+                .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::ACCENT)))
+                .child(
+                    div()
+                        .ml(px(4.))
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .child("Running"),
+                ),
+        )
+        .child(
+            div()
+                .id("cancel-turn")
+                .px(px(8.))
+                .py(px(3.))
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .text_size(px(11.))
+                .text_color(rgb(theme::ACCENT))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+                .child("Stop")
+                .on_click(cx.listener(|app, _, _, cx| app.cancel_turn(cx))),
+        )
 }
 
-fn message_view(m: Message, app: &mut App, cx: &mut Context<App>) -> gpui::AnyElement {
+fn message_view(
+    m: Message,
+    is_streaming: bool,
+    app: &mut App,
+    cx: &mut Context<App>,
+) -> gpui::AnyElement {
     match m.role {
         Role::User => user_message(m).into_any_element(),
-        Role::Assistant => assistant_message(m, app, cx).into_any_element(),
+        Role::Assistant => assistant_message(m, is_streaming, app, cx).into_any_element(),
     }
 }
 
 fn user_message(m: Message) -> impl IntoElement {
     div()
+        .w_full()
         .max_w(px(760.))
         .flex()
         .flex_col()
@@ -474,6 +490,9 @@ fn user_message(m: Message) -> impl IntoElement {
         )
         .child(
             div()
+                .w_full()
+                .min_w(px(0.))
+                .whitespace_normal()
                 .text_size(px(13.))
                 .line_height(px(21.))
                 .text_color(rgb(theme::TEXT_PRIMARY))
@@ -519,7 +538,12 @@ fn chip_view(text: String) -> impl IntoElement {
         .child(text)
 }
 
-fn assistant_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
+fn assistant_message(
+    m: Message,
+    is_streaming: bool,
+    app: &mut App,
+    cx: &mut Context<App>,
+) -> impl IntoElement {
     let msg_id = m.id.clone();
     let comment_key = format!("msg_{}", m.id);
     let steps_expanded = app.expanded_steps.contains(&msg_id);
@@ -527,7 +551,9 @@ fn assistant_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl I
     let toggle_comment_key = comment_key.clone();
 
     let mut col = div()
+        .w_full()
         .max_w(px(760.))
+        .min_w(px(0.))
         .border_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::PANEL_BG))
@@ -585,13 +611,21 @@ fn assistant_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl I
     if let Some(term) = &m.terminal {
         col = col.child(terminal_view(term, app, cx));
     }
-    col = col.child(
-        div()
-            .text_size(px(13.))
-            .line_height(px(21.))
-            .text_color(rgb(theme::TEXT_PRIMARY))
-            .child(m.text.clone()),
-    );
+    if !m.text.is_empty() {
+        col = col.child(
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .whitespace_normal()
+                .text_size(px(13.))
+                .line_height(px(21.))
+                .text_color(rgb(theme::TEXT_PRIMARY))
+                .child(m.text.clone()),
+        );
+    }
+    if is_streaming {
+        col = col.child(running_indicator(cx));
+    }
     if let Some(cp) = &m.checkpoint_label {
         col = col.child(
             div()
@@ -1037,6 +1071,7 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
             div()
                 .w(px(200.))
                 .flex_shrink_0()
+                .overflow_hidden()
                 .border_l_1()
                 .border_color(rgb(theme::BORDER))
                 .id("changed-files-scroll")
@@ -1075,6 +1110,8 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .id(SharedString::from(format!("changed-file-{path}")))
                         .flex()
                         .items_center()
+                        .w_full()
+                        .overflow_hidden()
                         .gap(px(6.))
                         .px(px(12.))
                         .py(px(4.))
@@ -1084,6 +1121,8 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .child(div().w(px(6.)).h(px(6.)).flex_shrink_0().bg(rgb(dot)))
                         .child(
                             div()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .text_size(px(12.))
                                 .text_color(rgb(theme::TEXT_PRIMARY))
                                 .whitespace_nowrap()
@@ -1095,6 +1134,8 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                             div()
                                 .id(SharedString::from(format!("attach-file-{path}")))
                                 .ml_auto()
+                                .flex_shrink_0()
+                                .px(px(2.))
                                 .text_size(px(11.))
                                 .text_color(rgb(theme::ACCENT))
                                 .cursor_pointer()
