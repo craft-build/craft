@@ -8,7 +8,7 @@ use toml_edit::DocumentMut;
 
 use super::error::McpError;
 use crate::tools::is_builtin_tool;
-use craft_config::{global_config_dir, is_valid_server_name};
+use craft_config::{expand_env, global_config_dir, is_valid_server_name};
 
 const MCP_CONFIG_FILE: &str = "mcp.toml";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -240,6 +240,25 @@ impl McpConfig {
     }
 }
 
+/// Erroring (not dropping) surfaces the variable name in the server's status
+/// instead of an untraceable 401 later.
+fn expand_map(
+    server: &str,
+    kind: &str,
+    map: HashMap<String, String>,
+) -> Result<HashMap<String, String>, McpError> {
+    map.into_iter()
+        .map(|(key, value)| {
+            let expanded = expand_env(&value).map_err(|var| {
+                McpError::Config(format!(
+                    "server '{server}' {kind} '{key}': environment variable '{var}' is unset or empty"
+                ))
+            })?;
+            Ok((key, expanded))
+        })
+        .collect()
+}
+
 pub fn parse_server(name: String, server: RawServerConfig) -> Result<ServerConfig, McpError> {
     if !is_valid_server_name(&name) {
         return Err(McpError::Config(format!(
@@ -265,7 +284,7 @@ pub fn parse_server(name: String, server: RawServerConfig) -> Result<ServerConfi
             Transport::Stdio {
                 program,
                 args: cmd.collect(),
-                environment: cfg.environment,
+                environment: expand_map(&name, "environment", cfg.environment)?,
             }
         }
         RawTransport::Http(cfg) => {
@@ -283,7 +302,7 @@ pub fn parse_server(name: String, server: RawServerConfig) -> Result<ServerConfi
             }
             Transport::Http {
                 url: cfg.url,
-                headers: cfg.headers,
+                headers: expand_map(&name, "header", cfg.headers)?,
                 oauth: cfg.oauth,
             }
         }
@@ -449,6 +468,58 @@ mod tests {
     fn parse_server_rejects(name: &str, cfg: RawServerConfig, expected_msg: &str) {
         let err = parse_server(name.into(), cfg).unwrap_err();
         assert!(err.to_string().contains(expected_msg), "got: {err}");
+    }
+
+    #[test]
+    fn header_with_unset_var_fails_the_server_with_the_var_name() {
+        let config: McpConfig = toml::from_str(
+            r#"
+[mcp.remote]
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${CRAFT_TEST_MCP_UNSET_84421}" }
+"#,
+        )
+        .unwrap();
+        let err = parse_server("remote".into(), config.mcp["remote"].clone()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("CRAFT_TEST_MCP_UNSET_84421"), "got: {msg}");
+        assert!(msg.contains("Authorization"), "got: {msg}");
+    }
+
+    #[test]
+    fn header_with_empty_var_fails_the_server_like_unset() {
+        unsafe { std::env::set_var("CRAFT_TEST_MCP_EMPTY_84421", "") };
+        let config: McpConfig = toml::from_str(
+            r#"
+[mcp.remote]
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${CRAFT_TEST_MCP_EMPTY_84421}" }
+"#,
+        )
+        .unwrap();
+        let err = parse_server("remote".into(), config.mcp["remote"].clone()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("CRAFT_TEST_MCP_EMPTY_84421"), "got: {msg}");
+    }
+
+    #[test]
+    fn stdio_environment_expands_from_the_process_env() {
+        unsafe { std::env::set_var("CRAFT_TEST_MCP_ENV_84421", "tok") };
+        let config: McpConfig = toml::from_str(
+            r#"
+[mcp.local]
+command = ["server"]
+environment = { GITHUB_TOKEN = "${CRAFT_TEST_MCP_ENV_84421}" }
+"#,
+        )
+        .unwrap();
+        let parsed = parse_server("local".into(), config.mcp["local"].clone()).unwrap();
+        match parsed.transport {
+            Transport::Stdio { environment, .. } => {
+                assert_eq!(environment["GITHUB_TOKEN"], "tok");
+            }
+            _ => panic!("expected Stdio"),
+        }
     }
 
     #[test_case(0               ; "zero")]

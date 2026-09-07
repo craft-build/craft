@@ -339,6 +339,7 @@ Each entry under `providers.toml` is a table keyed by the provider slug:
 | `plan` | string | No | Plan name for providers with multiple plans |
 | `api_key_env` | string | No | Env var name for the API key (defaults to `{SLUG}_API_KEY`) |
 | `api_key` | string | No | API key stored inline (not recommended; use `craft auth login` instead) |
+| `headers` | table | No | Extra HTTP headers sent on every request to this provider. Values expand `${VAR}` from the environment; an unset or empty variable fails the provider instead of sending a half-filled header. A same-name header (case-insensitive) replaces the built-in auth header and survives key rotation |
 | `default_model` | string | No | Default model identifier without the provider prefix |
 | `discover_models` | bool | No | Query the provider for model list at startup (default `false`) |
 | `models` | array of tables | No | Override context window and max output for specific models |

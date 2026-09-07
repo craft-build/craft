@@ -165,7 +165,7 @@ impl OpenAi {
         })?;
         let resolved = match auth::refresh_tokens(&tokens).await {
             Ok(fresh) => {
-                let resolved = auth::build_oauth_resolved(&fresh);
+                let resolved = auth::build_oauth_resolved(&fresh)?;
                 tokio::task::spawn_blocking({
                     let storage = storage.clone();
                     move || craft_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)
@@ -214,7 +214,7 @@ impl OpenAi {
         if let Some(storage) = self.storage.as_ref()
             && let Some(tokens) = craft_storage::auth::load_tokens(storage, auth::PROVIDER)
         {
-            return Ok(auth::build_coding_plan_resolved(&tokens));
+            return auth::build_coding_plan_resolved(&tokens);
         }
         // Fall back to standard API key via the Responses API. Env /
         // providers.toml base_url overrides the platform API only, never the

@@ -125,9 +125,7 @@ fn resolve_custom_auth_from_def(slug: &str, def: &ProviderDef) -> Result<Resolve
     let base_url = resolve_base_url(slug, Some(def)).ok_or_else(|| AgentError::Config {
         message: format!("unknown custom provider '{slug}'"),
     })?;
-    let mut auth = ResolvedAuth::bearer(pool.current());
-    auth.base_url = Some(base_url);
-    Ok(auth)
+    Ok(ResolvedAuth::bearer(slug, pool.current())?.with_base_url(Some(base_url)))
 }
 
 pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {

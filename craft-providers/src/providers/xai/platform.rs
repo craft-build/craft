@@ -92,7 +92,7 @@ impl Xai {
         })?;
         let resolved = match auth::refresh_tokens(&tokens).await {
             Ok(fresh) => {
-                let resolved = auth::build_oauth_resolved(&fresh);
+                let resolved = auth::build_oauth_resolved(&fresh)?;
                 tokio::task::spawn_blocking({
                     let storage = storage.clone();
                     move || craft_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)
@@ -368,10 +368,10 @@ mod tests {
 
     #[test]
     fn bearer_token_extracts_access() {
-        let auth = ResolvedAuth {
-            base_url: None,
-            headers: vec![("authorization".into(), "Bearer tok-123".into())],
-        };
+        let auth = ResolvedAuth::for_test(
+            None,
+            vec![("authorization".into(), "Bearer tok-123".into())],
+        );
         assert_eq!(bearer_token(&auth).as_deref(), Some("tok-123"));
     }
 }

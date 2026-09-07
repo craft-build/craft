@@ -131,7 +131,10 @@ impl Synthetic {
         let pool = KeyPool::resolve("synthetic", CONFIG.api_key_env)?;
         Ok(Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts)?,
-            auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
+            auth: Arc::new(Mutex::new(ResolvedAuth::bearer(
+                "synthetic",
+                pool.current(),
+            )?)),
             key_pool: Some(pool),
             system_prefix: None,
         })
@@ -193,6 +196,6 @@ impl Provider for Synthetic {
         Ok(self
             .key_pool
             .as_ref()
-            .is_some_and(|p| p.rotate_auth(&self.auth, ResolvedAuth::bearer)))
+            .is_some_and(|p| p.rotate_bearer(&self.auth)))
     }
 }

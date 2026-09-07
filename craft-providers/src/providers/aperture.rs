@@ -269,10 +269,9 @@ pub struct Aperture {
 impl Aperture {
     pub fn new(timeouts: Timeouts) -> Result<Self, AgentError> {
         let base_url = resolve_base_url()?;
-        let auth = Arc::new(Mutex::new(ResolvedAuth {
-            base_url: Some(base_url),
-            headers: Vec::new(),
-        }));
+        let auth = Arc::new(Mutex::new(
+            ResolvedAuth::new(CONFIG.slug, Vec::new())?.with_base_url(Some(base_url)),
+        ));
         Self::with_auth_and_overrides(auth, timeouts, load_overrides())
     }
 
@@ -564,10 +563,10 @@ mod tests {
     }
 
     fn test_auth() -> Arc<Mutex<ResolvedAuth>> {
-        Arc::new(Mutex::new(ResolvedAuth {
-            base_url: Some("https://aperture.example.com".into()),
-            headers: Vec::new(),
-        }))
+        Arc::new(Mutex::new(ResolvedAuth::for_test(
+            Some("https://aperture.example.com".into()),
+            Vec::new(),
+        )))
     }
 
     #[test_case(Some(ProviderKind::Ollama), Some("https://aperture.example.com/v1") ; "ollama_appends_v1")]
@@ -600,10 +599,10 @@ mod tests {
 
     #[test]
     fn routed_auth_handles_host_with_trailing_slash() {
-        let auth = Arc::new(Mutex::new(ResolvedAuth {
-            base_url: Some("https://aperture.example.com/".into()),
-            headers: Vec::new(),
-        }));
+        let auth = Arc::new(Mutex::new(ResolvedAuth::for_test(
+            Some("https://aperture.example.com/".into()),
+            Vec::new(),
+        )));
         let routed = routed_auth(&auth, DEFAULT_PATH_PREFIX);
         assert_eq!(
             routed.lock().unwrap().base_url.as_deref(),
@@ -803,10 +802,10 @@ mod tests {
 
     #[test]
     fn adjust_model_inherits_routed_provider_thinking_support() {
-        let auth = Arc::new(Mutex::new(ResolvedAuth {
-            base_url: Some("https://example.com".into()),
-            headers: Vec::new(),
-        }));
+        let auth = Arc::new(Mutex::new(ResolvedAuth::for_test(
+            Some("https://example.com".into()),
+            Vec::new(),
+        )));
         let aperture =
             Aperture::with_auth_and_overrides(auth, Timeouts::default(), Overrides::new()).unwrap();
         let mut model = Model::from_spec("aperture/mistral/glm-5-2").unwrap();
