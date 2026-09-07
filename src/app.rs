@@ -15,7 +15,9 @@ use crate::acp::{
 };
 use crate::async_runtime;
 use crate::checkpoint::{Checkpoint, CheckpointManager};
-use crate::config::{ConfigStore, ProjectAgentConfig, TransportConfig};
+use crate::config::{
+    AgentProfile, ConfigStore, ProjectAgentConfig, ProjectAgentRegistry, TransportConfig,
+};
 use crate::persistence::{PersistedState, StateStore};
 use crate::screens;
 use crate::state::*;
@@ -58,6 +60,8 @@ pub struct App {
 
     pub session_config_controls: Vec<SessionConfigControl>,
     pub open_config_menu: Option<String>,
+    pub agent_profiles: Vec<AgentProfile>,
+    pub agent_menu_open: bool,
 
     pub sidebar_visible: bool,
     pub file_tree_visible: bool,
@@ -95,6 +99,7 @@ pub struct App {
     pub checkpoints_by_project: HashMap<String, Vec<Checkpoint>>,
 
     pub config_remote: bool,
+    pub agent_profile_name_input: Entity<TextInput>,
     pub agent_command_input: Entity<TextInput>,
     pub remote_workspace_input: Entity<TextInput>,
     pub ssh_host_input: Entity<TextInput>,
@@ -113,6 +118,7 @@ impl App {
                     weak.update(cx, |app, cx| app.send_message(text, cx)).ok();
                 })
         });
+        let agent_profile_name_input = cx.new(|cx| TextInput::new(cx, "e.g. Claude Code"));
         let agent_command_input = cx.new(|cx| TextInput::new(cx, "e.g. gemini --experimental-acp"));
         let remote_workspace_input = cx.new(|cx| TextInput::new(cx, "/path/on/remote/machine"));
         let ssh_host_input = cx.new(|cx| TextInput::new(cx, "host from ~/.ssh/config"));
@@ -133,6 +139,8 @@ impl App {
             active_session_id: None,
             session_config_controls: vec![],
             open_config_menu: None,
+            agent_profiles: vec![],
+            agent_menu_open: false,
             sidebar_visible: true,
             file_tree_visible: true,
             collapsed_projects: HashSet::new(),
@@ -163,6 +171,7 @@ impl App {
             thread_scroll: ScrollHandle::new(),
             checkpoints_by_project: persisted.checkpoints_by_project,
             config_remote: false,
+            agent_profile_name_input,
             agent_command_input,
             remote_workspace_input,
             ssh_host_input,
@@ -237,6 +246,7 @@ impl App {
                 messages: vec![],
                 acp_session_id: None,
                 archived: false,
+                agent_profile_id: None,
             }],
         );
         self.persist_state();
@@ -320,6 +330,7 @@ impl App {
             messages: vec![],
             acp_session_id: None,
             archived: false,
+            agent_profile_id: None,
         });
         self.active_project = Some(project);
         self.active_session_id = Some(new_id);
@@ -373,6 +384,7 @@ impl App {
                         messages: vec![],
                         acp_session_id: None,
                         archived: false,
+                        agent_profile_id: None,
                     });
                     id
                 });
@@ -472,6 +484,59 @@ impl App {
         cx.notify();
     }
 
+    pub fn toggle_agent_menu(&mut self, cx: &mut Context<Self>) {
+        if self.can_select_agent_for_session() {
+            self.agent_menu_open = !self.agent_menu_open;
+            cx.notify();
+        }
+    }
+
+    pub fn can_select_agent_for_session(&self) -> bool {
+        self.active_session().is_some_and(|session| {
+            session.agent_profile_id.is_none()
+                || (session.messages.is_empty() && session.acp_session_id.is_none())
+        })
+    }
+
+    pub fn active_agent_profile_id(&self) -> Option<&str> {
+        self.active_session()
+            .and_then(|session| session.agent_profile_id.as_deref())
+    }
+
+    fn active_session(&self) -> Option<&Session> {
+        let project_id = self.active_project.as_ref().map(|project| &project.id)?;
+        self.sessions_by_project
+            .get(project_id)?
+            .iter()
+            .find(|session| Some(&session.id) == self.active_session_id.as_ref())
+    }
+
+    pub fn select_agent_profile(&mut self, profile_id: &str, cx: &mut Context<Self>) {
+        if !self.can_select_agent_for_session()
+            || !self
+                .agent_profiles
+                .iter()
+                .any(|profile| profile.id == profile_id)
+        {
+            return;
+        }
+        let project_id = self.current_thread_key();
+        if let Some(session) = self
+            .sessions_by_project
+            .get_mut(&project_id)
+            .and_then(|sessions| {
+                sessions
+                    .iter_mut()
+                    .find(|session| Some(&session.id) == self.active_session_id.as_ref())
+            })
+        {
+            session.agent_profile_id = Some(profile_id.to_string());
+        }
+        self.agent_menu_open = false;
+        self.persist_state();
+        self.connect_project(cx);
+    }
+
     pub fn save_agent_config(&mut self, cx: &mut Context<Self>) {
         let Some(project) = self.active_project.as_ref() else {
             self.toast = Some("Open a project before configuring an agent".into());
@@ -479,6 +544,12 @@ impl App {
             return;
         };
         let project_id = project.id.clone();
+        let name = self
+            .agent_profile_name_input
+            .read(cx)
+            .content
+            .trim()
+            .to_string();
         let command = self.agent_command_input.read(cx).content.trim().to_string();
         let remote_workspace = self
             .remote_workspace_input
@@ -489,8 +560,8 @@ impl App {
         let host = self.ssh_host_input.read(cx).content.trim().to_string();
         let user = self.ssh_user_input.read(cx).content.trim().to_string();
         let key = self.ssh_key_input.read(cx).content.trim().to_string();
-        if command.is_empty() {
-            self.toast = Some("Agent command is required".into());
+        if name.is_empty() || command.is_empty() {
+            self.toast = Some("Agent name and command are required".into());
             cx.notify();
             return;
         }
@@ -509,23 +580,89 @@ impl App {
         } else {
             TransportConfig::Local
         };
-        let config = ProjectAgentConfig {
-            agent_command: command,
-            transport,
+        let profile = AgentProfile {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            name,
+            config: ProjectAgentConfig {
+                agent_command: command,
+                transport,
+            },
         };
-        match ConfigStore::for_user().save(&project_id, &config) {
+        let mut registry = ProjectAgentRegistry {
+            agents: self.agent_profiles.clone(),
+        };
+        if registry
+            .agents
+            .iter()
+            .any(|registered| registered.name.eq_ignore_ascii_case(&profile.name))
+        {
+            self.toast = Some("An agent with this name is already registered".into());
+            cx.notify();
+            return;
+        }
+        registry.agents.push(profile);
+        match ConfigStore::for_user().save(&project_id, &registry) {
             Ok(()) => {
-                self.agent_config = Some(config);
-                self.toast = Some("Agent configuration saved".into());
-                self.connect_project(cx);
+                self.agent_profiles = registry.agents;
+                self.agent_profile_name_input
+                    .update(cx, |input, _| input.clear());
+                self.agent_command_input
+                    .update(cx, |input, _| input.clear());
+                self.remote_workspace_input
+                    .update(cx, |input, _| input.clear());
+                self.ssh_host_input.update(cx, |input, _| input.clear());
+                self.ssh_user_input.update(cx, |input, _| input.clear());
+                self.ssh_key_input.update(cx, |input, _| input.clear());
+                self.config_remote = false;
+                if self.can_select_agent_for_session() {
+                    self.connection_status = "Select an agent".into();
+                }
+                self.toast = Some("Agent registered".into());
             }
-            Err(error) => self.toast = Some(format!("Could not save agent configuration: {error}")),
+            Err(error) => self.toast = Some(format!("Could not register agent: {error}")),
+        }
+        cx.notify();
+    }
+
+    pub fn delete_agent_profile(&mut self, profile_id: &str, cx: &mut Context<Self>) {
+        let in_use = self
+            .sessions_by_project
+            .values()
+            .flatten()
+            .any(|session| session.agent_profile_id.as_deref() == Some(profile_id));
+        if in_use {
+            self.toast = Some("This agent is used by a saved session and cannot be removed".into());
+            cx.notify();
+            return;
+        }
+        let Some(project_id) = self
+            .active_project
+            .as_ref()
+            .map(|project| project.id.clone())
+        else {
+            return;
+        };
+        self.agent_profiles
+            .retain(|profile| profile.id != profile_id);
+        let registry = ProjectAgentRegistry {
+            agents: self.agent_profiles.clone(),
+        };
+        match ConfigStore::for_user().save(&project_id, &registry) {
+            Ok(()) => {
+                if self.agent_profiles.is_empty() {
+                    self.connection_status = "No agents registered".into();
+                }
+                self.toast = Some("Agent removed".into());
+            }
+            Err(error) => self.toast = Some(format!("Could not remove agent: {error}")),
         }
         cx.notify();
     }
 
     fn connect_project(&mut self, cx: &mut Context<Self>) {
         self.acp_client = None;
+        self.agent_config = None;
+        self.agent_menu_open = false;
         self.pending_permission = None;
         self.pending_elicitation = None;
         self.elicitation_inputs.clear();
@@ -536,10 +673,12 @@ impl App {
         let Some(project) = self.active_project.clone() else {
             return;
         };
-        let config = match ConfigStore::for_user().load(&project.id) {
-            Ok(Some(config)) => config,
+        let registry = match ConfigStore::for_user().load(&project.id) {
+            Ok(Some(registry)) => registry,
             Ok(None) => {
-                self.connection_status = "Not configured".into();
+                self.agent_profiles.clear();
+                self.connection_status = "No agents registered".into();
+                self.refresh_workspace(cx);
                 return;
             }
             Err(error) => {
@@ -547,6 +686,45 @@ impl App {
                 return;
             }
         };
+        self.agent_profiles = registry.agents;
+        let selected_profile_id = self
+            .sessions_by_project
+            .get_mut(&project.id)
+            .and_then(|sessions| {
+                sessions
+                    .iter_mut()
+                    .find(|session| Some(&session.id) == self.active_session_id.as_ref())
+            })
+            .and_then(|session| {
+                if session.agent_profile_id.is_none()
+                    && (session.acp_session_id.is_some() || !session.messages.is_empty())
+                    && self.agent_profiles.len() == 1
+                {
+                    session.agent_profile_id = Some(self.agent_profiles[0].id.clone());
+                }
+                session.agent_profile_id.clone()
+            });
+        let Some(profile_id) = selected_profile_id else {
+            self.connection_status = if self.agent_profiles.is_empty() {
+                "No agents registered".into()
+            } else {
+                "Select an agent".into()
+            };
+            self.persist_state();
+            self.refresh_workspace(cx);
+            return;
+        };
+        let Some(profile) = self
+            .agent_profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+        else {
+            self.connection_status = "Session agent is no longer registered".into();
+            self.refresh_workspace(cx);
+            return;
+        };
+        let config = profile.config;
         if matches!(
             &config.transport,
             TransportConfig::Ssh {
@@ -558,34 +736,6 @@ impl App {
                 "SSH agent needs a remote workspace mapping in Settings".into();
             self.agent_config = Some(config);
             return;
-        }
-        self.config_remote = matches!(config.transport, TransportConfig::Ssh { .. });
-        self.agent_command_input.update(cx, |input, _| {
-            input.set_content(config.agent_command.clone())
-        });
-        if let TransportConfig::Ssh {
-            host,
-            user,
-            identity_file,
-            remote_workspace,
-        } = &config.transport
-        {
-            self.ssh_host_input
-                .update(cx, |input, _| input.set_content(host));
-            self.ssh_user_input.update(cx, |input, _| {
-                input.set_content(user.clone().unwrap_or_default())
-            });
-            self.ssh_key_input.update(cx, |input, _| {
-                input.set_content(
-                    identity_file
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
-            });
-            self.remote_workspace_input.update(cx, |input, _| {
-                input.set_content(remote_workspace.to_string_lossy())
-            });
         }
         self.agent_config = Some(config.clone());
         self.refresh_workspace(cx);
@@ -827,7 +977,7 @@ impl App {
             return;
         }
         let Some(client) = self.acp_client.clone() else {
-            self.toast = Some("Configure and connect an ACP agent before sending a message".into());
+            self.toast = Some("Select an agent for this session before sending a message".into());
             cx.notify();
             return;
         };

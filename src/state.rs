@@ -30,6 +30,8 @@ pub struct Session {
     pub acp_session_id: Option<String>,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default)]
+    pub agent_profile_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -44,6 +46,17 @@ mod tests {
         .expect("older persisted sessions should still load");
 
         assert!(!session.archived);
+        assert!(session.agent_profile_id.is_none());
+    }
+
+    #[test]
+    fn session_remembers_its_agent_profile() {
+        let session: Session = serde_json::from_str(
+            r#"{"id":"session-1","name":"Thread","messages":[],"agent_profile_id":"claude"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(session.agent_profile_id.as_deref(), Some("claude"));
     }
 }
 

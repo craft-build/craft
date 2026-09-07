@@ -1547,6 +1547,10 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     };
     let config_controls = app.session_config_controls.clone();
     let open_config_menu = app.open_config_menu.clone();
+    let agent_profiles = app.agent_profiles.clone();
+    let selected_agent = app.active_agent_profile_id().map(str::to_string);
+    let can_select_agent = app.can_select_agent_for_session();
+    let agent_menu_open = app.agent_menu_open;
 
     div()
         .h(px(32.))
@@ -1563,6 +1567,13 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(16.))
+                .child(agent_selector(
+                    agent_profiles,
+                    selected_agent,
+                    can_select_agent,
+                    agent_menu_open,
+                    cx,
+                ))
                 .children(config_controls.into_iter().map(|control| {
                     let is_open = open_config_menu.as_deref() == Some(control.id.as_str());
                     config_selector(control, is_open, cx)
@@ -1610,6 +1621,79 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .child(status_label),
                 ),
         )
+}
+
+fn agent_selector(
+    profiles: Vec<crate::config::AgentProfile>,
+    selected_id: Option<String>,
+    can_select: bool,
+    menu_open: bool,
+    cx: &mut Context<App>,
+) -> gpui::AnyElement {
+    let selected_name = selected_id
+        .as_ref()
+        .and_then(|selected| {
+            profiles
+                .iter()
+                .find(|profile| &profile.id == selected)
+                .map(|profile| profile.name.clone())
+        })
+        .unwrap_or_else(|| "Select agent".into());
+    let has_profiles = !profiles.is_empty();
+
+    div()
+        .relative()
+        .child(
+            div()
+                .id("agent-menu-toggle")
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(11.))
+                .text_color(rgb(if selected_id.is_some() {
+                    theme::TEXT_SECONDARY
+                } else {
+                    theme::ACCENT
+                }))
+                .when(can_select && has_profiles, |d| {
+                    d.cursor_pointer()
+                        .on_click(cx.listener(|app, _, _, cx| app.toggle_agent_menu(cx)))
+                })
+                .child(format!("Agent: {selected_name}"))
+                .when(can_select && has_profiles, |d| {
+                    d.child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
+                }),
+        )
+        .when(menu_open && can_select && has_profiles, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .bottom(px(28.))
+                    .left(px(0.))
+                    .bg(rgb(theme::INPUT_BG))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .min_w(px(170.))
+                    .children(profiles.into_iter().map(|profile| {
+                        let profile_id = profile.id.clone();
+                        div()
+                            .id(SharedString::from(format!(
+                                "session-agent-profile-{}",
+                                profile.id
+                            )))
+                            .px(px(10.))
+                            .py(px(8.))
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+                            .child(profile.name)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.select_agent_profile(&profile_id, cx)
+                            }))
+                    })),
+            )
+        })
+        .into_any_element()
 }
 
 fn config_selector(

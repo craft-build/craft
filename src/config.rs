@@ -1,8 +1,8 @@
-//! Per-project ACP process configuration.
+//! Per-project registry of ACP process configurations.
 //!
 //! Forge deliberately stores executable commands rather than an enum of known
-//! agents. Any ACP-compatible executable can therefore be connected without a
-//! Forge release.
+//! agents. Any number of ACP-compatible executables can therefore be registered
+//! and selected per session without a Forge release.
 
 use std::fs;
 use std::io;
@@ -34,6 +34,19 @@ pub struct ProjectAgentConfig {
     /// A shell-like command line parsed locally into executable and arguments.
     pub agent_command: String,
     pub transport: TransportConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentProfile {
+    pub id: String,
+    pub name: String,
+    pub config: ProjectAgentConfig,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAgentRegistry {
+    #[serde(default)]
+    pub agents: Vec<AgentProfile>,
 }
 
 impl ProjectAgentConfig {
@@ -109,24 +122,39 @@ impl ConfigStore {
         Self { root }
     }
 
-    pub fn load(&self, project_id: &str) -> io::Result<Option<ProjectAgentConfig>> {
+    pub fn load(&self, project_id: &str) -> io::Result<Option<ProjectAgentRegistry>> {
         let path = self.path(project_id)?;
         match fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(io::Error::other),
+            Ok(bytes) => {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                if value.get("agents").is_some() {
+                    return serde_json::from_value(value)
+                        .map(Some)
+                        .map_err(io::Error::other);
+                }
+                let legacy: ProjectAgentConfig =
+                    serde_json::from_value(value).map_err(io::Error::other)?;
+                Ok(Some(ProjectAgentRegistry {
+                    agents: vec![AgentProfile {
+                        id: "migrated-default".into(),
+                        name: "Default agent".into(),
+                        config: legacy,
+                    }],
+                }))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
         }
     }
 
-    pub fn save(&self, project_id: &str, config: &ProjectAgentConfig) -> io::Result<()> {
+    pub fn save(&self, project_id: &str, registry: &ProjectAgentRegistry) -> io::Result<()> {
         let path = self.path(project_id)?;
         fs::create_dir_all(&self.root)?;
         let temporary = path.with_extension("json.tmp");
         fs::write(
             &temporary,
-            serde_json::to_vec_pretty(config).map_err(io::Error::other)?,
+            serde_json::to_vec_pretty(registry).map_err(io::Error::other)?,
         )?;
         fs::rename(temporary, path)
     }
@@ -182,5 +210,57 @@ mod tests {
             config.workspace_for(Path::new("/selected/project")),
             PathBuf::from("/selected/project")
         );
+    }
+
+    #[test]
+    fn legacy_single_agent_config_migrates_to_a_registry() {
+        let root = std::env::temp_dir().join(format!("forge-config-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = ConfigStore { root: root.clone() };
+        let legacy = ProjectAgentConfig {
+            agent_command: "agent --acp".into(),
+            transport: TransportConfig::Local,
+        };
+        fs::write(
+            root.join("project.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let registry = store.load("project").unwrap().unwrap();
+
+        assert_eq!(registry.agents.len(), 1);
+        assert_eq!(registry.agents[0].name, "Default agent");
+        assert_eq!(registry.agents[0].config, legacy);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_preserves_multiple_named_agents() {
+        let registry = ProjectAgentRegistry {
+            agents: vec![
+                AgentProfile {
+                    id: "claude".into(),
+                    name: "Claude Code".into(),
+                    config: ProjectAgentConfig {
+                        agent_command: "claude --acp".into(),
+                        transport: TransportConfig::Local,
+                    },
+                },
+                AgentProfile {
+                    id: "gemini".into(),
+                    name: "Gemini".into(),
+                    config: ProjectAgentConfig {
+                        agent_command: "gemini --experimental-acp".into(),
+                        transport: TransportConfig::Local,
+                    },
+                },
+            ],
+        };
+
+        let restored: ProjectAgentRegistry =
+            serde_json::from_slice(&serde_json::to_vec(&registry).unwrap()).unwrap();
+
+        assert_eq!(restored, registry);
     }
 }
