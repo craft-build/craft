@@ -13,7 +13,7 @@ use include_dir::{Dir, File, include_dir};
 
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
-use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
+use crate::api::util::command::{HintReader, LuaCommandReader, UiAction, UiAttachment};
 use crate::error::PluginError;
 use crate::pack::DiscoveredPackage;
 use crate::plugin_permissions::{
@@ -850,6 +850,14 @@ impl PluginHost {
             tx: self.inner.tx.clone(),
             ended: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// The bit every `craft.ui` and `craft.fn` roundtrip consults. The event
+    /// loop attaches while it drains [`Self::ui_action_rx`] and detaches
+    /// before teardown runs `SessionEnd`, since that receiver is a clone and
+    /// dropping it would leave a handler parked on a reply that never comes.
+    pub fn ui_attachment(&self) -> UiAttachment {
+        self.inner.ui_attachment.clone()
     }
 
     pub fn command_reader(&self) -> LuaCommandReader {

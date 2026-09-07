@@ -372,9 +372,9 @@ craft.create_autocmd("ModelChanged", {
 
 ### `SessionEnd`
 
-`craft.create_autocmd("SessionEnd", { callback = ... })` fires whenever a session goes away: a `/reset`, loading or opening another session, deleting a tab, quitting the TUI, closing an ACP session, and the end of a headless run. The payload carries `data.session_id` naming the session that ended, `data.reason` naming the path, and `data.deadline_ms`. `reason` is one of `"reset"` (TUI `/new`), `"load"`, `"delete"` (the tab was closed), `"shutdown"` (the process is exiting), `"replaced"` (an ACP client took the session's place), or `"completed"` (a headless run finished). Use it to drop caches or state tied to that session. The session that replaces it announces itself with `SessionStart`.
+`craft.create_autocmd("SessionEnd", { callback = ... })` fires whenever a session goes away: a `/reset`, loading or opening another session, deleting a tab, quitting the TUI, closing an ACP session, and the end of a headless run. The payload carries `data.session_id` naming the session that ended, `data.reason` naming the path, and `data.deadline_ms`. `reason` is one of `"reset"` (TUI `/new`), `"load"`, `"delete"` (the tab was closed), `"shutdown"` (the process is exiting), `"reload"` (`/reload` is rebuilding the plugin host, and the session carries on in the new one), `"replaced"` (an ACP client took the session's place), or `"completed"` (a headless run finished). Use it to drop caches or state tied to that session. The session that replaces it announces itself with `SessionStart`.
 
-The last three reasons are exit paths: the host is already tearing down, so the UI is gone (`craft.fn` roundtrips fail right away) and every handler shares one grace period. `data.deadline_ms` says how much of it is left when the handler runs; write state out with `craft.fs` and do not park. On the other paths nothing waits and `data.deadline_ms` is nil.
+The last four reasons are exit paths: the host is already tearing down, so the UI is detached (`craft.fn` roundtrips fail right away) and every handler shares one grace period. `data.deadline_ms` says how much of it is left when the handler runs; write state out with `craft.fs` and do not park. On the other paths nothing waits and `data.deadline_ms` is nil.
 
 ## `craft.ui`
 

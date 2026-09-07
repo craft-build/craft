@@ -25,7 +25,7 @@ use craft_agent::{
 use craft_config::UiConfig;
 use craft_lua::{
     EventHandle, HintReader, KeymapReader, LuaCommandReader, ModelRequest, SessionEndReason,
-    SessionRequest, TaskRequest, UiAction, UiReply,
+    SessionRequest, TaskRequest, UiAction, UiAttachment, UiReply,
 };
 use craft_providers::Timeouts;
 use craft_providers::provider::{Provider, fetch_all_models, from_model};
@@ -115,6 +115,7 @@ pub struct EventLoopParams {
     pub keymap_reader: KeymapReader,
     pub hint_reader: HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
+    pub ui_attachment: UiAttachment,
     pub lua_event_handle: EventHandle,
     pub provider: Arc<dyn Provider>,
     pub mcp_handle: Option<McpHandle>,
@@ -523,6 +524,7 @@ pub(crate) struct EventLoop<'t> {
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
     ui_action_rx: flume::Receiver<UiAction>,
+    ui_attachment: UiAttachment,
     _model_fetch_task: tokio::task::JoinHandle<()>,
 }
 
@@ -717,6 +719,7 @@ impl<'t> EventLoop<'t> {
             keymap_reader,
             hint_reader,
             ui_action_rx,
+            ui_attachment,
             lua_event_handle,
             provider,
             mcp_handle,
@@ -725,6 +728,9 @@ impl<'t> EventLoop<'t> {
             watch_enabled,
             model_policy,
         } = params;
+        // A `/reload` generation inherits the handles of the one before it,
+        // so every loop has to claim the UI back for itself.
+        ui_attachment.attach();
 
         if let Some(ref name) = ui_config.theme {
             match crate::theme::load_by_name(name) {
@@ -824,6 +830,7 @@ impl<'t> EventLoop<'t> {
             warn_rx: bg.warn_rx,
             warn_tx: bg.warn_tx,
             ui_action_rx,
+            ui_attachment,
             _model_fetch_task: bg.task,
         })
     }
@@ -1941,16 +1948,20 @@ impl<'t> EventLoop<'t> {
         if let Some(ref h) = mcp_handle {
             craft_agent::mcp::kill_process_groups(&h.reader().load().pids);
         }
-        // The loop already stopped draining `UiAction`. Drop the receiver
-        // before the handlers run, or one that touches the UI parks forever
-        // and only the teardown deadline gets us out of it.
-        let (dead_tx, dead_rx) = flume::unbounded::<UiAction>();
-        drop(dead_tx);
-        self.ui_action_rx = dead_rx;
-        self.ctx.lua_event_handle.end_sessions_blocking(
-            self.sessions.iter().map(SessionRuntime::id),
-            SessionEndReason::Shutdown,
-        );
+        // The loop already stopped draining `UiAction`, so say so before the
+        // handlers run. Swapping in a dead receiver does not, since the Lua
+        // runtime holds a sender of its own and `try_send` keeps succeeding,
+        // parking a handler on a reply nobody is left to send.
+        self.ui_attachment.detach();
+        // `/reload` hands these same sessions to the next generation, so
+        // their handlers must not hear that the process is quitting.
+        let reason = match exit {
+            ExitRequest::Reload => SessionEndReason::Reload,
+            _ => SessionEndReason::Shutdown,
+        };
+        self.ctx
+            .lua_event_handle
+            .end_sessions_blocking(self.sessions.iter().map(SessionRuntime::id), reason);
         for rt in &mut self.sessions {
             let _ = rt.handles.cmd_tx.try_send(AgentCommand::CancelAll);
             rt.app.checkpoint_now();

@@ -548,8 +548,8 @@ impl From<Option<StopReason>> for DoneReason {
 }
 
 /// Why a session ended, as `SessionEnd` handlers see it in `data.reason`.
-/// `Shutdown`, `Replaced`, and `Completed` are exit paths: no UI is left to
-/// talk to and every handler shares one grace period.
+/// `Shutdown`, `Reload`, `Replaced`, and `Completed` tear the host down: no
+/// UI is left to talk to and every handler shares one grace period.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum SessionEndReason {
@@ -561,6 +561,9 @@ pub enum SessionEndReason {
     Delete,
     /// The process is exiting.
     Shutdown,
+    /// `/reload` is rebuilding the plugin host. The session carries on in the
+    /// next generation, so a handler cleaning up for good wants `Shutdown`.
+    Reload,
     /// An ACP client started or loaded a session over this one.
     Replaced,
     /// A headless run finished.
