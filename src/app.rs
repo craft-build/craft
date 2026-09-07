@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use agent_client_protocol::schema::v1::{
     ContentBlock, ElicitationMode, ElicitationPropertySchema, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions, SessionUpdate,
-    ToolCallContent,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionUpdate, ToolCallContent,
 };
 use gpui::prelude::*;
 use gpui::{Context, Entity, PathPromptOptions, ScrollHandle, Window, div, px, rgb};
@@ -49,6 +49,7 @@ pub struct SessionConfigControl {
     pub name: String,
     pub selected_name: String,
     pub choices: Vec<SessionConfigChoice>,
+    pub searchable: bool,
 }
 
 pub struct App {
@@ -60,6 +61,7 @@ pub struct App {
 
     pub session_config_controls: Vec<SessionConfigControl>,
     pub open_config_menu: Option<String>,
+    pub config_search_input: Entity<TextInput>,
     pub agent_profiles: Vec<AgentProfile>,
     pub agent_menu_open: bool,
 
@@ -119,6 +121,12 @@ impl App {
                 })
         });
         let agent_profile_name_input = cx.new(|cx| TextInput::new(cx, "e.g. Claude Code"));
+        let search_owner = cx.weak_entity();
+        let config_search_input = cx.new(|cx| {
+            TextInput::new(cx, "Search models").on_change(move |_, cx| {
+                search_owner.update(cx, |_, cx| cx.notify()).ok();
+            })
+        });
         let agent_command_input = cx.new(|cx| TextInput::new(cx, "e.g. gemini --experimental-acp"));
         let remote_workspace_input = cx.new(|cx| TextInput::new(cx, "/path/on/remote/machine"));
         let ssh_host_input = cx.new(|cx| TextInput::new(cx, "host from ~/.ssh/config"));
@@ -139,6 +147,7 @@ impl App {
             active_session_id: None,
             session_config_controls: vec![],
             open_config_menu: None,
+            config_search_input,
             agent_profiles: vec![],
             agent_menu_open: false,
             sidebar_visible: true,
@@ -459,6 +468,8 @@ impl App {
         } else {
             self.open_config_menu = Some(id.to_string());
         }
+        self.config_search_input
+            .update(cx, |input, _| input.clear());
         cx.notify();
     }
 
@@ -1764,6 +1775,7 @@ fn session_config_controls(options: Vec<SessionConfigOption>) -> Vec<SessionConf
         .map(|option| {
             let id = option.id.to_string();
             let name = option.name;
+            let searchable = matches!(option.category, Some(SessionConfigOptionCategory::Model));
             match option.kind {
                 SessionConfigKind::Select(select) => {
                     let current_value = select.current_value.to_string();
@@ -1798,6 +1810,7 @@ fn session_config_controls(options: Vec<SessionConfigOption>) -> Vec<SessionConf
                         name,
                         selected_name,
                         choices,
+                        searchable,
                     }
                 }
                 SessionConfigKind::Boolean(boolean) => SessionConfigControl {
@@ -1818,12 +1831,14 @@ fn session_config_controls(options: Vec<SessionConfigOption>) -> Vec<SessionConf
                             value: SessionConfigOptionValue::boolean(false),
                         },
                     ],
+                    searchable,
                 },
                 _ => SessionConfigControl {
                     id,
                     name,
                     selected_name: "Unsupported".into(),
                     choices: vec![],
+                    searchable,
                 },
             }
         })
@@ -1846,7 +1861,8 @@ mod session_config_tests {
                     SessionConfigSelectOption::new("small", "Small"),
                     SessionConfigSelectOption::new("large", "Large"),
                 ],
-            ),
+            )
+            .category(SessionConfigOptionCategory::Model),
             SessionConfigOption::select(
                 "thought-level",
                 "Thought level",
@@ -1862,8 +1878,10 @@ mod session_config_tests {
         assert_eq!(controls.len(), 3);
         assert_eq!(controls[0].id, "model");
         assert_eq!(controls[0].selected_name, "Large");
+        assert!(controls[0].searchable);
         assert_eq!(controls[1].id, "thought-level");
         assert_eq!(controls[1].selected_name, "High");
+        assert!(!controls[1].searchable);
         assert_eq!(controls[2].id, "auto-format");
         assert_eq!(controls[2].selected_name, "On");
     }

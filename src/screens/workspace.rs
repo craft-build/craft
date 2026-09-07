@@ -1547,6 +1547,13 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     };
     let config_controls = app.session_config_controls.clone();
     let open_config_menu = app.open_config_menu.clone();
+    let config_search_input = app.config_search_input.clone();
+    let config_search_query = app
+        .config_search_input
+        .read(cx)
+        .content
+        .trim()
+        .to_lowercase();
     let agent_profiles = app.agent_profiles.clone();
     let selected_agent = app.active_agent_profile_id().map(str::to_string);
     let can_select_agent = app.can_select_agent_for_session();
@@ -1576,7 +1583,13 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 ))
                 .children(config_controls.into_iter().map(|control| {
                     let is_open = open_config_menu.as_deref() == Some(control.id.as_str());
-                    config_selector(control, is_open, cx)
+                    config_selector(
+                        control,
+                        is_open,
+                        config_search_input.clone(),
+                        config_search_query.clone(),
+                        cx,
+                    )
                 })),
         )
         .child(
@@ -1699,11 +1712,20 @@ fn agent_selector(
 fn config_selector(
     control: SessionConfigControl,
     is_open: bool,
+    search_input: gpui::Entity<crate::text_input::TextInput>,
+    search_query: String,
     cx: &mut Context<App>,
 ) -> gpui::AnyElement {
     let toggle_id = control.id.clone();
-    let choices = control.choices.clone();
-    let has_choices = !choices.is_empty();
+    let has_choices = !control.choices.is_empty();
+    let searchable = control.searchable;
+    let choices = control
+        .choices
+        .iter()
+        .filter(|choice| !searchable || choice.name.to_lowercase().contains(&search_query))
+        .cloned()
+        .collect::<Vec<_>>();
+    let no_matches = choices.is_empty();
 
     div()
         .relative()
@@ -1738,25 +1760,70 @@ fn config_selector(
                     .bg(rgb(theme::INPUT_BG))
                     .border_1()
                     .border_color(rgb(theme::BORDER))
-                    .min_w(px(150.))
-                    .children(choices.into_iter().map(|choice| {
-                        let config_id = control.id.clone();
-                        let value = choice.value.clone();
+                    .w(px(280.))
+                    .max_h(px(320.))
+                    .flex()
+                    .flex_col()
+                    .when(searchable, |d| {
+                        d.child(
+                            div()
+                                .flex_shrink_0()
+                                .p(px(8.))
+                                .border_b_1()
+                                .border_color(rgb(theme::BORDER))
+                                .child(
+                                    div()
+                                        .bg(rgb(theme::PANEL_BG))
+                                        .border_1()
+                                        .border_color(rgb(theme::BORDER))
+                                        .px(px(8.))
+                                        .py(px(6.))
+                                        .text_size(px(11.))
+                                        .child(search_input),
+                                ),
+                        )
+                    })
+                    .child(
                         div()
                             .id(SharedString::from(format!(
-                                "footer-config-{}-{}",
-                                control.id, choice.name
+                                "config-options-scroll-{}",
+                                control.id
                             )))
-                            .px(px(10.))
-                            .py(px(8.))
-                            .text_size(px(12.))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(theme::HOVER_BG)))
-                            .child(choice.name)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                app.select_session_config(config_id.clone(), value.clone(), cx)
-                            }))
-                    })),
+                            .max_h(px(if searchable { 264. } else { 318. }))
+                            .overflow_y_scroll()
+                            .when(no_matches, |d| {
+                                d.child(
+                                    div()
+                                        .px(px(10.))
+                                        .py(px(12.))
+                                        .text_size(px(11.))
+                                        .text_color(rgb(theme::TEXT_MUTED))
+                                        .child("No matching models"),
+                                )
+                            })
+                            .children(choices.into_iter().map(|choice| {
+                                let config_id = control.id.clone();
+                                let value = choice.value.clone();
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "footer-config-{}-{}",
+                                        control.id, choice.name
+                                    )))
+                                    .px(px(10.))
+                                    .py(px(8.))
+                                    .text_size(px(12.))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+                                    .child(choice.name)
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.select_session_config(
+                                            config_id.clone(),
+                                            value.clone(),
+                                            cx,
+                                        )
+                                    }))
+                            })),
+                    ),
             )
         })
         .into_any_element()
