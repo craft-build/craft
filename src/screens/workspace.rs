@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{Context, FontWeight, SharedString, Window, div, px, rgb, rgba};
 
-use crate::app::App;
+use crate::app::{App, SessionConfigControl};
 use crate::chrome;
 use crate::state::{Comment, Diff, DiffLine, DiffLineKind, Message, Role, Steps, Terminal};
 use crate::theme;
@@ -1182,13 +1182,8 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     } else {
         theme::TEXT_MUTED
     };
-    let selected_model = if app.selected_model.is_empty() {
-        "Agent model".to_string()
-    } else {
-        app.selected_model.clone()
-    };
-    let models = app.available_models.clone();
-    let menu_open = app.model_menu_open;
+    let config_controls = app.session_config_controls.clone();
+    let open_config_menu = app.open_config_menu.clone();
 
     div()
         .h(px(32.))
@@ -1202,46 +1197,13 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .bg(rgb(theme::FOOTER_BG))
         .child(
             div()
-                .relative()
-                .child(
-                    div()
-                        .id("model-menu-toggle")
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_SECONDARY))
-                        .cursor_pointer()
-                        .child(selected_model)
-                        .child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
-                        .on_click(cx.listener(|app, _, _, cx| app.toggle_model_menu(cx))),
-                )
-                .when(menu_open && !models.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .bottom(px(28.))
-                            .left(px(0.))
-                            .bg(rgb(theme::INPUT_BG))
-                            .border_1()
-                            .border_color(rgb(theme::BORDER))
-                            .min_w(px(150.))
-                            .children(models.into_iter().map(|name| {
-                                let click_name = name.clone();
-                                div()
-                                    .id(SharedString::from(format!("footer-model-{name}")))
-                                    .px(px(10.))
-                                    .py(px(8.))
-                                    .text_size(px(12.))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(theme::HOVER_BG)))
-                                    .child(name)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.select_model(&click_name, cx)
-                                    }))
-                            })),
-                    )
-                }),
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .children(config_controls.into_iter().map(|control| {
+                    let is_open = open_config_menu.as_deref() == Some(control.id.as_str());
+                    config_selector(control, is_open, cx)
+                })),
         )
         .child(
             div()
@@ -1285,6 +1247,72 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .child(status_label),
                 ),
         )
+}
+
+fn config_selector(
+    control: SessionConfigControl,
+    is_open: bool,
+    cx: &mut Context<App>,
+) -> gpui::AnyElement {
+    let toggle_id = control.id.clone();
+    let choices = control.choices.clone();
+    let has_choices = !choices.is_empty();
+
+    div()
+        .relative()
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "config-menu-toggle-{}",
+                    control.id
+                )))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(11.))
+                .text_color(rgb(theme::TEXT_SECONDARY))
+                .when(has_choices, |d| d.cursor_pointer())
+                .child(format!("{}: {}", control.name, control.selected_name))
+                .when(has_choices, |d| {
+                    d.child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
+                        .on_click(
+                            cx.listener(move |app, _, _, cx| {
+                                app.toggle_config_menu(&toggle_id, cx)
+                            }),
+                        )
+                }),
+        )
+        .when(is_open && has_choices, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .bottom(px(28.))
+                    .left(px(0.))
+                    .bg(rgb(theme::INPUT_BG))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .min_w(px(150.))
+                    .children(choices.into_iter().map(|choice| {
+                        let config_id = control.id.clone();
+                        let value = choice.value.clone();
+                        div()
+                            .id(SharedString::from(format!(
+                                "footer-config-{}-{}",
+                                control.id, choice.name
+                            )))
+                            .px(px(10.))
+                            .py(px(8.))
+                            .text_size(px(12.))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+                            .child(choice.name)
+                            .on_click(cx.listener(move |app, _, _, cx| {
+                                app.select_session_config(config_id.clone(), value.clone(), cx)
+                            }))
+                    })),
+            )
+        })
+        .into_any_element()
 }
 
 // ---------------------------------------------------------------- checkpoints & toast

@@ -63,7 +63,7 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                         .gap(px(28.))
                         .when(app.active_project.is_some(), |d| {
                             d.child(agent_section(app, cx))
-                                .child(model_section(app, cx))
+                                .child(session_options_section(app, cx))
                         })
                         .when(app.active_project.is_none(), |d| {
                             d.child(
@@ -86,52 +86,67 @@ fn section_label(text: &'static str) -> impl IntoElement {
         .child(text)
 }
 
-fn model_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
-    let models = app.available_models.clone();
+fn session_options_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
+    let controls = app.session_config_controls.clone();
     div()
         .flex()
         .flex_col()
-        .child(section_label("AGENT MODELS"))
+        .child(section_label("SESSION OPTIONS"))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.))
-                .when(models.is_empty(), |d| {
+                .gap(px(12.))
+                .when(controls.is_empty(), |d| {
                     d.child(
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(theme::TEXT_MUTED))
-                            .child("The connected agent has not advertised model choices."),
+                            .child("The connected agent has not advertised session options."),
                     )
                 })
-                .children(models.into_iter().map(|name| {
-                    let selected = app.selected_model == name;
-                    let click_name = name.clone();
+                .children(controls.into_iter().map(|control| {
                     div()
-                        .id(gpui::SharedString::from(format!("model-{name}")))
                         .flex()
-                        .items_center()
-                        .gap(px(10.))
+                        .flex_col()
+                        .gap(px(6.))
                         .px(px(10.))
                         .py(px(8.))
                         .border_1()
                         .border_color(rgb(theme::BORDER))
-                        .cursor_pointer()
-                        .when(selected, |d| d.bg(rgb(theme::INPUT_BG)))
                         .child(
                             div()
-                                .w(px(8.))
-                                .h(px(8.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(rgb(theme::ACCENT))
-                                .when(selected, |d| d.bg(rgb(theme::ACCENT))),
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(control.name.clone()),
                         )
-                        .child(div().text_size(px(12.)).child(name))
-                        .on_click(
-                            cx.listener(move |app, _, _, cx| app.select_model(&click_name, cx)),
-                        )
+                        .child(div().flex().flex_wrap().gap(px(6.)).children(
+                            control.choices.into_iter().map(|choice| {
+                                let selected = choice.name == control.selected_name;
+                                let config_id = control.id.clone();
+                                let value = choice.value.clone();
+                                div()
+                                    .id(gpui::SharedString::from(format!(
+                                        "session-option-{}-{}",
+                                        control.id, choice.name
+                                    )))
+                                    .px(px(8.))
+                                    .py(px(5.))
+                                    .text_size(px(11.))
+                                    .border_1()
+                                    .border_color(rgb(theme::BORDER))
+                                    .cursor_pointer()
+                                    .when(selected, |d| d.bg(rgb(theme::INPUT_BG)))
+                                    .child(choice.name)
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.select_session_config(
+                                            config_id.clone(),
+                                            value.clone(),
+                                            cx,
+                                        )
+                                    }))
+                            }),
+                        ))
                 })),
         )
 }

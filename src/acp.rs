@@ -16,7 +16,7 @@ use agent_client_protocol::schema::v1::{
     ElicitationFormCapabilities, Implementation, InitializeRequest, NewSessionRequest,
     PermissionOption, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, ResourceLink, SelectedPermissionOutcome, SessionConfigOption,
-    SessionConfigValueId, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SessionConfigOptionValue, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Error, Responder};
@@ -129,7 +129,10 @@ pub enum AcpEvent {
 
 enum AcpCommand {
     Prompt(Vec<ContentBlock>),
-    SetConfig { id: String, value: String },
+    SetConfig {
+        id: String,
+        value: SessionConfigOptionValue,
+    },
     Cancel,
 }
 
@@ -169,7 +172,7 @@ impl AcpClient {
             .map_err(|_| "ACP connection is not running".into())
     }
 
-    pub fn set_config(&self, id: String, value: String) -> Result<(), String> {
+    pub fn set_config(&self, id: String, value: SessionConfigOptionValue) -> Result<(), String> {
         self.commands
             .send(AcpCommand::SetConfig { id, value })
             .map_err(|_| "ACP connection is not running".into())
@@ -382,14 +385,20 @@ async fn run_connection(
                             .send_request(SetSessionConfigOptionRequest::new(
                                 session_id.clone(),
                                 id,
-                                SessionConfigValueId::new(value),
+                                value,
                             ))
                             .block_task()
                             .await;
-                        if let Err(error) = response {
-                            let _ = events.send(AcpEvent::Error(format!(
-                                "could not change agent configuration: {error}"
-                            )));
+                        match response {
+                            Ok(response) => {
+                                let _ =
+                                    events.send(AcpEvent::ConfigOptions(response.config_options));
+                            }
+                            Err(error) => {
+                                let _ = events.send(AcpEvent::Error(format!(
+                                    "could not change agent configuration: {error}"
+                                )));
+                            }
                         }
                     }
                 }

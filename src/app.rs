@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate, ToolCallContent};
+use agent_client_protocol::schema::v1::{
+    ContentBlock, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionUpdate, ToolCallContent,
+};
 use gpui::prelude::*;
 use gpui::{Context, Entity, PathPromptOptions, ScrollHandle, Window, div, px, rgb};
 
@@ -31,6 +34,20 @@ pub struct WorkspaceFile {
     pub status: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SessionConfigChoice {
+    pub name: String,
+    pub value: SessionConfigOptionValue,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionConfigControl {
+    pub id: String,
+    pub name: String,
+    pub selected_name: String,
+    pub choices: Vec<SessionConfigChoice>,
+}
+
 pub struct App {
     pub screen: Screen,
     pub projects: Vec<Project>,
@@ -38,10 +55,8 @@ pub struct App {
     pub active_project: Option<Project>,
     pub active_session_id: Option<String>,
 
-    pub selected_model: String,
-    pub available_models: Vec<String>,
-    pub model_options: HashMap<String, (String, String)>,
-    pub model_menu_open: bool,
+    pub session_config_controls: Vec<SessionConfigControl>,
+    pub open_config_menu: Option<String>,
 
     pub sidebar_visible: bool,
     pub file_tree_visible: bool,
@@ -114,10 +129,8 @@ impl App {
             sessions_by_project: persisted.sessions_by_project,
             active_project: None,
             active_session_id: None,
-            selected_model: String::new(),
-            available_models: vec![],
-            model_options: HashMap::new(),
-            model_menu_open: false,
+            session_config_controls: vec![],
+            open_config_menu: None,
             sidebar_visible: true,
             file_tree_visible: true,
             collapsed_projects: HashSet::new(),
@@ -321,22 +334,29 @@ impl App {
         cx.notify();
     }
 
-    pub fn toggle_model_menu(&mut self, cx: &mut Context<Self>) {
-        self.model_menu_open = !self.model_menu_open;
+    pub fn toggle_config_menu(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.open_config_menu.as_deref() == Some(id) {
+            self.open_config_menu = None;
+        } else {
+            self.open_config_menu = Some(id.to_string());
+        }
         cx.notify();
     }
 
-    pub fn select_model(&mut self, name: &str, cx: &mut Context<Self>) {
-        if let Some((id, value)) = self.model_options.get(name)
-            && let Some(client) = &self.acp_client
-            && let Err(error) = client.set_config(id.clone(), value.clone())
+    pub fn select_session_config(
+        &mut self,
+        id: String,
+        value: SessionConfigOptionValue,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(client) = &self.acp_client
+            && let Err(error) = client.set_config(id, value)
         {
             self.connection_status = error;
             cx.notify();
             return;
         }
-        self.selected_model = name.to_string();
-        self.model_menu_open = false;
+        self.open_config_menu = None;
         cx.notify();
     }
 
@@ -402,8 +422,8 @@ impl App {
         self.pending_permission = None;
         self.pending_elicitation = None;
         self.context_usage = None;
-        self.available_models.clear();
-        self.model_options.clear();
+        self.session_config_controls.clear();
+        self.open_config_menu = None;
         let Some(project) = self.active_project.clone() else {
             return;
         };
@@ -815,8 +835,7 @@ impl App {
                 self.persist_state();
             }
             AcpEvent::ConfigOptions(options) => {
-                let value = serde_json::to_value(options).unwrap_or_default();
-                self.set_model_options(extract_model_options(&value));
+                self.set_session_config_options(options);
             }
             AcpEvent::TurnStarted => {
                 self.thinking = true;
@@ -900,21 +919,21 @@ impl App {
                     .then_some(((usage.used.saturating_mul(100) / usage.size).min(100)) as u8);
             }
             SessionUpdate::ConfigOptionUpdate(options) => {
-                let value = serde_json::to_value(options).unwrap_or_default();
-                self.set_model_options(extract_model_options(&value));
+                self.set_session_config_options(options.config_options);
             }
             _ => {}
         }
     }
 
-    fn set_model_options(&mut self, options: Vec<(String, String, String)>) {
-        self.available_models = options.iter().map(|(name, _, _)| name.clone()).collect();
-        self.model_options = options
-            .into_iter()
-            .map(|(name, id, value)| (name, (id, value)))
-            .collect();
-        if self.selected_model.is_empty() {
-            self.selected_model = self.available_models.first().cloned().unwrap_or_default();
+    fn set_session_config_options(&mut self, options: Vec<SessionConfigOption>) {
+        self.session_config_controls = session_config_controls(options);
+        if self.open_config_menu.as_ref().is_some_and(|open| {
+            !self
+                .session_config_controls
+                .iter()
+                .any(|item| &item.id == open)
+        }) {
+            self.open_config_menu = None;
         }
     }
 
@@ -1290,60 +1309,115 @@ fn render_acp_diff(diff: agent_client_protocol::schema::v1::Diff) -> Diff {
     }
 }
 
-fn extract_model_options(value: &serde_json::Value) -> Vec<(String, String, String)> {
-    fn visit(value: &serde_json::Value, output: &mut Vec<(String, String, String)>) {
-        match value {
-            serde_json::Value::Object(object) => {
-                let is_model = object
-                    .get("category")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|category| category.eq_ignore_ascii_case("model"));
-                if is_model {
-                    let config_id = object
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("model");
-                    if let Some(options) =
-                        object.get("options").and_then(serde_json::Value::as_array)
-                    {
-                        for option in options {
-                            if let (Some(name), Some(value)) = (
-                                option
-                                    .get("name")
-                                    .or_else(|| option.get("label"))
-                                    .and_then(serde_json::Value::as_str),
-                                option.get("value").and_then(serde_json::Value::as_str),
-                            ) && !output.iter().any(|(existing, _, _)| existing == name)
-                            {
-                                output.push((
-                                    name.to_string(),
-                                    config_id.to_string(),
-                                    value.to_string(),
-                                ));
-                            } else if let Some(value) = option.as_str()
-                                && !output.iter().any(|(existing, _, _)| existing == value)
-                            {
-                                output.push((
-                                    value.to_string(),
-                                    config_id.to_string(),
-                                    value.to_string(),
-                                ));
-                            }
+fn session_config_controls(options: Vec<SessionConfigOption>) -> Vec<SessionConfigControl> {
+    options
+        .into_iter()
+        .map(|option| {
+            let id = option.id.to_string();
+            let name = option.name;
+            match option.kind {
+                SessionConfigKind::Select(select) => {
+                    let current_value = select.current_value.to_string();
+                    let options = match select.options {
+                        SessionConfigSelectOptions::Ungrouped(options) => options,
+                        SessionConfigSelectOptions::Grouped(groups) => {
+                            groups.into_iter().flat_map(|group| group.options).collect()
                         }
+                        _ => vec![],
+                    };
+                    let choices = options
+                        .into_iter()
+                        .map(|choice| SessionConfigChoice {
+                            name: choice.name,
+                            value: SessionConfigOptionValue::value_id(choice.value),
+                        })
+                        .collect::<Vec<_>>();
+                    let selected_name = choices
+                        .iter()
+                        .find(|choice| {
+                            choice
+                                .value
+                                .as_value_id()
+                                .map(ToString::to_string)
+                                .as_deref()
+                                == Some(current_value.as_str())
+                        })
+                        .map(|choice| choice.name.clone())
+                        .unwrap_or(current_value);
+                    SessionConfigControl {
+                        id,
+                        name,
+                        selected_name,
+                        choices,
                     }
                 }
-                object.values().for_each(|child| visit(child, output));
+                SessionConfigKind::Boolean(boolean) => SessionConfigControl {
+                    id,
+                    name,
+                    selected_name: if boolean.current_value {
+                        "On".into()
+                    } else {
+                        "Off".into()
+                    },
+                    choices: vec![
+                        SessionConfigChoice {
+                            name: "On".into(),
+                            value: SessionConfigOptionValue::boolean(true),
+                        },
+                        SessionConfigChoice {
+                            name: "Off".into(),
+                            value: SessionConfigOptionValue::boolean(false),
+                        },
+                    ],
+                },
+                _ => SessionConfigControl {
+                    id,
+                    name,
+                    selected_name: "Unsupported".into(),
+                    choices: vec![],
+                },
             }
-            serde_json::Value::Array(array) => {
-                array.iter().for_each(|child| visit(child, output));
-            }
-            _ => {}
-        }
-    }
+        })
+        .collect()
+}
 
-    let mut output = vec![];
-    visit(value, &mut output);
-    output
+#[cfg(test)]
+mod session_config_tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::SessionConfigSelectOption;
+
+    #[test]
+    fn preserves_each_acp_session_option_as_a_distinct_control() {
+        let controls = session_config_controls(vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "large",
+                vec![
+                    SessionConfigSelectOption::new("small", "Small"),
+                    SessionConfigSelectOption::new("large", "Large"),
+                ],
+            ),
+            SessionConfigOption::select(
+                "thought-level",
+                "Thought level",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            ),
+            SessionConfigOption::boolean("auto-format", "Auto format", true),
+        ]);
+
+        assert_eq!(controls.len(), 3);
+        assert_eq!(controls[0].id, "model");
+        assert_eq!(controls[0].selected_name, "Large");
+        assert_eq!(controls[1].id, "thought-level");
+        assert_eq!(controls[1].selected_name, "High");
+        assert_eq!(controls[2].id, "auto-format");
+        assert_eq!(controls[2].selected_name, "On");
+    }
 }
 
 fn json_elicitation_value(
