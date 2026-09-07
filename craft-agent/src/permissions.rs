@@ -94,6 +94,39 @@ impl PermissionError {
     }
 }
 
+/// How squarely an approval names the tool being checked. Every source of
+/// approval has to say which one it is, so the question cannot be skipped by a
+/// source added later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Approval {
+    /// A rule naming this tool. The user answered about this tool.
+    ForThisTool,
+    /// Yolo, a default, a `*` rule, a whole-server rule. It covers this tool
+    /// along with others and says nothing about this one in particular.
+    Standing,
+}
+
+/// Whether an approval counts for the tool at hand. An MCP tool is opaque, so
+/// nothing here tells a repo search from a commit, and plan mode only stays
+/// read-only while a standing yes never speaks for one. Native tools are known
+/// quantities and keep every approval they had.
+#[derive(Clone, Copy)]
+struct ApprovalGate {
+    opaque_under_plan_mode: bool,
+}
+
+impl ApprovalGate {
+    fn new(tool: &ToolKey, plan_path: Option<&Path>) -> Self {
+        Self {
+            opaque_under_plan_mode: plan_path.is_some() && tool.is_mcp(),
+        }
+    }
+
+    fn accepts(self, approval: Approval) -> bool {
+        !self.opaque_under_plan_mode || approval == Approval::ForThisTool
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionAnswer {
     AllowOnce,
@@ -281,9 +314,10 @@ impl PermissionManager {
     }
 
     /// The order of the checks below is the policy itself, not an accident of
-    /// how it was written: denies and explicit allows first in the scope loop,
-    /// then plan mode's hold on MCP tools, then yolo, the plan file write, and
-    /// last the defaults. Moving one moves the rules.
+    /// how it was written: denies first, then yolo, then explicit allows, the
+    /// plan file write, and last the defaults. Moving one moves the rules.
+    /// Every approval among them goes through [`ApprovalGate`], which is what
+    /// keeps plan mode's hold from depending on which one happens to run first.
     fn check_inner(
         &self,
         tool: &ToolKey,
@@ -293,6 +327,11 @@ impl PermissionManager {
     ) -> PermissionCheck {
         let session = self.session_rules();
         let plugin = self.plugin_rules.snapshot();
+        let gate = ApprovalGate::new(tool, plan_path);
+
+        // Any matching deny wins, however broadly it was aimed. Only approvals
+        // are ranked by how squarely they name the tool, and only plan mode
+        // reads that rank.
 
         let mut unclaimed_scopes: Vec<&str> = if force_prompt {
             Vec::new()
@@ -308,7 +347,10 @@ impl PermissionManager {
                 .chain(&self.builtin_rules)
                 .chain(&plugin)
             {
-                if !matches_rule(&r.tool, tool) || !rule_matches_scope(r, scope) {
+                let Some(approval) = rule_reach(&r.tool, tool) else {
+                    continue;
+                };
+                if !rule_matches_scope(r, scope) {
                     continue;
                 }
                 match r.effect {
@@ -316,9 +358,7 @@ impl PermissionManager {
                         info!(tool = %tool, scope = %scope, "permission denied");
                         return PermissionCheck::Denied;
                     }
-                    Effect::Allow => {
-                        has_allow = true;
-                    }
+                    Effect::Allow => has_allow |= gate.accepts(approval),
                 }
             }
 
@@ -330,15 +370,7 @@ impl PermissionManager {
             // force_prompt: all scopes will be prompted anyway
         }
 
-        // An MCP tool is opaque. Nothing here can tell a repo search from a
-        // commit, so plan mode stays read-only only if such a call is never
-        // approved for the user. Blanket approvals (yolo, `default = "allow"`)
-        // are held back and the user is asked instead. A rule written for the
-        // tool is the user's own answer and still decides. Native tools are
-        // known quantities and keep their approvals.
-        let plan_withholds_approval = plan_path.is_some() && tool.is_mcp();
-
-        if self.yolo.load(Ordering::Relaxed) && !plan_withholds_approval {
+        if self.yolo.load(Ordering::Relaxed) && gate.accepts(Approval::Standing) {
             return PermissionCheck::Allowed;
         }
 
@@ -388,7 +420,7 @@ impl PermissionManager {
                 info!(tool = %tool, "denied by default");
                 PermissionCheck::Denied
             }
-            DefaultEffect::Allow if !plan_withholds_approval => PermissionCheck::Allowed,
+            DefaultEffect::Allow if gate.accepts(Approval::Standing) => PermissionCheck::Allowed,
             DefaultEffect::Allow | DefaultEffect::Prompt => PermissionCheck::NeedsPrompt {
                 tool: tool.clone(),
                 scopes: pending.into_iter().map(|s| s.to_string()).collect(),
@@ -646,12 +678,19 @@ impl PermissionManager {
     }
 }
 
-fn matches_rule(rule_key: &ToolKey, actual: &ToolKey) -> bool {
+/// Whether a rule reaches this tool, and how narrowly it was aimed if it does.
+/// Both questions get answered by the one match, because a rule that reaches a
+/// tool without saying how squarely is what let a `*` allow walk past plan mode.
+fn rule_reach(rule_key: &ToolKey, actual: &ToolKey) -> Option<Approval> {
     match (rule_key, actual) {
-        (ToolKey::Wildcard, _) => true,
-        (ToolKey::Native(a), ToolKey::Native(b)) => a == b,
-        (ToolKey::McpServer { server: rs }, ToolKey::McpServer { server: as_ }) => rs == as_,
-        (ToolKey::McpServer { server: rs }, ToolKey::McpTool { server: as_, .. }) => rs == as_,
+        (ToolKey::Wildcard, _) => Some(Approval::Standing),
+        (ToolKey::McpServer { server: rs }, ToolKey::McpTool { server: as_, .. }) => {
+            (rs == as_).then_some(Approval::Standing)
+        }
+        (ToolKey::Native(a), ToolKey::Native(b)) => (a == b).then_some(Approval::ForThisTool),
+        (ToolKey::McpServer { server: rs }, ToolKey::McpServer { server: as_ }) => {
+            (rs == as_).then_some(Approval::ForThisTool)
+        }
         (
             ToolKey::McpTool {
                 server: rs,
@@ -661,8 +700,8 @@ fn matches_rule(rule_key: &ToolKey, actual: &ToolKey) -> bool {
                 server: as_,
                 tool: at,
             },
-        ) => rs == as_ && rt == at,
-        _ => false,
+        ) => (rs == as_ && rt == at).then_some(Approval::ForThisTool),
+        _ => None,
     }
 }
 
@@ -1563,6 +1602,51 @@ mod tests {
         ));
     }
 
+    /// The gate itself, apart from any one source of approval. A tool plan mode
+    /// cannot read is the only case where how squarely a yes was aimed changes
+    /// the answer.
+    #[test_case(&mcp_tool_key(), true,  Approval::Standing    => false ; "opaque_tool_refuses_a_standing_yes")]
+    #[test_case(&mcp_tool_key(), true,  Approval::ForThisTool => true  ; "opaque_tool_takes_an_answer_about_itself")]
+    #[test_case(&mcp_tool_key(), false, Approval::Standing    => true  ; "no_plan_mode_takes_anything")]
+    #[test_case(&native_key(),   true,  Approval::Standing    => true  ; "native_tool_is_never_opaque")]
+    fn the_gate_only_ranks_approvals_for_a_tool_plan_mode_cannot_read(
+        tool: &ToolKey,
+        plan_mode: bool,
+        approval: Approval,
+    ) -> bool {
+        ApprovalGate::new(tool, plan_mode.then_some(Path::new(PLAN_FILE))).accepts(approval)
+    }
+
+    /// A rule that was not written for this exact tool is a standing approval
+    /// the user never gave it, so plan mode holds it back the way it holds back
+    /// yolo. Denies are not approvals and keep winning.
+    #[test_case(ToolKey::Wildcard,  Effect::Allow, true  => PROMPTS ; "wildcard_allow_prompts_in_plan_mode")]
+    #[test_case(mcp_server_key(),   Effect::Allow, true  => PROMPTS ; "server_allow_prompts_in_plan_mode")]
+    #[test_case(mcp_tool_key(),     Effect::Allow, true  => ALLOWED ; "exact_tool_allow_decides_in_plan_mode")]
+    #[test_case(ToolKey::Wildcard,  Effect::Deny,  true  => DENIED  ; "wildcard_deny_denies_in_plan_mode")]
+    #[test_case(ToolKey::Wildcard,  Effect::Allow, false => ALLOWED ; "wildcard_allow_outside_plan_mode")]
+    #[test_case(mcp_server_key(),   Effect::Allow, false => ALLOWED ; "server_allow_outside_plan_mode")]
+    #[test_case(ToolKey::Wildcard,  Effect::Deny,  false => DENIED  ; "wildcard_deny_outside_plan_mode")]
+    fn plan_mode_holds_back_rules_not_written_for_the_mcp_tool(
+        rule_key: ToolKey,
+        effect: Effect,
+        plan_mode: bool,
+    ) -> &'static str {
+        let mgr = mgr_with(
+            make_config(vec![PermissionRule {
+                tool: rule_key,
+                scope: None,
+                effect,
+            }]),
+            PathBuf::from(TEST_CWD),
+        );
+        outcome(mgr.check(
+            &mcp_tool_key(),
+            MCP_ARGS,
+            plan_mode.then_some(Path::new(PLAN_FILE)),
+        ))
+    }
+
     #[test]
     fn plugin_rules_apply_to_manager_and_forks() {
         let store = Arc::new(PluginRuleStore::default());
@@ -1613,6 +1697,8 @@ mod tests {
     }
 
     const PLAN_FILE: &str = "/home/user/.local/state/craft/plans/test.md";
+    const TEST_CWD: &str = "/tmp";
+    const MCP_SERVER: &str = "deepwiki";
     const MCP_TOOL: &str = "deepwiki.search";
     const MCP_ARGS: &str = "{\"q\":\"craft\"}";
     const READ_TOOL: &str = "read";
@@ -1621,6 +1707,20 @@ mod tests {
     const ALLOWED: &str = "allowed";
     const DENIED: &str = "denied";
     const PROMPTS: &str = "prompts";
+
+    fn mcp_tool_key() -> ToolKey {
+        ToolKey::parse(MCP_TOOL).expect("test tool key parses")
+    }
+
+    fn native_key() -> ToolKey {
+        ToolKey::Native(READ_TOOL.into())
+    }
+
+    fn mcp_server_key() -> ToolKey {
+        ToolKey::McpServer {
+            server: MCP_SERVER.into(),
+        }
+    }
 
     fn outcome(check: PermissionCheck) -> &'static str {
         match check {
