@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use mlua::{Lua, Result as LuaResult, Table};
@@ -16,6 +16,17 @@ const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 const CF_MITIGATED: &str = "cf-mitigated";
 const CF_CHALLENGE: &str = "challenge";
 const FALLBACK_USER_AGENT: &str = "craft";
+
+/// Reserved IPv4 ranges the standard library has no predicate for. Carrier
+/// grade NAT is the one that bites: Alibaba Cloud parks its instance metadata
+/// service on it at 100.100.100.200. Then protocol assignments, benchmarking,
+/// and everything from 240.0.0.0 up, which takes in the broadcast address.
+const RESERVED_V4_NETS: [(Ipv4Addr, u8); 4] = [
+    (Ipv4Addr::new(100, 64, 0, 0), 10),
+    (Ipv4Addr::new(192, 0, 0, 0), 24),
+    (Ipv4Addr::new(198, 18, 0, 0), 15),
+    (Ipv4Addr::new(240, 0, 0, 0), 4),
+];
 
 struct RequestParams {
     url: String,
@@ -301,7 +312,11 @@ async fn resolve_and_check_ssrf(url: &str) -> Result<(String, Vec<SocketAddr>), 
 fn is_private_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || is_reserved_v4(*v4)
         }
         IpAddr::V6(v6) => {
             if v6.is_loopback() || v6.is_unspecified() {
@@ -314,7 +329,9 @@ fn is_private_ip(ip: &IpAddr) -> bool {
                 return is_private_ip(&IpAddr::V4(v4));
             }
             let bytes = v6.octets();
-            if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 {
+            // fe80::/10 link-local and fec0::/10 site-local. Site-local was
+            // deprecated rather than withdrawn, and stacks still route it.
+            if bytes[0] == 0xfe && matches!(bytes[1] & 0xc0, 0x80 | 0xc0) {
                 return true;
             }
             if bytes[0] & 0xfe == 0xfc {
@@ -323,6 +340,26 @@ fn is_private_ip(ip: &IpAddr) -> bool {
             false
         }
     }
+}
+
+fn ip_in_net(ip: IpAddr, net: IpAddr, prefix: u8) -> bool {
+    match (ip, net) {
+        (IpAddr::V4(ip), IpAddr::V4(net)) => {
+            let shift = 32 - prefix;
+            (u32::from(ip) >> shift) == (u32::from(net) >> shift)
+        }
+        (IpAddr::V6(ip), IpAddr::V6(net)) => {
+            let shift = 128 - prefix;
+            (u128::from(ip) >> shift) == (u128::from(net) >> shift)
+        }
+        _ => false,
+    }
+}
+
+fn is_reserved_v4(v4: Ipv4Addr) -> bool {
+    RESERVED_V4_NETS
+        .iter()
+        .any(|(net, prefix)| ip_in_net(v4.into(), (*net).into(), *prefix))
 }
 
 fn validate_and_upgrade_url(url: &str) -> Result<String, String> {
@@ -430,6 +467,43 @@ mod tests {
     #[test_case(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)), false ; "v6_global_unicast")]
     fn is_private_ip_cases(ip: IpAddr, expected: bool) {
         assert_eq!(is_private_ip(&ip), expected);
+    }
+
+    /// Ranges the standard library has no predicate for. Each is checked in
+    /// both spellings, because `::ffff:100.100.100.200` reaches the same host
+    /// as `100.100.100.200`.
+    #[test_case(Ipv4Addr::new(100, 100, 100, 200) ; "aliyun_metadata_in_cgnat")]
+    #[test_case(Ipv4Addr::new(100, 64, 0, 0) ; "cgnat_first")]
+    #[test_case(Ipv4Addr::new(100, 127, 255, 255) ; "cgnat_last")]
+    #[test_case(Ipv4Addr::new(192, 0, 0, 1) ; "ietf_protocol_assignments")]
+    #[test_case(Ipv4Addr::new(198, 18, 0, 1) ; "benchmarking_first")]
+    #[test_case(Ipv4Addr::new(198, 19, 255, 255) ; "benchmarking_last")]
+    #[test_case(Ipv4Addr::new(240, 0, 0, 1) ; "reserved_class_e")]
+    #[test_case(Ipv4Addr::BROADCAST ; "broadcast")]
+    fn reserved_v4_is_private_in_both_spellings(v4: Ipv4Addr) {
+        assert!(is_private_ip(&IpAddr::V4(v4)));
+        assert!(is_private_ip(&IpAddr::V6(v4.to_ipv6_mapped())));
+    }
+
+    /// The address just past each range, so a prefix that is one bit too wide
+    /// does not pass unnoticed.
+    #[test_case(Ipv4Addr::new(100, 63, 255, 255) ; "below_cgnat")]
+    #[test_case(Ipv4Addr::new(100, 128, 0, 0) ; "above_cgnat")]
+    #[test_case(Ipv4Addr::new(192, 0, 1, 1) ; "above_ietf_protocol_assignments")]
+    #[test_case(Ipv4Addr::new(198, 20, 0, 0) ; "above_benchmarking")]
+    #[test_case(Ipv4Addr::new(198, 17, 255, 255) ; "below_benchmarking")]
+    fn addresses_beside_the_reserved_ranges_stay_public(v4: Ipv4Addr) {
+        assert!(!is_private_ip(&IpAddr::V4(v4)));
+        assert!(!is_private_ip(&IpAddr::V6(v4.to_ipv6_mapped())));
+    }
+
+    #[tokio::test]
+    async fn resolve_ssrf_aliyun_metadata_blocked() {
+        assert!(
+            resolve_and_check_ssrf("https://100.100.100.200")
+                .await
+                .is_err()
+        );
     }
 
     #[test_case("https://example.com", Some("example.com") ; "simple_domain")]
