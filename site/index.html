@@ -89,17 +89,7 @@
       transition: color 0.2s;
     }
     .nav-right a:hover { color: var(--deep-navy); }
-    .nav-cta {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      background: var(--deep-navy) !important;
-      color: var(--cream) !important;
-      padding: 0.45rem 1.1rem;
-      border-radius: 8px;
-      transition: opacity 0.2s !important;
-    }
-    .nav-cta:hover { opacity: 0.85; }
+    .nav-github { display: inline-flex; align-items: center; gap: 0.35rem; }
 
     /* ── STAR BADGE ── */
     .star-badge {
@@ -122,14 +112,17 @@
     }
     .star-badge svg {
       flex-shrink: 0;
+      fill: currentColor;
+      opacity: 0.5;
+      transition: fill 0.2s, opacity 0.2s;
     }
-    .nav-cta .star-badge.loaded,
     .btn-primary .star-badge.loaded {
       margin-left: 0.15rem;
       padding-left: 0.5rem;
       border-left: 1px solid oklch(80% 0.02 90 / 0.25);
     }
-    .nav-cta .star-badge svg,
+    .nav-github .star-badge { margin-left: 0.1rem; }
+    .nav-github:hover .star-badge svg { fill: oklch(74% 0.15 85); opacity: 1; }
     .btn-primary .star-badge svg { fill: oklch(80% 0.10 85); }
 
     /* ── HERO ── */
@@ -1153,7 +1146,8 @@
 
     /* ── RESPONSIVE ── */
     @media (max-width: 768px) {
-      .nav-right a:not(.nav-cta):not([href="/docs/"]) { display: none; }
+      .nav-right a:not(.nav-github):not([href="/docs/"]) { display: none; }
+      .nav-label { display: none; }
       .hero { padding-inline: 1rem; }
       .hero-grid { grid-template-columns: 1fr; text-align: center; }
       .hero-intro { display: flex; flex-direction: column; align-items: center; }
@@ -1186,7 +1180,7 @@
   <a href="#" class="nav-logo">craft</a>
   <div class="nav-right">
     <a href="/docs/">Docs</a>
-    <a href="https://github.com/craft-build/craft" target="_blank" rel="noopener" class="nav-cta"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.92...
+    <a href="https://github.com/craft-build/craft" target="_blank" rel="noopener" class="nav-github" aria-label="GitHub"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.92...
   </div>
 </nav>
 
@@ -1226,7 +1220,7 @@
     <div class="hero-actions">
       <a href="https://github.com/craft-build/craft" target="_blank" rel="noopener" class="btn-primary">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98...
-        GitHub<span class="star-badge" data-stars><svg width="11" height="11" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><span data-star-count></span></span>
+        <span class="nav-label">GitHub</span><span class="star-badge" data-stars><svg width="11" height="11" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><span data-star-count></span></span>
       </a>
       <a href="#features" class="btn-ghost">Features</a>
     </div>
