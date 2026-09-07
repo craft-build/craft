@@ -370,11 +370,44 @@ craft.create_autocmd("ModelChanged", {
 })
 ```
 
+### Turn and context events
+
+Every host event carries `data.session_id`. `ToolStart` and `ToolDone` also carry `data.tool_id` and `data.tool`.
+
+- `TurnEnd` fires once at the end of a whole turn, main session only. It carries `data.reason` (`"finished"`, `"max_tokens"`, `"max_turns"`, or `"cancelled"`), `data.usage` (the four token fields, cache included), `data.cost`, `data.list_cost` (the un-subsidised list price), `data.context_size`, `data.context_window`, and `data.num_turns` (model round-trips the turn took). A manual `/compact` ends its run without ending a turn, so it stays quiet.
+- `TurnError` carries `data.message`.
+- `AutoCompacting` carries `data.context_size` and `data.context_window` at trigger time.
+- `CompactionDone` carries `data.context_size_before`, `data.context_size_after`, and `data.context_window`.
+- `PlanReady` (TUI only) carries `data.path`, the plan file the agent just wrote. Fires once per draft.
+
+```lua
+craft.create_autocmd("TurnEnd", {
+    callback = function(ev)
+        if ev.data.reason == "max_tokens" then
+            craft.ui.notify("turn hit the token limit")
+        end
+    end,
+})
+```
+
+For the running gauge between turns, read `craft.session.read()`.
+
 ### `SessionEnd`
 
 `craft.create_autocmd("SessionEnd", { callback = ... })` fires whenever a session goes away: a `/reset`, loading or opening another session, deleting a tab, quitting the TUI, closing an ACP session, and the end of a headless run. The payload carries `data.session_id` naming the session that ended, `data.reason` naming the path, and `data.deadline_ms`. `reason` is one of `"reset"` (TUI `/new`), `"load"`, `"delete"` (the tab was closed), `"shutdown"` (the process is exiting), `"reload"` (`/reload` is rebuilding the plugin host, and the session carries on in the new one), `"replaced"` (an ACP client took the session's place), or `"completed"` (a headless run finished). Use it to drop caches or state tied to that session. The session that replaces it announces itself with `SessionStart`.
 
 The last four reasons are exit paths: the host is already tearing down, so the UI is detached (`craft.fn` roundtrips fail right away) and every handler shares one grace period. `data.deadline_ms` says how much of it is left when the handler runs; write state out with `craft.fs` and do not park. On the other paths nothing waits and `data.deadline_ms` is nil.
+
+## `craft.session`
+
+- `craft.session.read({ session = "..." })` returns a one-call snapshot of a session: queue, usage, context, cost, mode, and status. Reads the focused session, or the one you name when you act on a background tab. `usage` and `cost` include subagent spend, `queue = { count }` counts pending user messages (nil under headless drivers), and `status` is `"idle"`, `"working"`, or `"needs_input"`.
+
+```lua
+local s = craft.session.read()
+if s.context_size > s.context_window * 0.8 then
+    craft.ui.notify("context is nearly full")
+end
+```
 
 ## `craft.ui`
 

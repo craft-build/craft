@@ -244,6 +244,7 @@ async fn drain(
                 usage,
                 num_turns,
                 reason,
+                ..
             } => {
                 outcome.usage = *usage;
                 outcome.num_turns = *num_turns;

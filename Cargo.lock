@@ -2287,6 +2287,7 @@ dependencies = [
  "craft-highlight",
  "craft-markdown",
  "craft-pack",
+ "craft-providers",
  "craft-sandbox",
  "craft-storage",
  "criterion",

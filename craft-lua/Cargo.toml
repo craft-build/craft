@@ -17,6 +17,7 @@ craft-config = { workspace = true }
 craft-highlight = { workspace = true }
 craft-markdown = { workspace = true }
 craft-pack = { workspace = true }
+craft-providers = { workspace = true }
 craft-sandbox = { workspace = true }
 mlua = { workspace = true }
 pin-project-lite = { workspace = true }

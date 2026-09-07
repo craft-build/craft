@@ -298,6 +298,9 @@ pub struct ToolContext {
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub opts: RequestOptions,
     pub subagent_cancels: Arc<CancelMap<String>>,
+    /// Shared with the run that spawned this tool, so a subagent's spend lands
+    /// in the parent turn's totals.
+    pub ledger: Arc<crate::RunLedger>,
     pub compression: craft_config::CompressionConfig,
     pub(crate) compression_store: crate::agent::compression_store::SharedCompressionStore,
     pub findings_store: Option<crate::agent::SharedFindingsStore>,
@@ -957,6 +960,7 @@ pub(crate) fn providerless_ctx(
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
         opts: RequestOptions::default(),
         subagent_cancels: Arc::new(CancelMap::new()),
+        ledger: Arc::default(),
         compression: craft_config::CompressionConfig::default(),
         compression_store: crate::agent::compression_store::shared_store(),
         findings_store: None,
@@ -1026,6 +1030,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         prompt_slots: Arc::clone(&env.prompt_slots),
         opts: RequestOptions::default(),
         subagent_cancels: Arc::new(CancelMap::new()),
+        ledger: Arc::default(),
         compression: env.compression.clone(),
         compression_store: crate::agent::compression_store::shared_store(),
         findings_store: None,

@@ -249,6 +249,7 @@ pub async fn run_subagent(
                 file_tracker: FileReadTracker::fresh(),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 subagent_cancels: Arc::new(CancelMap::new()),
+                ledger: crate::RunLedger::child(&ctx.ledger),
                 compression: ctx.compression.clone(),
                 model_policy: Arc::clone(&ctx.model_policy),
                 findings_store: None,

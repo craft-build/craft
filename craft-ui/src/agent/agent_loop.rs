@@ -301,6 +301,7 @@ impl AgentLoop {
                 file_tracker: Arc::clone(&self.file_tracker),
                 prompt_slots: std::sync::Arc::new(prompt_slots),
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
+                ledger: Arc::new(craft_agent::RunLedger::default()),
                 registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
                 compression: self.compression.clone(),
                 model_policy: Arc::clone(&self.model_policy),
@@ -456,6 +457,7 @@ impl AgentLoop {
                     file_tracker: Arc::clone(&self.file_tracker),
                     prompt_slots: std::sync::Arc::new(prompt_slots),
                     subagent_cancels: Arc::clone(&self.subagent_cancels),
+                    ledger: Arc::new(craft_agent::RunLedger::default()),
                     registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
                     compression: self.compression.clone(),
                     model_policy: Arc::clone(&self.model_policy),
@@ -568,6 +570,10 @@ impl AgentLoop {
         // the cancel message.
         let _ = event_tx.send(AgentEvent::Done {
             usage: TokenUsage::default(),
+            cost: None,
+            list_cost: None,
+            context_size: 0,
+            context_window: 0,
             num_turns: 0,
             reason: DoneReason::Cancelled,
         });

@@ -424,6 +424,9 @@ pub fn map_done_reason(reason: DoneReason) -> StopReason {
         // The approval gate is a Craft-only pause; ACP has no equivalent, so
         // surface it as EndTurn (the ACP session simply ends from its view).
         DoneReason::AwaitingGoalApproval => StopReason::EndTurn,
+        // Manual `/compact` isn't a turn boundary; ACP has no dedicated
+        // stop reason for housekeeping, so surface it as EndTurn.
+        DoneReason::Compact => StopReason::EndTurn,
     }
 }
 

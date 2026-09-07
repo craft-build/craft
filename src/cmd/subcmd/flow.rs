@@ -180,6 +180,7 @@ async fn run_flow(
             file_tracker: Arc::new(craft_agent::tools::FileReadTracker::new()),
             prompt_slots: Arc::new(plugin_host.event_handle().collect_prompt_slots()),
             subagent_cancels: Arc::new(craft_agent::cancel::CancelMap::new()),
+            ledger: Arc::new(craft_agent::RunLedger::default()),
             registry: Arc::clone(craft_agent::tools::ToolRegistry::native_arc()),
             compression: config.compression.clone(),
             model_policy: Arc::new(config.provider.model_policy.clone()),

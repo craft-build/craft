@@ -7,7 +7,18 @@ use craft_storage::id::CraftId;
 use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::api::util::command::{SessionRequest, UiAction, ui_json_roundtrip};
+use crate::api::util::convert::json_to_lua;
 use crate::api::util::pair::{Pair, err_pair};
+
+/// Answers `craft.session.read` for a driver that has no UI to ask. Takes the
+/// optional session id from Lua and returns a serialized
+/// [`crate::SessionSnapshot`].
+pub type SessionSnapshotFn =
+    Box<dyn Fn(Option<&str>) -> Result<serde_json::Value, String> + Send + Sync + 'static>;
+
+/// Set by headless drivers so `craft.session.read` answers without a UI. The
+/// app data slot keeps the lookup off the UI channel entirely.
+pub struct SessionSnapshotSlot(pub SessionSnapshotFn);
 
 const BLANK_NOTIFY_ERR: &str = "text must not be blank";
 const SESSION_REQUIRED_ERR: &str = "session is required";
@@ -59,6 +70,31 @@ pub(crate) fn create_session_table(
             move |lua, ()| {
                 let tx = tx.clone();
                 async move { roundtrip(lua, tx, SessionRequest::Current).await }
+            }
+        })?,
+    )?;
+
+    t.set(
+        "read",
+        lua.create_async_function({
+            let tx = tx.clone();
+            move |lua, opts: Option<Table>| {
+                let tx = tx.clone();
+                async move {
+                    let id = match opts {
+                        Some(t) => t.get::<Option<String>>("session")?,
+                        None => None,
+                    };
+                    // Headless drivers install a provider, the UI leaves the slot empty and
+                    // answers from its event loop, which owns the live session runtimes.
+                    if let Some(slot) = lua.app_data_ref::<SessionSnapshotSlot>() {
+                        return match (slot.0)(id.as_deref()) {
+                            Ok(value) => Ok((Some(json_to_lua(&lua, &value)?), None)),
+                            Err(msg) => Ok(err_pair(msg)),
+                        };
+                    }
+                    roundtrip(lua, tx, SessionRequest::Read { id }).await
+                }
             }
         })?,
     )?;

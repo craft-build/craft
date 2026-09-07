@@ -22,6 +22,7 @@ use craft_agent::{
     ToolOutput,
 };
 use craft_config::{CompressionConfig, ModelPolicy};
+use craft_lua::session_snapshot::{HeadlessMeta, HeadlessSnapshot, MODE_BUILD, MODE_PLAN};
 use craft_providers::model::Model;
 use craft_providers::{ImageSource, Message, StopReason, Timeouts, TokenUsage, add_cost};
 use craft_storage::StateDir;
@@ -443,6 +444,9 @@ pub struct SdkParams {
     pub fast: bool,
     pub model_policy: Arc<ModelPolicy>,
     pub plugin_rules: Arc<PluginRuleStore>,
+    /// Plugins loaded here still want turn events, and this is what fires
+    /// them the way `craft-ui` does.
+    pub lua_handle: craft_lua::EventHandle,
 }
 
 struct Shared {
@@ -464,6 +468,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
         fast,
         model_policy,
         plugin_rules,
+        lua_handle,
     } = params;
     cli.warn_ignored_flags();
     if let Some(max) = cli.max_turns {
@@ -543,6 +548,22 @@ pub async fn run(params: SdkParams) -> Result<()> {
         pending: HashSet::new(),
     }));
 
+    let snapshot = HeadlessSnapshot::default();
+    let shared_for_mode = Arc::clone(&shared);
+    snapshot.install(
+        &lua_handle,
+        HeadlessMeta {
+            id: handle.session_id.to_string(),
+            cwd: working_dir.clone(),
+            model: startup_model.spec(),
+        },
+        // `set_permission_mode` can flip this mid-run, so read it per call.
+        move || match shared_for_mode.lock().unwrap().permission_mode {
+            PermissionMode::Plan => MODE_PLAN,
+            _ => MODE_BUILD,
+        },
+    );
+
     let pump = EventPump {
         writer: writer.clone(),
         shared: Arc::clone(&shared),
@@ -553,6 +574,9 @@ pub async fn run(params: SdkParams) -> Result<()> {
         result_text: String::new(),
         cost: None,
         request_counter: 0,
+        lua_handle: lua_handle.clone(),
+        session_id: handle.session_id.to_string(),
+        snapshot,
     }
     .spawn(handle.event_rx.clone());
 
@@ -858,12 +882,24 @@ struct EventPump {
     /// the rate it paid.
     cost: Option<f64>,
     request_counter: u64,
+    lua_handle: craft_lua::EventHandle,
+    session_id: String,
+    snapshot: HeadlessSnapshot,
 }
 
 impl EventPump {
     fn spawn(mut self, event_rx: Receiver<Envelope>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Ok(envelope) = event_rx.recv_async().await {
+                // Folded in first, so a plugin handling `TurnEnd` finds the
+                // finished totals when it calls `craft.session.read()`.
+                self.snapshot.observe(&envelope);
+                craft_lua::agent_autocmd::dispatch(
+                    &self.lua_handle,
+                    &self.session_id,
+                    &envelope,
+                    envelope.subagent.is_some(),
+                );
                 if let Err(e) = self.handle(envelope) {
                     warn!(error = %e, "sdk event pump stopped");
                     break;
@@ -963,8 +999,8 @@ impl EventPump {
             | AgentEvent::BatchProgress(_)
             | AgentEvent::QueueItemConsumed { .. }
             | AgentEvent::QueueDrained
-            | AgentEvent::AutoCompacting
-            | AgentEvent::CompactionDone
+            | AgentEvent::AutoCompacting { .. }
+            | AgentEvent::CompactionDone { .. }
             | AgentEvent::AuthRequired
             | AgentEvent::SubagentHistory { .. }
             | AgentEvent::ToolSnapshot { .. }
@@ -1050,6 +1086,7 @@ impl EventPump {
                 usage,
                 num_turns,
                 reason,
+                ..
             } => {
                 // An interrupted run leaves a partial answer, so it is not a success.
                 let is_error = *reason == DoneReason::Cancelled;

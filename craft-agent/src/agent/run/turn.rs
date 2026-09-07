@@ -195,10 +195,9 @@ impl<'h> Agent<'h> {
             "API response received"
         );
 
+        self.context_size = response.usage.total_input();
         self.emit_turn_complete(&response)?;
         let usage = response.usage;
-        self.total_usage += usage;
-        self.context_size = usage.total_input();
         self.compaction
             .cache_tracker
             .update(&usage, self.history.len());
@@ -403,6 +402,7 @@ impl<'h> Agent<'h> {
             code_tools: Arc::clone(&self.tool_state.code_tools),
             prompt_slots: Arc::clone(&self.prompt_slots),
             subagent_cancels: Arc::clone(&self.tool_state.subagent_cancels),
+            ledger: Arc::clone(&self.ledger),
             opts: self.io.opts,
             compression: self.compaction.compression.clone(),
             registry: Arc::clone(&self.tool_state.registry),

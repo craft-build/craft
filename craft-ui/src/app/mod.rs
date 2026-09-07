@@ -1373,29 +1373,12 @@ impl App {
             return vec![];
         }
 
-        match &envelope.event {
-            AgentEvent::ToolStart(event) => {
-                self.lua_event_handle.fire_autocmd(
-                    "ToolStart",
-                    serde_json::json!({
-                        "session_id": self.state.session.id,
-                        "tool_id": event.id,
-                        "tool": event.tool,
-                    }),
-                );
-            }
-            AgentEvent::ToolDone(event) => {
-                self.lua_event_handle.fire_autocmd(
-                    "ToolDone",
-                    serde_json::json!({
-                        "session_id": self.state.session.id,
-                        "tool_id": event.id,
-                        "tool": event.tool,
-                    }),
-                );
-            }
-            _ => {}
-        }
+        craft_lua::agent_autocmd::dispatch(
+            &self.lua_event_handle,
+            &self.state.session.id,
+            &envelope,
+            envelope.subagent.is_some(),
+        );
 
         if let AgentEvent::SubagentHistory {
             tool_use_id,
@@ -1546,10 +1529,6 @@ impl App {
                     self.subagent_answers.clear();
                     if !is_goal_gate {
                         self.status = Status::Idle;
-                        self.lua_event_handle.fire_autocmd(
-                            "TurnEnd",
-                            serde_json::json!({ "session_id": self.state.session.id }),
-                        );
                     }
                     if self.exit_on_done && !is_goal_gate {
                         self.exit_request = ExitRequest::Success;
@@ -1563,8 +1542,6 @@ impl App {
                     self.recoverable_queue = self.queue.text_messages();
                     self.queue.clear();
                     self.chat_index.clear();
-                    self.lua_event_handle
-                        .fire_autocmd("TurnError", serde_json::json!({ "message": message }));
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Error;
                     }

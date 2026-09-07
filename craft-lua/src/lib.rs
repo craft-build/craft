@@ -1,3 +1,4 @@
+pub mod agent_autocmd;
 mod api;
 mod error;
 pub mod language;
@@ -5,6 +6,7 @@ mod loader;
 mod pack;
 pub(crate) mod plugin_permissions;
 mod runtime;
+pub mod session_snapshot;
 pub mod terminal_backend;
 
 pub use api::embed::EmbedChannel;
@@ -12,6 +14,7 @@ pub use api::hooks::LuaHooks;
 pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::pack::{Declared, PackOp};
+pub use api::session::SessionSnapshotFn;
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,
     HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest, SessionRequest,
@@ -26,6 +29,7 @@ pub use pack::{
 };
 pub use plugin_permissions::{Permission, PluginPermissions, Requested, denied_error};
 pub use runtime::{KILL_GRACE, MAX_INFLIGHT_TOOLS, RestoreItem, SharedSandboxConfig};
+pub use session_snapshot::{SessionQueueSnapshot, SessionSnapshot};
 pub use terminal_backend::{
     JobEvent as TerminalEvent, LocalTerminal, TerminalBackend, TerminalFuture, TerminalHandle,
     TerminalSpec, local_backend,

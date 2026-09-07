@@ -178,6 +178,10 @@ fn agent_msg_with_run_id(event: AgentEvent, run_id: u64) -> Msg {
 fn done() -> AgentEvent {
     AgentEvent::Done {
         usage: TokenUsage::default(),
+        cost: None,
+        list_cost: None,
+        context_size: 0,
+        context_window: 0,
         num_turns: 1,
         reason: DoneReason::EndTurn,
     }
@@ -327,6 +331,10 @@ fn reset_session_clears_exit_request_source() {
     app.run_id = 1;
     app.update(agent_msg(AgentEvent::Done {
         usage: TokenUsage::default(),
+        cost: None,
+        list_cost: None,
+        context_size: 0,
+        context_window: 0,
         num_turns: 1,
         reason: DoneReason::EndTurn,
     }));

@@ -20,6 +20,7 @@ use craft_agent::permissions::PluginRuleStore;
 use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{AgentConfig, AgentEvent, DoneReason, Envelope, ImageSource, PermissionsConfig};
 use craft_config::ModelPolicy;
+use craft_lua::session_snapshot::{HeadlessMeta, HeadlessSnapshot, MODE_BUILD};
 use craft_lua::{EventHandle, SessionEndReason};
 use craft_providers::model::Model;
 use craft_providers::{TokenUsage, add_cost};
@@ -224,7 +225,29 @@ pub async fn run(
     let mut cost = None;
     let mut stop_reason: Option<DoneReason> = None;
 
+    let snapshot = HeadlessSnapshot::default();
+    snapshot.install(
+        &lua_handle,
+        HeadlessMeta {
+            id: session_id.to_string(),
+            cwd: cwd.clone(),
+            model: model.spec(),
+        },
+        // `craft -p` always runs the agent in build mode
+        // (`headless::spawn` hardcodes `AgentMode::Build`).
+        || MODE_BUILD,
+    );
+
     while let Ok(envelope) = event_rx.recv_async().await {
+        // Folded in first, so a plugin handling `TurnEnd` finds the finished
+        // totals when it calls `craft.session.read()`.
+        snapshot.observe(&envelope);
+        craft_lua::agent_autocmd::dispatch(
+            &lua_handle,
+            &session_id,
+            &envelope,
+            envelope.subagent.is_some(),
+        );
         let Envelope {
             ref event,
             ref subagent,
@@ -246,8 +269,8 @@ pub async fn run(
             | AgentEvent::BatchProgress(_)
             | AgentEvent::QueueItemConsumed { .. }
             | AgentEvent::QueueDrained
-            | AgentEvent::AutoCompacting
-            | AgentEvent::CompactionDone
+            | AgentEvent::AutoCompacting { .. }
+            | AgentEvent::CompactionDone { .. }
             | AgentEvent::AuthRequired
             | AgentEvent::PermissionRequest { .. }
             | AgentEvent::QuestionRequest { .. }
@@ -315,9 +338,14 @@ pub async fn run(
                 usage: u,
                 num_turns: turns,
                 reason,
+                cost: dcost,
+                ..
             } => {
                 num_turns = *turns;
                 usage = *u;
+                // The agent's own ledger also counts compaction spend, which
+                // summing the turns misses.
+                cost = (*dcost).or(cost);
                 stop_reason = Some(*reason);
                 break;
             }

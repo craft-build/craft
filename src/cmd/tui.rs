@@ -295,6 +295,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             fast,
             model_policy: Arc::new(stack.config.provider.model_policy.clone()),
             plugin_rules: stack.plugin_host.plugin_rules(),
+            lua_handle: stack.plugin_host.event_handle(),
         })
         .await
         .context("run SDK mode")?;

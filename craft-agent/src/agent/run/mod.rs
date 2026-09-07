@@ -23,7 +23,7 @@ use crate::permissions::PermissionManager;
 use crate::tools::FileReadTracker;
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, DoneReason, EventSender,
-    InterruptSource, SessionMailbox,
+    InterruptSource, RunLedger, SessionMailbox,
 };
 use craft_config::{ModelPolicy, ToolOutputLines};
 
@@ -71,6 +71,8 @@ pub struct AgentParams {
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub subagent_cancels: Arc<CancelMap<String>>,
+    /// Subagents inherit this, so a turn's totals cover everything it spawned.
+    pub ledger: Arc<RunLedger>,
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub compression: craft_config::CompressionConfig,
     pub model_policy: Arc<ModelPolicy>,
@@ -108,7 +110,7 @@ pub struct Agent<'h> {
     config: AgentConfig,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     findings_store: Option<super::findings_store::SharedFindingsStore>,
-    total_usage: TokenUsage,
+    ledger: Arc<RunLedger>,
     context_size: u32,
     num_turns: u32,
     io: AgentIo,
@@ -153,7 +155,7 @@ impl<'h> Agent<'h> {
             config: params.config,
             prompt_slots: params.prompt_slots,
             findings_store: params.findings_store,
-            total_usage: TokenUsage::default(),
+            ledger: params.ledger,
             context_size: 0,
             num_turns: 0,
             io: AgentIo {
@@ -554,31 +556,37 @@ impl<'h> Agent<'h> {
     }
 
     fn emit_turn_complete(&self, response: &StreamResponse) -> Result<(), AgentError> {
+        let fast = self.io.opts.clamped(&self.io.model).fast;
+        let cost = self.io.model.billed_cost(&response.usage, fast);
+        let list_cost = self.io.model.list_cost(&response.usage, fast);
+        self.ledger.add(response.usage, cost, list_cost);
         self.io.event_tx.send(AgentEvent::TurnComplete(Box::new(
             crate::TurnCompleteEvent {
                 message: response.message.clone(),
                 usage: response.usage,
                 model: self.io.model.id.clone(),
-                cost: self
-                    .io
-                    .model
-                    .billed_cost(&response.usage, self.io.opts.fast),
-                context_size: Some(response.usage.context_tokens()),
+                cost,
+                context_size: Some(self.context_size),
                 context_window: self.io.model.context_window,
             },
         )))
     }
 
     fn emit_done(&self, reason: DoneReason) -> Result<(), AgentError> {
+        let totals = self.ledger.totals();
         info!(
             self.num_turns,
-            total_input = self.total_usage.input,
-            total_output = self.total_usage.output,
+            total_input = totals.usage.input,
+            total_output = totals.usage.output,
             %reason,
             "agent run completed"
         );
         self.io.event_tx.send(AgentEvent::Done {
-            usage: self.total_usage,
+            usage: totals.usage,
+            cost: totals.cost,
+            list_cost: totals.list_cost,
+            context_size: self.context_size,
+            context_window: self.io.model.context_window,
             num_turns: self.num_turns,
             reason,
         })

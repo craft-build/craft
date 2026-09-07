@@ -391,6 +391,7 @@ impl Task {
                     file_tracker: FileReadTracker::fresh(),
                     prompt_slots: Arc::clone(&ctx.prompt_slots),
                     subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
+                    ledger: crate::RunLedger::child(&ctx.ledger),
                     registry: Arc::clone(ToolRegistry::native_arc()),
                     compression: ctx.compression.clone(),
                     model_policy: Arc::clone(&ctx.model_policy),

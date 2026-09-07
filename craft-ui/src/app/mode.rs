@@ -107,6 +107,12 @@ impl App {
                 }
                 self.state.plan.mark_ready();
                 self.plan_form.on_plan_ready();
+                // The path is the whole point here, so with no path we stay
+                // quiet instead of handing a plugin an empty one to open.
+                if let Some(path) = self.state.plan.path().map(|p| p.display().to_string()) {
+                    self.lua_event_handle
+                        .fire_autocmd("PlanReady", serde_json::json!({ "path": path }));
+                }
             }
             PlanTrigger::InteractivePrompt => {
                 if self.state.plan.is_ready() {

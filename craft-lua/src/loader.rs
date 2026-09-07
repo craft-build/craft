@@ -969,6 +969,16 @@ impl EventHandle {
         });
     }
 
+    /// Headless drivers install their own provider so `craft.session.read` has
+    /// something to answer with instead of "no interactive UI attached". The UI
+    /// leaves the slot empty and answers through its event loop, which owns the
+    /// live session runtimes.
+    pub fn install_session_snapshot(&self, provider: crate::api::session::SessionSnapshotFn) {
+        let _ = self
+            .tx
+            .try_send(Request::InstallSessionSnapshot { provider });
+    }
+
     /// Queue the `SessionEnd` dispatch and the reap of that session's jobs,
     /// then return. Nothing waits here, so handlers get no deadline and the
     /// UI is still there to answer them. Call from every queued session-end

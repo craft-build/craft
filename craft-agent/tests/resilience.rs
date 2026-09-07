@@ -349,6 +349,7 @@ fn make_agent_params(model: Model, provider: Arc<dyn Provider>) -> AgentParams {
         file_tracker: FileReadTracker::fresh(),
         prompt_slots: Arc::new(ResolvedSlots::default()),
         subagent_cancels: Arc::new(CancelMap::new()),
+        ledger: Arc::new(craft_agent::RunLedger::default()),
         registry: Arc::new(ToolRegistry::with_natives()),
         compression: CompressionConfig::default(),
         model_policy: Arc::new(craft_config::ModelPolicy::default()),

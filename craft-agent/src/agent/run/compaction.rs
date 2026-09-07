@@ -187,7 +187,10 @@ impl<'h> Agent<'h> {
         }
 
         info!(total_input = usage.total_input(), "auto-compacting (full)");
-        self.io.event_tx.send(AgentEvent::AutoCompacting)?;
+        self.io.event_tx.send(AgentEvent::AutoCompacting {
+            context_size: self.context_size,
+            context_window: self.io.model.context_window,
+        })?;
         let chars_before: usize = self
             .history
             .as_slice()
@@ -245,6 +248,7 @@ impl<'h> Agent<'h> {
     }
 
     pub(super) async fn do_compact(&mut self) -> Result<(), AgentError> {
+        let context_size_before = self.context_size;
         let vcc_ok = compaction::vcc_compact(
             self.history,
             &self.io.model,
@@ -260,7 +264,7 @@ impl<'h> Agent<'h> {
                 &self.model_policy,
             )
             .await;
-            self.total_usage += compaction::compact_history(
+            let compaction_usage = compaction::compact_history(
                 &*compact_provider,
                 &compact_model,
                 self.history,
@@ -270,9 +274,23 @@ impl<'h> Agent<'h> {
                 &self.config,
             )
             .await?;
+            // The summariser can be a different model, so price this with
+            // `compact_model` and not the session model.
+            let fast = self.io.opts.clamped(&compact_model).fast;
+            let compact_cost = compact_model.billed_cost(&compaction_usage, fast);
+            let compact_list_cost = compact_model.list_cost(&compaction_usage, fast);
+            self.ledger
+                .add(compaction_usage, compact_cost, compact_list_cost);
+            // The summary the model just wrote is all the next call will see, so
+            // its output count is the new gauge.
+            self.context_size = compaction_usage.output;
         }
         self.compaction.rollback_len = self.history.len();
-        self.io.event_tx.send(AgentEvent::CompactionDone)?;
+        self.io.event_tx.send(AgentEvent::CompactionDone {
+            context_size_before,
+            context_size_after: self.context_size,
+            context_window: self.io.model.context_window,
+        })?;
         self.history
             .push(Message::synthetic(continue_message(&self.config)));
         if let Some(state) = self.flow.advisor_state.as_mut() {
@@ -375,7 +393,7 @@ mod tests {
         assert_eq!(
             has_event(&drain_events(&event_rx), |e| matches!(
                 e,
-                AgentEvent::AutoCompacting
+                AgentEvent::AutoCompacting { .. }
             )),
             expected,
         );
