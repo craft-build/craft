@@ -534,19 +534,14 @@ pub(crate) struct EventLoop<'t> {
     warn_tx: flume::Sender<String>,
     ui_action_rx: flume::Receiver<UiAction>,
     ui_attachment: UiAttachment,
-    pack_tx: flume::Sender<PackOutcome>,
-    pack_rx: flume::Receiver<PackOutcome>,
+    pack_tx: flume::Sender<Box<craft_lua::PackPreparation>>,
+    pack_rx: flume::Receiver<Box<craft_lua::PackPreparation>>,
     /// One package command at a time. The work runs on its own thread, so
     /// without this a second `/packupdate` would race the first over the same
     /// clones and locks.
     pack_running: bool,
     _model_fetch_task: tokio::task::JoinHandle<()>,
 }
-
-/// Which session asked, and what preparing its command produced. Named rather
-/// than indexed: preparation outlives a `remove_runtime` that shifts every
-/// index after it, and a misrouted plan is a plan nobody applies.
-type PackOutcome = (CraftId, Box<craft_lua::PackPreparation>);
 
 /// One item from any of the event loop's sources; `None` from `next_wake`
 /// means the wait timed out (animation/idle tick).
@@ -561,7 +556,7 @@ enum Wake {
     Warn(Option<usize>, String),
     Flow(usize, craft_agent::FlowProgress),
     Action(usize, Action),
-    Pack(PackOutcome),
+    Pack(Box<craft_lua::PackPreparation>),
 }
 
 struct BackgroundModels {
@@ -984,7 +979,7 @@ impl<'t> EventLoop<'t> {
                 self.dispatch(i, actions);
             }
             Wake::Action(idx, action) => self.handle_action(idx, action),
-            Wake::Pack((id, preparation)) => self.finish_pack(id, *preparation),
+            Wake::Pack(preparation) => self.finish_pack(*preparation),
         }
         Ok(())
     }
@@ -1684,7 +1679,6 @@ impl<'t> EventLoop<'t> {
         }
         self.pack_running = true;
         self.sessions[idx].app.flash(PACK_PREPARING.to_owned());
-        let id = self.sessions[idx].id();
         let handle = self.ctx.lua_event_handle.clone();
         let tx = self.pack_tx.clone();
         std::thread::spawn(move || {
@@ -1696,19 +1690,17 @@ impl<'t> EventLoop<'t> {
                 Err(error) => craft_lua::PackPreparation::failed(error),
             }))
             .unwrap_or_else(|_| craft_lua::PackPreparation::failed(PACK_PANIC_ERR.to_owned()));
-            let _ = tx.send((id, Box::new(preparation)));
+            let _ = tx.send(Box::new(preparation));
         });
     }
 
-    /// A session closed while its command ran drops the result: the plan is
-    /// only ever applied by leaving the TUI, and there is no TUI left to leave.
-    fn finish_pack(&mut self, id: CraftId, preparation: craft_lua::PackPreparation) {
+    /// The answer lands on the focused session, not on the one that asked: a
+    /// package command reloads the whole Lua host, and only the focused session
+    /// is read for an exit request or seen by whoever answers the review.
+    fn finish_pack(&mut self, preparation: craft_lua::PackPreparation) {
         self.pack_running = false;
-        let Some(idx) = self.position(id) else {
-            return;
-        };
-        let actions = self.sessions[idx].app.handle_pack_preparation(preparation);
-        self.dispatch(idx, actions);
+        let actions = self.focused_app().handle_pack_preparation(preparation);
+        self.dispatch(self.focused, actions);
     }
 
     fn respawn_agent(&mut self, idx: usize, history: Vec<Message>) {
