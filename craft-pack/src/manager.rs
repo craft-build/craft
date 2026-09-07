@@ -288,13 +288,13 @@ impl Manager {
         }
 
         let have = match want {
-            Want::Commit(rev) => git::run(git::has_commit_args(hooks, rev), Some(work.clone()))
+            Want::Commit(rev) => git::run(git::has_commit_args(hooks, rev), work.clone())
                 .await
                 .is_ok(),
             Want::Ref => false,
         };
         if !have {
-            git::run(git::fetch_args(hooks), Some(work.clone())).await?;
+            git::run(git::fetch_args(hooks), work.clone()).await?;
         }
         Ok(work)
     }
@@ -309,7 +309,7 @@ impl Manager {
             "get-url".to_owned(),
             "origin".to_owned(),
         ];
-        match git::run(args, Some(work.to_path_buf())).await {
+        match git::run(args, work.to_path_buf()).await {
             Ok(out) => out.stdout.trim() == src.trim(),
             Err(_) => false,
         }
@@ -331,12 +331,16 @@ impl Manager {
     }
 
     async fn clone_into(&self, hooks: &Path, src: &str, work: &Path) -> Result<(), ManagerError> {
-        if let Some(parent) = work.parent() {
-            fs::create_dir_all(parent).map_err(|source| ManagerError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
+        // The package root, and the directory the clone itself runs from, since
+        // git reads the config of whatever repository it starts in and craft's
+        // own process directory is one the agent may be editing. `work` always
+        // has a parent, the site dir standing in only so that no path shape can
+        // ever hand the clone back to the cwd.
+        let parent = work.parent().unwrap_or(self.site.as_path());
+        fs::create_dir_all(parent).map_err(|source| ManagerError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
         // A clone killed halfway leaves a directory behind with no `.git` in
         // it, and git refuses to clone into a directory that is not empty. So
         // every attempt starts from nothing, not just the retry below.
@@ -346,11 +350,20 @@ impl Manager {
         // A blobless clone is much smaller, but an older server refuses the
         // filter outright, so fall back to a full clone rather than failing.
         clear();
-        match git::run(git::clone_args(hooks, src, work, true), None).await {
+        match git::run(
+            git::clone_args(hooks, src, work, true),
+            parent.to_path_buf(),
+        )
+        .await
+        {
             Ok(_) => Ok(()),
             Err(_) => {
                 clear();
-                git::run(git::clone_args(hooks, src, work, false), None).await?;
+                git::run(
+                    git::clone_args(hooks, src, work, false),
+                    parent.to_path_buf(),
+                )
+                .await?;
                 Ok(())
             }
         }
@@ -386,12 +399,7 @@ impl Manager {
                     rev: candidate.clone(),
                 });
             }
-            match git::run(
-                git::rev_parse_args(hooks, candidate),
-                Some(work.to_path_buf()),
-            )
-            .await
-            {
+            match git::run(git::rev_parse_args(hooks, candidate), work.to_path_buf()).await {
                 Ok(out) => return Ok(out.stdout.trim().to_owned()),
                 Err(e) => last = Some(e),
             }
@@ -408,7 +416,7 @@ impl Manager {
         rev: &str,
         dest: &Path,
     ) -> Result<(), ManagerError> {
-        git::run(git::checkout_args(hooks, rev), Some(work.to_path_buf())).await?;
+        git::run(git::checkout_args(hooks, rev), work.to_path_buf()).await?;
 
         let staging = dest.with_extension("incoming");
         let _ = fs::remove_dir_all(&staging);
@@ -673,7 +681,7 @@ mod tests {
         let run = |args: Vec<&str>| {
             smol::block_on(git::run(
                 args.iter().map(|a| (*a).to_owned()).collect(),
-                Some(repo.clone()),
+                repo.clone(),
             ))
             .unwrap_or_else(|e| panic!("git {args:?} failed while building the fixture: {e}"))
         };
@@ -765,7 +773,7 @@ mod tests {
         let git = |args: Vec<&str>| {
             smol::block_on(git::run(
                 args.iter().map(|a| (*a).to_owned()).collect(),
-                Some(origin.clone()),
+                origin.clone(),
             ))
             .unwrap()
         };
@@ -805,7 +813,7 @@ mod tests {
         for args in [vec!["add", "."], vec!["commit", "--quiet", "-m", "later"]] {
             smol::block_on(git::run(
                 args.iter().map(|a| (*a).to_owned()).collect(),
-                Some(origin.clone()),
+                origin.clone(),
             ))
             .unwrap();
         }
@@ -835,7 +843,7 @@ mod tests {
         let git = |args: Vec<&str>| {
             smol::block_on(git::run(
                 args.iter().map(|a| (*a).to_owned()).collect(),
-                Some(origin.clone()),
+                origin.clone(),
             ))
             .unwrap()
         };
@@ -926,7 +934,7 @@ mod tests {
         for args in [vec!["add", "."], vec!["commit", "--quiet", "-m", "second"]] {
             smol::block_on(git::run(
                 args.iter().map(|a| (*a).to_owned()).collect(),
-                Some(second.clone()),
+                second.clone(),
             ))
             .unwrap();
         }

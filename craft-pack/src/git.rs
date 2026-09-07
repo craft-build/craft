@@ -10,6 +10,20 @@ use std::path::{Path, PathBuf};
 /// Peels whatever a ref names down to a commit.
 const COMMIT_PEEL: &str = "^{commit}";
 
+/// `ext::` hands its argument to a shell, and it is what a hostile
+/// `url.<base>.insteadOf` reaches for. Git already refuses it by default, but
+/// that default sits in config a repository can override, while a `-c` on the
+/// command line outranks every config file. Only this one protocol is pinned,
+/// since `protocol.allow` would also move `file`, and that is how a local path
+/// source gets cloned.
+const EXT_TRANSPORT_DENIED: &str = "protocol.ext.allow=never";
+const NO_TERMINAL_PROMPT: (&str, &str) = ("GIT_TERMINAL_PROMPT", "0");
+const NO_ASKPASS: (&str, &str) = ("GIT_ASKPASS", "");
+/// These pairs are meant to configure one invocation, so anything still set in
+/// craft's environment was put there by someone else. Zero pairs reads the same
+/// as none, and unlike `GIT_CONFIG_NOSYSTEM` the user's own config is untouched.
+const NO_INJECTED_CONFIG: (&str, &str) = ("GIT_CONFIG_COUNT", "0");
+
 /// Flags every invocation carries, whatever it is doing.
 ///
 /// `core.hooksPath` points at a directory craft keeps empty, so a repository
@@ -21,6 +35,8 @@ pub fn hardening_args(empty_hooks_dir: &Path) -> Vec<String> {
     vec![
         "-c".to_owned(),
         format!("core.hooksPath={}", empty_hooks_dir.display()),
+        "-c".to_owned(),
+        EXT_TRANSPORT_DENIED.to_owned(),
     ]
 }
 
@@ -111,8 +127,8 @@ pub fn rev_parse_args(empty_hooks_dir: &Path, rev: &str) -> Vec<String> {
 /// Environment every invocation runs with. Disabling the terminal prompt makes
 /// a credential request fail immediately instead of hanging a startup on a
 /// prompt nobody is watching.
-pub fn hardening_env() -> [(&'static str, &'static str); 2] {
-    [("GIT_TERMINAL_PROMPT", "0"), ("GIT_ASKPASS", "")]
+pub fn hardening_env() -> [(&'static str, &'static str); 3] {
+    [NO_TERMINAL_PROMPT, NO_ASKPASS, NO_INJECTED_CONFIG]
 }
 
 /// What one git invocation produced.
@@ -160,14 +176,19 @@ pub fn redact(text: &str) -> String {
 /// `Command::output` there would stall the whole VM, the watchdog included, so
 /// every invocation goes through `smol::unblock` and the caller awaits it. On a
 /// first start a clone can take seconds, which is exactly when this matters.
-pub async fn run(args: Vec<String>, cwd: Option<PathBuf>) -> Result<GitOutput, GitError> {
+///
+/// The directory is required, never optional. Git reads the config of whatever
+/// repository it stands in, a clone included, and the inherited process
+/// directory is wherever the user launched craft, usually a repository the agent
+/// is editing. An `insteadOf` in its `.git/config` is enough to point a clone
+/// at a transport that runs a command, so every caller names a directory craft
+/// owns and the question goes away.
+pub async fn run(args: Vec<String>, cwd: PathBuf) -> Result<GitOutput, GitError> {
     let display = redact(&args.join(" "));
     let output = smol::unblock(move || {
         let mut cmd = std::process::Command::new("git");
         cmd.args(&args);
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
+        cmd.current_dir(cwd);
         for (key, value) in hardening_env() {
             cmd.env(key, value);
         }
@@ -217,11 +238,29 @@ mod tests {
     }
 
     #[test]
-    fn git_cannot_open_an_interactive_credential_prompt() {
-        assert_eq!(
-            hardening_env(),
-            [("GIT_TERMINAL_PROMPT", "0"), ("GIT_ASKPASS", "")]
-        );
+    fn git_runs_without_prompts_or_environment_supplied_config() {
+        let env = hardening_env();
+        assert!(env.contains(&NO_TERMINAL_PROMPT), "{env:?}");
+        assert!(env.contains(&NO_ASKPASS), "{env:?}");
+        assert!(env.contains(&NO_INJECTED_CONFIG), "{env:?}");
+    }
+
+    /// Refused on the command line, where no repository's config can reach it.
+    #[test]
+    fn every_command_denies_the_ext_transport() {
+        for args in [
+            clone_args(&hooks(), "src", Path::new("/dest"), true),
+            fetch_args(&hooks()),
+            checkout_args(&hooks(), "main"),
+            rev_parse_args(&hooks(), "HEAD"),
+            has_commit_args(&hooks(), "abc123"),
+        ] {
+            assert!(
+                args.windows(2)
+                    .any(|w| w[0] == "-c" && w[1] == EXT_TRANSPORT_DENIED),
+                "{args:?}"
+            );
+        }
     }
 
     /// The hardening is the point of routing every command through here, so
@@ -345,7 +384,7 @@ mod tests {
 
         let result = smol::block_on(run(
             rev_parse_args(&hooks, "definitely-not-a-ref"),
-            Some(dir.path().to_path_buf()),
+            dir.path().to_path_buf(),
         ));
         assert!(result.is_err(), "an unknown revision must be an error");
     }
