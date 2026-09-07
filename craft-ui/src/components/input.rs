@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::shell::parse_shell_prefix;
 use crate::highlight;
@@ -18,8 +18,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph};
 
+use super::apply_scroll_delta;
 use super::scrollbar::render_vertical_scrollbar;
-use super::{apply_scroll_delta, visual_line_count};
 use crate::selection::LineBreaks;
 
 const CHEVRON: &str = super::CHEVRON;
@@ -189,13 +189,19 @@ impl InputBox {
             .join("\n")
     }
 
+    /// Where the drawn rows start a new buffer line, for a selection copied out
+    /// of the box. It walks the same greedy wrap the box draws with, cursor row
+    /// included, since a count off by one row moves every later line start and
+    /// scatters the newlines.
     pub fn line_breaks(&self, content_width: u16) -> LineBreaks {
         let ew = effective_width(content_width as usize);
+        let cursor_y = self.buffer.y();
         LineBreaks::from_heights(
             self.buffer
                 .lines()
                 .iter()
-                .map(|line| visual_line_count(line.width(), ew) as u16),
+                .enumerate()
+                .map(|(i, line)| wrapped_row_count(line, ew, i == cursor_y) as u16),
         )
     }
 
@@ -785,6 +791,7 @@ fn total_visual_lines(buffer: &TextBuffer, ew: usize, cursor_visible: bool) -> u
 mod tests {
     use super::*;
     use crate::components::scrollbar::SCROLLBAR_THUMB;
+    use crate::selection::{ContentRegion, ScreenSelection, extract_selected_text};
     use ratatui::layout::{Position, Rect};
     use test_case::test_case;
 
@@ -1104,6 +1111,41 @@ mod tests {
         input.buffer.add_line();
         type_text(&mut input, "line2");
         assert_eq!(input.copy_text(), "❯ line1\n  line2");
+    }
+
+    /// Eleven double width chars take three rows of an eleven column line, one
+    /// more than dividing width by columns gives, because the char that no
+    /// longer fits leaves a gap behind.
+    #[test]
+    fn a_partial_selection_of_a_wide_char_input_breaks_where_the_box_wrapped() {
+        const WIDTH: u16 = 13;
+        const HEIGHT: u16 = 8;
+        const WIDE_LINE: &str = "一二三四五六七八九十百";
+        const TAIL: &str = "tail";
+
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        type_text(&mut input, WIDE_LINE);
+        input.buffer.add_line();
+        type_text(&mut input, TAIL);
+        let terminal = render_input(&mut input, WIDTH, HEIGHT);
+
+        let copy_text = input.copy_text();
+        let regions = [ContentRegion {
+            area: Rect::new(0, 1, WIDTH, HEIGHT - 2),
+            raw_text: &copy_text,
+            line_breaks: input.line_breaks(WIDTH),
+        }];
+        // Leaving the first drawn row out keeps the region partly selected, so
+        // the copy walks cells and the row counting decides where it breaks.
+        let selection = ScreenSelection {
+            start_row: 2,
+            start_col: 0,
+            end_row: 4,
+            end_col: WIDTH - 1,
+        };
+
+        let text = extract_selected_text(terminal.backend().buffer(), &selection, &regions);
+        assert_eq!(text, format!("六七八九十百\n{NEWLINE_PAD}{TAIL}"));
     }
 
     #[test]
