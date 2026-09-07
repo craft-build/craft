@@ -477,6 +477,32 @@ mod tests {
         lines.iter().map(|l| segments_text(l)).collect()
     }
 
+    const PYTHON: &str = "python";
+    const OPENS_A_STRING: &str = "x = '''";
+
+    /// A closing fence takes the newline before it, so the block's last line
+    /// arrives complete and then turns back into the partial tail. Painting it
+    /// from the checkpoint that already ate it opens the string twice, and the
+    /// line keeps the string's color for the rest of the turn.
+    #[test]
+    fn the_last_line_of_a_block_keeps_its_colors_when_the_fence_closes() {
+        let _guard = exclusive_globals();
+        warmup();
+        let mut ch = CodeHighlighter::new(PYTHON);
+        // The newline gives the line a trailing empty segment the fence takes
+        // away again, so only the colors of the text itself are comparable.
+        let colors = |lines: &[Vec<StyledSegment>]| {
+            lines
+                .iter()
+                .flatten()
+                .filter(|s| !s.text.is_empty())
+                .map(|s| (s.text.clone(), s.fg))
+                .collect::<Vec<_>>()
+        };
+        let while_streaming = colors(ch.update(&format!("{OPENS_A_STRING}\n")));
+        assert_eq!(while_streaming, colors(ch.update(OPENS_A_STRING)));
+    }
+
     #[test]
     fn highlight_code_line_handling() {
         warmup();
