@@ -74,15 +74,9 @@ impl TextInput {
         self.cursor = 0;
     }
 
-    /// Fire the submit callback with the current content, as if Enter had
-    /// been pressed. Used by "Add" buttons that submit the same draft.
-    pub fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(cb) = self.on_submit.clone() {
-            let content = std::mem::take(&mut self.content);
-            self.cursor = 0;
-            cb(&content, window, cx);
-        }
-        cx.notify();
+    pub fn take_content(&mut self) -> String {
+        self.cursor = 0;
+        std::mem::take(&mut self.content)
     }
 
     fn prev_boundary(&self) -> usize {
@@ -125,8 +119,7 @@ impl TextInput {
             "enter" => {
                 if submit_mod || !self.multiline {
                     if let Some(cb) = self.on_submit.clone() {
-                        let content = std::mem::take(&mut self.content);
-                        self.cursor = 0;
+                        let content = self.take_content();
                         cb(&content, window, cx);
                     }
                     cx.notify();

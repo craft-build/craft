@@ -650,7 +650,12 @@ fn assistant_message(
     if app.open_comment_boxes.contains(&comment_key) {
         if let Some(input) = app.comment_inputs.get(&comment_key).cloned() {
             let submit_key = comment_key.clone();
-            col = col.child(comment_box(input, submit_key, cx));
+            col = col.child(comment_box(
+                input,
+                submit_key,
+                "assistant reply".to_string(),
+                cx,
+            ));
         }
     }
     col
@@ -739,6 +744,7 @@ fn comments_list(list: &[Comment]) -> impl IntoElement {
 fn comment_box(
     input: gpui::Entity<crate::text_input::TextInput>,
     key: String,
+    label: String,
     cx: &mut Context<App>,
 ) -> impl IntoElement {
     div()
@@ -765,8 +771,12 @@ fn comment_box(
                 .py(px(4.))
                 .cursor_pointer()
                 .child("Add")
-                .on_click(cx.listener(move |_app, _, window, cx| {
-                    input.update(cx, |ti, cx| ti.submit(window, cx));
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    // This listener is already updating App. Calling
+                    // TextInput::submit here would invoke its callback and
+                    // recursively update App, which GPUI correctly rejects.
+                    let text = input.update(cx, |input, _| input.take_content());
+                    app.submit_comment(key.clone(), text, label.clone(), cx);
                 })),
         )
 }
@@ -846,6 +856,7 @@ fn diff_line_view(
     let comments = app.comments.get(&key).cloned().unwrap_or_default();
     let open = app.open_comment_boxes.contains(&key);
     let toggle_key = key.clone();
+    let toggle_label = label.clone();
 
     let row = div()
         .flex()
@@ -876,7 +887,7 @@ fn diff_line_view(
                 .cursor_pointer()
                 .child("✎")
                 .on_click(cx.listener(move |app, _, _, cx| {
-                    app.open_comment_box(toggle_key.clone(), label.clone(), cx)
+                    app.open_comment_box(toggle_key.clone(), toggle_label.clone(), cx)
                 })),
         );
 
@@ -908,7 +919,7 @@ fn diff_line_view(
                     .pl(px(26.))
                     .pr(px(10.))
                     .py(px(4.))
-                    .child(comment_box(input, submit_key, cx)),
+                    .child(comment_box(input, submit_key, label.clone(), cx)),
             );
         }
     }
