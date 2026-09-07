@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString, Window, div,
-    px, rgb,
+    App, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString, Window, div, px,
+    rgb,
 };
 
 use crate::theme;
@@ -61,6 +61,11 @@ impl TextInput {
     pub fn multiline(mut self) -> Self {
         self.multiline = true;
         self
+    }
+
+    pub fn set_content(&mut self, content: impl Into<String>) {
+        self.content = content.into();
+        self.cursor = self.content.len();
     }
 
     #[allow(dead_code)]
@@ -187,14 +192,11 @@ impl Render for TextInput {
                 )
             })
             .when(!empty, |d| {
-                d.child(before.to_string()).when(focused, |d| {
-                    d.child(
-                        div()
-                            .w(px(1.5))
-                            .h(px(14.))
-                            .bg(rgb(theme::ACCENT)),
-                    )
-                }).child(after.to_string())
+                d.child(before.to_string())
+                    .when(focused, |d| {
+                        d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(theme::ACCENT)))
+                    })
+                    .child(after.to_string())
             })
             .when(empty && focused, |d| {
                 d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(theme::ACCENT)))

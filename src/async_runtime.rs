@@ -7,24 +7,17 @@
 //! fires into once its sleep completes, then hands control back to the UI
 //! thread to apply the result.
 
-use std::time::Duration;
-
 use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
-use tokio::sync::oneshot;
 
-static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    Runtime::new().expect("failed to start the Tokio runtime")
-});
+static RUNTIME: Lazy<Runtime> =
+    Lazy::new(|| Runtime::new().expect("failed to start the Tokio runtime"));
 
-/// Sleep for `duration` on the Tokio runtime, resolving the returned
-/// receiver afterwards. Await it from a `cx.spawn` future to bridge back
-/// into GPUI.
-pub fn delay(duration: Duration) -> oneshot::Receiver<()> {
-    let (tx, rx) = oneshot::channel();
-    RUNTIME.spawn(async move {
-        tokio::time::sleep(duration).await;
-        let _ = tx.send(());
-    });
-    rx
+/// Run long-lived ACP connections and workspace operations without blocking GPUI.
+pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    RUNTIME.spawn(future)
 }

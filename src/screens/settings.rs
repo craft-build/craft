@@ -3,7 +3,7 @@ use gpui::{Context, FontWeight, Window, div, px, rgb};
 
 use crate::app::App;
 use crate::chrome;
-use crate::state::MODEL_NAMES;
+use crate::text_input::TextInput;
 use crate::theme;
 
 pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
@@ -61,6 +61,7 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                         .flex()
                         .flex_col()
                         .gap(px(28.))
+                        .child(agent_section(app, cx))
                         .child(model_section(app, cx))
                         .child(editor_section())
                         .child(shortcuts_section())
@@ -78,37 +79,125 @@ fn section_label(text: &'static str) -> impl IntoElement {
 }
 
 fn model_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
-    div().flex().flex_col().child(section_label("DEFAULT MODEL")).child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .children(MODEL_NAMES.iter().map(|&name| {
-                let selected = app.selected_model == name;
-                div()
-                    .id(gpui::SharedString::from(format!("model-{name}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(10.))
-                    .py(px(8.))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(rgb(theme::INPUT_BG)))
-                    .child(
+    let models = app.available_models.clone();
+    div()
+        .flex()
+        .flex_col()
+        .child(section_label("AGENT MODELS"))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .when(models.is_empty(), |d| {
+                    d.child(
                         div()
-                            .w(px(8.))
-                            .h(px(8.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(rgb(theme::ACCENT))
-                            .when(selected, |d| d.bg(rgb(theme::ACCENT))),
+                            .text_size(px(12.))
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child("The connected agent has not advertised model choices."),
                     )
-                    .child(div().text_size(px(12.)).child(name))
-                    .on_click(cx.listener(move |app, _, _, cx| app.select_model(name, cx)))
-            })),
-    )
+                })
+                .children(models.into_iter().map(|name| {
+                    let selected = app.selected_model == name;
+                    let click_name = name.clone();
+                    div()
+                        .id(gpui::SharedString::from(format!("model-{name}")))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(10.))
+                        .py(px(8.))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .cursor_pointer()
+                        .when(selected, |d| d.bg(rgb(theme::INPUT_BG)))
+                        .child(
+                            div()
+                                .w(px(8.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgb(theme::ACCENT))
+                                .when(selected, |d| d.bg(rgb(theme::ACCENT))),
+                        )
+                        .child(div().text_size(px(12.)).child(name))
+                        .on_click(
+                            cx.listener(move |app, _, _, cx| app.select_model(&click_name, cx)),
+                        )
+                })),
+        )
+}
+
+fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
+    let remote = app.config_remote;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(section_label("ACP AGENT"))
+        .child(input_row("Agent command", app.agent_command_input.clone()))
+        .child(input_row("Workspace", app.workspace_input.clone()))
+        .child(
+            div()
+                .id("transport-toggle")
+                .flex()
+                .justify_between()
+                .px(px(10.))
+                .py(px(8.))
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .cursor_pointer()
+                .child(div().text_size(px(12.)).child("Transport"))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(theme::ACCENT))
+                        .child(if remote { "SSH" } else { "Local" }),
+                )
+                .on_click(cx.listener(|app, _, _, cx| app.toggle_config_remote(cx))),
+        )
+        .when(remote, |d| {
+            d.child(input_row("SSH host", app.ssh_host_input.clone()))
+                .child(input_row("SSH user", app.ssh_user_input.clone()))
+                .child(input_row("Identity file", app.ssh_key_input.clone()))
+        })
+        .child(
+            div()
+                .id("save-agent-config")
+                .px(px(12.))
+                .py(px(7.))
+                .bg(rgb(theme::SELECTION))
+                .text_size(px(12.))
+                .cursor_pointer()
+                .child("Save & connect")
+                .on_click(cx.listener(|app, _, _, cx| app.save_agent_config(cx))),
+        )
+}
+
+fn input_row(label: &'static str, input: gpui::Entity<TextInput>) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .px(px(10.))
+        .py(px(8.))
+        .border_1()
+        .border_color(rgb(theme::BORDER))
+        .child(
+            div()
+                .w(px(100.))
+                .flex_shrink_0()
+                .text_size(px(12.))
+                .text_color(rgb(theme::TEXT_SECONDARY))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_size(px(12.))
+                .text_color(rgb(theme::TEXT_PRIMARY))
+                .child(input),
+        )
 }
 
 fn settings_row(label: &'static str, value: &'static str) -> impl IntoElement {
@@ -182,14 +271,10 @@ fn shortcuts_section() -> impl IntoElement {
 }
 
 fn about_section() -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .child(section_label("ABOUT"))
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(theme::TEXT_SECONDARY))
-                .child("Forge 0.9.2 · build 2026.09.04"),
-        )
+    div().flex().flex_col().child(section_label("ABOUT")).child(
+        div()
+            .text_size(px(12.))
+            .text_color(rgb(theme::TEXT_SECONDARY))
+            .child("Forge 0.9.2 · build 2026.09.04"),
+    )
 }

@@ -1,6 +1,9 @@
+mod acp;
 mod app;
 mod async_runtime;
+mod checkpoint;
 mod chrome;
+mod config;
 mod screens;
 mod state;
 mod text_input;

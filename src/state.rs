@@ -133,14 +133,38 @@ pub fn seed_file_diffs() -> HashMap<String, Diff> {
             stat: "+6 -1".into(),
             hunk_header: "@@ -18,2 +18,7 @@".into(),
             lines: vec![
-                DiffLine { kind: DiffLineKind::Ctx, text: "export function recomputeTotals(cart: Cart): Totals {".into() },
-                DiffLine { kind: DiffLineKind::Del, text: "  return calculate(cart.items, cart.discounts);".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "  const key = signature(cart.items, cart.discounts);".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "  if (cache.key === key) return cache.value;".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "  const value = calculate(cart.items, cart.discounts);".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "  cache = { key, value };".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "  return value;".into() },
-                DiffLine { kind: DiffLineKind::Ctx, text: "}".into() },
+                DiffLine {
+                    kind: DiffLineKind::Ctx,
+                    text: "export function recomputeTotals(cart: Cart): Totals {".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Del,
+                    text: "  return calculate(cart.items, cart.discounts);".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "  const key = signature(cart.items, cart.discounts);".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "  if (cache.key === key) return cache.value;".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "  const value = calculate(cart.items, cart.discounts);".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "  cache = { key, value };".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "  return value;".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Ctx,
+                    text: "}".into(),
+                },
             ],
         },
     );
@@ -151,64 +175,47 @@ pub fn seed_file_diffs() -> HashMap<String, Diff> {
             stat: "+9 -0".into(),
             hunk_header: "@@ -0,0 +1,9 @@".into(),
             lines: vec![
-                DiffLine { kind: DiffLineKind::Add, text: "describe('recomputeTotals cache', () => {".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "  it('invalidates when a new discount is applied mid-session', () => {".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "    const cart = buildCart({ items: TWO_ITEMS });".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "    recomputeTotals(cart);".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "    applyDiscount(cart, PERCENT_10);".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "    const totals = recomputeTotals(cart);".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "    expect(totals.discountTotal).toBeGreaterThan(0);".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "  });".into() },
-                DiffLine { kind: DiffLineKind::Add, text: "});".into() },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "describe('recomputeTotals cache', () => {".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "  it('invalidates when a new discount is applied mid-session', () => {"
+                        .into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "    const cart = buildCart({ items: TWO_ITEMS });".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "    recomputeTotals(cart);".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "    applyDiscount(cart, PERCENT_10);".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "    const totals = recomputeTotals(cart);".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "    expect(totals.discountTotal).toBeGreaterThan(0);".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "  });".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "});".into(),
+                },
             ],
         },
     );
     m
-}
-
-pub struct Canned {
-    pub text: &'static str,
-    pub steps: Option<Steps>,
-    pub diff: Option<Diff>,
-    pub terminal: Option<Terminal>,
-}
-
-pub fn canned_replies() -> Vec<Canned> {
-    vec![
-        Canned {
-            text: "Looked at src/routes/checkout.tsx — it's already wired to the memoized path, so this should just work. Want a loading state while the cache warms on first render?",
-            steps: Some(Steps {
-                summary: "Thought 1 time · read 1 file".into(),
-                items: vec!["Read src/routes/checkout.tsx".into()],
-            }),
-            diff: None,
-            terminal: None,
-        },
-        Canned {
-            text: "Done — added a guard so an empty cart short-circuits before touching the cache at all.",
-            steps: Some(Steps {
-                summary: "Thought 1 time · wrote 1 file · ran 1 test".into(),
-                items: vec![
-                    "Edited src/lib/cart/totals.ts".into(),
-                    "Ran pnpm test cart".into(),
-                ],
-            }),
-            diff: Some(Diff {
-                file: "src/lib/cart/totals.ts".into(),
-                stat: "+3 -0".into(),
-                hunk_header: "@@ -18,1 +18,4 @@".into(),
-                lines: vec![
-                    DiffLine { kind: DiffLineKind::Ctx, text: "export function recomputeTotals(cart: Cart): Totals {".into() },
-                    DiffLine { kind: DiffLineKind::Add, text: "  if (cart.items.length === 0) return EMPTY_TOTALS;".into() },
-                    DiffLine { kind: DiffLineKind::Ctx, text: "  const key = signature(cart.items, cart.discounts);".into() },
-                ],
-            }),
-            terminal: Some(Terminal {
-                cmd: "pnpm test cart".into(),
-                output: "✓ 36 passed  0 failed  (401ms)".into(),
-            }),
-        },
-    ]
 }
 
 pub fn seed_projects() -> Vec<Project> {
@@ -220,7 +227,7 @@ pub fn seed_projects() -> Vec<Project> {
             desc: "Cart totals cache + regression tests".into(),
             updated: "2h ago".into(),
             checkpoint_label: "2 checkpoints".into(),
-            model: "Sable Large".into(),
+            model: "Not configured".into(),
         },
         Project {
             id: "weather-cli".into(),
@@ -229,7 +236,7 @@ pub fn seed_projects() -> Vec<Project> {
             desc: "Retry logic for a flaky NOAA endpoint".into(),
             updated: "Yesterday".into(),
             checkpoint_label: "5 checkpoints".into(),
-            model: "Sable Fast".into(),
+            model: "Not configured".into(),
         },
         Project {
             id: "notes-sync".into(),
@@ -238,7 +245,7 @@ pub fn seed_projects() -> Vec<Project> {
             desc: "Conflict resolution for offline edits".into(),
             updated: "3 days ago".into(),
             checkpoint_label: "8 checkpoints".into(),
-            model: "Local 8B".into(),
+            model: "Not configured".into(),
         },
     ]
 }
@@ -251,14 +258,38 @@ pub fn seed_sessions() -> HashMap<String, Vec<Session>> {
         stat: "+6 -1".into(),
         hunk_header: "@@ -18,2 +18,7 @@".into(),
         lines: vec![
-            DiffLine { kind: DiffLineKind::Ctx, text: "export function recomputeTotals(cart: Cart): Totals {".into() },
-            DiffLine { kind: DiffLineKind::Del, text: "  return calculate(cart.items, cart.discounts);".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "  const key = signature(cart.items, cart.discounts);".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "  if (cache.key === key) return cache.value;".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "  const value = calculate(cart.items, cart.discounts);".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "  cache = { key, value };".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "  return value;".into() },
-            DiffLine { kind: DiffLineKind::Ctx, text: "}".into() },
+            DiffLine {
+                kind: DiffLineKind::Ctx,
+                text: "export function recomputeTotals(cart: Cart): Totals {".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Del,
+                text: "  return calculate(cart.items, cart.discounts);".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "  const key = signature(cart.items, cart.discounts);".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "  if (cache.key === key) return cache.value;".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "  const value = calculate(cart.items, cart.discounts);".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "  cache = { key, value };".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "  return value;".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Ctx,
+                text: "}".into(),
+            },
         ],
     };
     let m4_diff = Diff {
@@ -266,15 +297,43 @@ pub fn seed_sessions() -> HashMap<String, Vec<Session>> {
         stat: "+9 -0".into(),
         hunk_header: "@@ -0,0 +1,9 @@".into(),
         lines: vec![
-            DiffLine { kind: DiffLineKind::Add, text: "describe('recomputeTotals cache', () => {".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "  it('invalidates when a new discount is applied mid-session', () => {".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "    const cart = buildCart({ items: TWO_ITEMS });".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "    recomputeTotals(cart);".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "    applyDiscount(cart, PERCENT_10);".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "    const totals = recomputeTotals(cart);".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "    expect(totals.discountTotal).toBeGreaterThan(0);".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "  });".into() },
-            DiffLine { kind: DiffLineKind::Add, text: "});".into() },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "describe('recomputeTotals cache', () => {".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "  it('invalidates when a new discount is applied mid-session', () => {"
+                    .into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "    const cart = buildCart({ items: TWO_ITEMS });".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "    recomputeTotals(cart);".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "    applyDiscount(cart, PERCENT_10);".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "    const totals = recomputeTotals(cart);".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "    expect(totals.discountTotal).toBeGreaterThan(0);".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "  });".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Add,
+                text: "});".into(),
+            },
         ],
     };
 
@@ -337,11 +396,19 @@ pub fn seed_sessions() -> HashMap<String, Vec<Session>> {
     );
     m.insert(
         "weather-cli".to_string(),
-        vec![Session { id: "s1".into(), name: "Retry logic".into(), messages: vec![] }],
+        vec![Session {
+            id: "s1".into(),
+            name: "Retry logic".into(),
+            messages: vec![],
+        }],
     );
     m.insert(
         "notes-sync".to_string(),
-        vec![Session { id: "s1".into(), name: "Conflict resolution".into(), messages: vec![] }],
+        vec![Session {
+            id: "s1".into(),
+            name: "Conflict resolution".into(),
+            messages: vec![],
+        }],
     );
     m
 }
@@ -359,5 +426,3 @@ pub fn seed_comments() -> HashMap<String, Vec<Comment>> {
     );
     m
 }
-
-pub const MODEL_NAMES: &[&str] = &["Sable Large", "Sable Fast", "Local 8B"];

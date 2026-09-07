@@ -24,7 +24,9 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                 .when(app.file_tree_visible, |d| d.child(right_panels(app, cx))),
         )
         .child(footer_bar(app, cx))
-        .when(app.show_checkpoints, |d| d.child(checkpoints_overlay(app, cx)))
+        .when(app.show_checkpoints, |d| {
+            d.child(checkpoints_overlay(app, cx))
+        })
         .when(app.toast.is_some(), |d| d.child(toast_view(app)))
 }
 
@@ -56,61 +58,63 @@ fn top_bar(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl In
             .border_color(rgb(theme::BORDER)),
     )
     .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .child(icon_button("toggle-sidebar", "☰", cx, |app, cx| app.toggle_sidebar(cx)))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_MUTED))
-                        .child(path),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .id("toggle-checkpoints")
-                        .px(px(10.))
-                        .py(px(6.))
-                        .bg(rgb(theme::INPUT_BG))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .text_size(px(12.))
-                        .text_color(rgb(theme::TEXT_SECONDARY))
-                        .cursor_pointer()
-                        .child(format!("Checkpoints ({checkpoint_count})"))
-                        .on_click(cx.listener(|app, _, _, cx| app.toggle_checkpoints(cx))),
-                )
-                .child(
-                    div()
-                        .id("goto-settings")
-                        .px(px(10.))
-                        .py(px(6.))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .text_size(px(12.))
-                        .text_color(rgb(theme::TEXT_SECONDARY))
-                        .cursor_pointer()
-                        .child("Settings")
-                        .on_click(cx.listener(|app, _, _, cx| app.go_settings(cx))),
-                )
-                .child(icon_button("toggle-file-tree", "☰", cx, |app, cx| {
-                    app.toggle_file_tree(cx)
-                }))
-                .child(chrome::window_controls(window, cx)),
-        )
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(icon_button("toggle-sidebar", "☰", cx, |app, cx| {
+                app.toggle_sidebar(cx)
+            }))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .child(path),
+            ),
+    )
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .id("toggle-checkpoints")
+                    .px(px(10.))
+                    .py(px(6.))
+                    .bg(rgb(theme::INPUT_BG))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::TEXT_SECONDARY))
+                    .cursor_pointer()
+                    .child(format!("Checkpoints ({checkpoint_count})"))
+                    .on_click(cx.listener(|app, _, _, cx| app.toggle_checkpoints(cx))),
+            )
+            .child(
+                div()
+                    .id("goto-settings")
+                    .px(px(10.))
+                    .py(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::TEXT_SECONDARY))
+                    .cursor_pointer()
+                    .child("Settings")
+                    .on_click(cx.listener(|app, _, _, cx| app.go_settings(cx))),
+            )
+            .child(icon_button("toggle-file-tree", "☰", cx, |app, cx| {
+                app.toggle_file_tree(cx)
+            }))
+            .child(chrome::window_controls(window, cx)),
+    )
 }
 
 fn icon_button(
@@ -267,12 +271,152 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
                 .flex_col()
                 .gap(px(14.))
                 .children(messages.into_iter().map(|m| message_view(m, app, cx)))
-                .when(app.thinking, |d| d.child(thinking_view()))
+                .when(app.thinking, |d| d.child(thinking_view(cx)))
+                .when(app.pending_permission.is_some(), |d| {
+                    d.child(permission_view(app, cx))
+                })
+                .when(app.pending_elicitation.is_some(), |d| {
+                    d.child(elicitation_view(app, cx))
+                })
                 .child(composer_view(app, cx)),
         )
 }
 
-fn thinking_view() -> impl IntoElement {
+fn permission_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
+    let (title, choices) = app
+        .pending_permission
+        .as_ref()
+        .map(|permission| {
+            (
+                permission.title.clone(),
+                permission
+                    .options
+                    .iter()
+                    .map(|option| option.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            )
+        })
+        .unwrap_or_default();
+    div()
+        .max_w(px(760.))
+        .border_1()
+        .border_color(rgb(theme::ACCENT))
+        .p(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(format!("Permission required · {title}")),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(choices),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(8.))
+                .child(action_button(
+                    "permission-reject",
+                    "Reject",
+                    cx,
+                    |app, cx| app.decide_permission(false, cx),
+                ))
+                .child(action_button(
+                    "permission-allow",
+                    "Allow once",
+                    cx,
+                    |app, cx| app.decide_permission(true, cx),
+                )),
+        )
+}
+
+fn elicitation_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
+    let (message, schema) = app
+        .pending_elicitation
+        .as_ref()
+        .map(|elicitation| {
+            (
+                elicitation.request.message.clone(),
+                serde_json::to_string_pretty(&elicitation.request)
+                    .unwrap_or_else(|_| "Could not render requested schema".into()),
+            )
+        })
+        .unwrap_or_default();
+    div()
+        .max_w(px(760.))
+        .border_1()
+        .border_color(rgb(theme::ACCENT))
+        .p(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Agent needs information"),
+        )
+        .child(div().text_size(px(12.)).child(message))
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(schema),
+        )
+        .child(
+            div()
+                .bg(rgb(theme::INPUT_BG))
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .p(px(7.))
+                .text_size(px(12.))
+                .child(app.elicitation_input.clone()),
+        )
+        .child(
+            div()
+                .flex()
+                .gap(px(8.))
+                .child(action_button(
+                    "elicitation-decline",
+                    "Decline",
+                    cx,
+                    |app, cx| app.decline_elicitation(cx),
+                ))
+                .child(action_button(
+                    "elicitation-accept",
+                    "Submit",
+                    cx,
+                    |app, cx| app.accept_elicitation(cx),
+                )),
+        )
+}
+
+fn action_button(
+    id: &'static str,
+    label: &'static str,
+    cx: &mut Context<App>,
+    action: impl Fn(&mut App, &mut Context<App>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px(px(10.))
+        .py(px(5.))
+        .border_1()
+        .border_color(rgb(theme::BORDER))
+        .text_size(px(11.))
+        .cursor_pointer()
+        .child(label)
+        .on_click(cx.listener(move |app, _, _, cx| action(app, cx)))
+}
+
+fn thinking_view(cx: &mut Context<App>) -> impl IntoElement {
     div().max_w(px(760.)).child(
         div()
             .flex()
@@ -291,7 +435,17 @@ fn thinking_view() -> impl IntoElement {
                     .gap(px(4.))
                     .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::TEXT_SECONDARY)))
                     .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::TEXT_SECONDARY)))
-                    .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::TEXT_SECONDARY))),
+                    .child(div().w(px(5.)).h(px(5.)).bg(rgb(theme::TEXT_SECONDARY)))
+                    .child(
+                        div()
+                            .id("cancel-turn")
+                            .ml(px(8.))
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::ACCENT))
+                            .cursor_pointer()
+                            .child("Stop")
+                            .on_click(cx.listener(|app, _, _, cx| app.cancel_turn(cx))),
+                    ),
             ),
     )
 }
@@ -304,43 +458,51 @@ fn message_view(m: Message, app: &mut App, cx: &mut Context<App>) -> gpui::AnyEl
 }
 
 fn user_message(m: Message) -> impl IntoElement {
-    div().max_w(px(760.)).flex().flex_col().gap(px(4.)).child(
-        div()
-            .text_size(px(11.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(theme::ACCENT))
-            .child("you"),
-    ).child(
-        div()
-            .text_size(px(13.))
-            .line_height(px(21.))
-            .text_color(rgb(theme::TEXT_PRIMARY))
-            .child(m.text.clone()),
-    ).when(!m.context.is_empty(), |d| {
-        d.child(
+    div()
+        .max_w(px(760.))
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
             div()
-                .flex()
-                .gap(px(6.))
-                .flex_wrap()
-                .children(m.context.iter().map(|c| chip_view(c.clone()))),
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme::ACCENT))
+                .child("you"),
         )
-    }).when(!m.attached_comments.is_empty(), |d| {
-        d.child(
+        .child(
             div()
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .border_l_2()
-                .border_color(rgb(theme::BORDER))
-                .pl(px(8.))
-                .children(m.attached_comments.iter().map(|(label, text)| {
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_SECONDARY))
-                        .child(format!("{label}: {text}"))
-                })),
+                .text_size(px(13.))
+                .line_height(px(21.))
+                .text_color(rgb(theme::TEXT_PRIMARY))
+                .child(m.text.clone()),
         )
-    })
+        .when(!m.context.is_empty(), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .flex_wrap()
+                    .children(m.context.iter().map(|c| chip_view(c.clone()))),
+            )
+        })
+        .when(!m.attached_comments.is_empty(), |d| {
+            d.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .border_l_2()
+                    .border_color(rgb(theme::BORDER))
+                    .pl(px(8.))
+                    .children(m.attached_comments.iter().map(|(label, text)| {
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::TEXT_SECONDARY))
+                            .child(format!("{label}: {text}"))
+                    })),
+            )
+        })
 }
 
 fn chip_view(text: String) -> impl IntoElement {
@@ -408,13 +570,18 @@ fn assistant_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl I
         let file = diff.file.clone();
         col = col.child(diff_view(
             diff,
-            move |idx| (format!("{key_prefix}_{idx}"), format!("{file} line {}", idx + 1)),
+            move |idx| {
+                (
+                    format!("{key_prefix}_{idx}"),
+                    format!("{file} line {}", idx + 1),
+                )
+            },
             app,
             cx,
         ));
     }
     if let Some(term) = &m.terminal {
-        col = col.child(terminal_view(term));
+        col = col.child(terminal_view(term, app, cx));
     }
     col = col.child(
         div()
@@ -455,37 +622,40 @@ fn steps_view(
     cx: &mut Context<App>,
 ) -> impl IntoElement {
     let items = steps.items.clone();
-    div().child(
-        div()
-            .id(SharedString::from(format!("steps-{msg_id}")))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .cursor_pointer()
-            .text_size(px(12.))
-            .text_color(rgb(theme::TEXT_MUTED))
-            .child(if expanded { "▾" } else { "▸" })
-            .child(steps.summary.clone())
-            .on_click(cx.listener(move |app, _, _, cx| app.toggle_steps(&msg_id, cx))),
-    ).when(expanded, |d| {
-        d.child(
+    div()
+        .child(
             div()
-                .mt(px(6.))
-                .pl(px(16.))
+                .id(SharedString::from(format!("steps-{msg_id}")))
                 .flex()
-                .flex_col()
-                .gap(px(3.))
-                .children(items.into_iter().map(|item| {
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_MUTED))
-                        .child(format!("· {item}"))
-                })),
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(if expanded { "▾" } else { "▸" })
+                .child(steps.summary.clone())
+                .on_click(cx.listener(move |app, _, _, cx| app.toggle_steps(&msg_id, cx))),
         )
-    })
+        .when(expanded, |d| {
+            d.child(
+                div()
+                    .mt(px(6.))
+                    .pl(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .children(items.into_iter().map(|item| {
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child(format!("· {item}"))
+                    })),
+            )
+        })
 }
 
-fn terminal_view(term: &Terminal) -> impl IntoElement {
+fn terminal_view(term: &Terminal, app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
+    let awaiting_approval = app.pending_permission.is_some();
     div()
         .bg(rgb(theme::TERMINAL_BG))
         .border_1()
@@ -506,6 +676,7 @@ fn terminal_view(term: &Terminal) -> impl IntoElement {
                 .text_color(rgb(theme::DIFF_ADD_TEXT))
                 .child(term.output.clone()),
         )
+        .when(awaiting_approval, |d| d.child(approval_controls(cx)))
 }
 
 fn comments_list(list: &[Comment]) -> impl IntoElement {
@@ -567,33 +738,55 @@ fn diff_view(
     app: &mut App,
     cx: &mut Context<App>,
 ) -> impl IntoElement {
-    div().border_1().border_color(rgb(theme::TERMINAL_BORDER)).child(
-        div()
-            .flex()
-            .justify_between()
-            .px(px(10.))
-            .py(px(6.))
-            .bg(rgb(theme::INPUT_BG))
-            .border_b_1()
-            .border_color(rgb(theme::TERMINAL_BORDER))
-            .child(div().text_size(px(12.)).child(diff.file.clone()))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(theme::TEXT_MUTED))
-                    .child(diff.stat.clone()),
-            ),
-    ).child(
-        div()
-            .text_size(px(11.))
-            .text_color(rgb(theme::TEXT_MUTED))
-            .px(px(10.))
-            .py(px(4.))
-            .child(diff.hunk_header.clone()),
-    ).children(diff.lines.iter().enumerate().map(|(idx, line)| {
-        let (key, label) = key_fn(idx);
-        diff_line_view(line, key, label, app, cx)
-    }))
+    let awaiting_approval = app.pending_permission.is_some();
+    div()
+        .border_1()
+        .border_color(rgb(theme::TERMINAL_BORDER))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .px(px(10.))
+                .py(px(6.))
+                .bg(rgb(theme::INPUT_BG))
+                .border_b_1()
+                .border_color(rgb(theme::TERMINAL_BORDER))
+                .child(div().text_size(px(12.)).child(diff.file.clone()))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .child(diff.stat.clone()),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(theme::TEXT_MUTED))
+                .px(px(10.))
+                .py(px(4.))
+                .child(diff.hunk_header.clone()),
+        )
+        .children(diff.lines.iter().enumerate().map(|(idx, line)| {
+            let (key, label) = key_fn(idx);
+            diff_line_view(line, key, label, app, cx)
+        }))
+        .when(awaiting_approval, |d| d.child(approval_controls(cx)))
+}
+
+fn approval_controls(cx: &mut Context<App>) -> impl IntoElement {
+    div()
+        .flex()
+        .gap(px(8.))
+        .p(px(8.))
+        .border_t_1()
+        .border_color(rgb(theme::TERMINAL_BORDER))
+        .child(action_button("inline-reject", "Reject", cx, |app, cx| {
+            app.decide_permission(false, cx)
+        }))
+        .child(action_button("inline-allow", "Accept", cx, |app, cx| {
+            app.decide_permission(true, cx)
+        }))
 }
 
 fn diff_line_view(
@@ -689,74 +882,68 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let chips = app.context_chips.clone();
     let composer = app.composer.clone();
 
-    div().max_w(px(760.)).flex().flex_col().gap(px(4.))
+    div()
+        .max_w(px(760.))
+        .flex()
+        .flex_col()
+        .gap(px(4.))
         .when(has_chips, |d| {
-            d.child(
-                div()
-                    .flex()
-                    .gap(px(6.))
-                    .flex_wrap()
-                    .mb(px(4.))
-                    .children(chips.into_iter().enumerate().map(|(idx, path)| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_size(px(11.))
-                            .px(px(6.))
-                            .py(px(2.))
-                            .bg(rgb(theme::INPUT_BG))
-                            .border_1()
-                            .border_color(rgb(theme::BORDER))
-                            .text_color(rgb(theme::TEXT_SECONDARY))
-                            .child(path)
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("remove-chip-{idx}")))
-                                    .cursor_pointer()
-                                    .text_color(rgb(theme::TEXT_MUTED))
-                                    .child("×")
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.context_chips.remove(idx);
-                                        cx.notify();
-                                    })),
-                            )
-                    })),
-            )
+            d.child(div().flex().gap(px(6.)).flex_wrap().mb(px(4.)).children(
+                chips.into_iter().enumerate().map(|(idx, path)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .px(px(6.))
+                        .py(px(2.))
+                        .bg(rgb(theme::INPUT_BG))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .text_color(rgb(theme::TEXT_SECONDARY))
+                        .child(path)
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("remove-chip-{idx}")))
+                                .cursor_pointer()
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .child("×")
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.context_chips.remove(idx);
+                                    cx.notify();
+                                })),
+                        )
+                }),
+            ))
         })
         .when(!pending.is_empty(), |d| {
-            d.child(
-                div()
-                    .flex()
-                    .gap(px(6.))
-                    .flex_wrap()
-                    .mb(px(4.))
-                    .children(pending.into_iter().map(|p| {
-                        let key = p.key.clone();
-                        let idx = p.idx;
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_size(px(11.))
-                            .px(px(6.))
-                            .py(px(2.))
-                            .bg(rgba(theme::PENDING_CHIP_BG))
-                            .border_1()
-                            .border_color(rgba(theme::PENDING_CHIP_BORDER))
-                            .text_color(rgb(theme::ACCENT))
-                            .child(format!("{}: {}", p.label, p.text))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("remove-pending-{key}-{idx}")))
-                                    .cursor_pointer()
-                                    .child("×")
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        app.remove_pending_comment(&key, idx, cx)
-                                    })),
-                            )
-                    })),
-            )
+            d.child(div().flex().gap(px(6.)).flex_wrap().mb(px(4.)).children(
+                pending.into_iter().map(|p| {
+                    let key = p.key.clone();
+                    let idx = p.idx;
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .px(px(6.))
+                        .py(px(2.))
+                        .bg(rgba(theme::PENDING_CHIP_BG))
+                        .border_1()
+                        .border_color(rgba(theme::PENDING_CHIP_BORDER))
+                        .text_color(rgb(theme::ACCENT))
+                        .child(format!("{}: {}", p.label, p.text))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("remove-pending-{key}-{idx}")))
+                                .cursor_pointer()
+                                .child("×")
+                                .on_click(cx.listener(move |app, _, _, cx| {
+                                    app.remove_pending_comment(&key, idx, cx)
+                                })),
+                        )
+                }),
+            ))
         })
         .child(
             div()
@@ -779,7 +966,9 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let active_diff = app.active_diff_file.clone();
     let files = app.changed_files();
 
-    div().flex().flex_shrink_0()
+    div()
+        .flex()
+        .flex_shrink_0()
         .when_some(active_diff.clone(), |d, path| {
             let Some(diff) = app.file_diffs.get(&path).cloned() else {
                 return d;
@@ -889,9 +1078,9 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                                 .text_ellipsis()
                                 .child(label),
                         )
-                        .on_click(cx.listener(move |app, _, _, cx| {
-                            app.toggle_diff_file(&click_path, cx)
-                        }))
+                        .on_click(
+                            cx.listener(move |app, _, _, cx| app.toggle_diff_file(&click_path, cx)),
+                        )
                 })),
         )
 }
@@ -899,10 +1088,23 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
 // ---------------------------------------------------------------- footer
 
 fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
-    let percent = (18 + app.sent_count as i32 * 9).min(100);
-    let status_label = if app.thinking { "Running" } else { "Idle" };
-    let status_color = if app.thinking { theme::ACCENT } else { theme::TEXT_MUTED };
-    let selected_model = app.selected_model.clone();
+    let percent = app.context_usage.unwrap_or(0);
+    let context_label = app
+        .context_usage
+        .map(|percent| format!("{percent}% context"))
+        .unwrap_or_else(|| "Context unavailable".into());
+    let status_label = app.connection_status.clone();
+    let status_color = if app.thinking {
+        theme::ACCENT
+    } else {
+        theme::TEXT_MUTED
+    };
+    let selected_model = if app.selected_model.is_empty() {
+        "Agent model".to_string()
+    } else {
+        app.selected_model.clone()
+    };
+    let models = app.available_models.clone();
     let menu_open = app.model_menu_open;
 
     div()
@@ -916,43 +1118,47 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::FOOTER_BG))
         .child(
-            div().relative().child(
-                div()
-                    .id("model-menu-toggle")
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(11.))
-                    .text_color(rgb(theme::TEXT_SECONDARY))
-                    .cursor_pointer()
-                    .child(selected_model)
-                    .child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
-                    .on_click(cx.listener(|app, _, _, cx| app.toggle_model_menu(cx)))
-            ).when(menu_open, |d| {
-                d.child(
+            div()
+                .relative()
+                .child(
                     div()
-                        .absolute()
-                        .bottom(px(28.))
-                        .left(px(0.))
-                        .bg(rgb(theme::INPUT_BG))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .min_w(px(150.))
-                        .children(crate::state::MODEL_NAMES.iter().map(|&name| {
-                            div()
-                                .id(SharedString::from(format!("footer-model-{name}")))
-                                .px(px(10.))
-                                .py(px(8.))
-                                .text_size(px(12.))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(rgb(theme::HOVER_BG)))
-                                .child(name)
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.select_model(name, cx)
-                                }))
-                        })),
+                        .id("model-menu-toggle")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::TEXT_SECONDARY))
+                        .cursor_pointer()
+                        .child(selected_model)
+                        .child(div().text_color(rgb(theme::TEXT_MUTED)).child("▾"))
+                        .on_click(cx.listener(|app, _, _, cx| app.toggle_model_menu(cx))),
                 )
-            }),
+                .when(menu_open && !models.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .bottom(px(28.))
+                            .left(px(0.))
+                            .bg(rgb(theme::INPUT_BG))
+                            .border_1()
+                            .border_color(rgb(theme::BORDER))
+                            .min_w(px(150.))
+                            .children(models.into_iter().map(|name| {
+                                let click_name = name.clone();
+                                div()
+                                    .id(SharedString::from(format!("footer-model-{name}")))
+                                    .px(px(10.))
+                                    .py(px(8.))
+                                    .text_size(px(12.))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(theme::HOVER_BG)))
+                                    .child(name)
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.select_model(&click_name, cx)
+                                    }))
+                            })),
+                    )
+                }),
         )
         .child(
             div()
@@ -976,7 +1182,7 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                             div()
                                 .text_size(px(11.))
                                 .text_color(rgb(theme::TEXT_MUTED))
-                                .child(format!("{percent}% context")),
+                                .child(context_label),
                         ),
                 )
                 .child(

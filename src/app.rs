@@ -1,10 +1,17 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::path::PathBuf;
 
+use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate, ToolCallContent};
 use gpui::prelude::*;
 use gpui::{Context, Entity, ScrollHandle, Window, div, px, rgb};
 
+use crate::acp::{
+    AcpClient, AcpEvent, AnchoredComment, ElicitationDecision, PendingElicitation,
+    PendingPermission, PermissionDecision, TurnInput,
+};
 use crate::async_runtime;
+use crate::checkpoint::{Checkpoint, CheckpointManager};
+use crate::config::{ConfigStore, ProjectAgentConfig, TransportConfig};
 use crate::screens;
 use crate::state::*;
 use crate::text_input::TextInput;
@@ -25,6 +32,8 @@ pub struct App {
     pub active_session_id: Option<String>,
 
     pub selected_model: String,
+    pub available_models: Vec<String>,
+    pub model_options: HashMap<String, (String, String)>,
     pub model_menu_open: bool,
 
     pub sidebar_visible: bool,
@@ -37,7 +46,12 @@ pub struct App {
     pub composer: Entity<TextInput>,
     pub context_chips: Vec<String>,
     pub thinking: bool,
-    pub reply_generation: u64,
+    pub connection_status: String,
+    pub context_usage: Option<u8>,
+    pub acp_client: Option<AcpClient>,
+    pub agent_config: Option<ProjectAgentConfig>,
+    pub pending_permission: Option<PendingPermission>,
+    pub pending_elicitation: Option<PendingElicitation>,
     pub sent_count: usize,
 
     pub show_checkpoints: bool,
@@ -50,6 +64,15 @@ pub struct App {
     pub comments: HashMap<String, Vec<Comment>>,
 
     pub thread_scroll: ScrollHandle,
+    pub checkpoints: Vec<Checkpoint>,
+
+    pub config_remote: bool,
+    pub agent_command_input: Entity<TextInput>,
+    pub workspace_input: Entity<TextInput>,
+    pub ssh_host_input: Entity<TextInput>,
+    pub ssh_user_input: Entity<TextInput>,
+    pub ssh_key_input: Entity<TextInput>,
+    pub elicitation_input: Entity<TextInput>,
 }
 
 impl App {
@@ -63,6 +86,13 @@ impl App {
                     weak.update(cx, |app, cx| app.send_message(text, cx)).ok();
                 })
         });
+        let agent_command_input = cx.new(|cx| TextInput::new(cx, "e.g. gemini --experimental-acp"));
+        let workspace_input = cx.new(|cx| TextInput::new(cx, "/path/to/project"));
+        let ssh_host_input = cx.new(|cx| TextInput::new(cx, "host from ~/.ssh/config"));
+        let ssh_user_input = cx.new(|cx| TextInput::new(cx, "optional SSH user"));
+        let ssh_key_input = cx.new(|cx| TextInput::new(cx, "optional identity file"));
+        let elicitation_input =
+            cx.new(|cx| TextInput::new(cx, r#"JSON object, e.g. {"answer":"yes"}"#));
 
         App {
             screen: Screen::Onboarding,
@@ -70,7 +100,9 @@ impl App {
             sessions_by_project: seed_sessions(),
             active_project: None,
             active_session_id: None,
-            selected_model: MODEL_NAMES[0].to_string(),
+            selected_model: String::new(),
+            available_models: vec![],
+            model_options: HashMap::new(),
             model_menu_open: false,
             sidebar_visible: true,
             file_tree_visible: true,
@@ -80,7 +112,12 @@ impl App {
             composer,
             context_chips: vec![],
             thinking: false,
-            reply_generation: 0,
+            connection_status: "Not configured".into(),
+            context_usage: None,
+            acp_client: None,
+            agent_config: None,
+            pending_permission: None,
+            pending_elicitation: None,
             sent_count: 0,
             show_checkpoints: false,
             toast: None,
@@ -90,6 +127,14 @@ impl App {
             comment_inputs: HashMap::new(),
             comments: seed_comments(),
             thread_scroll: ScrollHandle::new(),
+            checkpoints: vec![],
+            config_remote: false,
+            agent_command_input,
+            workspace_input,
+            ssh_host_input,
+            ssh_user_input,
+            ssh_key_input,
+            elicitation_input,
         }
     }
 
@@ -128,6 +173,7 @@ impl App {
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
+        self.connect_project(cx);
         cx.notify();
     }
 
@@ -140,6 +186,7 @@ impl App {
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
+        self.connect_project(cx);
         cx.notify();
     }
 
@@ -162,6 +209,7 @@ impl App {
         self.show_checkpoints = false;
         self.context_chips.clear();
         self.screen = Screen::Workspace;
+        self.connect_project(cx);
         cx.notify();
     }
 
@@ -216,9 +264,124 @@ impl App {
     }
 
     pub fn select_model(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some((id, value)) = self.model_options.get(name)
+            && let Some(client) = &self.acp_client
+            && let Err(error) = client.set_config(id.clone(), value.clone())
+        {
+            self.connection_status = error;
+            cx.notify();
+            return;
+        }
         self.selected_model = name.to_string();
         self.model_menu_open = false;
         cx.notify();
+    }
+
+    pub fn toggle_config_remote(&mut self, cx: &mut Context<Self>) {
+        self.config_remote = !self.config_remote;
+        cx.notify();
+    }
+
+    pub fn save_agent_config(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.active_project.as_ref() else {
+            self.toast = Some("Open a project before configuring an agent".into());
+            cx.notify();
+            return;
+        };
+        let project_id = project.id.clone();
+        let command = self.agent_command_input.read(cx).content.trim().to_string();
+        let workspace = self.workspace_input.read(cx).content.trim().to_string();
+        let host = self.ssh_host_input.read(cx).content.trim().to_string();
+        let user = self.ssh_user_input.read(cx).content.trim().to_string();
+        let key = self.ssh_key_input.read(cx).content.trim().to_string();
+        let transport = if self.config_remote {
+            TransportConfig::Ssh {
+                host,
+                user: (!user.is_empty()).then_some(user),
+                identity_file: (!key.is_empty()).then(|| PathBuf::from(key)),
+            }
+        } else {
+            TransportConfig::Local
+        };
+        let config = ProjectAgentConfig {
+            agent_command: command,
+            transport,
+            workspace: PathBuf::from(workspace),
+        };
+        match ConfigStore::for_user().save(&project_id, &config) {
+            Ok(()) => {
+                self.agent_config = Some(config);
+                self.toast = Some("Agent configuration saved".into());
+                self.connect_project(cx);
+            }
+            Err(error) => self.toast = Some(format!("Could not save agent configuration: {error}")),
+        }
+        cx.notify();
+    }
+
+    fn connect_project(&mut self, cx: &mut Context<Self>) {
+        self.acp_client = None;
+        self.pending_permission = None;
+        self.pending_elicitation = None;
+        self.context_usage = None;
+        self.available_models.clear();
+        self.model_options.clear();
+        let Some(project) = self.active_project.as_ref() else {
+            return;
+        };
+        let config = match ConfigStore::for_user().load(&project.id) {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                self.connection_status = "Not configured".into();
+                return;
+            }
+            Err(error) => {
+                self.connection_status = format!("Config error: {error}");
+                return;
+            }
+        };
+        self.config_remote = matches!(config.transport, TransportConfig::Ssh { .. });
+        self.agent_command_input.update(cx, |input, _| {
+            input.set_content(config.agent_command.clone())
+        });
+        self.workspace_input.update(cx, |input, _| {
+            input.set_content(config.workspace.to_string_lossy())
+        });
+        if let TransportConfig::Ssh {
+            host,
+            user,
+            identity_file,
+        } = &config.transport
+        {
+            self.ssh_host_input
+                .update(cx, |input, _| input.set_content(host));
+            self.ssh_user_input.update(cx, |input, _| {
+                input.set_content(user.clone().unwrap_or_default())
+            });
+            self.ssh_key_input.update(cx, |input, _| {
+                input.set_content(
+                    identity_file
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            });
+        }
+        self.agent_config = Some(config.clone());
+        let (client, mut events) = AcpClient::connect(config);
+        self.acp_client = Some(client);
+        self.connection_status = "Connecting".into();
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                if this
+                    .update(cx, |app, cx| app.apply_acp_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub fn toggle_checkpoints(&mut self, cx: &mut Context<Self>) {
@@ -266,7 +429,13 @@ impl App {
         cx.notify();
     }
 
-    pub fn submit_comment(&mut self, key: String, text: String, label: String, cx: &mut Context<Self>) {
+    pub fn submit_comment(
+        &mut self,
+        key: String,
+        text: String,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -342,6 +511,11 @@ impl App {
     }
 
     pub fn send_message(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.thinking {
+            self.toast = Some("Stop the running turn before sending another message".into());
+            cx.notify();
+            return;
+        }
         let pending = self.pending_comments();
         let text = text.trim().to_string();
         if text.is_empty() && pending.is_empty() {
@@ -366,7 +540,6 @@ impl App {
             diff: None,
             terminal: None,
         });
-        let sent_count = self.sent_count;
         self.update_active_messages(thread);
 
         for p in &pending {
@@ -378,49 +551,283 @@ impl App {
         }
 
         self.context_chips.clear();
-        self.thinking = true;
         self.sent_count += 1;
-        self.reply_generation += 1;
-        let generation = self.reply_generation;
-
-        let rx = async_runtime::delay(Duration::from_millis(1200));
-        cx.spawn(async move |this, cx| {
-            let _ = rx.await;
-            this.update(cx, |app, cx| app.apply_reply(generation, sent_count, cx))
-                .ok();
-        })
-        .detach();
+        let turn = TurnInput {
+            text: self
+                .active_messages()
+                .last()
+                .map(|message| message.text.clone())
+                .unwrap_or_default(),
+            context_files: self
+                .active_messages()
+                .last()
+                .map(|message| message.context.clone())
+                .unwrap_or_default(),
+            comments: pending
+                .iter()
+                .map(|comment| AnchoredComment {
+                    target: comment.label.clone(),
+                    body: comment.text.clone(),
+                })
+                .collect(),
+        };
+        match self.acp_client.as_ref() {
+            Some(client) => {
+                if let Err(error) = client.prompt(turn) {
+                    self.connection_status = error;
+                }
+            }
+            None => {
+                self.connection_status =
+                    "No ACP agent configured; open Settings to connect one".into();
+            }
+        }
 
         cx.notify();
     }
 
-    fn apply_reply(&mut self, generation: u64, sent_count: usize, cx: &mut Context<Self>) {
-        if generation != self.reply_generation {
-            return;
+    fn apply_acp_event(&mut self, event: AcpEvent, cx: &mut Context<Self>) {
+        match event {
+            AcpEvent::Connecting => self.connection_status = "Connecting".into(),
+            AcpEvent::Connected { agent_name } => {
+                self.connection_status = agent_name
+                    .map(|name| format!("Connected · {name}"))
+                    .unwrap_or_else(|| "Connected".into());
+            }
+            AcpEvent::Reconnecting { attempt, reason } => {
+                self.thinking = false;
+                self.connection_status = format!("Reconnecting ({attempt}) · {reason}");
+            }
+            AcpEvent::SessionReady => self.connection_status = "Idle".into(),
+            AcpEvent::TurnStarted => {
+                self.thinking = true;
+                self.connection_status = "Running".into();
+                let mut thread = self.active_messages();
+                thread.push(Message {
+                    id: format!("a{}", now_ms()),
+                    role: Role::Assistant,
+                    text: String::new(),
+                    time: Some("Just now".into()),
+                    context: vec![],
+                    attached_comments: vec![],
+                    checkpoint_label: None,
+                    steps: None,
+                    diff: None,
+                    terminal: None,
+                });
+                self.update_active_messages(thread);
+            }
+            AcpEvent::Update(update) => self.apply_session_update(update),
+            AcpEvent::Permission(permission) => self.pending_permission = Some(permission),
+            AcpEvent::Elicitation(elicitation) => self.pending_elicitation = Some(elicitation),
+            AcpEvent::TurnFinished => {
+                self.thinking = false;
+                self.connection_status = "Idle".into();
+                self.create_turn_checkpoint(cx);
+            }
+            AcpEvent::TurnCancelled => {
+                self.thinking = false;
+                self.connection_status = "Cancelled".into();
+                if let Some(permission) = self.pending_permission.take() {
+                    permission.respond(PermissionDecision::Cancel);
+                }
+                if let Some(elicitation) = self.pending_elicitation.take() {
+                    elicitation.respond(ElicitationDecision::Cancel);
+                }
+            }
+            AcpEvent::Error(error) | AcpEvent::Disconnected(error) => {
+                self.thinking = false;
+                self.connection_status = error.clone();
+                self.toast = Some(error);
+            }
         }
-        let canned = canned_replies();
-        let reply = &canned[sent_count % canned.len()];
-        let checkpoint_label = reply
-            .diff
-            .as_ref()
-            .map(|d| format!("Checkpoint {} · {}", self.checkpoints_for().len() + 1, d.file));
-        let id = format!("a{}", now_ms());
-        let mut thread = self.active_messages();
-        thread.push(Message {
-            id,
-            role: Role::Assistant,
-            text: reply.text.to_string(),
-            time: Some("Just now".into()),
-            context: vec![],
-            attached_comments: vec![],
-            checkpoint_label,
-            steps: reply.steps.clone(),
-            diff: reply.diff.clone(),
-            terminal: reply.terminal.clone(),
-        });
-        self.update_active_messages(thread);
-        self.thinking = false;
         cx.notify();
+    }
+
+    fn apply_session_update(&mut self, update: SessionUpdate) {
+        match update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                if let ContentBlock::Text(text) = chunk.content {
+                    let mut thread = self.active_messages();
+                    if let Some(message) = thread
+                        .iter_mut()
+                        .rev()
+                        .find(|message| matches!(message.role, Role::Assistant))
+                    {
+                        message.text.push_str(&text.text);
+                    }
+                    self.update_active_messages(thread);
+                }
+            }
+            SessionUpdate::ToolCall(call) => {
+                self.apply_tool_content(call.title, call.content);
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                self.apply_tool_content(
+                    update
+                        .fields
+                        .title
+                        .unwrap_or_else(|| "Agent operation".into()),
+                    update.fields.content.unwrap_or_default(),
+                );
+            }
+            SessionUpdate::UsageUpdate(usage) => {
+                self.context_usage = (usage.size > 0)
+                    .then_some(((usage.used.saturating_mul(100) / usage.size).min(100)) as u8);
+            }
+            SessionUpdate::ConfigOptionUpdate(options) => {
+                let value = serde_json::to_value(options).unwrap_or_default();
+                let options = extract_model_options(&value);
+                self.available_models = options.iter().map(|(name, _, _)| name.clone()).collect();
+                self.model_options = options
+                    .into_iter()
+                    .map(|(name, id, value)| (name, (id, value)))
+                    .collect();
+                if self.selected_model.is_empty() {
+                    self.selected_model =
+                        self.available_models.first().cloned().unwrap_or_default();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_tool_content(&mut self, title: String, content: Vec<ToolCallContent>) {
+        let mut thread = self.active_messages();
+        let Some(message) = thread
+            .iter_mut()
+            .rev()
+            .find(|message| matches!(message.role, Role::Assistant))
+        else {
+            return;
+        };
+        for item in content {
+            match item {
+                ToolCallContent::Diff(diff) => {
+                    let rendered = render_acp_diff(diff);
+                    self.file_diffs
+                        .insert(rendered.file.clone(), rendered.clone());
+                    message.diff = Some(rendered);
+                }
+                ToolCallContent::Content(content) => {
+                    if let ContentBlock::Text(text) = content.content {
+                        message.terminal = Some(Terminal {
+                            cmd: title.clone(),
+                            output: text.text,
+                        });
+                    }
+                }
+                ToolCallContent::Terminal(_) => {
+                    message.terminal.get_or_insert(Terminal {
+                        cmd: title.clone(),
+                        output: "Interactive terminal is managed by the connected agent".into(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        self.update_active_messages(thread);
+    }
+
+    pub fn decide_permission(&mut self, allow: bool, cx: &mut Context<Self>) {
+        let Some(permission) = self.pending_permission.take() else {
+            return;
+        };
+        let option = permission.options.iter().find(|option| {
+            let kind = format!("{:?}", option.kind);
+            kind.starts_with(if allow { "Allow" } else { "Reject" })
+        });
+        let decision = option
+            .map(|option| PermissionDecision::Select(option.option_id.to_string()))
+            .unwrap_or(PermissionDecision::Cancel);
+        permission.respond(decision);
+        cx.notify();
+    }
+
+    pub fn cancel_turn(&mut self, cx: &mut Context<Self>) {
+        if let Some(client) = &self.acp_client {
+            if let Err(error) = client.cancel() {
+                self.connection_status = error;
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn decline_elicitation(&mut self, cx: &mut Context<Self>) {
+        if let Some(elicitation) = self.pending_elicitation.take() {
+            elicitation.respond(ElicitationDecision::Decline);
+        }
+        cx.notify();
+    }
+
+    pub fn accept_elicitation(&mut self, cx: &mut Context<Self>) {
+        let raw = self.elicitation_input.read(cx).content.clone();
+        let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
+        let content = match parsed {
+            Ok(object) => {
+                let mut content = std::collections::BTreeMap::new();
+                for (key, value) in object {
+                    let Some(value) = json_elicitation_value(value) else {
+                        self.toast = Some(format!(
+                            "Unsupported elicitation value for {key}; use strings, numbers, booleans, or string arrays"
+                        ));
+                        cx.notify();
+                        return;
+                    };
+                    content.insert(key, value);
+                }
+                content
+            }
+            Err(error) => {
+                self.toast = Some(format!("Invalid elicitation response: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(elicitation) = self.pending_elicitation.take() {
+            elicitation.respond(ElicitationDecision::Accept(content));
+            self.elicitation_input.update(cx, |input, _| input.clear());
+        }
+        cx.notify();
+    }
+
+    fn create_turn_checkpoint(&mut self, cx: &mut Context<Self>) {
+        let Some(config) = self.agent_config.clone() else {
+            return;
+        };
+        let label = format!("Checkpoint {}", self.checkpoints.len() + 1);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        async_runtime::spawn(async move {
+            let result =
+                tokio::task::spawn_blocking(move || CheckpointManager::new(config).create(&label))
+                    .await
+                    .unwrap_or_else(|error| Err(format!("checkpoint task failed: {error}")));
+            let _ = sender.send(result);
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(result) = receiver.await {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(checkpoint) => {
+                            let mut thread = app.active_messages();
+                            if let Some(message) = thread
+                                .iter_mut()
+                                .rev()
+                                .find(|message| matches!(message.role, Role::Assistant))
+                            {
+                                message.checkpoint_label = Some(checkpoint.label.clone());
+                            }
+                            app.update_active_messages(thread);
+                            app.checkpoints.push(checkpoint);
+                        }
+                        Err(error) => app.toast = Some(error),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Checkpoints in chronological order (oldest first) — matches the JS
@@ -435,17 +842,45 @@ impl App {
     }
 
     pub fn restore_checkpoint(&mut self, label: &str, cx: &mut Context<Self>) {
-        self.toast = Some(format!("Restored to {label}"));
+        let Some(checkpoint) = self
+            .checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.label == label)
+            .cloned()
+        else {
+            self.toast = Some(format!("Checkpoint data is unavailable for {label}"));
+            cx.notify();
+            return;
+        };
+        let Some(config) = self.agent_config.clone() else {
+            self.toast = Some("Agent workspace is not configured".into());
+            cx.notify();
+            return;
+        };
+        self.toast = Some(format!("Restoring {label}…"));
+        let restored_label = label.to_string();
         self.show_checkpoints = false;
         self.toast_generation += 1;
         let generation = self.toast_generation;
-
-        let rx = async_runtime::delay(Duration::from_millis(2200));
+        let (sender, rx) = tokio::sync::oneshot::channel();
+        async_runtime::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                CheckpointManager::new(config).restore(&checkpoint)
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("restore task failed: {error}")));
+            let _ = sender.send(result);
+        });
         cx.spawn(async move |this, cx| {
-            let _ = rx.await;
+            let result = rx.await;
             this.update(cx, |app, cx| {
                 if generation == app.toast_generation {
-                    app.toast = None;
+                    app.toast = Some(match result {
+                        Ok(Ok(())) => format!("Restored to {restored_label}"),
+                        Ok(Err(error)) => format!("Restore failed: {error}"),
+                        Err(_) => "Restore task stopped unexpectedly".into(),
+                    });
                     cx.notify();
                 }
             })
@@ -490,4 +925,115 @@ fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+fn render_acp_diff(diff: agent_client_protocol::schema::v1::Diff) -> Diff {
+    use similar::{ChangeTag, TextDiff};
+
+    let old = diff.old_text.unwrap_or_default();
+    let patch = TextDiff::from_lines(&old, &diff.new_text);
+    let mut added = 0;
+    let mut removed = 0;
+    let lines = patch
+        .iter_all_changes()
+        .map(|change| {
+            let (kind, text) = match change.tag() {
+                ChangeTag::Equal => (DiffLineKind::Ctx, change.value()),
+                ChangeTag::Delete => {
+                    removed += 1;
+                    (DiffLineKind::Del, change.value())
+                }
+                ChangeTag::Insert => {
+                    added += 1;
+                    (DiffLineKind::Add, change.value())
+                }
+            };
+            DiffLine {
+                kind,
+                text: text.trim_end_matches('\n').to_string(),
+            }
+        })
+        .collect();
+    Diff {
+        file: diff.path.to_string_lossy().into_owned(),
+        stat: format!("+{added} -{removed}"),
+        hunk_header: "@@ ACP structured edit @@".into(),
+        lines,
+    }
+}
+
+fn extract_model_options(value: &serde_json::Value) -> Vec<(String, String, String)> {
+    fn visit(value: &serde_json::Value, output: &mut Vec<(String, String, String)>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let is_model = object
+                    .get("category")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|category| category.eq_ignore_ascii_case("model"));
+                if is_model {
+                    let config_id = object
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("model");
+                    if let Some(options) =
+                        object.get("options").and_then(serde_json::Value::as_array)
+                    {
+                        for option in options {
+                            if let (Some(name), Some(value)) = (
+                                option
+                                    .get("name")
+                                    .or_else(|| option.get("label"))
+                                    .and_then(serde_json::Value::as_str),
+                                option.get("value").and_then(serde_json::Value::as_str),
+                            ) && !output.iter().any(|(existing, _, _)| existing == name)
+                            {
+                                output.push((
+                                    name.to_string(),
+                                    config_id.to_string(),
+                                    value.to_string(),
+                                ));
+                            } else if let Some(value) = option.as_str()
+                                && !output.iter().any(|(existing, _, _)| existing == value)
+                            {
+                                output.push((
+                                    value.to_string(),
+                                    config_id.to_string(),
+                                    value.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                object.values().for_each(|child| visit(child, output));
+            }
+            serde_json::Value::Array(array) => {
+                array.iter().for_each(|child| visit(child, output));
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = vec![];
+    visit(value, &mut output);
+    output
+}
+
+fn json_elicitation_value(
+    value: serde_json::Value,
+) -> Option<agent_client_protocol::schema::v1::ElicitationContentValue> {
+    use agent_client_protocol::schema::v1::ElicitationContentValue;
+    match value {
+        serde_json::Value::String(value) => Some(ElicitationContentValue::String(value)),
+        serde_json::Value::Bool(value) => Some(ElicitationContentValue::Boolean(value)),
+        serde_json::Value::Number(value) if value.is_i64() => {
+            Some(ElicitationContentValue::Integer(value.as_i64()?))
+        }
+        serde_json::Value::Number(value) => Some(ElicitationContentValue::Number(value.as_f64()?)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(|value| value.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .map(ElicitationContentValue::StringArray),
+        _ => None,
+    }
 }

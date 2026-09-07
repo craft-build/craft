@@ -69,18 +69,28 @@ pub fn window_controls(window: &mut Window, _cx: &mut Context<App>) -> impl Into
         .flex()
         .items_center()
         .h_full()
-        .child(control_button("win-minimize", "−", WindowControlArea::Min, |window, _| {
-            window.minimize_window();
-        }))
+        .child(control_button(
+            "win-minimize",
+            "−",
+            WindowControlArea::Min,
+            |window, _| {
+                window.minimize_window();
+            },
+        ))
         .child(control_button(
             "win-maximize",
             if maximized { "❐" } else { "□" },
             WindowControlArea::Max,
             |window, _| window.zoom_window(),
         ))
-        .child(control_button("win-close", "✕", WindowControlArea::Close, |window, _| {
-            window.remove_window();
-        }))
+        .child(control_button(
+            "win-close",
+            "✕",
+            WindowControlArea::Close,
+            |window, _| {
+                window.remove_window();
+            },
+        ))
 }
 
 fn control_button(

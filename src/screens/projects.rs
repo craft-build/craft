@@ -31,7 +31,12 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                                 .text_color(rgb(theme::TEXT_MUTED))
                                 .child("RECENT SESSIONS"),
                         )
-                        .children(app.projects.clone().into_iter().map(|p| project_card(p, cx))),
+                        .children(
+                            app.projects
+                                .clone()
+                                .into_iter()
+                                .map(|p| project_card(p, cx)),
+                        ),
                 ),
         )
 }
@@ -50,51 +55,51 @@ fn top_bar(window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
             .border_color(rgb(theme::BORDER)),
     )
     .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(div().w(px(8.)).h(px(8.)).bg(rgb(theme::ACCENT)))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::BOLD)
-                        .child("FORGE"),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .child(
-                    div()
-                        .id("new-session")
-                        .px(px(12.))
-                        .py(px(6.))
-                        .bg(rgb(theme::ACCENT))
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::ACCENT_DARK_TEXT))
-                        .cursor_pointer()
-                        .child("+ New session")
-                        .on_click(cx.listener(|app, _, _, cx| app.new_session(cx))),
-                )
-                .child(
-                    div()
-                        .id("settings-from-projects")
-                        .px(px(10.))
-                        .py(px(6.))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER))
-                        .text_size(px(12.))
-                        .text_color(rgb(theme::TEXT_SECONDARY))
-                        .cursor_pointer()
-                        .child("Settings")
-                        .on_click(cx.listener(|app, _, _, cx| app.go_settings(cx))),
-                )
-                .child(chrome::window_controls(window, cx)),
-        )
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(div().w(px(8.)).h(px(8.)).bg(rgb(theme::ACCENT)))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::BOLD)
+                    .child("FORGE"),
+            ),
+    )
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(
+                div()
+                    .id("new-session")
+                    .px(px(12.))
+                    .py(px(6.))
+                    .bg(rgb(theme::ACCENT))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::ACCENT_DARK_TEXT))
+                    .cursor_pointer()
+                    .child("+ New session")
+                    .on_click(cx.listener(|app, _, _, cx| app.new_session(cx))),
+            )
+            .child(
+                div()
+                    .id("settings-from-projects")
+                    .px(px(10.))
+                    .py(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::TEXT_SECONDARY))
+                    .cursor_pointer()
+                    .child("Settings")
+                    .on_click(cx.listener(|app, _, _, cx| app.go_settings(cx))),
+            )
+            .child(chrome::window_controls(window, cx)),
+    )
 }
 
 fn project_card(p: crate::state::Project, cx: &mut Context<App>) -> gpui::AnyElement {
