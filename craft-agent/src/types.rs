@@ -313,6 +313,25 @@ impl ToolOutput {
         }
     }
 
+    /// The text a [`HookStage::Output`](crate::tools::HookStage::Output) hook
+    /// may read and rewrite, or `None` when the output has none to lend. Only
+    /// a plain-text shape qualifies: the other variants render from their own
+    /// fields, so prose a hook redacted would disagree with the display, and
+    /// `ReadDir` with instruction blocks appends state a rewrite cannot see.
+    ///
+    /// One accessor for both directions, so a getter and a setter can never
+    /// drift into letting a hook read text it cannot write back.
+    pub fn filterable_text_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Plain(t) | Self::Markdown(t) => Some(t),
+            Self::ReadDir {
+                text,
+                instructions: None,
+            } => Some(text),
+            _ => None,
+        }
+    }
+
     pub fn as_display_text(&self) -> String {
         match self {
             Self::Plain(s) | Self::Markdown(s) => s.clone(),
@@ -1064,6 +1083,32 @@ mod tests {
     #[test_case(Some(StopReason::ToolUse) ; "tool_use")]
     fn stop_reason_without_its_own_ending_becomes_end_turn(stop: Option<StopReason>) {
         assert_eq!(DoneReason::from(stop), DoneReason::EndTurn);
+    }
+
+    const FILTERABLE_TEXT: &str = "body";
+
+    #[test_case(ToolOutput::Plain(FILTERABLE_TEXT.into()),   Some(FILTERABLE_TEXT) ; "plain_lends_text")]
+    #[test_case(ToolOutput::Markdown(FILTERABLE_TEXT.into()), Some(FILTERABLE_TEXT) ; "markdown_lends_text")]
+    #[test_case(
+        ToolOutput::ReadDir {
+            text: FILTERABLE_TEXT.into(),
+            instructions: None,
+        },
+        Some(FILTERABLE_TEXT) ; "read_dir_without_instructions_lends_text"
+    )]
+    #[test_case(
+        ToolOutput::ReadDir {
+            text: FILTERABLE_TEXT.into(),
+            instructions: Some(vec![]),
+        },
+        None ; "read_dir_with_instructions_withholds_text"
+    )]
+    #[test_case(ToolOutput::Diff { path: "a.rs".into(), before: String::new(), after: String::new(), summary: FILTERABLE_TEXT.into() }, None ; "diff_withholds_text")]
+    fn filterable_text_needs_text_to_be_the_sole_representation(
+        mut output: ToolOutput,
+        expected: Option<&str>,
+    ) {
+        assert_eq!(output.filterable_text_mut().map(|t| t.as_str()), expected);
     }
 
     #[test]

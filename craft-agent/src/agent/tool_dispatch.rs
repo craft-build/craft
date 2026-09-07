@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -7,13 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracing::{debug, error, info, warn};
 
 use crate::mcp::{McpHandle, UNKNOWN_MCP, wire_tool_name};
 use crate::permissions::{ASK_TIMEOUT, DEFAULT_DENY_GUIDANCE};
 use crate::task_set::TaskSet;
-use crate::tools::registry::{ToolInvocation, ToolRegistry};
+use crate::tools::hook::{Authority, HookStage, OUTPUT_IS_ERROR, OUTPUT_TEXT, Verdict};
+use crate::tools::registry::{InstalledHook, ToolInvocation, ToolRegistry};
 use crate::tools::{ToolAudience, ToolContext, truncate_bytes};
 use crate::{
     AgentError, AgentEvent, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent,
@@ -38,6 +40,16 @@ const MCP_SCOPE_PREVIEW_BYTES: usize = 200;
 const NULL_VALUE: Value = Value::Null;
 const PRE_TOOL_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 const POST_TOOL_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The window a chain gets when the call carries no deadline of its own.
+/// Generous, because a layer may shell out before it decides, but a layer that
+/// parks and never comes back has to end somewhere short of "when the user
+/// gives up".
+const HOOK_CHAIN_MAX: Duration = Duration::from_secs(60);
+
+/// What the model reads when cancellation outranks a hook chain: nobody is
+/// left to read a verdict, so the call ends as a plain cancellation error.
+const ERROR_CANCELLED: &str = "cancelled";
 
 #[derive(Default)]
 pub(super) struct RecentCalls(VecDeque<(String, u64)>);
@@ -80,7 +92,195 @@ impl RecentCalls {
 
 /// Parse errors and unknown tools skip the start event so the UI never
 /// shows a phantom spinner.
+///
+/// Every tool call lands here (native, Lua, MCP), which makes it the one
+/// place [hooks](crate::tools::hook) fire: the input stage before the schema
+/// check and before permission rules resolve, so rules judge the call as the
+/// layer left it, and the output stage on the text the call produced.
 pub async fn run(
+    registry: &ToolRegistry,
+    mcp: Option<&McpHandle>,
+    id: String,
+    name: &str,
+    input: &Value,
+    ctx: &ToolContext,
+    emit: Emit,
+) -> ToolDoneEvent {
+    let name = super::streaming::canonical_tool_name(name);
+    let hook = Hook::of(registry, mcp, ctx, name);
+
+    let verdict = match &hook {
+        Some(hook) => hook.filter_input(&id, input).await,
+        None => Verdict::Unchanged,
+    };
+    let input = match verdict {
+        Verdict::Unchanged => Cow::Borrowed(input),
+        Verdict::Replaced(value) => {
+            debug!(tool = %name, "input hook rewrote the call");
+            Cow::Owned(value)
+        }
+        Verdict::Denied(reason) => {
+            warn!(tool = %name, reason = %reason, "input hook stopped the call");
+            return ToolDoneEvent {
+                id,
+                tool: Arc::from(name),
+                output: ToolOutput::Plain(reason),
+                is_error: true,
+                annotation: None,
+                written_path: None,
+            };
+        }
+    };
+
+    let mut done = run_inner(registry, mcp, id, name, &input, ctx, emit).await;
+    if let Some(hook) = &hook {
+        hook.filter_output(&mut done).await;
+    }
+    done
+}
+
+/// The hook installed on this registry, bound to one call. `None` when nobody
+/// installed one, or when the name routes nowhere to run.
+///
+/// The call id is handed to each stage instead of held, because `run_inner`
+/// owns it in between.
+struct Hook<'a> {
+    installed: InstalledHook,
+    ctx: &'a ToolContext,
+    tool: &'a str,
+    authority: Authority,
+}
+
+impl<'a> Hook<'a> {
+    fn of(
+        registry: &'a ToolRegistry,
+        mcp: Option<&McpHandle>,
+        ctx: &'a ToolContext,
+        name: &'a str,
+    ) -> Option<Self> {
+        let installed = registry.hook()?;
+        let entry = registry.get(name);
+        let mcp_name;
+        let mcp_lookup = if entry.is_none() && name.contains("__") && mcp.is_some() {
+            mcp_name = crate::mcp::internal_tool_name(name);
+            mcp_name.as_str()
+        } else {
+            name
+        };
+        // What hooking this call would lend. Only a declared capability
+        // narrows it: reading undeclared as free is what would let an
+        // unprivileged plugin steer `batch` or `code_execution` into any tool
+        // it likes. A name that routes nowhere lends no authority either, so
+        // a rewrite cannot make the name exist.
+        let authority = if let Some(entry) = &entry {
+            entry
+                .tool
+                .required_permission()
+                .map_or(Authority::Unbounded, Authority::Capability)
+        } else if mcp.is_some_and(|m| m.has_tool(mcp_lookup)) {
+            Authority::Unbounded
+        } else {
+            return None;
+        };
+        Some(Self {
+            installed,
+            ctx,
+            tool: name,
+            authority,
+        })
+    }
+
+    async fn filter_input(&self, tool_id: &str, input: &Value) -> Verdict {
+        if !self.installed.wraps(self.tool, HookStage::Input) {
+            return Verdict::Unchanged;
+        }
+        let cancelled = Verdict::Denied(ERROR_CANCELLED.to_owned());
+        self.fire(HookStage::Input, tool_id, input.clone(), cancelled)
+            .await
+    }
+
+    /// Rewrites the finished event in place. Text and error flag move together,
+    /// so a hook that cannot reach the text cannot flip the flag either.
+    async fn filter_output(&self, done: &mut ToolDoneEvent) {
+        if !self.installed.wraps(self.tool, HookStage::Output) {
+            return;
+        }
+        let was_error = done.is_error;
+        let Some(text) = done.output.filterable_text_mut() else {
+            debug!(
+                tool = %self.tool,
+                "output hook skipped: this output renders from fields, not prose"
+            );
+            return;
+        };
+        let value = json!({ OUTPUT_TEXT: &*text, OUTPUT_IS_ERROR: was_error });
+        let (rewritten, is_error) = match self
+            .fire(HookStage::Output, &done.id, value, Verdict::Unchanged)
+            .await
+        {
+            Verdict::Unchanged => return,
+            // Nothing left to stop, so the reason becomes what the model reads.
+            Verdict::Denied(reason) => (reason, true),
+            Verdict::Replaced(value) => match value.get(OUTPUT_TEXT).and_then(Value::as_str) {
+                Some(replaced) => (
+                    replaced.to_owned(),
+                    value
+                        .get(OUTPUT_IS_ERROR)
+                        .and_then(Value::as_bool)
+                        .unwrap_or(was_error),
+                ),
+                None => {
+                    warn!(
+                        tool = %self.tool,
+                        field = OUTPUT_TEXT,
+                        "output hook replaced the output without a text field, leaving it alone"
+                    );
+                    return;
+                }
+            },
+        };
+        *text = rewritten;
+        done.is_error = is_error;
+        debug!(tool = %self.tool, "output hook rewrote the output");
+    }
+
+    /// Cancellation outranks a hook: nobody is left to read the verdict, so
+    /// the wait ends with `on_cancel`.
+    async fn fire(
+        &self,
+        stage: HookStage,
+        tool_id: &str,
+        value: Value,
+        on_cancel: Verdict,
+    ) -> Verdict {
+        let call = crate::tools::HookCall {
+            tool: self.tool,
+            tool_id,
+            session_id: self.ctx.session_id.as_deref(),
+            authority: self.authority,
+            cancel: &self.ctx.cancel,
+            deadline: self.window(),
+        };
+        self.ctx
+            .cancel
+            .race(self.installed.run(stage, value, &call))
+            .await
+            .unwrap_or(on_cancel)
+    }
+
+    /// Read when a stage fires, not once per call: the input chain and the
+    /// tool spend from the same budget, so an output chain handed the entry-time
+    /// answer would inherit a window the call already used up.
+    fn window(&self) -> Instant {
+        let cap = Instant::now() + HOOK_CHAIN_MAX;
+        match self.ctx.deadline {
+            crate::tools::Deadline::At(at) => at.min(cap),
+            crate::tools::Deadline::None => cap,
+        }
+    }
+}
+
+async fn run_inner(
     registry: &ToolRegistry,
     mcp: Option<&McpHandle>,
     id: String,
@@ -2146,5 +2346,604 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // --- tool hooks ---
+
+    use crate::tools::hook::{OUTPUT_IS_ERROR, OUTPUT_TEXT};
+    use crate::tools::registry::ExecFuture;
+    use crate::tools::schema::{JsonPath, ToolInputErrorKind};
+
+    const TEST_ID: &str = "t1";
+    const HOOK_TOOL_NAME: &str = "hook_probe";
+    const HOOK_FIELD: &str = "command";
+    const HOOK_PLAIN: &str = "ls";
+    const HOOK_REWRITTEN_FROM: &str = "grep -r x .";
+    const HOOK_REWRITTEN_TO: &str = "rg x";
+    const HOOK_DENIED: &str = "sudo rm -rf /";
+    const HOOK_DENY_REASON: &str = "not on my watch";
+    const HOOK_OUTPUT_TEXT: &str = "trimmed";
+    const HOOK_PERMISSION: craft_config::Permission = craft_config::Permission::Run;
+    const HOOK_FIELD_TYPE: &str = "string";
+    const HOOK_DIFF_COMMAND: &str = "apply";
+    const HOOK_DIFF_PATH: &str = "/tmp/diffed.txt";
+    const HOOK_DIFF_SUMMARY: &str = "1 file changed";
+    const HOOK_ESCAPED_PATH: &str = "/tmp/not-the-plan.md";
+    const PLAN_PATH: &str = "/tmp/plan.md";
+    const HOOK_CALL_DEADLINE: Duration = Duration::from_secs(7);
+    const HOOK_SLOW_COMMAND: &str = "slow";
+    /// Real elapsed time inside the call, so the gap between the two stages'
+    /// windows is a measurement rather than a race.
+    const HOOK_SLOW_RUN: Duration = Duration::from_millis(20);
+
+    fn build_ctx() -> ToolContext {
+        crate::tools::test_support::stub_ctx(&AgentMode::Build)
+    }
+
+    fn denying_ctx() -> ToolContext {
+        use craft_config::{Effect, PermissionRule, PermissionsConfig, ToolKey};
+
+        let config = PermissionsConfig {
+            rules: vec![PermissionRule {
+                tool: ToolKey::native(HOOK_TOOL_NAME),
+                scope: None,
+                effect: Effect::Deny,
+            }],
+            ..Default::default()
+        };
+        let permissions = Arc::new(crate::permissions::PermissionManager::new(
+            config,
+            PathBuf::from("/tmp"),
+            Arc::default(),
+        ));
+        crate::tools::test_support::stub_ctx_with_permissions(&AgentMode::Build, permissions)
+    }
+
+    /// Its permission scope, its write target and its output are all its
+    /// input, which is how a test sees the input each stage of dispatch got.
+    struct HookMock(Option<craft_config::Permission>);
+
+    struct HookMockInvocation(String);
+
+    impl ToolInvocation for HookMockInvocation {
+        fn start_header(&self) -> crate::tools::HeaderFuture {
+            crate::tools::HeaderFuture::Ready(crate::tools::HeaderResult::plain(
+                HOOK_TOOL_NAME.into(),
+            ))
+        }
+        fn permission_scopes(
+            &self,
+        ) -> crate::tools::BoxFuture<'_, Option<crate::tools::PermissionScopes>> {
+            Box::pin(std::future::ready(Some(
+                crate::tools::PermissionScopes::single(self.0.clone()),
+            )))
+        }
+        fn mutable_path(&self) -> Option<&Path> {
+            Some(Path::new(&self.0))
+        }
+        fn execute<'a>(self: Box<Self>, _ctx: &'a ToolContext) -> ExecFuture<'a> {
+            Box::pin(async move {
+                if self.0 == HOOK_SLOW_COMMAND {
+                    tokio::time::sleep(HOOK_SLOW_RUN).await;
+                }
+                Ok(output_of(&self.0)).into()
+            })
+        }
+    }
+
+    fn ran(command: &str) -> String {
+        format!("ran {command}")
+    }
+
+    /// One command answers with a shape the UI renders from fields, the one
+    /// kind of output a hook may not touch.
+    fn output_of(command: &str) -> ToolOutput {
+        if command == HOOK_DIFF_COMMAND {
+            return ToolOutput::Diff {
+                path: HOOK_DIFF_PATH.to_owned(),
+                before: String::new(),
+                after: String::new(),
+                summary: HOOK_DIFF_SUMMARY.to_owned(),
+            };
+        }
+        ToolOutput::Plain(ran(command))
+    }
+
+    /// Shared by the mock and the assertion, so the test cannot pass against
+    /// some other error.
+    fn missing_command() -> crate::tools::ParseError {
+        crate::tools::ParseError {
+            path: JsonPath::default(),
+            kind: ToolInputErrorKind::Missing {
+                expected: HOOK_FIELD_TYPE,
+            },
+        }
+    }
+
+    impl crate::tools::Tool for HookMock {
+        fn name(&self) -> &str {
+            HOOK_TOOL_NAME
+        }
+        fn description(&self, _ctx: &crate::tools::DescriptionContext) -> Cow<'_, str> {
+            "hook mock".into()
+        }
+        fn schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}})
+        }
+        fn required_permission(&self) -> Option<craft_config::Permission> {
+            self.0
+        }
+        fn parse(
+            &self,
+            input: &Value,
+        ) -> Result<Box<dyn ToolInvocation>, crate::tools::ParseError> {
+            match input[HOOK_FIELD].as_str() {
+                Some(command) => Ok(Box::new(HookMockInvocation(command.to_owned()))),
+                None => Err(missing_command()),
+            }
+        }
+    }
+
+    /// One firing as the hook saw it.
+    #[derive(Clone, Debug)]
+    struct Seen {
+        stage: HookStage,
+        authority: Authority,
+        tool: String,
+        tool_id: String,
+        session_id: Option<String>,
+        value: Value,
+        cancelled: bool,
+        deadline: Instant,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Reply {
+        Answers(fn(HookStage, &Value) -> Verdict),
+        /// Never resolves, so only cancellation can end the wait.
+        Pending,
+    }
+
+    /// Stands in for the Lua slot chain: records every firing and answers with
+    /// whatever the test scripted.
+    #[derive(Clone)]
+    struct RecordingHook {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Seen>>>,
+        wrapped: &'static [HookStage],
+        reply: Reply,
+    }
+
+    impl Default for RecordingHook {
+        fn default() -> Self {
+            Self {
+                seen: std::sync::Arc::default(),
+                wrapped: &HookStage::ALL,
+                reply: Reply::Answers(steer_the_call),
+            }
+        }
+    }
+
+    /// Rewrites, denies or defers on the way in, the way a plugin steering the
+    /// model off one command onto another would.
+    fn steer_the_call(stage: HookStage, value: &Value) -> Verdict {
+        match stage {
+            HookStage::Input => match value[HOOK_FIELD].as_str() {
+                Some(HOOK_DENIED) => Verdict::Denied(HOOK_DENY_REASON.into()),
+                Some(HOOK_REWRITTEN_FROM) => Verdict::Replaced(call_input(HOOK_REWRITTEN_TO)),
+                _ => Verdict::Unchanged,
+            },
+            HookStage::Output => Verdict::Unchanged,
+        }
+    }
+
+    impl RecordingHook {
+        fn wrapping(wrapped: &'static [HookStage]) -> Self {
+            Self {
+                wrapped,
+                ..Self::default()
+            }
+        }
+
+        fn answering(answer: fn(HookStage, &Value) -> Verdict) -> Self {
+            Self {
+                reply: Reply::Answers(answer),
+                ..Self::default()
+            }
+        }
+
+        fn never_answering(wrapped: &'static [HookStage]) -> Self {
+            Self {
+                wrapped,
+                reply: Reply::Pending,
+                ..Self::default()
+            }
+        }
+
+        fn seen(&self) -> Vec<Seen> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        fn stages(&self) -> Vec<(HookStage, Authority)> {
+            self.seen().iter().map(|s| (s.stage, s.authority)).collect()
+        }
+
+        fn at(&self, stage: HookStage) -> Option<Seen> {
+            self.seen().into_iter().find(|s| s.stage == stage)
+        }
+    }
+
+    impl crate::tools::ToolHook for RecordingHook {
+        fn wraps(&self, _tool: &str, stage: HookStage) -> bool {
+            self.wrapped.contains(&stage)
+        }
+
+        fn run<'a>(
+            &'a self,
+            stage: HookStage,
+            value: Value,
+            call: &'a crate::tools::HookCall<'a>,
+        ) -> crate::tools::BoxFuture<'a, Verdict> {
+            self.seen.lock().unwrap().push(Seen {
+                stage,
+                authority: call.authority,
+                tool: call.tool.to_owned(),
+                tool_id: call.tool_id.to_owned(),
+                session_id: call.session_id.map(str::to_owned),
+                value: value.clone(),
+                cancelled: call.cancel.is_cancelled(),
+                deadline: call.deadline,
+            });
+            match self.reply {
+                Reply::Answers(answer) => Box::pin(std::future::ready(answer(stage, &value))),
+                Reply::Pending => Box::pin(std::future::pending()),
+            }
+        }
+    }
+
+    fn hooked_with(
+        mut ctx: ToolContext,
+        permission: Option<craft_config::Permission>,
+        hook: RecordingHook,
+    ) -> (ToolContext, RecordingHook) {
+        let registry = ToolRegistry::new();
+        registry
+            .register(
+                Arc::new(HookMock(permission)),
+                crate::tools::registry::ToolSource::Native,
+            )
+            .unwrap();
+        registry.set_hook(hook.clone());
+        ctx.registry = Arc::new(registry);
+        (ctx, hook)
+    }
+
+    fn hooked_ctx(ctx: ToolContext) -> (ToolContext, RecordingHook) {
+        hooked_with(ctx, None, RecordingHook::default())
+    }
+
+    fn plain_hooked_ctx(hook: RecordingHook) -> (ToolContext, RecordingHook) {
+        hooked_with(build_ctx(), None, hook)
+    }
+
+    fn cancelled_token() -> crate::CancelToken {
+        let (trigger, token) = crate::CancelToken::new();
+        trigger.cancel();
+        token
+    }
+
+    fn call_input(command: &str) -> Value {
+        serde_json::json!({ HOOK_FIELD: command })
+    }
+
+    async fn dispatch(ctx: &ToolContext, tool: &str, input: &Value) -> ToolDoneEvent {
+        run(
+            &ctx.registry,
+            ctx.mcp.as_ref(),
+            TEST_ID.to_owned(),
+            tool,
+            input,
+            ctx,
+            Emit::Silent,
+        )
+        .await
+    }
+
+    fn both_stages(authority: Authority) -> Vec<(HookStage, Authority)> {
+        HookStage::ALL.map(|stage| (stage, authority)).into()
+    }
+
+    /// The rewritten call is the one that runs and the one the rules judge.
+    /// Were it the other way round, an `allow bash: git status` rule would be a
+    /// way to run anything.
+    #[test_case(build_ctx   , false ; "reaches_execute")]
+    #[test_case(denying_ctx, true  ; "reaches_the_permission_prompt")]
+    #[tokio::test]
+    async fn an_input_rewrite_is_the_call_that_runs(build: fn() -> ToolContext, is_error: bool) {
+        let (ctx, _hook) = hooked_ctx(build());
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_REWRITTEN_FROM)).await;
+
+        let text = done.output.as_text();
+        assert_eq!(done.is_error, is_error, "{text}");
+        assert!(
+            text.contains(HOOK_REWRITTEN_TO) && !text.contains(HOOK_REWRITTEN_FROM),
+            "everything downstream names the rewritten command: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn input_hook_denial_never_runs_the_tool() {
+        let (ctx, hook) = hooked_ctx(build_ctx());
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_DENIED)).await;
+
+        assert!(done.is_error);
+        assert_eq!(done.output.as_text(), HOOK_DENY_REASON);
+        assert_eq!(
+            hook.stages(),
+            vec![(HookStage::Input, Authority::Unbounded)],
+            "a stopped call has no output to hook"
+        );
+    }
+
+    /// Everything the model reads passes the output stage, so a hook that
+    /// redacts or trims cannot be walked around by failing the call.
+    #[tokio::test]
+    async fn a_refused_call_still_reaches_the_output_stage() {
+        let (ctx, hook) = hooked_ctx(denying_ctx());
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_PLAIN)).await;
+
+        assert!(done.is_error);
+        assert!(
+            done.output
+                .as_text()
+                .contains(crate::permissions::PERMISSION_DENIED_PREFIX)
+        );
+        assert_eq!(hook.stages(), both_stages(Authority::Unbounded));
+
+        let firing = hook.at(HookStage::Output).expect("the output stage fired");
+        assert_eq!(firing.value[OUTPUT_IS_ERROR], Value::Bool(true));
+        let text = firing.value[OUTPUT_TEXT].as_str().unwrap_or_default();
+        assert!(
+            text.contains(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "got: {text}"
+        );
+    }
+
+    /// A name that routes nowhere lends no authority, so nothing fires.
+    #[tokio::test]
+    async fn unknown_names_are_not_hooked() {
+        let (ctx, hook) = hooked_ctx(build_ctx());
+        let done = dispatch(&ctx, "nope", &call_input(HOOK_DENIED)).await;
+
+        assert!(done.is_error);
+        assert!(done.output.as_text().contains(UNKNOWN_TOOL_PREFIX));
+        assert!(hook.stages().is_empty());
+    }
+
+    fn mcp_route_ctx() -> ToolContext {
+        let mut ctx = mcp_ctx(&[(PROBE_QUALIFIED, "")]);
+        let (hooked, _) = hooked_ctx(build_ctx());
+        ctx.registry = hooked.registry;
+        ctx
+    }
+
+    /// Hooking in dispatch is what reaches a route craft did not write the code
+    /// behind, and each one has to answer for what that lends. Only a declared
+    /// capability narrows the price; everything else prices at the maximum.
+    /// The name stays the one the model called, not whatever dispatch routes
+    /// it to.
+    #[test_case(build_ctx,    HOOK_TOOL_NAME, Some(HOOK_PERMISSION), Authority::Capability(HOOK_PERMISSION) ; "a_checked_tool_lends_its_capability")]
+    #[test_case(build_ctx,    HOOK_TOOL_NAME, None,                  Authority::Unbounded                   ; "a_tool_declaring_nothing_declares_no_limit")]
+    #[test_case(mcp_route_ctx, PROBE_WIRE,    None,                  Authority::Unbounded                   ; "an_mcp_tool_is_code_craft_does_not_own")]
+    #[tokio::test]
+    async fn a_route_lends_the_authority_it_declares(
+        build: fn() -> ToolContext,
+        name: &str,
+        permission: Option<craft_config::Permission>,
+        expected: Authority,
+    ) {
+        let (ctx, hook) = hooked_with(build(), permission, RecordingHook::default());
+        dispatch(&ctx, name, &call_input(HOOK_PLAIN)).await;
+
+        let firing = hook.at(HookStage::Input).expect("the input stage fired");
+        assert_eq!(firing.authority, expected);
+        assert_eq!(firing.tool, name, "hooked under the name the model called");
+    }
+
+    /// `wraps` is why an unwrapped slot costs nothing: a stage the hook
+    /// declines never reaches `run` at all.
+    #[test_case(&[HookStage::Input]  ; "input_only")]
+    #[test_case(&[HookStage::Output] ; "output_only")]
+    #[tokio::test]
+    async fn a_stage_the_hook_declines_never_fires(wrapped: &'static [HookStage]) {
+        let (ctx, hook) = plain_hooked_ctx(RecordingHook::wrapping(wrapped));
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_PLAIN)).await;
+
+        assert!(!done.is_error);
+        assert_eq!(done.output.as_text(), ran(HOOK_PLAIN));
+        let fired: Vec<HookStage> = hook.seen().iter().map(|s| s.stage).collect();
+        assert_eq!(fired, wrapped);
+    }
+
+    /// Nobody is left reading the answer, so waiting on a verdict that never
+    /// comes would only keep the call alive. Each stage keeps what it has: no
+    /// input was judged, and an output already produced stands.
+    #[test_case(&[HookStage::Input],  true,  ERROR_CANCELLED.to_owned() ; "input")]
+    #[test_case(&[HookStage::Output], false, ran(HOOK_PLAIN)            ; "output")]
+    #[tokio::test]
+    async fn a_cancelled_call_does_not_wait_for_a_verdict(
+        wrapped: &'static [HookStage],
+        is_error: bool,
+        expected: String,
+    ) {
+        let mut ctx = build_ctx();
+        ctx.cancel = cancelled_token();
+        let (ctx, _hook) = hooked_with(ctx, None, RecordingHook::never_answering(wrapped));
+
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_PLAIN)).await;
+
+        assert_eq!(done.is_error, is_error);
+        assert_eq!(done.output.as_text(), expected);
+    }
+
+    /// A chain runs off this thread, so it only dies with the call it filters
+    /// when it is handed that call's own token and an instant to be killed at.
+    #[tokio::test]
+    async fn a_firing_carries_the_calls_cancellation_and_deadline() {
+        let at = Instant::now() + HOOK_CALL_DEADLINE;
+        let mut ctx = build_ctx();
+        ctx.deadline = crate::tools::Deadline::At(at);
+        ctx.cancel = cancelled_token();
+        let (ctx, hook) = hooked_ctx(ctx);
+
+        dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_PLAIN)).await;
+
+        let firing = hook.at(HookStage::Input).expect("the input stage fired");
+        assert!(firing.cancelled, "the call's own token, not a fresh one");
+        assert_eq!(firing.deadline, at, "and no later than the call itself");
+    }
+
+    /// A call with no deadline of its own still bounds each chain, or a layer
+    /// that hangs hangs the call with it. Bounded from where the stage starts,
+    /// too: the input chain and the tool spend from the same budget, and an
+    /// output chain handed the entry-time answer would get whatever they left,
+    /// which for a slow tool is nothing.
+    #[tokio::test]
+    async fn a_call_without_a_deadline_bounds_each_stage_from_where_it_starts() {
+        let (ctx, hook) = hooked_ctx(build_ctx());
+        let before = Instant::now();
+
+        dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_SLOW_COMMAND)).await;
+
+        let input = hook.at(HookStage::Input).expect("the input stage fired");
+        let output = hook.at(HookStage::Output).expect("the output stage fired");
+        assert!(
+            input.deadline >= before && input.deadline <= Instant::now() + HOOK_CHAIN_MAX,
+            "a deadline already past kills every chain"
+        );
+        assert!(
+            output.deadline - input.deadline >= HOOK_SLOW_RUN,
+            "the output chain inherited a window the call had already spent"
+        );
+    }
+
+    fn replace_the_output(stage: HookStage, _value: &Value) -> Verdict {
+        match stage {
+            HookStage::Input => Verdict::Unchanged,
+            HookStage::Output => Verdict::Replaced(serde_json::json!({
+                OUTPUT_TEXT: HOOK_OUTPUT_TEXT,
+                OUTPUT_IS_ERROR: true,
+            })),
+        }
+    }
+
+    fn replace_the_output_without_text(stage: HookStage, _value: &Value) -> Verdict {
+        match stage {
+            HookStage::Input => Verdict::Unchanged,
+            HookStage::Output => Verdict::Replaced(serde_json::json!({ OUTPUT_IS_ERROR: true })),
+        }
+    }
+
+    fn deny_the_output(stage: HookStage, _value: &Value) -> Verdict {
+        match stage {
+            HookStage::Input => Verdict::Unchanged,
+            HookStage::Output => Verdict::Denied(HOOK_DENY_REASON.into()),
+        }
+    }
+
+    /// Text and error flag move together, and a hook that has run out of call
+    /// to stop has only the text left to say so with.
+    #[test_case(replace_the_output,              true,  HOOK_OUTPUT_TEXT.to_owned() ; "a_replacement_moves_text_and_flag")]
+    #[test_case(replace_the_output_without_text, false, ran(HOOK_PLAIN)             ; "a_replacement_without_text_changes_neither")]
+    #[test_case(deny_the_output,                 true,  HOOK_DENY_REASON.to_owned() ; "a_denial_becomes_the_result")]
+    #[tokio::test]
+    async fn the_output_stage_decides_what_the_model_reads(
+        answer: fn(HookStage, &Value) -> Verdict,
+        is_error: bool,
+        expected: String,
+    ) {
+        let (ctx, _hook) = plain_hooked_ctx(RecordingHook::answering(answer));
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_PLAIN)).await;
+
+        assert_eq!(done.is_error, is_error);
+        assert_eq!(done.output.as_text(), expected);
+    }
+
+    /// An output the UI renders from fields carries no prose to lend, and
+    /// editing it would desync the fields from the text.
+    #[tokio::test]
+    async fn a_rendered_output_skips_the_output_stage() {
+        let (ctx, hook) = plain_hooked_ctx(RecordingHook::answering(deny_the_output));
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_DIFF_COMMAND)).await;
+
+        assert!(!done.is_error);
+        assert_eq!(done.output.as_text(), HOOK_DIFF_SUMMARY);
+        assert_eq!(
+            hook.stages(),
+            vec![(HookStage::Input, Authority::Unbounded)]
+        );
+    }
+
+    fn drop_the_field(stage: HookStage, _value: &Value) -> Verdict {
+        match stage {
+            HookStage::Input => Verdict::Replaced(serde_json::json!({})),
+            HookStage::Output => Verdict::Unchanged,
+        }
+    }
+
+    /// The rewrite lands before the schema check, so a shape the tool cannot
+    /// parse is an ordinary parse error rather than something dispatch has to
+    /// survive.
+    #[tokio::test]
+    async fn a_rewrite_the_tool_cannot_parse_is_a_parse_error() {
+        let (ctx, _hook) = plain_hooked_ctx(RecordingHook::answering(drop_the_field));
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_PLAIN)).await;
+
+        assert!(done.is_error);
+        assert_eq!(done.output.as_text(), missing_command().to_string());
+    }
+
+    fn rewrite_the_target(stage: HookStage, _value: &Value) -> Verdict {
+        match stage {
+            HookStage::Input => Verdict::Replaced(call_input(HOOK_ESCAPED_PATH)),
+            HookStage::Output => Verdict::Unchanged,
+        }
+    }
+
+    /// The write gate reads its target off the rewritten input, so a hook
+    /// cannot point a plan-mode write anywhere but the plan file. The
+    /// untouched call is the control, otherwise the gate could be refusing for
+    /// some unrelated reason.
+    #[test_case(RecordingHook::answering(rewrite_the_target), crate::tools::PLAN_WRITE_RESTRICTED.to_owned() ; "rewritten_away_from_the_plan_file")]
+    #[test_case(RecordingHook::default(),                     ran(PLAN_PATH)                                 ; "left_on_the_plan_file")]
+    #[tokio::test]
+    async fn a_rewritten_write_target_is_still_plan_gated(hook: RecordingHook, expected: String) {
+        let plan = AgentMode::Plan(PathBuf::from(PLAN_PATH));
+        let (ctx, _hook) = hooked_with(build_ctx_for(&plan), None, hook);
+        let done = dispatch(&ctx, HOOK_TOOL_NAME, &call_input(PLAN_PATH)).await;
+
+        assert_eq!(done.output.as_text(), expected);
+    }
+
+    fn build_ctx_for(mode: &AgentMode) -> ToolContext {
+        crate::tools::test_support::stub_ctx(mode)
+    }
+
+    /// A plugin keys its state on these, so a stage firing under another
+    /// call's identity would write onto that other call.
+    #[tokio::test]
+    async fn both_stages_carry_the_call_id_and_the_session() {
+        let session = "sess-hook";
+        let mut ctx = build_ctx();
+        ctx.session_id = Some(session.to_owned());
+        let (ctx, hook) = hooked_ctx(ctx);
+
+        dispatch(&ctx, HOOK_TOOL_NAME, &call_input(HOOK_PLAIN)).await;
+
+        let seen = hook.seen();
+        assert_eq!(seen.len(), HookStage::ALL.len(), "both stages fire");
+        for firing in seen {
+            assert_eq!(firing.tool_id, TEST_ID);
+            assert_eq!(firing.session_id.as_deref(), Some(session));
+        }
     }
 }

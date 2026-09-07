@@ -25,6 +25,7 @@ pub(crate) mod flow_search_backend;
 pub mod fs_backend;
 mod fuzzy_replace;
 pub mod grep;
+pub mod hook;
 mod inspect;
 mod internal_urls;
 pub(crate) mod interpreter_bridge;
@@ -58,6 +59,7 @@ pub use dynamic::{
 };
 pub use file_tracker::FileReadTracker;
 pub use fs_backend::{FsBackend, FsFuture, LocalFs};
+pub use hook::{Authority, HookCall, HookStage, ToolHook, Verdict};
 pub use registry::{
     BoxFuture, ExecFuture, HeaderFuture, HeaderResult, Native, ParseError, PermissionScopes,
     RegisteredTool, RegistryError, Tool, ToolAudience, ToolExecResult, ToolInvocation,

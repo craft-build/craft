@@ -1,6 +1,7 @@
 pub mod agent_autocmd;
 mod api;
 mod error;
+mod hook;
 pub mod language;
 mod loader;
 mod pack;
@@ -44,6 +45,8 @@ pub mod test_support {
     };
     use crate::loader::EventHandle;
     use crate::runtime::Request;
+
+    pub use crate::api::util::dispatch::MAX_HOOK_DEPTH;
 
     pub struct LuaCommandWriterHandle(LuaCommandWriter);
 

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mlua::{Function, Lua, Result as LuaResult, Table, Value};
 
-use crate::api::util::dispatch::DepthGuard;
+use crate::api::util::dispatch::{DepthGuard, Reentry};
 use crate::runtime::{run_detached, strip_traceback};
 
 static NEXT_AUTOCMD_ID: AtomicU64 = AtomicU64::new(1);
@@ -66,7 +66,7 @@ fn pattern_matches(patterns: Option<&[String]>, fired: Option<&str>) -> bool {
 /// thread and plugin unloads arrive through the request channel, so nothing
 /// can unload between the snapshot and the calls.
 pub(crate) async fn dispatch(lua: Lua, event: String, pattern: Option<String>, data: Value) {
-    let Ok(_guard) = DepthGuard::enter(&lua, "autocmd", &event) else {
+    let Ok(_guard) = DepthGuard::enter(&lua, "autocmd", &event, Reentry::Vm) else {
         tracing::warn!(event, "autocmd dispatch exceeded max depth, skipping");
         return;
     };
@@ -180,10 +180,7 @@ pub(crate) fn add_autocmd_methods(api_table: &Table, lua: &Lua, plugin: Arc<str>
         })?,
     )?;
 
-    // A handler may suspend, so this call may too. That rules it out inside
-    // a slot chain, which runs synchronously (see `declare_slot`): the first
-    // handler to park dies with "attempt to yield across metamethod/C-call
-    // boundary". Fire the event from the code that calls the slot instead.
+    // A handler may suspend, so this call may too.
     api_table.set(
         "exec_autocmds",
         lua.create_async_function(

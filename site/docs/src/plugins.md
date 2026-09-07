@@ -398,6 +398,32 @@ For the running gauge between turns, read `craft.session.read()`.
 
 The last four reasons are exit paths: the host is already tearing down, so the UI is detached (`craft.fn` roundtrips fail right away) and every handler shares one grace period. `data.deadline_ms` says how much of it is left when the handler runs; write state out with `craft.fs` and do not park. On the other paths nothing waits and `data.deadline_ms` is nil.
 
+### Tool slots
+
+Autocmds tell you a call happened. A slot lets you change it. Every registered tool fires two slots, whether it is native, a plugin's, or an MCP server's:
+
+- `tool.<name>.input` fires before the input is parsed or checked against permission rules.
+- `tool.<name>.output` fires on the text the call produced, failures included.
+
+A layer takes `function(prev, value, ctx)` and answers one of three ways: return a table to replace the value, return nothing to leave it alone, or return `nil, reason` to stop the call with a reason the model reads. `ctx` carries `tool`, `tool_id`, and `session_id`. Call `prev(value, ctx)` to pass the value down; the last layer registered runs first, and calling `prev` twice throws.
+
+```lua
+craft.api.set_slot("tool.bash.input", function(prev, input, ctx)
+    if input.command:find("git push %-%-force") then
+        return nil, "Force pushing is not allowed here. Open a PR instead."
+    end
+    return prev(input, ctx)
+end)
+```
+
+Because the input layer runs before permission rules resolve, the rules and the prompt judge the call as the layer left it, so an allowed `git status` cannot be rewritten into something else. Wrapping a slot also borrows the tool's authority: a layer on `tool.bash.input` decides what bash runs, so its plugin needs the `run` permission, the capability the bash tool declares. A tool that declares no capability (`read`, `batch`, MCP tools) reaches anything, so layering it costs every permission; a plugin without the grant is skipped, not a denial. The check runs per call, so narrowing a grant needs only a reload.
+
+Chains are async: a layer may read a file or run a job before it decides. It runs inside the call it filters, so cancelling the call cancels the layer, and each stage gets whatever the call has left of its deadline, capped at 60 seconds. A layer that throws or outlives its window is skipped and the call proceeds unchanged. Plugin-declared slots (`craft.api.declare_slot`) became async too: the default and every layer may park, and so does the returned callable.
+
+An output layer sees and returns `{ text, is_error }`. It only fires when the text is the whole output; tools the UI renders from fields (`read`, `edit`) are excluded. Stopping there keeps the work but replaces the text with the reason.
+
+JSON nulls arrive as `nil` inside a layer and are carried back across for you, so an untouched value is a true no-op. The cost: you cannot delete a field whose value is null.
+
 ## `craft.session`
 
 - `craft.session.read({ session = "..." })` returns a one-call snapshot of a session: queue, usage, context, cost, mode, and status. Reads the focused session, or the one you name when you act on a background tab. `usage` and `cost` include subagent spend, `queue = { count }` counts pending user messages (nil under headless drivers), and `status` is `"idle"`, `"working"`, or `"needs_input"`.

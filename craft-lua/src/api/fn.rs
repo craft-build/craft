@@ -967,10 +967,6 @@ pub(crate) fn create_fn_table(
         })?,
     )?;
 
-    // Waiting parks the caller, so a slot chain cannot call it: slot dispatch
-    // runs synchronously and dies on the first suspension. From a slot, start
-    // the job with an `on_exit` that stashes the result in plugin state and
-    // pick it back up with `jobfind` next time.
     let p = perms.clone();
     let owner = plugin.clone();
     t.set(
