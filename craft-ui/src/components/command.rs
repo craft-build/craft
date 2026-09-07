@@ -21,6 +21,9 @@ pub struct BuiltinCommand {
     pub name: &'static str,
     pub description: &'static str,
     pub max_args: usize,
+    /// A typed `!` filters the palette down to commands that read one, so no
+    /// handler can be reached by a bang it ignores.
+    pub bang: bool,
 }
 
 pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
@@ -28,162 +31,206 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         name: "/compact",
         description: "Summarize and compact conversation history",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/new",
         description: "Start a new session",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/help",
         description: "Show keybindings",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/usage",
         description: "Show token usage breakdown",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/stats",
         description: "Show cost and usage stats",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/queue",
         description: "Remove items from queue",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/model",
         description: "Switch model",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/theme",
         description: "Switch color theme",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/mcp",
         description: "Configure MCP servers",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/login",
         description: "Authenticate with an LLM provider",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/cd",
         description: "Change working directory",
         max_args: 1,
+        bang: false,
     },
     BuiltinCommand {
         name: "/btw",
         description: "Ask a quick question (no tools, no history pollution)",
         max_args: usize::MAX,
+        bang: false,
     },
     BuiltinCommand {
         name: "/yolo",
         description: "Toggle YOLO mode (skip all permission prompts)",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/auto-review",
         description: "Toggle auto-review (an LLM decides permission prompts instead of asking)",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/thinking",
         description: "Set thinking level (opens a picker; or pass off, adaptive, effort level, or budget)",
         max_args: 1,
+        bang: false,
     },
     BuiltinCommand {
         name: "/fast",
         description: "Toggle Anthropic fast mode (Opus only)",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/exit",
         description: "Exit the application",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/reload",
         description: "Reload plugins and config",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/goal",
         description: "Set a goal the agent must meet before stopping (blank to clear)",
         max_args: usize::MAX,
+        bang: false,
     },
     BuiltinCommand {
         name: "/recipe",
         description: "Browse and run a recipe",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/dream",
         description: "Consolidate and curate project memory",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/scan",
         description: "Document the project into durable memory (summary, architecture, tech, development)",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/distill",
         description: "Discover reusable workflows and propose skills",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/checkpoint",
         description: "Write a session checkpoint for smooth resume",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/set-context-window",
         description: "Override a model's context window (tokens)",
         max_args: 2,
+        bang: false,
     },
     BuiltinCommand {
         name: "/clear-context-window",
         description: "Clear a context-window override",
         max_args: 1,
+        bang: false,
     },
     BuiltinCommand {
         name: "/wiki",
         description: "Init the project wiki, ingest a file, list entries, or show a page",
         max_args: usize::MAX,
+        bang: false,
     },
     BuiltinCommand {
         name: "/map",
         description: "Show the current repo map (ranked symbol context)",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/map-refresh",
         description: "Force rebuild the repo map cache",
         max_args: 0,
+        bang: false,
     },
     BuiltinCommand {
         name: "/map-toggle",
         description: "Toggle repo map injection on/off",
         max_args: 0,
+        bang: false,
+    },
+    BuiltinCommand {
+        name: "/packupdate",
+        description: "Update packages (++lockfile, ! skips review)",
+        max_args: 2,
+        bang: true,
+    },
+    BuiltinCommand {
+        name: "/packdel",
+        description: "Remove undeclared packages (++all, or a name)",
+        max_args: 1,
+        bang: true,
     },
     BuiltinCommand {
         name: "/watch",
         description: "Toggle watch mode (AI comments in editor drive the agent)",
         max_args: 0,
+        bang: false,
     },
 ];
 
 pub struct ParsedCommand {
     pub name: String,
     pub args: String,
+    pub bang: bool,
 }
 
 pub enum CommandAction {
@@ -225,6 +272,7 @@ pub struct CommandPalette {
     nucleo: Nucleo<CommandItem>,
     matcher: Matcher,
     current_arg_count: usize,
+    current_bang: bool,
 }
 
 fn push_matcher(item: &CommandItem, cols: &mut [Utf32String]) {
@@ -259,6 +307,7 @@ impl CommandPalette {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT),
             current_arg_count: 0,
+            current_bang: false,
         }
     }
 
@@ -340,12 +389,13 @@ impl CommandPalette {
             },
             KeyCode::Tab => {
                 if let Some(item) = self.filtered.get(self.selected) {
-                    let name = self.item_name(item);
-                    let text = if self.item_has_args(item) {
-                        format!("{name} ")
-                    } else {
-                        name
-                    };
+                    let mut text = self.item_name(item);
+                    if self.current_bang {
+                        text.push('!');
+                    }
+                    if self.item_has_args(item) {
+                        text.push(' ');
+                    }
                     CommandAction::Complete(text)
                 } else {
                     CommandAction::Consumed
@@ -373,11 +423,16 @@ impl CommandPalette {
         let Some(stripped) = input.strip_prefix('/') else {
             self.filtered.clear();
             self.current_arg_count = 0;
+            self.current_bang = false;
             return;
         };
 
         let parts: Vec<&str> = stripped.split_whitespace().collect();
-        let cmd_word = parts.first().copied().unwrap_or(stripped);
+        let raw_word = parts.first().copied().unwrap_or(stripped);
+        let (cmd_word, bang) = raw_word
+            .strip_suffix('!')
+            .map_or((raw_word, false), |word| (word, true));
+        self.current_bang = bang;
         let trailing_space = stripped.ends_with(char::is_whitespace);
 
         self.current_arg_count = if trailing_space {
@@ -395,6 +450,26 @@ impl CommandPalette {
         );
 
         self.tick();
+
+        let typed = format!("/{cmd_word}");
+        match self
+            .filtered
+            .iter()
+            .position(|item| self.item_name(item).eq_ignore_ascii_case(&typed))
+        {
+            // A full name beats any fuzzy neighbor, so `/model` cannot run
+            // `/models`.
+            Some(index) => {
+                let exact = self.filtered.remove(index);
+                self.filtered.insert(0, exact);
+                self.selected = 0;
+            }
+            // The command exists but this input ruled it out: too many args, or
+            // a bang it does not read. Its fuzzy neighbors are still here and
+            // Enter would run one, so `/cd a b` would launch `/packupdate`.
+            None if self.resolve(&typed).is_some() => self.filtered.clear(),
+            None => {}
+        }
     }
 
     fn tick(&mut self) {
@@ -423,6 +498,11 @@ impl CommandPalette {
             if self.current_arg_count > cmd_item.max_args {
                 continue;
             }
+            if self.current_bang
+                && !matches!(cmd_item.command_type, CommandType::Builtin(command) if command.bang)
+            {
+                continue;
+            }
 
             let indices = if has_pattern {
                 let mut indices_buf = vec![];
@@ -448,6 +528,7 @@ impl CommandPalette {
     pub fn close(&mut self) {
         self.filtered.clear();
         self.current_arg_count = 0;
+        self.current_bang = false;
     }
 
     pub fn move_up(&mut self) {
@@ -510,6 +591,7 @@ impl CommandPalette {
         Some(ParsedCommand {
             name,
             args: args.to_string(),
+            bang: self.current_bang,
         })
     }
 
@@ -780,7 +862,7 @@ mod tests {
     #[test_case("/CD ~/foo", "/cd", "~/foo"   ; "case_insensitive")]
     #[test_case("/compact", "/compact", ""    ; "other_command")]
     #[test_case("/cmp", "/compact", ""    ; "fuzzy-match-1")]
-    #[test_case("/pct", "/compact", ""    ; "fuzzy-match-2")]
+    #[test_case("/cpt", "/compact", ""    ; "fuzzy-match-2")]
     #[test_case("/btw hello world", "/btw", "hello world" ; "btw_multi_word")]
     fn confirm_parses_args(input: &str, expected_name: &str, expected_args: &str) {
         let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
@@ -788,6 +870,47 @@ mod tests {
         let cmd = p.confirm(input).unwrap();
         assert_eq!(cmd.name, expected_name);
         assert_eq!(cmd.args, expected_args);
+    }
+
+    #[test]
+    fn packupdate_bang_reaches_the_builtin_handler() {
+        let input = "/packupdate! ++lockfile demo";
+        let command = synced(input).confirm(input).unwrap();
+        assert_eq!(command.name, "/packupdate");
+        assert_eq!(command.args, "++lockfile demo");
+        assert!(command.bang);
+    }
+
+    #[test]
+    fn exact_match_ranks_first_without_hiding_fuzzy_matches() {
+        let reader = LuaCommandReader::from_commands(vec![LuaCommandInfo {
+            name: Arc::from("/models"),
+            description: Arc::from("List models"),
+            plugin: Arc::from("models"),
+            max_args: 0,
+        }]);
+        let mut palette = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
+
+        palette.sync("/model");
+
+        assert_eq!(palette.item_name(&palette.filtered[0]), "/model");
+        assert!(
+            palette
+                .filtered
+                .iter()
+                .any(|item| palette.item_name(item) == "/models")
+        );
+        palette.move_down();
+        assert_eq!(palette.confirm("/model").unwrap().name, "/models");
+    }
+
+    /// A full name the input rules out empties the palette instead of leaving
+    /// its fuzzy neighbors, which Enter would then run.
+    #[test_case("/packdel! demo", true ; "bang_on_a_command_that_reads_one")]
+    #[test_case("/reload!", false      ; "bang_on_a_command_that_ignores_it")]
+    #[test_case("/cd one two", false   ; "more_args_than_the_command_takes")]
+    fn bang_and_arg_count_decide_what_the_palette_offers(input: &str, active: bool) {
+        assert_eq!(synced(input).is_active(), active);
     }
 
     #[test]

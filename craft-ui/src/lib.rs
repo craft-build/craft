@@ -38,6 +38,7 @@ mod watch;
 
 use color_eyre::Result;
 use craft_agent::ToolOutput;
+use craft_lua::PackPlan;
 use craft_providers::Message;
 use craft_providers::TokenUsage;
 use std::time::Instant;
@@ -57,6 +58,7 @@ pub enum RunOutcome {
     Reload {
         tabs: Vec<AppSession>,
         focused: usize,
+        pack: Option<PackPlan>,
     },
 }
 
@@ -70,10 +72,15 @@ pub fn run(
     color_compat::init();
     let report = event_loop::EventLoop::new(&mut terminal, params)?.run(initial_prompt)?;
     let exit = report.exit_request();
+    let pack = match &exit {
+        components::ExitRequest::Pack(plan) => Some(plan.clone()),
+        _ => None,
+    };
     Ok(match exit {
-        components::ExitRequest::Reload => RunOutcome::Reload {
+        components::ExitRequest::Reload | components::ExitRequest::Pack(_) => RunOutcome::Reload {
             tabs: report.tabs().to_vec(),
             focused: report.focused(),
+            pack,
         },
         exit => {
             let session_id = report.session_id();

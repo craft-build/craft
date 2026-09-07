@@ -334,6 +334,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
     )?];
     let mut focused = 0;
     let mut warnings = startup_warnings;
+    let mut notice = None;
     let mut initial_prompt = read_initial_prompt(cli.initial_prompt.take())?;
     let mut teardown = Teardown::default();
 
@@ -383,6 +384,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             sessions: std::mem::take(&mut tabs),
             focused,
             startup_warnings: std::mem::take(&mut warnings),
+            startup_notice: notice.take(),
             storage: storage.clone(),
             config: stack.config.agent.clone(),
             compression: stack.config.compression.clone(),
@@ -437,18 +439,26 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             RunOutcome::Reload {
                 tabs: reloaded,
                 focused: f,
+                pack,
             } => {
                 let started = Instant::now();
                 let last_good = (stack.config.clone(), stack.model.clone());
-                // Shut the old host down first so nothing can repopulate
-                // the registry after the clear: its sender disconnects, the
-                // watchdog aborts in-flight callbacks, and only this thread
-                // issues loads. The old VM then shares nothing with the new
-                // stack, so its slow join (up to 2s) can run on a
-                // background thread.
+                // Shut the old host down first so nothing can repopulate the
+                // registry after the clear: its senders disconnect, the watchdog
+                // aborts in-flight callbacks, and only this thread issues loads.
+                // A package plan then has to wait for the old revision leases to
+                // close, while an ordinary reload can drop the stack in the
+                // background.
                 stack.plugin_host.begin_shutdown();
                 ToolRegistry::native().clear_lua();
-                teardown.defer(move || drop(stack));
+                let pack_report = if let Some(plan) = pack {
+                    teardown.join();
+                    drop(stack);
+                    Some(craft_lua::apply_pack_plan(plan))
+                } else {
+                    teardown.defer(move || drop(stack));
+                    None
+                };
                 let (new_stack, new_warnings) =
                     build_stack(&cli, &cwd, &storage, interaction, Some(last_good)).await?;
                 tabs = reloaded;
@@ -456,7 +466,11 @@ pub async fn run(mut cli: Cli) -> Result<()> {
                     tabs.push(AppSession::new(&new_stack.model.spec(), &cwd_str));
                 }
                 stack = new_stack;
-                warnings = new_warnings;
+                if let Some(report) = pack_report {
+                    notice = report.changed().then(|| report.summary());
+                    warnings = super::sanitize_warnings(&report.failures);
+                }
+                warnings.extend(new_warnings);
                 focused = f.min(tabs.len().saturating_sub(1));
                 tracing::info!(
                     elapsed_ms = started.elapsed().as_millis() as u64,

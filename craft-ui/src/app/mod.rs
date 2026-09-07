@@ -40,6 +40,7 @@ use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
 use crate::components::model_picker::{ModelPicker, ModelPickerAction};
+use crate::components::pack_review::{PackReview, PackReviewAction};
 use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::plan_form::{PlanForm, PlanFormAction};
 use crate::components::recipe_picker::{RecipePicker, RecipePickerAction};
@@ -65,7 +66,8 @@ use craft_agent::{
 };
 use craft_config::UiConfig;
 use craft_lua::{
-    BuiltinAction, EventHandle, HintReader, HintSnapshot, KeymapReader, LuaCommandReader, WinView,
+    BuiltinAction, EventHandle, HintReader, HintSnapshot, KeymapReader, LuaCommandReader,
+    PackCommand, PackPreparation, WinView,
 };
 use craft_providers::{ContentBlock, Message, Model, ThinkingConfig, add_cost};
 use craft_storage::StateDir;
@@ -92,6 +94,8 @@ const FLASH_REWIND: &str = "Press esc again to rewind...";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
 const THINKING_UNSUPPORTED_MSG: &str = "Thinking requires a model that supports it";
 const FAST_ON_MSG: &str = "Fast mode: on";
+const PACK_CHANGES_DECLINED: &str = "Package changes declined";
+const PACK_USER_ONLY_SUFFIX: &str = " can only be run by you";
 const FAST_OFF_MSG: &str = "Fast mode: off";
 const SET_CONTEXT_WINDOW_USAGE: &str = "Usage: /set-context-window [model] <tokens> (tokens > 0)";
 const AUTH_EXPIRED_MSG: &str =
@@ -215,6 +219,7 @@ pub struct App {
     pub(super) search_modal: SearchModal,
     pub(super) file_picker: FilePickerModal,
     pub(super) permission_prompt: PermissionPrompt,
+    pub(super) pack_review: PackReview,
     pub(super) plan_form: PlanForm,
     pub(super) flow_panel: FlowPanel,
     pub(super) flow_goal_form: FlowGoalForm,
@@ -355,6 +360,7 @@ impl App {
             search_modal: SearchModal::new(),
             file_picker: FilePickerModal::new(),
             permission_prompt: PermissionPrompt::new(),
+            pack_review: PackReview::new(),
             plan_form: PlanForm::new(),
             flow_panel: FlowPanel::new(),
             flow_goal_form: FlowGoalForm::new(),
@@ -792,6 +798,8 @@ impl App {
     /// Returns `Some` when an overlay is open (consuming the key),
     /// `None` when no overlay is active and input should continue.
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
+        // With both up the permission prompt goes first: a tool is blocked on
+        // it and it owns the bottom panel. The pack review waits on nothing.
         if self.permission_prompt.is_open() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
                 let subagent_id = self.permission_prompt.subagent_id().map(str::to_owned);
@@ -800,6 +808,17 @@ impl App {
                 self.send_to_agent(subagent_id.as_deref(), encoded);
             }
             return Some(vec![]);
+        }
+
+        if self.pack_review.is_open() {
+            return Some(match self.pack_review.handle_key(key) {
+                Some(PackReviewAction::Accept(plan)) => self.quit_with(ExitRequest::Pack(plan)),
+                Some(PackReviewAction::Decline) => {
+                    self.flash(PACK_CHANGES_DECLINED.to_owned());
+                    Vec::new()
+                }
+                None => Vec::new(),
+            });
         }
 
         if self.recipe_picker.is_open() {
@@ -1604,6 +1623,7 @@ impl App {
             ParsedCommand {
                 name: resolved,
                 args: args.trim().to_string(),
+                bang: false,
             },
             depth,
         ))
@@ -1732,6 +1752,19 @@ impl App {
             }
             "/exit" => self.quit(),
             "/reload" => self.quit_with(ExitRequest::Reload),
+            name @ ("/packupdate" | "/packdel") => {
+                if depth > 0 {
+                    self.flash(format!("{name}{PACK_USER_ONLY_SUFFIX}"));
+                    return vec![];
+                }
+                match PackCommand::parse(name, &cmd.args, cmd.bang) {
+                    Ok(command) => vec![Action::PreparePack(command)],
+                    Err(message) => {
+                        self.flash(message);
+                        vec![]
+                    }
+                }
+            }
             "/goal" => {
                 let goal = cmd.args.trim().to_string();
                 let session = self.state.session_mut();
@@ -2169,6 +2202,20 @@ impl App {
         vec![]
     }
 
+    pub(crate) fn handle_pack_preparation(&mut self, preparation: PackPreparation) -> Vec<Action> {
+        match preparation {
+            PackPreparation::Complete(report) => {
+                self.flash(report.message());
+                Vec::new()
+            }
+            PackPreparation::Ready(plan) => self.quit_with(ExitRequest::Pack(plan)),
+            PackPreparation::Review { prompt, plan } => {
+                self.pack_review.open(prompt, plan);
+                Vec::new()
+            }
+        }
+    }
+
     define_overlays!(
         help_modal,
         usage_modal,
@@ -2185,6 +2232,7 @@ impl App {
         login_picker,
         mcp_picker,
         permission_prompt,
+        pack_review,
     );
 
     pub fn any_overlay_open(&self) -> bool {

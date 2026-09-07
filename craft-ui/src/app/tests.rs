@@ -20,7 +20,10 @@ use craft_agent::{
 };
 use craft_config::{Effect, PermissionRule, PermissionsConfig, ToolKey, UiConfig};
 use craft_lua::test_support::{HintWriterHandle, hint_writer_pair};
-use craft_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader, SessionEndReason};
+use craft_lua::{
+    HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader, PackCommand, PackPlan,
+    PackPreparation, PackReport, SessionEndReason,
+};
 use craft_providers::{ContentBlock, Effort, Message, Role, THINKING_USAGE, TokenUsage};
 use craft_storage::sessions::{SessionMeta, StoredMode, StoredThinking};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
@@ -56,6 +59,11 @@ const MODEL_CHANGED_EVENT: &str = "ModelChanged";
 const TEST_MODEL_SPEC: &str = "test-model";
 const TEST_CWD: &str = "/tmp/test";
 const PERMISSIONS_CWD: &str = "/tmp";
+const PACKUPDATE: &str = "/packupdate";
+const PACK_NAME: &str = "demo";
+const PACKDEL_USAGE: &str = "/packdel: name a package, or pass ++all";
+const PACK_FAILURES: &str = "first; second";
+const PACK_REVIEW_PROMPT: &str = "Apply these package changes?";
 /// The rewind fixture holds a few dozen bytes of chat, far below this, so it
 /// doubles as the window the gauge is allowed to land in.
 const SMALL_HISTORY: u32 = 1_000;
@@ -603,6 +611,7 @@ fn cmd(name: &str) -> ParsedCommand {
     ParsedCommand {
         name: name.to_string(),
         args: String::new(),
+        bang: false,
     }
 }
 
@@ -2637,6 +2646,7 @@ fn cd_command_behavior() {
         ParsedCommand {
             name: "/cd".into(),
             args: "/tmp".into(),
+            bang: false,
         },
         0,
     );
@@ -2649,6 +2659,7 @@ fn cd_command_behavior() {
         ParsedCommand {
             name: "/cd".into(),
             args: "/nonexistent_path_12345".into(),
+            bang: false,
         },
         0,
     );
@@ -3179,6 +3190,7 @@ fn btw_empty_flashes_error() {
         ParsedCommand {
             name: "/btw".into(),
             args: String::new(),
+            bang: false,
         },
         0,
     );
@@ -3196,6 +3208,7 @@ fn btw_with_question_returns_action() {
         ParsedCommand {
             name: "/btw".into(),
             args: "what is rust?".into(),
+            bang: false,
         },
         0,
     );
@@ -3793,6 +3806,7 @@ fn thinking_explicit_args() {
         ParsedCommand {
             name: "/thinking".into(),
             args: "8192".into(),
+            bang: false,
         },
         0,
     );
@@ -3802,6 +3816,7 @@ fn thinking_explicit_args() {
         ParsedCommand {
             name: "/thinking".into(),
             args: "high".into(),
+            bang: false,
         },
         0,
     );
@@ -3817,6 +3832,94 @@ fn thinking_unsupported_model_flashes_error() {
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
     assert!(!app.thinking_picker.is_open());
     assert_eq!(app.status_bar.flash_text(), Some(THINKING_UNSUPPORTED_MSG));
+}
+
+#[test]
+fn package_commands_are_user_only_and_preserve_update_bang() {
+    let mut app = test_app();
+    let typed = || ParsedCommand {
+        name: PACKUPDATE.into(),
+        args: PACK_NAME.into(),
+        bang: true,
+    };
+
+    app.execute_command(typed(), 1);
+    assert_eq!(app.exit_request, ExitRequest::None);
+    assert_eq!(
+        app.status_bar.flash_text().unwrap(),
+        format!("{PACKUPDATE}{PACK_USER_ONLY_SUFFIX}")
+    );
+
+    let actions = app.execute_command(typed(), 0);
+    assert_eq!(app.exit_request, ExitRequest::None);
+    let [Action::PreparePack(PackCommand::Update { name, options })] = actions.as_slice() else {
+        panic!("expected one package preparation action");
+    };
+    assert_eq!(name.as_deref(), Some(PACK_NAME));
+    assert!(options.force);
+}
+
+#[test]
+fn invalid_package_command_stays_in_the_current_tui() {
+    let mut app = test_app();
+
+    let actions = app.execute_command(
+        ParsedCommand {
+            name: "/packdel".into(),
+            args: "one two".into(),
+            bang: false,
+        },
+        0,
+    );
+
+    assert!(actions.is_empty());
+    assert_eq!(app.exit_request, ExitRequest::None);
+    assert_eq!(app.status_bar.flash_text(), Some(PACKDEL_USAGE));
+}
+
+#[test]
+fn completed_package_preparation_reports_all_failures_without_exit() {
+    let mut app = test_app();
+    let report = PackReport {
+        failures: vec!["first".into(), "second".into()],
+        ..PackReport::default()
+    };
+
+    let actions = app.handle_pack_preparation(PackPreparation::Complete(report));
+
+    assert!(actions.is_empty());
+    assert_eq!(app.exit_request, ExitRequest::None);
+    assert_eq!(app.status_bar.flash_text(), Some(PACK_FAILURES));
+}
+
+/// Preparation runs off the event loop, so an agent can raise a permission
+/// prompt while the review is already up. The prompt has a tool waiting on it
+/// and owns the bottom panel, so it answers first even though it opened last.
+#[test]
+fn a_pending_permission_prompt_answers_before_the_package_review() {
+    let mut app = test_app();
+    app.handle_pack_preparation(PackPreparation::Review {
+        prompt: PACK_REVIEW_PROMPT.into(),
+        plan: PackPlan::default(),
+    });
+    app.permission_prompt.open(
+        "id".into(),
+        craft_config::ToolKey::native("bash"),
+        vec!["execute".into()],
+        craft_agent::types::PermissionContext::default(),
+        None,
+    );
+
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Char('y'))));
+
+    assert!(!app.permission_prompt.is_open());
+    assert!(app.pack_review.is_open(), "the review waits its turn");
+    assert_eq!(app.exit_request, ExitRequest::None);
+
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Char('y'))));
+
+    assert!(!app.pack_review.is_open());
+    assert!(matches!(app.exit_request, ExitRequest::Pack(_)));
 }
 
 #[test]

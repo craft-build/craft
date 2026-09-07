@@ -36,10 +36,7 @@ struct ViewLayout {
 impl App {
     pub fn view(&mut self, frame: &mut Frame) {
         self.sync_flow_snapshot();
-        let form_visible = self.permission_prompt.is_open()
-            || self.plan_form_active()
-            || self.flow_goal_form_active();
-        let layout = self.compute_layout(frame, form_visible);
+        let layout = self.compute_layout(frame);
         let render_chat = self.active_chat;
 
         self.render_background(frame);
@@ -53,12 +50,20 @@ impl App {
         self.apply_selection(frame, render_chat);
     }
 
-    fn compute_layout(&self, frame: &Frame, form_visible: bool) -> ViewLayout {
-        self.compute_layout_raw(frame.area(), form_visible)
+    fn compute_layout(&self, frame: &Frame) -> ViewLayout {
+        self.compute_layout_raw(frame.area())
     }
 
-    fn compute_layout_raw(&self, area: Rect, form_visible: bool) -> ViewLayout {
-        let permission_open = self.permission_prompt.is_open();
+    fn prompt_open(&self) -> bool {
+        self.pack_review.is_open() || self.permission_prompt.is_open()
+    }
+
+    fn form_visible(&self) -> bool {
+        self.prompt_open() || self.plan_form_active() || self.flow_goal_form_active()
+    }
+
+    fn compute_layout_raw(&self, area: Rect) -> ViewLayout {
+        let prompt_open = self.prompt_open();
 
         let [content, status_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
@@ -67,20 +72,22 @@ impl App {
             .float_mgr
             .split_reqs(content)
             .into_iter()
-            .filter(|r| !(permission_open && r.split == Split::Below))
+            .filter(|r| !(prompt_open && r.split == Split::Below))
             .collect();
         let splits = carve(content, &reqs);
         let inner = splits.inner;
 
         let below_active = splits.rect(Split::Below).is_some();
-        let bottom_takeover = form_visible || below_active;
-        let show_model_row = !permission_open && !bottom_takeover && self.is_main_chat();
+        let bottom_takeover = self.form_visible() || below_active;
+        let show_model_row = !prompt_open && !bottom_takeover && self.is_main_chat();
         let max_bottom = inner.height.saturating_sub(MIN_CHAT_ROWS);
-        let bottom_height = if permission_open {
+        let bottom_height = if self.permission_prompt.is_open() {
             self.permission_prompt.height(inner.width).min(max_bottom)
+        } else if self.pack_review.is_open() {
+            self.pack_review.height(inner.width).min(max_bottom)
         } else if below_active {
             0
-        } else if form_visible {
+        } else if self.form_visible() {
             let form_h = if self.plan_form_active() {
                 self.plan_form.height()
             } else if self.flow_goal_form_active() {
@@ -186,6 +193,8 @@ impl App {
     fn render_bottom_panel(&mut self, frame: &mut Frame, layout: &ViewLayout) {
         if self.permission_prompt.is_open() {
             self.permission_prompt.view(frame, layout.bottom_area);
+        } else if self.pack_review.is_open() {
+            self.pack_review.view(frame, layout.bottom_area);
         } else if !self.is_main_chat() {
             let panel_reqs = self.float_mgr.panel_reqs(layout.content_area);
             let panel_h: u16 = panel_reqs.iter().map(|(_, h)| *h).sum();
@@ -382,10 +391,7 @@ impl App {
 
         self.zones.push_overlay(layout.status_area);
 
-        if self.permission_prompt.is_open()
-            || self.plan_form_active()
-            || self.flow_goal_form_active()
-        {
+        if self.form_visible() {
             self.zones.push_overlay(layout.bottom_area);
         }
 
@@ -486,7 +492,7 @@ impl App {
     #[cfg(test)]
     pub(super) fn active_keybind_contexts(&self) -> Vec<KeybindContext> {
         let mut contexts = vec![KeybindContext::General];
-        if self.plan_form_active() || self.flow_goal_form_active() {
+        if self.pack_review.is_open() || self.plan_form_active() || self.flow_goal_form_active() {
             contexts.push(KeybindContext::FormInput);
         } else if self.queue.focus().is_some() {
             contexts.push(KeybindContext::QueueFocus);
@@ -513,10 +519,7 @@ impl App {
 
     #[cfg(test)]
     pub(super) fn layout_geometry(&self, area: Rect) -> (Rect, Rect, Rect, Rect, SplitLayout) {
-        let form_visible = self.permission_prompt.is_open()
-            || self.plan_form_active()
-            || self.flow_goal_form_active();
-        let layout = self.compute_layout_raw(area, form_visible);
+        let layout = self.compute_layout_raw(area);
         (
             layout.msg_area,
             layout.bottom_area,

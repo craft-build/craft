@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::c_int;
 use std::future::Future;
 use std::panic::catch_unwind;
@@ -232,6 +232,9 @@ pub enum Request {
     /// that is when the declared set is complete.
     CollectPackages {
         reply: flume::Sender<Vec<crate::api::pack::Declared>>,
+    },
+    CollectPackageContext {
+        reply: flume::Sender<(Vec<crate::api::pack::Declared>, BTreeSet<String>)>,
     },
     RunPackLoader {
         declared: crate::api::pack::Declared,
@@ -3238,6 +3241,12 @@ pub fn spawn(
                         Request::CollectPackages { reply } => {
                             let declared = with_packs(&rt.lua, |packs| packs.specs.clone());
                             let _ = reply.send(declared);
+                        }
+                        Request::CollectPackageContext { reply } => {
+                            let context = with_packs(&rt.lua, |packs| {
+                                (packs.specs.clone(), packs.active.clone())
+                            });
+                            let _ = reply.send(context);
                         }
                         Request::RunPackLoader {
                             declared,

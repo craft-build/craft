@@ -9,6 +9,7 @@
 //! of sleeping in `event::poll`.
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,6 +67,9 @@ const MODEL_POLICY_ERR: &str = "Model is not allowed by policy";
 const INVALID_MODEL_ERR: &str = "Invalid model";
 const PROVIDER_INIT_ERR: &str = "Failed to create provider";
 const NOT_LIVE_ERR: &str = "session not live";
+const PACK_PREPARING: &str = "Checking packages...";
+const PACK_BUSY_ERR: &str = "a package command is already running";
+const PACK_PANIC_ERR: &str = "the package command stopped unexpectedly";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
 /// disk round-trip; `session_has_content` tells which ones were saved.
@@ -86,7 +90,7 @@ impl ShutdownReport {
     }
 
     pub fn exit_request(&self) -> ExitRequest {
-        self.exit
+        self.exit.clone()
     }
 
     pub fn tabs(&self) -> &[AppSession] {
@@ -107,6 +111,7 @@ pub struct EventLoopParams {
     pub sessions: Vec<AppSession>,
     pub focused: usize,
     pub startup_warnings: Vec<String>,
+    pub startup_notice: Option<String>,
     pub storage: StateDir,
     pub config: AgentConfig,
     pub compression: craft_config::CompressionConfig,
@@ -529,8 +534,19 @@ pub(crate) struct EventLoop<'t> {
     warn_tx: flume::Sender<String>,
     ui_action_rx: flume::Receiver<UiAction>,
     ui_attachment: UiAttachment,
+    pack_tx: flume::Sender<PackOutcome>,
+    pack_rx: flume::Receiver<PackOutcome>,
+    /// One package command at a time. The work runs on its own thread, so
+    /// without this a second `/packupdate` would race the first over the same
+    /// clones and locks.
+    pack_running: bool,
     _model_fetch_task: tokio::task::JoinHandle<()>,
 }
+
+/// Which session asked, and what preparing its command produced. Named rather
+/// than indexed: preparation outlives a `remove_runtime` that shifts every
+/// index after it, and a misrouted plan is a plan nobody applies.
+type PackOutcome = (CraftId, Box<craft_lua::PackPreparation>);
 
 /// One item from any of the event loop's sources; `None` from `next_wake`
 /// means the wait timed out (animation/idle tick).
@@ -545,6 +561,7 @@ enum Wake {
     Warn(Option<usize>, String),
     Flow(usize, craft_agent::FlowProgress),
     Action(usize, Action),
+    Pack(PackOutcome),
 }
 
 struct BackgroundModels {
@@ -711,6 +728,7 @@ impl<'t> EventLoop<'t> {
             sessions,
             focused,
             mut startup_warnings,
+            startup_notice,
             storage,
             config,
             compression,
@@ -803,10 +821,14 @@ impl<'t> EventLoop<'t> {
         if !ctx.mcp_config_errors.is_empty() {
             focused_app.flash(format!("MCP config error: {}", ctx.mcp_config_errors));
         }
-        for w in startup_warnings {
-            focused_app.flash(w);
+        if let Some(notice) = startup_notice {
+            focused_app.flash(notice);
+        }
+        for warning in startup_warnings {
+            focused_app.flash(warning);
         }
 
+        let (pack_tx, pack_rx) = flume::unbounded();
         // Single embed consumer: the EmbeddingService is stateless, so one task
         // drains the shared receiver no matter which session's plugin asked.
         let embed_rx_owned = ctx.embed_rx.take();
@@ -835,6 +857,9 @@ impl<'t> EventLoop<'t> {
             warn_tx: bg.warn_tx,
             ui_action_rx,
             ui_attachment,
+            pack_tx,
+            pack_rx,
+            pack_running: false,
             _model_fetch_task: bg.task,
         })
     }
@@ -922,6 +947,7 @@ impl<'t> EventLoop<'t> {
             sel = sel.recv(&self.ui_action_rx, |res| res.ok().map(Wake::Ui));
         }
         sel = sel.recv(&self.warn_rx, |res| res.ok().map(|w| Wake::Warn(None, w)));
+        sel = sel.recv(&self.pack_rx, |res| res.ok().map(Wake::Pack));
         for (i, rt) in self.sessions.iter().enumerate() {
             if !rt.handles.agent_rx.is_disconnected() {
                 sel = sel.recv(&rt.handles.agent_rx, move |res| {
@@ -958,6 +984,7 @@ impl<'t> EventLoop<'t> {
                 self.dispatch(i, actions);
             }
             Wake::Action(idx, action) => self.handle_action(idx, action),
+            Wake::Pack((id, preparation)) => self.finish_pack(id, *preparation),
         }
         Ok(())
     }
@@ -1645,6 +1672,45 @@ impl<'t> EventLoop<'t> {
         }
     }
 
+    /// Prepares a package command on its own thread.
+    ///
+    /// Preparation fetches over the network through a git child process nothing
+    /// here can cancel. Inline it would freeze drawing and input for as long as
+    /// the slowest remote takes, so the answer comes back as an event instead.
+    fn start_pack(&mut self, idx: usize, command: craft_lua::PackCommand) {
+        if self.pack_running {
+            self.sessions[idx].app.flash(PACK_BUSY_ERR.to_owned());
+            return;
+        }
+        self.pack_running = true;
+        self.sessions[idx].app.flash(PACK_PREPARING.to_owned());
+        let id = self.sessions[idx].id();
+        let handle = self.ctx.lua_event_handle.clone();
+        let tx = self.pack_tx.clone();
+        std::thread::spawn(move || {
+            // Without this a panic drops the sender with no answer, and
+            // `pack_running` stays set for the rest of the process, so every
+            // later package command reports "already running".
+            let preparation = catch_unwind(AssertUnwindSafe(|| match handle.package_context() {
+                Ok(context) => craft_lua::prepare_pack_command(&command, &context),
+                Err(error) => craft_lua::PackPreparation::failed(error),
+            }))
+            .unwrap_or_else(|_| craft_lua::PackPreparation::failed(PACK_PANIC_ERR.to_owned()));
+            let _ = tx.send((id, Box::new(preparation)));
+        });
+    }
+
+    /// A session closed while its command ran drops the result: the plan is
+    /// only ever applied by leaving the TUI, and there is no TUI left to leave.
+    fn finish_pack(&mut self, id: CraftId, preparation: craft_lua::PackPreparation) {
+        self.pack_running = false;
+        let Some(idx) = self.position(id) else {
+            return;
+        };
+        let actions = self.sessions[idx].app.handle_pack_preparation(preparation);
+        self.dispatch(idx, actions);
+    }
+
     fn respawn_agent(&mut self, idx: usize, history: Vec<Message>) {
         let rt = &mut self.sessions[idx];
         rt.reset_run_notifications();
@@ -1810,6 +1876,7 @@ impl<'t> EventLoop<'t> {
                 let actions = self.sessions[idx].app.submit_watch_prompt(label, text);
                 self.dispatch(idx, actions);
             }
+            Action::PreparePack(command) => self.start_pack(idx, command),
             Action::Suspend => {
                 let _pause = self.input.pause();
                 terminal::suspend(self.terminal);
@@ -1993,7 +2060,7 @@ impl<'t> EventLoop<'t> {
     }
 
     fn shutdown(mut self) -> ShutdownReport {
-        let exit = self.sessions[self.focused].app.exit_request;
+        let exit = self.sessions[self.focused].app.exit_request.clone();
         let mcp_handle = self.ctx.mcp_handle.clone();
         if let Some(ref h) = mcp_handle {
             craft_agent::mcp::kill_process_groups(&h.reader().load().pids);

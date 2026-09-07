@@ -15,6 +15,7 @@ pub(crate) mod mcp_picker;
 pub mod messages;
 pub(crate) mod modal;
 pub(crate) mod model_picker;
+pub(crate) mod pack_review;
 pub(crate) mod permission_prompt;
 pub(crate) mod plan_form;
 pub(crate) mod progress_bar;
@@ -39,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use craft_agent::AgentInput;
 use craft_agent::{BufferSnapshot, ToolInput, ToolOutput};
+use craft_lua::{PackCommand, PackPlan};
 use craft_providers::provider::Provider;
 use craft_providers::{Message, ModelTier};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -211,6 +213,7 @@ pub enum Action {
     OpenEditor(PathBuf),
     EditInputInEditor,
     Btw(String),
+    PreparePack(PackCommand),
     Suspend,
     RefreshModels,
     RefreshUsage,
@@ -234,19 +237,20 @@ pub enum Action {
 
 const ERROR_DISPLAY: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ExitRequest {
     #[default]
     None,
     Success,
     Error,
     Reload,
+    Pack(PackPlan),
 }
 
 impl ExitRequest {
     pub fn code(&self) -> i32 {
         match self {
-            Self::None | Self::Success | Self::Reload => 0,
+            Self::None | Self::Success | Self::Reload | Self::Pack(_) => 0,
             Self::Error => 1,
         }
     }
