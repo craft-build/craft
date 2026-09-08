@@ -21,6 +21,9 @@ use gpui::{
 
 use crate::theme;
 
+type SubmitCallback = dyn Fn(&str, &mut Window, &mut App);
+type ChangeCallback = dyn Fn(&mut Window, &mut App);
+
 pub struct TextInput {
     pub focus_handle: FocusHandle,
     pub content: String,
@@ -31,8 +34,8 @@ pub struct TextInput {
     /// "Cmd+Enter to send" placeholder).
     pub multiline: bool,
     soft_wrap: bool,
-    on_submit: Option<Rc<dyn Fn(&str, &mut Window, &mut App)>>,
-    on_change: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_submit: Option<Rc<SubmitCallback>>,
+    on_change: Option<Rc<ChangeCallback>>,
 }
 
 impl TextInput {

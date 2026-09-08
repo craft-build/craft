@@ -1036,21 +1036,21 @@ fn assistant_message(
                 .child(cp.clone()),
         );
     }
-    if let Some(list) = app.comments.get(&comment_key).cloned() {
-        if !list.is_empty() {
-            col = col.child(comments_list(&list));
-        }
+    if let Some(list) = app.comments.get(&comment_key).cloned()
+        && !list.is_empty()
+    {
+        col = col.child(comments_list(&list));
     }
-    if app.open_comment_boxes.contains(&comment_key) {
-        if let Some(input) = app.comment_inputs.get(&comment_key).cloned() {
-            let submit_key = comment_key.clone();
-            col = col.child(comment_box(
-                input,
-                submit_key,
-                "assistant reply".to_string(),
-                cx,
-            ));
-        }
+    if app.open_comment_boxes.contains(&comment_key)
+        && let Some(input) = app.comment_inputs.get(&comment_key).cloned()
+    {
+        let submit_key = comment_key.clone();
+        col = col.child(comment_box(
+            input,
+            submit_key,
+            "assistant reply".to_string(),
+            cx,
+        ));
     }
     col
 }
@@ -1330,18 +1330,16 @@ fn diff_line_view(
                 })),
         );
     }
-    if open {
-        if let Some(input) = app.comment_inputs.get(&key).cloned() {
-            let submit_key = key.clone();
-            wrapper = wrapper.child(
-                div()
-                    .bg(rgb(theme::INPUT_BG))
-                    .pl(px(26.))
-                    .pr(px(10.))
-                    .py(px(4.))
-                    .child(comment_box(input, submit_key, label.clone(), cx)),
-            );
-        }
+    if open && let Some(input) = app.comment_inputs.get(&key).cloned() {
+        let submit_key = key.clone();
+        wrapper = wrapper.child(
+            div()
+                .bg(rgb(theme::INPUT_BG))
+                .pl(px(26.))
+                .pr(px(10.))
+                .py(px(4.))
+                .child(comment_box(input, submit_key, label.clone(), cx)),
+        );
     }
     wrapper.into_any_element()
 }

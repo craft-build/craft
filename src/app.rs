@@ -232,7 +232,7 @@ impl App {
         if let Some(project_id) = self
             .projects
             .iter()
-            .find(|project| PathBuf::from(&project.path) == path)
+            .find(|project| std::path::Path::new(&project.path) == path)
             .map(|project| project.id.clone())
         {
             self.open_project(&project_id, cx);
@@ -979,10 +979,10 @@ impl App {
     }
 
     pub fn remove_pending_comment(&mut self, key: &str, idx: usize, cx: &mut Context<Self>) {
-        if let Some(list) = self.comments.get_mut(key) {
-            if idx < list.len() {
-                list.remove(idx);
-            }
+        if let Some(list) = self.comments.get_mut(key)
+            && idx < list.len()
+        {
+            list.remove(idx);
         }
         self.persist_state();
         cx.notify();
@@ -1010,13 +1010,12 @@ impl App {
 
     fn update_active_messages(&mut self, new_messages: Vec<Message>) {
         let key = self.current_thread_key();
-        if let Some(sessions) = self.sessions_by_project.get_mut(&key) {
-            if let Some(sess) = sessions
+        if let Some(sessions) = self.sessions_by_project.get_mut(&key)
+            && let Some(sess) = sessions
                 .iter_mut()
                 .find(|s| Some(&s.id) == self.active_session_id.as_ref())
-            {
-                sess.messages = new_messages;
-            }
+        {
+            sess.messages = new_messages;
         }
     }
 
@@ -1092,10 +1091,10 @@ impl App {
         }
 
         for p in &pending {
-            if let Some(list) = self.comments.get_mut(&p.key) {
-                if let Some(c) = list.get_mut(p.idx) {
-                    c.pending = false;
-                }
+            if let Some(list) = self.comments.get_mut(&p.key)
+                && let Some(c) = list.get_mut(p.idx)
+            {
+                c.pending = false;
             }
         }
 
@@ -1318,10 +1317,10 @@ impl App {
     }
 
     pub fn cancel_turn(&mut self, cx: &mut Context<Self>) {
-        if let Some(client) = &self.acp_client {
-            if let Err(error) = client.cancel() {
-                self.connection_status = error;
-            }
+        if let Some(client) = &self.acp_client
+            && let Err(error) = client.cancel()
+        {
+            self.connection_status = error;
         }
         cx.notify();
     }
@@ -1897,10 +1896,32 @@ fn session_config_controls(options: Vec<SessionConfigOption>) -> Vec<SessionConf
         .collect()
 }
 
+fn json_elicitation_value(
+    value: serde_json::Value,
+) -> Option<agent_client_protocol::schema::v1::ElicitationContentValue> {
+    use agent_client_protocol::schema::v1::ElicitationContentValue;
+    match value {
+        serde_json::Value::String(value) => Some(ElicitationContentValue::String(value)),
+        serde_json::Value::Bool(value) => Some(ElicitationContentValue::Boolean(value)),
+        serde_json::Value::Number(value) if value.is_i64() => {
+            Some(ElicitationContentValue::Integer(value.as_i64()?))
+        }
+        serde_json::Value::Number(value) => Some(ElicitationContentValue::Number(value.as_f64()?)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(|value| value.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .map(ElicitationContentValue::StringArray),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod session_config_tests {
     use super::*;
-    use agent_client_protocol::schema::v1::SessionConfigSelectOption;
+    use agent_client_protocol::schema::v1::{
+        Diff as AcpDiff, ElicitationContentValue, SessionConfigSelectOption,
+    };
 
     #[test]
     fn preserves_each_acp_session_option_as_a_distinct_control() {
@@ -1937,24 +1958,58 @@ mod session_config_tests {
         assert_eq!(controls[2].id, "auto-format");
         assert_eq!(controls[2].selected_name, "On");
     }
-}
 
-fn json_elicitation_value(
-    value: serde_json::Value,
-) -> Option<agent_client_protocol::schema::v1::ElicitationContentValue> {
-    use agent_client_protocol::schema::v1::ElicitationContentValue;
-    match value {
-        serde_json::Value::String(value) => Some(ElicitationContentValue::String(value)),
-        serde_json::Value::Bool(value) => Some(ElicitationContentValue::Boolean(value)),
-        serde_json::Value::Number(value) if value.is_i64() => {
-            Some(ElicitationContentValue::Integer(value.as_i64()?))
+    #[test]
+    fn renders_structured_acp_diff_with_line_kinds_and_stats() {
+        let rendered =
+            render_acp_diff(AcpDiff::new("/tmp/main.rs", "same\nnew\n").old_text("same\nold\n"));
+
+        assert_eq!(rendered.file, "/tmp/main.rs");
+        assert_eq!(rendered.stat, "+1 -1");
+        assert_eq!(rendered.lines.len(), 3);
+        assert!(matches!(rendered.lines[0].kind, DiffLineKind::Ctx));
+        assert_eq!(rendered.lines[0].text, "same");
+        assert!(matches!(rendered.lines[1].kind, DiffLineKind::Del));
+        assert_eq!(rendered.lines[1].text, "old");
+        assert!(matches!(rendered.lines[2].kind, DiffLineKind::Add));
+        assert_eq!(rendered.lines[2].text, "new");
+    }
+
+    #[test]
+    fn converts_supported_json_elicitation_values() {
+        assert_eq!(
+            json_elicitation_value(serde_json::json!("answer")),
+            Some(ElicitationContentValue::String("answer".into()))
+        );
+        assert_eq!(
+            json_elicitation_value(serde_json::json!(42)),
+            Some(ElicitationContentValue::Integer(42))
+        );
+        assert_eq!(
+            json_elicitation_value(serde_json::json!(3.5)),
+            Some(ElicitationContentValue::Number(3.5))
+        );
+        assert_eq!(
+            json_elicitation_value(serde_json::json!(true)),
+            Some(ElicitationContentValue::Boolean(true))
+        );
+        assert_eq!(
+            json_elicitation_value(serde_json::json!(["one", "two"])),
+            Some(ElicitationContentValue::StringArray(vec![
+                "one".into(),
+                "two".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn rejects_json_values_not_supported_by_acp_elicitation() {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({"nested": "object"}),
+            serde_json::json!(["text", 2]),
+        ] {
+            assert_eq!(json_elicitation_value(value), None);
         }
-        serde_json::Value::Number(value) => Some(ElicitationContentValue::Number(value.as_f64()?)),
-        serde_json::Value::Array(values) => values
-            .into_iter()
-            .map(|value| value.as_str().map(str::to_string))
-            .collect::<Option<Vec<_>>>()
-            .map(ElicitationContentValue::StringArray),
-        _ => None,
     }
 }

@@ -39,7 +39,7 @@ fn main() {
                 window_min_size: Some(size(px(760.0), px(480.0))),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|cx| app::App::new(cx)),
+            |_window, cx| cx.new(app::App::new),
         )
         .unwrap();
         cx.activate(true);

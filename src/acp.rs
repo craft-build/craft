@@ -463,6 +463,74 @@ mod tests {
     }
 
     #[test]
+    fn prompt_without_context_contains_only_user_text() {
+        let prompt = compose_prompt(TurnInput {
+            text: "Hello".into(),
+            ..TurnInput::default()
+        });
+
+        assert_eq!(prompt.len(), 1);
+        let ContentBlock::Text(text) = &prompt[0] else {
+            panic!("expected user text")
+        };
+        assert_eq!(text.text, "Hello");
+    }
+
+    #[test]
+    fn context_file_uris_are_normalized_without_double_prefixing() {
+        let prompt = compose_prompt(TurnInput {
+            context_files: vec![
+                "/tmp/main.rs".into(),
+                "file:///tmp/already-prefixed.rs".into(),
+            ],
+            ..TurnInput::default()
+        });
+
+        let encoded = serde_json::to_string(&prompt).unwrap();
+        assert!(encoded.contains("file:///tmp/main.rs"));
+        assert!(encoded.contains("file:///tmp/already-prefixed.rs"));
+        assert!(!encoded.contains("file://file://"));
+    }
+
+    #[test]
+    fn multiple_comments_are_kept_in_one_delimited_context_block() {
+        let prompt = compose_prompt(TurnInput {
+            comments: vec![
+                AnchoredComment {
+                    target: "src/a.rs:1".into(),
+                    body: "First".into(),
+                },
+                AnchoredComment {
+                    target: "src/b.rs:2".into(),
+                    body: "Second".into(),
+                },
+            ],
+            ..TurnInput::default()
+        });
+
+        assert_eq!(prompt.len(), 2);
+        let ContentBlock::Text(context) = &prompt[1] else {
+            panic!("expected anchored context")
+        };
+        assert!(
+            context
+                .text
+                .starts_with("[Forge anchored review context]\n")
+        );
+        assert!(
+            context
+                .text
+                .contains("- target: src/a.rs:1\n  comment: First\n")
+        );
+        assert!(
+            context
+                .text
+                .contains("- target: src/b.rs:2\n  comment: Second\n")
+        );
+        assert!(context.text.ends_with("[/Forge anchored review context]"));
+    }
+
+    #[test]
     fn validation_rejects_a_command_that_cannot_start() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

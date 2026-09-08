@@ -480,4 +480,69 @@ mod tests {
             mark.kind == InlineKind::Link && mark.url.as_deref() == Some("https://example.com")
         }));
     }
+
+    #[test]
+    fn ordered_and_nested_lists_keep_their_markers_and_depth() {
+        let blocks = parse("3. third\n4. fourth\n   - nested");
+        let items = blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                BlockKind::ListItem { depth, marker } => {
+                    Some((*depth, marker.as_str(), block.text.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            items,
+            vec![(0, "3.", "third"), (0, "4.", "fourth"), (1, "•", "nested")]
+        );
+    }
+
+    #[test]
+    fn gfm_task_lists_tables_rules_and_math_become_distinct_blocks() {
+        let blocks = parse(
+            "- [x] done\n- [ ] pending\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n---\n\n$$total$$",
+        );
+
+        assert!(blocks.iter().any(|block| block.text == "[x] done"));
+        assert!(blocks.iter().any(|block| block.text == "[ ] pending"));
+        assert!(blocks.iter().any(|block| {
+            matches!(block.kind, BlockKind::TableRow) && block.text.contains("A  |  B")
+        }));
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block.kind, BlockKind::Rule))
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| { matches!(block.kind, BlockKind::Code) && block.text == "total" })
+        );
+    }
+
+    #[test]
+    fn inline_mark_ranges_are_utf8_byte_ranges() {
+        let blocks = parse("é **bold** and ~~gone~~ plus *soft*");
+        let block = &blocks[0];
+
+        for (kind, expected_text) in [
+            (InlineKind::Strong, "bold"),
+            (InlineKind::Strikethrough, "gone"),
+            (InlineKind::Emphasis, "soft"),
+        ] {
+            let mark = block.marks.iter().find(|mark| mark.kind == kind).unwrap();
+            assert_eq!(&block.text[mark.range.clone()], expected_text);
+        }
+    }
+
+    #[test]
+    fn soft_and_hard_breaks_have_different_text_output() {
+        let blocks = parse("soft\nwrap  \nhard");
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "soft wrap\nhard");
+    }
 }

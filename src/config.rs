@@ -375,4 +375,102 @@ mod tests {
         assert_eq!(migrated.agents[1].name, "Agent (2)");
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn invalid_agent_commands_fail_before_starting_a_process() {
+        for (command, expected) in [
+            ("", "agent command is empty"),
+            ("agent 'unterminated", "invalid agent command"),
+        ] {
+            let error = AgentConfig {
+                agent_command: command.into(),
+                transport: TransportConfig::Local,
+            }
+            .agent()
+            .unwrap_err();
+
+            assert!(
+                error.contains(expected),
+                "expected {error:?} to contain {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_transport_rejects_a_blank_host() {
+        let error = AgentConfig {
+            agent_command: "agent --acp".into(),
+            transport: TransportConfig::Ssh {
+                host: "  ".into(),
+                user: Some("dev".into()),
+                identity_file: None,
+                remote_workspace: "/srv/project".into(),
+            },
+        }
+        .agent()
+        .unwrap_err();
+
+        assert_eq!(error, "SSH host is empty");
+    }
+
+    #[test]
+    fn remote_transport_uses_remote_workspace_and_identity_file() {
+        let config = AgentConfig {
+            agent_command: "agent --name 'two words'".into(),
+            transport: TransportConfig::Ssh {
+                host: "build.example".into(),
+                user: None,
+                identity_file: Some("/keys/forge key".into()),
+                remote_workspace: "/srv/forge".into(),
+            },
+        };
+        let agent = config.agent().unwrap();
+        let arguments = agent.config().arguments();
+
+        assert_eq!(
+            config.workspace_for(Path::new("/local/forge")),
+            PathBuf::from("/srv/forge")
+        );
+        assert!(
+            arguments
+                .windows(2)
+                .any(|args| args == ["-i", "/keys/forge key"])
+        );
+        assert!(
+            arguments
+                .windows(2)
+                .any(|args| args == ["--name", "two words"])
+        );
+        assert!(arguments.iter().any(|arg| arg == "build.example"));
+    }
+
+    #[test]
+    fn load_prefers_application_registry_over_legacy_project_files() {
+        let root = std::env::temp_dir().join(format!("forge-config-test-{}", uuid::Uuid::new_v4()));
+        let store = ConfigStore { root: root.clone() };
+        let current = AgentRegistry {
+            agents: vec![AgentProfile {
+                id: "current".into(),
+                name: "Current".into(),
+                config: AgentConfig {
+                    agent_command: "current-agent".into(),
+                    transport: TransportConfig::Local,
+                },
+            }],
+        };
+        store.save(&current).unwrap();
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::write(
+            root.join("projects").join("legacy.json"),
+            serde_json::to_vec(&AgentConfig {
+                agent_command: "legacy-agent".into(),
+                transport: TransportConfig::Local,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.load().unwrap(), Some(current));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

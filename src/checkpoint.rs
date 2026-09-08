@@ -213,10 +213,40 @@ fn expand_home(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn initialized_workspace() -> PathBuf {
+        let workspace =
+            std::env::temp_dir().join(format!("forge-checkpoint-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let initialized = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&workspace)
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        workspace
+    }
+
+    fn local_manager(workspace: &Path) -> CheckpointManager {
+        CheckpointManager::new(
+            AgentConfig {
+                agent_command: String::new(),
+                transport: TransportConfig::Local,
+            },
+            workspace.to_path_buf(),
+        )
+    }
+
+    fn git(workspace: &Path, args: &[&str]) -> Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .unwrap()
+    }
+
     #[test]
     fn changelist_expands_untracked_directories_and_marks_binary_files() {
-        let workspace =
-            std::env::temp_dir().join(format!("forge-changelist-test-{}", uuid::Uuid::new_v4()));
+        let workspace = initialized_workspace();
         std::fs::create_dir_all(workspace.join("new-folder")).unwrap();
         std::fs::write(workspace.join("new-folder").join("notes.txt"), "hello\n").unwrap();
         std::fs::write(
@@ -224,19 +254,7 @@ mod tests {
             [0, 159, 146, 150],
         )
         .unwrap();
-        let initialized = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&workspace)
-            .status()
-            .unwrap();
-        assert!(initialized.success());
-        let manager = CheckpointManager::new(
-            AgentConfig {
-                agent_command: String::new(),
-                transport: TransportConfig::Local,
-            },
-            workspace.clone(),
-        );
+        let manager = local_manager(&workspace);
 
         let files = manager.changed_files().unwrap();
 
@@ -252,6 +270,95 @@ mod tests {
                 .any(|(path, _, is_text)| { path == "new-folder/image.bin" && !*is_text })
         );
         assert!(manager.file_snapshot("new-folder/image.bin").is_err());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_captures_worktree_without_changing_index_and_can_restore_it() {
+        let workspace = initialized_workspace();
+        std::fs::write(workspace.join("tracked.txt"), "base\n").unwrap();
+        assert!(git(&workspace, &["add", "tracked.txt"]).status.success());
+        assert!(
+            git(
+                &workspace,
+                &[
+                    "-c",
+                    "user.name=Forge Test",
+                    "-c",
+                    "user.email=forge-test@localhost",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "base",
+                ],
+            )
+            .status
+            .success()
+        );
+
+        std::fs::write(workspace.join("tracked.txt"), "staged\n").unwrap();
+        assert!(git(&workspace, &["add", "tracked.txt"]).status.success());
+        std::fs::write(workspace.join("tracked.txt"), "working\n").unwrap();
+        std::fs::write(workspace.join("untracked.txt"), "new\n").unwrap();
+        std::fs::write(workspace.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(workspace.join("ignored.txt"), "secret\n").unwrap();
+        let manager = local_manager(&workspace);
+
+        let checkpoint = manager.create("Developer's checkpoint").unwrap();
+
+        assert_eq!(
+            manager
+                .run_git(&["show", &format!("{}:tracked.txt", checkpoint.commit)])
+                .unwrap(),
+            "working\n"
+        );
+        assert_eq!(
+            manager
+                .run_git(&["show", &format!("{}:untracked.txt", checkpoint.commit)])
+                .unwrap(),
+            "new\n"
+        );
+        assert!(
+            !git(
+                &workspace,
+                &[
+                    "cat-file",
+                    "-e",
+                    &format!("{}:ignored.txt", checkpoint.commit),
+                ],
+            )
+            .status
+            .success()
+        );
+        assert_eq!(
+            manager.run_git(&["show", ":tracked.txt"]).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(
+            manager
+                .run_git(&["log", "-1", "--format=%s", &checkpoint.commit])
+                .unwrap(),
+            "Developer's checkpoint\n"
+        );
+
+        std::fs::write(workspace.join("tracked.txt"), "later\n").unwrap();
+        std::fs::remove_file(workspace.join("untracked.txt")).unwrap();
+        std::fs::write(workspace.join("extra.txt"), "remove me\n").unwrap();
+        manager.restore(&checkpoint).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
+            "working\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("untracked.txt")).unwrap(),
+            "new\n"
+        );
+        assert!(!workspace.join("extra.txt").exists());
+        assert!(
+            workspace.join("ignored.txt").exists(),
+            "restore must leave ignored files alone"
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
 }
