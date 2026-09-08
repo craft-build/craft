@@ -400,10 +400,10 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
                 .flex_1()
                 .overflow_y_scroll()
                 .px(px(20.))
-                .py(px(18.))
+                .py(px(16.))
                 .flex()
                 .flex_col()
-                .gap(px(14.))
+                .gap(px(16.))
                 .children(messages.into_iter().enumerate().map(|(index, message)| {
                     let is_streaming = app.thinking
                         && index == last_index
@@ -437,6 +437,7 @@ fn permission_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         })
         .unwrap_or_default();
     div()
+        .w_full()
         .max_w(px(760.))
         .border_1()
         .border_color(rgb(theme::ACCENT))
@@ -452,7 +453,11 @@ fn permission_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         )
         .child(
             div()
+                .w_full()
+                .min_w(px(0.))
+                .whitespace_normal()
                 .text_size(px(11.))
+                .line_height(px(16.))
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child(choices),
         )
@@ -510,21 +515,33 @@ fn elicitation_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .max_w(px(760.))
         .border_1()
         .border_color(rgb(theme::ACCENT))
-        .p(px(14.))
+        .p(px(12.))
         .flex()
         .flex_col()
-        .gap(px(10.))
+        .gap(px(8.))
         .child(
             div()
                 .text_size(px(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(title.unwrap_or_else(|| "Agent needs information".into())),
         )
-        .child(div().text_size(px(12.)).child(message))
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .whitespace_normal()
+                .text_size(px(12.))
+                .line_height(px(18.))
+                .child(message),
+        )
         .when_some(description, |d, description| {
             d.child(
                 div()
+                    .w_full()
+                    .min_w(px(0.))
+                    .whitespace_normal()
                     .text_size(px(11.))
+                    .line_height(px(16.))
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child(description),
             )
@@ -606,7 +623,11 @@ fn elicitation_field(
         .when_some(description, |d, description| {
             d.child(
                 div()
+                    .w_full()
+                    .min_w(px(0.))
+                    .whitespace_normal()
                     .text_size(px(10.))
+                    .line_height(px(15.))
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child(description),
             )
@@ -707,6 +728,9 @@ fn elicitation_choice_buttons(
             let selected_key = key.clone();
             div()
                 .id(SharedString::from(format!("elicitation-{key}-{value}")))
+                .max_w_full()
+                .min_w(px(0.))
+                .whitespace_normal()
                 .px(px(9.))
                 .py(px(5.))
                 .border_1()
@@ -717,7 +741,9 @@ fn elicitation_choice_buttons(
                 }))
                 .when(is_selected, |d| d.bg(rgb(theme::INPUT_BG)))
                 .text_size(px(11.))
+                .line_height(px(16.))
                 .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
                 .child(label)
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.set_elicitation_value(selected_key.clone(), selected_value.clone(), cx)
@@ -749,6 +775,9 @@ fn elicitation_multi_choice_buttons(
             let selected_value = value.clone();
             div()
                 .id(SharedString::from(format!("elicitation-{key}-{value}")))
+                .max_w_full()
+                .min_w(px(0.))
+                .whitespace_normal()
                 .px(px(9.))
                 .py(px(5.))
                 .border_1()
@@ -759,7 +788,9 @@ fn elicitation_multi_choice_buttons(
                 }))
                 .when(is_selected, |d| d.bg(rgb(theme::INPUT_BG)))
                 .text_size(px(11.))
+                .line_height(px(16.))
                 .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
                 .child(label)
                 .on_click(cx.listener(move |app, _, _, cx| {
                     app.toggle_elicitation_value(selected_key.clone(), selected_value.clone(), cx)
@@ -781,6 +812,7 @@ fn action_button(
         .border_color(rgb(theme::BORDER))
         .text_size(px(11.))
         .cursor_pointer()
+        .hover(|style| style.bg(rgb(theme::HOVER_BG)))
         .child(label)
         .on_click(cx.listener(move |app, _, _, cx| action(app, cx)))
 }
@@ -881,7 +913,11 @@ fn user_message(m: Message) -> impl IntoElement {
                     .pl(px(8.))
                     .children(m.attached_comments.iter().map(|(label, text)| {
                         div()
+                            .w_full()
+                            .min_w(px(0.))
+                            .whitespace_normal()
                             .text_size(px(11.))
+                            .line_height(px(16.))
                             .text_color(rgb(theme::TEXT_SECONDARY))
                             .child(format!("{label}: {text}"))
                     })),
@@ -891,7 +927,11 @@ fn user_message(m: Message) -> impl IntoElement {
 
 fn chip_view(text: String) -> impl IntoElement {
     div()
+        .max_w_full()
+        .min_w(px(0.))
+        .whitespace_normal()
         .text_size(px(11.))
+        .line_height(px(16.))
         .px(px(6.))
         .py(px(2.))
         .bg(rgb(theme::INPUT_BG))
@@ -920,10 +960,10 @@ fn assistant_message(
         .border_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::PANEL_BG))
-        .p(px(14.))
+        .p(px(16.))
         .flex()
         .flex_col()
-        .gap(px(10.))
+        .gap(px(12.))
         .child(
             div()
                 .flex()
@@ -939,10 +979,13 @@ fn assistant_message(
                 .child(
                     div()
                         .id(SharedString::from(format!("comment-toggle-{msg_id}")))
-                        .text_size(px(12.))
+                        .px(px(4.))
+                        .py(px(2.))
+                        .text_size(px(11.))
                         .text_color(rgb(theme::TEXT_MUTED))
                         .cursor_pointer()
-                        .child("💬")
+                        .hover(|style| style.text_color(rgb(theme::TEXT_SECONDARY)))
+                        .child("✎")
                         .on_click(cx.listener(move |app, _, _, cx| {
                             app.open_comment_box(
                                 toggle_comment_key.clone(),
@@ -961,6 +1004,7 @@ fn assistant_message(
         let file = diff.file.clone();
         col = col.child(diff_view(
             diff,
+            format!("inline-diff-{msg_id}"),
             move |idx| {
                 (
                     format!("{key_prefix}_{idx}"),
@@ -972,7 +1016,7 @@ fn assistant_message(
         ));
     }
     if let Some(term) = &m.terminal {
-        col = col.child(terminal_view(term, app, cx));
+        col = col.child(terminal_view(term, &msg_id));
     }
     if !m.text.is_empty() {
         col = col.child(
@@ -1042,7 +1086,13 @@ fn steps_view(
                 .text_size(px(12.))
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child(if expanded { "▾" } else { "▸" })
-                .child(steps.summary.clone())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .whitespace_normal()
+                        .child(steps.summary.clone()),
+                )
                 .on_click(cx.listener(move |app, _, _, cx| app.toggle_steps(&msg_id, cx))),
         )
         .when(expanded, |d| {
@@ -1055,7 +1105,11 @@ fn steps_view(
                     .gap(px(3.))
                     .children(items.into_iter().map(|item| {
                         div()
+                            .w_full()
+                            .min_w(px(0.))
+                            .whitespace_normal()
                             .text_size(px(11.))
+                            .line_height(px(16.))
                             .text_color(rgb(theme::TEXT_MUTED))
                             .child(format!("· {item}"))
                     })),
@@ -1063,9 +1117,12 @@ fn steps_view(
         })
 }
 
-fn terminal_view(term: &Terminal, app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
-    let awaiting_approval = app.pending_permission.is_some();
+fn terminal_view(term: &Terminal, message_id: &str) -> impl IntoElement {
     div()
+        .id(SharedString::from(format!("terminal-scroll-{message_id}")))
+        .w_full()
+        .min_w(px(0.))
+        .overflow_x_scroll()
         .bg(rgb(theme::TERMINAL_BG))
         .border_1()
         .border_color(rgb(theme::TERMINAL_BORDER))
@@ -1076,16 +1133,17 @@ fn terminal_view(term: &Terminal, app: &mut App, cx: &mut Context<App>) -> impl 
         .flex_col()
         .child(
             div()
+                .whitespace_nowrap()
                 .text_color(rgb(theme::TEXT_SECONDARY))
                 .child(format!("$ {}", term.cmd)),
         )
         .child(
             div()
                 .mt(px(2.))
+                .whitespace_nowrap()
                 .text_color(rgb(theme::DIFF_ADD_TEXT))
                 .child(term.output.clone()),
         )
-        .when(awaiting_approval, |d| d.child(approval_controls(cx)))
 }
 
 fn comments_list(list: &[Comment]) -> impl IntoElement {
@@ -1098,7 +1156,11 @@ fn comments_list(list: &[Comment]) -> impl IntoElement {
         .pt(px(6.))
         .children(list.iter().map(|c| {
             div()
+                .w_full()
+                .min_w(px(0.))
+                .whitespace_normal()
                 .text_size(px(11.))
+                .line_height(px(16.))
                 .text_color(rgb(theme::TEXT_SECONDARY))
                 .child(format!("{}: {}", c.author, c.text))
         }))
@@ -1112,6 +1174,7 @@ fn comment_box(
 ) -> impl IntoElement {
     div()
         .flex()
+        .items_start()
         .gap(px(6.))
         .child(
             div()
@@ -1134,6 +1197,7 @@ fn comment_box(
                 .px(px(8.))
                 .py(px(4.))
                 .cursor_pointer()
+                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
                 .child("Add")
                 .on_click(cx.listener(move |app, _, _, cx| {
                     // This listener is already updating App. Calling
@@ -1149,26 +1213,42 @@ fn comment_box(
 
 fn diff_view(
     diff: &Diff,
+    scroll_id: String,
     key_fn: impl Fn(usize) -> (String, String) + 'static,
     app: &mut App,
     cx: &mut Context<App>,
 ) -> impl IntoElement {
-    let awaiting_approval = app.pending_permission.is_some();
     div()
+        .id(SharedString::from(scroll_id))
+        .w_full()
+        .min_w(px(0.))
+        .overflow_x_scroll()
         .border_1()
         .border_color(rgb(theme::TERMINAL_BORDER))
         .child(
             div()
                 .flex()
+                .items_center()
                 .justify_between()
+                .gap(px(8.))
                 .px(px(10.))
                 .py(px(6.))
                 .bg(rgb(theme::INPUT_BG))
                 .border_b_1()
                 .border_color(rgb(theme::TERMINAL_BORDER))
-                .child(div().text_size(px(12.)).child(diff.file.clone()))
                 .child(
                     div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_size(px(12.))
+                        .child(diff.file.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
                         .text_size(px(11.))
                         .text_color(rgb(theme::TEXT_MUTED))
                         .child(diff.stat.clone()),
@@ -1185,22 +1265,6 @@ fn diff_view(
         .children(diff.lines.iter().enumerate().map(|(idx, line)| {
             let (key, label) = key_fn(idx);
             diff_line_view(line, key, label, app, cx)
-        }))
-        .when(awaiting_approval, |d| d.child(approval_controls(cx)))
-}
-
-fn approval_controls(cx: &mut Context<App>) -> impl IntoElement {
-    div()
-        .flex()
-        .gap(px(8.))
-        .p(px(8.))
-        .border_t_1()
-        .border_color(rgb(theme::TERMINAL_BORDER))
-        .child(action_button("inline-reject", "Reject", cx, |app, cx| {
-            app.decide_permission(false, cx)
-        }))
-        .child(action_button("inline-allow", "Accept", cx, |app, cx| {
-            app.decide_permission(true, cx)
         }))
 }
 
@@ -1238,6 +1302,7 @@ fn diff_line_view(
         .child(
             div()
                 .flex_1()
+                .min_w(px(0.))
                 .text_size(px(12.))
                 .whitespace_nowrap()
                 .text_color(rgb(theme::TEXT_PRIMARY))
@@ -1268,7 +1333,11 @@ fn diff_line_view(
                 .gap(px(3.))
                 .children(comments.iter().map(|c| {
                     div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .whitespace_normal()
                         .text_size(px(11.))
+                        .line_height(px(16.))
                         .text_color(rgb(theme::TEXT_SECONDARY))
                         .child(format!("{}: {}", c.author, c.text))
                 })),
@@ -1299,6 +1368,8 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let composer = app.composer.clone();
 
     div()
+        .w_full()
+        .min_w(px(0.))
         .max_w(px(760.))
         .flex()
         .flex_col()
@@ -1307,6 +1378,8 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
             d.child(div().flex().gap(px(6.)).flex_wrap().mb(px(4.)).children(
                 chips.into_iter().enumerate().map(|(idx, path)| {
                     div()
+                        .max_w_full()
+                        .min_w(px(0.))
                         .flex()
                         .items_center()
                         .gap(px(6.))
@@ -1317,7 +1390,14 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .border_1()
                         .border_color(rgb(theme::BORDER))
                         .text_color(rgb(theme::TEXT_SECONDARY))
-                        .child(path)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .whitespace_normal()
+                                .line_height(px(16.))
+                                .child(path),
+                        )
                         .child(
                             div()
                                 .id(SharedString::from(format!("remove-chip-{idx}")))
@@ -1338,6 +1418,8 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                     let key = p.key.clone();
                     let idx = p.idx;
                     div()
+                        .max_w_full()
+                        .min_w(px(0.))
                         .flex()
                         .items_center()
                         .gap(px(6.))
@@ -1348,7 +1430,14 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .border_1()
                         .border_color(rgba(theme::PENDING_CHIP_BORDER))
                         .text_color(rgb(theme::ACCENT))
-                        .child(format!("{}: {}", p.label, p.text))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .whitespace_normal()
+                                .line_height(px(16.))
+                                .child(format!("{}: {}", p.label, p.text)),
+                        )
                         .child(
                             div()
                                 .id(SharedString::from(format!("remove-pending-{key}-{idx}")))
