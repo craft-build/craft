@@ -227,7 +227,7 @@ pub async fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
             debug!("using xAI OAuth authentication");
             return build_oauth_resolved(&tokens);
         }
-        match refreshed_tokens(dir, PROVIDER, |tokens| async move {
+        match refreshed_tokens(dir, PROVIDER, None, |tokens| async move {
             refresh_tokens(&tokens).await
         })
         .await

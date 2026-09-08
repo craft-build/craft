@@ -78,9 +78,13 @@ impl Xai {
         let storage = self.storage.clone().ok_or_else(|| AgentError::Config {
             message: "OAuth refresh not available for externally-managed auth".into(),
         })?;
-        let resolved = match refreshed_tokens(&storage, auth::PROVIDER, |tokens| async move {
-            auth::refresh_tokens(&tokens).await
-        })
+        let rejected = lock_unpoison(&self.auth).access_token().map(str::to_owned);
+        let resolved = match refreshed_tokens(
+            &storage,
+            auth::PROVIDER,
+            rejected.as_deref(),
+            |tokens| async move { auth::refresh_tokens(&tokens).await },
+        )
         .await
         {
             Ok(fresh) => auth::build_oauth_resolved(&fresh)?,
