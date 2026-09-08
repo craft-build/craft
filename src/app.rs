@@ -913,6 +913,10 @@ impl App {
 
     // ---- comments ----
 
+    pub fn comment_key(&self, anchor: &str) -> String {
+        scoped_comment_key(self.active_session_id.as_deref(), anchor)
+    }
+
     pub fn open_comment_box(&mut self, key: String, label: String, cx: &mut Context<Self>) {
         if !self.open_comment_boxes.insert(key.clone()) {
             self.open_comment_boxes.remove(&key);
@@ -962,7 +966,12 @@ impl App {
 
     pub fn pending_comments(&self) -> Vec<PendingComment> {
         let mut out = vec![];
-        for (key, list) in &self.comments {
+        let scope = comment_scope_prefix(self.active_session_id.as_deref());
+        for (key, list) in self
+            .comments
+            .iter()
+            .filter(|(key, _)| key.starts_with(&scope))
+        {
             for (idx, c) in list.iter().enumerate() {
                 if c.pending {
                     out.push(PendingComment {
@@ -1785,6 +1794,14 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+fn comment_scope_prefix(session_id: Option<&str>) -> String {
+    format!("session:{}:", session_id.unwrap_or("<none>"))
+}
+
+fn scoped_comment_key(session_id: Option<&str>, anchor: &str) -> String {
+    format!("{}{anchor}", comment_scope_prefix(session_id))
+}
+
 fn render_acp_diff(diff: agent_client_protocol::schema::v1::Diff) -> Diff {
     use similar::{ChangeTag, TextDiff};
 
@@ -2011,5 +2028,22 @@ mod session_config_tests {
         ] {
             assert_eq!(json_elicitation_value(value), None);
         }
+    }
+
+    #[test]
+    fn comment_keys_are_isolated_by_session() {
+        let first = scoped_comment_key(Some("session-1"), "f_src/main.rs_4");
+        let second = scoped_comment_key(Some("session-2"), "f_src/main.rs_4");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with(&comment_scope_prefix(Some("session-1"))));
+        assert!(!first.starts_with(&comment_scope_prefix(Some("session-2"))));
+    }
+
+    #[test]
+    fn unscoped_legacy_comments_do_not_match_an_active_session() {
+        let legacy_key = "f_src/main.rs_4";
+
+        assert!(!legacy_key.starts_with(&comment_scope_prefix(Some("session-1"))));
     }
 }

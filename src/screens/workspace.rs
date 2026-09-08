@@ -956,7 +956,7 @@ fn assistant_message(
     cx: &mut Context<App>,
 ) -> impl IntoElement {
     let msg_id = m.id.clone();
-    let comment_key = format!("msg_{}", m.id);
+    let comment_key = app.comment_key(&format!("msg_{}", m.id));
     let steps_expanded = app.expanded_steps.contains(&msg_id);
     let toggle_steps_id = msg_id.clone();
     let toggle_comment_key = comment_key.clone();
@@ -1283,6 +1283,7 @@ fn diff_line_view(
         DiffLineKind::Ctx => (" ", theme::TEXT_MUTED, None),
     };
 
+    let key = app.comment_key(&key);
     let comments = app.comments.get(&key).cloned().unwrap_or_default();
     let open = app.open_comment_boxes.contains(&key);
     let toggle_key = key.clone();
