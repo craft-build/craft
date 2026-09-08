@@ -2,6 +2,10 @@
 //! Retryable: 429, 5xx, IO, HTTP transport. Non-retryable: other 4xx, JSON parse, config,
 //! channel closed, user cancel. `user_message()` returns human-readable text for each variant.
 
+/// Request fields that cap the *output*. A 400 naming one of them is about the
+/// cap we sent, never about the prompt being too big.
+const OUTPUT_CAP_FIELDS: [&str; 3] = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("API error ({status}): {message}")]
@@ -156,6 +160,13 @@ impl AgentError {
     /// - OpenRouter: 400 "endpoint's maximum context length is X tokens"  <https://openrouter.ai/docs/api/reference/errors-and-debugging.mdx>
     fn is_context_overflow_body(message: &str) -> bool {
         let m = message.to_lowercase();
+        // `Invalid 'max_tokens': integer above maximum value` reads as "token"
+        // plus "maximum" and would sail through the sniff below, but the
+        // caller answers an overflow by summarizing the whole session away,
+        // and no amount of that fixes a cap we guessed too high.
+        if OUTPUT_CAP_FIELDS.iter().any(|field| m.contains(field)) {
+            return false;
+        }
         let is_scope = m.contains("context")
             || m.contains("token")
             || m.contains("prompt")
@@ -290,6 +301,10 @@ mod tests {
     #[test_case(400, "Invalid API key", false                                                             ; "auth_error")]
     #[test_case(500, "Internal server error", false                                                       ; "server_error")]
     #[test_case(400, "The output is too long", false                                                      ; "output_not_context")]
+    // A cap we sent, not a prompt we grew. Compacting cannot fix either of these.
+    #[test_case(400, "Invalid 'max_tokens': integer above maximum value. Expected a value <= 32768", false ; "openai_max_tokens_cap")]
+    #[test_case(400, "max_completion_tokens is too large: 100000", false                                  ; "openai_max_completion_tokens_cap")]
+    #[test_case(400, "max_output_tokens exceeds the model maximum", false                                 ; "max_output_tokens_cap")]
     fn classify_context_overflow(status: u16, message: &str, expected: bool) {
         let classified = api_msg(status, message).classify();
         assert_eq!(classified.is_overflow(), expected);
