@@ -40,6 +40,7 @@ use craft_storage::id::{CraftId, CraftIdParseError};
 use crossterm::event::{
     Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
+use ratatui::backend::Backend;
 use serde_json::json;
 use tracing::warn;
 
@@ -863,6 +864,34 @@ impl<'t> EventLoop<'t> {
         &mut self.sessions[self.focused].app
     }
 
+    /// Paints a frame and parks the terminal cursor on the cell the input box
+    /// reversed, without showing it. macOS anchors IME preedit text to the
+    /// cursor, so it has to sit there, but a visible one would invert that
+    /// already reversed cell back to plain text and ride along with every cell
+    /// the next diff writes.
+    ///
+    /// `Frame::set_cursor_position` cannot do this: ratatui shows the cursor
+    /// whenever a frame asks for a position. Hence the move after the draw,
+    /// and the hide that goes with it, so a widget that does ask for one
+    /// cannot bring the block cursor back.
+    fn paint(&mut self) -> Result<()> {
+        let app = &mut self.sessions[self.focused].app;
+        let mut cursor = None;
+        crate::terminal::begin_synchronized_output();
+        let draw = self.terminal.draw(|f| {
+            cursor = app.view(f);
+            color_compat::downgrade_if_needed(f.buffer_mut());
+        });
+        crate::terminal::end_synchronized_output();
+        draw?;
+        if let Some(pos) = cursor {
+            self.terminal.hide_cursor()?;
+            self.terminal.set_cursor_position(pos)?;
+            self.terminal.backend_mut().flush()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn run(mut self, initial_prompt: Option<String>) -> RunResult {
         if let Some(prompt) = initial_prompt {
             let sub = Submission {
@@ -882,16 +911,10 @@ impl<'t> EventLoop<'t> {
                 Err(e) => break Err(e),
             }
             self.checkpoint_all();
-            if dirty.take() {
-                crate::terminal::begin_synchronized_output();
-                if let Err(e) = self.terminal.draw(|f| {
-                    self.sessions[self.focused].app.view(f);
-                    color_compat::downgrade_if_needed(f.buffer_mut());
-                }) {
-                    crate::terminal::end_synchronized_output();
-                    break Err(e.into());
-                }
-                crate::terminal::end_synchronized_output();
+            if dirty.take()
+                && let Err(e) = self.paint()
+            {
+                break Err(e);
             }
             self.focused_app().dispatch_pending_restores();
 

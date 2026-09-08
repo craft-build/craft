@@ -28,6 +28,7 @@ use craft_providers::{ContentBlock, Effort, Message, Role, THINKING_USAGE, Token
 use craft_storage::sessions::{SessionMeta, StoredMode, StoredThinking};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use std::env;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -1835,8 +1836,51 @@ fn status_hints_published_by_a_plugin_reach_the_screen() {
 fn rendered(app: &mut App) -> String {
     let backend = ratatui::backend::TestBackend::new(80, 24);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| app.view(frame)).unwrap();
+    terminal
+        .draw(|frame| {
+            app.view(frame);
+        })
+        .unwrap();
     buffer_text(terminal.backend().buffer())
+}
+
+/// The event loop parks the terminal cursor on whatever `view` reports, so an
+/// IME anchors its preedit text there. The report has to be the very cell the
+/// input box reversed for its software cursor, and the hardware cursor has to
+/// stay hidden: shown, it would invert that cell back to plain text.
+#[test]
+fn view_reports_the_reversed_input_cell_and_hides_the_hardware_cursor() {
+    let mut app = test_app();
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let mut draw = |app: &mut App| {
+        let mut cursor = None;
+        terminal.draw(|frame| cursor = app.view(frame)).unwrap();
+        assert!(
+            !terminal.backend().cursor_visible(),
+            "the hardware cursor must never be shown"
+        );
+        cursor.map(|pos| {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell(pos)
+                .expect("the reported cursor must be on screen");
+            (pos, cell.modifier.contains(Modifier::REVERSED))
+        })
+    };
+
+    assert!(
+        matches!(draw(&mut app), Some((_, true))),
+        "the focused input box owns a reversed cursor cell"
+    );
+
+    app.update(Msg::Key(kb::HELP.to_key_event()));
+    assert_eq!(
+        draw(&mut app),
+        None,
+        "an overlay unfocuses the input box, so no cell is reversed"
+    );
 }
 
 /// When the picker gives up on a directory it cannot list, the flash is the

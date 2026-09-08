@@ -330,7 +330,7 @@ impl InputBox {
         streaming: bool,
         focused: bool,
         top_right_hint: Option<Line<'_>>,
-    ) {
+    ) -> Option<Position> {
         let content_height = area.height.saturating_sub(2);
         let ew = effective_width(area.width as usize);
 
@@ -448,20 +448,15 @@ impl InputBox {
             );
         }
 
-        // macOS anchors IME preedit text to the real terminal cursor, and
-        // ratatui only moves it when asked, so park it on the cell we reversed.
-        if let Some(cell) = cursor_cell
-            && let Some(y) = cell.y.checked_sub(self.scroll_y)
-            && y < content_height
-            && cell.x < area.width
-        {
-            frame.set_cursor_position(Position::new(area.x + cell.x, area.y + 1 + y));
-        }
-
         if max_scroll > 0 {
             let inner = area.inner(ratatui::layout::Margin::new(0, 1));
             render_vertical_scrollbar(frame, inner, u32::from(total_vl), u32::from(self.scroll_y));
         }
+
+        let cell = cursor_cell?;
+        let y = cell.y.checked_sub(self.scroll_y)?;
+        (y < content_height && cell.x < area.width)
+            .then(|| Position::new(area.x + cell.x, area.y + 1 + y))
     }
 
     fn max_scroll(&self) -> u16 {
@@ -964,16 +959,17 @@ mod tests {
         width: u16,
         height: u16,
         streaming: bool,
-    ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+    ) -> Rendered {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut cursor = None;
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, width, height);
-                input.view(frame, area, streaming, true, None);
+                cursor = input.view(frame, area, streaming, true, None);
             })
             .unwrap();
-        terminal
+        Rendered { terminal, cursor }
     }
 
     fn render_input(
@@ -981,7 +977,7 @@ mod tests {
         width: u16,
         height: u16,
     ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
-        render_input_with(input, width, height, false)
+        render_input_with(input, width, height, false).terminal
     }
 
     fn has_scrollbar_thumb(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> bool {
@@ -1356,21 +1352,17 @@ mod tests {
         input.click_position(area(10), row, col, focused)
     }
 
-    fn draw_input(
-        input: &mut InputBox,
-        width: u16,
-        height: u16,
-        focused: bool,
-    ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+    fn draw_input(input: &mut InputBox, width: u16, height: u16, focused: bool) -> Rendered {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut cursor = None;
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, width, height);
-                input.view(frame, area, false, focused, None);
+                cursor = input.view(frame, area, false, focused, None);
             })
             .unwrap();
-        terminal
+        Rendered { terminal, cursor }
     }
 
     // Width 12 leaves 10 text columns after the 2 cell prefix, height 6 leaves
@@ -1392,31 +1384,30 @@ mod tests {
             .collect()
     }
 
-    /// An IME anchors its preedit text to the terminal cursor, so the cursor
-    /// has to sit on the very cell the input box reversed, and on no other.
-    fn assert_cursor_at(
-        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
-        expected: Position,
-    ) {
-        assert!(terminal.backend().cursor_visible());
-        assert_eq!(terminal.backend().cursor_position(), expected);
-        assert_eq!(reversed_cells(terminal), vec![expected]);
+    struct Rendered {
+        terminal: ratatui::Terminal<ratatui::backend::TestBackend>,
+        cursor: Option<Position>,
     }
 
-    fn assert_no_cursor(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) {
-        assert!(!terminal.backend().cursor_visible());
-        assert!(reversed_cells(terminal).is_empty());
+    /// An IME anchors its preedit text to the terminal cursor, so the box has to
+    /// report the very cell it reversed, and no other. The hardware cursor stays
+    /// hidden: shown, it would invert that cell back to plain text.
+    fn assert_cursor_at(rendered: &Rendered, expected: Option<Position>) {
+        assert!(!rendered.terminal.backend().cursor_visible());
+        assert_eq!(rendered.cursor, expected);
+        assert_eq!(reversed_cells(&rendered.terminal), Vec::from_iter(expected));
     }
 
-    fn render_with_cursor_left(
-        text: &str,
-        left: usize,
-    ) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+    fn render_cursor(input: &mut InputBox, width: u16, height: u16) -> Rendered {
+        draw_input(input, width, height, true)
+    }
+
+    fn render_with_cursor_left(text: &str, left: usize) -> Rendered {
         let mut input = single_line(text);
         for _ in 0..left {
             input.buffer.move_left();
         }
-        render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT)
+        render_cursor(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT)
     }
 
     #[test_case("hello", 0, Position::new(9, 1) ; "ascii_at_end_of_line")]
@@ -1425,7 +1416,7 @@ mod tests {
     #[test_case("a漢b", 1, Position::new(7, 1)  ; "after_a_wide_char")]
     #[test_case("a漢b", 2, Position::new(5, 1)  ; "on_a_wide_char")]
     fn terminal_cursor_tracks_the_software_cursor(text: &str, left: usize, expected: Position) {
-        assert_cursor_at(&render_with_cursor_left(text, left), expected);
+        assert_cursor_at(&render_with_cursor_left(text, left), Some(expected));
     }
 
     #[test_case(CURSOR_EW, 0, Position::new(2, 2)         ; "at_the_boundary_it_starts_the_next_row")]
@@ -1433,22 +1424,28 @@ mod tests {
     #[test_case(CURSOR_EW + 2, 2, Position::new(2, 2)     ; "inside_the_text_at_the_boundary")]
     #[test_case(CURSOR_EW * 2 + 2, 2, Position::new(2, 3) ; "at_a_continuation_row_boundary")]
     fn terminal_cursor_at_wrap_boundary(chars: usize, left: usize, expected: Position) {
-        assert_cursor_at(&render_with_cursor_left(&"x".repeat(chars), left), expected);
+        assert_cursor_at(
+            &render_with_cursor_left(&"x".repeat(chars), left),
+            Some(expected),
+        );
     }
 
     #[test]
     fn terminal_cursor_on_second_buffer_line() {
         let mut input = InputBox::new(InputHistory::default(), 20);
         input.handle_paste("aaa\nbb");
-        let terminal = render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
-        assert_cursor_at(&terminal, Position::new(PREFIX_WIDTH * 2 + 2, 2));
+        let rendered = render_cursor(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
+        assert_cursor_at(&rendered, Some(Position::new(PREFIX_WIDTH * 2 + 2, 2)));
     }
 
     #[test]
     fn terminal_cursor_on_empty_input_sits_after_the_chevron() {
         let mut input = InputBox::new(InputHistory::default(), 20);
-        let terminal = render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
-        assert_cursor_at(&terminal, Position::new(INPUT_LEFT_PAD + PREFIX_WIDTH, 1));
+        let rendered = render_cursor(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
+        assert_cursor_at(
+            &rendered,
+            Some(Position::new(INPUT_LEFT_PAD + PREFIX_WIDTH, 1)),
+        );
     }
 
     #[test]
@@ -1457,16 +1454,22 @@ mod tests {
         let mut input = InputBox::new(InputHistory::default(), 20);
         input.handle_paste(&["a"; LINES].join("\n"));
 
-        let terminal = render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
+        let rendered = render_cursor(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
         assert!(input.scroll_y() > 0, "input should have scrolled");
         assert_cursor_at(
-            &terminal,
-            Position::new(INPUT_LEFT_PAD + PREFIX_WIDTH + 1, CURSOR_HEIGHT - 2),
+            &rendered,
+            Some(Position::new(
+                INPUT_LEFT_PAD + PREFIX_WIDTH + 1,
+                CURSOR_HEIGHT - 2,
+            )),
         );
 
         input.scroll(LINES as i32);
         assert_eq!(input.scroll_y(), 0, "should be back at the top");
-        assert_no_cursor(&render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT));
+        assert_cursor_at(
+            &render_cursor(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT),
+            None,
+        );
     }
 
     // `a` plus five wide chars is 11 columns, so the last one does not fit in
@@ -1485,19 +1488,19 @@ mod tests {
         for _ in 0..left {
             input.buffer.move_left();
         }
-        let terminal = render_input(&mut input, CURSOR_WIDTH, WIDE_WRAP_HEIGHT);
+        let rendered = render_cursor(&mut input, CURSOR_WIDTH, WIDE_WRAP_HEIGHT);
         assert_eq!(
             input.scroll_y(),
             WIDE_WRAP_SCROLL,
             "{SHOULD_FOLLOW_WIDE_WRAP}"
         );
-        assert_cursor_at(&terminal, expected);
+        assert_cursor_at(&rendered, Some(expected));
     }
 
     #[test]
     fn unfocused_input_leaves_the_terminal_cursor_alone() {
         let mut input = single_line("hello");
-        let terminal = draw_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT, false);
-        assert_no_cursor(&terminal);
+        let rendered = draw_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT, false);
+        assert_cursor_at(&rendered, None);
     }
 }
