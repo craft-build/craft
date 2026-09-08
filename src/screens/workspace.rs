@@ -7,6 +7,7 @@ use gpui::{Context, FontWeight, SharedString, Window, div, px, rgb, rgba};
 use crate::app::{App, SessionConfigControl};
 use crate::chrome;
 use crate::markdown::markdown_view;
+use crate::selectable_text::SelectableText;
 use crate::state::{Comment, Diff, DiffLine, DiffLineKind, Message, Role, Steps, Terminal};
 use crate::theme;
 
@@ -1323,7 +1324,11 @@ fn diff_line_view(
                 .text_size(px(12.))
                 .whitespace_nowrap()
                 .text_color(rgb(theme::TEXT_PRIMARY))
-                .child(line.text.clone()),
+                .child(SelectableText::new(
+                    format!("diff-text-{key}"),
+                    gpui::StyledText::new(line.text.clone()),
+                    line.text.clone(),
+                )),
         )
         .child(
             div()

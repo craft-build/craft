@@ -1,4 +1,4 @@
-//! Selectable rich text for rendered conversation content.
+//! Selectable rich text for rendered conversation and diff content.
 //!
 //! GPUI's built-in `StyledText` supports links and rich runs but does not
 //! provide browser-style selection. This wrapper keeps the same text layout,
@@ -22,7 +22,7 @@ thread_local! {
     static ACTIVE_SELECTION: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
 }
 
-/// Copies the most recently dragged conversation selection, if one exists.
+/// Copies the most recently dragged text selection, if one exists.
 pub fn copy_active_selection(cx: &mut App) -> bool {
     ACTIVE_SELECTION.with_borrow(|active| {
         let Some((_, text)) = active.as_ref() else {
@@ -97,6 +97,12 @@ impl SelectableText {
         ACTIVE_SELECTION.with_borrow_mut(|active| {
             *active = Some((key.to_string(), text));
         });
+    }
+
+    fn is_active(key: &str) -> bool {
+        ACTIVE_SELECTION.with_borrow(|active| {
+            active.as_ref().is_some_and(|(active_key, _)| active_key == key)
+        })
     }
 
     fn word_range(source: &str, index: usize) -> Range<usize> {
@@ -200,7 +206,11 @@ impl Element for SelectableText {
             global_id.expect("selectable text requires an element id"),
             |selection, _| {
                 let selection = selection.unwrap_or_default();
-                let range = Self::selection(selection.anchor.get(), selection.head.get());
+                let range = if Self::is_active(&self.selection_key) {
+                    Self::selection(selection.anchor.get(), selection.head.get())
+                } else {
+                    0..0
+                };
                 let quads = Self::selection_quads(self.text.layout(), range);
                 (quads, selection)
             },
@@ -219,6 +229,10 @@ impl Element for SelectableText {
         cx: &mut App,
     ) {
         window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        // Rich runs (notably Markdown code) paint their own opaque backgrounds.
+        // Paint the translucent selection above those runs so it remains visible.
+        self.text
+            .paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
         for quad in quads.drain(..) {
             window.paint_quad(quad);
         }
@@ -323,9 +337,6 @@ impl Element for SelectableText {
                 ((), selection)
             },
         );
-
-        self.text
-            .paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
     }
 }
 
@@ -334,5 +345,45 @@ impl IntoElement for SelectableText {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reverse_selection_copies_rendered_unicode_and_newlines() {
+        let source = "é `code`\nnext";
+        let range = SelectableText::selection(source.len(), "é ".len());
+        SelectableText::remember_selection("code", source, range);
+        ACTIVE_SELECTION.with_borrow(|active| {
+            assert_eq!(active.as_ref().unwrap().1, "`code`\nnext");
+        });
+    }
+
+    #[test]
+    fn only_the_latest_selection_is_active() {
+        SelectableText::remember_selection("markdown", "code", 0..4);
+        assert!(SelectableText::is_active("markdown"));
+
+        SelectableText::remember_selection("diff", "let value = 1;", 4..9);
+        assert!(!SelectableText::is_active("markdown"));
+        assert!(SelectableText::is_active("diff"));
+        ACTIVE_SELECTION.with_borrow(|active| {
+            assert_eq!(active.as_ref().unwrap().1, "value");
+        });
+
+        SelectableText::remember_selection("diff", "let value = 1;", 4..4);
+        ACTIVE_SELECTION.with_borrow(|active| {
+            assert!(active.as_ref().unwrap().1.is_empty());
+        });
+    }
+
+    #[test]
+    fn double_click_word_range_uses_utf8_boundaries() {
+        let source = "let café_value = 1;";
+        let range = SelectableText::word_range(source, "let café".len());
+        assert_eq!(&source[range], "café_value");
     }
 }
