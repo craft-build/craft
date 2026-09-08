@@ -874,13 +874,15 @@ impl App {
         let weak = cx.weak_entity();
         let submit_key = key.clone();
         let input = cx.new(|cx| {
-            TextInput::new(cx, "Comment...").on_submit(move |text, _window, cx| {
-                let text = text.to_string();
-                let key = submit_key.clone();
-                let label = label.clone();
-                weak.update(cx, |app, cx| app.submit_comment(key, text, label, cx))
-                    .ok();
-            })
+            TextInput::new(cx, "Comment...")
+                .soft_wrap()
+                .on_submit(move |text, _window, cx| {
+                    let text = text.to_string();
+                    let key = submit_key.clone();
+                    let label = label.clone();
+                    weak.update(cx, |app, cx| app.submit_comment(key, text, label, cx))
+                        .ok();
+                })
         });
         self.comment_inputs.insert(key, input);
         cx.notify();

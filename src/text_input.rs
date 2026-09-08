@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton, SharedString, Window, div, px,
-    rgb,
+    App, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, MouseButton, SharedString,
+    StyledText, Window, div, px, rgb,
 };
 
 use crate::theme;
@@ -30,6 +30,7 @@ pub struct TextInput {
     /// newline and only Cmd/Ctrl+Enter submits (matches the composer's
     /// "Cmd+Enter to send" placeholder).
     pub multiline: bool,
+    soft_wrap: bool,
     on_submit: Option<Rc<dyn Fn(&str, &mut Window, &mut App)>>,
     on_change: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 }
@@ -42,6 +43,7 @@ impl TextInput {
             cursor: 0,
             placeholder: placeholder.into(),
             multiline: false,
+            soft_wrap: false,
             on_submit: None,
             on_change: None,
         }
@@ -60,6 +62,12 @@ impl TextInput {
 
     pub fn multiline(mut self) -> Self {
         self.multiline = true;
+        self.soft_wrap = true;
+        self
+    }
+
+    pub fn soft_wrap(mut self) -> Self {
+        self.soft_wrap = true;
         self
     }
 
@@ -159,6 +167,20 @@ impl Render for TextInput {
         let focused = self.focus_handle.is_focused(window);
         let (before, after) = self.content.split_at(self.cursor);
         let empty = self.content.is_empty();
+        let wrapped_text = (self.soft_wrap && !empty).then(|| {
+            let mut text = self.content.clone();
+            let highlights = if focused {
+                const CARET: &str = "▏";
+                text.insert_str(self.cursor, CARET);
+                vec![(
+                    self.cursor..self.cursor + CARET.len(),
+                    HighlightStyle::color(rgb(theme::ACCENT).into()),
+                )]
+            } else {
+                Vec::new()
+            };
+            StyledText::new(text).with_highlights(highlights)
+        });
 
         div()
             .id(("text-input", cx.entity_id()))
@@ -173,10 +195,12 @@ impl Render for TextInput {
                     cx.notify();
                 }),
             )
-            .flex()
-            .flex_row()
-            .items_center()
             .w_full()
+            .min_w(px(0.))
+            .when(!self.soft_wrap || empty, |d| {
+                d.flex().flex_row().items_center()
+            })
+            .when(self.soft_wrap, |d| d.whitespace_normal())
             .when(empty && focused, |d| {
                 d.child(
                     div()
@@ -193,12 +217,13 @@ impl Render for TextInput {
                         .child(self.placeholder.clone()),
                 )
             })
-            .when(!empty, |d| {
+            .when(!empty && !self.soft_wrap, |d| {
                 d.child(before.to_string())
                     .when(focused, |d| {
                         d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(theme::ACCENT)))
                     })
                     .child(after.to_string())
             })
+            .when_some(wrapped_text, |d, text| d.child(text))
     }
 }

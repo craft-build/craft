@@ -1116,6 +1116,7 @@ fn comment_box(
         .child(
             div()
                 .flex_1()
+                .min_w(px(0.))
                 .bg(rgb(theme::INPUT_BG))
                 .border_1()
                 .border_color(rgb(theme::BORDER))
