@@ -2,15 +2,18 @@ use std::sync::{Arc, Mutex};
 
 use craft_storage::StateDir;
 use craft_storage::id::SessionRef;
+use craft_storage::sessions::Effort;
 use flume::Sender;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::model::Model;
 use async_trait::async_trait;
 
+use crate::model::{Model, ModelInfo};
+use crate::model_registry;
 use crate::provider::Provider;
+use crate::types::EffortDialect;
 use crate::{
     AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, UsageLimit,
     dialect,
@@ -30,9 +33,9 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "OpenAI",
 };
 
-// Non-codex models OpenAI offers for subscription usage via the Coding Plan.
-// Codex models are matched by their `-codex` substring in
-// `coding_plan_context_window`, so they never need listing here.
+// Offline fallback; the Codex backend's `/models` is the source of truth.
+// Codex models match by their `-codex` substring in
+// `coding_plan_context_window`, so they are not listed here.
 pub(crate) const PLAN_MODELS: &[&str] = &[
     "gpt-6-astra",
     "gpt-5.6-luna",
@@ -47,8 +50,16 @@ pub(crate) const PLAN_MODELS: &[&str] = &[
 const CODEX_PLAN_CONTEXT_WINDOW: u32 = 272_000;
 const GPT_5_6_PLAN_CONTEXT_WINDOW: u32 = 372_000;
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+// The backend hides models newer than this Codex CLI version, so bump it when
+// a fresh model is missing from the list.
+const CODEX_CLIENT_VERSION: &str = "0.153.4";
+const PLAN_MODELS_PATH: &str = "/models?client_version=";
+const LISTED_VISIBILITY: &str = "list";
+const IMAGE_MODALITY: &str = "image";
 const EMPTY_USAGE_ERROR: &str =
     "OpenAI usage response contained no plan or rate limits; the endpoint schema likely changed";
+const EMPTY_MODELS_ERROR: &str =
+    "Codex models response listed no visible models; the endpoint schema likely changed";
 const MILLIS_PER_SECOND: u64 = 1_000;
 const SECONDS_PER_HOUR: u64 = 60 * 60;
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
@@ -56,6 +67,102 @@ const SECONDS_PER_WEEK: u64 = 7 * SECONDS_PER_DAY;
 
 fn is_codex_model(model_id: &str) -> bool {
     coding_plan_context_window(model_id).is_some()
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PlanModelsResponse {
+    models: Vec<PlanModel>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PlanModel {
+    slug: String,
+    visibility: String,
+    context_window: Option<u32>,
+    default_reasoning_level: Option<String>,
+    supported_reasoning_levels: Vec<PlanReasoningLevel>,
+    input_modalities: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PlanReasoningLevel {
+    effort: String,
+}
+
+/// Effort levels the Codex backend declared for a plan model.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PlanModelInfo {
+    efforts: Vec<Effort>,
+    adaptive: Option<Effort>,
+    off: bool,
+}
+
+impl PlanModelInfo {
+    fn dialect(&self) -> EffortDialect<'_> {
+        EffortDialect {
+            supported: &self.efforts,
+            adaptive: self.adaptive,
+            off: self.off.then_some(dialect::OFF),
+        }
+    }
+}
+
+impl From<PlanModel> for ModelInfo {
+    fn from(model: PlanModel) -> Self {
+        let levels = &model.supported_reasoning_levels;
+        let mut efforts: Vec<Effort> = levels
+            .iter()
+            .filter_map(|level| level.effort.parse().ok())
+            .collect();
+        efforts.sort_unstable();
+        efforts.dedup();
+        let info = PlanModelInfo {
+            off: levels.iter().any(|level| level.effort == dialect::OFF),
+            adaptive: model
+                .default_reasoning_level
+                .and_then(|level| level.parse().ok()),
+            efforts,
+        };
+        Self {
+            id: model.slug,
+            context_window: model.context_window,
+            max_output_tokens: None,
+            pricing: None,
+            supports_thinking: Some(!info.efforts.is_empty()),
+            supports_vision: (!model.input_modalities.is_empty())
+                .then(|| model.input_modalities.iter().any(|m| m == IMAGE_MODALITY)),
+            tier: None,
+            provider_info: Some(Arc::new(info)),
+        }
+    }
+}
+
+fn parse_plan_models(response: &str) -> Result<Vec<ModelInfo>, AgentError> {
+    let parsed: PlanModelsResponse = serde_json::from_str(response)?;
+    let models: Vec<ModelInfo> = parsed
+        .models
+        .into_iter()
+        .filter(|model| model.visibility == LISTED_VISIBILITY)
+        .map(ModelInfo::from)
+        .collect();
+    if models.is_empty() {
+        return Err(AgentError::Config {
+            message: EMPTY_MODELS_ERROR.into(),
+        });
+    }
+    Ok(models)
+}
+
+fn static_plan_models() -> Vec<ModelInfo> {
+    super::models()
+        .iter()
+        .flat_map(|e| e.prefixes.iter())
+        .filter(|id| is_codex_model(id))
+        .map(|&s| ModelInfo::new(s.to_string()))
+        .collect()
 }
 
 #[derive(Deserialize, Default)]
@@ -214,6 +321,15 @@ impl OpenAi {
         }
         Ok(auth)
     }
+
+    async fn fetch_plan_models(&self) -> Result<Vec<ModelInfo>, AgentError> {
+        let auth = self.codex_auth()?;
+        let url = format!(
+            "{}{PLAN_MODELS_PATH}{CODEX_CLIENT_VERSION}",
+            auth::CODING_PLAN_BASE_URL
+        );
+        parse_plan_models(&self.compat.get_text(&auth, &url).await?)
+    }
 }
 
 fn usage_percentage(percentage: f64) -> Option<u32> {
@@ -298,7 +414,15 @@ impl Provider for OpenAi {
         let system = super::super::with_prefix(&self.system_prefix, system, &mut buf);
 
         if is_codex_model(&model.id) {
-            let body = super::responses::build_body(model, messages, system, tools);
+            let mut body = super::responses::build_body(model, messages, system, tools);
+            // Craft has no static plan dialect on the Responses path, so only a
+            // backend-discovered dialect is spoken here.
+            if let Some(info) =
+                model_registry::provider_info::<PlanModelInfo>(CONFIG.slug, &model.id)
+                && let Some(effort) = opts.thinking.effort_str(&info.dialect(), model)
+            {
+                body["reasoning"] = serde_json::json!({"effort": effort});
+            }
             let stream_timeout = self.compat.stream_timeout();
             return self
                 .with_oauth_retry(|| async {
@@ -330,17 +454,33 @@ impl Provider for OpenAi {
 
     async fn list_models(&self) -> Result<Vec<String>, AgentError> {
         if self.is_oauth() {
-            let models = super::models()
-                .iter()
-                .flat_map(|e| e.prefixes.iter())
-                .filter(|id| is_codex_model(id))
-                .map(|&s| s.to_string())
-                .collect();
-            return Ok(models);
+            return Ok(self
+                .list_models_with_info()
+                .await?
+                .into_iter()
+                .map(|m| m.id)
+                .collect());
         }
         self.with_oauth_retry(|| async {
             let auth = self.current_auth();
             self.compat.do_list_models(&auth).await
+        })
+        .await
+    }
+
+    async fn list_models_with_info(&self) -> Result<Vec<ModelInfo>, AgentError> {
+        if self.is_oauth() {
+            return match self.with_oauth_retry(|| self.fetch_plan_models()).await {
+                Ok(models) => Ok(models),
+                Err(e) => {
+                    warn!(error = %e, "Codex model listing failed, using static plan models");
+                    Ok(static_plan_models())
+                }
+            };
+        }
+        self.with_oauth_retry(|| async {
+            let auth = self.current_auth();
+            self.compat.do_list_models_with_info(&auth).await
         })
         .await
     }
@@ -386,9 +526,103 @@ impl Provider for OpenAi {
 
 #[cfg(test)]
 mod tests {
+    use craft_storage::sessions::Effort;
     use test_case::test_case;
 
     use super::*;
+    use crate::types::ThinkingConfig;
+
+    const PLAN_MODELS_RESPONSE: &str = r#"{
+        "models": [
+            {
+                "slug": "gpt-7-nova",
+                "visibility": "list",
+                "context_window": 300000,
+                "default_reasoning_level": "low",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": ""},
+                    {"effort": "medium", "description": ""},
+                    {"effort": "max", "description": ""},
+                    {"effort": "ultra", "description": ""}
+                ],
+                "input_modalities": ["text", "image"]
+            },
+            {
+                "slug": "gpt-5.5",
+                "visibility": "list",
+                "context_window": 272000,
+                "supported_reasoning_levels": [
+                    {"effort": "none", "description": ""},
+                    {"effort": "high", "description": ""}
+                ],
+                "input_modalities": ["text"]
+            },
+            {"slug": "gpt-5.1-codex", "visibility": "hide", "supported_reasoning_levels": []}
+        ]
+    }"#;
+
+    fn plan_info(info: &ModelInfo) -> Arc<PlanModelInfo> {
+        info.provider_info
+            .clone()
+            .unwrap()
+            .downcast::<PlanModelInfo>()
+            .unwrap()
+    }
+
+    #[test]
+    fn plan_models_keep_listed_models_with_declared_metadata() {
+        let models = parse_plan_models(PLAN_MODELS_RESPONSE).unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gpt-7-nova", "gpt-5.5"]);
+
+        let nova = &models[0];
+        assert_eq!(nova.context_window, Some(300_000));
+        assert_eq!(nova.supports_vision, Some(true));
+        assert_eq!(nova.supports_thinking, Some(true));
+        assert_eq!(
+            *plan_info(nova),
+            PlanModelInfo {
+                efforts: vec![Effort::Low, Effort::Medium, Effort::Max],
+                adaptive: Some(Effort::Low),
+                off: false,
+            }
+        );
+
+        let gpt_5_5 = &models[1];
+        assert_eq!(gpt_5_5.supports_vision, Some(false));
+        assert_eq!(
+            *plan_info(gpt_5_5),
+            PlanModelInfo {
+                efforts: vec![Effort::High],
+                adaptive: None,
+                off: true,
+            }
+        );
+    }
+
+    #[test_case("{}")]
+    #[test_case(r#"{"models": [{"slug": "x", "visibility": "hide"}]}"#)]
+    fn plan_models_reject_responses_without_visible_models(response: &str) {
+        assert_eq!(
+            parse_plan_models(response).unwrap_err().to_string(),
+            EMPTY_MODELS_ERROR
+        );
+    }
+
+    #[test_case(0, ThinkingConfig::Adaptive, Some("low") ; "adaptive_uses_backend_default")]
+    #[test_case(0, ThinkingConfig::Effort(Effort::XHigh), Some("medium") ; "undeclared_level_snaps_to_declared")]
+    #[test_case(0, ThinkingConfig::Off, None ; "undeclared_none_omits_reasoning")]
+    #[test_case(1, ThinkingConfig::Off, Some("none") ; "declared_none_is_sent")]
+    fn discovered_dialect_speaks_declared_levels(
+        index: usize,
+        thinking: ThinkingConfig,
+        expected: Option<&str>,
+    ) {
+        let models = parse_plan_models(PLAN_MODELS_RESPONSE).unwrap();
+        let info = plan_info(&models[index]);
+        let model = Model::from_spec(&format!("openai/{}", models[index].id)).unwrap();
+        assert_eq!(thinking.effort_str(&info.dialect(), &model), expected);
+    }
 
     #[test_case("gpt-5.6-luna")]
     #[test_case("gpt-5.6-terra")]

@@ -88,6 +88,8 @@ const XAI_OAUTH_NOTE: &str = r#"OAuth uses the same first-party xAI client as th
 
 If `~/.grok/auth.json` already exists, login offers to reuse it without writing that file."#;
 
+const OPENAI_OAUTH_NOTE: &str = r#"With ChatGPT OAuth (`craft auth login openai`) the model list comes from the Codex backend's own `/models` endpoint, so a model your plan gains shows up without a Craft update, with the context window and reasoning levels the backend declares for it. The table above is the offline fallback. The endpoint hides models newer than the Codex CLI version Craft reports, so a brand new release can lag until that version is bumped."#;
+
 const OPENCODE_FREE_MODELS_NOTE: &str = r#"By default Craft hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/craft/providers.toml`:
 
 ```toml
@@ -482,6 +484,10 @@ fn write_section(out: &mut String, section: &ProviderSection) {
 
     if section.kind == ProviderKind::Xai {
         let _ = writeln!(out, "\n{XAI_OAUTH_NOTE}");
+    }
+
+    if section.kind == ProviderKind::OpenAi {
+        let _ = writeln!(out, "\n{OPENAI_OAUTH_NOTE}");
     }
 }
 
