@@ -80,6 +80,10 @@ pub struct App {
     pub connection_status: String,
     pub context_usage: Option<u8>,
     pub acp_client: Option<AcpClient>,
+    /// Identifies the ACP event stream that belongs to the current session.
+    /// Dropping a client closes it asynchronously, so older streams can still
+    /// have queued events after the user switches sessions.
+    connection_generation: u64,
     pub agent_config: Option<AgentConfig>,
     pub pending_permission: Option<PendingPermission>,
     pub pending_elicitation: Option<PendingElicitation>,
@@ -169,6 +173,7 @@ impl App {
             connection_status: "Not configured".into(),
             context_usage: None,
             acp_client: None,
+            connection_generation: 0,
             agent_config: None,
             pending_permission: None,
             pending_elicitation: None,
@@ -306,6 +311,15 @@ impl App {
     }
 
     pub fn open_session(&mut self, project_id: &str, session_id: &str, cx: &mut Context<Self>) {
+        let already_active = self
+            .active_project
+            .as_ref()
+            .is_some_and(|project| project.id == project_id)
+            && self.active_session_id.as_deref() == Some(session_id);
+        if already_active {
+            return;
+        }
+
         let Some(project) = self.projects.iter().find(|p| p.id == project_id).cloned() else {
             return;
         };
@@ -713,6 +727,8 @@ impl App {
     }
 
     fn connect_project(&mut self, cx: &mut Context<Self>) {
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        let connection_generation = self.connection_generation;
         self.acp_client = None;
         self.agent_config = None;
         self.agent_menu_open = false;
@@ -808,7 +824,11 @@ impl App {
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
                 if this
-                    .update(cx, |app, cx| app.apply_acp_event(event, cx))
+                    .update(cx, |app, cx| {
+                        if app.connection_generation == connection_generation {
+                            app.apply_acp_event(event, cx);
+                        }
+                    })
                     .is_err()
                 {
                     break;
