@@ -7,6 +7,7 @@ mod config;
 mod markdown;
 mod persistence;
 mod screens;
+mod selectable_text;
 mod state;
 mod text_input;
 mod theme;

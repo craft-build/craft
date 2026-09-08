@@ -2,11 +2,12 @@ use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, FontStyle, FontWeight, HighlightStyle, InteractiveText, SharedString,
-    StrikethroughStyle, StyledText, UnderlineStyle, div, px, rgb,
+    AnyElement, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle,
+    StyledText, UnderlineStyle, div, px, rgb,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+use crate::selectable_text::SelectableText;
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,12 +318,13 @@ fn inline_text(block: &MarkdownBlock, id: String) -> AnyElement {
                 .map(|url| (mark.range.clone(), url.clone()))
         })
         .collect::<Vec<_>>();
+    let selectable = SelectableText::new(id, styled, block.text.clone());
     if links.is_empty() {
-        styled.into_any_element()
+        selectable.into_any_element()
     } else {
         let ranges = links.iter().map(|(range, _)| range.clone()).collect();
         let urls = links.into_iter().map(|(_, url)| url).collect::<Vec<_>>();
-        InteractiveText::new(SharedString::from(id), styled)
+        selectable
             .on_click(ranges, move |index, _, cx| cx.open_url(&urls[index]))
             .into_any_element()
     }
@@ -410,7 +412,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
             .text_size(px(12.))
             .line_height(px(18.))
             .text_color(rgb(theme::TEXT_SECONDARY))
-            .child(block.text)
+            .child(inline_text(&block, inline_id))
             .into_any_element(),
         BlockKind::TableRow => div()
             .w_full()

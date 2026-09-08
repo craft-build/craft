@@ -1753,6 +1753,16 @@ impl Render for App {
             .font_family(theme::FONT_FAMILY)
             .text_size(px(12.))
             .overflow_hidden()
+            .on_key_down(|event, _, cx| {
+                let shortcut =
+                    event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+                if shortcut
+                    && event.keystroke.key == "c"
+                    && crate::selectable_text::copy_active_selection(cx)
+                {
+                    cx.stop_propagation();
+                }
+            })
             .child(match self.screen {
                 Screen::Onboarding => {
                     screens::onboarding::render(self, window, cx).into_any_element()

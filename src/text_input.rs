@@ -11,12 +11,12 @@
 //! offset) is likewise skipped: clicking a field focuses it and moves the
 //! caret to the end.
 
-use std::rc::Rc;
+use std::{ops::Range, rc::Rc};
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, MouseButton, SharedString,
-    StyledText, Window, div, px, rgb,
+    App, ClipboardItem, Context, FocusHandle, Focusable, HighlightStyle, KeyDownEvent, MouseButton,
+    SharedString, StyledText, Window, div, px, rgb,
 };
 
 use crate::theme;
@@ -28,6 +28,7 @@ pub struct TextInput {
     pub focus_handle: FocusHandle,
     pub content: String,
     cursor: usize,
+    selection_anchor: Option<usize>,
     placeholder: SharedString,
     /// Enter submits when `false`; when `true` plain Enter inserts a
     /// newline and only Cmd/Ctrl+Enter submits (matches the composer's
@@ -44,6 +45,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content: String::new(),
             cursor: 0,
+            selection_anchor: None,
             placeholder: placeholder.into(),
             multiline: false,
             soft_wrap: false,
@@ -77,17 +79,51 @@ impl TextInput {
     pub fn set_content(&mut self, content: impl Into<String>) {
         self.content = content.into();
         self.cursor = self.content.len();
+        self.selection_anchor = None;
     }
 
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.content.clear();
         self.cursor = 0;
+        self.selection_anchor = None;
     }
 
     pub fn take_content(&mut self) -> String {
         self.cursor = 0;
+        self.selection_anchor = None;
         std::mem::take(&mut self.content)
+    }
+
+    fn selected_range(&self) -> Option<Range<usize>> {
+        let anchor = self.selection_anchor?;
+        (anchor != self.cursor).then(|| anchor.min(self.cursor)..anchor.max(self.cursor))
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selected_range() else {
+            self.selection_anchor = None;
+            return false;
+        };
+        self.cursor = range.start;
+        self.content.replace_range(range, "");
+        self.selection_anchor = None;
+        true
+    }
+
+    fn replace_selection(&mut self, text: &str) {
+        self.delete_selection();
+        self.content.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    fn move_cursor(&mut self, cursor: usize, selecting: bool) {
+        if selecting {
+            self.selection_anchor.get_or_insert(self.cursor);
+        } else {
+            self.selection_anchor = None;
+        }
+        self.cursor = cursor;
     }
 
     fn prev_boundary(&self) -> usize {
@@ -109,24 +145,95 @@ impl TextInput {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = event.keystroke.clone();
         let submit_mod = ks.modifiers.platform || ks.modifiers.control;
+        if submit_mod {
+            match ks.key.as_str() {
+                "a" => {
+                    self.selection_anchor = Some(0);
+                    self.cursor = self.content.len();
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "c" => {
+                    if let Some(range) = self.selected_range() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            self.content[range].to_string(),
+                        ));
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                "x" => {
+                    if let Some(range) = self.selected_range() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            self.content[range].to_string(),
+                        ));
+                        self.delete_selection();
+                        if let Some(cb) = self.on_change.clone() {
+                            cb(window, cx);
+                        }
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                "v" => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        let text = if self.multiline {
+                            text
+                        } else {
+                            text.replace(['\r', '\n'], " ")
+                        };
+                        self.replace_selection(&text);
+                        if let Some(cb) = self.on_change.clone() {
+                            cb(window, cx);
+                        }
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let selecting = ks.modifiers.shift;
         match ks.key.as_str() {
             "backspace" => {
-                if self.cursor > 0 {
+                if !self.delete_selection() && self.cursor > 0 {
                     let start = self.prev_boundary();
                     self.content.replace_range(start..self.cursor, "");
                     self.cursor = start;
                 }
             }
             "delete" => {
-                if self.cursor < self.content.len() {
+                if !self.delete_selection() && self.cursor < self.content.len() {
                     let end = self.next_boundary();
                     self.content.replace_range(self.cursor..end, "");
                 }
             }
-            "left" => self.cursor = self.prev_boundary(),
-            "right" => self.cursor = self.next_boundary(),
-            "home" => self.cursor = 0,
-            "end" => self.cursor = self.content.len(),
+            "left" => {
+                let cursor = if !selecting {
+                    self.selected_range()
+                        .map(|range| range.start)
+                        .unwrap_or_else(|| self.prev_boundary())
+                } else {
+                    self.prev_boundary()
+                };
+                self.move_cursor(cursor, selecting);
+            }
+            "right" => {
+                let cursor = if !selecting {
+                    self.selected_range()
+                        .map(|range| range.end)
+                        .unwrap_or_else(|| self.next_boundary())
+                } else {
+                    self.next_boundary()
+                };
+                self.move_cursor(cursor, selecting);
+            }
+            "home" => self.move_cursor(0, selecting),
+            "end" => self.move_cursor(self.content.len(), selecting),
             "enter" => {
                 if submit_mod || !self.multiline {
                     if let Some(cb) = self.on_submit.clone() {
@@ -136,8 +243,7 @@ impl TextInput {
                     cx.notify();
                     return;
                 }
-                self.content.insert(self.cursor, '\n');
-                self.cursor += 1;
+                self.replace_selection("\n");
             }
             "escape" => {
                 window.blur();
@@ -147,8 +253,7 @@ impl TextInput {
                     && !ks.modifiers.control
                     && let Some(ch) = ks.key_char.as_ref()
                 {
-                    self.content.insert_str(self.cursor, ch);
-                    self.cursor += ch.len();
+                    self.replace_selection(ch);
                 }
             }
         }
@@ -168,11 +273,18 @@ impl Focusable for TextInput {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus_handle.is_focused(window);
-        let (before, after) = self.content.split_at(self.cursor);
         let empty = self.content.is_empty();
-        let wrapped_text = (self.soft_wrap && !empty).then(|| {
+        let rendered_text = (!empty).then(|| {
             let mut text = self.content.clone();
-            let highlights = if focused {
+            let highlights = if let Some(range) = self.selected_range() {
+                vec![(
+                    range,
+                    HighlightStyle {
+                        background_color: Some(rgb(theme::SELECTION).into()),
+                        ..Default::default()
+                    },
+                )]
+            } else if focused {
                 const CARET: &str = "▏";
                 text.insert_str(self.cursor, CARET);
                 vec![(
@@ -195,6 +307,7 @@ impl Render for TextInput {
                 cx.listener(|this, _, window, cx| {
                     window.focus(&this.focus_handle);
                     this.cursor = this.content.len();
+                    this.selection_anchor = None;
                     cx.notify();
                 }),
             )
@@ -220,13 +333,6 @@ impl Render for TextInput {
                         .child(self.placeholder.clone()),
                 )
             })
-            .when(!empty && !self.soft_wrap, |d| {
-                d.child(before.to_string())
-                    .when(focused, |d| {
-                        d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(theme::ACCENT)))
-                    })
-                    .child(after.to_string())
-            })
-            .when_some(wrapped_text, |d, text| d.child(text))
+            .when_some(rendered_text, |d, text| d.child(text))
     }
 }
