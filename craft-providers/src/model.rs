@@ -381,8 +381,13 @@ impl Model {
     /// what makes it right for re-pricing a session whose turns never recorded
     /// what they paid: the rate back then is unknown, and the table price is
     /// the honest guess.
+    ///
+    /// `fast` arrives as the user's raw preference and is gated here, against
+    /// *this* model. Callers often price a model they are not running (a
+    /// session's per-model breakdown, a compaction model), so a gate on their
+    /// side would answer for the wrong one.
     pub fn list_cost(&self, usage: &TokenUsage, fast: bool) -> Option<f64> {
-        (!self.pricing.is_zero()).then(|| usage.cost(&self.pricing, fast))
+        (!self.pricing.is_zero()).then(|| usage.cost(&self.pricing, fast && self.supports_fast()))
     }
 
     pub fn provider_display_name(&self) -> &'static str {
@@ -1007,8 +1012,11 @@ mod tests {
         assert_eq!(model.supports_fast(), expected);
     }
 
+    /// Fast mode is Anthropic-only, so a fast rate that lands on anyone else is
+    /// dead weight: nobody can turn it on, and an `always_fast` carried in from
+    /// config must not quietly reprice the session with it.
     #[test]
-    fn supports_fast_false_for_non_anthropic_even_with_fast_pricing() {
+    fn fast_pricing_on_a_non_anthropic_model_stays_inert() {
         let mut model = Model::from_base(
             ManifestRegistry::get("google").unwrap(),
             "google",
@@ -1019,6 +1027,16 @@ mod tests {
             output: 150.0,
         });
         assert!(!model.supports_fast());
+
+        let usage = TokenUsage {
+            input: 100,
+            output: 10,
+            ..Default::default()
+        };
+        let standard = model
+            .list_cost(&usage, false)
+            .expect("the table prices this model");
+        assert_eq!(model.list_cost(&usage, true), Some(standard));
     }
 
     #[test_case(ModelFamily::Claude,  "a b c d e", 3 ; "claude_short")]

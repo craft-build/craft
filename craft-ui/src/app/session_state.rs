@@ -6,7 +6,9 @@ use craft_agent::TurnType;
 use craft_agent::permissions::PermissionManager;
 use craft_config::{Effect, ModelPolicy};
 use craft_providers::provider::adjust_model;
-use craft_providers::{Model, ThinkingConfig, Timeouts, TokenUsage, settle_session};
+use craft_providers::{
+    Model, RequestOptions, ThinkingConfig, Timeouts, TokenUsage, settle_session,
+};
 use craft_storage::StateDir;
 use craft_storage::sessions::{SessionMeta, StoredEffect, StoredMode, StoredRule};
 
@@ -31,6 +33,13 @@ pub(crate) struct SessionState {
 }
 
 const PLAN_FILE_MISSING_WARNING: &str = "Plan file was deleted \u{2014} started a new plan";
+
+/// The badge, the cost line and the request all read the same gate, so none of
+/// them can advertise a mode this model lacks, or miss one it demands.
+fn clamp(thinking: ThinkingConfig, fast: bool, model: &Model) -> (ThinkingConfig, bool) {
+    let opts = RequestOptions { thinking, fast }.clamped(model);
+    (opts.thinking, opts.fast)
+}
 
 impl SessionState {
     pub fn from_session(
@@ -104,16 +113,13 @@ impl SessionState {
         let token_usage = session.token_usage;
         let context_size = session.meta.context_size;
         let context_window_overrides = session.meta.context_window_overrides.clone();
-        let fast = session.meta.fast && model.supports_fast();
+        // Saved model may differ from the live one (updated, removed, etc), so
+        // reconcile before anyone reads the toggles or prices history with them.
+        let (thinking, fast) = clamp(session.meta.thinking.into(), session.meta.fast, &model);
         let cost = settle_session(&token_usage, session.usage_by_model_mut(), &model, fast);
 
         Self {
-            thinking: session
-                .meta
-                .thinking
-                .map(Into::into)
-                .filter(|_| model.supports_thinking())
-                .unwrap_or_default(),
+            thinking,
             fast,
             session: Arc::new(session),
             model,
@@ -159,12 +165,7 @@ impl SessionState {
     }
 
     pub fn update_model(&mut self, model: &Model) {
-        if !model.supports_thinking() {
-            self.thinking = ThinkingConfig::Off;
-        }
-        if !model.supports_fast() {
-            self.fast = false;
-        }
+        (self.thinking, self.fast) = clamp(self.thinking, self.fast, model);
         self.session_mut().set_model(model.spec());
         self.model = model.clone();
     }

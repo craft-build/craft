@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use craft_config_macro::ConfigSection;
 use craft_storage::paths;
-use craft_storage::sessions::{StoredThinking, ThinkingParseError};
+use craft_storage::sessions::{SessionMeta, StoredThinking, ThinkingParseError};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -341,6 +341,34 @@ impl AlwaysThinking {
     }
 }
 
+/// The `always_*` knobs that seed a session's own toggles.
+///
+/// One value, so every entry point that starts a session (TUI, `run`, the
+/// SDK, ACP) takes the whole set at once. A knob that lives here cannot be
+/// honoured by one frontend and dropped by another, which is how
+/// `always_thinking` once reached the TUI and nobody else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionDefaults {
+    pub fast: bool,
+    pub thinking: Option<StoredThinking>,
+}
+
+impl SessionDefaults {
+    /// Seeds a session that has not spoken yet. An unset knob means "no
+    /// opinion" and leaves the session's own toggle alone, so a `/fast` from an
+    /// earlier run survives a config that never mentions it.
+    ///
+    /// The model is nobody's business here. `RequestOptions::clamped` is the
+    /// single gate for what the model can actually do, and the model can still
+    /// change after this runs.
+    pub fn seed(self, meta: &mut SessionMeta) {
+        meta.fast |= self.fast;
+        if self.thinking.is_some() {
+            meta.thinking = self.thinking;
+        }
+    }
+}
+
 #[derive(Deserialize, Default, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct RawConfig {
@@ -426,11 +454,13 @@ impl RawConfig {
         Ok(Config {
             always_yolo: self.always_yolo.unwrap_or(false),
             always_auto_review: self.always_auto_review.unwrap_or(false),
-            always_fast: self.always_fast.unwrap_or(false),
-            always_thinking: self
-                .always_thinking
-                .map(AlwaysThinking::resolve)
-                .transpose()?,
+            session_defaults: SessionDefaults {
+                fast: self.always_fast.unwrap_or(false),
+                thinking: self
+                    .always_thinking
+                    .map(AlwaysThinking::resolve)
+                    .transpose()?,
+            },
             ui: UiConfig::from_file(self.ui),
             agent,
             provider: ProviderConfig::from_file(self.provider)?,
@@ -1089,8 +1119,7 @@ pub struct PermissionsConfig {
 pub struct Config {
     pub always_yolo: bool,
     pub always_auto_review: bool,
-    pub always_fast: bool,
-    pub always_thinking: Option<StoredThinking>,
+    pub session_defaults: SessionDefaults,
     pub ui: UiConfig,
     pub agent: AgentConfig,
     pub provider: ProviderConfig,
@@ -3142,8 +3171,7 @@ tasks = []
         let mut config = Config {
             always_yolo: false,
             always_auto_review: false,
-            always_fast: false,
-            always_thinking: None,
+            session_defaults: SessionDefaults::default(),
             ui: UiConfig::default(),
             agent: AgentConfig::default(),
             provider: ProviderConfig::default(),
@@ -3834,7 +3862,7 @@ tasks = []
     #[test]
     fn into_config_resolves_always_thinking() {
         let defaults = RawConfig::default().into_config(&[]).unwrap();
-        assert!(defaults.always_thinking.is_none());
+        assert!(defaults.session_defaults.thinking.is_none());
 
         let raw = RawConfig {
             always_thinking: Some(AlwaysThinking::Mode("8192".into())),
@@ -3842,7 +3870,7 @@ tasks = []
         };
         let config = raw.into_config(&[]).unwrap();
         assert_eq!(
-            config.always_thinking,
+            config.session_defaults.thinking,
             Some(StoredThinking::Budget { tokens: 8192 })
         );
 

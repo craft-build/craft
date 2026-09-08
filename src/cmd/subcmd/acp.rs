@@ -95,6 +95,7 @@ pub async fn run(
         mcp_config,
         prompt_slots: Arc::new(prompt_slots),
         yolo,
+        defaults: config.session_defaults,
         model_policy: Arc::new(config.provider.model_policy.clone()),
         plugin_rules: plugin_host.plugin_rules(),
         plugin_host,

@@ -25,7 +25,7 @@ pub use agent::{
 };
 pub use agent::{ApprovalPayload, FLOW_APPROVE_ANSWER, FLOW_CANCEL_ANSWER, FlowProgress};
 pub use cancel::{CancelMap, CancelSlot, CancelToken, CancelTrigger};
-pub use craft_config::{AgentConfig, PermissionsConfig, ToolOutputLines};
+pub use craft_config::{AgentConfig, PermissionsConfig, SessionDefaults, ToolOutputLines};
 pub use mailbox::{MailboxError, SessionMailbox};
 pub mod checks;
 pub mod command;
@@ -123,6 +123,26 @@ pub struct AgentInput {
 }
 
 impl AgentInput {
+    /// What a host with no toggle UI sends. `run`, the SDK and ACP know
+    /// nothing about the toggles beyond what config says, so they all build
+    /// their input here and a knob added to [`SessionDefaults`] reaches every
+    /// one of them.
+    pub fn from_defaults(
+        message: String,
+        mode: AgentMode,
+        images: Vec<ImageSource>,
+        defaults: SessionDefaults,
+    ) -> Self {
+        Self {
+            message,
+            mode,
+            images,
+            thinking: defaults.thinking.into(),
+            fast: defaults.fast,
+            ..Self::default()
+        }
+    }
+
     /// Return a copy of this input re-targeted at a new message, resuming the
     /// Flow workstream. Used by the goal-approval resume loop: the user's
     /// approve/revise answer becomes the resume message, `flow_resume` marks

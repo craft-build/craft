@@ -121,7 +121,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         eprintln!("MCP config error: {mcp_config_errors}");
     }
 
-    let fast = config.always_fast && model.supports_fast();
+    let defaults = config.session_defaults;
 
     let mut excluded = vec![QUESTION_TOOL_NAME];
     excluded.extend(opts.extra_excluded_tools);
@@ -153,7 +153,7 @@ pub async fn run_headless(opts: HeadlessOptions) -> Result<HeadlessOutcome> {
         excluded_tools: excluded,
         mcp_handle,
         initial_wd: cwd.clone(),
-        fast,
+        defaults,
         model_policy: Arc::new(config.provider.model_policy.clone()),
         mode: opts.mode,
         plugin_rules: plugin_host.plugin_rules(),

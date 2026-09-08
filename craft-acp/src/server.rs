@@ -26,7 +26,7 @@ use craft_agent::mcp::config::{McpConfig, ServerConfig, Transport};
 use craft_agent::tools::{FsBackend, FsFuture, LocalFs};
 use craft_agent::types::{AgentEvent, BatchToolStatus};
 use craft_agent::{AgentInput, AgentMode, Envelope, ImageMediaType, ImageSource};
-use craft_config::ModelPolicy;
+use craft_config::{ModelPolicy, SessionDefaults};
 use craft_lua::{
     LocalTerminal, SessionEndReason, TerminalBackend, TerminalEvent, TerminalFuture,
     TerminalHandle, TerminalSpec,
@@ -409,6 +409,7 @@ pub(crate) struct Server {
     pub(crate) out_tx: Sender<Value>,
     model_specs: ModelSpecs,
     model_policy: Arc<ModelPolicy>,
+    defaults: SessionDefaults,
     shared_session: SharedSession,
     pending_requests: PendingRequests,
     client_caps: Arc<ClientCaps>,
@@ -516,6 +517,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
         out_tx,
         model_specs,
         model_policy: Arc::clone(&params.model_policy),
+        defaults: params.defaults,
         shared_session,
         pending_requests,
         client_caps,
@@ -702,7 +704,7 @@ async fn handle_request(
                 &loaded.usage,
                 &mut loaded.by_model,
                 &recorded_model,
-                RESTORED_FAST,
+                srv.defaults.fast,
             );
             install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::LoadSessionResponse(resp))
@@ -763,7 +765,7 @@ async fn handle_request(
                 &loaded.usage,
                 &mut loaded.by_model,
                 &recorded_model,
-                RESTORED_FAST,
+                srv.defaults.fast,
             );
             install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::ResumeSessionResponse(resp))
@@ -969,9 +971,6 @@ async fn teardown_session(
     }
 }
 
-/// ACP has no fast-mode toggle, so a restored total is priced at standard rates.
-const RESTORED_FAST: bool = false;
-
 #[derive(Debug)]
 struct LoadedHistory {
     history: Vec<Message>,
@@ -1033,6 +1032,7 @@ fn handle_prompt(
 ) -> Result<(), AcpError> {
     let req: PromptRequest = parse_params(raw)?;
     let session = srv.session.as_mut().ok_or_else(no_session)?;
+
     if session
         .pending
         .lock()
@@ -1070,6 +1070,7 @@ fn handle_prompt(
         mode: session.current_mode.clone(),
         images,
         thinking: parse_thinking(&session.current_thinking),
+        fast: srv.defaults.fast,
         ..Default::default()
     };
 
@@ -1878,6 +1879,7 @@ mod tests {
                 title_sent: false,
                 cwd: PathBuf::from("/project"),
             }),
+            defaults: SessionDefaults::default(),
             lua: craft_lua::EventHandle::disconnected_for_test(),
         };
         (server, answer_rx)
@@ -2032,12 +2034,7 @@ mod tests {
         let recorded_model = Model::from_spec(&loaded.model)
             .unwrap_or_else(|_| Model::from_spec(SELECTED_SPEC).expect("a shipped model"));
         assert_eq!(
-            settle_session(
-                &loaded.usage,
-                &mut loaded.by_model,
-                &recorded_model,
-                RESTORED_FAST
-            ),
+            settle_session(&loaded.usage, &mut loaded.by_model, &recorded_model, false),
             Some(RECORDED_COST)
         );
     }

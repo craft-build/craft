@@ -19,7 +19,7 @@ use craft_agent::headless::{HeadlessHandle, HeadlessParams};
 use craft_agent::permissions::PluginRuleStore;
 use craft_agent::tools::QUESTION_TOOL_NAME;
 use craft_agent::{AgentConfig, AgentEvent, DoneReason, Envelope, ImageSource, PermissionsConfig};
-use craft_config::ModelPolicy;
+use craft_config::{ModelPolicy, SessionDefaults};
 use craft_lua::session_snapshot::{HeadlessMeta, HeadlessSnapshot, MODE_BUILD};
 use craft_lua::{EventHandle, SessionEndReason};
 use craft_providers::model::Model;
@@ -137,23 +137,39 @@ impl VerboseOutput {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    model: &Model,
-    prompt_arg: Option<String>,
-    image_paths: Vec<PathBuf>,
-    format: OutputFormat,
-    verbose: bool,
-    config: AgentConfig,
-    compression: craft_config::CompressionConfig,
-    permissions_config: PermissionsConfig,
-    timeouts: craft_providers::Timeouts,
-    lua_handle: EventHandle,
-    fast: bool,
-    model_policy: Arc<ModelPolicy>,
-    plugin_rules: Arc<PluginRuleStore>,
-) -> Result<()> {
-    let prompt = match prompt_arg {
+pub struct PrintParams {
+    pub model: Model,
+    pub prompt: Option<String>,
+    pub image_paths: Vec<PathBuf>,
+    pub format: OutputFormat,
+    pub verbose: bool,
+    pub config: AgentConfig,
+    pub compression: craft_config::CompressionConfig,
+    pub permissions_config: PermissionsConfig,
+    pub timeouts: craft_providers::Timeouts,
+    pub lua_handle: EventHandle,
+    pub defaults: SessionDefaults,
+    pub model_policy: Arc<ModelPolicy>,
+    pub plugin_rules: Arc<PluginRuleStore>,
+}
+
+pub async fn run(params: PrintParams) -> Result<()> {
+    let PrintParams {
+        model,
+        prompt,
+        image_paths,
+        format,
+        verbose,
+        config,
+        compression,
+        permissions_config,
+        timeouts,
+        lua_handle,
+        defaults,
+        model_policy,
+        plugin_rules,
+    } = params;
+    let prompt = match prompt {
         Some(p) => p,
         None => {
             let mut buf = String::new();
@@ -184,7 +200,7 @@ pub async fn run(
         excluded_tools: vec![QUESTION_TOOL_NAME],
         mcp_handle,
         initial_wd: cwd,
-        fast,
+        defaults,
         model_policy,
         mode: craft_agent::AgentMode::Build,
         plugin_rules,

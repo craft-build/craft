@@ -755,6 +755,15 @@ impl From<StoredThinking> for ThinkingConfig {
     }
 }
 
+/// One place decides what silence means, so a session that never set a level, a
+/// config without `always_thinking` and a frontend with no toggle all read it
+/// the same way: off.
+impl From<Option<StoredThinking>> for ThinkingConfig {
+    fn from(s: Option<StoredThinking>) -> Self {
+        s.map_or(Self::Off, Self::from)
+    }
+}
+
 impl From<ThinkingConfig> for StoredThinking {
     fn from(c: ThinkingConfig) -> Self {
         match c {

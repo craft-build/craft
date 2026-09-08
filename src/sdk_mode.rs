@@ -21,7 +21,7 @@ use craft_agent::{
     AgentConfig, AgentEvent, AgentInput, AgentMode, DoneReason, Envelope, PermissionsConfig,
     ToolOutput,
 };
-use craft_config::{CompressionConfig, ModelPolicy};
+use craft_config::{CompressionConfig, ModelPolicy, SessionDefaults};
 use craft_lua::session_snapshot::{HeadlessMeta, HeadlessSnapshot, MODE_BUILD, MODE_PLAN};
 use craft_providers::model::Model;
 use craft_providers::{ImageSource, Message, StopReason, Timeouts, TokenUsage, add_cost};
@@ -441,7 +441,7 @@ pub struct SdkParams {
     pub permissions_config: PermissionsConfig,
     pub timeouts: Timeouts,
     pub prompt_slots: ResolvedSlots,
-    pub fast: bool,
+    pub defaults: SessionDefaults,
     pub model_policy: Arc<ModelPolicy>,
     pub plugin_rules: Arc<PluginRuleStore>,
     /// Plugins loaded here still want turn events, and this is what fires
@@ -465,7 +465,7 @@ pub async fn run(params: SdkParams) -> Result<()> {
         permissions_config,
         timeouts,
         prompt_slots,
-        fast,
+        defaults,
         model_policy,
         plugin_rules,
         lua_handle,
@@ -613,13 +613,8 @@ pub async fn run(params: SdkParams) -> Result<()> {
                     shared.turn_start = Instant::now();
                     shared.permission_mode
                 };
-                let input = AgentInput {
-                    message: prompt,
-                    mode: mode.agent_mode(&cwd),
-                    images,
-                    fast,
-                    ..Default::default()
-                };
+                let input =
+                    AgentInput::from_defaults(prompt, mode.agent_mode(&cwd), images, defaults);
                 if handle.input_tx.send(input).is_err() {
                     break;
                 }

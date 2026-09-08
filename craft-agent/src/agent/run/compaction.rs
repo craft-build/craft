@@ -337,8 +337,9 @@ impl<'h> Agent<'h> {
             )
             .await?;
             // The summariser can be a different model, so price this with
-            // `compact_model` and not the session model.
-            let fast = self.io.opts.clamped(&compact_model).fast;
+            // `compact_model` and not `self.io.model`. `list_cost` gates `fast`
+            // against whichever one it gets.
+            let fast = self.io.opts.fast;
             let compact_cost = compact_model.billed_cost(&compaction_usage, fast);
             let compact_list_cost = compact_model.list_cost(&compaction_usage, fast);
             self.ledger

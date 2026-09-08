@@ -603,9 +603,11 @@ impl<'h> Agent<'h> {
     }
 
     fn emit_turn_complete(&self, response: &StreamResponse) -> Result<(), AgentError> {
-        let fast = self.io.opts.clamped(&self.io.model).fast;
-        let cost = self.io.model.billed_cost(&response.usage, fast);
-        let list_cost = self.io.model.list_cost(&response.usage, fast);
+        let cost = self
+            .io
+            .model
+            .billed_cost(&response.usage, self.io.opts.fast);
+        let list_cost = self.io.model.list_cost(&response.usage, self.io.opts.fast);
         self.ledger.add(response.usage, cost, list_cost);
         self.io.event_tx.send(AgentEvent::TurnComplete(Box::new(
             crate::TurnCompleteEvent {

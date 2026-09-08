@@ -23,7 +23,7 @@ use crate::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams,
     Envelope, EventSender, ImageSource, McpHandle, PermissionsConfig, ToolOutput, ToolOutputLines,
 };
-use craft_config::ModelPolicy;
+use craft_config::{ModelPolicy, SessionDefaults};
 use craft_storage::flow::{FlowStore, project_id as flow_project_id};
 
 type StoredSession = Session<Message, TokenUsage, ToolOutput>;
@@ -88,7 +88,9 @@ pub struct HeadlessParams {
     pub excluded_tools: Vec<&'static str>,
     pub mcp_handle: Option<McpHandle>,
     pub initial_wd: PathBuf,
-    pub fast: bool,
+    /// The `always_*` knobs. A headless run has no toggle UI, so config is the
+    /// whole answer. The model gate stays in `RequestOptions::clamped`.
+    pub defaults: SessionDefaults,
     /// Agent mode for this headless run. `Build` for the ordinary `craft run`
     /// path; `Flow(workstream_id)` for `craft flow` (Phase 1: Flow mode runs a
     /// General turn, same as Build, until the turn-typed loop lands in Phase 2).
@@ -238,13 +240,12 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             .with_mcp(params.mcp_handle);
 
             let result = agent
-                .run(AgentInput {
-                    message: params.prompt,
+                .run(AgentInput::from_defaults(
+                    params.prompt,
                     mode,
-                    images: params.images,
-                    fast: params.fast,
-                    ..Default::default()
-                })
+                    params.images,
+                    params.defaults,
+                ))
                 .await;
 
             if let Err(e) = result {

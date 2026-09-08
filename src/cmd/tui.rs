@@ -281,7 +281,6 @@ pub async fn run(mut cli: Cli) -> Result<()> {
     }
 
     if cli.is_sdk_mode() {
-        let fast = stack.config.always_fast && stack.model.supports_fast();
         let prompt_slots = stack.plugin_host.event_handle().collect_prompt_slots();
         let timeouts = stack.timeouts();
         crate::sdk_mode::run(crate::sdk_mode::SdkParams {
@@ -292,7 +291,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
             permissions_config: stack.config.permissions,
             timeouts,
             prompt_slots,
-            fast,
+            defaults: stack.config.session_defaults,
             model_policy: Arc::new(stack.config.provider.model_policy.clone()),
             plugin_rules: stack.plugin_host.plugin_rules(),
             lua_handle: stack.plugin_host.event_handle(),
@@ -302,23 +301,22 @@ pub async fn run(mut cli: Cli) -> Result<()> {
         return Ok(());
     }
     if cli.print {
-        let fast = stack.config.always_fast && stack.model.supports_fast();
         let timeouts = stack.timeouts();
-        crate::print::run(
-            &stack.model,
-            cli.initial_prompt,
-            cli.images,
-            cli.output_format,
-            cli.verbose,
-            stack.config.agent,
-            stack.config.compression,
-            stack.config.permissions,
+        crate::print::run(crate::print::PrintParams {
+            model: stack.model,
+            prompt: cli.initial_prompt,
+            image_paths: cli.images,
+            format: cli.output_format,
+            verbose: cli.verbose,
+            config: stack.config.agent,
+            compression: stack.config.compression,
+            permissions_config: stack.config.permissions,
             timeouts,
-            stack.plugin_host.event_handle(),
-            fast,
-            Arc::new(stack.config.provider.model_policy.clone()),
-            stack.plugin_host.plugin_rules(),
-        )
+            lua_handle: stack.plugin_host.event_handle(),
+            defaults: stack.config.session_defaults,
+            model_policy: Arc::new(stack.config.provider.model_policy.clone()),
+            plugin_rules: stack.plugin_host.plugin_rules(),
+        })
         .await
         .context("run print mode")?;
         return Ok(());
@@ -341,10 +339,7 @@ pub async fn run(mut cli: Cli) -> Result<()> {
     loop {
         for session in &mut tabs {
             if session.messages().is_empty() {
-                session.meta.fast |= stack.config.always_fast;
-                if let Some(thinking) = stack.config.always_thinking {
-                    session.meta.thinking = Some(thinking);
-                }
+                stack.config.session_defaults.seed(&mut session.meta);
                 session.meta.mode = match cli.mode {
                     crate::cli::CliMode::Build => Some(craft_storage::sessions::StoredMode::Build),
                     crate::cli::CliMode::Plan => Some(craft_storage::sessions::StoredMode::Plan),
@@ -520,13 +515,13 @@ mod tests {
     #[test]
     fn broken_config_with_fallback_uses_last_good_and_warns() {
         let mut last_good = test_config();
-        last_good.always_fast = true;
+        last_good.session_defaults.fast = true;
         let mut warnings = Vec::new();
 
         let config = config_or_fallback(Err(eyre!("boom")), Some(last_good), &mut warnings)
             .expect("fallback config");
 
-        assert!(config.always_fast);
+        assert!(config.session_defaults.fast);
         assert_eq!(warnings.len(), 1);
         assert!(
             warnings[0].starts_with(CONFIG_FALLBACK_WARNING),

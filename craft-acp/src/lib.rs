@@ -13,7 +13,7 @@ use craft_agent::mcp::config::McpConfig;
 use craft_agent::permissions::PluginRuleStore;
 use craft_agent::prompt::ResolvedSlots;
 use craft_agent::{AgentConfig, PermissionsConfig};
-use craft_config::ModelPolicy;
+use craft_config::{ModelPolicy, SessionDefaults};
 use craft_lua::PluginHost;
 use craft_providers::Timeouts;
 use craft_providers::model::Model;
@@ -28,6 +28,9 @@ pub struct AcpParams {
     pub mcp_config: McpConfig,
     pub prompt_slots: Arc<ResolvedSlots>,
     pub yolo: bool,
+    /// ACP exposes no fast toggle of its own, so the `always_*` knobs are the
+    /// whole answer for every prompt this server runs.
+    pub defaults: SessionDefaults,
     pub model_policy: Arc<ModelPolicy>,
     pub plugin_host: PluginHost,
     pub flow_store: Arc<FlowStore>,
