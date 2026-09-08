@@ -497,14 +497,14 @@ pub struct ToolStartEvent {
     pub annotation: Option<String>,
     pub input: Option<ToolInput>,
     pub raw_input: Option<serde_json::Value>,
-    pub output: Option<ToolOutput>,
+    pub output: Option<Arc<ToolOutput>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDoneEvent {
     pub id: String,
     pub tool: Arc<str>,
-    pub output: ToolOutput,
+    pub output: Arc<ToolOutput>,
     pub is_error: bool,
     pub annotation: Option<String>,
     #[serde(default)]
@@ -518,7 +518,7 @@ impl ToolDoneEvent {
         Self {
             id,
             tool: Arc::from(UNKNOWN_TOOL),
-            output: ToolOutput::Plain(message.into()),
+            output: Arc::new(ToolOutput::Plain(message.into())),
             is_error: true,
             annotation: None,
             written_path: None,
@@ -1215,7 +1215,7 @@ mod tests {
                 ToolDoneEvent {
                     id: "t1".into(),
                     tool: Arc::from("bash"),
-                    output: ToolOutput::Plain("ok".into()),
+                    output: Arc::new(ToolOutput::Plain("ok".into())),
                     is_error: false,
                     annotation: None,
                     written_path: None,
@@ -1223,7 +1223,7 @@ mod tests {
                 ToolDoneEvent {
                     id: "t2".into(),
                     tool: Arc::from("read"),
-                    output: ToolOutput::Plain("fail".into()),
+                    output: Arc::new(ToolOutput::Plain("fail".into())),
                     is_error: true,
                     annotation: None,
                     written_path: None,
@@ -1329,11 +1329,11 @@ mod tests {
         let ok_event = ToolDoneEvent {
             id: "id".into(),
             tool: Arc::from("write"),
-            output: ToolOutput::WriteCode {
+            output: Arc::new(ToolOutput::WriteCode {
                 path: "/plans/slug.md".into(),
                 byte_count: 10,
                 lines: vec![],
-            },
+            }),
             is_error: false,
             annotation: None,
             written_path: None,
@@ -1373,7 +1373,7 @@ mod tests {
         let event = ToolDoneEvent {
             id: "id".into(),
             tool: Arc::from("tool"),
-            output,
+            output: Arc::new(output),
             is_error,
             annotation: None,
             written_path,

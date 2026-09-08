@@ -13,7 +13,7 @@ use super::code_execution::IMAGE_NOT_VISIBLE_NOTE;
 /// An error becomes `Err(text)`; an image success gets the not-visible note
 /// appended (its pixels are dropped here); anything else is plain text.
 pub fn flatten(done: &ToolDoneEvent) -> Result<String, String> {
-    let text = match &done.output {
+    let text = match done.output.as_ref() {
         crate::ToolOutput::Image { caption, .. } if !done.is_error => {
             format!("{caption} ({IMAGE_NOT_VISIBLE_NOTE})")
         }

@@ -1542,8 +1542,8 @@ where
 
     /// A change under an existing id is not expressible as an append, so it
     /// voids the cursors; a new id is a pure append.
-    pub fn insert_tool_output(&mut self, id: String, output: T) {
-        if self.tool_outputs.insert(id, Arc::new(output)).is_some() {
+    pub fn insert_tool_output(&mut self, id: String, output: Arc<T>) {
+        if self.tool_outputs.insert(id, output).is_some() {
             self.rewrite();
         } else {
             self.touch();
@@ -1927,7 +1927,7 @@ mod tests {
         session.set_subagent_messages("task-stale".into(), vec!["stale-sub-tool".into()]);
         session.set_subagents(vec![subagent("task-live"), subagent("task-stale")]);
         for id in ["task-live", "sub-tool", "stale-sub-tool", "orphan"] {
-            session.insert_tool_output(id.into(), Value::Null);
+            session.insert_tool_output(id.into(), Arc::new(Value::Null));
         }
 
         session.prune_orphans(ids);
@@ -2001,7 +2001,10 @@ mod tests {
 
         session.push_message(assistant_message("reply"));
         session.push_message(user_message("second"));
-        session.insert_tool_output("tool-1".into(), serde_json::json!({"result": "ok"}));
+        session.insert_tool_output(
+            "tool-1".into(),
+            Arc::new(serde_json::json!({"result": "ok"})),
+        );
         session.set_subagent_messages("sub-1".into(), vec![user_message("sub-prompt")]);
         log.append(&session).unwrap();
 
@@ -3012,7 +3015,7 @@ mod tests {
         let dir = tmp.path();
         let mut session: TestSession = Session::new("m", "/project");
         session.push_message(user_message("first"));
-        session.insert_tool_output("t1".into(), serde_json::json!({"result": "ok"}));
+        session.insert_tool_output("t1".into(), Arc::new(serde_json::json!({"result": "ok"})));
         let mut log = SessionLog::rewrite(dir, &session).unwrap();
         log.append(&session).unwrap();
 

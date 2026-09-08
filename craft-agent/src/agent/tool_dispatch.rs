@@ -124,7 +124,7 @@ pub async fn run(
             return ToolDoneEvent {
                 id,
                 tool: Arc::from(name),
-                output: ToolOutput::Plain(reason),
+                output: Arc::new(ToolOutput::Plain(reason)),
                 is_error: true,
                 annotation: None,
                 written_path: None,
@@ -206,7 +206,16 @@ impl<'a> Hook<'a> {
             return;
         }
         let was_error = done.is_error;
-        let Some(text) = done.output.filterable_text_mut() else {
+        // The output has not reached the session or the UI yet, so `make_mut`
+        // takes the allocation instead of cloning it. Publishing the event any
+        // earlier would still be correct, only silently back to deep copies.
+        debug_assert_eq!(
+            Arc::strong_count(&done.output),
+            1,
+            "a tool output hook ran on an already-published output: whoever \
+             published it before this point turned every hook into a deep copy"
+        );
+        let Some(text) = Arc::make_mut(&mut done.output).filterable_text_mut() else {
             debug!(
                 tool = %self.tool,
                 "output hook skipped: this output renders from fields, not prose"
@@ -316,7 +325,7 @@ async fn run_inner(
     let done_error = |msg: String| ToolDoneEvent {
         id: id.clone(),
         tool: Arc::clone(&tool_id),
-        output: ToolOutput::Plain(msg),
+        output: Arc::new(ToolOutput::Plain(msg)),
         is_error: true,
         annotation: None,
         written_path: None,
@@ -418,7 +427,7 @@ async fn run_inner(
             annotation: invocation.start_annotation(),
             input: invocation.start_input(),
             raw_input: Some(input.clone()),
-            output: invocation.start_output(ctx),
+            output: invocation.start_output(ctx).map(Arc::new),
         };
         if matches!(emit, Emit::Notify) {
             let _ = ctx.event_tx.send(AgentEvent::ToolStart(Box::new(start)));
@@ -474,7 +483,7 @@ async fn run_inner(
                 ToolDoneEvent {
                     id,
                     tool: tool_id,
-                    output,
+                    output: Arc::new(output),
                     is_error: false,
                     annotation: result.annotation,
                     written_path: result.written_path,
@@ -643,7 +652,7 @@ async fn run_headless_question(
     let done_error = |msg: String| ToolDoneEvent {
         id: id.clone(),
         tool: Arc::clone(tool_id),
-        output: ToolOutput::Plain(msg),
+        output: Arc::new(ToolOutput::Plain(msg)),
         is_error: true,
         annotation: None,
         written_path: None,
@@ -708,7 +717,7 @@ async fn run_headless_question(
     ToolDoneEvent {
         id,
         tool: Arc::clone(tool_id),
-        output: ToolOutput::Markdown(markdown),
+        output: Arc::new(ToolOutput::Markdown(markdown)),
         is_error: false,
         annotation: None,
         written_path: None,
@@ -967,7 +976,7 @@ async fn execute_mcp_tool(
     let done = |output: String, is_error: bool| ToolDoneEvent {
         id: id.to_owned(),
         tool: Arc::clone(&tool_id),
-        output: ToolOutput::Plain(output),
+        output: Arc::new(ToolOutput::Plain(output)),
         is_error,
         annotation: None,
         written_path: None,
@@ -1174,7 +1183,7 @@ pub(super) async fn process_tool_calls(
             let done = ToolDoneEvent {
                 id: id.clone(),
                 tool: Arc::from(name.as_str()),
-                output: cached_output,
+                output: Arc::new(cached_output),
                 is_error: false,
                 annotation: None,
                 written_path: None,
@@ -1297,9 +1306,9 @@ pub(super) async fn process_tool_calls(
                     let validation_result = ToolDoneEvent {
                         id: format!("validation-{}", all_results[0].id),
                         tool: Arc::from("validation"),
-                        output: crate::ToolOutput::Plain(format!(
+                        output: Arc::new(crate::ToolOutput::Plain(format!(
                             "post-write validation failed:\n{errors}"
-                        )),
+                        ))),
                         is_error: true,
                         annotation: None,
                         written_path: None,
@@ -1403,7 +1412,10 @@ async fn collect_format_events(
         Some(ToolDoneEvent {
             id: format!("format-{base_id}"),
             tool: Arc::from(FORMAT_TOOL_NAME),
-            output: crate::ToolOutput::Plain(format!("format failed:\n{}", errors.join("\n"))),
+            output: Arc::new(crate::ToolOutput::Plain(format!(
+                "format failed:\n{}",
+                errors.join("\n")
+            ))),
             is_error: true,
             annotation: None,
             written_path: None,
@@ -1412,7 +1424,10 @@ async fn collect_format_events(
         Some(ToolDoneEvent {
             id: format!("format-{base_id}"),
             tool: Arc::from(FORMAT_TOOL_NAME),
-            output: crate::ToolOutput::Plain(format!("reformatted {}", reformatted.join(", "))),
+            output: Arc::new(crate::ToolOutput::Plain(format!(
+                "reformatted {}",
+                reformatted.join(", ")
+            ))),
             is_error: false,
             annotation: None,
             written_path: None,
@@ -1616,7 +1631,7 @@ mod tests {
             let done = ToolDoneEvent {
                 id: format!("e{i}"),
                 tool: Arc::from(crate::tools::EDIT_TOOL_NAME),
-                output: ToolOutput::Plain("file changed since last read".into()),
+                output: Arc::new(ToolOutput::Plain("file changed since last read".into())),
                 is_error: true,
                 annotation: None,
                 written_path: None,
@@ -2091,7 +2106,7 @@ mod tests {
         ToolDoneEvent {
             id: id.into(),
             tool: Arc::from(crate::tools::WRITE_TOOL_NAME),
-            output: crate::ToolOutput::Plain("wrote".into()),
+            output: Arc::new(crate::ToolOutput::Plain("wrote".into())),
             is_error: false,
             annotation: None,
             written_path: Some(path.into()),
@@ -2203,7 +2218,7 @@ mod tests {
         let results = vec![ToolDoneEvent {
             id: "t1".into(),
             tool: Arc::from(crate::tools::READ_TOOL_NAME),
-            output: crate::ToolOutput::Plain("read".into()),
+            output: Arc::new(crate::ToolOutput::Plain("read".into())),
             is_error: false,
             annotation: None,
             written_path: None,

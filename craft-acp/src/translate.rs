@@ -369,7 +369,7 @@ pub fn tool_done(event: &ToolDoneEvent, cwd: &Path, home: Option<&Path>) -> Sess
         ToolCallStatus::Completed
     };
 
-    let content = match &event.output {
+    let content = match event.output.as_ref() {
         ToolOutput::Diff {
             path,
             before,
@@ -966,13 +966,13 @@ mod tests {
         let event = ToolDoneEvent {
             id: "t-img".into(),
             tool: Arc::from("browser"),
-            output: ToolOutput::Image {
+            output: Arc::new(ToolOutput::Image {
                 caption: "[screenshot of https://a.test]".into(),
                 source: ImageSource {
                     media_type: ImageMediaType::Png,
                     data: std::sync::Arc::from("b64shot"),
                 },
-            },
+            }),
             is_error: false,
             annotation: None,
             written_path: None,
@@ -1172,7 +1172,7 @@ mod tests {
         ToolDoneEvent {
             id: "t-1".into(),
             tool: Arc::from(tool),
-            output,
+            output: Arc::new(output),
             is_error,
             annotation: None,
             written_path: written.map(str::to_owned),

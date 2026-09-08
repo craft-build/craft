@@ -406,7 +406,7 @@ fn tool_done_transitions_plan_to_ready(output: ToolOutput, expect_ready: bool) {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: "t1".into(),
         tool: "write".into(),
-        output,
+        output: Arc::new(output),
         is_error: false,
         annotation: None,
         written_path: None,
@@ -695,7 +695,7 @@ fn tool_lifecycle_events_name_the_session_and_tool() {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: "tool-1".into(),
         tool: "bash".into(),
-        output: ToolOutput::Plain("done".into()),
+        output: Arc::new(ToolOutput::Plain("done".into())),
         is_error: false,
         annotation: None,
         written_path: None,
@@ -1363,7 +1363,7 @@ pub(crate) fn finish_subagent(app: &mut App, id: &str, is_error: bool) {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: id.into(),
         tool: "task".into(),
-        output: ToolOutput::Plain("result".into()),
+        output: Arc::new(ToolOutput::Plain("result".into())),
         is_error,
         annotation: None,
         written_path: None,
@@ -2862,9 +2862,10 @@ fn build_rewind_app() -> App {
         },
         Message::user("third prompt".into()),
     ]);
-    app.state
-        .session_mut()
-        .insert_tool_output("tool-1".into(), ToolOutput::Plain("output".into()));
+    app.state.session_mut().insert_tool_output(
+        "tool-1".into(),
+        Arc::new(ToolOutput::Plain("output".into())),
+    );
     app
 }
 
@@ -3618,11 +3619,11 @@ fn plan_app() -> App {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: "t1".into(),
         tool: "write".into(),
-        output: ToolOutput::WriteCode {
+        output: Arc::new(ToolOutput::WriteCode {
             path: "test-plan.md".into(),
             byte_count: 42,
             lines: vec![],
-        },
+        }),
         is_error: false,
         annotation: None,
         written_path: None,
@@ -3641,11 +3642,11 @@ fn tool_done_write_opens_plan_form(mode: Mode, expect_form: bool) {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: "t1".into(),
         tool: "write".into(),
-        output: ToolOutput::WriteCode {
+        output: Arc::new(ToolOutput::WriteCode {
             path: "/tmp/plans/test.md".into(),
             byte_count: 42,
             lines: vec![],
-        },
+        }),
         is_error: false,
         annotation: None,
         written_path: None,
@@ -3677,11 +3678,11 @@ fn re_edit_keeps_plan_form_visible() {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: "t2".into(),
         tool: "write".into(),
-        output: ToolOutput::WriteCode {
+        output: Arc::new(ToolOutput::WriteCode {
             path: "test-plan.md".into(),
             byte_count: 50,
             lines: vec![],
-        },
+        }),
         is_error: false,
         annotation: None,
         written_path: None,
@@ -3749,11 +3750,11 @@ fn rewrite_plan(app: &mut App) {
     app.update(agent_msg(AgentEvent::ToolDone(Box::new(ToolDoneEvent {
         id: "t2".into(),
         tool: "write".into(),
-        output: ToolOutput::WriteCode {
+        output: Arc::new(ToolOutput::WriteCode {
             path: "test-plan.md".into(),
             byte_count: 99,
             lines: vec![],
-        },
+        }),
         is_error: false,
         annotation: None,
         written_path: None,

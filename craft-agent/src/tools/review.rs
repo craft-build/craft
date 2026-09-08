@@ -239,7 +239,7 @@ fn filter_subagent_envelope(
     use crate::AgentEvent;
     match &envelope.event {
         AgentEvent::ToolDone(done) => {
-            if let ToolOutput::Findings(f) = &done.output {
+            if let ToolOutput::Findings(f) = done.output.as_ref() {
                 findings
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -290,7 +290,7 @@ mod tests {
         let env = envelope(crate::AgentEvent::ToolDone(Box::new(ToolDoneEvent {
             id: "t1".into(),
             tool: "report_finding".into(),
-            output: ToolOutput::Findings(vec![finding("a"), finding("b")]),
+            output: std::sync::Arc::new(ToolOutput::Findings(vec![finding("a"), finding("b")])),
             is_error: false,
             annotation: None,
             written_path: None,
@@ -305,7 +305,7 @@ mod tests {
         let env = envelope(crate::AgentEvent::ToolDone(Box::new(ToolDoneEvent {
             id: "t1".into(),
             tool: "read".into(),
-            output: ToolOutput::Plain("x".into()),
+            output: std::sync::Arc::new(ToolOutput::Plain("x".into())),
             is_error: false,
             annotation: None,
             written_path: None,

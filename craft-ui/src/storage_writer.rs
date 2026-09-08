@@ -347,7 +347,7 @@ mod tests {
         session.push_message(craft_providers::Message::user(RESUMED_MSG.into()));
         session.insert_tool_output(
             TOOL_ID.into(),
-            craft_agent::ToolOutput::Plain(TOOL_TEXT.to_string()),
+            Arc::new(craft_agent::ToolOutput::Plain(TOOL_TEXT.to_string())),
         );
         session.set_title(TITLE.into());
 

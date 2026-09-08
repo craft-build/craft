@@ -244,7 +244,7 @@ impl MessagesPanel {
             }
             msg.text = event.summary;
             msg.tool_input = event.input.map(Arc::new);
-            msg.tool_output = event.output.map(Arc::new);
+            msg.tool_output = event.output.clone();
             msg.tool_raw_input = event.raw_input;
             msg.annotation = event.annotation;
             msg.render_header = event.render_header;
@@ -261,7 +261,7 @@ impl MessagesPanel {
             event.summary,
         );
         msg.tool_input = event.input.map(Arc::new);
-        msg.tool_output = event.output.map(Arc::new);
+        msg.tool_output = event.output;
         msg.tool_raw_input = event.raw_input;
         msg.annotation = event.annotation;
         msg.render_header = event.render_header;
@@ -322,7 +322,7 @@ impl MessagesPanel {
             append_annotation(&mut msg.annotation, suffix);
         }
 
-        match &event.output {
+        match event.output.as_ref() {
             ToolOutput::Plain(text)
             | ToolOutput::Markdown(text)
             | ToolOutput::ReadDir { text, .. }
@@ -364,7 +364,7 @@ impl MessagesPanel {
             entries: new_entries,
             text,
             ..
-        } = &event.output
+        } = event.output.as_ref()
             && let Some(arc) = &mut msg.tool_output
             && let ToolOutput::Batch {
                 entries: existing,
@@ -378,7 +378,7 @@ impl MessagesPanel {
             }
             *existing_text = text.clone();
         } else {
-            msg.tool_output = Some(Arc::new(event.output));
+            msg.tool_output = Some(event.output);
         }
         msg.live_output = None;
         self.rebuild_tool_segment(&event.id);
@@ -636,7 +636,7 @@ impl MessagesPanel {
             self.tool_done(ToolDoneEvent {
                 id,
                 tool,
-                output: ToolOutput::Plain(message.clone()),
+                output: Arc::new(ToolOutput::Plain(message.clone())),
                 is_error: true,
                 annotation: None,
                 written_path: None,

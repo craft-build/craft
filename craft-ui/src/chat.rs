@@ -134,7 +134,7 @@ impl Chat {
             }
             AgentEvent::ToolDone(e) => {
                 let plan_write = plan_path.filter(|pp| e.wrote_to(pp));
-                let is_write = matches!(e.output, ToolOutput::WriteCode { .. });
+                let is_write = matches!(e.output.as_ref(), ToolOutput::WriteCode { .. });
                 self.messages_panel.tool_done(*e);
                 if let Some(pp) = plan_write {
                     let content = if is_write {
@@ -745,7 +745,7 @@ mod tests {
         AgentEvent::ToolDone(Box::new(ToolDoneEvent {
             id: id.into(),
             tool: tool.into(),
-            output,
+            output: Arc::new(output),
             is_error: false,
             annotation: None,
             written_path: None,

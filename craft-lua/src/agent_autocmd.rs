@@ -153,7 +153,7 @@ mod tests {
             AgentEvent::ToolDone(Box::new(ToolDoneEvent {
                 id: "t1".into(),
                 tool: "bash".into(),
-                output: ToolOutput::Plain("ok".into()),
+                output: std::sync::Arc::new(ToolOutput::Plain("ok".into())),
                 is_error: false,
                 annotation: None,
                 written_path: None,

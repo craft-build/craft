@@ -235,14 +235,14 @@ impl Batch {
                         index: i,
                         tool: name.clone(),
                         status,
-                        output: Some(done.output.clone()),
+                        output: Some(done.output.as_ref().clone()),
                         summary: Some(summary.clone()),
                     })));
                 (
                     i,
                     BatchResult {
                         text,
-                        output: Some(done.output),
+                        output: Some(done.output.as_ref().clone()),
                         summary: Some(summary),
                     },
                 )
