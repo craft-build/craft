@@ -80,6 +80,8 @@ pub(crate) const TOP_LEVEL_BAR_PREFIX: &str = "  │ ";
 
 const TOOL_SEPARATOR: &str = "──────────────────";
 const CODE_OUTPUT_DIVIDER: &str = "  ────────────";
+/// Stands in for a tool message whose role carries no name.
+const UNNAMED_TOOL: &str = "?";
 const BATCH_INDENT: &str = "  ";
 const BATCH_CONTENT_INDENT: &str = "    ";
 const BATCH_BAR_PREFIX: &str = "  │ ";
@@ -270,7 +272,6 @@ pub fn done_style() -> RoleStyle {
 
 pub struct ToolLines {
     pub lines: Vec<Line<'static>>,
-    pub search_text: String,
     pub highlight: Option<HighlightRequest>,
     pub spinner_lines: Vec<usize>,
     pub content_indent: &'static str,
@@ -408,7 +409,6 @@ impl From<BatchToolStatus> for Indicator {
 
 struct ResolvedOutput<'a> {
     text: Option<Cow<'a, str>>,
-    full_text: Option<Cow<'a, str>>,
     skipped: usize,
 }
 
@@ -423,7 +423,6 @@ fn resolve_output<'a>(
     if let Some(ToolOutput::Batch { .. }) = output {
         return ResolvedOutput {
             text: None,
-            full_text: None,
             skipped: 0,
         };
     }
@@ -441,7 +440,6 @@ fn resolve_output<'a>(
             None if output.is_some() => {
                 return ResolvedOutput {
                     text: None,
-                    full_text: None,
                     skipped: 0,
                 };
             }
@@ -460,7 +458,6 @@ fn resolve_output<'a>(
             (None, None) if output.is_some() => {
                 return ResolvedOutput {
                     text: None,
-                    full_text: None,
                     skipped: 0,
                 };
             }
@@ -481,16 +478,11 @@ fn resolve_output<'a>(
         _ => (None, already_truncated),
     };
 
-    ResolvedOutput {
-        text,
-        full_text,
-        skipped,
-    }
+    ResolvedOutput { text, skipped }
 }
 
 struct ToolLineBuilder {
     lines: Vec<Line<'static>>,
-    search_text: String,
     spinner_lines: Vec<usize>,
     content_range: (usize, usize),
     width: u16,
@@ -526,7 +518,6 @@ impl ToolLineBuilder {
         };
         Self {
             lines: Vec::new(),
-            search_text: String::new(),
             spinner_lines: Vec::new(),
             content_range: (0, 0),
             width: width.saturating_sub(indent_reserve),
@@ -587,20 +578,17 @@ impl ToolLineBuilder {
             header_uri = uri;
             spans.extend(styled);
         }
-        let mut copy = format!("{tool_name} {header}");
         if let Some(ann) = annotation {
             spans.push(Span::styled(
                 format!(" ({ann})"),
                 theme::current().tool_annotation,
             ));
-            write!(copy, " ({ann})").unwrap();
         }
         self.record_header_hyperlink(
             &spans,
             header_uri.or_else(|| output.and_then(output_path_uri)),
         );
         self.lines.push(Line::from(spans));
-        self.search_text = copy;
     }
 
     fn record_header_hyperlink(&mut self, spans: &[Span<'static>], uri: Option<String>) {
@@ -624,13 +612,6 @@ impl ToolLineBuilder {
             (prefix_w + last_w) as u16,
             uri,
         ));
-    }
-
-    fn push_search_text(&mut self, text: &str) {
-        if !self.search_text.is_empty() {
-            self.search_text.push('\n');
-        }
-        self.search_text.push_str(text);
     }
 
     fn prepend_indicator(&mut self, indicator: Indicator, started_at: Instant) {
@@ -680,12 +661,6 @@ impl ToolLineBuilder {
             self.lines.push(line);
         }
         self.content_range = (start, self.lines.len());
-        if let Some(ToolInput::Code { code, .. } | ToolInput::Script { code, .. }) = input {
-            self.push_search_text(code.trim_end());
-        }
-        if let Some(text) = output.and_then(|o| o.structured_display_text()) {
-            self.push_search_text(&text);
-        }
     }
 
     fn push_resolved_output(&mut self, resolved: &ResolvedOutput<'_>) {
@@ -710,11 +685,6 @@ impl ToolLineBuilder {
                     let indent = self.body_indent();
                     push_text_lines(&mut self.lines, text, indent);
                 }
-            }
-            if let Some(full) = &resolved.full_text {
-                self.push_search_text(full);
-            } else {
-                self.push_search_text(text);
             }
             if matches!(self.keep, Keep::Head) {
                 self.push_truncation_count(resolved.skipped);
@@ -754,7 +724,7 @@ impl ToolLineBuilder {
         }
     }
 
-    fn push_snapshot(&mut self, snapshot: &BufferSnapshot, search_fallback: Option<&str>) {
+    fn push_snapshot(&mut self, snapshot: &BufferSnapshot) {
         let start = self.lines.len();
         let total = snapshot.lines.len();
         self.lines.extend(snapshot_to_lines_range(
@@ -763,9 +733,6 @@ impl ToolLineBuilder {
             0..total,
         ));
         self.content_range = (start, self.lines.len());
-        if let Some(text) = search_fallback {
-            self.push_search_text(text);
-        }
     }
 
     fn prepend_separator(&mut self, index: usize) {
@@ -781,7 +748,6 @@ impl ToolLineBuilder {
         self.spinner_lines.iter_mut().for_each(|l| *l += 3);
         self.content_range.0 += 3;
         self.content_range.1 += 3;
-        self.search_text.insert(0, '\n');
     }
 
     fn finish(
@@ -819,7 +785,6 @@ impl ToolLineBuilder {
         }
         ToolLines {
             lines: self.lines,
-            search_text: self.search_text,
             highlight,
             spinner_lines: self.spinner_lines,
             content_indent,
@@ -910,7 +875,7 @@ pub fn build_tool_lines(
     rctx: &RenderCtx,
     expanded: SectionFlags,
 ) -> ToolLines {
-    let tool_name = msg.role.tool_name().unwrap_or("?");
+    let tool_name = msg.role.tool_name().unwrap_or(UNNAMED_TOOL);
     let hints = rctx.registry.get(tool_name);
     let limits = output_limits_from_hints(tool_name, hints, rctx.tool_output_lines);
     let (header, body) = match msg.text.split_once('\n') {
@@ -938,15 +903,7 @@ pub fn build_tool_lines(
         },
     );
     let show_output = if let Some(ref snapshot) = msg.render_snapshot {
-        let search_text = msg
-            .tool_output
-            .as_ref()
-            .and_then(|o| match o.as_ref() {
-                ToolOutput::Plain(t) | ToolOutput::Markdown(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .or(body);
-        b.push_snapshot(snapshot, search_text);
+        b.push_snapshot(snapshot);
         // A denial can land while the snapshot still shows only the
         // pre-permission script preview, so the error goes below it.
         // But a collapsed snapshot keeps just a window of the output,
@@ -985,6 +942,96 @@ pub fn build_tool_lines(
     )
 }
 
+/// What `/` searches for one tool message, built on demand instead of kept
+/// beside every rendered segment. It follows the same order
+/// [`build_tool_lines`] draws in, except the output is never truncated: a
+/// collapsed tool would otherwise hide its own body from search, and a tool
+/// still running is searched through its live buffer.
+pub fn search_text_for(msg: &DisplayMessage) -> String {
+    let tool_name = msg.role.tool_name().unwrap_or(UNNAMED_TOOL);
+    let (header, body) = match msg.text.split_once('\n') {
+        Some((h, b)) => (h, Some(b)),
+        None => (msg.text.as_str(), None),
+    };
+    let mut out = header_search_text(tool_name, header, msg.annotation.as_deref());
+
+    let output = msg.tool_output.as_deref();
+    if let Some(ToolInput::Code { code, .. } | ToolInput::Script { code, .. }) =
+        msg.tool_input.as_deref()
+    {
+        push_section(&mut out, code.trim_end());
+    }
+    if let Some(text) = output.and_then(ToolOutput::structured_display_text) {
+        push_section(&mut out, &text);
+    }
+    if let Some(text) = output
+        .and_then(plain_output_text)
+        .or(body)
+        .or(msg.live_output.as_deref())
+    {
+        push_section(&mut out, text);
+    }
+    out
+}
+
+/// A batch child renders under its own header, so it searches on its own text.
+pub fn batch_entry_search_text(entry: &BatchToolEntry) -> String {
+    let mut annotation = entry.annotation.clone();
+    if let Some(suffix) = entry.output.as_ref().and_then(tool_output_annotation) {
+        append_annotation(&mut annotation, &suffix);
+    }
+    let mut out = header_search_text(&entry.tool, &entry.summary, annotation.as_deref());
+    if let Some(ToolInput::Code { code, .. } | ToolInput::Script { code, .. }) =
+        entry.input.as_ref()
+    {
+        push_section(&mut out, code.trim_end());
+    }
+    if let Some(text) = entry
+        .output
+        .as_ref()
+        .and_then(|o| o.structured_display_text())
+    {
+        push_section(&mut out, &text);
+    }
+    if let Some(text) = entry.output.as_ref().and_then(plain_output_text) {
+        push_section(&mut out, text);
+    }
+    out
+}
+
+/// An instruction segment sits beside its tool but draws its own blocks, so it
+/// searches on its own text.
+pub fn instructions_search_text(blocks: &[InstructionBlock]) -> String {
+    let header = blocks.first().map_or("", |b| b.path.as_str());
+    let annotation = (blocks.len() > 1).then(|| format!("+{}", blocks.len() - 1));
+    let mut out = header_search_text("load", header, annotation.as_deref());
+    for block in blocks {
+        push_section(&mut out, &block.content);
+    }
+    out
+}
+
+fn header_search_text(tool: &str, header: &str, annotation: Option<&str>) -> String {
+    match annotation {
+        Some(ann) => format!("{tool} {header} ({ann})"),
+        None => format!("{tool} {header}"),
+    }
+}
+
+fn push_section(out: &mut String, text: &str) {
+    out.push('\n');
+    out.push_str(text);
+}
+
+/// The untruncated output text, for the variants that carry one.
+fn plain_output_text(output: &ToolOutput) -> Option<&str> {
+    match output {
+        ToolOutput::Plain(t) | ToolOutput::Markdown(t) => Some(t.as_str()),
+        ToolOutput::ReadDir { text, .. } => Some(text.as_str()),
+        _ => None,
+    }
+}
+
 pub fn truncate_to_header(text: &mut String) {
     let end = text.find('\n').unwrap_or(text.len());
     text.truncate(end);
@@ -1017,11 +1064,7 @@ pub fn build_batch_entry_lines(
     b.prepend_indicator(entry.status.into(), rctx.started_at);
     b.push_code_content(entry.input.as_ref(), entry.output.as_ref());
     if let Some(snap) = child_state.and_then(|s| s.snapshot.as_ref()) {
-        let search_text = entry.output.as_ref().and_then(|o| match o {
-            ToolOutput::Plain(t) | ToolOutput::Markdown(t) => Some(t.as_str()),
-            _ => None,
-        });
-        b.push_snapshot(snap, search_text);
+        b.push_snapshot(snap);
     } else {
         let resolved = resolve_output(entry.output.as_ref(), None, None, 0, b.limits, b.keep);
         b.push_resolved_output(&resolved);
@@ -1090,14 +1133,6 @@ pub fn build_instructions_lines(
         }
     }
     b.content_range = (start, b.lines.len());
-
-    b.push_search_text(
-        &blocks
-            .iter()
-            .map(|bl| bl.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-    );
 
     if let Some(idx) = batch_index {
         b.prepend_separator(idx);
@@ -1705,8 +1740,8 @@ mod tests {
         assert!(text.contains("from_snapshot"));
         assert!(!text.contains("plain fallback"));
         assert!(
-            tl.search_text.contains("plain fallback"),
-            "search_text should contain tool output for Ctrl+F"
+            search_text_for(&msg).contains("plain fallback"),
+            "search must reach the tool output the snapshot hides"
         );
     }
 
@@ -2143,15 +2178,10 @@ mod tests {
             snapshot_theme_gen: 0,
             thinking_collapsed: false,
         };
-        let tl = build_tool_lines(
-            &msg,
-            ToolStatus::Success,
-            &test_rctx(80, &reg()),
-            SectionFlags::default(),
-        );
+        let text = search_text_for(&msg);
         assert!(
-            tl.search_text.contains("llm_output_here"),
-            "search_text should come from ToolOutput::Plain, not body text"
+            text.contains("llm_output_here"),
+            "search text should come from ToolOutput::Plain, not body text"
         );
     }
 
@@ -2183,15 +2213,10 @@ mod tests {
             snapshot_theme_gen: 0,
             thinking_collapsed: false,
         };
-        let tl = build_tool_lines(
-            &msg,
-            ToolStatus::Success,
-            &test_rctx(80, &reg()),
-            SectionFlags::default(),
-        );
+        let tl = search_text_for(&msg);
         assert!(
-            tl.search_text.contains("body_fallback"),
-            "search_text should fall back to msg body when no plain output"
+            tl.contains("body_fallback"),
+            "search text should fall back to msg body when no plain output"
         );
     }
 

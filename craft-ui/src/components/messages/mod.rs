@@ -14,9 +14,10 @@ use self::selection::parse_batch_inner_id;
 
 use super::render_hints::RenderHintsRegistry;
 use super::tool_display::{
-    BatchChildState, RenderCtx, ToolLines, append_annotation, append_right_info, assistant_style,
-    build_batch_entry_lines, build_instructions_lines, build_tool_lines, done_style, error_style,
-    format_timestamp_now, output_limits_from_hints, thinking_style, tool_output_annotation,
+    BatchChildState, RenderCtx, RoleStyle, ToolLines, append_annotation, append_right_info,
+    assistant_style, batch_entry_search_text, build_batch_entry_lines, build_instructions_lines,
+    build_tool_lines, done_style, error_style, format_timestamp_now, instructions_search_text,
+    output_limits_from_hints, search_text_for, thinking_style, tool_output_annotation,
     truncate_to_header, user_style,
 };
 use super::{DisplayMessage, DisplayRole, ToolRole, ToolStatus, code_view::SectionFlags};
@@ -502,7 +503,6 @@ impl MessagesPanel {
             spacer.set_lines(vec![Line::default()]);
         }
         let seg = self.cache.get_mut(seg_idx).unwrap();
-        seg.search_text = tl.search_text.clone();
         seg.update_with_reuse(tl, &self.hl_worker);
     }
 
@@ -536,7 +536,6 @@ impl MessagesPanel {
 
         if let Some(seg_idx) = self.cache.find_by_tool_id(&img_id) {
             let seg = self.cache.get_mut(seg_idx).unwrap();
-            seg.search_text = caption.clone();
             seg.set_image(render_state.map(std::sync::Arc::new));
             seg.set_lines(vec![caption_line]);
             if let Some(uri) = hyperlink {
@@ -551,7 +550,6 @@ impl MessagesPanel {
             }
         } else if let Some(parent_idx) = self.cache.find_by_tool_id(parent_id) {
             let mut seg = Segment::with_tool(img_id, msg_index);
-            seg.search_text = caption.clone();
             seg.set_image(render_state.map(std::sync::Arc::new));
             seg.set_lines(vec![caption_line]);
             if let Some(uri) = hyperlink {
@@ -1191,8 +1189,84 @@ impl MessagesPanel {
         }
     }
 
-    pub fn segment_search_texts(&self) -> Vec<&str> {
-        self.cache.search_texts()
+    /// Built on demand rather than retained: a plain-text copy of the whole
+    /// transcript, sitting beside the rendered one, was the second largest
+    /// thing the panel held. Entry `i` must describe segment `i`, because
+    /// `SearchAction::Select` feeds the index straight back to
+    /// [`Self::scroll_to_segment`].
+    pub fn segment_search_texts(&self) -> Vec<String> {
+        self.cache
+            .segments()
+            .iter()
+            .map(|seg| self.segment_search_text(seg))
+            .collect()
+    }
+
+    fn segment_search_text(&self, seg: &Segment) -> String {
+        let Some(id) = seg.tool_id.as_deref() else {
+            return seg
+                .msg_index
+                .and_then(|i| self.messages.get(i))
+                .map(message_search_text)
+                .unwrap_or_default();
+        };
+        if id.ends_with(Self::IMG_SUFFIX) {
+            return self
+                .output_for(id.trim_end_matches(Self::IMG_SUFFIX))
+                .and_then(|o| match o {
+                    ToolOutput::Image { caption, .. } => Some(caption.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+        }
+        let parent = segment::instruction_parent(id).unwrap_or(id);
+        if segment::is_instruction_segment(id) {
+            return self
+                .output_for(parent)
+                .and_then(|o| o.instructions())
+                .map(instructions_search_text)
+                .unwrap_or_default();
+        }
+        if let Some((batch_id, idx)) = parse_batch_inner_id(id) {
+            return self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == batch_id))
+                .and_then(|m| match m.tool_output.as_deref() {
+                    Some(ToolOutput::Batch { entries, .. }) => entries.get(idx),
+                    _ => None,
+                })
+                .map(batch_entry_search_text)
+                .unwrap_or_default();
+        }
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == parent))
+            .map(search_text_for)
+            .unwrap_or_default()
+    }
+
+    fn output_for(&self, tool_id: &str) -> Option<&ToolOutput> {
+        if let Some((batch_id, idx)) = parse_batch_inner_id(tool_id) {
+            let msg = self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == batch_id))?;
+            return match msg.tool_output.as_deref() {
+                Some(ToolOutput::Batch { entries, .. }) => {
+                    entries.get(idx).and_then(|e| e.output.as_ref())
+                }
+                _ => None,
+            };
+        }
+        self.messages
+            .iter()
+            .rev()
+            .find(|m| matches!(&m.role, DisplayRole::Tool(t) if t.id == tool_id))
+            .and_then(|m| m.tool_output.as_deref())
     }
 
     pub fn extract_selection_text(&self, sel: &Selection, msg_area: Rect) -> String {
@@ -1466,7 +1540,6 @@ impl MessagesPanel {
                 None,
             )
         };
-        let search_text = format!("thinking> {text}");
         let seg_idx = self
             .cache
             .segments()
@@ -1475,7 +1548,6 @@ impl MessagesPanel {
         let Some(seg_idx) = seg_idx else { return };
         if let Some(seg) = self.cache.get_mut(seg_idx) {
             seg.set_lines(lines);
-            seg.search_text = search_text;
         }
     }
 
@@ -1550,7 +1622,6 @@ impl MessagesPanel {
         });
 
         let seg = self.cache.get_mut(seg_idx).unwrap();
-        seg.search_text = tl.search_text.clone();
         seg.update_with_reuse(tl, &self.hl_worker);
 
         self.build_and_upsert_batch_children(seg_idx, tool_id);
@@ -1590,21 +1661,18 @@ impl MessagesPanel {
                     child_exp,
                     self.batch_children.get(&child_id),
                 );
-                let search = tl.search_text.clone();
                 let instructions = entry.output.as_ref().and_then(|o| o.owned_instructions());
-                (child_id, search, tl, instructions)
+                (child_id, tl, instructions)
             })
             .collect();
         let child_prefix = format!("{tool_id}__");
         let msg_index = self.cache.get(parent_idx).and_then(|s| s.msg_index);
-        for (child_id, search, tl, instructions) in children {
+        for (child_id, tl, instructions) in children {
             if let Some(cseg_idx) = self.cache.find_by_tool_id(&child_id) {
                 let cseg = self.cache.get_mut(cseg_idx).unwrap();
-                cseg.search_text = search;
                 cseg.update_with_reuse(tl, &self.hl_worker);
             } else {
                 let mut seg = Segment::with_tool(child_id.clone(), msg_index);
-                seg.search_text = search;
                 seg.apply_highlight(tl, &self.hl_worker);
                 let insert_pos = self
                     .cache
@@ -1642,10 +1710,8 @@ impl MessagesPanel {
                 let status = t.status;
                 let tl = Self::build_tool_segment_lines(msg, status, &self.rctx(), exp);
                 let id = t.id.clone();
-                let search_text = tl.search_text.clone();
                 self.cache.push_spacer_if_needed();
                 let mut seg = Segment::with_tool(id.clone(), Some(i));
-                seg.search_text = search_text;
                 seg.apply_highlight(tl, &self.hl_worker);
                 self.cache.push(seg);
                 self.cache.reserve_instructions(&id, Some(i));
@@ -1674,7 +1740,6 @@ impl MessagesPanel {
                         .collect();
                     for (child_id, tl, blocks) in inst_data {
                         let mut seg = Segment::with_tool(child_id.clone(), Some(i));
-                        seg.search_text = tl.search_text.clone();
                         seg.apply_highlight(tl, &self.hl_worker);
                         self.cache.push(seg);
                         self.cache.push(Segment::with_tool(
@@ -1703,16 +1768,13 @@ impl MessagesPanel {
                 if matches!(&msg.role, DisplayRole::Thinking) && msg.thinking_collapsed {
                     let text = msg.text.clone();
                     let lines = self.build_cached_thinking_indicator(&text);
-                    let search_text = format!("thinking> {text}");
                     self.cache.push_spacer_if_needed();
-                    self.cache
-                        .push(Segment::with_lines(lines, search_text, Some(i)));
+                    self.cache.push(Segment::with_lines(lines, Some(i)));
                     continue;
                 }
-                let (lines, search_text) = build_message_lines(msg, self.viewport_width);
+                let lines = build_message_lines(msg, self.viewport_width);
                 self.cache.push_spacer_if_needed();
-                self.cache
-                    .push(Segment::with_lines(lines, search_text, Some(i)));
+                self.cache.push(Segment::with_lines(lines, Some(i)));
             }
         }
         self.cache.mark_built(self.messages.len());
@@ -1823,12 +1885,11 @@ impl MessagesPanel {
         let Some(msg) = self.messages.get(msg_idx) else {
             return;
         };
-        let (lines, search_text) = build_message_lines(msg, width);
+        let lines = build_message_lines(msg, width);
         let Some(seg) = self.cache.get_mut(seg_idx) else {
             return;
         };
         seg.set_lines(lines);
-        seg.search_text = search_text;
     }
 }
 
@@ -1852,23 +1913,12 @@ fn logical_line_count(text: &str) -> usize {
 }
 
 /// Builds ratatui lines for a non-Tool, non-collapsed-Thinking message at the
-/// given width, returning the lines and search text. Shared by
-/// `rebuild_line_cache` (new messages) and `reflow_text_segment` (stale-on-resize
-/// messages) so both paths produce identical segments.
-fn build_message_lines(msg: &DisplayMessage, width: u16) -> (Vec<Line<'static>>, String) {
-    let style = match &msg.role {
-        DisplayRole::User => user_style(),
-        DisplayRole::Assistant => assistant_style(),
-        DisplayRole::Thinking => thinking_style(),
-        DisplayRole::Error => error_style(),
-        DisplayRole::Done => done_style(),
-        DisplayRole::Tool(_) => unreachable!(),
-    };
-    let prefix = if msg.plan_path.is_some() {
-        ""
-    } else {
-        style.prefix
-    };
+/// given width. Shared by `rebuild_line_cache` (new messages) and
+/// `reflow_text_segment` (stale-on-resize messages) so both paths produce
+/// identical segments.
+fn build_message_lines(msg: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
+    let style = message_style(&msg.role);
+    let prefix = message_prefix(msg, &style);
     let mut lines = if style.use_markdown {
         text_to_lines(
             &msg.text,
@@ -1904,6 +1954,33 @@ fn build_message_lines(msg: &DisplayMessage, width: u16) -> (Vec<Line<'static>>,
             theme::current().tool_dim,
         )));
     }
-    let search_text = format!("{prefix}{}", msg.text);
-    (lines, search_text)
+    lines
+}
+
+fn message_style(role: &DisplayRole) -> RoleStyle {
+    match role {
+        DisplayRole::User => user_style(),
+        DisplayRole::Assistant => assistant_style(),
+        DisplayRole::Thinking => thinking_style(),
+        DisplayRole::Error => error_style(),
+        DisplayRole::Done => done_style(),
+        DisplayRole::Tool(_) => unreachable!(),
+    }
+}
+
+/// A plan message draws its own rule and path instead of the role prefix.
+fn message_prefix(msg: &DisplayMessage, style: &RoleStyle) -> &'static str {
+    if msg.plan_path.is_some() {
+        ""
+    } else {
+        style.prefix
+    }
+}
+
+/// Carries the role prefix so a query can hit either the prose or the "you>"
+/// and "thinking>" markers the reader sees. Collapsed thinking needs no case of
+/// its own: its indicator is drawn from the same prefix.
+fn message_search_text(msg: &DisplayMessage) -> String {
+    let style = message_style(&msg.role);
+    format!("{}{}", message_prefix(msg, &style), msg.text)
 }

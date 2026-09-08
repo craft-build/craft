@@ -570,14 +570,13 @@ fn selection_freezes_viewport_during_auto_scroll() {
 }
 
 fn seg_search(panel: &MessagesPanel, tool_id: &str) -> String {
-    panel
+    let idx = panel
         .cache
         .segments()
         .iter()
-        .find(|s| s.tool_id.as_deref() == Some(tool_id))
-        .unwrap()
-        .search_text
-        .clone()
+        .position(|s| s.tool_id.as_deref() == Some(tool_id))
+        .unwrap();
+    panel.segment_search_texts().swap_remove(idx)
 }
 
 #[test]
@@ -1736,7 +1735,7 @@ fn stream_reset_clears_thinking_expand_state() {
 
 #[test]
 fn height_measures_the_width_asked_for_even_while_stale() {
-    let mut seg = Segment::with_lines(vec![Line::from("x".repeat(80))], "test".into(), None);
+    let mut seg = Segment::with_lines(vec![Line::from("x".repeat(80))], None);
     // Measure once so the cache holds a height for the pre-resize width.
     assert_eq!(seg.height(80), 1, "80 chars at width 80 fits on one line");
 
@@ -1761,7 +1760,6 @@ fn wrapped_segment() -> Segment {
             Line::from("c"),
             Line::from("d".repeat(15)),
         ],
-        "test".into(),
         None,
     );
     assert_eq!(seg.height(ROW_WALK_WIDTH), 7, "fixture must wrap as above");
