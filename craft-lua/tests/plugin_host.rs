@@ -3011,6 +3011,49 @@ async fn bash_permission_scopes_unparseable_command() {
     bash_permission_scopes_never_falls_back_to_json("echo 'unterminated").await;
 }
 
+/// Every command in a chain needs its own scope, otherwise one allow rule
+/// covers commands nobody approved. The redirect case is the one that used to
+/// slip: tree-sitter hangs a trailing `2>&1` off the whole chain, so the chain
+/// arrived as a single scope starting with `cd `, and a `cd *` rule took it.
+#[test_case::test_case(
+    "cd /tmp && cargo check 2>&1 | tail -3",
+    &["cd /tmp", "cargo check 2>&1", "tail -3"]
+    ; "chain_with_redirect_and_pipe"
+)]
+#[test_case::test_case(
+    "ls\n# a note\npwd",
+    &["ls", "pwd"]
+    ; "comments_are_not_scopes"
+)]
+#[test_case::test_case(
+    "if [ -f x ]; then rm x; fi",
+    &["if [ -f x ]; then rm x; fi"]
+    ; "block_stays_one_scope"
+)]
+#[test_case::test_case(
+    "cd /tmp && > log",
+    &["cd /tmp", "> log"]
+    ; "bodiless_redirect_is_its_own_scope"
+)]
+#[tokio::test]
+async fn bash_permission_scopes_split_per_command(command: &str, expected: &[&str]) {
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
+        .unwrap();
+
+    let input = serde_json::json!({ "command": command });
+    let entry = reg.get("bash").expect("bash registered");
+    let inv = entry.tool.parse(&input).expect("parse failed");
+    let scopes = inv
+        .permission_scopes()
+        .await
+        .expect("permission_scopes returned None");
+
+    assert!(!scopes.force_prompt, "command: {command}");
+    assert_eq!(scopes.scopes, expected, "command: {command}");
+}
+
 async fn bash_permission_scopes_never_falls_back_to_json(command: &str) {
     let reg = fresh_registry();
     let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
