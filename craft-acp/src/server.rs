@@ -1046,17 +1046,6 @@ fn handle_prompt(
     let req: PromptRequest = parse_params(raw)?;
     let session = srv.session.as_mut().ok_or_else(no_session)?;
 
-    if session
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .prompt
-        .is_some()
-    {
-        return Err(AcpError::invalid_request()
-            .data(json_str("a prompt is already in progress for this session")));
-    }
-
     let (message, images) = extract_prompt_content(&req.prompt);
     {
         let sid = SessionId::from(session.handle.session_id.to_string());
@@ -1087,16 +1076,20 @@ fn handle_prompt(
         ..Default::default()
     };
 
+    // One outstanding id per session, checked and set under the same guard:
+    // `input_tx` is unbounded, so a second prompt would queue happily and
+    // overwrite the first id, leaving that request unanswered forever.
+    let mut pending = session.pending.lock().unwrap_or_else(|e| e.into_inner());
+    if pending.prompt.is_some() {
+        return Err(AcpError::invalid_request()
+            .data(json_str("a prompt is already in progress for this session")));
+    }
     session
         .handle
         .input_tx
         .send(input)
         .map_err(|_| AcpError::internal_error().data(json_str("session ended")))?;
-    session
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .prompt = Some(id.clone());
+    pending.prompt = Some(id.clone());
     Ok(())
 }
 
