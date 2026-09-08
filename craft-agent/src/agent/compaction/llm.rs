@@ -50,6 +50,14 @@ fn build_compaction_user_message(relevance_scores: Option<&[(usize, f32)]>) -> M
     Message::user(COMPACT_USER_PROMPT.to_string())
 }
 
+/// Replaces `history` with a summary of itself, retrying on overflow by
+/// pruning what it sends.
+///
+/// The last `carry_len` messages are held out of the summary and re-appended
+/// after it, so input no turn has answered yet survives verbatim without ever
+/// leaving `history`. Anything less and the mirror would publish a transcript
+/// missing that input for the length of the summary request.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn compact_history(
     provider: &dyn craft_providers::provider::Provider,
     model: &Model,
@@ -58,6 +66,7 @@ pub(crate) async fn compact_history(
     cancel: &CancelToken,
     relevance_scores: Option<&[(usize, f32)]>,
     config: &craft_config::AgentConfig,
+    carry_len: usize,
 ) -> Result<TokenUsage, AgentError> {
     let compact_start = std::time::Instant::now();
 
@@ -69,7 +78,8 @@ pub(crate) async fn compact_history(
         );
     }
 
-    let mut compaction_history: Vec<Message> = history.as_slice().to_vec();
+    let summarized = history.len().saturating_sub(carry_len);
+    let mut compaction_history: Vec<Message> = history.as_slice()[..summarized].to_vec();
     remove_orphaned_tool_results(&mut compaction_history);
     strip_images(&mut compaction_history);
     strip_thinking(&mut compaction_history);
@@ -133,11 +143,11 @@ pub(crate) async fn compact_history(
                     continue;
                 }
                 info!(error = %e, "LLM compaction failed, using static fallback");
-                return Ok(static_fallback(history));
+                return Ok(static_fallback(history, summarized));
             }
             Err(e) => {
                 info!(error = %e, "LLM compaction failed, using static fallback");
-                return Ok(static_fallback(history));
+                return Ok(static_fallback(history, summarized));
             }
         }
     };
@@ -145,7 +155,7 @@ pub(crate) async fn compact_history(
     // A summary the model never wrote would throw the session away for nothing.
     if response.message.first_text_content().is_none() {
         info!("compaction returned no text, using static fallback");
-        return Ok(static_fallback(history));
+        return Ok(static_fallback(history, summarized));
     }
 
     event_tx.send(AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
@@ -157,7 +167,8 @@ pub(crate) async fn compact_history(
         context_window: model.context_window,
     })))?;
 
-    let new_history = vec![Message::user(COMPACT_USER_PROMPT.into()), response.message];
+    let mut new_history = vec![Message::user(COMPACT_USER_PROMPT.into()), response.message];
+    new_history.extend_from_slice(&history.as_slice()[summarized..]);
     history.replace(new_history);
     info!(
         model = %model.id,
@@ -176,7 +187,8 @@ pub async fn compact(
     config: &craft_config::AgentConfig,
 ) -> Result<(), AgentError> {
     let cancel = CancelToken::none();
-    let usage = compact_history(provider, model, history, event_tx, &cancel, None, config).await?;
+    let usage =
+        compact_history(provider, model, history, event_tx, &cancel, None, config, 0).await?;
     if let Some(post) = normalize(&config.post_compaction_instructions) {
         history.push(Message::synthetic(post.to_string()));
     }
@@ -207,16 +219,18 @@ pub async fn compact(
     Ok(())
 }
 
-fn static_fallback(history: &mut History) -> TokenUsage {
-    let summary = build_static_summary(history.as_slice());
-    history.replace(vec![
+fn static_fallback(history: &mut History, summarized: usize) -> TokenUsage {
+    let summary = build_static_summary(&history.as_slice()[..summarized]);
+    let mut replacement = vec![
         Message::user(COMPACT_USER_PROMPT.into()),
         Message {
             role: Role::Assistant,
             content: vec![ContentBlock::Text { text: summary }],
             ..Default::default()
         },
-    ]);
+    ];
+    replacement.extend_from_slice(&history.as_slice()[summarized..]);
+    history.replace(replacement);
     TokenUsage::default()
 }
 
@@ -277,6 +291,45 @@ mod tests {
     use craft_providers::{ContentBlock, Message, Role, StopReason, TokenUsage};
     use std::sync::{Arc, Mutex};
     use test_case::test_case;
+
+    const CARRIED: &str = "answer this next";
+    const CARRY_UNSENT_MSG: &str = "carried input is not the summariser's to read";
+    const CARRY_KEPT_MSG: &str = "carried input must outlive the summary verbatim";
+
+    #[tokio::test]
+    async fn compact_history_carries_the_tail_past_the_summary() {
+        let provider = MockProvider::new(vec![Ok(text_response(StopReason::EndTurn))]);
+        let mut history = History::new(vec![
+            Message::user("first".into()),
+            Message::user(CARRIED.into()),
+        ]);
+        let (raw_tx, _rx) = flume::unbounded();
+
+        compact_history(
+            &provider,
+            &default_model(),
+            &mut history,
+            &EventSender::new(raw_tx, 0),
+            &CancelToken::none(),
+            None,
+            &craft_config::AgentConfig::default(),
+            1,
+        )
+        .await
+        .unwrap();
+
+        let carried = |messages: &[Message]| {
+            messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == CARRIED))
+        };
+        assert!(
+            !carried(&provider.requests.lock().unwrap()[0]),
+            "{CARRY_UNSENT_MSG}"
+        );
+        assert!(carried(history.as_slice()), "{CARRY_KEPT_MSG}");
+    }
 
     #[tokio::test]
     async fn compact_replaces_history_with_summary() {
@@ -384,6 +437,7 @@ mod tests {
             &CancelToken::none(),
             None,
             &craft_config::AgentConfig::default(),
+            0,
         )
         .await
         .unwrap();
@@ -418,6 +472,9 @@ mod tests {
             Err(AgentError::ContextOverflow {
                 message: "prompt is too long".into(),
             }),
+            Err(AgentError::ContextOverflow {
+                message: "prompt is too long".into(),
+            }),
             Ok(text_response(StopReason::EndTurn)),
         ]);
         let mut history = History::new(vec![
@@ -440,12 +497,13 @@ mod tests {
             &CancelToken::none(),
             None,
             &craft_config::AgentConfig::default(),
+            0,
         )
         .await
         .unwrap();
 
         let requests = provider.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(
             requests[0]
                 .iter()
@@ -455,8 +513,18 @@ mod tests {
                     ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == TOOL_USE_ID
                 ))
         );
+        // Attempt 1 only collapses the result, attempt 2 drops the round.
         assert!(
-            !requests[1]
+            requests[1]
+                .iter()
+                .flat_map(|message| &message.content)
+                .any(|block| matches!(
+                    block,
+                    ContentBlock::ToolResult { content, .. } if content == crate::agent::compaction::TOOL_RESULT_PLACEHOLDER
+                ))
+        );
+        assert!(
+            !requests[2]
                 .iter()
                 .flat_map(|message| &message.content)
                 .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
@@ -486,6 +554,7 @@ mod tests {
             &CancelToken::none(),
             None,
             &craft_config::AgentConfig::default(),
+            0,
         )
         .await
         .unwrap();
@@ -533,6 +602,7 @@ mod tests {
             &CancelToken::none(),
             None,
             &craft_config::AgentConfig::default(),
+            0,
         )
         .await
         .unwrap();

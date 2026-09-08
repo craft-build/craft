@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use craft_providers::provider::Provider;
 use craft_providers::{Message, Model, RequestOptions, StopReason, StreamResponse, TokenUsage};
@@ -113,6 +113,7 @@ pub struct Agent<'h> {
     ledger: Arc<RunLedger>,
     context_size: u32,
     num_turns: u32,
+    pending_overflow: Option<AgentError>,
     io: AgentIo,
     tool_state: AgentTools,
     compaction: AgentCompaction,
@@ -158,6 +159,7 @@ impl<'h> Agent<'h> {
             ledger: params.ledger,
             context_size: 0,
             num_turns: 0,
+            pending_overflow: None,
             io: AgentIo {
                 provider: params.provider,
                 model: Arc::new(params.model),
@@ -210,6 +212,8 @@ impl<'h> Agent<'h> {
                 last_relevance_scores: None,
                 ineffective_compaction_count: 0,
                 rollback_len: 0,
+                carry_from: 0,
+                overflow_recoveries: 0,
             },
             model_policy: params.model_policy,
             doom: AgentDoom {
@@ -377,6 +381,10 @@ impl<'h> Agent<'h> {
         self.flow.goal = input.goal;
         self.flow.goal_criteria = input.goal_criteria.clone();
         self.io.opts = RequestOptions { thinking, fast };
+        // Compaction holds everything from here out of the summary: it is
+        // input no turn has answered yet.
+        self.compaction.carry_from = self.history.len();
+        self.seed_gauge();
 
         info!(
             model = %self.io.model.id,
@@ -407,6 +415,23 @@ impl<'h> Agent<'h> {
         self.emit_done(reason)?;
 
         Ok(reason)
+    }
+
+    /// A resumed session can already fill the window, and the gauge only
+    /// learns the real size from a response, so without a seed the first
+    /// request goes out unguarded and comes back rejected. A chars/4 estimate
+    /// is a floor, good enough until the first response replaces it with the
+    /// provider's own count. Seeded here rather than in `new` because the MCP
+    /// schemas, the largest per-request addition on a heavy server set, are
+    /// only attached by the builder afterwards.
+    fn seed_gauge(&mut self) {
+        if self.context_size == 0 {
+            self.context_size = compaction::estimate_prompt_tokens(
+                self.history.as_slice(),
+                &self.system,
+                &self.tools,
+            );
+        }
     }
 
     fn push_input_context(&mut self, preamble: Vec<Message>) {
@@ -544,6 +569,28 @@ impl<'h> Agent<'h> {
                         .push(Message::synthetic(flow::SHIFT_OUT_TO_GENERAL_PROMPT.into()));
                 }
                 TurnOutcome::Overflow => {
+                    // The gauge is a chars/4 floor, so a prompt can overflow
+                    // with the compaction threshold still unmet. Compaction is
+                    // the only way out and it is exactly what the gauge would
+                    // have asked for, so run it and retry. The counter resets
+                    // on every successful stream, so a second overflow in a row
+                    // means compaction did not help and the error is the
+                    // honest answer.
+                    if self.compaction.overflow_recoveries >= compaction::MAX_OVERFLOW_RECOVERIES {
+                        let err = self.pending_overflow.take().unwrap_or_else(|| {
+                            AgentError::ContextOverflow {
+                                message: "prompt exceeded the context window".into(),
+                            }
+                        });
+                        error!(
+                            error = %err,
+                            model = %self.io.model.id,
+                            self.num_turns,
+                            "stream_message failed"
+                        );
+                        return Err(err);
+                    }
+                    self.compaction.overflow_recoveries += 1;
                     info!("context overflow detected, attempting auto-compact and retry");
                     let usage = TokenUsage {
                         input: self.context_size,

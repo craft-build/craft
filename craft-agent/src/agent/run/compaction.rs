@@ -14,6 +14,13 @@ use super::Agent;
 const DEFAULT_SMALL_MODEL_RATIO: f64 = 0.60;
 const INEFFECTIVE_COMPACTION_THRESHOLD: f32 = 0.1;
 const CHARS_PER_TOKEN: usize = 4;
+/// Charged flat per image, because the only thing in reach is the encoded
+/// blob, whose size tracks compression and not the tile count the provider
+/// bills. A screenshot at the sizes `adapt_images_for_model` allows lands near
+/// this; counting nothing at all made the transcripts most likely to overflow
+/// the ones the estimate understated the most.
+const TOKENS_PER_IMAGE: u32 = 1_500;
+pub(super) const MAX_OVERFLOW_RECOVERIES: u32 = 1;
 
 pub(super) struct AgentCompaction {
     pub(super) auto_compact: bool,
@@ -24,6 +31,11 @@ pub(super) struct AgentCompaction {
     pub(super) last_relevance_scores: Option<Vec<(usize, f32)>>,
     pub(super) ineffective_compaction_count: u8,
     pub(super) rollback_len: usize,
+    /// Where the unanswered input starts: the run's own prompt plus anything
+    /// queued in since the last turn ended. Compaction holds it out of the
+    /// summary.
+    pub(super) carry_from: usize,
+    pub(super) overflow_recoveries: u32,
 }
 
 pub async fn resolve_compaction_model(
@@ -47,25 +59,53 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
     if messages.is_empty() {
         return 0;
     }
-    let total_bytes: usize = messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|b| match b {
-            craft_providers::ContentBlock::Text { text } => Some(text.len()),
-            craft_providers::ContentBlock::ToolResult { content, .. } => Some(content.len()),
-            craft_providers::ContentBlock::ToolUse { input, .. } => Some(input.to_string().len()),
-            craft_providers::ContentBlock::Thinking { thinking, .. } => Some(thinking.len()),
-            _ => None,
-        })
-        .sum();
-    (total_bytes.max(CHARS_PER_TOKEN) / CHARS_PER_TOKEN) as u32
+    let (total_bytes, images) =
+        messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .fold((0usize, 0u32), |(bytes, images), block| match block {
+                craft_providers::ContentBlock::Text { text } => (bytes + text.len(), images),
+                craft_providers::ContentBlock::ToolResult { content, .. } => {
+                    (bytes + content.len(), images)
+                }
+                craft_providers::ContentBlock::ToolUse { input, .. } => {
+                    (bytes + json_len(input), images)
+                }
+                craft_providers::ContentBlock::Thinking { thinking, .. } => {
+                    (bytes + thinking.len(), images)
+                }
+                craft_providers::ContentBlock::Image { .. } => (bytes, images + 1),
+                craft_providers::ContentBlock::RedactedThinking { .. } => (bytes, images),
+            });
+    (total_bytes.max(CHARS_PER_TOKEN) / CHARS_PER_TOKEN) as u32 + images * TOKENS_PER_IMAGE
+}
+
+/// Serialized length without the string: the estimator runs over the whole
+/// transcript plus the tool catalog before every request, and only ever wants
+/// the byte count.
+fn json_len(value: &Value) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => counter.0,
+        Err(_) => 0,
+    }
 }
 
 /// Adds what [`estimate_message_tokens`] leaves out: the system prompt and the
 /// serialized tool schemas, which a server enforcing `prompt + max_tokens <=
 /// context_window` counts against the same budget.
 pub fn estimate_prompt_tokens(messages: &[Message], system: &str, tools: &Value) -> u32 {
-    let overhead = (system.len() + tools.to_string().len()) / CHARS_PER_TOKEN;
+    let overhead = (system.len() + json_len(tools)) / CHARS_PER_TOKEN;
     estimate_message_tokens(messages).saturating_add(overhead as u32)
 }
 
@@ -258,6 +298,14 @@ impl<'h> Agent<'h> {
 
     pub(super) async fn do_compact(&mut self) -> Result<(), AgentError> {
         let context_size_before = self.context_size;
+        // Compaction replaces the whole transcript, so input no turn has
+        // answered yet would be summarized away before the model ever saw it,
+        // images and all. `carry_from` is where that input starts: the run's
+        // own prompt, plus anything queued in since the last turn ended.
+        let carry_len = self
+            .history
+            .len()
+            .saturating_sub(self.compaction.carry_from);
         let vcc_ok = compaction::vcc_compact(
             self.history,
             &self.io.model,
@@ -281,6 +329,7 @@ impl<'h> Agent<'h> {
                 &self.io.cancel,
                 self.compaction.last_relevance_scores.as_deref(),
                 &self.config,
+                carry_len,
             )
             .await?;
             // The summariser can be a different model, so price this with
@@ -290,18 +339,29 @@ impl<'h> Agent<'h> {
             let compact_list_cost = compact_model.list_cost(&compaction_usage, fast);
             self.ledger
                 .add(compaction_usage, compact_cost, compact_list_cost);
-            // The summary the model just wrote is all the next call will see, so
-            // its output count is the new gauge.
-            self.context_size = compaction_usage.output;
+            // The summary the model just wrote is all the next call will see,
+            // plus whatever was carried past it, which the summariser never
+            // read and so never counted.
+            let carry_start = self.history.len().saturating_sub(carry_len);
+            self.context_size = compaction_usage.output
+                + estimate_message_tokens(&self.history.as_slice()[carry_start..]);
+            self.compaction.rollback_len = carry_start;
+            self.compaction.carry_from = carry_start;
+        } else {
+            self.compaction.rollback_len = self.history.len();
+            self.compaction.carry_from = self.history.len();
         }
-        self.compaction.rollback_len = self.history.len();
         self.io.event_tx.send(AgentEvent::CompactionDone {
             context_size_before,
             context_size_after: self.context_size,
             context_window: self.io.model.context_window,
         })?;
-        self.history
-            .push(Message::synthetic(continue_message(&self.config)));
+        // An unanswered prompt says what to do next better than the generic
+        // nudge, so it stands in for it.
+        if carry_len == 0 || vcc_ok {
+            self.history
+                .push(Message::synthetic(continue_message(&self.config)));
+        }
         if let Some(state) = self.flow.advisor_state.as_mut() {
             state.reset(&self.config.advisor);
         }
@@ -448,6 +508,7 @@ mod tests {
         let mut params = make_agent_params();
         params.provider = std::sync::Arc::new(PanickingProvider);
         let mut agent = Agent::new(params, run_params);
+        agent.compaction.carry_from = agent.history.len();
         agent.do_compact().await.unwrap();
         drop(event_rx);
         let msgs = agent.history.as_slice();
@@ -472,6 +533,7 @@ mod tests {
             m
         };
         let mut agent = Agent::new(params, run_params);
+        agent.compaction.carry_from = agent.history.len();
         agent.do_compact().await.unwrap();
         let msgs = agent.history.as_slice();
         assert_eq!(
@@ -497,6 +559,7 @@ mod tests {
             m
         };
         let mut agent = Agent::new(params, run_params);
+        agent.compaction.carry_from = agent.history.len();
         agent.config.post_compaction_instructions = Some(POST.into());
         agent.do_compact().await.unwrap();
         drop(agent);

@@ -134,6 +134,7 @@ impl<'h> Agent<'h> {
         {
             Ok((r, injection)) => {
                 self.io.reauth_attempts = 0;
+                self.compaction.overflow_recoveries = 0;
                 if let Some(reminder) = injection {
                     self.history.push(Message::synthetic(reminder));
                 }
@@ -159,6 +160,7 @@ impl<'h> Agent<'h> {
             }
             Err(StreamError::Other(e)) if e.is_overflow() => {
                 info!("context overflow detected, will attempt auto-compact");
+                self.pending_overflow = Some(e);
                 return Ok(TurnOutcome::Overflow);
             }
             Err(StreamError::Other(e)) => {
@@ -278,6 +280,10 @@ impl<'h> Agent<'h> {
                 return Ok(TurnOutcome::Continue);
             }
         }
+
+        // Everything the turn appended is answered, so a compaction from here
+        // on may summarize it. Input arriving after this point may not.
+        self.compaction.carry_from = self.history.len();
 
         let cumulative_usage = TokenUsage {
             input: self.context_size,
