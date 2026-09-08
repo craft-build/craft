@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-08
+
+### Added
+
+- **providers**: add Regolo (`api.regolo.ai`) (`45331f80`), `gpt-6-astra` on OpenAI (`a64d2c51`), discover Coding Plan models from the Codex backend (`bcfb16e8`), and a per-model usage breakdown in the usage modal (`f671e436`)
+- **compact**: guide one compaction from the command (`ca9c2c08`)
+- **lua**: let plugins rewrite a tool call before it runs (`5d0d4ee8`), turn-boundary observability for supervision plugins (`8ead088a`), and the `craft.toast` lib, list picker action keys, `defer_fn`, `notify` (`88311d84`)
+- **theme**: let themes name terminal colors (`98cc69db`)
+- **pack**: reviewed update and delete workflows (`68102027`)
+- **config**: env-expanded custom headers for MCP servers and providers (`54f285c6`)
+
+### Changed
+
+- **deps**: ran `cargo update`, refreshing transitive dependencies in the lockfile (tinyvec 1.13, toml 1.1.5, ureq 3.4.1, wasm-bindgen 0.2.128, zerocopy 0.8.57)
+- **ui**: build the search corpus on demand (`022f123b`), and dim the yolo status label less (`f7a1e3cc`)
+- **highlight**: move syntect off the render and blocking pools (`26a3eade`)
+- **agent**: share one tool output between the session and the UI (`5395347e`)
+- **providers**: intern image payloads while decoding them (`5dc7dc72`)
+
+### Fixed
+
+- **agent**: give the session event stream a real end (`29a5018f`), clamp the output cap against the measured prompt, not the estimate (`ce3803a3`), keep the clamped output cap above the thinking floor (`1de10fcd`), guard the first request of a resumed session (`2264276e`), stop a full context from wedging the session (`4218d080`), and one gate for every file mutation (`525d1742`)
+- **acp**: let the writer task see the last sender go (`5c56134b`), reject a second prompt instead of losing its id (`0c9e7442`), and price a restored session at what it cost, not at today's toggle (`94f9a4ff`)
+- **config**: make the `always_*` knobs one value every frontend takes (`92923958`), and search every config dir for global files (`ccdf5b1b`)
+- **lua**: stop every window from opening invisible (`a30b8240`), and name the tool and the fix when a permission pair is incompatible (`a174cffc`)
+- **net**: don't call a DNS hiccup an SSRF block (`17c82f4c`)
+- **opencode**: send `x-opencode-session` on Zen and Go requests (`69c3f38c`), and read `enable_free_models` live instead of at catalog init (`305cf4df`)
+- **permissions**: stop "allow always" handing out a blank cheque (`63bdf04d`), and don't collapse a redirected bash chain into one scope (`3b4fb79f`)
+- **providers**: stop oauth refreshes racing each other (`39547492`), make a 401 refresh actually refresh (`23a8501e`), don't log the user out when the token file won't write (`b8bf5e4c`), stop a bad output cap from eating the transcript (`7a3534ee`), and don't kill the session over a `providers.toml` typo (`d8aa81f3`)
+- **task**: count only working subagents in the status hint (`f4bb2d8e`)
+- **ui**: copy only the rows the selection covers (`a751edc1`), stop showing the hardware cursor over the software one (`33d82302`), and hand a package result to the focused tab (`5b57471f`)
+- **pack**: rename a package root aside before deleting it (`5db0a36b`)
+- **desktop**: match on the SegmentColor enum in CodeFence (`d3454483`)
+
 ## [0.14.0] - 2026-08-30
 
 ### Added
