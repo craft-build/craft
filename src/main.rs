@@ -4,6 +4,7 @@ mod async_runtime;
 mod checkpoint;
 mod chrome;
 mod config;
+mod markdown;
 mod persistence;
 mod screens;
 mod state;

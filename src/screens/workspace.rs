@@ -6,6 +6,7 @@ use gpui::{Context, FontWeight, SharedString, Window, div, px, rgb, rgba};
 
 use crate::app::{App, SessionConfigControl};
 use crate::chrome;
+use crate::markdown::markdown_view;
 use crate::state::{Comment, Diff, DiffLine, DiffLineKind, Message, Role, Steps, Terminal};
 use crate::theme;
 
@@ -870,6 +871,7 @@ fn message_view(
 }
 
 fn user_message(m: Message) -> impl IntoElement {
+    let markdown_id = format!("user-markdown-{}", m.id);
     div()
         .w_full()
         .max_w(px(760.))
@@ -883,16 +885,7 @@ fn user_message(m: Message) -> impl IntoElement {
                 .text_color(rgb(theme::ACCENT))
                 .child("you"),
         )
-        .child(
-            div()
-                .w_full()
-                .min_w(px(0.))
-                .whitespace_normal()
-                .text_size(px(13.))
-                .line_height(px(21.))
-                .text_color(rgb(theme::TEXT_PRIMARY))
-                .child(m.text.clone()),
-        )
+        .child(markdown_view(&m.text, markdown_id))
         .when(!m.context.is_empty(), |d| {
             d.child(
                 div()
@@ -1019,16 +1012,10 @@ fn assistant_message(
         col = col.child(terminal_view(term, &msg_id));
     }
     if !m.text.is_empty() {
-        col = col.child(
-            div()
-                .w_full()
-                .min_w(px(0.))
-                .whitespace_normal()
-                .text_size(px(13.))
-                .line_height(px(21.))
-                .text_color(rgb(theme::TEXT_PRIMARY))
-                .child(m.text.clone()),
-        );
+        col = col.child(markdown_view(
+            &m.text,
+            format!("assistant-markdown-{msg_id}"),
+        ));
     }
     if is_streaming {
         col = col.child(running_indicator(cx));
