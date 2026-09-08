@@ -4,13 +4,14 @@
 //! Rig's `AgentRunner` drives model calls, hooks, and future tool execution.
 //!
 //! ```no_run
-//! use craft_acp::{agent, config::Config, providers::Provider};
+//! use craft_acp::{agent, config::Config, providers::Provider, tools::Workspace};
 //! use rig::completion::{Chat, Message};
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let config = Config::load().await?;
 //! let provider = Provider::from_config(&config.providers["openai"])?;
-//! let agent = agent::build(&provider, "gpt-5.2", &config.agent)?;
+//! let workspace = Workspace::new("/path/to/project")?;
+//! let agent = agent::build(&provider, "gpt-5.2", &config.agent, &workspace)?;
 //!
 //! // Caller-owned history; Rig appends committed messages after a successful run.
 //! let mut history = Vec::<Message>::new();
@@ -27,26 +28,37 @@
 //! ```
 
 use anyhow::Result;
-use rig::agent::{Agent, AgentBuilder, ModelHandle};
+use rig::agent::{Agent, AgentBuilder, ModelHandle, WithBuilderTools};
 
-use crate::{config::AgentConfig, providers::Provider};
+use crate::{config::AgentConfig, providers::Provider, tools::Workspace};
 
-/// Build a tool-free agent for an explicit provider and exact model ID.
+/// Build an agent with read, grep, edit, and delete tools in an explicit workspace.
 ///
-/// Call inside a Tokio runtime: Rig starts its tool-server task on build, even
-/// with no tools registered. Construction performs no model discovery or inference.
+/// Call inside a Tokio runtime: Rig starts its tool-server task on build.
+/// Construction performs no model discovery or inference. The host selects the
+/// workspace and is responsible for any approval or sandbox policy.
 /// The returned native agent supports `runner`, `Prompt`, `Chat`, and streaming.
-pub fn build(provider: &Provider, model: &str, config: &AgentConfig) -> Result<Agent> {
-    Ok(builder(provider, model, config)?.build())
+pub fn build(
+    provider: &Provider,
+    model: &str,
+    config: &AgentConfig,
+    workspace: &Workspace,
+) -> Result<Agent> {
+    Ok(builder(provider, model, config, workspace)?.build())
 }
 
 /// Configure the native builder, leaving Rig's hook/tool extension points open.
 ///
 /// Unknown-to-discovery model IDs are allowed; the provider validates them on
 /// the first request. Non-completion providers (e.g. Voyage AI) are rejected.
-pub fn builder(provider: &Provider, model: &str, config: &AgentConfig) -> Result<AgentBuilder> {
+pub fn builder(
+    provider: &Provider,
+    model: &str,
+    config: &AgentConfig,
+    workspace: &Workspace,
+) -> Result<AgentBuilder<WithBuilderTools>> {
     config.validate()?;
-    Ok(configure(provider.completion_model(model)?, config))
+    Ok(workspace.register(configure(provider.completion_model(model)?, config)))
 }
 
 fn configure(model: ModelHandle, config: &AgentConfig) -> AgentBuilder {
@@ -233,24 +245,31 @@ mod tests {
 
     #[test]
     fn rejects_invalid_selection_and_programmatic_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
         let provider = Provider::Llamafile(
             rig::providers::llamafile::Client::from_url("http://127.0.0.1:1").unwrap(),
         );
-        assert!(builder(&provider, " ", &AgentConfig::default()).is_err());
+        assert!(builder(&provider, " ", &AgentConfig::default(), &workspace).is_err());
         let config = AgentConfig {
             max_turns: 0,
             ..AgentConfig::default()
         };
-        assert!(builder(&provider, "test", &config).is_err());
+        assert!(builder(&provider, "test", &config, &workspace).is_err());
         let provider = Provider::Voyageai(
             rig::providers::voyageai::Client::builder()
                 .api_key("test-key")
                 .build()
                 .unwrap(),
         );
-        let error = builder(&provider, "embedding-model", &AgentConfig::default())
-            .err()
-            .unwrap();
+        let error = builder(
+            &provider,
+            "embedding-model",
+            &AgentConfig::default(),
+            &workspace,
+        )
+        .err()
+        .unwrap();
         assert!(format!("{error:#}").contains("does not support completion"));
         assert!(format!("{error:#}").contains("voyageai"));
     }

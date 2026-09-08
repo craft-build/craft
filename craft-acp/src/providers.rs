@@ -335,6 +335,8 @@ mod tests {
 
     #[tokio::test]
     async fn constructs_every_kind_and_supports_manual_catalogs_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = crate::tools::Workspace::new(dir.path()).unwrap();
         for &kind in ProviderKind::ALL {
             let mut config = config(kind, "http://127.0.0.1:1");
             config.discover_models = false;
@@ -347,6 +349,7 @@ mod tests {
                     &provider,
                     "unlisted-model",
                     &crate::config::AgentConfig::default(),
+                    &workspace,
                 )
                 .unwrap();
                 assert_eq!(agent.model_handle().label(), Some("unlisted-model"));
@@ -474,10 +477,13 @@ mod tests {
         }"#,
         );
         let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/v1"));
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = crate::tools::Workspace::new(dir.path()).unwrap();
         let agent = crate::agent::build(
             &build(&config),
             "manual",
             &crate::config::AgentConfig::default(),
+            &workspace,
         )
         .unwrap();
         let response = agent.runner("hi").run().await.unwrap();
@@ -503,7 +509,9 @@ mod tests {
             max_tokens: Some(32),
             ..crate::config::AgentConfig::default()
         };
-        let agent = crate::agent::build(&build(&config), "manual", &settings).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = crate::tools::Workspace::new(dir.path()).unwrap();
+        let agent = crate::agent::build(&build(&config), "manual", &settings, &workspace).unwrap();
         let response = agent.runner("hi").run().await.unwrap();
         assert_eq!(response.output(), "hello");
         assert_eq!(response.requests(), 1);

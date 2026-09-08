@@ -70,21 +70,24 @@ set a generation cap. Set `[agent].max_tokens` for a request-level output cap.
 
 ## Agent loop
 
-`agent::build(&provider, model_id, &config.agent)` returns a native Rig `Agent`.
+`agent::build(&provider, model_id, &config.agent, &workspace)` returns a native Rig
+`Agent` with the base filesystem tools registered. The caller explicitly chooses
+a `tools::Workspace`; it is not controlled by model arguments or agent TOML.
 Build inside a Tokio runtime. The selected model ID is passed through exactly,
 without discovery or a network request; manual and not-yet-listed models work.
 Providers without completion support (Voyage AI) return an error before running.
 The provider still validates whether a particular model supports chat at request time.
 
 ```rust
-use craft_acp::{agent, config::Config, providers::Provider};
+use craft_acp::{agent, config::Config, providers::Provider, tools::Workspace};
 use rig::completion::{Chat, Message};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load().await?;
     let provider = Provider::from_config(&config.providers["openai"])?;
-    let agent = agent::build(&provider, "gpt-5.2", &config.agent)?;
+    let workspace = Workspace::new("/path/to/project")?;
+    let agent = agent::build(&provider, "gpt-5.2", &config.agent, &workspace)?;
     let mut history = Vec::<Message>::new();
     let reply = agent.chat("Help me plan a refactor.", &mut history).await?;
     println!("{reply}");
@@ -100,15 +103,55 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 Rig's runner owns model calls, continuations, retries, hook cancellation, and
-future tool execution. There is no second Craft loop or conversation store.
+tool execution. There is no second Craft loop or conversation store.
 `Chat` appends committed messages to caller-owned history only on success;
 native errors are preserved, including budget/cancellation errors with recovery
 history where Rig supplies it. For rich results, the caller handles the runner's
 returned messages. Rig's streaming API is also available on the returned agent.
 
-`agent::builder` returns the configured Rig builder so future tools and hooks can
-be registered before `.build()`. No tools are registered yet, and unexpected tool
-calls fail through Rig rather than executing anything.
+`agent::builder` returns the configured Rig builder with base tools attached, so
+additional tools and hooks can be registered before `.build()`. Unknown tool
+names still fail through Rig. A caller building a custom Rig agent can also use
+`workspace.register(builder)` or register individual tool types.
+
+### Filesystem tools
+
+All tools use strict typed JSON arguments and structured JSON results. Paths
+are workspace-relative or absolute beneath the canonical workspace root. `..`,
+Git metadata (`.git`), and symlink components are refused. Text tools support
+UTF-8 files up to 8 MiB, including CRLF files. File I/O runs on blocking workers,
+serialized across clones of the same workspace handle.
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `read` | `path`, optional `offset` and `limit` | One-based lines, total line count, and `next_offset` for paging. Defaults to 200 lines; maximum 2000 (`limit = 0` means 2000). |
+| `grep` | `pattern`, optional `path`, `glob`, `case_sensitive`, `literal`, `max_matches` | Line-based Rust regex search, or literal matching. Defaults to the whole workspace, case-sensitive, at most 100 matching lines (maximum 1000). |
+| `edit` | `path`, `old_string`, `new_string`, optional `replace_all` or `occurrence` | Exact replacement in an existing file. Ambiguous matches fail unless disambiguated by a one-based occurrence or replace-all. No fuzzy matching or file creation. |
+| `delete` | `path` | Permanently removes one existing regular file. No directories, recursion, or undo. Missing files are errors. |
+
+Reads and searches bound returned text to 64 KiB and individual line excerpts
+to 2048 bytes, with explicit truncation markers. Grep respects workspace and
+nested ignore rules even when a glob or path narrows the search. It skips hidden
+files, symlinks, binary/non-UTF-8 files, non-Unicode filenames, and oversized files; skipped content files
+are counted. Search stops at 10000 candidate files or its 64 MiB scan budget
+and reports incomplete results rather than implying the search was exhaustive.
+Grep excerpts include the first match and report one-based byte columns for both
+the match and excerpt start; read output starts each line at its beginning.
+
+Edits stage beside the destination and atomically replace it, preserving basic
+file permissions and bytes outside the exact replacement. A final content check
+detects changes made while preparing the edit. Read-only files are refused.
+There is no read-before-edit enforcement or stale-read tracking yet: agents
+are instructed to read first, and ambiguous/missing old text is rejected.
+
+Workspace checks are guardrails for a trusted local project, **not an OS security
+sandbox**. Concurrent external filesystem changes can race path validation or
+the final content check; the shared lock only coordinates tools using the same
+workspace handle. Atomic replacement does not preserve extended metadata or
+hardlink identity. Dropping a tool future does not cancel blocking I/O already
+in progress. The host must supply any user-approval hooks or sandbox policy
+before exposing an agent to untrusted workspaces. No approval UI or undo store
+is implemented by this module.
 
 ### Agent settings
 
