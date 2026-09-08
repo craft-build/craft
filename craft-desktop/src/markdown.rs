@@ -1,6 +1,7 @@
 //! Markdown rendering: `craft_markdown::parse` → Dioxus nodes, with fenced
 //! code highlighted via `craft_highlight`.
 
+use craft_highlight::SegmentColor;
 use craft_markdown::{Block as MdBlock, BlockKind, InlineSpan, SpanKind, parse, parse_inline};
 use dioxus::prelude::*;
 
@@ -134,7 +135,12 @@ pub fn CodeFence(lang: String, code: String) -> Element {
                     for (j, seg) in line.iter().enumerate() {
                         span {
                             key: "{j}",
-                            style: format!("color:rgb({},{},{})", seg.fg.0, seg.fg.1, seg.fg.2),
+                            style: match seg.fg {
+                                SegmentColor::Rgb((r, g, b)) => format!("color:rgb({r},{g},{b})"),
+                                // The webview has no ANSI palette mapped to
+                                // CSS vars; inherit the page text color.
+                                SegmentColor::Ansi(_) | SegmentColor::Default => String::new(),
+                            },
                             if seg.bold && seg.italic {
                                 strong { em { "{seg.text}" } }
                             } else if seg.bold {
