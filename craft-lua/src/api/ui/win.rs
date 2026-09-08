@@ -5,6 +5,7 @@ use mlua::{AnyUserData, Lua, Result as LuaResult, Table, UserData, UserDataMetho
 
 use super::{parse_footer, try_parse_dimension};
 use crate::api::util::command::{Anchor, Border, FloatConfigPatch, TitlePos, WinCommand, WinEvent};
+use crate::api::util::convert::opt_bool;
 
 /// All mutable state is in `Cell`s so every Lua method takes a shared
 /// borrow and `recv` never needs to re-borrow mutably after waking.
@@ -173,9 +174,7 @@ impl UserData for WinHandle {
             if let Ok(o) = opts.get::<u16>("order") {
                 patch.order = Some(o);
             }
-            if let Ok(Some(ni)) = opts.get::<Option<bool>>("needs_input") {
-                patch.needs_input = Some(ni);
-            }
+            patch.needs_input = opt_bool(&opts, "needs_input");
             patch.width = try_parse_dimension(&opts, "width");
             patch.height = try_parse_dimension(&opts, "height");
             // A missing key leaves the window where it is. Lua has no way to

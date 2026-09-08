@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 
 use mlua::{Lua, Result as LuaResult, Table};
 
+use crate::api::util::convert::opt_bool;
 use crate::api::util::pair::{err_pair, pair, try_pair};
 
 /// Serializes `append` calls so concurrent writers land in call order
@@ -438,11 +439,11 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 let abs = make_absolute(&path)?;
                 let recursive = opts
                     .as_ref()
-                    .and_then(|t| t.get::<bool>("recursive").ok())
+                    .and_then(|t| opt_bool(t, "recursive"))
                     .unwrap_or(false);
                 let force = opts
                     .as_ref()
-                    .and_then(|t| t.get::<bool>("force").ok())
+                    .and_then(|t| opt_bool(t, "force"))
                     .unwrap_or(false);
                 let result = async {
                     let meta = match tokio::fs::symlink_metadata(&abs).await {
@@ -486,7 +487,7 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 let abs = make_absolute(&path)?;
                 let parents = opts
                     .as_ref()
-                    .and_then(|t| t.get::<bool>("parents").ok())
+                    .and_then(|t| opt_bool(t, "parents"))
                     .unwrap_or(false);
                 let result = if parents {
                     tokio::fs::create_dir_all(&abs).await
@@ -528,7 +529,7 @@ pub(crate) fn create_fs_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                 let limit = opts.as_ref().and_then(|t| t.get::<usize>("limit").ok());
                 let gitignore = opts
                     .as_ref()
-                    .and_then(|t| t.get::<bool>("gitignore").ok())
+                    .and_then(|t| opt_bool(t, "gitignore"))
                     .unwrap_or(true);
                 let sort = opts.as_ref().and_then(|t| t.get::<String>("sort").ok());
                 let sort_mtime = sort.as_deref() == Some("mtime");
@@ -1416,6 +1417,36 @@ mod tests {
             .unwrap();
         assert!(matches!(err2, mlua::Value::Nil));
         assert_eq!(empty.len().unwrap(), 0);
+    }
+
+    /// The fixture ignores through `.ignore` so the walker needs no git repo,
+    /// and hides a directory rather than a file because the glob patterns turn
+    /// into whitelist overrides that outrank a file-level ignore rule.
+    #[test_case::test_case(None, 0 ; "omitted_key_keeps_the_true_default")]
+    #[test_case::test_case(Some(false), 1 ; "false_includes_ignored_files")]
+    #[tokio::test]
+    async fn glob_gitignore_option(gitignore: Option<bool>, expected_hits: i64) {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".ignore"), "sub/\n").unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        std::fs::write(tmp.path().join("sub/ignored.log"), "").unwrap();
+
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::trusted()).unwrap();
+        let glob: mlua::Function = tbl.get("glob").unwrap();
+
+        let opts = lua.create_table().unwrap();
+        opts.set("path", tmp.path().to_str().unwrap()).unwrap();
+        if let Some(gitignore) = gitignore {
+            opts.set("gitignore", gitignore).unwrap();
+        }
+
+        let (result, err): (Table, mlua::Value) = glob
+            .call_async::<(Table, mlua::Value)>(("**/*.log", opts))
+            .await
+            .unwrap();
+        assert!(matches!(err, mlua::Value::Nil));
+        assert_eq!(result.len().unwrap(), expected_hits);
     }
 
     #[tokio::test]

@@ -16,6 +16,7 @@ pub(crate) mod win;
 
 use win::WinHandle;
 
+use crate::api::util::convert::opt_bool;
 use crate::api::util::pair::{Pair, try_pair};
 use crate::runtime::with_task_bufs;
 use strum::VariantNames;
@@ -91,10 +92,7 @@ pub(crate) fn create_ui_table(
             // during a tool call would take that spot away, so create its
             // buffer with `{ scratch = true }`, nvim's
             // `nvim_create_buf(false, true)` analog.
-            let scratch = match opts {
-                Some(t) => t.get::<Option<bool>>("scratch")?.unwrap_or(false),
-                None => false,
-            };
+            let scratch = opts.and_then(|t| opt_bool(&t, "scratch")).unwrap_or(false);
             Ok(with_task_bufs(lua, |store| {
                 if scratch {
                     store.create()
@@ -121,7 +119,7 @@ pub(crate) fn create_ui_table(
             |lua, (code, lang, opts): (String, String, Option<mlua::Table>)| async move {
                 let independent = opts
                     .as_ref()
-                    .and_then(|t| t.get::<bool>("independent").ok())
+                    .and_then(|t| opt_bool(t, "independent"))
                     .unwrap_or(false);
                 let prefix = opts
                     .and_then(|t| t.get::<String>("prefix").ok())
@@ -281,20 +279,16 @@ pub(crate) fn create_ui_table(
                 move |_lua, (buf_ud, opts_tbl): (mlua::AnyUserData, Table)| {
                     let buf_handle = buf_ud.borrow::<buf::BufHandle>()?;
                     let title: String = opts_tbl.get("title").unwrap_or_default();
-                    let cursor_line: bool = opts_tbl.get("cursor_line").unwrap_or(false);
+                    let cursor_line = opt_bool(&opts_tbl, "cursor_line").unwrap_or(false);
                     let footer = parse_footer(&opts_tbl)?;
                     let reserved_bottom: usize = opts_tbl.get("reserved_bottom").unwrap_or(0);
                     let reserved_top: usize = opts_tbl.get("reserved_top").unwrap_or(0);
-                    let focus: bool = opts_tbl
-                        .get::<Option<bool>>("focus")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(true);
+                    let focus = opt_bool(&opts_tbl, "focus").unwrap_or(true);
                     let zindex: u16 = opts_tbl.get("zindex").unwrap_or(DEFAULT_ZINDEX);
                     let order: u16 = opts_tbl.get("order").unwrap_or(DEFAULT_ORDER);
-                    let visible: bool = opts_tbl.get("visible").unwrap_or(true);
-                    let needs_input: bool = opts_tbl.get("needs_input").unwrap_or(false);
-                    let stack: bool = opts_tbl.get("stack").unwrap_or(false);
+                    let visible = opt_bool(&opts_tbl, "visible").unwrap_or(true);
+                    let needs_input = opt_bool(&opts_tbl, "needs_input").unwrap_or(false);
+                    let stack = opt_bool(&opts_tbl, "stack").unwrap_or(false);
 
                     let width = parse_dimension(&opts_tbl, "width", Dimension::Percent(60));
                     let height = parse_dimension(&opts_tbl, "height", Dimension::Percent(70));
