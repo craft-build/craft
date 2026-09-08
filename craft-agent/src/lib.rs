@@ -83,7 +83,9 @@ impl AgentMode {
 
 pub enum ExtractedCommand {
     Interrupt(AgentInput, u64),
-    Compact(u64),
+    /// Carries the guidance typed as `/compact <instructions>`, for this one
+    /// summary.
+    Compact(u64, Option<String>),
     Undo(u64),
 }
 

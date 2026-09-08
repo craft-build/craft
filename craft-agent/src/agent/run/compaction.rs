@@ -254,7 +254,7 @@ impl<'h> Agent<'h> {
                     .sum::<usize>()
             })
             .sum();
-        self.do_compact().await?;
+        self.do_compact(None).await?;
         let chars_after: usize = self
             .history
             .as_slice()
@@ -296,7 +296,10 @@ impl<'h> Agent<'h> {
         Ok(true)
     }
 
-    pub(super) async fn do_compact(&mut self) -> Result<(), AgentError> {
+    pub(super) async fn do_compact(
+        &mut self,
+        instructions: Option<&str>,
+    ) -> Result<(), AgentError> {
         let context_size_before = self.context_size;
         // Compaction replaces the whole transcript, so input no turn has
         // answered yet would be summarized away before the model ever saw it,
@@ -329,6 +332,7 @@ impl<'h> Agent<'h> {
                 &self.io.cancel,
                 self.compaction.last_relevance_scores.as_deref(),
                 &self.config,
+                instructions,
                 carry_len,
             )
             .await?;
@@ -509,7 +513,7 @@ mod tests {
         params.provider = std::sync::Arc::new(PanickingProvider);
         let mut agent = Agent::new(params, run_params);
         agent.compaction.carry_from = agent.history.len();
-        agent.do_compact().await.unwrap();
+        agent.do_compact(None).await.unwrap();
         drop(event_rx);
         let msgs = agent.history.as_slice();
         assert!(matches!(msgs[0].role, Role::Assistant));
@@ -534,7 +538,7 @@ mod tests {
         };
         let mut agent = Agent::new(params, run_params);
         agent.compaction.carry_from = agent.history.len();
-        agent.do_compact().await.unwrap();
+        agent.do_compact(None).await.unwrap();
         let msgs = agent.history.as_slice();
         assert_eq!(
             msgs.len(),
@@ -561,7 +565,7 @@ mod tests {
         let mut agent = Agent::new(params, run_params);
         agent.compaction.carry_from = agent.history.len();
         agent.config.post_compaction_instructions = Some(POST.into());
-        agent.do_compact().await.unwrap();
+        agent.do_compact(None).await.unwrap();
         drop(agent);
 
         let last = history.as_slice().last().unwrap();

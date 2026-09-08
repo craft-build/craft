@@ -208,7 +208,7 @@ pub enum Action {
     },
     AssignTier(String, ModelTier),
     UnassignTier(String, ModelTier),
-    Compact,
+    Compact(Option<String>),
     ToggleMcp(String, bool),
     OpenEditor(PathBuf),
     EditInputInEditor,

@@ -1820,11 +1820,14 @@ impl<'t> EventLoop<'t> {
                     &self.sessions[idx].app.storage,
                 );
             }
-            Action::Compact => {
+            Action::Compact(instructions) => {
                 let rt = &mut self.sessions[idx];
                 rt.reset_run_notifications();
                 let run_id = rt.app.run_id;
-                rt.handles.queue.push(QueueItem::Compact { run_id });
+                rt.handles.queue.push(QueueItem::Compact {
+                    run_id,
+                    instructions,
+                });
             }
             Action::ToggleMcp(server_name, enabled) => {
                 self.sessions[idx].handles.send_mcp(McpCommand::Toggle {

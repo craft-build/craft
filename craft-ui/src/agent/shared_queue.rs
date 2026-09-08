@@ -49,13 +49,14 @@ pub(crate) enum QueueItem {
     },
     Compact {
         run_id: u64,
+        instructions: Option<String>,
     },
 }
 
 impl QueueItem {
     pub(crate) fn run_id(&self) -> u64 {
         match self {
-            Self::Message { run_id, .. } | Self::Compact { run_id } => *run_id,
+            Self::Message { run_id, .. } | Self::Compact { run_id, .. } => *run_id,
         }
     }
 
@@ -64,6 +65,16 @@ impl QueueItem {
             Self::Message { text, .. } => QueueEntry {
                 text: Cow::Owned(text.clone()),
                 color: theme::current().foreground,
+            },
+            Self::Compact {
+                instructions: Some(extra),
+                ..
+            } => QueueEntry {
+                text: Cow::Owned(format!("{COMPACT_LABEL} {extra}")),
+                color: theme::current()
+                    .queue
+                    .fg
+                    .unwrap_or(theme::current().foreground),
             },
             Self::Compact { .. } => QueueEntry {
                 text: Cow::Borrowed(COMPACT_LABEL),
@@ -78,7 +89,10 @@ impl QueueItem {
     fn into_extracted_command(self) -> ExtractedCommand {
         match self {
             Self::Message { input, run_id, .. } => ExtractedCommand::Interrupt(input, run_id),
-            Self::Compact { run_id } => ExtractedCommand::Compact(run_id),
+            Self::Compact {
+                run_id,
+                instructions,
+            } => ExtractedCommand::Compact(run_id, instructions),
         }
     }
 
@@ -216,7 +230,7 @@ mod tests {
 
     #[test_case(msg(false),                       true  ; "deferred_message_visible")]
     #[test_case(msg(true),                        false ; "displayed_message_hidden")]
-    #[test_case(QueueItem::Compact { run_id: 0 }, true  ; "compact_visible")]
+    #[test_case(QueueItem::Compact { run_id: 0, instructions: None }, true  ; "compact_visible")]
     fn panel_visibility(item: QueueItem, visible: bool) {
         let (tx, _rx) = queue();
         tx.push(item);

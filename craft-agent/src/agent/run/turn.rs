@@ -453,8 +453,8 @@ impl<'h> Agent<'h> {
                 );
                 self.history.push(Message::user_display(wrapped, display));
             }
-            ExtractedCommand::Compact(_) => {
-                self.do_compact().await?;
+            ExtractedCommand::Compact(_, instructions) => {
+                self.do_compact(instructions.as_deref()).await?;
             }
             ExtractedCommand::Undo(_) => {
                 if let Some(msg) = self.tool_state.snapshot.rollback().await {
@@ -807,7 +807,7 @@ mod tests {
 
     #[test_case(
         (0..10).map(|i| Message::user(format!("msg {i}"))).collect(),
-        vec![ExtractedCommand::Compact(0)],
+        vec![ExtractedCommand::Compact(0, None)],
         vec![tool_call_response("glob", "t1"), text_response(StopReason::EndTurn), text_response(StopReason::EndTurn)]
         ; "compaction_via_interrupt_source"
     )]

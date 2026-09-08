@@ -167,7 +167,9 @@ impl AgentLoop {
                 }
                 self.do_agent_run(input, event_tx, run_id).await
             }
-            QueueItem::Compact { .. } => self.do_compact(&event_tx).await,
+            QueueItem::Compact { instructions, .. } => {
+                self.do_compact(&event_tx, instructions.as_deref()).await
+            }
         };
 
         if let Err(e) = result {
@@ -196,7 +198,11 @@ impl AgentLoop {
         !self.init_cancel.is_cancelled()
     }
 
-    async fn do_compact(&mut self, event_tx: &EventSender) -> Result<(), AgentError> {
+    async fn do_compact(
+        &mut self,
+        event_tx: &EventSender,
+        instructions: Option<&str>,
+    ) -> Result<(), AgentError> {
         let slot = self.model_slot.load();
         let (provider, model) = agent::resolve_compaction_model(
             &slot.provider,
@@ -211,6 +217,7 @@ impl AgentLoop {
             &mut self.history,
             event_tx,
             &self.config,
+            instructions,
         )
         .await
     }
