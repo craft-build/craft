@@ -177,7 +177,7 @@ async fn run_flow(
             session_id: None,
             mailbox: None,
             timeouts,
-            file_tracker: Arc::new(craft_agent::tools::FileReadTracker::new()),
+            file_access: craft_agent::tools::FileAccess::fresh(),
             prompt_slots: Arc::new(plugin_host.event_handle().collect_prompt_slots()),
             subagent_cancels: Arc::new(craft_agent::cancel::CancelMap::new()),
             ledger: Arc::new(craft_agent::RunLedger::default()),

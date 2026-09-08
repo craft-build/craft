@@ -19,7 +19,7 @@ mod dynamic;
 mod edit;
 mod edit_helpers;
 mod edit_lines;
-mod file_tracker;
+mod file_access;
 pub mod flow_search;
 pub(crate) mod flow_search_backend;
 pub mod fs_backend;
@@ -57,7 +57,7 @@ mod zoom;
 pub use dynamic::{
     DynamicContext, PromotedTools, RequestTools, ToolBuild, build_active_tools, filter_to_active,
 };
-pub use file_tracker::FileReadTracker;
+pub use file_access::{FileAccess, FileGuard, FileKey};
 pub use fs_backend::{FsBackend, FsFuture, LocalFs};
 pub use hook::{Authority, HookCall, HookStage, ToolHook, Verdict};
 pub use registry::{
@@ -293,7 +293,7 @@ pub struct ToolContext {
     pub permissions: Arc<PermissionManager>,
     pub model_policy: Arc<craft_config::ModelPolicy>,
     pub timeouts: craft_providers::Timeouts,
-    pub file_tracker: Arc<FileReadTracker>,
+    pub file_access: Arc<FileAccess>,
     /// Shared codetools state (stale-read guard, repomap cache) backing the
     /// native code-intelligence tools. One per agent run.
     pub code_tools: Arc<argosy::codetools::CodeTools>,
@@ -350,7 +350,11 @@ impl ToolContext {
         if !self.config.stale_read_check {
             return Ok(());
         }
-        self.file_tracker.check_before_edit(path)
+        self.file_access.check_before_edit(&FileKey::new(path))
+    }
+
+    pub fn record_read(&self, path: &Path) {
+        self.file_access.record_read(&FileKey::new(path));
     }
 }
 
@@ -933,7 +937,7 @@ pub(crate) fn providerless_ctx(
     event_tx: &EventSender,
     cancel: CancelToken,
     permissions: Arc<PermissionManager>,
-    file_tracker: Arc<FileReadTracker>,
+    file_access: Arc<FileAccess>,
     user_response_rx: Option<Arc<tokio::sync::Mutex<flume::Receiver<String>>>>,
     registry: Arc<ToolRegistry>,
 ) -> ToolContext {
@@ -957,7 +961,7 @@ pub(crate) fn providerless_ctx(
         permissions,
         model_policy: Arc::new(craft_config::ModelPolicy::default()),
         timeouts: craft_providers::Timeouts::default(),
-        file_tracker,
+        file_access,
         code_tools: Arc::new(argosy::codetools::CodeTools::default()),
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
         opts: RequestOptions::default(),
@@ -1027,7 +1031,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         permissions: Arc::clone(&env.permissions),
         model_policy: Arc::new(craft_config::ModelPolicy::default()),
         timeouts: env.timeouts,
-        file_tracker: Arc::new(FileReadTracker::new()),
+        file_access: Arc::new(FileAccess::default()),
         code_tools: Arc::new(argosy::codetools::CodeTools::default()),
         prompt_slots: Arc::clone(&env.prompt_slots),
         opts: RequestOptions::default(),
@@ -1072,7 +1076,7 @@ pub fn cli_tool_ctx() -> ToolContext {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             Arc::default(),
         )),
-        Arc::new(FileReadTracker::new()),
+        Arc::new(FileAccess::default()),
         None,
         Arc::clone(ToolRegistry::native_arc()),
     )
@@ -1161,7 +1165,7 @@ pub mod test_support {
             event_tx,
             CancelToken::none(),
             Arc::clone(&TEST_PERMISSIONS),
-            Arc::new(FileReadTracker::new()),
+            Arc::new(FileAccess::default()),
             None,
             Arc::new(ToolRegistry::with_natives()),
         );
@@ -1185,7 +1189,7 @@ pub mod test_support {
             &event_tx,
             CancelToken::none(),
             permissions,
-            Arc::new(FileReadTracker::new()),
+            Arc::new(FileAccess::default()),
             None,
             Arc::new(ToolRegistry::with_natives()),
         );
@@ -1195,7 +1199,7 @@ pub mod test_support {
 
     #[cfg(test)]
     pub(crate) fn pre_read(ctx: &ToolContext, path: &str) {
-        ctx.file_tracker.record_read(Path::new(path));
+        ctx.record_read(Path::new(path));
     }
 
     #[cfg(test)]
@@ -1314,8 +1318,8 @@ mod tests {
         let path = dir.path().join("f.rs");
         fs::write(&path, "v1").unwrap();
 
-        let tracker = FileReadTracker::new();
-        tracker.record_read(&path);
+        let tracker = FileAccess::default();
+        tracker.record_read(&FileKey::new(&path));
         File::options()
             .write(true)
             .open(&path)
@@ -1324,7 +1328,7 @@ mod tests {
             .unwrap();
 
         let mut ctx = stub_ctx(&AgentMode::Build);
-        ctx.file_tracker = Arc::new(tracker);
+        ctx.file_access = Arc::new(tracker);
         ctx.config.stale_read_check = check_on;
 
         assert_eq!(ctx.check_before_edit(&path).is_ok(), allowed);
@@ -1666,8 +1670,8 @@ mod tests {
         let plan_str = plan_path.to_str().unwrap();
         let other_str = other.to_str().unwrap();
 
-        ctx.file_tracker.record_read(Path::new(plan_str));
-        ctx.file_tracker.record_read(Path::new(other_str));
+        ctx.record_read(Path::new(plan_str));
+        ctx.record_read(Path::new(other_str));
 
         let registry = ToolRegistry::native();
         let blocked = tool_dispatch::run(

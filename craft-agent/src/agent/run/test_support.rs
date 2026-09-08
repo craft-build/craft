@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::permissions::PermissionManager;
-use crate::tools::FileReadTracker;
+use crate::tools::FileAccess;
 use crate::{AdvisorSeverity, AgentMode, Envelope, EventSender, ExtractedCommand, InterruptSource};
 use craft_config::ToolOutputLines;
 
@@ -130,7 +130,7 @@ pub(super) fn make_agent_params() -> AgentParams {
         session_id: None,
         mailbox: None,
         timeouts: craft_providers::Timeouts::default(),
-        file_tracker: FileReadTracker::fresh(),
+        file_access: FileAccess::fresh(),
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
         subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
         ledger: Arc::new(crate::RunLedger::default()),
@@ -365,7 +365,7 @@ pub(super) fn flow_agent_params(
         session_id: None,
         mailbox: None,
         timeouts: craft_providers::Timeouts::default(),
-        file_tracker: FileReadTracker::fresh(),
+        file_access: FileAccess::fresh(),
         prompt_slots: Arc::new(crate::prompt::ResolvedSlots::default()),
         subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
         ledger: Arc::new(crate::RunLedger::default()),

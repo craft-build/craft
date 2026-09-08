@@ -88,7 +88,7 @@ impl Resolve {
                 Ok(()) => {
                     ctx.snapshot_store
                         .push_backup(file.path.clone(), file.before.clone());
-                    ctx.file_tracker.record_read(&file.path);
+                    ctx.record_read(&file.path);
                     written += 1;
                 }
                 Err(e) => {

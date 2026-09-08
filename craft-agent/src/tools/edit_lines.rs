@@ -87,7 +87,7 @@ impl EditLines {
         }
 
         ctx.fs.write_text_file(p, &after).await?;
-        ctx.file_tracker.record_read(p);
+        ctx.record_read(p);
 
         let warn = if !validation.syntax_valid {
             format!(" [{} pre-existing error(s)]", validation.error_count)
@@ -226,7 +226,7 @@ impl InsertLines {
         }
 
         ctx.fs.write_text_file(p, &after).await?;
-        ctx.file_tracker.record_read(p);
+        ctx.record_read(p);
 
         let warn = if !validation.syntax_valid {
             format!(" [{} pre-existing error(s)]", validation.error_count)

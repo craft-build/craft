@@ -36,8 +36,7 @@ impl Outline {
         let report = outline::run(&ctx.code_tools, params).map_err(|e| e.to_string())?;
         let resolved = super::resolve_path(&self.path)?;
         if std::path::Path::new(&resolved).is_file() {
-            ctx.file_tracker
-                .record_read(std::path::Path::new(&resolved));
+            ctx.record_read(std::path::Path::new(&resolved));
         }
         Ok(ToolOutput::Plain(report.text))
     }

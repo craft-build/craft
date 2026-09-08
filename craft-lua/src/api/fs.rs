@@ -19,16 +19,7 @@ use crate::plugin_permissions::{
 };
 
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = craft_storage::paths::home() {
-            return home.join(rest);
-        }
-    } else if path == "~"
-        && let Some(home) = craft_storage::paths::home()
-    {
-        return home;
-    }
-    PathBuf::from(path)
+    craft_storage::paths::expand_tilde(Path::new(path))
 }
 
 fn make_absolute(path: &str) -> LuaResult<PathBuf> {

@@ -86,7 +86,7 @@ impl<'h> Agent<'h> {
         let repo_map_msg = if let Some(rm) = &self.recency.repo_map {
             let context_files: Vec<String> = self
                 .tool_state
-                .file_tracker
+                .file_access
                 .read_paths()
                 .into_iter()
                 .filter_map(|p| p.to_str().map(String::from))
@@ -398,7 +398,7 @@ impl<'h> Agent<'h> {
             permissions: Arc::clone(&self.tool_state.permissions),
             model_policy: Arc::clone(&self.model_policy),
             timeouts: self.io.timeouts,
-            file_tracker: Arc::clone(&self.tool_state.file_tracker),
+            file_access: Arc::clone(&self.tool_state.file_access),
             code_tools: Arc::clone(&self.tool_state.code_tools),
             prompt_slots: Arc::clone(&self.prompt_slots),
             subagent_cancels: Arc::clone(&self.tool_state.subagent_cancels),

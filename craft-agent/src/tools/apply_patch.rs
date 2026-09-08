@@ -98,7 +98,7 @@ impl ApplyPatch {
                         .write_text_file(p, contents)
                         .await
                         .map_err(|e| format!("write error for {path}: {e}"))?;
-                    ctx.file_tracker.record_read(p);
+                    ctx.record_read(p);
 
                     touched_paths.push(path.clone());
                     last_before = String::new();
@@ -135,7 +135,7 @@ impl ApplyPatch {
                     let new_contents = apply_update_chunks(&original, chunks, path)?;
                     let diff_text = generate_diff_summary(&original, &new_contents);
                     ctx.fs.write_text_file(p, &new_contents).await?;
-                    ctx.file_tracker.record_read(p);
+                    ctx.record_read(p);
 
                     touched_paths.push(path.clone());
                     last_before = original;

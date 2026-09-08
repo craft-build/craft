@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use craft_agent::cancel::CancelMap;
 use craft_agent::prompt::ResolvedSlots;
-use craft_agent::tools::{FileReadTracker, LocalFs, PromotedTools, ToolRegistry};
+use craft_agent::tools::{FileAccess, LocalFs, PromotedTools, ToolRegistry};
 use craft_agent::{
     Agent, AgentInput, AgentParams, AgentRunParams, CancelToken, DoneReason, DoomTracker, Envelope,
     EventSender, History,
@@ -346,7 +346,7 @@ fn make_agent_params(model: Model, provider: Arc<dyn Provider>) -> AgentParams {
         session_id: None,
         mailbox: None,
         timeouts: craft_providers::Timeouts::default(),
-        file_tracker: FileReadTracker::fresh(),
+        file_access: FileAccess::fresh(),
         prompt_slots: Arc::new(ResolvedSlots::default()),
         subagent_cancels: Arc::new(CancelMap::new()),
         ledger: Arc::new(craft_agent::RunLedger::default()),

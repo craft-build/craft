@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use super::schema as tool_schema;
 use super::worktree::Worktree;
-use super::{DescriptionContext, FileReadTracker, ToolContext, ToolFilter};
+use super::{DescriptionContext, ToolContext, ToolFilter};
 use crate::agent;
 use crate::template;
 use crate::tools::{ToolAudience, ToolRegistry};
@@ -388,7 +388,7 @@ impl Task {
                     session_id: Some(session_id.clone()),
                     mailbox: None,
                     timeouts: ctx.timeouts,
-                    file_tracker: FileReadTracker::fresh(),
+                    file_access: Arc::clone(&ctx.file_access),
                     prompt_slots: Arc::clone(&ctx.prompt_slots),
                     subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                     ledger: crate::RunLedger::child(&ctx.ledger),

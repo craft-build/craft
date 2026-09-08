@@ -41,8 +41,7 @@ impl Zoom {
         let report = zoom::run(&ctx.code_tools, params)
             .map_err(|e| normalize_ambiguous_error(&e.to_string()))?;
         let resolved = super::resolve_path(&self.path)?;
-        ctx.file_tracker
-            .record_read(std::path::Path::new(&resolved));
+        ctx.record_read(std::path::Path::new(&resolved));
         Ok(ToolOutput::Plain(report.text))
     }
 

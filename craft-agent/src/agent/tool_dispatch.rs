@@ -16,7 +16,7 @@ use crate::permissions::{ASK_TIMEOUT, DEFAULT_DENY_GUIDANCE};
 use crate::task_set::TaskSet;
 use crate::tools::hook::{Authority, HookStage, OUTPUT_IS_ERROR, OUTPUT_TEXT, Verdict};
 use crate::tools::registry::{InstalledHook, ToolInvocation, ToolRegistry};
-use crate::tools::{ToolAudience, ToolContext, truncate_bytes};
+use crate::tools::{FileKey, ToolAudience, ToolContext, truncate_bytes};
 use crate::{
     AgentError, AgentEvent, HookDecision, ToolDoneEvent, ToolOutput, ToolStartEvent, ToolUseEvent,
 };
@@ -388,13 +388,22 @@ async fn run_inner(
             }
         };
 
-        if let Some(target) = invocation.mutable_path() {
-            let is_plan_target = ctx.mode.plan_path().is_some_and(|pp| target == pp);
+        // The one declaration a file-mutating tool makes, and the only place
+        // its consequences live: plan-mode block, boundary block, write
+        // serialization and the stale-read check. Keyed once so all four
+        // agree on what "the same file" means.
+        let mutated = invocation.mutable_path().map(FileKey::new);
+
+        if let Some(key) = &mutated {
+            let is_plan_target = ctx
+                .mode
+                .plan_path()
+                .is_some_and(|plan| FileKey::new(plan) == *key);
             if !is_plan_target {
-                if let Some(reason) = plan_mode_block_reason(ctx, name, target) {
+                if let Some(reason) = plan_mode_block_reason(ctx, name, key.as_path()) {
                     return done_error(reason);
                 }
-                if let Some(reason) = ctx.permissions.boundary_block_reason(target) {
+                if let Some(reason) = ctx.permissions.boundary_block_reason(key.as_path()) {
                     return done_error(reason);
                 }
             }
@@ -419,7 +428,38 @@ async fn run_inner(
             return done_error(e);
         }
 
+        // Taken after the permission gate, so a pending approval prompt never
+        // holds a file lock, and around the whole handler, so it may `await`
+        // freely without a sibling call on the same file interleaving its
+        // read-modify-write. Every early return below drops it.
+        //
+        // The stale-read check belongs inside the lock: outside it, two
+        // siblings both pass before either writes.
+        let _guard = match &mutated {
+            Some(key) => {
+                let guard = ctx.file_access.acquire(key).await;
+                if ctx.config.stale_read_check
+                    && let Err(message) = ctx.file_access.check_before_edit(key)
+                {
+                    return done_error(message);
+                }
+                Some(guard)
+            }
+            None => None,
+        };
+
         let result = invocation.execute(ctx).await;
+
+        // Nothing else could have touched the file while the guard was held,
+        // so the mtime is refreshed here instead of by each write tool
+        // remembering to. Only on success: a failed or half-finished write
+        // must leave the changed mtime visible, so the next edit is correctly
+        // told the file moved.
+        if result.output.is_ok()
+            && let Some(key) = &mutated
+        {
+            ctx.file_access.record_read(key);
+        }
 
         let elapsed = started.elapsed();
         let done = match result.output {
@@ -1958,7 +1998,7 @@ mod tests {
             input: serde_json::json!({"path": real_str, "offset": 1, "limit": 0}),
         });
         let ctx = stub_ctx_with_hooks(&AgentMode::Build, hooks);
-        ctx.file_tracker.record_read(Path::new(&real_str));
+        ctx.record_read(Path::new(&real_str));
 
         let done = run(
             ToolRegistry::native(),
@@ -1994,7 +2034,7 @@ mod tests {
         let path = dir.path().join("ok.txt");
         let path_str = path.to_str().unwrap().to_string();
         fs::write(&path, "hello").unwrap();
-        ctx.file_tracker.record_read(Path::new(&path_str));
+        ctx.record_read(Path::new(&path_str));
         let done = run(
             ToolRegistry::native(),
             None,
@@ -2032,7 +2072,7 @@ mod tests {
         let path = dir.path().join("ok.txt");
         let path_str = path.to_str().unwrap().to_string();
         fs::write(&path, "hello").unwrap();
-        ctx.file_tracker.record_read(Path::new(&path_str));
+        ctx.record_read(Path::new(&path_str));
 
         let done = run(
             ToolRegistry::native(),

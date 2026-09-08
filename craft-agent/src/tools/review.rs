@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-use super::{DescriptionContext, FileReadTracker, ToolContext, ToolFilter, ToolRegistry};
+use super::{DescriptionContext, ToolContext, ToolFilter, ToolRegistry};
 use crate::agent;
 use crate::template;
 use crate::tools::ToolAudience;
@@ -142,7 +142,7 @@ impl Review {
                 session_id: Some(session_id),
                 mailbox: None,
                 timeouts: ctx.timeouts,
-                file_tracker: FileReadTracker::fresh(),
+                file_access: Arc::clone(&ctx.file_access),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                 ledger: crate::RunLedger::child(&ctx.ledger),

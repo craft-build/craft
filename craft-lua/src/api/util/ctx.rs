@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use craft_agent::agent::LoadedInstructions;
 use craft_agent::cancel::CancelToken;
-use craft_agent::tools::FileReadTracker;
+use craft_agent::tools::{FileAccess, FileKey};
 use craft_config::{AgentConfig, ToolOutputLines};
 use mlua::{LuaSerdeExt, MultiValue, UserData, UserDataMethods, Value as LuaValue};
 
@@ -31,7 +31,7 @@ pub(crate) struct LuaCtx {
     pub(crate) config: AgentConfig,
     pub(crate) tool_output_lines: ToolOutputLines,
     pub(crate) finish_tx: Option<flume::Sender<ToolCallReply>>,
-    pub(crate) file_tracker: Arc<FileReadTracker>,
+    pub(crate) file_access: Arc<FileAccess>,
     pub(crate) loaded_instructions: LoadedInstructions,
     pub(crate) session_id: Option<String>,
 }
@@ -78,19 +78,14 @@ impl UserData for LuaCtx {
         });
 
         methods.add_method("record_read", |_, this, path: String| {
-            this.file_tracker.record_read(Path::new(&path));
+            this.file_access
+                .record_read(&FileKey::new(Path::new(&path)));
             Ok(())
         });
 
-        methods.add_method("check_before_edit", |_, this, path: String| {
-            if !this.config.stale_read_check {
-                return Ok((true, Option::<String>::None));
-            }
-            match this.file_tracker.check_before_edit(Path::new(&path)) {
-                Ok(()) => Ok((true, Option::<String>::None)),
-                Err(msg) => Ok((false, Some(msg))),
-            }
-        });
+        // The matching check before a write is not exposed: the dispatcher
+        // runs it under the file lock for every tool declaring `mutable_path`,
+        // and a handler-side copy would race its own sibling.
 
         methods.add_async_method(
             "find_instructions",

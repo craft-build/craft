@@ -133,7 +133,7 @@ async fn update_imports(
                 .write_text_file(&path, &new_content)
                 .await
                 .map_err(|e| format!("import rewrite write failed for {}: {e}", path.display()))?;
-            ctx.file_tracker.record_read(&path);
+            ctx.record_read(&path);
             updates.push((relative_path(&path.to_string_lossy()), count));
         }
     }

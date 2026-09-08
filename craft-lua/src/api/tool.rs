@@ -319,7 +319,7 @@ impl ToolInvocation for LuaToolInvocation {
                 config: ctx.config.clone(),
                 tool_output_lines: ctx.tool_output_lines,
                 finish_tx: None,
-                file_tracker: ctx.file_tracker.clone(),
+                file_access: ctx.file_access.clone(),
                 loaded_instructions: ctx.loaded_instructions.clone(),
                 session_id: ctx.session_id.clone(),
             };

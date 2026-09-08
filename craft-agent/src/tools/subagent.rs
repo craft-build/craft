@@ -20,9 +20,7 @@ use crate::prompt::PromptId;
 use crate::template::Vars;
 use crate::tools::schema as tool_schema;
 use crate::tools::worktree::Worktree;
-use crate::tools::{
-    DescriptionContext, FileReadTracker, ToolAudience, ToolContext, ToolFilter, ToolRegistry,
-};
+use crate::tools::{DescriptionContext, ToolAudience, ToolContext, ToolFilter, ToolRegistry};
 use crate::{
     Agent, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, EventSender,
     SubagentInfo,
@@ -246,7 +244,7 @@ pub async fn run_subagent(
                 session_id: Some(session_id.clone()),
                 mailbox: None,
                 timeouts: ctx.timeouts,
-                file_tracker: FileReadTracker::fresh(),
+                file_access: Arc::clone(&ctx.file_access),
                 prompt_slots: Arc::clone(&ctx.prompt_slots),
                 subagent_cancels: Arc::new(CancelMap::new()),
                 ledger: crate::RunLedger::child(&ctx.ledger),

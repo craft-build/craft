@@ -221,6 +221,28 @@ pub fn home() -> Option<PathBuf> {
     etcetera::home_dir().ok()
 }
 
+/// Resolve a leading `~`. The one answer to what a tilde means, because a
+/// spelling one layer expands and another does not is two names for one file.
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), home()) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The identity of a file, independent of how a path was spelled: relative or
+/// absolute, with `..` or not, through a symlink or not, under `~` or spelled
+/// out, existing or not yet.
+///
+/// Over-resolving is safe here; under-resolving is the bug, because two keys
+/// for one file mean two locks for one file, or a staleness check that looks
+/// up an entry nobody wrote.
+pub fn canonical_key(path: &Path) -> PathBuf {
+    let expanded = expand_tilde(path);
+    let abs = std::path::absolute(&expanded).unwrap_or(expanded);
+    incremental_canonicalize(&abs).unwrap_or_else(|| normalize_path(&abs))
+}
+
 pub fn legacy_home_dir() -> Option<PathBuf> {
     etcetera::home_dir()
         .ok()
@@ -240,7 +262,73 @@ pub fn user_config_dirs(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use super::*;
+
+    const KEYED_FILE: &str = "f.rs";
+    const SUBDIR: &str = "sub";
+
+    #[test]
+    fn every_spelling_of_one_file_is_one_key() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::TempDir::new_in(&cwd).unwrap();
+        let abs = dir.path();
+        let rel = PathBuf::from(abs.file_name().unwrap());
+        fs::create_dir(abs.join(SUBDIR)).unwrap();
+
+        let spells: [(&str, PathBuf); 3] = [
+            ("absolute", abs.join(KEYED_FILE)),
+            ("relative", rel.join(KEYED_FILE)),
+            (
+                "parent_component",
+                rel.join(SUBDIR).join("..").join(KEYED_FILE),
+            ),
+        ];
+        let expected = canonical_key(&abs.join(KEYED_FILE));
+        for (name, spell) in spells.iter().map(|(n, s)| (*n, s.clone())) {
+            assert_eq!(
+                canonical_key(&spell),
+                expected,
+                "{name}: before the file exists"
+            );
+        }
+
+        fs::write(abs.join(KEYED_FILE), "content").unwrap();
+        for (name, spell) in spells {
+            assert_eq!(
+                canonical_key(&spell),
+                expected,
+                "{name}: once the file exists"
+            );
+        }
+    }
+
+    #[test]
+    fn tilde_spelling_is_one_key() {
+        let home = home().expect("no home dir");
+        assert_eq!(
+            canonical_key(Path::new("~").join(KEYED_FILE).as_path()),
+            canonical_key(&home.join(KEYED_FILE))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_spelling_is_one_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join(SUBDIR);
+        let link = dir.path().join("link");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join(KEYED_FILE), "content").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(
+            canonical_key(&link.join(KEYED_FILE)),
+            canonical_key(&real.join(KEYED_FILE))
+        );
+    }
 
     #[test]
     fn user_config_dirs_returns_legacy_and_xdg() {

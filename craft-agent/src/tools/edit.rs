@@ -67,7 +67,7 @@ impl Edit {
 
         ctx.fs.write_text_file(p, &after).await?;
 
-        ctx.file_tracker.record_read(p);
+        ctx.record_read(p);
 
         let pass_label = if pass == fuzzy_replace::Pass::Exact {
             String::new()

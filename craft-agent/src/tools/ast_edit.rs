@@ -131,7 +131,7 @@ impl AstEdit {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            ctx.file_tracker.record_read(&path);
+            ctx.record_read(&path);
             files_scanned += 1;
 
             let mut grep = lang.ast_grep(&content);

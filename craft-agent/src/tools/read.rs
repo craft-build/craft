@@ -108,7 +108,7 @@ impl Read {
             ))
         });
 
-        ctx.file_tracker.record_read(p);
+        ctx.record_read(p);
         ctx.code_tools.record_read(p);
 
         Ok(ToolOutput::ReadCode {

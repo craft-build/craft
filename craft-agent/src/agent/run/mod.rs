@@ -20,7 +20,7 @@ use super::validation::Validator;
 use crate::cancel::{CancelMap, CancelToken};
 use crate::mcp::McpHandle;
 use crate::permissions::PermissionManager;
-use crate::tools::FileReadTracker;
+use crate::tools::FileAccess;
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, DoneReason, EventSender,
     InterruptSource, RunLedger, SessionMailbox,
@@ -68,7 +68,7 @@ pub struct AgentParams {
     pub session_id: Option<craft_storage::id::SessionRef>,
     pub mailbox: Option<SessionMailbox>,
     pub timeouts: craft_providers::Timeouts,
-    pub file_tracker: Arc<FileReadTracker>,
+    pub file_access: Arc<FileAccess>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
     pub subagent_cancels: Arc<CancelMap<String>>,
     /// Subagents inherit this, so a turn's totals cover everything it spawned.
@@ -193,7 +193,7 @@ impl<'h> Agent<'h> {
                     std::env::current_dir().unwrap_or_default(),
                     craft_config::FormatConfig::default(),
                 ),
-                file_tracker: params.file_tracker,
+                file_access: params.file_access,
                 code_tools: Arc::new(argosy::codetools::CodeTools::default()),
                 tool_output_lines: params.tool_output_lines,
                 host_question_routing: false,

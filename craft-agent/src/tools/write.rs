@@ -44,7 +44,7 @@ impl Write {
                 .map_err(|e| format!("mkdir error: {e}"))?;
         }
         ctx.fs.write_text_file(p, &self.content).await?;
-        ctx.file_tracker.record_read(p);
+        ctx.record_read(p);
         Ok(output)
     }
 

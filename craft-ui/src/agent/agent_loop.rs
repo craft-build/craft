@@ -7,7 +7,7 @@ use craft_agent::mcp::config::McpServerStatus;
 use craft_agent::permissions::PermissionManager;
 use craft_agent::template;
 use craft_agent::template::Vars;
-use craft_agent::tools::FileReadTracker;
+use craft_agent::tools::FileAccess;
 use craft_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, DoneReason, DoomTracker, Envelope, EventSender, FindingsStore,
@@ -38,7 +38,7 @@ pub(super) struct AgentLoop {
     cancel_map: Arc<RunCancelMap>,
     init_cancel: CancelToken,
     permissions: Arc<PermissionManager>,
-    file_tracker: Arc<FileReadTracker>,
+    file_access: Arc<FileAccess>,
     findings_store: SharedFindingsStore,
     min_run_id: u64,
     agent_tx: flume::Sender<Envelope>,
@@ -106,7 +106,7 @@ impl AgentLoop {
             cancel_map,
             init_cancel,
             permissions,
-            file_tracker: FileReadTracker::fresh(),
+            file_access: FileAccess::fresh(),
             findings_store: FindingsStore::new_shared(),
             min_run_id: 0,
             agent_tx,
@@ -298,7 +298,7 @@ impl AgentLoop {
                 session_id: self.session_id.clone(),
                 mailbox: self.mailbox.clone(),
                 timeouts: self.timeouts,
-                file_tracker: Arc::clone(&self.file_tracker),
+                file_access: Arc::clone(&self.file_access),
                 prompt_slots: std::sync::Arc::new(prompt_slots),
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
                 ledger: Arc::new(craft_agent::RunLedger::default()),
@@ -454,7 +454,7 @@ impl AgentLoop {
                     session_id: self.session_id.clone(),
                     mailbox: self.mailbox.clone(),
                     timeouts: self.timeouts,
-                    file_tracker: Arc::clone(&self.file_tracker),
+                    file_access: Arc::clone(&self.file_access),
                     prompt_slots: std::sync::Arc::new(prompt_slots),
                     subagent_cancels: Arc::clone(&self.subagent_cancels),
                     ledger: Arc::new(craft_agent::RunLedger::default()),
