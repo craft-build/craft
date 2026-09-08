@@ -54,7 +54,7 @@ pub fn render(_app: &mut App, window: &mut Window, cx: &mut Context<App>) -> imp
                             div()
                                 .text_size(px(15.))
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .child("FORGE"),
+                                .child("CRAFT"),
                         ),
                 )
                 .child(

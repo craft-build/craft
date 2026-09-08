@@ -1,4 +1,4 @@
-//! Persisted Forge project, session, and conversation data.
+//! Persisted Craft project, session, and conversation data.
 
 use serde::{Deserialize, Serialize};
 

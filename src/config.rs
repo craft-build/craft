@@ -1,8 +1,8 @@
 //! Application-wide registry of ACP process configurations.
 //!
-//! Forge deliberately stores executable commands rather than an enum of known
+//! Craft deliberately stores executable commands rather than an enum of known
 //! agents. Any number of ACP-compatible executables can therefore be registered
-//! once and selected for sessions in any workspace without a Forge release.
+//! once and selected for sessions in any workspace without a Craft release.
 
 use std::fs;
 use std::io;
@@ -113,6 +113,7 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn for_user() -> Self {
+        // Keep the legacy directory so the rebrand preserves existing agent settings.
         let root = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))

@@ -31,6 +31,7 @@ impl CheckpointManager {
     /// Git index. The real index and working tree are not changed.
     pub fn create(&self, label: &str) -> Result<Checkpoint, String> {
         let id = uuid::Uuid::new_v4().simple().to_string();
+        // Retain the legacy Git namespace; existing checkpoint refs must stay reachable.
         let index = format!(".git/forge/checkpoint-index-{id}");
         let quoted_index = shell_words::quote(&index);
         let quoted_label = shell_words::quote(label);
@@ -43,9 +44,9 @@ impl CheckpointManager {
              tree=$(GIT_INDEX_FILE={quoted_index} git write-tree); \
              parent=$(git rev-parse -q --verify HEAD || true); \
              if [ -n \"$parent\" ]; then \
-               commit=$(printf '%s\\n' {quoted_label} | GIT_AUTHOR_NAME=Forge GIT_AUTHOR_EMAIL=forge@localhost GIT_COMMITTER_NAME=Forge GIT_COMMITTER_EMAIL=forge@localhost git commit-tree \"$tree\" -p \"$parent\"); \
+               commit=$(printf '%s\\n' {quoted_label} | GIT_AUTHOR_NAME=Craft GIT_AUTHOR_EMAIL=craft@localhost GIT_COMMITTER_NAME=Craft GIT_COMMITTER_EMAIL=craft@localhost git commit-tree \"$tree\" -p \"$parent\"); \
              else \
-               commit=$(printf '%s\\n' {quoted_label} | GIT_AUTHOR_NAME=Forge GIT_AUTHOR_EMAIL=forge@localhost GIT_COMMITTER_NAME=Forge GIT_COMMITTER_EMAIL=forge@localhost git commit-tree \"$tree\"); \
+               commit=$(printf '%s\\n' {quoted_label} | GIT_AUTHOR_NAME=Craft GIT_AUTHOR_EMAIL=craft@localhost GIT_COMMITTER_NAME=Craft GIT_COMMITTER_EMAIL=craft@localhost git commit-tree \"$tree\"); \
              fi; \
              git update-ref refs/forge/checkpoints/{id} \"$commit\"; \
              printf '%s' \"$commit\""

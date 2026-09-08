@@ -1,4 +1,4 @@
-//! Durable local Forge project and thread state.
+//! Durable local Craft project and thread state.
 
 use std::collections::HashMap;
 use std::fs;
@@ -24,6 +24,7 @@ pub struct StateStore {
 
 impl StateStore {
     pub fn for_user() -> Self {
+        // Keep the legacy directory so the rebrand preserves existing projects and sessions.
         let root = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
@@ -46,7 +47,7 @@ impl StateStore {
         let parent = self
             .path
             .parent()
-            .ok_or_else(|| io::Error::other("invalid Forge state path"))?;
+            .ok_or_else(|| io::Error::other("invalid Craft state path"))?;
         fs::create_dir_all(parent)?;
         let temporary = self.path.with_extension("json.tmp");
         fs::write(

@@ -84,7 +84,7 @@ fn top_bar(window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
                 div()
                     .text_size(px(13.))
                     .font_weight(FontWeight::BOLD)
-                    .child("FORGE"),
+                    .child("CRAFT"),
             ),
     )
     .child(

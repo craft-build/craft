@@ -25,7 +25,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Forge".into()),
+                    title: Some("Craft".into()),
                     // No native white titlebar — every screen draws its own
                     // 36px bar (see `chrome.rs`) and reserves room on the
                     // left for the still-native macOS traffic lights, which

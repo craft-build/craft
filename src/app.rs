@@ -1147,7 +1147,7 @@ impl App {
             checkpoints_by_project: self.checkpoints_by_project.clone(),
         };
         if let Err(error) = StateStore::for_user().save(&state) {
-            self.toast = Some(format!("Could not save Forge state: {error}"));
+            self.toast = Some(format!("Could not save Craft state: {error}"));
         }
     }
 

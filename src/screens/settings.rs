@@ -242,6 +242,6 @@ fn about_section() -> impl IntoElement {
         div()
             .text_size(px(12.))
             .text_color(rgb(theme::TEXT_SECONDARY))
-            .child(format!("Forge {}", env!("CARGO_PKG_VERSION"))),
+            .child(format!("Craft {}", env!("CARGO_PKG_VERSION"))),
     )
 }

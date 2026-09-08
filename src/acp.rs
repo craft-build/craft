@@ -1,4 +1,4 @@
-//! Forge's ACP client boundary.
+//! Craft's ACP client boundary.
 //!
 //! Protocol objects stay typed all the way to this boundary. The UI consumes
 //! `AcpEvent`s and never parses JSON-RPC method names itself.
@@ -56,14 +56,14 @@ pub fn compose_prompt(input: TurnInput) -> Vec<ContentBlock> {
         ContentBlock::ResourceLink(ResourceLink::new(path, uri))
     }));
     if !input.comments.is_empty() {
-        let mut grounded = String::from("[Forge anchored review context]\n");
+        let mut grounded = String::from("[Craft anchored review context]\n");
         for comment in input.comments {
             grounded.push_str(&format!(
                 "- target: {}\n  comment: {}\n",
                 comment.target, comment.body
             ));
         }
-        grounded.push_str("[/Forge anchored review context]");
+        grounded.push_str("[/Craft anchored review context]");
         prompt.push(ContentBlock::Text(TextContent::new(grounded)));
     }
     prompt
@@ -138,7 +138,7 @@ pub async fn validate_agent(config: AgentConfig) -> Result<(), String> {
                     .send_request(
                         InitializeRequest::new(ProtocolVersion::V1)
                             .client_capabilities(ClientCapabilities::default())
-                            .client_info(Implementation::new("Forge", env!("CARGO_PKG_VERSION"))),
+                            .client_info(Implementation::new("Craft", env!("CARGO_PKG_VERSION"))),
                     )
                     .block_task()
                     .await?;
@@ -343,7 +343,7 @@ async fn run_connection(
                 .send_request(
                     InitializeRequest::new(ProtocolVersion::V1)
                         .client_capabilities(capabilities)
-                        .client_info(Implementation::new("Forge", env!("CARGO_PKG_VERSION"))),
+                        .client_info(Implementation::new("Craft", env!("CARGO_PKG_VERSION"))),
                 )
                 .block_task()
                 .await?;
@@ -515,7 +515,7 @@ mod tests {
         assert!(
             context
                 .text
-                .starts_with("[Forge anchored review context]\n")
+                .starts_with("[Craft anchored review context]\n")
         );
         assert!(
             context
@@ -527,7 +527,7 @@ mod tests {
                 .text
                 .contains("- target: src/b.rs:2\n  comment: Second\n")
         );
-        assert!(context.text.ends_with("[/Forge anchored review context]"));
+        assert!(context.text.ends_with("[/Craft anchored review context]"));
     }
 
     #[test]
