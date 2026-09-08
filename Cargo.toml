@@ -1,3 +1,7 @@
+[workspace]
+members = ["craft-acp"]
+resolver = "3"
+
 [package]
 name = "craft"
 version = "0.1.0"
