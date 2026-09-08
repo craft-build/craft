@@ -7,7 +7,7 @@ use gpui::{
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use crate::selectable_text::SelectableText;
+use crate::selectable_text::{CommentTarget, SelectableText};
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,7 +302,7 @@ fn highlight(mark: &InlineMark) -> HighlightStyle {
     }
 }
 
-fn inline_text(block: &MarkdownBlock, id: String) -> AnyElement {
+fn inline_text(block: &MarkdownBlock, id: String, target: &CommentTarget) -> AnyElement {
     let styled = StyledText::new(block.text.clone()).with_highlights(
         block
             .marks
@@ -318,7 +318,8 @@ fn inline_text(block: &MarkdownBlock, id: String) -> AnyElement {
                 .map(|url| (mark.range.clone(), url.clone()))
         })
         .collect::<Vec<_>>();
-    let selectable = SelectableText::new(id, styled, block.text.clone());
+    let selectable =
+        SelectableText::new(id, styled, block.text.clone()).comment_target(target.clone());
     if links.is_empty() {
         selectable.into_any_element()
     } else {
@@ -330,7 +331,7 @@ fn inline_text(block: &MarkdownBlock, id: String) -> AnyElement {
     }
 }
 
-fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
+fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarget) -> AnyElement {
     let inline_id = format!("{id}-inline-{index}");
     match block.kind {
         BlockKind::Paragraph => div()
@@ -340,7 +341,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
             .text_size(px(13.))
             .line_height(px(21.))
             .text_color(rgb(theme::TEXT_PRIMARY))
-            .child(inline_text(&block, inline_id))
+            .child(inline_text(&block, inline_id, target))
             .into_any_element(),
         BlockKind::Heading(level) => {
             let size = match level {
@@ -357,7 +358,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
                 .line_height(px(size + 7.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(theme::TEXT_PRIMARY))
-                .child(inline_text(&block, inline_id))
+                .child(inline_text(&block, inline_id, target))
                 .into_any_element()
         }
         BlockKind::Quote(depth) => div()
@@ -371,7 +372,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
             .text_size(px(12.))
             .line_height(px(19.))
             .text_color(rgb(theme::TEXT_SECONDARY))
-            .child(inline_text(&block, inline_id))
+            .child(inline_text(&block, inline_id, target))
             .into_any_element(),
         BlockKind::ListItem { depth, ref marker } => div()
             .w_full()
@@ -395,7 +396,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
                     .min_w(px(0.))
                     .whitespace_normal()
                     .text_color(rgb(theme::TEXT_PRIMARY))
-                    .child(inline_text(&block, inline_id)),
+                    .child(inline_text(&block, inline_id, target)),
             )
             .into_any_element(),
         BlockKind::Code => div()
@@ -412,7 +413,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
             .text_size(px(12.))
             .line_height(px(18.))
             .text_color(rgb(theme::TEXT_SECONDARY))
-            .child(inline_text(&block, inline_id))
+            .child(inline_text(&block, inline_id, target))
             .into_any_element(),
         BlockKind::TableRow => div()
             .w_full()
@@ -425,7 +426,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
             .text_size(px(12.))
             .line_height(px(18.))
             .text_color(rgb(theme::TEXT_SECONDARY))
-            .child(inline_text(&block, inline_id))
+            .child(inline_text(&block, inline_id, target))
             .into_any_element(),
         BlockKind::Rule => div()
             .w_full()
@@ -436,7 +437,11 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize) -> AnyElement {
     }
 }
 
-pub fn markdown_view(source: &str, id: impl Into<String>) -> impl IntoElement {
+pub fn markdown_view(
+    source: &str,
+    id: impl Into<String>,
+    target: CommentTarget,
+) -> impl IntoElement {
     let id = id.into();
     div()
         .w_full()
@@ -448,7 +453,7 @@ pub fn markdown_view(source: &str, id: impl Into<String>) -> impl IntoElement {
             parse(source)
                 .into_iter()
                 .enumerate()
-                .map(|(index, block)| block_view(block, &id, index)),
+                .map(|(index, block)| block_view(block, &id, index, &target)),
         )
 }
 

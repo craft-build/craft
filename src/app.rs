@@ -22,6 +22,33 @@ use crate::state::*;
 use crate::text_input::TextInput;
 use crate::theme;
 
+#[derive(Clone)]
+pub struct CommentDraft {
+    pub input: Entity<TextInput>,
+    pub label: String,
+    pub selections: Vec<String>,
+    pub scroll_anchor: Option<gpui::ScrollAnchor>,
+}
+
+impl CommentDraft {
+    pub fn reference_label(&self) -> String {
+        comment_reference_label(&self.label, &self.selections)
+    }
+}
+
+fn comment_reference_label(label: &str, selections: &[String]) -> String {
+    let mut reference = label.to_string();
+    for selection in selections {
+        reference.push_str("\nSelected text:\n");
+        for line in selection.split('\n') {
+            reference.push_str("> ");
+            reference.push_str(line);
+            reference.push('\n');
+        }
+    }
+    reference
+}
+
 pub struct PendingComment {
     pub key: String,
     pub idx: usize,
@@ -96,11 +123,11 @@ pub struct App {
     pub toast_generation: u64,
 
     pub expanded_steps: HashSet<String>,
-    pub open_comment_boxes: HashSet<String>,
-    pub comment_inputs: HashMap<String, Entity<TextInput>>,
+    pub comment_drafts: HashMap<String, CommentDraft>,
     pub comments: HashMap<String, Vec<Comment>>,
 
     pub thread_scroll: ScrollHandle,
+    pub diff_scroll: ScrollHandle,
     pub checkpoints_by_project: HashMap<String, Vec<Checkpoint>>,
 
     pub config_remote: bool,
@@ -184,10 +211,10 @@ impl App {
             toast: config_error,
             toast_generation: 0,
             expanded_steps: HashSet::new(),
-            open_comment_boxes: HashSet::new(),
-            comment_inputs: HashMap::new(),
+            comment_drafts: HashMap::new(),
             comments: persisted.comments,
             thread_scroll: ScrollHandle::new(),
+            diff_scroll: ScrollHandle::new(),
             checkpoints_by_project: persisted.checkpoints_by_project,
             config_remote: false,
             validating_agent_config: false,
@@ -938,10 +965,15 @@ impl App {
     }
 
     pub fn open_comment_box(&mut self, key: String, label: String, cx: &mut Context<Self>) {
-        if !self.open_comment_boxes.insert(key.clone()) {
-            self.open_comment_boxes.remove(&key);
-            self.comment_inputs.remove(&key);
+        if self.comment_drafts.remove(&key).is_some() {
             cx.notify();
+            return;
+        }
+        self.ensure_comment_box(key, label, cx);
+    }
+
+    fn ensure_comment_box(&mut self, key: String, label: String, cx: &mut Context<Self>) {
+        if self.comment_drafts.contains_key(&key) {
             return;
         }
         let weak = cx.weak_entity();
@@ -952,34 +984,71 @@ impl App {
                 .on_submit(move |text, _window, cx| {
                     let text = text.to_string();
                     let key = submit_key.clone();
-                    let label = label.clone();
-                    weak.update(cx, |app, cx| app.submit_comment(key, text, label, cx))
+                    weak.update(cx, |app, cx| app.submit_comment(key, text, cx))
                         .ok();
                 })
         });
-        self.comment_inputs.insert(key, input);
+        self.comment_drafts.insert(
+            key,
+            CommentDraft {
+                input,
+                label,
+                selections: Vec::new(),
+                scroll_anchor: None,
+            },
+        );
         cx.notify();
     }
 
-    pub fn submit_comment(
+    fn start_selection_comment(
         &mut self,
-        key: String,
-        text: String,
-        label: String,
+        target: crate::selectable_text::CommentTarget,
+        selection: String,
+        typed: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A selection from another session must never create a comment here.
+        if self.screen != Screen::Workspace
+            || !target
+                .key
+                .starts_with(&comment_scope_prefix(self.active_session_id.as_deref()))
+        {
+            return;
+        }
+        self.ensure_comment_box(target.key.clone(), target.label, cx);
+        let draft = self.comment_drafts.get_mut(&target.key).unwrap();
+        // Reuse an open draft without discarding text or earlier references.
+        if !draft.selections.contains(&selection) {
+            draft.selections.push(selection);
+        }
+        draft.input.update(cx, |input, cx| {
+            input.set_content(format!("{}{typed}", input.content));
+            window.focus(&input.focus_handle);
+            cx.notify();
+        });
+        let anchor = gpui::ScrollAnchor::for_handle(target.scroll_handle);
+        anchor.scroll_to(window, cx);
+        draft.scroll_anchor = Some(anchor);
+        cx.notify();
+    }
+
+    pub fn submit_comment(&mut self, key: String, text: String, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
         }
+        let Some(draft) = self.comment_drafts.get(&key) else {
+            return;
+        };
+        let label = draft.reference_label();
         self.comments.entry(key.clone()).or_default().push(Comment {
             author: "you".into(),
             text,
             pending: true,
             label,
         });
-        self.open_comment_boxes.remove(&key);
-        self.comment_inputs.remove(&key);
+        self.comment_drafts.remove(&key);
         self.persist_state();
         cx.notify();
     }
@@ -1773,7 +1842,12 @@ impl Render for App {
             .font_family(theme::FONT_FAMILY)
             .text_size(px(12.))
             .overflow_hidden()
-            .on_key_down(|event, _, cx| {
+            .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
+                // Input fields own their keystrokes; only a blurred content
+                // selection can start a comment or supply the copy shortcut.
+                if window.focused(cx).is_some() {
+                    return;
+                }
                 let shortcut =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
                 if shortcut
@@ -1781,8 +1855,17 @@ impl Render for App {
                     && crate::selectable_text::copy_active_selection(cx)
                 {
                     cx.stop_propagation();
+                    return;
                 }
-            })
+                if let Some(typed) =
+                    crate::selectable_text::comment_text_for_keystroke(&event.keystroke)
+                    && let Some((target, selection)) =
+                        crate::selectable_text::take_comment_selection()
+                {
+                    app.start_selection_comment(target, selection, typed, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(match self.screen {
                 Screen::Onboarding => {
                     screens::onboarding::render(self, window, cx).into_any_element()
@@ -1970,6 +2053,30 @@ mod session_config_tests {
     use agent_client_protocol::schema::v1::{
         Diff as AcpDiff, ElicitationContentValue, SessionConfigSelectOption,
     };
+
+    #[test]
+    fn selection_comments_preserve_complete_multiline_references() {
+        let reference = comment_reference_label(
+            "src/main.rs line 2",
+            &[
+                "let café = 1;\n  café + 1".to_string(),
+                "another selection".to_string(),
+            ],
+        );
+        assert_eq!(
+            reference,
+            "src/main.rs line 2\nSelected text:\n> let café = 1;\n>   café + 1\n\
+             \nSelected text:\n> another selection\n"
+        );
+    }
+
+    #[test]
+    fn ordinary_comments_keep_their_original_label() {
+        assert_eq!(
+            comment_reference_label("assistant reply", &[]),
+            "assistant reply"
+        );
+    }
 
     #[test]
     fn preserves_each_acp_session_option_as_a_distinct_control() {

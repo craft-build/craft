@@ -4,10 +4,10 @@ use agent_client_protocol::schema::v1::{
 use gpui::prelude::*;
 use gpui::{Context, FontWeight, SharedString, Window, div, px, rgb, rgba};
 
-use crate::app::{App, SessionConfigControl};
+use crate::app::{App, CommentDraft, SessionConfigControl};
 use crate::chrome;
 use crate::markdown::markdown_view;
-use crate::selectable_text::SelectableText;
+use crate::selectable_text::{CommentTarget, SelectableText};
 use crate::state::{Comment, Diff, DiffLine, DiffLineKind, Message, Role, Steps, Terminal};
 use crate::theme;
 
@@ -875,7 +875,7 @@ fn message_view(
     cx: &mut Context<App>,
 ) -> gpui::AnyElement {
     match m.role {
-        Role::User => user_message(m).into_any_element(),
+        Role::User => user_message(m, app, cx).into_any_element(),
         Role::Assistant => assistant_message(m, is_streaming, app, cx).into_any_element(),
     }
 }
@@ -895,8 +895,9 @@ fn comment_preview(text: &str) -> String {
     preview
 }
 
-fn user_message(m: Message) -> impl IntoElement {
+fn user_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let markdown_id = format!("user-markdown-{}", m.id);
+    let comment_key = app.comment_key(&format!("msg_{}", m.id));
     div()
         .w_full()
         .max_w(px(760.))
@@ -910,7 +911,21 @@ fn user_message(m: Message) -> impl IntoElement {
                 .text_color(rgb(theme::ACCENT))
                 .child("you"),
         )
-        .child(markdown_view(&m.text, markdown_id))
+        .child(markdown_view(
+            &m.text,
+            markdown_id,
+            CommentTarget {
+                key: comment_key.clone(),
+                label: "user message".to_string(),
+                scroll_handle: app.thread_scroll.clone(),
+            },
+        ))
+        .when_some(app.comments.get(&comment_key), |d, comments| {
+            d.child(comments_list(comments))
+        })
+        .when_some(app.comment_drafts.get(&comment_key).cloned(), |d, draft| {
+            d.child(comment_box(draft, comment_key, cx))
+        })
         .when(!m.context.is_empty(), |d| {
             d.child(
                 div()
@@ -1042,6 +1057,11 @@ fn assistant_message(
         col = col.child(markdown_view(
             &m.text,
             format!("assistant-markdown-{msg_id}"),
+            CommentTarget {
+                key: comment_key.clone(),
+                label: "assistant reply".to_string(),
+                scroll_handle: app.thread_scroll.clone(),
+            },
         ));
     }
     if is_streaming {
@@ -1068,16 +1088,9 @@ fn assistant_message(
     {
         col = col.child(comments_list(&list));
     }
-    if app.open_comment_boxes.contains(&comment_key)
-        && let Some(input) = app.comment_inputs.get(&comment_key).cloned()
-    {
+    if let Some(draft) = app.comment_drafts.get(&comment_key).cloned() {
         let submit_key = comment_key.clone();
-        col = col.child(comment_box(
-            input,
-            submit_key,
-            "assistant reply".to_string(),
-            cx,
-        ));
+        col = col.child(comment_box(draft, submit_key, cx));
     }
     col
 }
@@ -1182,46 +1195,60 @@ fn comments_list(list: &[Comment]) -> impl IntoElement {
         }))
 }
 
-fn comment_box(
-    input: gpui::Entity<crate::text_input::TextInput>,
-    key: String,
-    label: String,
-    cx: &mut Context<App>,
-) -> impl IntoElement {
+fn comment_box(draft: CommentDraft, key: String, cx: &mut Context<App>) -> impl IntoElement {
+    let reference = draft.reference_label();
+    let input = draft.input;
     div()
+        .id(SharedString::from(format!("comment-draft-{key}")))
+        .anchor_scroll(draft.scroll_anchor)
+        .w_full()
+        .min_w(px(0.))
         .flex()
-        .items_start()
-        .gap(px(6.))
+        .flex_col()
+        .gap(px(4.))
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.))
-                .bg(rgb(theme::INPUT_BG))
-                .border_1()
-                .border_color(rgb(theme::BORDER))
+                .whitespace_normal()
                 .text_size(px(11.))
-                .px(px(6.))
-                .py(px(4.))
-                .child(input.clone()),
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(comment_preview(&reference)),
         )
         .child(
             div()
-                .id(SharedString::from(format!("add-comment-{key}")))
-                .bg(rgb(theme::SELECTION))
-                .text_size(px(11.))
-                .text_color(rgb(theme::TEXT_PRIMARY))
-                .px(px(8.))
-                .py(px(4.))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(theme::HOVER_BG)))
-                .child("Add")
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    // This listener is already updating App. Calling
-                    // TextInput::submit here would invoke its callback and
-                    // recursively update App, which GPUI correctly rejects.
-                    let text = input.update(cx, |input, _| input.take_content());
-                    app.submit_comment(key.clone(), text, label.clone(), cx);
-                })),
+                .w_full()
+                .flex()
+                .items_start()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .bg(rgb(theme::INPUT_BG))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .text_size(px(11.))
+                        .px(px(6.))
+                        .py(px(4.))
+                        .child(input.clone()),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("add-comment-{key}")))
+                        .bg(rgb(theme::SELECTION))
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::TEXT_PRIMARY))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(theme::HOVER_BG)))
+                        .child("Add")
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            // This listener is already updating App. Calling
+                            // TextInput::submit here would recursively update App.
+                            let text = input.update(cx, |input, _| input.take_content());
+                            app.submit_comment(key.clone(), text, cx);
+                        })),
+                ),
         )
 }
 
@@ -1281,7 +1308,7 @@ fn diff_view(
         )
         .children(diff.lines.iter().enumerate().map(|(idx, line)| {
             let (key, label) = key_fn(idx);
-            diff_line_view(line, key, label, app, cx)
+            diff_line_view(line, key, label, app.thread_scroll.clone(), app, cx)
         }))
 }
 
@@ -1289,6 +1316,7 @@ fn diff_line_view(
     line: &DiffLine,
     key: String,
     label: String,
+    scroll_handle: gpui::ScrollHandle,
     app: &mut App,
     cx: &mut Context<App>,
 ) -> gpui::AnyElement {
@@ -1300,7 +1328,6 @@ fn diff_line_view(
 
     let key = app.comment_key(&key);
     let comments = app.comments.get(&key).cloned().unwrap_or_default();
-    let open = app.open_comment_boxes.contains(&key);
     let toggle_key = key.clone();
     let toggle_label = label.clone();
 
@@ -1324,11 +1351,18 @@ fn diff_line_view(
                 .text_size(px(12.))
                 .whitespace_nowrap()
                 .text_color(rgb(theme::TEXT_PRIMARY))
-                .child(SelectableText::new(
-                    format!("diff-text-{key}"),
-                    gpui::StyledText::new(line.text.clone()),
-                    line.text.clone(),
-                )),
+                .child(
+                    SelectableText::new(
+                        format!("diff-text-{key}"),
+                        gpui::StyledText::new(line.text.clone()),
+                        line.text.clone(),
+                    )
+                    .comment_target(CommentTarget {
+                        key: key.clone(),
+                        label: label.clone(),
+                        scroll_handle,
+                    }),
+                ),
         )
         .child(
             div()
@@ -1365,7 +1399,7 @@ fn diff_line_view(
                 })),
         );
     }
-    if open && let Some(input) = app.comment_inputs.get(&key).cloned() {
+    if let Some(draft) = app.comment_drafts.get(&key).cloned() {
         let submit_key = key.clone();
         wrapper = wrapper.child(
             div()
@@ -1373,7 +1407,7 @@ fn diff_line_view(
                 .pl(px(26.))
                 .pr(px(10.))
                 .py(px(4.))
-                .child(comment_box(input, submit_key, label.clone(), cx)),
+                .child(comment_box(draft, submit_key, cx)),
         );
     }
     wrapper.into_any_element()
@@ -1515,6 +1549,7 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                     .border_l_1()
                     .border_color(rgb(theme::BORDER))
                     .id("active-diff-scroll")
+                    .track_scroll(&app.diff_scroll)
                     .overflow_y_scroll()
                     .child(
                         div()
@@ -1562,7 +1597,7 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                     .children(diff.lines.iter().enumerate().map(|(idx, line)| {
                         let key = format!("f_{path}_{idx}");
                         let label = format!("{path} line {}", idx + 1);
-                        diff_line_view(line, key, label, app, cx)
+                        diff_line_view(line, key, label, app.diff_scroll.clone(), app, cx)
                     })),
             )
         })
