@@ -7,7 +7,7 @@ use craft_config::{CompressionConfig, ToolKey};
 use craft_providers::{
     AgentError, ContentBlock, ImageSource, Message, Role, StopReason, TokenUsage, add_cost,
 };
-use flume::Sender;
+use flume::{Receiver, Sender};
 
 use crate::TurnType;
 use crate::agent::flow_loop::FlowProgress;
@@ -774,6 +774,10 @@ pub enum AgentEvent {
     FlowProgress {
         progress: Box<FlowProgress>,
     },
+    /// End of a session's event stream. Emitted only by
+    /// [`EventStreamGuard::drop`] and swallowed by [`SessionEvents::next`], so
+    /// a consumer sees `None` and never this variant.
+    StreamClosed,
 }
 
 /// Append-only buffer for streaming tool output to the UI. Writers append
@@ -1082,8 +1086,13 @@ impl EventSender {
         self.run_id
     }
 
-    pub fn raw_tx(&self) -> &Sender<Envelope> {
-        &self.tx
+    /// Same stream, different run. Lets a session body stamp per-turn ids
+    /// without keeping the [`EventStreamGuard`] in scope.
+    pub fn with_run_id(&self, run_id: u64) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            run_id,
+        }
     }
 }
 
@@ -1096,10 +1105,178 @@ pub struct Envelope {
     pub run_id: u64,
 }
 
+/// The only way to create a session event stream.
+///
+/// Never key a loop off sender disconnect instead: Lua tool contexts retain
+/// [`EventSender`] clones until the VM garbage-collects them, which never
+/// happens on an idle VM.
+pub fn event_stream() -> (EventStreamGuard, SessionEvents) {
+    let (tx, rx) = flume::unbounded();
+    (EventStreamGuard { tx }, SessionEvents { rx, closed: false })
+}
+
+/// Dropping this ends the stream, and it is the only thing that does. Handing
+/// out [`EventSender`]s is free, none of them extend it.
+///
+/// Nothing here bounds *when* the drop happens, that is the owner's job. An
+/// owner that parks the guard in a struct is promising that the struct dies on
+/// a path it controls, not on a garbage collector's schedule.
+#[derive(Debug)]
+pub struct EventStreamGuard {
+    tx: Sender<Envelope>,
+}
+
+impl EventStreamGuard {
+    pub fn sender(&self, run_id: u64) -> EventSender {
+        EventSender::new(self.tx.clone(), run_id)
+    }
+
+    /// Divergence from upstream: craft's `InteractiveHandle` exposes a raw
+    /// sender for out-of-band `Envelope` injection (craft-acp's Flow
+    /// pipeline), so the guard hands one out instead of hiding the channel.
+    pub fn raw_sender(&self) -> Sender<Envelope> {
+        self.tx.clone()
+    }
+}
+
+impl Drop for EventStreamGuard {
+    fn drop(&mut self) {
+        let _ = self.tx.try_send(Envelope {
+            event: AgentEvent::StreamClosed,
+            subagent: None,
+            run_id: 0,
+        });
+    }
+}
+
+/// The single reader of a session's stream. Not `Clone`: two readers would
+/// split the terminal item and one of them would wait forever.
+#[derive(Debug)]
+pub struct SessionEvents {
+    rx: Receiver<Envelope>,
+    /// Kept instead of dropping `rx`, so a retained [`EventSender`] still
+    /// reports success: the stream ends because the marker said so, never
+    /// because a sender happened to notice a dead channel.
+    closed: bool,
+}
+
+impl SessionEvents {
+    /// `None` once the stream closed, forever after. The marker rides the same
+    /// FIFO as the events, so everything sent before the guard dropped is
+    /// delivered first and everything sent after it is lost. That is why a
+    /// session drops its guard only once the run returned and history landed.
+    ///
+    /// Cancel-safe: the only suspension point is flume's `recv_async`, which
+    /// leaves a queued envelope in the queue when dropped.
+    /// Divergence from upstream: craft's `HeadlessHandle`/`InteractiveHandle`
+    /// expose the raw receiver because craft-acp and the SDK each clone it,
+    /// which the single-reader contract upstream forbids. The marker still
+    /// rides the FIFO, so those pumps break on `StreamClosed` instead.
+    pub fn into_raw(self) -> Receiver<Envelope> {
+        self.rx
+    }
+
+    pub async fn next(&mut self) -> Option<Envelope> {
+        if self.closed {
+            return None;
+        }
+        match self.rx.recv_async().await {
+            Ok(envelope) if !matches!(envelope.event, AgentEvent::StreamClosed) => Some(envelope),
+            _ => {
+                self.closed = true;
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use test_case::test_case;
+
+    const STREAM_RUN_IDS: [u64; 3] = [1, 2, 3];
+    const STILL_PENDING: &str = "an empty stream must not resolve `next()`";
+    const NO_LATE_EVENTS: &str = "events queued after the marker must stay invisible";
+
+    async fn drain(events: &mut SessionEvents) -> Vec<u64> {
+        let mut seen = Vec::new();
+        while let Some(envelope) = events.next().await {
+            seen.push(envelope.run_id);
+        }
+        seen
+    }
+
+    /// The ordering the whole design rests on: the marker rides the same FIFO
+    /// as the events, so nothing queued before it is lost. The first `next()`
+    /// is polled on an empty queue and then dropped, the way a `select!` arm
+    /// in the SDK pump does, and it must not swallow what lands afterwards.
+    #[tokio::test]
+    async fn queued_events_arrive_in_order_before_the_close() {
+        let (guard, mut events) = event_stream();
+        {
+            let mut pending = std::pin::pin!(events.next());
+            assert!(
+                futures::future::FutureExt::now_or_never(pending.as_mut()).is_none(),
+                "{STILL_PENDING}"
+            );
+            for run_id in STREAM_RUN_IDS {
+                guard.sender(run_id).send(AgentEvent::Nudge).unwrap();
+            }
+        }
+        drop(guard);
+        assert_eq!(drain(&mut events).await, STREAM_RUN_IDS);
+    }
+
+    /// The marker is a point of no return, even for a reader that has not
+    /// polled yet. A Lua tool context parks a sender on an idle VM forever, so
+    /// its late send has to look fine to it and stay invisible to the reader.
+    #[tokio::test]
+    async fn events_sent_after_the_close_are_never_observed() {
+        let (guard, mut events) = event_stream();
+        let retained = guard.sender(STREAM_RUN_IDS[0]);
+        retained.send(AgentEvent::Nudge).unwrap();
+        drop(guard);
+        retained.send(AgentEvent::Nudge).unwrap();
+        assert_eq!(
+            drain(&mut events).await,
+            [STREAM_RUN_IDS[0]],
+            "{NO_LATE_EVENTS}"
+        );
+        assert!(events.next().await.is_none(), "{NO_LATE_EVENTS}");
+    }
+
+    /// A derived sender is just another clone: it stamps its own run id on the
+    /// same FIFO, and dropping it neither ends nor extends the stream.
+    #[tokio::test]
+    async fn with_run_id_restamps_without_forking_the_stream() {
+        let (guard, mut events) = event_stream();
+        let original = guard.sender(STREAM_RUN_IDS[0]);
+        let derived = original.with_run_id(STREAM_RUN_IDS[1]);
+        derived.send(AgentEvent::Nudge).unwrap();
+        drop(derived);
+        original.send(AgentEvent::Nudge).unwrap();
+        drop(guard);
+        assert_eq!(
+            drain(&mut events).await,
+            [STREAM_RUN_IDS[1], STREAM_RUN_IDS[0]],
+            "{NO_LATE_EVENTS}"
+        );
+    }
+
+    /// A consumer that exits first (SDK stdout closed, ACP client gone) leaves
+    /// the guard sending the marker into a dead channel, often while unwinding.
+    #[tokio::test]
+    async fn dropping_the_guard_after_the_reader_is_harmless() {
+        let (guard, events) = event_stream();
+        let retained = guard.sender(STREAM_RUN_IDS[0]);
+        drop(events);
+        drop(guard);
+        assert!(matches!(
+            retained.send(AgentEvent::Nudge),
+            Err(AgentError::Channel)
+        ));
+    }
 
     #[test_case(None ; "no_stop_reason")]
     #[test_case(Some(StopReason::ToolUse) ; "tool_use")]

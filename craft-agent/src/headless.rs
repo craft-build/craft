@@ -169,7 +169,8 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
 
     let tool_names = extract_tool_names(&tools);
 
-    let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
+    let (guard, events) = crate::event_stream();
+    let event_rx = events.into_raw();
 
     let session_id = CraftId::generate();
     let session_ref = SessionRef::from(session_id);
@@ -179,14 +180,14 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         let mcp_shutdown = params.mcp_handle.clone();
         let working_dir_path = params.initial_wd.clone();
         async move {
-            let event_tx = EventSender::new(raw_tx, 0);
+            let event_tx = guard.sender(0);
             let mut model = params.model;
             let provider: Arc<dyn Provider> =
                 match provider::from_model(&mut model, params.timeouts).await {
                     Ok(p) => Arc::from(p),
                     Err(e) => {
                         error!(error = %e, "provider error");
-                        let _ = event_tx.send(AgentEvent::Error {
+                        let _ = guard.sender(0).send(AgentEvent::Error {
                             message: e.user_message(),
                         });
                         return;
@@ -320,8 +321,9 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
 
     let tool_names = extract_tool_names(&tools);
 
-    let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
-    let raw_event_tx = raw_tx.clone();
+    let (guard, events) = crate::event_stream();
+    let event_rx = events.into_raw();
+    let raw_event_tx = guard.raw_sender();
     let (input_tx, input_rx) = flume::unbounded::<AgentInput>();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
     let (cancel_tx, cancel_rx) = flume::bounded::<()>(1);
@@ -360,7 +362,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                     Ok(p) => Arc::from(p),
                     Err(e) => {
                         error!(error = %e, "provider error");
-                        let _ = EventSender::new(raw_tx, 0).send(AgentEvent::Error {
+                        let _ = guard.sender(0).send(AgentEvent::Error {
                             message: e.user_message(),
                         });
                         return;
@@ -372,7 +374,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
             let mut run_id: u64 = 0;
 
             while let Ok(input) = input_rx.recv_async().await {
-                let event_tx = EventSender::new(raw_tx.clone(), run_id);
+                let event_tx = guard.sender(run_id);
                 let error_tx = event_tx.clone();
 
                 if let Some(mut new_model) = model_rx
@@ -460,7 +462,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                     {
                         Some(fs) => fs,
                         None => {
-                            let _ = event_tx.send(AgentEvent::Error {
+                            let _ = guard.sender(0).send(AgentEvent::Error {
                                 message: "flow state directory unavailable; cannot run flow".into(),
                             });
                             run_id += 1;
@@ -474,7 +476,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                             project_id,
                             workstream_id,
                         );
-                    let fwd_tx = raw_tx.clone();
+                    let fwd_tx = guard.raw_sender();
                     let fwd_run_id = run_id;
                     flow_forwarder = Some(tokio::spawn(async move {
                         while let Ok(p) = progress_rx.recv_async().await {

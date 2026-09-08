@@ -50,10 +50,10 @@ use craft_providers::Message;
 pub use craft_providers::{EMPTY_RESPONSE_MARKER, ImageMediaType, ImageSource, ThinkingConfig};
 pub use types::{
     AgentEvent, BatchProgressEvent, BatchToolEntry, BatchToolStatus, BufferSnapshot, DoneReason,
-    Envelope, EventSender, Finding, GrepFileEntry, GrepLine, GrepMatchGroup, InstructionBlock,
-    NO_FILES_FOUND, Priority, RunLedger, RunTotals, SessionEndReason, SharedBuf, SnapshotLine,
-    SnapshotSpan, SpanColor, SpanStyle, SubagentInfo, ToolDoneEvent, ToolInput, ToolOutput,
-    ToolStartEvent, TurnCompleteEvent,
+    Envelope, EventSender, EventStreamGuard, Finding, GrepFileEntry, GrepLine, GrepMatchGroup,
+    InstructionBlock, NO_FILES_FOUND, Priority, RunLedger, RunTotals, SessionEndReason,
+    SessionEvents, SharedBuf, SnapshotLine, SnapshotSpan, SpanColor, SpanStyle, SubagentInfo,
+    ToolDoneEvent, ToolInput, ToolOutput, ToolStartEvent, TurnCompleteEvent, event_stream,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

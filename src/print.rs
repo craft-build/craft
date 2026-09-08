@@ -256,6 +256,7 @@ pub async fn run(
         let parent_tool_use_id = subagent.as_ref().map(|s| s.parent_tool_use_id.as_str());
 
         match event {
+            AgentEvent::StreamClosed => {}
             AgentEvent::TextDelta { text } => {
                 if parent_tool_use_id.is_none() {
                     result_text.push_str(text);

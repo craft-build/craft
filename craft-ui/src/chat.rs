@@ -119,6 +119,7 @@ impl Chat {
 
     pub fn handle_event(&mut self, event: AgentEvent, plan_path: Option<&Path>) -> ChatEventResult {
         match event {
+            AgentEvent::StreamClosed => {}
             AgentEvent::ThinkingDelta { text } => {
                 self.messages_panel.clear_prompt_progress();
                 self.messages_panel.thinking_delta(&text);

@@ -1471,6 +1471,9 @@ fn start_event_pump(
             event, subagent, ..
         }) = event_rx.recv_async().await
         {
+            if matches!(event, AgentEvent::StreamClosed) {
+                break;
+            }
             // Subagent stream events stay out of the transcript, but their
             // turns still spend session money.
             if let AgentEvent::TurnComplete(tc) = &event {

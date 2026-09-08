@@ -891,6 +891,9 @@ impl EventPump {
     fn spawn(mut self, event_rx: Receiver<Envelope>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Ok(envelope) = event_rx.recv_async().await {
+                if matches!(envelope.event, AgentEvent::StreamClosed) {
+                    break;
+                }
                 // Folded in first, so a plugin handling `TurnEnd` finds the
                 // finished totals when it calls `craft.session.read()`.
                 self.snapshot.observe(&envelope);
@@ -963,6 +966,7 @@ impl EventPump {
             .map(|s| s.parent_tool_use_id.clone());
 
         match &envelope.event {
+            AgentEvent::StreamClosed => {}
             AgentEvent::TextDelta { text } => {
                 if self.include_partial_messages {
                     let model = self.model_id();
