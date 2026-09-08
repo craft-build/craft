@@ -66,8 +66,68 @@ treated as an empty catalog. Set `discover_models = false` for manual-only use
 or compatible endpoints that do not implement model listing.
 
 Token limits are catalog metadata, not request parameters. They do not silently
-set a generation cap. Request-level tuning and the agent loop will be added
-when inference execution is integrated.
+set a generation cap. Set `[agent].max_tokens` for a request-level output cap.
+
+## Agent loop
+
+`agent::build(&provider, model_id, &config.agent)` returns a native Rig `Agent`.
+Build inside a Tokio runtime. The selected model ID is passed through exactly,
+without discovery or a network request; manual and not-yet-listed models work.
+Providers without completion support (Voyage AI) return an error before running.
+The provider still validates whether a particular model supports chat at request time.
+
+```rust
+use craft_acp::{agent, config::Config, providers::Provider};
+use rig::completion::{Chat, Message};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let config = Config::load().await?;
+    let provider = Provider::from_config(&config.providers["openai"])?;
+    let agent = agent::build(&provider, "gpt-5.2", &config.agent)?;
+    let mut history = Vec::<Message>::new();
+    let reply = agent.chat("Help me plan a refactor.", &mut history).await?;
+    println!("{reply}");
+
+    // Rich results: final text/content, aggregate usage, and per-call metadata.
+    let response = agent.runner("Summarize the plan.")
+        .history(history)
+        .run()
+        .await?;
+    println!("{}", response.output());
+    Ok(())
+}
+```
+
+Rig's runner owns model calls, continuations, retries, hook cancellation, and
+future tool execution. There is no second Craft loop or conversation store.
+`Chat` appends committed messages to caller-owned history only on success;
+native errors are preserved, including budget/cancellation errors with recovery
+history where Rig supplies it. For rich results, the caller handles the runner's
+returned messages. Rig's streaming API is also available on the returned agent.
+
+`agent::builder` returns the configured Rig builder so future tools and hooks can
+be registered before `.build()`. No tools are registered yet, and unexpected tool
+calls fail through Rig rather than executing anything.
+
+### Agent settings
+
+The optional `[agent]` table has these defaults:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `preamble` | `"You are Craft, an AI coding assistant."` | System instructions; `""` disables them |
+| `max_turns` | `16` | Total model calls per run, including initial call, retries, and continuations |
+| `temperature` | Omitted | Provider/model sampling default |
+| `max_tokens` | Omitted | Provider/model output-token default |
+
+Limits must be positive; temperature must be finite and nonnegative. Individual
+providers/models may impose additional limits or reject sampling parameters.
+`max_turns` is a **per-run model-call budget**, not a limit on conversation
+messages. Rig's native per-run overrides remain available through `.runner(...)`.
+Prompt/response content telemetry is disabled; structural metadata and usage
+remain available. The binary remains config-validation-only until CLI/ACP wiring
+is added; the agent module is ready for its caller to select a provider/model.
 
 ## Development
 

@@ -15,6 +15,52 @@ use crate::providers::ProviderKind;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
+    pub agent: AgentConfig,
+}
+
+/// Defaults for each agent run, independent of provider/model selection.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentConfig {
+    /// System instructions. An empty string disables the preamble.
+    pub preamble: String,
+    /// Total model calls per run, including retries and continuations.
+    pub max_turns: usize,
+    /// Omit to preserve the provider/model's default sampling behavior.
+    pub temperature: Option<f64>,
+    /// Request-level output cap, not a model catalog metadata override.
+    pub max_tokens: Option<u64>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            preamble: "You are Craft, an AI coding assistant.".into(),
+            max_turns: 16,
+            temperature: None,
+            max_tokens: None,
+        }
+    }
+}
+
+impl AgentConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_turns == 0 {
+            bail!("agent.max_turns must be positive");
+        }
+        if self.max_tokens == Some(0) {
+            bail!("agent.max_tokens must be positive");
+        }
+        // Providers have different upper bounds (and some disallow temperature).
+        // Validate the portable constraint here; leave model-specific rules to Rig.
+        if self
+            .temperature
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            bail!("agent.temperature must be finite and nonnegative");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +123,7 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text).context("invalid agent TOML")?;
+        config.agent.validate()?;
         for (name, provider) in &config.providers {
             if name.trim().is_empty() {
                 bail!("provider names must not be empty");
@@ -173,6 +220,37 @@ mod tests {
     fn parses_example() {
         let config = Config::parse(include_str!("../agent.example.toml")).unwrap();
         assert_eq!(config.providers.len(), 4);
+        assert_eq!(config.agent.max_turns, 16);
+    }
+
+    #[test]
+    fn agent_config_is_optional_and_supports_partial_overrides() {
+        let config = Config::parse("").unwrap();
+        assert_eq!(config.agent.max_turns, AgentConfig::default().max_turns);
+        assert_eq!(config.agent.temperature, None);
+        assert_eq!(config.agent.max_tokens, None);
+        let config = Config::parse("[agent]\nmax_turns = 4\nmax_tokens = 1024").unwrap();
+        assert_eq!(config.agent.max_turns, 4);
+        assert_eq!(config.agent.max_tokens, Some(1024));
+        assert_eq!(config.agent.preamble, AgentConfig::default().preamble);
+    }
+
+    #[test]
+    fn rejects_invalid_agent_settings() {
+        for field in [
+            "max_turns = 0",
+            "max_turns = -1",
+            "max_tokens = 0",
+            "temperature = -0.1",
+            "temperature = nan",
+            "temperature = inf",
+            "unknown_setting = true",
+        ] {
+            assert!(
+                Config::parse(&format!("[agent]\n{field}")).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

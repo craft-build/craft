@@ -11,3 +11,6 @@ serde.workspace = true
 tokio = { workspace = true, features = ["macros", "fs"] }
 toml.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+rig = { workspace = true, features = ["test-utils"] }

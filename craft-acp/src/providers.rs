@@ -3,7 +3,8 @@
 
 use anyhow::{Context, Result, bail};
 use rig::{
-    client::{ModelListingClient, ProviderClient},
+    agent::ModelHandle,
+    client::{CompletionClient, ModelListingClient, ProviderClient},
     model::ModelList,
     providers::*,
 };
@@ -22,7 +23,7 @@ fn credential(name: &str) -> Result<String> {
 }
 
 // The table below is the single source of truth for config kinds, concrete
-// clients, construction, and model-discovery support. Rig expresses provider
+// clients, construction, discovery, and completion support. Rig expresses provider
 // capabilities at compile time, so unsupported listers must not be called.
 macro_rules! list_models {
     ($client:expr, yes) => {
@@ -31,6 +32,16 @@ macro_rules! list_models {
     ($client:expr, no) => {{
         let _ = $client;
         ModelList::new(vec![])
+    }};
+}
+
+macro_rules! completion_model {
+    ($client:expr, $model:expr, yes) => {
+        ModelHandle::named($model, $client.completion_model($model))
+    };
+    ($client:expr, $model:expr, no) => {{
+        let _ = ($client, $model);
+        bail!("provider does not support completion models");
     }};
 }
 
@@ -54,7 +65,7 @@ macro_rules! build_client {
 }
 
 macro_rules! providers {
-    ($($variant:ident, $name:literal, $client:ty, $auth:tt, $listing:ident;)+) => {
+    ($($variant:ident, $name:literal, $client:ty, $auth:tt, $listing:ident, $completion:ident;)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
         pub enum ProviderKind {
             $(#[serde(rename = $name)] $variant,)+
@@ -98,6 +109,21 @@ macro_rules! providers {
                 match self { $(Self::$variant(_) => ProviderKind::$variant,)+ }
             }
 
+            /// Select an exact provider model/deployment ID without discovery.
+            /// Rig erases the concrete model once, retaining its native protocol.
+            pub fn completion_model(&self, model: &str) -> Result<ModelHandle> {
+                if model.trim().is_empty() {
+                    bail!("model ID must not be empty");
+                }
+                (|| -> Result<ModelHandle> {
+                    Ok(match self {
+                        $(Self::$variant(client) => completion_model!(client, model, $completion),)+
+                    })
+                })().with_context(|| format!(
+                    "selecting model {model:?} on {} provider", self.kind().as_str()
+                ))
+            }
+
             /// Providers without listing support return the configured models.
             /// Discovery errors propagate instead of masquerading as an empty
             /// catalog. Set `discover_models = false` for manual-only catalogs.
@@ -119,34 +145,35 @@ macro_rules! providers {
     };
 }
 
+// Variant, config kind, client, auth, model listing, text completion.
 providers! {
-    Anthropic, "anthropic", anthropic::Client, "ANTHROPIC_API_KEY", yes;
-    Azure, "azure", azure::Client, build_azure, no;
-    Chatgpt, "chatgpt", chatgpt::Client, build_chatgpt, no;
-    Cohere, "cohere", cohere::Client, "COHERE_API_KEY", no;
-    Copilot, "copilot", copilot::Client, build_copilot, yes;
-    Deepseek, "deepseek", deepseek::Client, "DEEPSEEK_API_KEY", yes;
-    Doubleword, "doubleword", doubleword::Client, "DOUBLEWORD_API_KEY", no;
-    Gemini, "gemini", gemini::Client, "GEMINI_API_KEY", yes;
-    Groq, "groq", groq::Client, "GROQ_API_KEY", yes;
-    Huggingface, "huggingface", huggingface::Client, "HUGGINGFACE_API_KEY", no;
-    Hyperbolic, "hyperbolic", hyperbolic::Client, "HYPERBOLIC_API_KEY", no;
-    Llamafile, "llamafile", llamafile::Client, build_llamafile, no;
-    Minimax, "minimax", minimax::Client, "MINIMAX_API_KEY", yes;
-    Mira, "mira", mira::Client, "MIRA_API_KEY", yes;
-    Mistral, "mistral", mistral::Client, "MISTRAL_API_KEY", yes;
-    Moonshot, "moonshot", moonshot::Client, "MOONSHOT_API_KEY", yes;
-    Ollama, "ollama", ollama::Client, build_ollama, yes;
-    Openai, "openai", openai::Client, "OPENAI_API_KEY", yes;
-    OpenaiCompatible, "openai-compatible", openai::CompletionsClient, "OPENAI_API_KEY", yes;
-    Openrouter, "openrouter", openrouter::Client, "OPENROUTER_API_KEY", yes;
-    Perplexity, "perplexity", perplexity::Client, "PERPLEXITY_API_KEY", no;
-    Together, "together", together::Client, "TOGETHER_API_KEY", no;
-    Venice, "venice", venice::Client, "VENICE_API_KEY", yes;
-    Voyageai, "voyageai", voyageai::Client, "VOYAGE_API_KEY", no;
-    Xai, "xai", xai::Client, "XAI_API_KEY", no;
-    Xiaomimimo, "xiaomimimo", xiaomimimo::Client, "XIAOMI_MIMO_API_KEY", yes;
-    Zai, "zai", zai::Client, "ZAI_API_KEY", no;
+    Anthropic, "anthropic", anthropic::Client, "ANTHROPIC_API_KEY", yes, yes;
+    Azure, "azure", azure::Client, build_azure, no, yes;
+    Chatgpt, "chatgpt", chatgpt::Client, build_chatgpt, no, yes;
+    Cohere, "cohere", cohere::Client, "COHERE_API_KEY", no, yes;
+    Copilot, "copilot", copilot::Client, build_copilot, yes, yes;
+    Deepseek, "deepseek", deepseek::Client, "DEEPSEEK_API_KEY", yes, yes;
+    Doubleword, "doubleword", doubleword::Client, "DOUBLEWORD_API_KEY", no, yes;
+    Gemini, "gemini", gemini::Client, "GEMINI_API_KEY", yes, yes;
+    Groq, "groq", groq::Client, "GROQ_API_KEY", yes, yes;
+    Huggingface, "huggingface", huggingface::Client, "HUGGINGFACE_API_KEY", no, yes;
+    Hyperbolic, "hyperbolic", hyperbolic::Client, "HYPERBOLIC_API_KEY", no, yes;
+    Llamafile, "llamafile", llamafile::Client, build_llamafile, no, yes;
+    Minimax, "minimax", minimax::Client, "MINIMAX_API_KEY", yes, yes;
+    Mira, "mira", mira::Client, "MIRA_API_KEY", yes, yes;
+    Mistral, "mistral", mistral::Client, "MISTRAL_API_KEY", yes, yes;
+    Moonshot, "moonshot", moonshot::Client, "MOONSHOT_API_KEY", yes, yes;
+    Ollama, "ollama", ollama::Client, build_ollama, yes, yes;
+    Openai, "openai", openai::Client, "OPENAI_API_KEY", yes, yes;
+    OpenaiCompatible, "openai-compatible", openai::CompletionsClient, "OPENAI_API_KEY", yes, yes;
+    Openrouter, "openrouter", openrouter::Client, "OPENROUTER_API_KEY", yes, yes;
+    Perplexity, "perplexity", perplexity::Client, "PERPLEXITY_API_KEY", no, yes;
+    Together, "together", together::Client, "TOGETHER_API_KEY", no, yes;
+    Venice, "venice", venice::Client, "VENICE_API_KEY", yes, yes;
+    Voyageai, "voyageai", voyageai::Client, "VOYAGE_API_KEY", no, no;
+    Xai, "xai", xai::Client, "XAI_API_KEY", no, yes;
+    Xiaomimimo, "xiaomimimo", xiaomimimo::Client, "XIAOMI_MIMO_API_KEY", yes, yes;
+    Zai, "zai", zai::Client, "ZAI_API_KEY", no, yes;
 }
 
 fn build_llamafile(
@@ -269,7 +296,6 @@ fn first_env(names: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use rig::{client::CompletionClient, completion::CompletionModel};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -316,6 +342,15 @@ mod tests {
             assert_eq!(provider.kind(), kind);
             let models = provider.models(&config).await.unwrap();
             assert_eq!(models.len(), 1, "{}", kind.as_str());
+            if kind != ProviderKind::Voyageai {
+                let agent = crate::agent::build(
+                    &provider,
+                    "unlisted-model",
+                    &crate::config::AgentConfig::default(),
+                )
+                .unwrap();
+                assert_eq!(agent.model_handle().label(), Some("unlisted-model"));
+            }
         }
     }
 
@@ -439,15 +474,15 @@ mod tests {
         }"#,
         );
         let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/v1"));
-        let Provider::OpenaiCompatible(client) = build(&config) else {
-            unreachable!()
-        };
-        let model = client.completion_model("manual");
-        let response = model
-            .completion(model.completion_request("hi").build())
-            .await
-            .unwrap();
-        assert!(!response.choice.is_empty());
+        let agent = crate::agent::build(
+            &build(&config),
+            "manual",
+            &crate::config::AgentConfig::default(),
+        )
+        .unwrap();
+        let response = agent.runner("hi").run().await.unwrap();
+        assert_eq!(response.output(), "hello");
+        assert_eq!(response.requests(), 1);
         let request = task.join().unwrap();
         assert!(request.starts_with("POST /v1/chat/completions "));
         assert!(request.contains("\"model\":\"manual\""));
@@ -464,15 +499,14 @@ mod tests {
         }"#,
         );
         let config = config(ProviderKind::Anthropic, &format!("{base}/custom"));
-        let Provider::Anthropic(client) = build(&config) else {
-            unreachable!()
+        let settings = crate::config::AgentConfig {
+            max_tokens: Some(32),
+            ..crate::config::AgentConfig::default()
         };
-        let model = client.completion_model("manual");
-        let response = model
-            .completion(model.completion_request("hi").max_tokens(32).build())
-            .await
-            .unwrap();
-        assert!(!response.choice.is_empty());
+        let agent = crate::agent::build(&build(&config), "manual", &settings).unwrap();
+        let response = agent.runner("hi").run().await.unwrap();
+        assert_eq!(response.output(), "hello");
+        assert_eq!(response.requests(), 1);
         let request = task.join().unwrap();
         assert!(request.starts_with("POST /custom/v1/messages "));
         assert!(request.contains("\"model\":\"manual\""));
