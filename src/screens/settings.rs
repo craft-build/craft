@@ -61,17 +61,7 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                         .flex()
                         .flex_col()
                         .gap(px(28.))
-                        .when(app.active_project.is_some(), |d| {
-                            d.child(agent_section(app, cx))
-                        })
-                        .when(app.active_project.is_none(), |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(theme::TEXT_MUTED))
-                                    .child("Open a workspace to configure its ACP agent."),
-                            )
-                        })
+                        .child(agent_section(app, cx))
                         .child(about_section()),
                 ),
         )
@@ -99,7 +89,7 @@ fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 div()
                     .text_size(px(12.))
                     .text_color(rgb(theme::TEXT_MUTED))
-                    .child("No ACP agents are registered for this workspace."),
+                    .child("No ACP agents are registered for this application."),
             )
         })
         .children(profiles.into_iter().map(|profile| {

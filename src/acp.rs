@@ -23,7 +23,7 @@ use agent_client_protocol::{Agent, Client, ConnectionTo, Error, Responder};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::async_runtime;
-use crate::config::{ProjectAgentConfig, TransportConfig};
+use crate::config::{AgentConfig, TransportConfig};
 
 const INTERACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -128,7 +128,7 @@ pub enum AcpEvent {
     Disconnected(String),
 }
 
-pub async fn validate_agent(config: ProjectAgentConfig) -> Result<(), String> {
+pub async fn validate_agent(config: AgentConfig) -> Result<(), String> {
     let agent = config.agent()?;
     let handshake =
         Client
@@ -171,7 +171,7 @@ pub struct AcpClient {
 
 impl AcpClient {
     pub fn connect(
-        config: ProjectAgentConfig,
+        config: AgentConfig,
         local_workspace: PathBuf,
         resume_session: Option<String>,
     ) -> (Self, mpsc::UnboundedReceiver<AcpEvent>) {
@@ -208,7 +208,7 @@ impl AcpClient {
 }
 
 async fn run_with_reconnect(
-    config: ProjectAgentConfig,
+    config: AgentConfig,
     local_workspace: PathBuf,
     resume_session: Option<String>,
     commands: Arc<Mutex<mpsc::UnboundedReceiver<AcpCommand>>>,
@@ -250,7 +250,7 @@ async fn run_with_reconnect(
 }
 
 async fn run_connection(
-    config: ProjectAgentConfig,
+    config: AgentConfig,
     local_workspace: PathBuf,
     resume_session: Option<String>,
     commands: Arc<Mutex<mpsc::UnboundedReceiver<AcpCommand>>>,
@@ -468,7 +468,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let result = runtime.block_on(validate_agent(ProjectAgentConfig {
+        let result = runtime.block_on(validate_agent(AgentConfig {
             agent_command: "forge-test-command-that-does-not-exist".into(),
             transport: TransportConfig::Local,
         }));

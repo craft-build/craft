@@ -15,9 +15,7 @@ use crate::acp::{
 };
 use crate::async_runtime;
 use crate::checkpoint::{Checkpoint, CheckpointManager};
-use crate::config::{
-    AgentProfile, ConfigStore, ProjectAgentConfig, ProjectAgentRegistry, TransportConfig,
-};
+use crate::config::{AgentConfig, AgentProfile, AgentRegistry, ConfigStore, TransportConfig};
 use crate::persistence::{PersistedState, StateStore};
 use crate::screens;
 use crate::state::*;
@@ -81,7 +79,7 @@ pub struct App {
     pub connection_status: String,
     pub context_usage: Option<u8>,
     pub acp_client: Option<AcpClient>,
-    pub agent_config: Option<ProjectAgentConfig>,
+    pub agent_config: Option<AgentConfig>,
     pub pending_permission: Option<PendingPermission>,
     pub pending_elicitation: Option<PendingElicitation>,
     pub elicitation_inputs: HashMap<String, Entity<TextInput>>,
@@ -134,6 +132,11 @@ impl App {
         let ssh_user_input = cx.new(|cx| TextInput::new(cx, "optional SSH user"));
         let ssh_key_input = cx.new(|cx| TextInput::new(cx, "optional identity file"));
         let persisted = StateStore::for_user().load().unwrap_or_default();
+        let (agent_profiles, config_error) = match ConfigStore::for_user().load() {
+            Ok(Some(registry)) => (registry.agents, None),
+            Ok(None) => (vec![], None),
+            Err(error) => (vec![], Some(format!("Could not load agents: {error}"))),
+        };
         let screen = if persisted.projects.is_empty() {
             Screen::Onboarding
         } else {
@@ -149,7 +152,7 @@ impl App {
             session_config_controls: vec![],
             open_config_menu: None,
             config_search_input,
-            agent_profiles: vec![],
+            agent_profiles,
             agent_menu_open: false,
             sidebar_visible: true,
             file_tree_visible: true,
@@ -172,7 +175,7 @@ impl App {
             elicitation_values: HashMap::new(),
             sent_count: 0,
             show_checkpoints: false,
-            toast: None,
+            toast: config_error,
             toast_generation: 0,
             expanded_steps: HashSet::new(),
             open_comment_boxes: HashSet::new(),
@@ -554,12 +557,6 @@ impl App {
         if self.validating_agent_config {
             return;
         }
-        let Some(project) = self.active_project.as_ref() else {
-            self.toast = Some("Open a project before configuring an agent".into());
-            cx.notify();
-            return;
-        };
-        let project_id = project.id.clone();
         let name = self
             .agent_profile_name_input
             .read(cx)
@@ -599,7 +596,7 @@ impl App {
         let profile = AgentProfile {
             id: uuid::Uuid::new_v4().simple().to_string(),
             name,
-            config: ProjectAgentConfig {
+            config: AgentConfig {
                 agent_command: command,
                 transport,
             },
@@ -625,7 +622,7 @@ impl App {
                 .await
                 .unwrap_or_else(|_| Err("agent validation task stopped unexpectedly".into()));
             this.update(cx, |app, cx| {
-                app.finish_agent_registration(project_id, profile, result, cx);
+                app.finish_agent_registration(profile, result, cx);
             })
             .ok();
         })
@@ -635,22 +632,17 @@ impl App {
 
     fn finish_agent_registration(
         &mut self,
-        project_id: String,
         profile: AgentProfile,
         validation: Result<(), String>,
         cx: &mut Context<Self>,
     ) {
         self.validating_agent_config = false;
-        if self.active_project.as_ref().map(|project| &project.id) != Some(&project_id) {
-            cx.notify();
-            return;
-        }
         if let Err(error) = validation {
             self.toast = Some(format!("Could not register agent: {error}"));
             cx.notify();
             return;
         }
-        let mut registry = ProjectAgentRegistry {
+        let mut registry = AgentRegistry {
             agents: self.agent_profiles.clone(),
         };
         if registry
@@ -663,7 +655,7 @@ impl App {
             return;
         }
         registry.agents.push(profile);
-        match ConfigStore::for_user().save(&project_id, &registry) {
+        match ConfigStore::for_user().save(&registry) {
             Ok(()) => {
                 self.agent_profiles = registry.agents;
                 self.agent_profile_name_input
@@ -697,20 +689,18 @@ impl App {
             cx.notify();
             return;
         }
-        let Some(project_id) = self
-            .active_project
-            .as_ref()
-            .map(|project| project.id.clone())
-        else {
-            return;
+        let remaining_profiles = self
+            .agent_profiles
+            .iter()
+            .filter(|profile| profile.id != profile_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let registry = AgentRegistry {
+            agents: remaining_profiles,
         };
-        self.agent_profiles
-            .retain(|profile| profile.id != profile_id);
-        let registry = ProjectAgentRegistry {
-            agents: self.agent_profiles.clone(),
-        };
-        match ConfigStore::for_user().save(&project_id, &registry) {
+        match ConfigStore::for_user().save(&registry) {
             Ok(()) => {
+                self.agent_profiles = registry.agents;
                 if self.agent_profiles.is_empty() {
                     self.connection_status = "No agents registered".into();
                 }
@@ -735,7 +725,7 @@ impl App {
         let Some(project) = self.active_project.clone() else {
             return;
         };
-        let registry = match ConfigStore::for_user().load(&project.id) {
+        let registry = match ConfigStore::for_user().load() {
             Ok(Some(registry)) => registry,
             Ok(None) => {
                 self.agent_profiles.clear();
@@ -846,7 +836,7 @@ impl App {
         let Some(project) = self.active_project.clone() else {
             return;
         };
-        let config = self.agent_config.clone().unwrap_or(ProjectAgentConfig {
+        let config = self.agent_config.clone().unwrap_or(AgentConfig {
             agent_command: String::new(),
             transport: TransportConfig::Local,
         });
@@ -1450,7 +1440,7 @@ impl App {
             self.changed_files.clear();
             return;
         };
-        let config = self.agent_config.clone().unwrap_or(ProjectAgentConfig {
+        let config = self.agent_config.clone().unwrap_or(AgentConfig {
             agent_command: String::new(),
             transport: TransportConfig::Local,
         });

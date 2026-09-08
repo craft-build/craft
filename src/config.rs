@@ -1,8 +1,8 @@
-//! Per-project registry of ACP process configurations.
+//! Application-wide registry of ACP process configurations.
 //!
 //! Forge deliberately stores executable commands rather than an enum of known
 //! agents. Any number of ACP-compatible executables can therefore be registered
-//! and selected per session without a Forge release.
+//! once and selected for sessions in any workspace without a Forge release.
 
 use std::fs;
 use std::io;
@@ -30,7 +30,7 @@ pub enum TransportConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectAgentConfig {
+pub struct AgentConfig {
     /// A shell-like command line parsed locally into executable and arguments.
     pub agent_command: String,
     pub transport: TransportConfig,
@@ -40,16 +40,16 @@ pub struct ProjectAgentConfig {
 pub struct AgentProfile {
     pub id: String,
     pub name: String,
-    pub config: ProjectAgentConfig,
+    pub config: AgentConfig,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectAgentRegistry {
+pub struct AgentRegistry {
     #[serde(default)]
     pub agents: Vec<AgentProfile>,
 }
 
-impl ProjectAgentConfig {
+impl AgentConfig {
     pub fn workspace_for(&self, local_workspace: &Path) -> PathBuf {
         match &self.transport {
             TransportConfig::Local => local_workspace.to_path_buf(),
@@ -60,7 +60,7 @@ impl ProjectAgentConfig {
     }
 }
 
-impl ProjectAgentConfig {
+impl AgentConfig {
     pub fn agent(&self) -> Result<AcpAgent, String> {
         let words = shell_words::split(&self.agent_command)
             .map_err(|error| format!("invalid agent command: {error}"))?;
@@ -117,39 +117,21 @@ impl ConfigStore {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("forge")
-            .join("projects");
+            .join("forge");
         Self { root }
     }
 
-    pub fn load(&self, project_id: &str) -> io::Result<Option<ProjectAgentRegistry>> {
-        let path = self.path(project_id)?;
-        match fs::read(path) {
-            Ok(bytes) => {
-                let value: serde_json::Value =
-                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                if value.get("agents").is_some() {
-                    return serde_json::from_value(value)
-                        .map(Some)
-                        .map_err(io::Error::other);
-                }
-                let legacy: ProjectAgentConfig =
-                    serde_json::from_value(value).map_err(io::Error::other)?;
-                Ok(Some(ProjectAgentRegistry {
-                    agents: vec![AgentProfile {
-                        id: "migrated-default".into(),
-                        name: "Default agent".into(),
-                        config: legacy,
-                    }],
-                }))
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
+    pub fn load(&self) -> io::Result<Option<AgentRegistry>> {
+        match self.load_registry(&self.path()) {
+            Ok(registry) => return Ok(Some(registry)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
+        self.migrate_project_registries()
     }
 
-    pub fn save(&self, project_id: &str, registry: &ProjectAgentRegistry) -> io::Result<()> {
-        let path = self.path(project_id)?;
+    pub fn save(&self, registry: &AgentRegistry) -> io::Result<()> {
+        let path = self.path();
         fs::create_dir_all(&self.root)?;
         let temporary = path.with_extension("json.tmp");
         fs::write(
@@ -159,17 +141,72 @@ impl ConfigStore {
         fs::rename(temporary, path)
     }
 
-    fn path(&self, project_id: &str) -> io::Result<PathBuf> {
-        let safe = project_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character));
-        if !safe || project_id == "." || project_id == ".." {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid project id",
-            ));
+    fn path(&self) -> PathBuf {
+        self.root.join("agents.json")
+    }
+
+    fn load_registry(&self, path: &Path) -> io::Result<AgentRegistry> {
+        let bytes = fs::read(path)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if value.get("agents").is_some() {
+            return serde_json::from_value(value).map_err(io::Error::other);
         }
-        Ok(self.root.join(Path::new(project_id)).with_extension("json"))
+        let legacy: AgentConfig = serde_json::from_value(value).map_err(io::Error::other)?;
+        Ok(AgentRegistry {
+            agents: vec![AgentProfile {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                name: "Default agent".into(),
+                config: legacy,
+            }],
+        })
+    }
+
+    fn migrate_project_registries(&self) -> io::Result<Option<AgentRegistry>> {
+        let projects = self.root.join("projects");
+        let entries = match fs::read_dir(projects) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut paths = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+
+        let mut registry = AgentRegistry::default();
+        for path in paths {
+            let project_registry = self.load_registry(&path)?;
+            for mut profile in project_registry.agents {
+                if registry.agents.iter().any(|existing| {
+                    existing.id == profile.id
+                        || (existing.name.eq_ignore_ascii_case(&profile.name)
+                            && existing.config == profile.config)
+                }) {
+                    continue;
+                }
+                let original_name = profile.name.clone();
+                let mut suffix = 2;
+                while registry
+                    .agents
+                    .iter()
+                    .any(|existing| existing.name.eq_ignore_ascii_case(&profile.name))
+                {
+                    profile.name = format!("{original_name} ({suffix})");
+                    suffix += 1;
+                }
+                registry.agents.push(profile);
+            }
+        }
+        if registry.agents.is_empty() {
+            return Ok(None);
+        }
+        self.save(&registry)?;
+        Ok(Some(registry))
     }
 }
 
@@ -179,7 +216,7 @@ mod tests {
 
     #[test]
     fn ssh_transport_uses_argument_boundaries_not_a_local_shell() {
-        let config = ProjectAgentConfig {
+        let config = AgentConfig {
             agent_command: "gemini --experimental-acp".into(),
             transport: TransportConfig::Ssh {
                 host: "build.example".into(),
@@ -202,7 +239,7 @@ mod tests {
 
     #[test]
     fn local_agent_uses_the_selected_project_workspace() {
-        let config = ProjectAgentConfig {
+        let config = AgentConfig {
             agent_command: "agent --acp".into(),
             transport: TransportConfig::Local,
         };
@@ -215,34 +252,35 @@ mod tests {
     #[test]
     fn legacy_single_agent_config_migrates_to_a_registry() {
         let root = std::env::temp_dir().join(format!("forge-config-test-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("projects")).unwrap();
         let store = ConfigStore { root: root.clone() };
-        let legacy = ProjectAgentConfig {
+        let legacy = AgentConfig {
             agent_command: "agent --acp".into(),
             transport: TransportConfig::Local,
         };
         fs::write(
-            root.join("project.json"),
+            root.join("projects").join("project.json"),
             serde_json::to_vec(&legacy).unwrap(),
         )
         .unwrap();
 
-        let registry = store.load("project").unwrap().unwrap();
+        let registry = store.load().unwrap().unwrap();
 
         assert_eq!(registry.agents.len(), 1);
         assert_eq!(registry.agents[0].name, "Default agent");
         assert_eq!(registry.agents[0].config, legacy);
+        assert!(root.join("agents.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn registry_preserves_multiple_named_agents() {
-        let registry = ProjectAgentRegistry {
+        let registry = AgentRegistry {
             agents: vec![
                 AgentProfile {
                     id: "claude".into(),
                     name: "Claude Code".into(),
-                    config: ProjectAgentConfig {
+                    config: AgentConfig {
                         agent_command: "claude --acp".into(),
                         transport: TransportConfig::Local,
                     },
@@ -250,7 +288,7 @@ mod tests {
                 AgentProfile {
                     id: "gemini".into(),
                     name: "Gemini".into(),
-                    config: ProjectAgentConfig {
+                    config: AgentConfig {
                         agent_command: "gemini --experimental-acp".into(),
                         transport: TransportConfig::Local,
                     },
@@ -258,9 +296,83 @@ mod tests {
             ],
         };
 
-        let restored: ProjectAgentRegistry =
+        let restored: AgentRegistry =
             serde_json::from_slice(&serde_json::to_vec(&registry).unwrap()).unwrap();
 
         assert_eq!(restored, registry);
+    }
+
+    #[test]
+    fn application_registry_is_shared_without_a_project_key() {
+        let root = std::env::temp_dir().join(format!("forge-config-test-{}", uuid::Uuid::new_v4()));
+        let store = ConfigStore { root: root.clone() };
+        let registry = AgentRegistry {
+            agents: vec![AgentProfile {
+                id: "shared-agent".into(),
+                name: "Shared agent".into(),
+                config: AgentConfig {
+                    agent_command: "agent --acp".into(),
+                    transport: TransportConfig::Local,
+                },
+            }],
+        };
+
+        store.save(&registry).unwrap();
+
+        assert_eq!(store.load().unwrap(), Some(registry));
+        assert!(root.join("agents.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_merges_agents_from_all_project_registries() {
+        let root = std::env::temp_dir().join(format!("forge-config-test-{}", uuid::Uuid::new_v4()));
+        let projects = root.join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let shared_config = AgentConfig {
+            agent_command: "agent --acp".into(),
+            transport: TransportConfig::Local,
+        };
+        let first = AgentRegistry {
+            agents: vec![AgentProfile {
+                id: "first-agent".into(),
+                name: "Agent".into(),
+                config: shared_config.clone(),
+            }],
+        };
+        let second = AgentRegistry {
+            agents: vec![
+                AgentProfile {
+                    id: "duplicate-agent".into(),
+                    name: "Agent".into(),
+                    config: shared_config,
+                },
+                AgentProfile {
+                    id: "other-agent".into(),
+                    name: "Agent".into(),
+                    config: AgentConfig {
+                        agent_command: "other-agent --acp".into(),
+                        transport: TransportConfig::Local,
+                    },
+                },
+            ],
+        };
+        fs::write(
+            projects.join("first.json"),
+            serde_json::to_vec(&first).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            projects.join("second.json"),
+            serde_json::to_vec(&second).unwrap(),
+        )
+        .unwrap();
+
+        let migrated = ConfigStore { root: root.clone() }.load().unwrap().unwrap();
+
+        assert_eq!(migrated.agents.len(), 2);
+        assert_eq!(migrated.agents[0].name, "Agent");
+        assert_eq!(migrated.agents[1].name, "Agent (2)");
+        fs::remove_dir_all(root).unwrap();
     }
 }

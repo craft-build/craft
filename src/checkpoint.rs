@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ProjectAgentConfig, TransportConfig};
+use crate::config::{AgentConfig, TransportConfig};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -15,12 +15,12 @@ pub struct Checkpoint {
 }
 
 pub struct CheckpointManager {
-    config: ProjectAgentConfig,
+    config: AgentConfig,
     local_workspace: PathBuf,
 }
 
 impl CheckpointManager {
-    pub fn new(config: ProjectAgentConfig, local_workspace: PathBuf) -> Self {
+    pub fn new(config: AgentConfig, local_workspace: PathBuf) -> Self {
         Self {
             config,
             local_workspace,
