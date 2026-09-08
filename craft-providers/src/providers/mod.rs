@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use craft_storage::StateDir;
+use craft_storage::auth::OAuthTokens;
 use futures::StreamExt;
 use serde::Deserialize;
 use tracing::debug;
@@ -38,9 +40,62 @@ pub(crate) mod xai;
 pub(crate) const MIME_JSON: &str = "application/json";
 pub(crate) const MIME_FORM: &str = "application/x-www-form-urlencoded";
 const AUTHORIZATION_HEADER: &str = "authorization";
+const UNAUTHORIZED_STATUS: u16 = 401;
 
 fn bearer_value(api_key: &str) -> String {
     format!("Bearer {api_key}")
+}
+
+/// Reading, refreshing and writing tokens has to happen as one turn. Whoever
+/// queued behind a peer here is holding a copy the peer already spent, and
+/// replaying a rotated refresh token gets the whole family revoked, so the
+/// tokens are loaded again once the lock is in hand.
+pub(crate) async fn refreshed_tokens<F, Fut>(
+    dir: &StateDir,
+    provider: &str,
+    refresh: F,
+) -> Result<OAuthTokens, AgentError>
+where
+    F: FnOnce(OAuthTokens) -> Fut,
+    Fut: std::future::Future<Output = Result<OAuthTokens, AgentError>>,
+{
+    let lock_dir = dir.clone();
+    let lock_provider = provider.to_string();
+    let _lock = tokio::task::spawn_blocking(move || {
+        craft_storage::auth::lock_tokens(&lock_dir, &lock_provider)
+    })
+    .await
+    .map_err(|e| AgentError::Config {
+        message: format!("{provider} token lock task: {e}"),
+    })?;
+    let load_dir = dir.clone();
+    let load_provider = provider.to_string();
+    let current = tokio::task::spawn_blocking(move || {
+        craft_storage::auth::load_tokens(&load_dir, &load_provider)
+    })
+    .await
+    .map_err(|e| AgentError::Config {
+        message: format!("{provider} load_tokens task: {e}"),
+    })?
+    .ok_or_else(|| AgentError::Api {
+        status: UNAUTHORIZED_STATUS,
+        message: format!("{provider} OAuth tokens not found on disk"),
+    })?;
+    if !current.is_expired() {
+        return Ok(current);
+    }
+    let fresh = refresh(current).await?;
+    let saved = fresh.clone();
+    let save_dir = dir.clone();
+    let save_provider = provider.to_string();
+    tokio::task::spawn_blocking(move || {
+        craft_storage::auth::save_tokens(&save_dir, &save_provider, &saved)
+    })
+    .await
+    .map_err(|e| AgentError::Config {
+        message: format!("{provider} save_tokens task: {e}"),
+    })??;
+    Ok(fresh)
 }
 
 pub(crate) fn user_agent() -> &'static str {

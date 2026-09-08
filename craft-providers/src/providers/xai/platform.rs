@@ -10,7 +10,7 @@ use crate::model::{Model, ModelInfo};
 use crate::provider::Provider;
 use crate::providers::openai::responses;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use crate::providers::{ResolvedAuth, lock_unpoison};
+use crate::providers::{ResolvedAuth, lock_unpoison, refreshed_tokens};
 use crate::{
     AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, dialect,
 };
@@ -78,31 +78,12 @@ impl Xai {
         let storage = self.storage.clone().ok_or_else(|| AgentError::Config {
             message: "OAuth refresh not available for externally-managed auth".into(),
         })?;
-        let tokens = tokio::task::spawn_blocking({
-            let storage = storage.clone();
-            move || craft_storage::auth::load_tokens(&storage, auth::PROVIDER)
+        let resolved = match refreshed_tokens(&storage, auth::PROVIDER, |tokens| async move {
+            auth::refresh_tokens(&tokens).await
         })
         .await
-        .map_err(|e| AgentError::Config {
-            message: format!("xai load_tokens task: {e}"),
-        })?
-        .ok_or_else(|| AgentError::Api {
-            status: 401,
-            message: "xAI OAuth tokens not found on disk".into(),
-        })?;
-        let resolved = match auth::refresh_tokens(&tokens).await {
-            Ok(fresh) => {
-                let resolved = auth::build_oauth_resolved(&fresh)?;
-                tokio::task::spawn_blocking({
-                    let storage = storage.clone();
-                    move || craft_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)
-                })
-                .await
-                .map_err(|e| AgentError::Config {
-                    message: format!("xai save_tokens task: {e}"),
-                })??;
-                resolved
-            }
+        {
+            Ok(fresh) => auth::build_oauth_resolved(&fresh)?,
             Err(e) => {
                 warn!(error = %e, "xAI OAuth refresh failed, clearing stale tokens");
                 let _ = tokio::task::spawn_blocking({

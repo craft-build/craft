@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, warn};
 
 use crate::AgentError;
-use crate::providers::{KeyPool, MIME_FORM, ResolvedAuth, urlenc};
+use crate::providers::{KeyPool, MIME_FORM, ResolvedAuth, refreshed_tokens, urlenc};
 
 use super::catalog;
 
@@ -227,19 +227,14 @@ pub async fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
             debug!("using xAI OAuth authentication");
             return build_oauth_resolved(&tokens);
         }
-        match refresh_tokens(&tokens).await {
+        match refreshed_tokens(dir, PROVIDER, |tokens| async move {
+            refresh_tokens(&tokens).await
+        })
+        .await
+        {
             Ok(fresh) => {
-                let resolved = build_oauth_resolved(&fresh)?;
-                tokio::task::spawn_blocking({
-                    let dir = dir.clone();
-                    move || save_tokens(&dir, PROVIDER, &fresh)
-                })
-                .await
-                .map_err(|e| AgentError::Config {
-                    message: format!("xai save_tokens task: {e}"),
-                })??;
                 debug!("using xAI OAuth authentication (refreshed)");
-                return Ok(resolved);
+                return build_oauth_resolved(&fresh);
             }
             Err(e) => {
                 warn!(error = %e, "xAI OAuth refresh failed, clearing stale tokens");

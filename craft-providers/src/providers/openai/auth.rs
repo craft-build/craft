@@ -7,7 +7,7 @@ use serde::Deserialize;
 use tracing::{debug, error, warn};
 
 use crate::AgentError;
-use crate::providers::{MIME_FORM, MIME_JSON, ResolvedAuth, urlenc};
+use crate::providers::{MIME_FORM, MIME_JSON, ResolvedAuth, refreshed_tokens, urlenc};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const PROVIDER: &str = "openai";
@@ -278,19 +278,14 @@ pub async fn resolve(dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
             debug!("using OpenAI OAuth authentication");
             return build_oauth_resolved(&tokens);
         }
-        match refresh_tokens(&tokens).await {
+        match refreshed_tokens(dir, PROVIDER, |tokens| async move {
+            refresh_tokens(&tokens).await
+        })
+        .await
+        {
             Ok(fresh) => {
-                let resolved = build_oauth_resolved(&fresh)?;
-                tokio::task::spawn_blocking({
-                    let dir = dir.clone();
-                    move || save_tokens(&dir, PROVIDER, &fresh)
-                })
-                .await
-                .map_err(|e| AgentError::Config {
-                    message: format!("openai save_tokens task: {e}"),
-                })??;
                 debug!("using OpenAI OAuth authentication (refreshed)");
-                return Ok(resolved);
+                return build_oauth_resolved(&fresh);
             }
             Err(e) => {
                 warn!(error = %e, "OpenAI OAuth refresh failed, clearing stale tokens");
