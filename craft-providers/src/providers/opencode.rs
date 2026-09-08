@@ -299,7 +299,9 @@ pub enum Authentication {
 
 struct CatalogData {
     providers: HashMap<String, ProviderData>,
-    enable_free_models: bool,
+    /// Test override; `None` reads the live config so toggling
+    /// `enable_free_models` takes effect without a catalog re-init.
+    enable_free_models: Option<bool>,
     state_dir: StateDir,
 }
 
@@ -311,7 +313,18 @@ fn enable_free_models_config() -> bool {
 }
 
 impl CatalogData {
-    fn from_index(index: CatalogIndex, enable_free_models: bool, state_dir: &StateDir) -> Self {
+    #[cfg(test)]
+    fn from_index_pinned(
+        index: CatalogIndex,
+        enable_free_models: bool,
+        state_dir: &StateDir,
+    ) -> Self {
+        let mut data = Self::from_index(index, state_dir);
+        data.enable_free_models = Some(enable_free_models);
+        data
+    }
+
+    fn from_index(index: CatalogIndex, state_dir: &StateDir) -> Self {
         let mut providers = HashMap::new();
 
         for (provider_id, provider) in index {
@@ -407,7 +420,7 @@ impl CatalogData {
 
         Self {
             providers,
-            enable_free_models,
+            enable_free_models: None,
             state_dir: state_dir.clone(),
         }
     }
@@ -430,8 +443,10 @@ impl CatalogData {
     }
 
     /// Whether the opencode free-model public-token fallback is allowed.
+    /// Reads the live config unless a test pinned a value.
     fn enable_free_models(&self) -> bool {
         self.enable_free_models
+            .unwrap_or_else(enable_free_models_config)
     }
 
     fn all_models(&self) -> Vec<ModelInfo> {
@@ -439,7 +454,7 @@ impl CatalogData {
             .providers
             .values()
             .flat_map(|provider_data| {
-                provider_data.available_models(&self.state_dir, self.enable_free_models)
+                provider_data.available_models(&self.state_dir, self.enable_free_models())
             })
             .collect();
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -457,7 +472,7 @@ impl CatalogData {
         let Some(data) = self.providers.get(slug) else {
             return Vec::new();
         };
-        let mut models = data.available_models(&self.state_dir, self.enable_free_models);
+        let mut models = data.available_models(&self.state_dir, self.enable_free_models());
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
     }
@@ -540,12 +555,11 @@ impl Opencode {
         if !needs_fetch {
             return Ok(());
         }
-        let enable_free_models = enable_free_models_config();
         match fetch_remote_catalog(&self.client).await {
             Ok(index) => {
                 save_cached_catalog(&index);
                 let state_dir = resolve_state_dir_or_empty();
-                let data = CatalogData::from_index(index, enable_free_models, &state_dir);
+                let data = CatalogData::from_index(index, &state_dir);
                 if !data.providers.is_empty() {
                     *init_catalog_if_needed().lock().unwrap() = data;
                 }
@@ -871,22 +885,21 @@ fn determine_catalog_format(npm: &str) -> EndpointType {
 const ALLOWED_NPM: &[&str] = &["@ai-sdk/openai-compatible", "@ai-sdk/anthropic"];
 
 fn init_catalog_from_cache() -> CatalogData {
-    let enable_free_models = enable_free_models_config();
     let state_dir = resolve_state_dir_or_empty();
     if let Some(index) = load_cached_catalog() {
         debug!("using cached catalog");
-        return CatalogData::from_index(index, enable_free_models, &state_dir);
+        return CatalogData::from_index(index, &state_dir);
     }
     CatalogData {
         providers: HashMap::new(),
-        enable_free_models: false,
+        enable_free_models: None,
         state_dir,
     }
 }
 
 #[cfg(test)]
 fn seed_catalog_for_tests(index: CatalogIndex, state_dir: StateDir) {
-    let _ = CATALOG.set(Mutex::new(CatalogData::from_index(
+    let _ = CATALOG.set(Mutex::new(CatalogData::from_index_pinned(
         index, false, &state_dir,
     )));
 }
@@ -900,6 +913,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state_dir = StateDir::from_path(tmp.path().to_path_buf());
         (tmp, state_dir)
+    }
+
+    #[test]
+    fn unpinned_catalog_reads_live_config() {
+        let (_tmp, state_dir) = temp_state_dir();
+        let data = CatalogData::from_index(HashMap::new(), &state_dir);
+        assert_eq!(data.enable_free_models(), enable_free_models_config());
+        assert!(
+            CatalogData::from_index_pinned(HashMap::new(), true, &state_dir).enable_free_models()
+        );
     }
 
     fn free_catalog_model(input: Option<f64>, output: Option<f64>) -> CatalogModel {
@@ -1326,7 +1349,7 @@ mod tests {
             },
         );
 
-        let result = CatalogData::from_index(providers, true, &state_dir);
+        let result = CatalogData::from_index_pinned(providers, true, &state_dir);
         let vendor = result.providers.get("some-vendor").unwrap();
         assert_eq!(vendor.models.len(), 2, "all models included");
     }
@@ -1374,7 +1397,7 @@ mod tests {
             },
         );
 
-        let result = CatalogData::from_index(providers, true, &state_dir);
+        let result = CatalogData::from_index_pinned(providers, true, &state_dir);
         let opencode = result.providers.get("opencode").unwrap();
         assert_eq!(opencode.models.len(), 2, "all models included");
         assert!(matches!(
@@ -1427,7 +1450,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_OPENCODE_ALL_81274", "real-key") };
-        let result = CatalogData::from_index(providers, true, &state_dir);
+        let result = CatalogData::from_index_pinned(providers, true, &state_dir);
 
         let opencode = result.providers.get("opencode").unwrap();
         assert!(opencode.models.contains_key("free-model"));
@@ -1485,7 +1508,7 @@ mod tests {
     fn catalog_to_data_opencode_hides_free_models_when_disabled() {
         let (_tmp, state_dir) = temp_state_dir();
         let index = opencode_catalog_with_free_and_paid("unused");
-        let result = CatalogData::from_index(index, false, &state_dir);
+        let result = CatalogData::from_index_pinned(index, false, &state_dir);
 
         let opencode = result.providers.get("opencode").unwrap();
         assert!(opencode.models.contains_key("free-model"));
@@ -1501,7 +1524,7 @@ mod tests {
     fn catalog_to_data_opencode_no_models_without_key_when_disabled() {
         let (_tmp, state_dir) = temp_state_dir();
         let index = opencode_catalog_with_free_and_paid("unused");
-        let result = CatalogData::from_index(index, false, &state_dir);
+        let result = CatalogData::from_index_pinned(index, false, &state_dir);
 
         let opencode = result.providers.get("opencode").unwrap();
         assert!(opencode.models.contains_key("free-model"));
@@ -1557,7 +1580,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_VENDOR_KEY_81274", "test-key") };
-        let result = CatalogData::from_index(providers, true, &state_dir);
+        let result = CatalogData::from_index_pinned(providers, true, &state_dir);
         unsafe { std::env::remove_var("CRAFT_TEST_VENDOR_KEY_81274") };
 
         assert!(
@@ -1593,7 +1616,7 @@ mod tests {
             },
         );
 
-        let result = CatalogData::from_index(providers, true, &state_dir);
+        let result = CatalogData::from_index_pinned(providers, true, &state_dir);
         assert!(result.providers.is_empty());
     }
 
@@ -1644,7 +1667,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_OTHER_KEY_COLLISION", "key") };
-        let result = CatalogData::from_index(providers, true, &state_dir);
+        let result = CatalogData::from_index_pinned(providers, true, &state_dir);
         unsafe { std::env::remove_var("CRAFT_TEST_OTHER_KEY_COLLISION") };
 
         assert!(
@@ -1698,7 +1721,7 @@ mod tests {
             },
         );
 
-        let data = CatalogData::from_index(providers, true, &state_dir);
+        let data = CatalogData::from_index_pinned(providers, true, &state_dir);
         let (_meta, provider_data) = data.lookup("opencode", "opus").unwrap();
         assert_eq!(provider_data.slug, "opencode");
     }
@@ -1733,7 +1756,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_NVIDIA_KEY_LOOKUP", "key") };
-        let data = CatalogData::from_index(providers, true, &state_dir);
+        let data = CatalogData::from_index_pinned(providers, true, &state_dir);
         unsafe { std::env::remove_var("CRAFT_TEST_NVIDIA_KEY_LOOKUP") };
 
         let (_meta, provider_data) = data.lookup("nvidia", "openai/gpt-oss-120b").unwrap();
@@ -1770,7 +1793,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_NVIDIA_DIRECT", "key") };
-        let data = CatalogData::from_index(providers, true, &state_dir);
+        let data = CatalogData::from_index_pinned(providers, true, &state_dir);
         unsafe { std::env::remove_var("CRAFT_TEST_NVIDIA_DIRECT") };
 
         let _key = format!("{}/{}", "nvidia", "openai/gpt-oss-120b");
@@ -1808,7 +1831,7 @@ mod tests {
         );
 
         unsafe { std::env::set_var("CRAFT_TEST_FIREWORKS_DEEP", "key") };
-        let data = CatalogData::from_index(providers, true, &state_dir);
+        let data = CatalogData::from_index_pinned(providers, true, &state_dir);
         unsafe { std::env::remove_var("CRAFT_TEST_FIREWORKS_DEEP") };
 
         let _key = format!("{}/{}", "fireworks", "deepseek-ai/DeepSeek-R1");
@@ -1864,7 +1887,7 @@ mod tests {
             },
         );
 
-        let data = CatalogData::from_index(providers, true, &state_dir);
+        let data = CatalogData::from_index_pinned(providers, true, &state_dir);
 
         assert_eq!(data.providers.len(), 2);
 
@@ -1920,7 +1943,7 @@ mod tests {
             },
         );
 
-        let data = CatalogData::from_index(providers, true, &state_dir);
+        let data = CatalogData::from_index_pinned(providers, true, &state_dir);
 
         let opencode = data.providers.get("opencode").unwrap();
         assert_eq!(opencode.models.len(), 2);
@@ -2018,7 +2041,7 @@ mod tests {
         };
         let providers: CatalogIndex =
             HashMap::from([("opencode".into(), zen), ("opencode-go".into(), go)]);
-        let data = CatalogData::from_index(providers, true, &state_dir);
+        let data = CatalogData::from_index_pinned(providers, true, &state_dir);
 
         let all = data.models_for_slug("opencode");
         assert_eq!(
