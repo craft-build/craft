@@ -7,7 +7,7 @@ use craft_storage::StateDir;
 use craft_storage::auth::OAuthTokens;
 use futures::StreamExt;
 use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::AgentError;
 
@@ -97,13 +97,19 @@ where
     let saved = fresh.clone();
     let save_dir = dir.clone();
     let save_provider = provider.to_string();
-    tokio::task::spawn_blocking(move || {
+    // Not an error: every caller reads a failure here as "these credentials
+    // are dead" and deletes the token file, so a full disk would log the user
+    // out over a refresh that actually succeeded. The run keeps the token it
+    // just got and the next start refreshes again.
+    if let Err(e) = tokio::task::spawn_blocking(move || {
         craft_storage::auth::save_tokens(&save_dir, &save_provider, &saved)
     })
     .await
     .map_err(|e| AgentError::Config {
         message: format!("{provider} save_tokens task: {e}"),
-    })??;
+    }) {
+        warn!(provider, error = %e, "could not persist refreshed OAuth tokens");
+    }
     Ok(fresh)
 }
 
