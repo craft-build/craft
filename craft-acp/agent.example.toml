@@ -1,0 +1,35 @@
+# Copy to ~/.config/craft/agent.toml and set credentials in your environment.
+# Provider table names are your aliases, not fixed Rig provider names.
+
+[providers.openai]
+kind = "openai"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.openai.models."gpt-5.2"]
+name = "GPT-5.2"
+# These are catalog metadata overrides, not generation request parameters.
+context_length = 400000
+max_output_tokens = 32768
+
+# OpenAI Chat Completions protocol, rather than OpenAI's Responses API.
+[providers.local]
+kind = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+api_key_env = "LOCAL_LLM_API_KEY"
+discover_models = false
+
+[providers.local.models."my-coding-model"]
+context_length = 32768
+
+# The native Anthropic client also supports compatible endpoints.
+[providers.company]
+kind = "anthropic"
+base_url = "https://llm.example.com"
+api_key_env = "COMPANY_LLM_API_KEY"
+discover_models = false
+
+[providers.company.models."company-coder"]
+
+# Local Ollama needs no credential unless your server requires one.
+[providers.ollama]
+kind = "ollama"

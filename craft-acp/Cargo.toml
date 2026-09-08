@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+rig.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "fs"] }
+toml.workspace = true
+url.workspace = true
