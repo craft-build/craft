@@ -870,6 +870,21 @@ fn message_view(
     }
 }
 
+const COMMENT_PREVIEW_CHAR_LIMIT: usize = 120;
+
+fn comment_preview(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut preview = chars
+        .by_ref()
+        .take(COMMENT_PREVIEW_CHAR_LIMIT)
+        .collect::<String>();
+    if chars.next().is_some() {
+        preview.pop();
+        preview.push('…');
+    }
+    preview
+}
+
 fn user_message(m: Message) -> impl IntoElement {
     let markdown_id = format!("user-markdown-{}", m.id);
     div()
@@ -912,7 +927,7 @@ fn user_message(m: Message) -> impl IntoElement {
                             .text_size(px(11.))
                             .line_height(px(16.))
                             .text_color(rgb(theme::TEXT_SECONDARY))
-                            .child(format!("{label}: {text}"))
+                            .child(format!("{label}: {}", comment_preview(text)))
                     })),
             )
         })
@@ -1421,7 +1436,7 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                                 .min_w(px(0.))
                                 .whitespace_normal()
                                 .line_height(px(16.))
-                                .child(format!("{}: {}", p.label, p.text)),
+                                .child(format!("{}: {}", p.label, comment_preview(&p.text))),
                         )
                         .child(
                             div()
@@ -1999,4 +2014,29 @@ fn checkpoints_overlay(app: &mut App, cx: &mut Context<App>) -> impl IntoElement
                         )
                 })),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_comment_previews_are_unchanged() {
+        assert_eq!(comment_preview("Keep this branch"), "Keep this branch");
+        assert_eq!(
+            comment_preview(&"a".repeat(COMMENT_PREVIEW_CHAR_LIMIT)),
+            "a".repeat(COMMENT_PREVIEW_CHAR_LIMIT)
+        );
+    }
+
+    #[test]
+    fn long_comment_previews_are_capped_without_splitting_unicode() {
+        let preview = comment_preview(&"é".repeat(COMMENT_PREVIEW_CHAR_LIMIT + 1));
+
+        assert_eq!(preview.chars().count(), COMMENT_PREVIEW_CHAR_LIMIT);
+        assert_eq!(
+            preview,
+            format!("{}…", "é".repeat(COMMENT_PREVIEW_CHAR_LIMIT - 1))
+        );
+    }
 }
