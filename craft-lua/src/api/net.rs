@@ -11,6 +11,12 @@ const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
 const MAX_TIMEOUT_SECS: f64 = 120.0;
 const DEFAULT_MAX_BYTES: usize = 5 * 1024 * 1024;
 const MAX_RETRIES: u32 = 3;
+/// A resolver saying "try again" (a cold cache, a link that just came back)
+/// has not answered yet, so a couple of retries go out before a name lookup
+/// counts as a failure. The request's own retry budget never covers this,
+/// since the guard runs before the first attempt.
+const DNS_ATTEMPTS: u32 = 3;
+const DNS_RETRY_DELAY: Duration = Duration::from_millis(150);
 const MAX_REDIRECTS: usize = 10;
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const CF_MITIGATED: &str = "cf-mitigated";
@@ -288,9 +294,11 @@ async fn resolve_and_check_ssrf(url: &str) -> Result<(String, Vec<SocketAddr>), 
 
     let port = extract_port(url).unwrap_or(443);
     let addr = format!("{host}:{port}");
-    let addrs: Vec<_> = tokio::net::lookup_host(&addr)
+    // A resolver failure is the network's and not the guard's verdict, so it is
+    // not worded as one: the answer the guard would have judged never arrives.
+    let addrs: Vec<_> = resolve(&addr)
         .await
-        .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?
+        .map_err(|e| format!("cannot resolve {host}: {e}"))?
         .collect();
 
     if addrs.is_empty() {
@@ -307,6 +315,24 @@ async fn resolve_and_check_ssrf(url: &str) -> Result<(String, Vec<SocketAddr>), 
     }
 
     Ok((host.to_string(), addrs))
+}
+
+/// Retried lookup around `tokio::net::lookup_host`, which already runs
+/// getaddrinfo on the blocking pool rather than on the executor thread every
+/// plugin future shares.
+async fn resolve(addr: &str) -> std::io::Result<impl Iterator<Item = SocketAddr>> {
+    let mut attempt = 1;
+    loop {
+        match tokio::net::lookup_host(addr).await {
+            Ok(addrs) => return Ok(addrs),
+            Err(e) if attempt == DNS_ATTEMPTS => return Err(e),
+            Err(e) => {
+                tracing::debug!(addr, attempt, error = %e, "name lookup failed, retrying")
+            }
+        }
+        attempt += 1;
+        tokio::time::sleep(DNS_RETRY_DELAY).await;
+    }
 }
 
 fn is_private_ip(ip: &IpAddr) -> bool {
@@ -443,6 +469,21 @@ mod tests {
     #[tokio::test]
     async fn resolve_ssrf_unspecified_blocked() {
         assert!(resolve_and_check_ssrf("https://0.0.0.0").await.is_err());
+    }
+
+    /// A resolver with no answer has reached no verdict, so the failure must
+    /// not be worded as a block. `.invalid` is reserved by RFC 6761, so every
+    /// resolver answers NXDOMAIN for it.
+    #[tokio::test]
+    async fn an_unresolvable_host_reads_as_a_network_failure() {
+        const UNRESOLVABLE_HOST: &str = "craft.invalid";
+        const BLOCKED_PREFIX: &str = "blocked:";
+
+        let err = resolve_and_check_ssrf(&format!("https://{UNRESOLVABLE_HOST}/"))
+            .await
+            .expect_err(UNRESOLVABLE_HOST);
+        assert!(!err.starts_with(BLOCKED_PREFIX), "{err}");
+        assert!(err.contains(UNRESOLVABLE_HOST), "{err}");
     }
 
     #[tokio::test]
