@@ -49,6 +49,10 @@ use crate::{AcpParams, elicitation, mcp as acp_mcp, methods, permissions, transl
 const FIRST_OUTGOING_REQUEST_ID: i64 = 1000;
 const DELEGATION_TIMEOUT: Duration = Duration::from_secs(60);
 const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Turns already recorded were priced when they ran. `always_fast` is a live
+/// config value, so reading it here would reprice history the user paid for at
+/// standard rates. New turns still honour it.
+const RESTORED_FAST: bool = false;
 const TODO_WRITE_TOOL: &str = "todo_write";
 const TODO_UPDATE_METHOD_LEGACY: &str = "session/todo_update";
 const TODO_UPDATE_METHOD: &str = "_craft/session/todo_update";
@@ -717,7 +721,7 @@ async fn handle_request(
                 &loaded.usage,
                 &mut loaded.by_model,
                 &recorded_model,
-                srv.defaults.fast,
+                RESTORED_FAST,
             );
             install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::LoadSessionResponse(resp))
@@ -778,7 +782,7 @@ async fn handle_request(
                 &loaded.usage,
                 &mut loaded.by_model,
                 &recorded_model,
-                srv.defaults.fast,
+                RESTORED_FAST,
             );
             install_session(srv, handle, mcp, spec, loaded.thinking, cwd, restored_cost).await;
             Ok(AgentResponse::ResumeSessionResponse(resp))
