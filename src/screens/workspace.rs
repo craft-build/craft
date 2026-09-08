@@ -1477,6 +1477,7 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 })
                 .children(files.iter().map(|f| {
                     let path = f.path.clone();
+                    let supports_text_diff = f.supports_text_diff;
                     let is_active = active_diff.as_deref() == Some(f.path.as_str());
                     let dot = if f.status.as_deref() == Some("added") {
                         theme::DIFF_ADD_TEXT
@@ -1495,21 +1496,36 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .gap(px(6.))
                         .px(px(12.))
                         .py(px(4.))
-                        .cursor_pointer()
+                        .when(supports_text_diff, |d| d.cursor_pointer())
                         .when(is_active, |d| d.bg(rgb(theme::INPUT_BG)))
-                        .hover(|s| s.bg(rgb(theme::HOVER_BG)))
+                        .when(supports_text_diff, |d| {
+                            d.hover(|s| s.bg(rgb(theme::HOVER_BG)))
+                        })
                         .child(div().w(px(6.)).h(px(6.)).flex_shrink_0().bg(rgb(dot)))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
                                 .text_size(px(12.))
-                                .text_color(rgb(theme::TEXT_PRIMARY))
+                                .text_color(rgb(if supports_text_diff {
+                                    theme::TEXT_PRIMARY
+                                } else {
+                                    theme::TEXT_MUTED
+                                }))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .child(label),
                         )
+                        .when(!supports_text_diff, |d| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child("binary"),
+                            )
+                        })
                         .child(
                             div()
                                 .id(SharedString::from(format!("attach-file-{path}")))
@@ -1525,9 +1541,11 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                                     app.add_context_file(&attach_path, cx);
                                 })),
                         )
-                        .on_click(
-                            cx.listener(move |app, _, _, cx| app.toggle_diff_file(&click_path, cx)),
-                        )
+                        .when(supports_text_diff, |d| {
+                            d.on_click(cx.listener(move |app, _, _, cx| {
+                                app.toggle_diff_file(&click_path, cx)
+                            }))
+                        })
                 })),
         )
 }

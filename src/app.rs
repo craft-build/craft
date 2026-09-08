@@ -33,6 +33,7 @@ pub struct PendingComment {
 pub struct WorkspaceFile {
     pub path: String,
     pub status: Option<String>,
+    pub supports_text_diff: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -823,6 +824,13 @@ impl App {
     }
 
     pub fn toggle_diff_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self
+            .changed_files
+            .iter()
+            .any(|file| file.path == path && !file.supports_text_diff)
+        {
+            return;
+        }
         if self.active_diff_file.as_deref() == Some(path) {
             self.active_diff_file = None;
             cx.notify();
@@ -1461,9 +1469,10 @@ impl App {
                         Ok(files) => {
                             app.changed_files = files
                                 .into_iter()
-                                .map(|(path, status)| WorkspaceFile {
+                                .map(|(path, status, supports_text_diff)| WorkspaceFile {
                                     path,
                                     status: Some(status),
+                                    supports_text_diff,
                                 })
                                 .collect();
                         }

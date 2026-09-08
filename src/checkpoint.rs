@@ -69,9 +69,9 @@ impl CheckpointManager {
         Ok(())
     }
 
-    pub fn changed_files(&self) -> Result<Vec<(String, String)>, String> {
-        let status = self.run_git(&["status", "--porcelain=v1"])?;
-        Ok(status
+    pub fn changed_files(&self) -> Result<Vec<(String, String, bool)>, String> {
+        let status = self.run_git(&["status", "--porcelain=v1", "--untracked-files=all"])?;
+        status
             .lines()
             .filter_map(|line| {
                 if line.len() < 4 {
@@ -97,16 +97,41 @@ impl CheckpointManager {
                 };
                 Some((path, status.to_string()))
             })
-            .collect())
+            .map(|(path, status)| {
+                let supports_text_diff = self.supports_text_diff(&path)?;
+                Ok((path, status, supports_text_diff))
+            })
+            .collect()
     }
 
     pub fn file_snapshot(&self, path: &str) -> Result<(Option<String>, String), String> {
+        if !self.supports_text_diff(path)? {
+            return Err(format!("Cannot open a text diff for binary file: {path}"));
+        }
         let quoted = shell_words::quote(path);
         let old = self.run_shell(&format!(
             "git cat-file -e HEAD:{quoted} 2>/dev/null && git show HEAD:{quoted} || true"
         ))?;
         let new = self.run_shell(&format!("if [ -f {quoted} ]; then cat -- {quoted}; fi"))?;
         Ok(((!old.is_empty()).then_some(old), new))
+    }
+
+    fn supports_text_diff(&self, path: &str) -> Result<bool, String> {
+        let quoted = shell_words::quote(path);
+        let numstat = self.run_shell(&format!(
+            "if [ -d {quoted} ]; then \
+               printf '%s\\n' binary; \
+             elif git rev-parse -q --verify HEAD >/dev/null && \
+                  {{ git ls-files --error-unmatch -- {quoted} >/dev/null 2>&1 || \
+                     git cat-file -e HEAD:{quoted} 2>/dev/null; }}; then \
+               git diff --numstat HEAD -- {quoted}; \
+             elif [ -f {quoted} ]; then \
+               git diff --no-index --numstat /dev/null -- {quoted} || [ $? -eq 1 ]; \
+             else \
+               printf '%s\\n' binary; \
+             fi"
+        ))?;
+        Ok(numstat != "binary\n" && !numstat.starts_with("-\t-"))
     }
 
     fn run_git(&self, args: &[&str]) -> Result<String, String> {
@@ -182,4 +207,51 @@ fn expand_home(path: &Path) -> PathBuf {
         return expanded;
     }
     path.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changelist_expands_untracked_directories_and_marks_binary_files() {
+        let workspace =
+            std::env::temp_dir().join(format!("forge-changelist-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(workspace.join("new-folder")).unwrap();
+        std::fs::write(workspace.join("new-folder").join("notes.txt"), "hello\n").unwrap();
+        std::fs::write(
+            workspace.join("new-folder").join("image.bin"),
+            [0, 159, 146, 150],
+        )
+        .unwrap();
+        let initialized = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&workspace)
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        let manager = CheckpointManager::new(
+            AgentConfig {
+                agent_command: String::new(),
+                transport: TransportConfig::Local,
+            },
+            workspace.clone(),
+        );
+
+        let files = manager.changed_files().unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert!(
+            files
+                .iter()
+                .any(|(path, _, is_text)| { path == "new-folder/notes.txt" && *is_text })
+        );
+        assert!(
+            files
+                .iter()
+                .any(|(path, _, is_text)| { path == "new-folder/image.bin" && !*is_text })
+        );
+        assert!(manager.file_snapshot("new-folder/image.bin").is_err());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
 }
