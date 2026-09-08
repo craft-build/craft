@@ -2258,9 +2258,11 @@ dependencies = [
 name = "craft-highlight"
 version = "0.14.0"
 dependencies = [
+ "flume",
  "serde_json",
  "syntect",
  "test-case",
+ "tracing",
  "two-face",
 ]
 

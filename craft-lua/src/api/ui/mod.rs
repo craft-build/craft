@@ -127,11 +127,13 @@ pub(crate) fn create_ui_table(
                     .and_then(|t| t.get::<String>("prefix").ok())
                     .unwrap_or_default();
                 let segments = tokio::task::spawn_blocking(move || {
-                    if independent {
-                        craft_highlight::highlight_lines_independent(&lang, &code)
-                    } else {
-                        craft_highlight::highlight_code(&lang, &code, &prefix)
-                    }
+                    craft_highlight::pool::run(move || {
+                        if independent {
+                            craft_highlight::highlight_lines_independent(&lang, &code)
+                        } else {
+                            craft_highlight::highlight_code(&lang, &code, &prefix)
+                        }
+                    })
                 })
                 .await
                 .map_err(|e| mlua::Error::runtime(format!("highlight task failed: {e}")))?;
@@ -156,10 +158,11 @@ pub(crate) fn create_ui_table(
     t.set(
         "markdown",
         lua.create_async_function(|lua, (text, width): (String, u16)| async move {
-            let lines =
-                tokio::task::spawn_blocking(move || craft_markdown::render::render(&text, width))
-                    .await
-                    .map_err(|e| mlua::Error::runtime(format!("markdown task failed: {e}")))?;
+            let lines = tokio::task::spawn_blocking(move || {
+                craft_highlight::pool::run(move || craft_markdown::render::render(&text, width))
+            })
+            .await
+            .map_err(|e| mlua::Error::runtime(format!("markdown task failed: {e}")))?;
             markdown_lines_to_lua(&lua, &lines)
         })?,
     )?;
