@@ -36,6 +36,7 @@ const BLOCKED_PROVIDER_IN_CATALOG: &[&str] = &["zai", "zai-coding-plan", "github
 /// exempt from the "skip slugs owned by a builtin provider" filter in
 /// `CatalogData::from_index`.
 pub(crate) const OPENCODE_FAMILY_SLUGS: &[&str] = &["opencode", "opencode-go"];
+const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
 const CATALOG_CACHE_FILE: &str = "models-dev-catalog.json";
@@ -170,6 +171,26 @@ impl ProviderData {
             .with_base_url(self.base_url.clone()))
     }
 
+    fn is_opencode_family(&self) -> bool {
+        OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str())
+    }
+
+    /// OpenCode asked clients to send one stable ID per conversation here and
+    /// warned that requests without it may start failing:
+    /// https://github.com/tontinton/maki/issues/935
+    pub(crate) fn request_auth(
+        &self,
+        mut auth: ResolvedAuth,
+        session_id: Option<&SessionRef>,
+    ) -> ResolvedAuth {
+        if self.is_opencode_family()
+            && let Some(sid) = session_id
+        {
+            auth.set_header(OPENCODE_SESSION_HEADER, sid.to_string());
+        }
+        auth
+    }
+
     pub fn build_auth(
         &self,
         state_dir: &StateDir,
@@ -177,7 +198,7 @@ impl ProviderData {
     ) -> Result<Authentication, AgentError> {
         let api_key = match self.resolve_api_key(state_dir) {
             Some(key) => key,
-            None if allow_free_fallback && OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str()) => {
+            None if allow_free_fallback && self.is_opencode_family() => {
                 return Ok(Authentication::OpenCodeFreeKey(self.auth_for("public")?));
             }
             None => return Ok(Authentication::NoAuth),
@@ -202,7 +223,7 @@ impl ProviderData {
         state_dir: &StateDir,
         allow_free_fallback: bool,
     ) -> Result<Option<ResolvedAuth>, AgentError> {
-        if OPENCODE_FAMILY_SLUGS.contains(&self.slug.as_str())
+        if self.is_opencode_family()
             && let Some(auth) = override_auth
         {
             return Ok(Some(auth.lock().unwrap().clone()));
@@ -622,6 +643,7 @@ impl Opencode {
         &self,
         sub_provider: &str,
         actual_id: &str,
+        session_id: Option<&SessionRef>,
     ) -> Result<(CatalogMeta, EndpointType, ResolvedAuth), AgentError> {
         let guard = init_catalog_if_needed().lock().unwrap();
         let (meta, provider_data) = guard.lookup(sub_provider, actual_id)?;
@@ -633,7 +655,8 @@ impl Opencode {
                 config_error(format!(
                     "provider '{sub_provider}' has no API key; run `craft auth login {sub_provider}` or set providers.opencode.enable_free_models = true to use its free models"
                 ))
-            })?;
+            }        )?;
+        let auth = provider_data.request_auth(auth, session_id);
         Ok((meta.clone(), provider_data.api_format, auth))
     }
 }
@@ -648,7 +671,7 @@ impl Provider for Opencode {
         tools: &Value,
         event_tx: &Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&SessionRef>,
+        session_id: Option<&SessionRef>,
     ) -> Result<StreamResponse, AgentError> {
         let model_for_stream = model.clone();
 
@@ -656,7 +679,7 @@ impl Provider for Opencode {
         let model_id = &model_for_stream.id;
         let (sub_provider, actual_id) = model_id.split_once('/').unwrap_or((self.slug, model_id));
 
-        let (meta, api_format, auth) = self.lookup(sub_provider, actual_id).await?;
+        let (meta, api_format, auth) = self.lookup(sub_provider, actual_id, session_id).await?;
 
         let mut buf = String::new();
         let system = super::with_prefix(&self.system_prefix, system, &mut buf);
@@ -1147,6 +1170,28 @@ mod tests {
             _ => panic!("expected KeyBased"),
         }
         unsafe { std::env::remove_var("CRAFT_TEST_AUTH_KEY") };
+    }
+
+    #[test_case("opencode", true, true ; "zen_with_session")]
+    #[test_case("opencode-go", true, true ; "go_with_session")]
+    #[test_case("opencode-go", false, false ; "go_without_session")]
+    #[test_case("anthropic", true, false ; "other_provider_never")]
+    fn request_auth_sets_opencode_session_header(slug: &str, with_session: bool, expected: bool) {
+        let data = ProviderData {
+            slug: slug.into(),
+            ..opencode_go_provider_data("CRAFT_TEST_OPENCODE_GO_UNSET_KEY_91472")
+        };
+        let session = SessionRef::generate();
+        let auth = data.request_auth(
+            ResolvedAuth::for_test(None, Vec::new()),
+            with_session.then_some(&session),
+        );
+        let header = auth
+            .headers
+            .iter()
+            .find(|(key, _)| key == OPENCODE_SESSION_HEADER)
+            .map(|(_, value)| value.as_str());
+        assert_eq!(header, expected.then(|| session.to_string()).as_deref());
     }
 
     fn opencode_go_provider_data(env_key: &str) -> ProviderData {
