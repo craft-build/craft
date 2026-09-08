@@ -36,7 +36,7 @@ use craft_providers::model::Model;
 use craft_providers::{Message, TokenUsage, add_cost, settle_session};
 use craft_storage::id::{CraftId, SessionRef};
 use craft_storage::sessions::StoredTokenUsage;
-use flume::{Receiver, Sender};
+use flume::{Receiver, Sender, WeakSender};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -97,7 +97,11 @@ impl ClientCaps {
 
 struct AcpFs {
     caps: Arc<ClientCaps>,
-    out_tx: Sender<Value>,
+    /// Weak, because this backend rides into the agent's tool state, which
+    /// every `LuaCtx` a tool call parks keeps verbatim. A strong clone here
+    /// outlives `serve()` and leaves `writer_task` waiting on a sender nobody
+    /// will drop.
+    out_tx: WeakSender<Value>,
     pending: PendingRequests,
     next_id: Arc<AtomicI64>,
     shared_session: SharedSession,
@@ -122,11 +126,12 @@ impl FsBackend for AcpFs {
         let path = path.to_path_buf();
         Box::pin(async move {
             let sid = self.session_id()?;
+            let out_tx = self.out_tx.upgrade().ok_or("connection closed")?;
             let request = AgentRequest::ReadTextFileRequest(ReadTextFileRequest::new(
                 SessionId::from(sid),
                 path,
             ));
-            let v = send_delegated(&self.out_tx, &self.pending, &self.next_id, request).await?;
+            let v = send_delegated(&out_tx, &self.pending, &self.next_id, request).await?;
             let resp: ReadTextFileResponse =
                 serde_json::from_value(v).map_err(|e| e.to_string())?;
             Ok(resp.content)
@@ -141,12 +146,13 @@ impl FsBackend for AcpFs {
         let contents = contents.to_owned();
         Box::pin(async move {
             let sid = self.session_id()?;
+            let out_tx = self.out_tx.upgrade().ok_or("connection closed")?;
             let request = AgentRequest::WriteTextFileRequest(WriteTextFileRequest::new(
                 SessionId::from(sid),
                 path,
                 contents,
             ));
-            let v = send_delegated(&self.out_tx, &self.pending, &self.next_id, request).await?;
+            let v = send_delegated(&out_tx, &self.pending, &self.next_id, request).await?;
             let _: WriteTextFileResponse = serde_json::from_value(v).map_err(|e| e.to_string())?;
             Ok(())
         })
@@ -196,7 +202,9 @@ pub(crate) async fn send_delegated(
 
 struct AcpTerminal {
     caps: Arc<ClientCaps>,
-    out_tx: Sender<Value>,
+    /// Weak for the same reason as `AcpFs::out_tx`: the plugin host keeps this
+    /// backend alive past `serve()` returning.
+    out_tx: WeakSender<Value>,
     pending: PendingRequests,
     next_id: Arc<AtomicI64>,
     shared_session: SharedSession,
@@ -225,6 +233,7 @@ impl TerminalBackend for AcpTerminal {
         }
         Box::pin(async move {
             let sid = self.session_id()?;
+            let out_tx = self.out_tx.upgrade().ok_or("connection closed")?;
             let env: Vec<EnvVariable> = spec
                 .env
                 .as_ref()
@@ -248,7 +257,7 @@ impl TerminalBackend for AcpTerminal {
             create.cwd = spec.cwd.clone().map(PathBuf::from);
 
             let create_val = send_delegated(
-                &self.out_tx,
+                &out_tx,
                 &self.pending,
                 &self.next_id,
                 AgentRequest::CreateTerminalRequest(create),
@@ -262,18 +271,19 @@ impl TerminalBackend for AcpTerminal {
             let (event_tx, event_rx) = flume::unbounded::<TerminalEvent>();
             self.spawn_poller(sid.clone(), terminal_id.clone(), event_tx);
 
-            let kill_out = self.out_tx.clone();
+            let kill_out = WeakSender::clone(&self.out_tx);
             let kill_pending = Arc::clone(&self.pending);
             let kill_next = Arc::clone(&self.next_id);
             let kill_sid = sid;
             let kill_tid = terminal_id;
             let kill: Box<dyn FnOnce() + Send> = Box::new(move || {
-                let out_tx = kill_out.clone();
+                let out_tx = kill_out.upgrade();
                 let pending = Arc::clone(&kill_pending);
                 let next = Arc::clone(&kill_next);
                 let sid = kill_sid.clone();
                 let tid = kill_tid.clone();
                 tokio::spawn(async move {
+                    let Some(out_tx) = out_tx else { return };
                     let _ = send_delegated(
                         &out_tx,
                         &pending,
@@ -298,12 +308,15 @@ impl TerminalBackend for AcpTerminal {
 
 impl AcpTerminal {
     fn spawn_poller(&self, sid: String, terminal_id: TerminalId, event_tx: Sender<TerminalEvent>) {
-        let out_tx = self.out_tx.clone();
+        let out_tx = WeakSender::clone(&self.out_tx);
         let pending = Arc::clone(&self.pending);
         let next = Arc::clone(&self.next_id);
         tokio::spawn(async move {
             let mut sent = 0usize;
             loop {
+                let Some(out_tx) = out_tx.upgrade() else {
+                    return;
+                };
                 let resp = match send_delegated(
                     &out_tx,
                     &pending,
@@ -528,7 +541,7 @@ pub async fn serve(params: AcpParams) -> color_eyre::Result<()> {
 
     let acp_terminal: Arc<dyn TerminalBackend> = Arc::new(AcpTerminal {
         caps: Arc::clone(&server.client_caps),
-        out_tx: server.out_tx.clone(),
+        out_tx: server.out_tx.downgrade(),
         pending: Arc::clone(&server.pending_requests),
         next_id: Arc::clone(&server.next_request_id),
         shared_session: Arc::clone(&server.shared_session),
@@ -828,7 +841,7 @@ async fn spawn_session(
 fn build_delegated_fs(srv: &Server) -> Arc<dyn FsBackend> {
     Arc::new(AcpFs {
         caps: Arc::clone(&srv.client_caps),
-        out_tx: srv.out_tx.clone(),
+        out_tx: srv.out_tx.downgrade(),
         pending: Arc::clone(&srv.pending_requests),
         next_id: Arc::clone(&srv.next_request_id),
         shared_session: Arc::clone(&srv.shared_session),
