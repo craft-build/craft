@@ -37,6 +37,7 @@ pub struct TextInput {
     soft_wrap: bool,
     on_submit: Option<Rc<SubmitCallback>>,
     on_change: Option<Rc<ChangeCallback>>,
+    on_cancel: Option<Rc<ChangeCallback>>,
 }
 
 impl TextInput {
@@ -51,11 +52,19 @@ impl TextInput {
             soft_wrap: false,
             on_submit: None,
             on_change: None,
+            on_cancel: None,
         }
     }
 
     pub fn on_submit(mut self, f: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
         self.on_submit = Some(Rc::new(f));
+        self
+    }
+
+    /// Called when Escape is pressed with no text, after releasing focus.
+    /// Nonempty inputs keep their contents and only release focus.
+    pub fn on_cancel(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_cancel = Some(Rc::new(f));
         self
     }
 
@@ -247,6 +256,14 @@ impl TextInput {
             }
             "escape" => {
                 window.blur();
+                if self.content.is_empty()
+                    && let Some(cb) = self.on_cancel.clone()
+                {
+                    cx.stop_propagation();
+                    cb(window, cx);
+                    cx.notify();
+                    return;
+                }
             }
             _ => {
                 if !ks.modifiers.platform

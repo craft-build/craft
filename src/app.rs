@@ -989,9 +989,20 @@ impl App {
         }
         let weak = cx.weak_entity();
         let submit_key = key.clone();
+        let cancel_owner = weak.clone();
+        let cancel_key = key.clone();
         let input = cx.new(|cx| {
             TextInput::new(cx, "Comment...")
                 .soft_wrap()
+                .on_cancel(move |window, cx| {
+                    cancel_owner
+                        .update(cx, |app, cx| {
+                            app.comment_drafts.remove(&cancel_key);
+                            window.focus(&app.selection_focus);
+                            cx.notify();
+                        })
+                        .ok();
+                })
                 .on_submit(move |text, _window, cx| {
                     let text = text.to_string();
                     let key = submit_key.clone();
@@ -2196,6 +2207,45 @@ mod session_config_tests {
                 "hi"
             );
         });
+        // Escape must preserve a nonempty draft, then close it once emptied.
+        let input = cx.update(|window, cx| {
+            let app = app.read(cx);
+            let input = app
+                .comment_drafts
+                .get(&app.comment_key(anchor))
+                .unwrap()
+                .input
+                .clone();
+            window.focus(&input.read(cx).focus_handle);
+            input
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|_, cx| {
+            assert_eq!(input.read(cx).content, "hi");
+            assert!(
+                app.read(cx)
+                    .comment_drafts
+                    .contains_key(&app.read(cx).comment_key(anchor))
+            );
+        });
+        cx.update(|window, cx| window.focus(&input.read(cx).focus_handle));
+        cx.simulate_keystrokes("cmd-a backspace escape");
+        cx.update(|window, cx| {
+            assert!(app.read(cx).comment_drafts.is_empty());
+            assert!(app.read(cx).comments.is_empty());
+            assert!(app.read(cx).selection_focus.is_focused(window));
+        });
+
+        // A manually opened, untouched comment uses the same cancellation path.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let key = app.comment_key(anchor);
+                app.open_comment_box(key.clone(), "test reference".into(), cx);
+                window.focus(&app.comment_drafts[&key].input.read(cx).focus_handle);
+            });
+        });
+        cx.simulate_keystrokes("escape");
+        cx.update(|_, cx| assert!(app.read(cx).comment_drafts.is_empty()));
     }
 
     #[test]
