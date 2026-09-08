@@ -25,6 +25,12 @@ const MIN_OUTPUT_TOKENS: u32 = 4096;
 /// Servers like vLLM reject `prompt + max_tokens > window` even when the
 /// prompt alone fits. Returns the reduced cap, or `None` when the model's own
 /// cap already fits.
+///
+/// `prompt_tokens` must not be the chars/4 estimate alone. That estimate is a
+/// floor, and on code or JSON it lands well under the real count, which leaves
+/// `remaining` too generous and skips the clamp on exactly the long sessions
+/// this exists for. The caller's measured count from the last response is the
+/// better number whenever it is larger.
 fn clamped_output_tokens(model: &Model, prompt_tokens: u32) -> Option<u32> {
     let max_output = model.max_output_tokens?;
     let remaining = model.context_window.saturating_sub(prompt_tokens);
@@ -164,13 +170,15 @@ pub(crate) async fn stream_with_retry(
     event_tx: &EventSender,
     cancel: &CancelToken,
     opts: RequestOptions,
+    measured_prompt_tokens: u32,
     session_id: Option<&SessionRef>,
     fallbacks: &[ChainHop],
     ttsr: Option<Arc<TtsrManager>>,
     turn: u32,
 ) -> Result<(StreamResponse, Option<String>), StreamError> {
     let mut active_provider: &dyn Provider = provider;
-    let prompt_tokens = crate::agent::run::estimate_prompt_tokens(messages, system, tools);
+    let prompt_tokens = crate::agent::run::estimate_prompt_tokens(messages, system, tools)
+        .max(measured_prompt_tokens);
     let clamped_primary = clamped_model_copy(model, prompt_tokens);
     let mut active_model: &Model = clamped_primary.as_ref().unwrap_or(model);
     let messages = adapt_images_for_model(active_model, messages);
@@ -400,6 +408,7 @@ mod tests {
             &event_tx,
             &crate::cancel::CancelToken::none(),
             RequestOptions::default(),
+            0,
             None,
             &[fallback_hop],
             None,
@@ -454,6 +463,7 @@ mod tests {
                 &event_tx,
                 &cancel,
                 RequestOptions::default(),
+                0,
                 None,
                 &[fallback_hop],
                 None,

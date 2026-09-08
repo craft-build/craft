@@ -125,6 +125,7 @@ impl<'h> Agent<'h> {
             &self.io.event_tx,
             &self.io.cancel,
             self.io.opts,
+            self.context_size,
             self.io.session_id.as_ref(),
             &self.io.fallback_chain,
             self.flow.ttsr.clone(),
