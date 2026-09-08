@@ -1413,42 +1413,49 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
             ))
         })
         .when(!pending.is_empty(), |d| {
-            d.child(div().flex().gap(px(6.)).flex_wrap().mb(px(4.)).children(
-                pending.into_iter().map(|p| {
-                    let key = p.key.clone();
-                    let idx = p.idx;
-                    div()
-                        .max_w_full()
-                        .min_w(px(0.))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(11.))
-                        .px(px(6.))
-                        .py(px(2.))
-                        .bg(rgba(theme::PENDING_CHIP_BG))
-                        .border_1()
-                        .border_color(rgba(theme::PENDING_CHIP_BORDER))
-                        .text_color(rgb(theme::ACCENT))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .whitespace_normal()
-                                .line_height(px(16.))
-                                .child(format!("{}: {}", p.label, comment_preview(&p.text))),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("remove-pending-{key}-{idx}")))
-                                .cursor_pointer()
-                                .child("×")
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.remove_pending_comment(&key, idx, cx)
-                                })),
-                        )
-                }),
-            ))
+            d.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .mb(px(4.))
+                    .children(pending.into_iter().map(|p| {
+                        let key = p.key.clone();
+                        let idx = p.idx;
+                        div()
+                            .w_full()
+                            .min_w(px(0.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(11.))
+                            .px(px(6.))
+                            .py(px(2.))
+                            .bg(rgba(theme::PENDING_CHIP_BG))
+                            .border_1()
+                            .border_color(rgba(theme::PENDING_CHIP_BORDER))
+                            .text_color(rgb(theme::ACCENT))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .whitespace_normal()
+                                    .line_height(px(16.))
+                                    .child(format!("{}: {}", p.label, comment_preview(&p.text))),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("remove-pending-{key}-{idx}")))
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .child("×")
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        app.remove_pending_comment(&key, idx, cx)
+                                    })),
+                            )
+                    })),
+            )
         })
         .child(
             div()
