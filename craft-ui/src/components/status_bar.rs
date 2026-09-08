@@ -19,7 +19,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const FAST_LABEL: &str = " [fast]";
 const YOLO_LABEL: &str = " [yolo]";
-const YOLO_DIM_FACTOR: f32 = 0.5;
+const YOLO_DIM_FACTOR: f32 = 0.15;
 const TRUNCATE_PREFIX: &str = "..";
 
 const CONTEXT_BAR_WIDTH: usize = 10;
