@@ -125,6 +125,7 @@ pub struct App {
     pub expanded_steps: HashSet<String>,
     pub comment_drafts: HashMap<String, CommentDraft>,
     pub comments: HashMap<String, Vec<Comment>>,
+    pub selection_focus: gpui::FocusHandle,
 
     pub thread_scroll: ScrollHandle,
     pub diff_scroll: ScrollHandle,
@@ -142,6 +143,21 @@ pub struct App {
 
 impl App {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let persisted = StateStore::for_user().load().unwrap_or_default();
+        let (agent_profiles, config_error) = match ConfigStore::for_user().load() {
+            Ok(Some(registry)) => (registry.agents, None),
+            Ok(None) => (vec![], None),
+            Err(error) => (vec![], Some(format!("Could not load agents: {error}"))),
+        };
+        Self::from_state(persisted, agent_profiles, config_error, cx)
+    }
+
+    fn from_state(
+        persisted: PersistedState,
+        agent_profiles: Vec<AgentProfile>,
+        config_error: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let weak = cx.weak_entity();
         let composer = cx.new(|cx| {
             TextInput::new(cx, "Message the agent... (Cmd+Enter to send)")
@@ -163,12 +179,6 @@ impl App {
         let ssh_host_input = cx.new(|cx| TextInput::new(cx, "host from ~/.ssh/config"));
         let ssh_user_input = cx.new(|cx| TextInput::new(cx, "optional SSH user"));
         let ssh_key_input = cx.new(|cx| TextInput::new(cx, "optional identity file"));
-        let persisted = StateStore::for_user().load().unwrap_or_default();
-        let (agent_profiles, config_error) = match ConfigStore::for_user().load() {
-            Ok(Some(registry)) => (registry.agents, None),
-            Ok(None) => (vec![], None),
-            Err(error) => (vec![], Some(format!("Could not load agents: {error}"))),
-        };
         let screen = if persisted.projects.is_empty() {
             Screen::Onboarding
         } else {
@@ -213,6 +223,7 @@ impl App {
             expanded_steps: HashSet::new(),
             comment_drafts: HashMap::new(),
             comments: persisted.comments,
+            selection_focus: cx.focus_handle(),
             thread_scroll: ScrollHandle::new(),
             diff_scroll: ScrollHandle::new(),
             checkpoints_by_project: persisted.checkpoints_by_project,
@@ -1835,6 +1846,8 @@ impl App {
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("app")
+            .track_focus(&self.selection_focus)
             .size_full()
             .relative()
             .bg(rgb(theme::BG))
@@ -1843,9 +1856,9 @@ impl Render for App {
             .text_size(px(12.))
             .overflow_hidden()
             .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, window, cx| {
-                // Input fields own their keystrokes; only a blurred content
-                // selection can start a comment or supply the copy shortcut.
-                if window.focused(cx).is_some() {
+                // Selection owns keyboard focus until it hands off to a draft.
+                // Focused inputs still own their own typing and copy shortcuts.
+                if !app.selection_focus.is_focused(window) {
                     return;
                 }
                 let shortcut =
@@ -2053,6 +2066,137 @@ mod session_config_tests {
     use agent_client_protocol::schema::v1::{
         Diff as AcpDiff, ElicitationContentValue, SessionConfigSelectOption,
     };
+
+    #[gpui::test]
+    fn selecting_markdown_then_typing_opens_and_focuses_a_comment(cx: &mut gpui::TestAppContext) {
+        assert_type_to_comment("assistant", cx);
+    }
+
+    #[gpui::test]
+    fn selecting_user_text_then_typing_opens_a_comment(cx: &mut gpui::TestAppContext) {
+        assert_type_to_comment("user", cx);
+    }
+
+    #[gpui::test]
+    fn selecting_inline_diff_then_typing_opens_a_comment(cx: &mut gpui::TestAppContext) {
+        assert_type_to_comment("inline-diff", cx);
+    }
+
+    #[gpui::test]
+    fn selecting_file_diff_then_typing_opens_a_comment(cx: &mut gpui::TestAppContext) {
+        assert_type_to_comment("file-diff", cx);
+    }
+
+    fn assert_type_to_comment(surface: &str, cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, cx| {
+            // Build the real app without reading or writing the user's config.
+            let mut app = App::from_state(PersistedState::default(), vec![], None, cx);
+            let project = Project {
+                id: "project".into(),
+                name: "Test".into(),
+                path: ".".into(),
+                desc: String::new(),
+                updated: String::new(),
+                checkpoint_label: String::new(),
+                model: String::new(),
+            };
+            app.sessions_by_project.insert(
+                project.id.clone(),
+                vec![Session {
+                    id: "session".into(),
+                    name: "Test".into(),
+                    messages: vec![Message {
+                        id: "selection".into(),
+                        role: if surface == "user" {
+                            Role::User
+                        } else {
+                            Role::Assistant
+                        },
+                        text: "**selected text**".into(),
+                        time: None,
+                        context: vec![],
+                        attached_comments: vec![],
+                        checkpoint_label: None,
+                        steps: None,
+                        diff: None,
+                        terminal: None,
+                    }],
+                    acp_session_id: None,
+                    archived: false,
+                    agent_profile_id: None,
+                }],
+            );
+            app.active_project = Some(project);
+            app.active_session_id = Some("session".into());
+            app.screen = Screen::Workspace;
+            let diff = Diff {
+                file: "main.rs".into(),
+                stat: "+1".into(),
+                hunk_header: "@@ -0,0 +1 @@".into(),
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Add,
+                    text: "selected text".into(),
+                }],
+            };
+            if surface == "inline-diff" {
+                app.sessions_by_project.get_mut("project").unwrap()[0].messages[0].diff =
+                    Some(diff);
+            } else if surface == "file-diff" {
+                app.file_diffs.insert(diff.file.clone(), diff);
+                app.active_diff_file = Some("main.rs".into());
+            }
+            app
+        });
+        let (selector, anchor) = match surface {
+            "user" => ("user-markdown-selection", "msg_selection"),
+            "inline-diff" => ("diff-text-session:session:selection_0", "selection_0"),
+            "file-diff" => ("diff-text-session:session:f_main.rs_0", "f_main.rs_0"),
+            _ => ("assistant-markdown-selection", "msg_selection"),
+        };
+        let bounds = cx.debug_bounds(selector).unwrap();
+        let position = bounds.origin + gpui::point(px(0.), px(5.));
+        cx.simulate_mouse_move(position, None, Default::default());
+        cx.simulate_mouse_down(position, gpui::MouseButton::Left, Default::default());
+        let end = gpui::point(bounds.right() - px(1.), position.y);
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, Default::default());
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, Default::default());
+        cx.update(|window, cx| {
+            assert!(app.read(cx).selection_focus.is_focused(window));
+        });
+        cx.simulate_keystrokes("cmd-c");
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "selected text"
+        );
+        cx.update(|_, cx| assert!(app.read(cx).comment_drafts.is_empty()));
+        cx.simulate_keystrokes("h i");
+        cx.update(|window, cx| {
+            let app = app.read(cx);
+            let draft = app.comment_drafts.get(&app.comment_key(anchor)).unwrap();
+            assert_eq!(draft.selections, ["selected text"]);
+            assert_eq!(draft.input.read(cx).content, "hi");
+            assert!(draft.input.read(cx).focus_handle.is_focused(window));
+            assert!(app.composer.read(cx).content.is_empty());
+        });
+        // Focusing another input must not reopen or continue the comment.
+        cx.update(|window, cx| {
+            window.focus(&app.read(cx).composer.read(cx).focus_handle);
+        });
+        cx.simulate_keystrokes("x");
+        cx.update(|_, cx| {
+            let app = app.read(cx);
+            assert_eq!(app.composer.read(cx).content, "x");
+            assert_eq!(
+                app.comment_drafts
+                    .get(&app.comment_key(anchor))
+                    .unwrap()
+                    .input
+                    .read(cx)
+                    .content,
+                "hi"
+            );
+        });
+    }
 
     #[test]
     fn selection_comments_preserve_complete_multiline_references() {

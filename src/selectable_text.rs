@@ -27,6 +27,7 @@ pub struct CommentTarget {
     pub key: String,
     pub label: String,
     pub scroll_handle: gpui::ScrollHandle,
+    pub focus_handle: gpui::FocusHandle,
 }
 
 struct ActiveSelection {
@@ -331,7 +332,11 @@ impl Element for SelectableText {
                             && event.button == MouseButton::Left
                             && hitbox.is_hovered(window)
                         {
-                            window.blur();
+                            if let Some(target) = &comment_target {
+                                window.focus(&target.focus_handle);
+                            } else {
+                                window.blur();
+                            }
                             let index = Self::index_at(&layout, event.position);
                             let range = if event.click_count >= 3 {
                                 0..source.len()
@@ -465,12 +470,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn comment_selection_keeps_the_target_and_exact_quote_and_is_consumed_once() {
+    #[gpui::test]
+    fn comment_selection_keeps_the_target_and_exact_quote_and_is_consumed_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let target = CommentTarget {
             key: "session:msg_1".into(),
             label: "assistant reply".into(),
             scroll_handle: gpui::ScrollHandle::new(),
+            focus_handle: cx.update(|cx| cx.focus_handle()),
         };
         SelectableText::remember_selection("markdown", "é\ncode", 0..7, Some(&target));
         let (selected_target, quote) = take_comment_selection().unwrap();
@@ -481,14 +489,15 @@ mod tests {
         assert!(!SelectableText::is_active("markdown"));
     }
 
-    #[test]
-    fn empty_or_unanchored_selection_does_not_start_a_comment() {
+    #[gpui::test]
+    fn empty_or_unanchored_selection_does_not_start_a_comment(cx: &mut gpui::TestAppContext) {
         SelectableText::remember_selection("plain", "text", 0..4, None);
         assert!(take_comment_selection().is_none());
         let target = CommentTarget {
             key: "session:msg_1".into(),
             label: "assistant reply".into(),
             scroll_handle: gpui::ScrollHandle::new(),
+            focus_handle: cx.update(|cx| cx.focus_handle()),
         };
         SelectableText::remember_selection("markdown", "text", 1..1, Some(&target));
         assert!(take_comment_selection().is_none());

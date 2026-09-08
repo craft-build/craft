@@ -918,6 +918,7 @@ fn user_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl IntoEl
                 key: comment_key.clone(),
                 label: "user message".to_string(),
                 scroll_handle: app.thread_scroll.clone(),
+                focus_handle: app.selection_focus.clone(),
             },
         ))
         .when_some(app.comments.get(&comment_key), |d, comments| {
@@ -1061,6 +1062,7 @@ fn assistant_message(
                 key: comment_key.clone(),
                 label: "assistant reply".to_string(),
                 scroll_handle: app.thread_scroll.clone(),
+                focus_handle: app.selection_focus.clone(),
             },
         ));
     }
@@ -1351,6 +1353,7 @@ fn diff_line_view(
                 .text_size(px(12.))
                 .whitespace_nowrap()
                 .text_color(rgb(theme::TEXT_PRIMARY))
+                .debug_selector(|| format!("diff-text-{key}"))
                 .child(
                     SelectableText::new(
                         format!("diff-text-{key}"),
@@ -1361,6 +1364,7 @@ fn diff_line_view(
                         key: key.clone(),
                         label: label.clone(),
                         scroll_handle,
+                        focus_handle: app.selection_focus.clone(),
                     }),
                 ),
         )

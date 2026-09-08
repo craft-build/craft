@@ -444,6 +444,7 @@ pub fn markdown_view(
 ) -> impl IntoElement {
     let id = id.into();
     div()
+        .debug_selector(|| id.clone())
         .w_full()
         .min_w(px(0.))
         .flex()
