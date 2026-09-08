@@ -26,6 +26,7 @@ use crate::async_runtime;
 use crate::config::{ProjectAgentConfig, TransportConfig};
 
 const INTERACTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const VALIDATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug)]
 pub struct AnchoredComment {
@@ -125,6 +126,33 @@ pub enum AcpEvent {
     TurnCancelled,
     Error(String),
     Disconnected(String),
+}
+
+pub async fn validate_agent(config: ProjectAgentConfig) -> Result<(), String> {
+    let agent = config.agent()?;
+    let handshake =
+        Client
+            .builder()
+            .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
+                connection
+                    .send_request(
+                        InitializeRequest::new(ProtocolVersion::V1)
+                            .client_capabilities(ClientCapabilities::default())
+                            .client_info(Implementation::new("Forge", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .block_task()
+                    .await?;
+                Ok::<(), Error>(())
+            });
+
+    match tokio::time::timeout(VALIDATION_TIMEOUT, handshake).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("ACP initialization failed: {error}")),
+        Err(_) => Err(format!(
+            "ACP initialization timed out after {} seconds",
+            VALIDATION_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 enum AcpCommand {
@@ -432,5 +460,19 @@ mod tests {
             panic!("expected grounded comment text")
         };
         assert!(comment.text.contains("target: src/main.rs line 8"));
+    }
+
+    #[test]
+    fn validation_rejects_a_command_that_cannot_start() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(validate_agent(ProjectAgentConfig {
+            agent_command: "forge-test-command-that-does-not-exist".into(),
+            transport: TransportConfig::Local,
+        }));
+
+        assert!(result.is_err());
     }
 }

@@ -87,6 +87,7 @@ fn section_label(text: &'static str) -> impl IntoElement {
 
 fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let remote = app.config_remote;
+    let validating = app.validating_agent_config;
     let profiles = app.agent_profiles.clone();
     div()
         .flex()
@@ -201,9 +202,17 @@ fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .py(px(7.))
                 .bg(rgb(theme::SELECTION))
                 .text_size(px(12.))
-                .cursor_pointer()
-                .child("Register agent")
-                .on_click(cx.listener(|app, _, _, cx| app.save_agent_config(cx))),
+                .when(!validating, |d| d.cursor_pointer())
+                .child(if validating {
+                    "Checking agent…"
+                } else {
+                    "Register agent"
+                })
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if !validating {
+                        app.save_agent_config(cx);
+                    }
+                })),
         )
 }
 

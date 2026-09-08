@@ -11,7 +11,7 @@ use gpui::{Context, Entity, PathPromptOptions, ScrollHandle, Window, div, px, rg
 
 use crate::acp::{
     AcpClient, AcpEvent, AnchoredComment, ElicitationDecision, PendingElicitation,
-    PendingPermission, PermissionDecision, TurnInput,
+    PendingPermission, PermissionDecision, TurnInput, validate_agent,
 };
 use crate::async_runtime;
 use crate::checkpoint::{Checkpoint, CheckpointManager};
@@ -101,6 +101,7 @@ pub struct App {
     pub checkpoints_by_project: HashMap<String, Vec<Checkpoint>>,
 
     pub config_remote: bool,
+    pub validating_agent_config: bool,
     pub agent_profile_name_input: Entity<TextInput>,
     pub agent_command_input: Entity<TextInput>,
     pub remote_workspace_input: Entity<TextInput>,
@@ -180,6 +181,7 @@ impl App {
             thread_scroll: ScrollHandle::new(),
             checkpoints_by_project: persisted.checkpoints_by_project,
             config_remote: false,
+            validating_agent_config: false,
             agent_profile_name_input,
             agent_command_input,
             remote_workspace_input,
@@ -549,6 +551,9 @@ impl App {
     }
 
     pub fn save_agent_config(&mut self, cx: &mut Context<Self>) {
+        if self.validating_agent_config {
+            return;
+        }
         let Some(project) = self.active_project.as_ref() else {
             self.toast = Some("Open a project before configuring an agent".into());
             cx.notify();
@@ -599,6 +604,52 @@ impl App {
                 transport,
             },
         };
+        if self
+            .agent_profiles
+            .iter()
+            .any(|registered| registered.name.eq_ignore_ascii_case(&profile.name))
+        {
+            self.toast = Some("An agent with this name is already registered".into());
+            cx.notify();
+            return;
+        }
+        self.validating_agent_config = true;
+        self.toast = Some("Checking agent command…".into());
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let config = profile.config.clone();
+        async_runtime::spawn(async move {
+            let _ = sender.send(validate_agent(config).await);
+        });
+        cx.spawn(async move |this, cx| {
+            let result = receiver
+                .await
+                .unwrap_or_else(|_| Err("agent validation task stopped unexpectedly".into()));
+            this.update(cx, |app, cx| {
+                app.finish_agent_registration(project_id, profile, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_agent_registration(
+        &mut self,
+        project_id: String,
+        profile: AgentProfile,
+        validation: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.validating_agent_config = false;
+        if self.active_project.as_ref().map(|project| &project.id) != Some(&project_id) {
+            cx.notify();
+            return;
+        }
+        if let Err(error) = validation {
+            self.toast = Some(format!("Could not register agent: {error}"));
+            cx.notify();
+            return;
+        }
         let mut registry = ProjectAgentRegistry {
             agents: self.agent_profiles.clone(),
         };
