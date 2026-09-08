@@ -16,7 +16,7 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                 .flex_1()
                 .id("projects-scroll")
                 .overflow_y_scroll()
-                .p(px(28.))
+                .p(px(32.))
                 .flex()
                 .justify_center()
                 .child(
@@ -29,13 +29,15 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
                             div()
                                 .text_size(px(11.))
                                 .text_color(rgb(theme::TEXT_MUTED))
-                                .child("WORKSPACES"),
+                                .child("Workspaces"),
                         )
                         .when(app.projects.is_empty(), |d| {
                             d.child(
                                 div()
                                     .border_1()
                                     .border_color(rgb(theme::BORDER))
+                                    .rounded(px(8.))
+                                    .bg(rgb(theme::PANEL_BG))
                                     .p(px(20.))
                                     .text_size(px(12.))
                                     .text_color(rgb(theme::TEXT_MUTED))
@@ -55,13 +57,14 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
 fn top_bar(window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
     chrome::draggable(
         div()
-            .h(px(44.))
+            .h(px(36.))
             .flex_shrink_0()
             .flex()
             .items_center()
             .justify_between()
             .pl(px(chrome::leading_inset()))
             .pr(px(16.))
+            .bg(rgb(theme::PANEL_BG))
             .border_b_1()
             .border_color(rgb(theme::BORDER)),
     )
@@ -70,7 +73,13 @@ fn top_bar(window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(div().w(px(8.)).h(px(8.)).bg(rgb(theme::ACCENT)))
+            .child(
+                div()
+                    .w(px(8.))
+                    .h(px(8.))
+                    .rounded_full()
+                    .bg(rgb(theme::ACCENT)),
+            )
             .child(
                 div()
                     .text_size(px(13.))
@@ -89,6 +98,7 @@ fn top_bar(window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
                     .px(px(12.))
                     .py(px(6.))
                     .bg(rgb(theme::ACCENT))
+                    .rounded(px(5.))
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::ACCENT_DARK_TEXT))
@@ -103,6 +113,7 @@ fn top_bar(window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
                     .py(px(6.))
                     .border_1()
                     .border_color(rgb(theme::BORDER))
+                    .rounded(px(5.))
                     .text_size(px(12.))
                     .text_color(rgb(theme::TEXT_SECONDARY))
                     .cursor_pointer()
@@ -120,6 +131,7 @@ fn project_card(p: crate::state::Project, cx: &mut Context<App>) -> gpui::AnyEle
         .border_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::PANEL_BG))
+        .rounded(px(8.))
         .p(px(16.))
         .flex()
         .flex_col()

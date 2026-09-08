@@ -110,7 +110,7 @@ fn control_button(
         .text_size(px(12.))
         .text_color(rgb(theme::TEXT_SECONDARY))
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(theme::HOVER_BG)))
+        .hover(|s| s.bg(rgb(theme::HOVER_BG)).rounded(px(4.)))
         .child(glyph)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {

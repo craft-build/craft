@@ -1751,7 +1751,7 @@ impl Render for App {
             .bg(rgb(theme::BG))
             .text_color(rgb(theme::TEXT_PRIMARY))
             .font_family(theme::FONT_FAMILY)
-            .text_size(px(13.))
+            .text_size(px(12.))
             .overflow_hidden()
             .child(match self.screen {
                 Screen::Onboarding => {
@@ -1773,6 +1773,7 @@ impl Render for App {
                         .bg(rgb(theme::INPUT_BG))
                         .border_1()
                         .border_color(rgb(theme::SELECTION))
+                        .rounded(px(7.))
                         .text_size(px(12.))
                         .px(px(12.))
                         .py(px(8.))

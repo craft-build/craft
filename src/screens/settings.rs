@@ -14,13 +14,14 @@ pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl
         .child(
             chrome::draggable(
                 div()
-                    .h(px(44.))
+                    .h(px(36.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_between()
                     .pl(px(chrome::leading_inset()))
                     .pr(px(16.))
+                    .bg(rgb(theme::PANEL_BG))
                     .border_b_1()
                     .border_color(rgb(theme::BORDER)),
             )
@@ -110,6 +111,7 @@ fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .py(px(8.))
                 .border_1()
                 .border_color(rgb(theme::BORDER))
+                .rounded(px(7.))
                 .child(
                     div()
                         .flex_1()
@@ -166,6 +168,7 @@ fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .py(px(8.))
                 .border_1()
                 .border_color(rgb(theme::BORDER))
+                .rounded(px(7.))
                 .cursor_pointer()
                 .child(div().text_size(px(12.)).child("Transport"))
                 .child(
@@ -191,6 +194,7 @@ fn agent_section(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .px(px(12.))
                 .py(px(7.))
                 .bg(rgb(theme::SELECTION))
+                .rounded(px(6.))
                 .text_size(px(12.))
                 .when(!validating, |d| d.cursor_pointer())
                 .child(if validating {
@@ -215,6 +219,7 @@ fn input_row(label: &'static str, input: gpui::Entity<TextInput>) -> impl IntoEl
         .py(px(8.))
         .border_1()
         .border_color(rgb(theme::BORDER))
+        .rounded(px(7.))
         .child(
             div()
                 .w(px(100.))

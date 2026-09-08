@@ -50,13 +50,14 @@ fn top_bar(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl In
 
     chrome::draggable(
         div()
-            .h(px(44.))
+            .h(px(36.))
             .flex_shrink_0()
             .flex()
             .items_center()
             .justify_between()
             .pl(px(chrome::leading_inset()))
-            .pr(px(12.))
+            .pr(px(8.))
+            .bg(rgb(theme::PANEL_BG))
             .border_b_1()
             .border_color(rgb(theme::BORDER)),
     )
@@ -64,7 +65,7 @@ fn top_bar(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl In
         div()
             .flex()
             .items_center()
-            .gap(px(12.))
+            .gap(px(10.))
             .child(icon_button("all-workspaces", "←", cx, |app, cx| {
                 app.go_projects(cx)
             }))
@@ -73,13 +74,13 @@ fn top_bar(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl In
             }))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(name),
             )
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(px(10.))
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child(path),
             ),
@@ -92,12 +93,13 @@ fn top_bar(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl In
             .child(
                 div()
                     .id("toggle-checkpoints")
-                    .px(px(10.))
-                    .py(px(6.))
+                    .px(px(9.))
+                    .py(px(4.))
                     .bg(rgb(theme::INPUT_BG))
                     .border_1()
                     .border_color(rgb(theme::BORDER))
-                    .text_size(px(12.))
+                    .rounded(px(5.))
+                    .text_size(px(11.))
                     .text_color(rgb(theme::TEXT_SECONDARY))
                     .cursor_pointer()
                     .child(format!("Checkpoints ({checkpoint_count})"))
@@ -106,11 +108,12 @@ fn top_bar(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl In
             .child(
                 div()
                     .id("goto-settings")
-                    .px(px(10.))
-                    .py(px(6.))
+                    .px(px(9.))
+                    .py(px(4.))
                     .border_1()
                     .border_color(rgb(theme::BORDER))
-                    .text_size(px(12.))
+                    .rounded(px(5.))
+                    .text_size(px(11.))
                     .text_color(rgb(theme::TEXT_SECONDARY))
                     .cursor_pointer()
                     .child("Settings")
@@ -134,8 +137,10 @@ fn icon_button(
         .text_size(px(14.))
         .text_color(rgb(theme::TEXT_SECONDARY))
         .cursor_pointer()
-        .px(px(4.))
-        .py(px(2.))
+        .px(px(5.))
+        .py(px(3.))
+        .rounded(px(4.))
+        .hover(|style| style.bg(rgb(theme::HOVER_BG)))
         .child(label)
         .on_click(cx.listener(move |app, _, _, cx| on_click(app, cx)))
 }
@@ -147,20 +152,21 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let active_session_id = app.active_session_id.clone();
 
     div()
-        .w(px(190.))
+        .w(px(210.))
         .flex_shrink_0()
+        .bg(rgb(theme::PANEL_BG))
         .border_r_1()
         .border_color(rgb(theme::BORDER))
         .id("sidebar-scroll")
         .overflow_y_scroll()
-        .py(px(10.))
+        .py(px(8.))
         .child(
             div()
-                .text_size(px(11.))
-                .text_color(rgb(theme::TEXT_MUTED))
+                .text_size(px(12.))
+                .text_color(rgb(theme::TEXT_SECONDARY))
                 .px(px(12.))
-                .pb(px(8.))
-                .child("PROJECTS"),
+                .pb(px(6.))
+                .child("Projects"),
         )
         .children(app.projects.clone().into_iter().map(|p| {
             let expanded = !app.collapsed_projects.contains(&p.id);
@@ -192,7 +198,7 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .items_center()
                         .gap(px(6.))
                         .px(px(12.))
-                        .py(px(5.))
+                        .py(px(4.))
                         .cursor_pointer()
                         .hover(|s| s.bg(rgb(theme::HOVER_BG)))
                         .child(
@@ -204,12 +210,12 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(11.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(if is_active {
-                                    theme::ACCENT
-                                } else {
                                     theme::TEXT_PRIMARY
+                                } else {
+                                    theme::TEXT_SECONDARY
                                 }))
                                 .child(p.name.clone()),
                         )
@@ -229,7 +235,7 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                             .id(SharedString::from(format!("sess-{}-{}", p.id, s.id)))
                             .flex()
                             .items_center()
-                            .py(px(5.))
+                            .py(px(4.))
                             .pl(px(28.))
                             .pr(px(8.))
                             .cursor_pointer()
@@ -239,7 +245,7 @@ fn sidebar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                             } else {
                                 theme::TEXT_SECONDARY
                             }))
-                            .when(session_active, |d| d.bg(rgb(theme::INPUT_BG)))
+                            .when(session_active, |d| d.bg(rgb(theme::SELECTION)))
                             .hover(|s| s.bg(rgb(theme::HOVER_BG)))
                             .child(
                                 div()
@@ -394,14 +400,15 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
         .flex()
         .flex_col()
         .overflow_hidden()
+        .bg(rgb(theme::BG))
         .child(
             div()
                 .id("thread-scroll")
                 .track_scroll(&scroll_handle)
                 .flex_1()
                 .overflow_y_scroll()
-                .px(px(20.))
-                .py(px(16.))
+                .px(px(18.))
+                .py(px(14.))
                 .flex()
                 .flex_col()
                 .gap(px(16.))
@@ -442,6 +449,7 @@ fn permission_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .max_w(px(760.))
         .border_1()
         .border_color(rgb(theme::ACCENT))
+        .rounded(px(8.))
         .p(px(12.))
         .flex()
         .flex_col()
@@ -516,6 +524,7 @@ fn elicitation_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .max_w(px(760.))
         .border_1()
         .border_color(rgb(theme::ACCENT))
+        .rounded(px(8.))
         .p(px(12.))
         .flex()
         .flex_col()
@@ -945,6 +954,7 @@ fn chip_view(text: String) -> impl IntoElement {
         .bg(rgb(theme::INPUT_BG))
         .border_1()
         .border_color(rgb(theme::BORDER))
+        .rounded(px(5.))
         .text_color(rgb(theme::TEXT_SECONDARY))
         .child(text)
 }
@@ -968,6 +978,7 @@ fn assistant_message(
         .border_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::PANEL_BG))
+        .rounded(px(8.))
         .p(px(16.))
         .flex()
         .flex_col()
@@ -1128,6 +1139,8 @@ fn terminal_view(term: &Terminal, message_id: &str) -> impl IntoElement {
         .bg(rgb(theme::TERMINAL_BG))
         .border_1()
         .border_color(rgb(theme::TERMINAL_BORDER))
+        .rounded(px(6.))
+        .font_family(theme::MONO_FONT_FAMILY)
         .px(px(10.))
         .py(px(8.))
         .text_size(px(12.))
@@ -1223,6 +1236,7 @@ fn diff_view(
     div()
         .id(SharedString::from(scroll_id))
         .w_full()
+        .font_family(theme::MONO_FONT_FAMILY)
         .min_w(px(0.))
         .overflow_x_scroll()
         .border_1()
@@ -1390,6 +1404,7 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                         .bg(rgb(theme::INPUT_BG))
                         .border_1()
                         .border_color(rgb(theme::BORDER))
+                        .rounded(px(5.))
                         .text_color(rgb(theme::TEXT_SECONDARY))
                         .child(
                             div()
@@ -1436,6 +1451,7 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                             .bg(rgba(theme::PENDING_CHIP_BG))
                             .border_1()
                             .border_color(rgba(theme::PENDING_CHIP_BORDER))
+                            .rounded(px(5.))
                             .text_color(rgb(theme::ACCENT))
                             .child(
                                 div()
@@ -1490,6 +1506,7 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 div()
                     .w(px(360.))
                     .flex_shrink_0()
+                    .bg(rgb(theme::BG))
                     .border_l_1()
                     .border_color(rgb(theme::BORDER))
                     .id("active-diff-scroll")
@@ -1549,6 +1566,7 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .w(px(200.))
                 .flex_shrink_0()
                 .overflow_hidden()
+                .bg(rgb(theme::PANEL_BG))
                 .border_l_1()
                 .border_color(rgb(theme::BORDER))
                 .id("changed-files-scroll")
@@ -1556,11 +1574,11 @@ fn right_panels(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
                 .py(px(10.))
                 .child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_MUTED))
+                        .text_size(px(12.))
+                        .text_color(rgb(theme::TEXT_SECONDARY))
                         .px(px(12.))
                         .pb(px(8.))
-                        .child("CHANGED FILES"),
+                        .child("Changed files"),
                 )
                 .when(files.is_empty(), |d| {
                     d.child(
@@ -1676,12 +1694,12 @@ fn footer_bar(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let agent_menu_open = app.agent_menu_open;
 
     div()
-        .h(px(32.))
+        .h(px(28.))
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_between()
-        .px(px(16.))
+        .px(px(12.))
         .border_t_1()
         .border_color(rgb(theme::BORDER))
         .bg(rgb(theme::FOOTER_BG))

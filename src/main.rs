@@ -19,19 +19,19 @@ use gpui::{
 
 fn main() {
     Application::new().run(|cx: &mut gpui::App| {
-        let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1440.0), px(860.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Forge".into()),
                     // No native white titlebar — every screen draws its own
-                    // 44px bar (see `chrome.rs`) and reserves room on the
+                    // 36px bar (see `chrome.rs`) and reserves room on the
                     // left for the still-native macOS traffic lights, which
                     // are just repositioned (not hand-drawn) via
                     // `traffic_light_position` below.
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(16.0))),
+                    traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
                 // Client-side decorations on Linux, so there's no native
                 // titlebar strip left for our chrome to sit under either.

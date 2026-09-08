@@ -10,7 +10,15 @@ pub fn render(_app: &mut App, window: &mut Window, cx: &mut Context<App>) -> imp
         .size_full()
         .relative()
         .child(
-            chrome::draggable(div().absolute().top_0().left_0().right_0().h(px(44.)))
+            chrome::draggable(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(36.))
+                    .bg(rgb(theme::PANEL_BG)),
+            )
                 .flex()
                 .items_center()
                 .justify_end()
@@ -35,7 +43,13 @@ pub fn render(_app: &mut App, window: &mut Window, cx: &mut Context<App>) -> imp
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(div().w(px(9.)).h(px(9.)).bg(rgb(theme::ACCENT)))
+                        .child(
+                            div()
+                                .w(px(9.))
+                                .h(px(9.))
+                                .rounded_full()
+                                .bg(rgb(theme::ACCENT)),
+                        )
                         .child(
                             div()
                                 .text_size(px(15.))
@@ -67,6 +81,7 @@ pub fn render(_app: &mut App, window: &mut Window, cx: &mut Context<App>) -> imp
                         .px(px(16.))
                         .py(px(10.))
                         .bg(rgb(theme::ACCENT))
+                        .rounded(px(6.))
                         .text_size(px(13.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ACCENT_DARK_TEXT))
