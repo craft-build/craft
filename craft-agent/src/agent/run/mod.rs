@@ -44,7 +44,7 @@ use io::AgentIo;
 use recency::AgentRecency;
 use tools::AgentTools;
 
-pub use compaction::{estimate_message_tokens, resolve_compaction_model};
+pub use compaction::{estimate_message_tokens, estimate_prompt_tokens, resolve_compaction_model};
 
 const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
 const HOOK_BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(5);

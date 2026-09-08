@@ -16,6 +16,16 @@ use crate::cancel::CancelToken;
 use crate::{AgentError, AgentEvent, EventSender};
 
 const FUNCTIONS_PREFIX: &str = "functions.";
+const MIN_OUTPUT_TOKENS: u32 = 1024;
+
+/// Servers like vLLM reject `prompt + max_tokens > window` even when the
+/// prompt alone fits. Returns the reduced cap, or `None` when the model's own
+/// cap already fits.
+fn clamped_output_tokens(model: &Model, prompt_tokens: u32) -> Option<u32> {
+    let max_output = model.max_output_tokens?;
+    let remaining = model.context_window.saturating_sub(prompt_tokens);
+    (max_output > remaining).then(|| remaining.max(MIN_OUTPUT_TOKENS))
+}
 
 /// GPT models sometimes emit `functions.<name>`, a Codex training habit.
 /// Stripped here at the provider boundary so no raw name enters the agent;
@@ -119,6 +129,25 @@ impl From<StreamError> for AgentError {
     }
 }
 
+/// Applies [`clamped_output_tokens`], returning an owned clamped copy when the
+/// model's own cap does not fit the window.
+fn clamped_model_copy(model: &Model, prompt_tokens: u32) -> Option<Model> {
+    clamped_output_tokens(model, prompt_tokens)
+        .inspect(|&max_output| {
+            warn!(
+                model = %model.id,
+                prompt_tokens,
+                context_window = model.context_window,
+                max_output_tokens = max_output,
+                "clamped max output tokens to fit the context window"
+            )
+        })
+        .map(|max_output| Model {
+            max_output_tokens: Some(max_output),
+            ..model.clone()
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_with_retry(
     provider: &dyn Provider,
@@ -135,9 +164,12 @@ pub(crate) async fn stream_with_retry(
     turn: u32,
 ) -> Result<(StreamResponse, Option<String>), StreamError> {
     let mut active_provider: &dyn Provider = provider;
-    let mut active_model: &Model = model;
-    let messages = adapt_images_for_model(model, messages);
+    let prompt_tokens = crate::agent::run::estimate_prompt_tokens(messages, system, tools);
+    let clamped_primary = clamped_model_copy(model, prompt_tokens);
+    let mut active_model: &Model = clamped_primary.as_ref().unwrap_or(model);
+    let messages = adapt_images_for_model(active_model, messages);
     let messages = &*messages;
+    let mut clamped_fallback: Option<Model>;
     let mut next_fallback = 0usize;
     let mut retry = RetryState::new();
     let mut pending_injection: Option<String> = None;
@@ -181,7 +213,8 @@ pub(crate) async fn stream_with_retry(
                             "key rotation exhausted; advancing to fallback chain entry"
                         );
                         active_provider = &*hop.provider;
-                        active_model = &hop.model;
+                        clamped_fallback = clamped_model_copy(&hop.model, prompt_tokens);
+                        active_model = clamped_fallback.as_ref().unwrap_or(&hop.model);
                         next_fallback += 1;
                         retry = RetryState::new();
                         advanced = true;
@@ -230,6 +263,32 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use test_case::test_case;
+
+    const WINDOW: u32 = 262_144;
+    const BIG_PROMPT: u32 = 162_145;
+    const BIG_MAX_OUTPUT: u32 = 100_000;
+
+    fn model_with(context_window: u32, max_output_tokens: Option<u32>) -> Model {
+        let mut model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        model.context_window = context_window;
+        model.max_output_tokens = max_output_tokens;
+        model
+    }
+
+    #[test_case(WINDOW, Some(BIG_MAX_OUTPUT), 1_000, None; "cap_fits_inside_remaining_window")]
+    #[test_case(WINDOW, Some(BIG_MAX_OUTPUT), BIG_PROMPT, Some(WINDOW - BIG_PROMPT); "cap_exceeds_remaining_window")]
+    #[test_case(WINDOW, Some(BIG_MAX_OUTPUT), WINDOW + 1, Some(MIN_OUTPUT_TOKENS); "prompt_larger_than_window_floors_at_minimum")]
+    #[test_case(WINDOW, None, BIG_PROMPT, None; "provider_chosen_cap_is_left_alone")]
+    fn clamps_output_tokens_to_the_remaining_window(
+        context_window: u32,
+        max_output_tokens: Option<u32>,
+        prompt_tokens: u32,
+        expected: Option<u32>,
+    ) {
+        let model = model_with(context_window, max_output_tokens);
+        assert_eq!(clamped_output_tokens(&model, prompt_tokens), expected);
+    }
 
     /// Provider that fails the first N calls with a retryable 429 (no key to rotate),
     /// then succeeds. `fail_forever` makes it always fail (chain exhaustion case).

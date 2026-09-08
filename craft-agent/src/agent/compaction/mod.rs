@@ -21,7 +21,11 @@ pub(crate) use vcc_glue::vcc_compact;
 
 const IMAGE_PLACEHOLDER: &str = "[image]";
 const TOOL_RESULT_PLACEHOLDER: &str = "[tool result]";
-const KEEP_LAST_TOOL_RESULTS: usize = 3;
+/// How much of the newest tool output survives a compaction verbatim. This
+/// used to be a count, which kept three huge results and threw away thirty
+/// cheap ones, so one giant MCP dump could sit in the protected tail and blow
+/// the window on every retry.
+const RECENT_TOOL_RESULT_BUDGET: usize = 64 * 1024;
 const SUMMARY_MARKER_PREFIX: &str = "[Summary: ";
 const PROGRESSIVE_TOOL_REMOVAL_RATIOS: &[f32] = &[0.10, 0.20, 0.50, 1.00];
 

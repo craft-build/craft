@@ -4,7 +4,7 @@ use tracing::info;
 use super::super::history::{History, remove_orphaned_tool_results};
 use super::super::streaming::stream_with_retry;
 use super::strip::{
-    strip_images, strip_old_tool_results, strip_thinking, strip_tool_results_by_ratio,
+    collapse_tool_results, strip_images, strip_thinking, strip_tool_results_by_ratio,
     truncate_oldest_round,
 };
 
@@ -73,7 +73,7 @@ pub(crate) async fn compact_history(
     remove_orphaned_tool_results(&mut compaction_history);
     strip_images(&mut compaction_history);
     strip_thinking(&mut compaction_history);
-    strip_old_tool_results(&mut compaction_history);
+    collapse_tool_results(&mut compaction_history, super::RECENT_TOOL_RESULT_BUDGET);
     let mut user_message = build_compaction_user_message(relevance_scores);
     if let Some(extra) = normalize(&config.compaction_instructions)
         && let Some(ContentBlock::Text { text }) = user_message.content.iter_mut().next()
@@ -109,10 +109,16 @@ pub(crate) async fn compact_history(
             Err(e) if e.is_overflow() => {
                 if overflow_retries < MAX_OVERFLOW_RETRIES && compaction_history.len() > 1 {
                     overflow_retries += 1;
-                    truncate_oldest_round(&mut compaction_history);
+                    // Truncation eats from the front, so it can never shrink an
+                    // oversized result sitting in the protected tail. Collapse
+                    // that first, and once there is nothing left to collapse,
+                    // drop the oldest round rather than resend the same request.
+                    if !collapse_tool_results(&mut compaction_history, 0) {
+                        truncate_oldest_round(&mut compaction_history);
+                    }
                     info!(
                         attempt = overflow_retries,
-                        "truncated oldest round for compaction overflow"
+                        "pruned history for compaction overflow"
                     );
                     continue;
                 }

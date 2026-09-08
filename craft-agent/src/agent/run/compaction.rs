@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use craft_config::ModelPolicy;
 use craft_providers::{Message, Model, ModelTier, Role, TokenUsage};
+use serde_json::Value;
 use tracing::info;
 
 use crate::agent::compaction::{self, continue_message};
@@ -58,6 +59,14 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
         })
         .sum();
     (total_bytes.max(CHARS_PER_TOKEN) / CHARS_PER_TOKEN) as u32
+}
+
+/// Adds what [`estimate_message_tokens`] leaves out: the system prompt and the
+/// serialized tool schemas, which a server enforcing `prompt + max_tokens <=
+/// context_window` counts against the same budget.
+pub fn estimate_prompt_tokens(messages: &[Message], system: &str, tools: &Value) -> u32 {
+    let overhead = (system.len() + tools.to_string().len()) / CHARS_PER_TOKEN;
+    estimate_message_tokens(messages).saturating_add(overhead as u32)
 }
 
 pub(super) fn strip_trailing_grace_prompt(history: &mut History, grace_prompt: &str) {
@@ -357,6 +366,19 @@ impl<'h> Agent<'h> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prompt_estimate_counts_system_prompt_and_tool_schemas() {
+        const SYSTEM_PROMPT: &str = "You are a coding agent with a full tool set.";
+        const SHORT_USER_MESSAGE: &str = "hi";
+
+        let messages = [Message::user(SHORT_USER_MESSAGE.into())];
+        let tools = serde_json::json!([{ "name": "read", "description": SYSTEM_PROMPT }]);
+        assert!(
+            estimate_prompt_tokens(&messages, SYSTEM_PROMPT, &tools)
+                > estimate_message_tokens(&messages)
+        );
+    }
+
     use super::super::test_support::*;
     use super::*;
     use crate::agent::history::History;

@@ -2,7 +2,7 @@ use craft_providers::{ContentBlock, Message, Role};
 
 use super::super::history::remove_orphaned_tool_results;
 
-use super::{KEEP_LAST_TOOL_RESULTS, TOOL_RESULT_PLACEHOLDER};
+use super::TOOL_RESULT_PLACEHOLDER;
 
 pub(super) fn strip_images(messages: &mut [Message]) {
     for msg in messages {
@@ -28,24 +28,30 @@ pub(super) fn strip_thinking(messages: &mut [Message]) {
     }
 }
 
-pub(super) fn strip_old_tool_results(messages: &mut [Message]) {
-    let total: usize = messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
-        .count();
-
-    let mut seen = 0;
-    for msg in messages {
-        for block in &mut msg.content {
-            if let ContentBlock::ToolResult { content, .. } = block {
-                if seen < total.saturating_sub(KEEP_LAST_TOOL_RESULTS) {
+/// Walks newest first and collapses every tool result that does not fit in
+/// what is left of `budget`. One oversized result is collapsed on its own and
+/// leaves the budget to the older ones, which is the whole point: charging it
+/// would spend the tail on a block that is no longer there. Returns whether
+/// anything actually shrank, so a caller retrying on overflow can tell
+/// progress from a no-op.
+pub(super) fn collapse_tool_results(messages: &mut [Message], mut budget: usize) -> bool {
+    let mut collapsed = false;
+    for block in messages
+        .iter_mut()
+        .rev()
+        .flat_map(|m| m.content.iter_mut().rev())
+    {
+        if let ContentBlock::ToolResult { content, .. } = block {
+            match budget.checked_sub(content.len()) {
+                Some(rest) => budget = rest,
+                None => {
+                    collapsed |= content != TOOL_RESULT_PLACEHOLDER;
                     *content = TOOL_RESULT_PLACEHOLDER.into();
                 }
-                seen += 1;
             }
         }
     }
+    collapsed
 }
 
 pub(super) fn strip_tool_results_by_ratio(messages: &mut [Message], ratio: f32) -> usize {
@@ -106,98 +112,49 @@ pub(super) fn truncate_oldest_round(messages: &mut Vec<Message>) {
 
 #[cfg(test)]
 mod tests {
+    use test_case::test_case;
+
     use super::super::test_support::assert_tool_results_have_calls;
     use super::*;
 
-    #[test]
-    fn strip_old_tool_results_keeps_newest() {
-        let mut messages = vec![Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "t1".into(),
-                    content: "old result 1".into(),
-                    images: vec![],
-                    is_error: false,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "t2".into(),
-                    content: "old result 2".into(),
-                    images: vec![],
-                    is_error: false,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "t3".into(),
-                    content: "keep 1".into(),
-                    images: vec![],
-                    is_error: false,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "t4".into(),
-                    content: "keep 2".into(),
-                    images: vec![],
-                    is_error: false,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "t5".into(),
-                    content: "keep 3".into(),
-                    images: vec![],
-                    is_error: false,
-                },
-                ContentBlock::Text {
-                    text: "keep me".into(),
-                },
-            ],
-            ..Default::default()
-        }];
-        strip_old_tool_results(&mut messages);
-        assert_eq!(messages[0].content.len(), 6);
-        assert!(
-            matches!(&messages[0].content[0], ContentBlock::ToolResult { content, tool_use_id, .. } if content == TOOL_RESULT_PLACEHOLDER && tool_use_id == "t1")
-        );
-        assert!(
-            matches!(&messages[0].content[1], ContentBlock::ToolResult { content, tool_use_id, .. } if content == TOOL_RESULT_PLACEHOLDER && tool_use_id == "t2")
-        );
-        assert!(
-            matches!(&messages[0].content[2], ContentBlock::ToolResult { content, tool_use_id, .. } if content == "keep 1" && tool_use_id == "t3")
-        );
-        assert!(
-            matches!(&messages[0].content[3], ContentBlock::ToolResult { content, tool_use_id, .. } if content == "keep 2" && tool_use_id == "t4")
-        );
-        assert!(
-            matches!(&messages[0].content[4], ContentBlock::ToolResult { content, tool_use_id, .. } if content == "keep 3" && tool_use_id == "t5")
-        );
-        assert!(
-            matches!(&messages[0].content[5], ContentBlock::Text { text } if text == "keep me")
-        );
+    const OLD_RESULT: &str = "old";
+    const NEW_RESULT: &str = "new result";
+    const KEPT_TEXT: &str = "keep me";
+
+    fn tool_result(id: &str, content: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            content: content.into(),
+            images: vec![],
+            is_error: false,
+        }
     }
 
-    #[test]
-    fn strip_old_tool_results_keeps_all_when_fewer_than_threshold() {
+    #[test_case(OLD_RESULT.len() + NEW_RESULT.len(), &[OLD_RESULT, NEW_RESULT]; "whole_tail_fits")]
+    #[test_case(NEW_RESULT.len(), &[TOOL_RESULT_PLACEHOLDER, NEW_RESULT]; "only_newest_fits")]
+    #[test_case(NEW_RESULT.len() - 1, &[OLD_RESULT, TOOL_RESULT_PLACEHOLDER]; "oversized_newest_spares_the_older_ones")]
+    fn collapse_tool_results_budgets_the_tail(budget: usize, expected: &[&str]) {
         let mut messages = vec![Message {
             role: Role::User,
             content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "t1".into(),
-                    content: "only result".into(),
-                    images: vec![],
-                    is_error: false,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "t2".into(),
-                    content: "second".into(),
-                    images: vec![],
-                    is_error: false,
+                tool_result("t1", OLD_RESULT),
+                tool_result("t2", NEW_RESULT),
+                ContentBlock::Text {
+                    text: KEPT_TEXT.into(),
                 },
             ],
             ..Default::default()
         }];
-        strip_old_tool_results(&mut messages);
+        let shrank = collapse_tool_results(&mut messages, budget);
+        assert_eq!(shrank, expected.contains(&TOOL_RESULT_PLACEHOLDER));
+
+        for (block, expected) in messages[0].content.iter().zip(expected) {
+            assert!(
+                matches!(block, ContentBlock::ToolResult { content, .. } if content == expected)
+            );
+        }
         assert!(
-            matches!(&messages[0].content[0], ContentBlock::ToolResult { content, .. } if content == "only result")
-        );
-        assert!(
-            matches!(&messages[0].content[1], ContentBlock::ToolResult { content, .. } if content == "second")
+            matches!(&messages[0].content[2], ContentBlock::Text { text, .. } if text == KEPT_TEXT)
         );
     }
 
