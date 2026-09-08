@@ -126,9 +126,7 @@ fn builtin_slugs() -> Vec<String> {
 }
 
 fn providers_dir() -> Option<PathBuf> {
-    craft_storage::paths::config_dir()
-        .ok()
-        .map(|d| d.join(PROVIDERS_DIR))
+    craft_storage::paths::find_config_path(PROVIDERS_DIR)
 }
 
 fn run_script(path: &Path, subcommand: &str, timeout: Duration) -> Result<String, AgentError> {

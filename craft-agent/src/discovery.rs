@@ -213,7 +213,10 @@ impl Discovery {
     }
 
     fn global_dirs(&self, kind: &str) -> Vec<PathBuf> {
-        paths::user_config_dirs(self.home.as_deref(), self.xdg_config.as_deref(), kind)
+        paths::config_search_dirs_from(self.home.as_deref(), self.xdg_config.as_deref())
+            .into_iter()
+            .map(|dir| dir.join(kind))
+            .collect()
     }
 
     fn collect_files(

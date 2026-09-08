@@ -8,7 +8,7 @@ use toml_edit::DocumentMut;
 
 use super::error::McpError;
 use crate::tools::is_builtin_tool;
-use craft_config::{expand_env, global_config_dir, is_valid_server_name};
+use craft_config::{expand_env, is_valid_server_name};
 
 const MCP_CONFIG_FILE: &str = "mcp.toml";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -325,8 +325,7 @@ pub fn load_config(cwd: &Path) -> (McpConfig, McpConfigErrors) {
     let mut merged = McpConfig::default();
     let mut errors = McpConfigErrors::new(cwd.to_path_buf());
 
-    if let Some(global_dir) = global_config_dir() {
-        let global_path = global_dir.join(MCP_CONFIG_FILE);
+    if let Some(global_path) = craft_storage::paths::find_config_path(MCP_CONFIG_FILE) {
         match read_config(&global_path) {
             Ok(None) => {}
             Ok(Some(cfg)) => {

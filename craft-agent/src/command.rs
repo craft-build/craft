@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 
 const PROJECT_COMMAND_DIRS: &[&str] = &[".craft/commands", ".claude/commands"];
 const GLOBAL_THIRD_PARTY_COMMAND_DIRS: &[&str] = &[".claude/commands"];
+const COMMANDS_DIR: &str = "commands";
 const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";
 
 #[derive(Debug, Default, Deserialize)]
@@ -84,7 +85,7 @@ pub fn discover_commands(cwd: &Path) -> Vec<CustomCommand> {
     discover_commands_inner(
         cwd,
         craft_storage::paths::home().as_deref(),
-        craft_storage::paths::config_dir().ok().as_deref(),
+        craft_storage::paths::xdg_config_dir().ok().as_deref(),
     )
 }
 
@@ -95,8 +96,8 @@ fn discover_commands_inner(
 ) -> Vec<CustomCommand> {
     let mut commands: HashMap<String, CustomCommand> = HashMap::new();
 
-    for dir in craft_storage::paths::user_config_dirs(home, xdg_config, "commands") {
-        scan_command_dir(&dir, CommandScope::User, &mut commands);
+    for dir in craft_storage::paths::config_search_dirs_from(home, xdg_config) {
+        scan_command_dir(&dir.join(COMMANDS_DIR), CommandScope::User, &mut commands);
     }
     if let Some(home) = home {
         for dir in GLOBAL_THIRD_PARTY_COMMAND_DIRS {

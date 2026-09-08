@@ -193,7 +193,10 @@ pub fn parse_skill_md(content: &str) -> (String, String, String) {
 pub fn list(cwd: &Path) -> Vec<Skill> {
     let home = paths::home();
     let xdg_config = paths::xdg_paths().ok().map(|x| x.config);
-    let global = paths::user_config_dirs(home.as_deref(), xdg_config.as_deref(), SKILLS_DIR);
+    let global = paths::config_search_dirs_from(home.as_deref(), xdg_config.as_deref())
+        .into_iter()
+        .map(|dir| dir.join(SKILLS_DIR))
+        .collect::<Vec<_>>();
     list_in(cwd, &global)
 }
 
