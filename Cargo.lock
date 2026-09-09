@@ -1835,8 +1835,10 @@ dependencies = [
 name = "craft-acp"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
  "dirs 6.0.0",
+ "futures",
  "ignore",
  "regex",
  "rig",
