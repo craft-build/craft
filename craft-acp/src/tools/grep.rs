@@ -1,7 +1,8 @@
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use regex::RegexBuilder;
+use rig::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::{
     MAX_FILE_BYTES, MAX_LINE_BYTES, MAX_OUTPUT_BYTES, Result, Workspace, clip, failure, impl_tool,
@@ -36,7 +37,7 @@ fn default_limit() -> usize {
     100
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct GrepMatch {
     pub path: String,
     pub line: usize,
@@ -48,13 +49,49 @@ pub struct GrepMatch {
     pub truncated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct GrepOutput {
     pub matches: Vec<GrepMatch>,
     /// Search stopped at a match, output, or scan budget; more results may exist.
     pub truncated: bool,
     /// Binary/non-UTF-8/oversized files omitted from the search.
     pub skipped_files: usize,
+}
+
+impl IntoToolOutput for GrepOutput {
+    fn into_tool_output(self) -> Result<ToolOutput> {
+        let mut rows = Vec::new();
+        let mut previous_path = None;
+        for found in &self.matches {
+            if previous_path != Some(&found.path) {
+                if previous_path.is_some() {
+                    rows.push(String::new());
+                }
+                rows.push(format!("{}:", found.path));
+                previous_path = Some(&found.path);
+            }
+            rows.push(format!("  {}: {}", found.line, found.text));
+            if found.truncated {
+                rows.push(format!(
+                    "  [line truncated; excerpt starts at byte column {}; match at byte column {}]",
+                    found.text_start_column, found.column
+                ));
+            }
+        }
+        if rows.is_empty() {
+            rows.push("No files found".into());
+        }
+        if self.truncated {
+            rows.push("\n[Search truncated: more matches may exist. Narrow the path or pattern, or increase max_matches.]".into());
+        }
+        if self.skipped_files > 0 {
+            rows.push(format!(
+                "\n[Skipped {} files; results cover only the files searched.]",
+                self.skipped_files
+            ));
+        }
+        Ok(ToolOutput::text(rows.join("\n")))
+    }
 }
 
 #[derive(Clone)]

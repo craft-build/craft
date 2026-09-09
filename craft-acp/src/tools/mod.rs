@@ -2,6 +2,9 @@
 //!
 //! These checks prevent accidental escapes, not hostile filesystem races. The
 //! caller must supply a trusted workspace and apply any approval/sandbox policy.
+//!
+//! Output types implement `IntoToolOutput` rather than `Serialize`: Rig must send
+//! their readable text to both the model and ACP, not serialize the internal fields.
 
 mod delete;
 mod edit;

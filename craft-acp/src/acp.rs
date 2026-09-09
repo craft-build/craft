@@ -691,10 +691,8 @@ fn tool_result_content(result: &rig::core::completion::message::ToolResult) -> T
     ))))
 }
 
-/// Tool results arrive as Rig content blocks: text passes through verbatim,
-/// while JSON payloads (serialized tool outputs such as `ReadOutput`) are
-/// pretty-printed so clients show the data itself rather than the enum's
-/// Debug rendering (`Json { value: Object {...} }`).
+/// Built-in tools produce model-facing text, which ACP displays verbatim.
+/// Keep JSON readable for additional tools without interpreting their schemas.
 fn tool_result_text(items: &[rig::core::completion::message::ToolResultContent]) -> String {
     items
         .iter()
@@ -775,13 +773,136 @@ mod tests {
         assert_eq!(tool_kind("other"), ToolKind::Other);
     }
 
+    #[tokio::test]
+    async fn streamed_filesystem_results_match_model_and_acp_text() {
+        use rig::{
+            agent::AgentBuilder,
+            core::completion::message::UserContent,
+            test_utils::{MockCompletionModel, MockStreamEvent},
+        };
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("file.rs"),
+            "skipped\r\n\r\n    let name = \"βeta\";\r\nlast",
+        )
+        .unwrap();
+        let mut turns = Vec::new();
+        for (id, name, args) in [
+            (
+                "1",
+                "read",
+                json!({"path":"file.rs", "offset":2, "limit":2}),
+            ),
+            ("2", "grep", json!({"pattern":"βeta"})),
+            (
+                "3",
+                "edit",
+                json!({"path":"file.rs", "old_string":"βeta", "new_string":"new"}),
+            ),
+            ("4", "delete", json!({"path":"file.rs"})),
+        ] {
+            turns.push(vec![
+                MockStreamEvent::tool_call(id, name, args),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ]);
+        }
+        turns.push(vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]);
+        let model = MockCompletionModel::from_stream_turns(turns);
+        let agent = Workspace::new(dir.path())
+            .unwrap()
+            .register(AgentBuilder::new(model.clone()).default_max_turns(5))
+            .build();
+        let mut stream = agent.runner("read, search, edit, delete").stream().await;
+        let mut results = Vec::new();
+        let mut completed = false;
+        while let Some(item) = stream.next().await {
+            match item.unwrap() {
+                MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                    tool_result,
+                    ..
+                }) => {
+                    assert_eq!(tool_result.content.len(), 1);
+                    let text = tool_result.content[0].as_text().expect("literal tool text");
+                    let ToolCallContent::Content(Content {
+                        content: ContentBlock::Text(display),
+                        ..
+                    }) = tool_result_content(&tool_result)
+                    else {
+                        panic!("ACP must display tool text");
+                    };
+                    assert_eq!(display.text, text);
+                    results.push((tool_result.name.clone(), text.to_owned()));
+                }
+                MultiTurnStreamItem::FinalResponse(response) => {
+                    assert_eq!(response.output, "done");
+                    completed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(completed);
+        assert_eq!(results, [
+            ("read".into(), "2: \n3:     let name = \"βeta\";\n\n...\n\nTruncated lines: 4-4. Use offset=4 to read further.".into()),
+            ("grep".into(), "file.rs:\n  3:     let name = \"βeta\";".into()),
+            ("edit".into(), "edited file.rs".into()),
+            ("delete".into(), "deleted: file.rs".into()),
+        ]);
+        // Verify what the next model request actually receives, not only the
+        // stream's display events. All four results must remain literal text.
+        let requests = model.requests();
+        assert_eq!(requests.len(), 5);
+        let model_results = requests[4]
+            .chat_history
+            .iter()
+            .flat_map(|message| match message {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|item| {
+                        if let UserContent::ToolResult(result) = item {
+                            assert_eq!(result.content.len(), 1);
+                            Some((
+                                result.name.clone(),
+                                result.content[0].as_text().unwrap().to_owned(),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(model_results, results);
+        assert!(!dir.path().join("file.rs").exists());
+    }
+
+    #[test]
+    fn tool_result_text_preserves_literal_json_and_errors() {
+        use rig::core::completion::message::{Text, ToolResultContent};
+
+        for text in [r#"{"lines":[],"total_lines":0}"#, "file not found", ""] {
+            assert_eq!(
+                tool_result_text(&[ToolResultContent::Text(Text::from(text))]),
+                text
+            );
+        }
+    }
+
     #[test]
     fn tool_result_text_pretty_prints_json_results() {
         let items = vec![rig::core::completion::message::ToolResultContent::Json {
             value: serde_json::json!({ "path": "Cargo.lock", "total_lines": 2 }),
         }];
         let text = tool_result_text(&items);
-        assert!(text.contains("\"path\": \"Cargo.lock\""), "unexpected: {text}");
+        assert!(
+            text.contains("\"path\": \"Cargo.lock\""),
+            "unexpected: {text}"
+        );
         assert!(text.contains("\"total_lines\": 2"), "unexpected: {text}");
         assert!(!text.contains("Json {"), "Debug rendering leaked: {text}");
     }

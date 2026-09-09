@@ -1,5 +1,6 @@
+use rig::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::{
     MAX_LINE_BYTES, MAX_OUTPUT_BYTES, Result, Workspace, clip, impl_tool, invalid, read_bytes, text,
@@ -25,19 +26,44 @@ fn default_limit() -> usize {
     200
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ReadLine {
     pub number: usize,
     pub text: String,
     pub truncated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct ReadOutput {
     pub path: String,
     pub lines: Vec<ReadLine>,
     pub total_lines: usize,
     pub next_offset: Option<usize>,
+}
+
+impl IntoToolOutput for ReadOutput {
+    fn into_tool_output(self) -> Result<ToolOutput> {
+        let mut text = self
+            .lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "{}: {}{}",
+                    line.number,
+                    line.text,
+                    if line.truncated { "..." } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(offset) = self.next_offset {
+            text.push_str(&format!(
+                "\n\n...\n\nTruncated lines: {offset}-{}. Use offset={offset} to read further.",
+                self.total_lines
+            ));
+        }
+        Ok(ToolOutput::text(text))
+    }
 }
 
 #[derive(Clone)]
@@ -93,5 +119,5 @@ impl_tool!(
     ReadArgs,
     ReadOutput,
     "read",
-    "Read UTF-8 text with one-based line numbers. Use offset/limit for paging and next_offset to continue. Files are capped at 8 MiB; long lines are marked truncated at 2048 bytes. No binary files, symlinks, or paths outside the workspace."
+    "Read UTF-8 text with one-based line numbers. Use offset/limit for paging and the returned truncation hint to continue. Files are capped at 8 MiB; lines longer than 2048 bytes end with '...'. No binary files, symlinks, or paths outside the workspace."
 );

@@ -3,7 +3,7 @@ use std::fs;
 use rig::{
     agent::{AgentBuilder, AgentHook, HookContext, ToolResultAction, ToolResultEvent},
     test_utils::{MockCompletionModel, MockTurn},
-    tool::{Tool, ToolContext, ToolErrorKind},
+    tool::{IntoToolOutput, Tool, ToolContext, ToolErrorKind},
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -37,6 +37,10 @@ async fn read_pages_utf8_crlf_and_empty_files() {
     assert_eq!(page.lines[0].text, "βeta");
     assert_eq!(page.next_offset, Some(3));
     assert_eq!(
+        page.into_tool_output().unwrap().as_text(),
+        Some("2: βeta\n\n...\n\nTruncated lines: 3-3. Use offset=3 to read further.")
+    );
+    assert_eq!(
         invoke(&tool, json!({"path":"file.txt","offset":4}))
             .await
             .unwrap()
@@ -58,6 +62,7 @@ async fn read_pages_utf8_crlf_and_empty_files() {
     let empty = invoke(&tool, json!({"path":"empty"})).await.unwrap();
     assert_eq!(empty.total_lines, 0);
     assert_eq!(empty.next_offset, None);
+    assert_eq!(empty.into_tool_output().unwrap().as_text(), Some(""));
 }
 
 #[tokio::test]
@@ -75,6 +80,68 @@ async fn read_reports_line_and_page_truncation() {
     );
     assert!(page.lines.iter().map(|line| line.text.len()).sum::<usize>() <= MAX_OUTPUT_BYTES);
     assert_eq!(page.next_offset, Some(page.lines.len() + 1));
+    let next = page.next_offset.unwrap();
+    let rendered = page.into_tool_output().unwrap();
+    let text = rendered.as_text().unwrap();
+    assert!(text.starts_with(&format!("1: {}...\n2: ", "🦀".repeat(MAX_LINE_BYTES / 4))));
+    assert!(text.ends_with(&format!(
+        "Truncated lines: {next}-100. Use offset={next} to read further."
+    )));
+}
+
+#[tokio::test]
+async fn read_full_and_eof_pages_are_literal_numbered_text() {
+    let (_dir, workspace) = workspace();
+    fs::write(workspace.root().join("file"), "{\"lines\": []}\n\n  βeta\n").unwrap();
+    let tool = Read(workspace);
+    let full = invoke(&tool, json!({"path":"file"})).await.unwrap();
+    assert_eq!(
+        full.into_tool_output().unwrap().as_text(),
+        Some("1: {\"lines\": []}\n2: \n3:   βeta")
+    );
+    let eof = invoke(&tool, json!({"path":"file", "offset":4}))
+        .await
+        .unwrap();
+    assert_eq!(eof.into_tool_output().unwrap().as_text(), Some(""));
+}
+
+#[tokio::test]
+async fn grep_text_groups_files_and_reports_partial_searches() {
+    let (_dir, workspace) = workspace();
+    fs::write(workspace.root().join("a.rs"), "needle\n  needle again\n").unwrap();
+    fs::write(workspace.root().join("b.rs"), "no\nneedle βeta\n").unwrap();
+    let tool = Grep(workspace.clone());
+    let full = invoke(&tool, json!({"pattern":"needle"})).await.unwrap();
+    assert_eq!(
+        full.into_tool_output().unwrap().as_text(),
+        Some("a.rs:\n  1: needle\n  2:   needle again\n\nb.rs:\n  2: needle βeta")
+    );
+    let empty = invoke(&tool, json!({"pattern":"missing"})).await.unwrap();
+    assert_eq!(
+        empty.into_tool_output().unwrap().as_text(),
+        Some("No files found")
+    );
+
+    fs::write(workspace.root().join("0.binary"), [0, 255]).unwrap();
+    let limited = invoke(&tool, json!({"pattern":"needle", "max_matches":1}))
+        .await
+        .unwrap()
+        .into_tool_output()
+        .unwrap();
+    let text = limited.as_text().unwrap();
+    assert!(text.starts_with("a.rs:\n  1: needle\n"));
+    assert!(text.contains("Search truncated: more matches may exist"));
+    assert!(text.contains("Skipped 1 files; results cover only the files searched"));
+
+    let empty_partial = invoke(&tool, json!({"pattern":"missing"}))
+        .await
+        .unwrap()
+        .into_tool_output()
+        .unwrap();
+    assert_eq!(
+        empty_partial.as_text(),
+        Some("No files found\n\n[Skipped 1 files; results cover only the files searched.]")
+    );
 }
 
 #[tokio::test]
@@ -453,7 +520,7 @@ async fn rig_loop_executes_all_four_tools_and_returns_results_to_model() {
     assert_eq!(names, ["delete", "edit", "grep", "read"]);
     let transcript = serde_json::to_string(&requests[4].chat_history).unwrap();
     assert!(transcript.contains("old text"));
-    assert!(transcript.contains("replacements"));
+    assert!(transcript.contains("edited file.txt"));
     assert!(transcript.contains("deleted"));
 }
 
@@ -513,6 +580,13 @@ async fn grep_long_line_excerpt_contains_the_match() {
     assert!(found.text_start_column > 1);
     assert!(found.truncated);
     assert!(found.text.len() <= MAX_LINE_BYTES);
+    let start = found.text_start_column;
+    let rendered = result.into_tool_output().unwrap();
+    let text = rendered.as_text().unwrap();
+    assert!(text.contains("needle"));
+    assert!(text.ends_with(&format!(
+        "[line truncated; excerpt starts at byte column {start}; match at byte column 8001]"
+    )));
 }
 
 #[cfg(unix)]

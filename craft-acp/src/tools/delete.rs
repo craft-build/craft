@@ -1,5 +1,6 @@
+use rig::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::{Result, Workspace, impl_tool, io_error};
 
@@ -10,10 +11,16 @@ pub struct DeleteArgs {
     pub path: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct DeleteOutput {
     pub path: String,
     pub deleted: bool,
+}
+
+impl IntoToolOutput for DeleteOutput {
+    fn into_tool_output(self) -> Result<ToolOutput> {
+        Ok(ToolOutput::text(format!("deleted: {}", self.path)))
+    }
 }
 
 #[derive(Clone)]

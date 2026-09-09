@@ -116,27 +116,46 @@ names still fail through Rig. A caller building a custom Rig agent can also use
 
 ### Filesystem tools
 
-All tools use strict typed JSON arguments and structured JSON results. Paths
-are workspace-relative or absolute beneath the canonical workspace root. `..`,
+All tools use strict typed JSON arguments. Execution results remain typed Rust
+values internally, but each implements Rig's `IntoToolOutput` to produce literal
+text for the model. ACP displays that same text without tool-specific decoding.
+The formats follow the reference Craft harness:
+
+- `read`: `N: contents`, with `...` on clipped lines and a `Truncated lines: X-Y.
+  Use offset=X to read further.` continuation notice when more lines remain.
+  Empty files and reads just past EOF return empty text.
+- `grep`: matches grouped under `path:` headings, each as `  N: contents`.
+  No matches returns `No files found`. Partial-search, skipped-file, and clipped
+  excerpt notices preserve this implementation's search-limit information.
+- `edit`: `edited path` on success, not replacement-count JSON or a full diff.
+- `delete`: `deleted: path` on success.
+
+Error feedback remains literal text with Rig's existing error/refusal semantics.
+Additional tools may still return JSON; ACP pretty-prints it without interpreting
+its schema. This alignment concerns output, not feature parity: the argument
+schemas, filesystem limits, exact-only edits, and nonrecursive deletes below
+remain unchanged.
+
+Paths are workspace-relative or absolute beneath the canonical workspace root. `..`,
 Git metadata (`.git`), and symlink components are refused. Text tools support
 UTF-8 files up to 8 MiB, including CRLF files. File I/O runs on blocking workers,
 serialized across clones of the same workspace handle.
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
-| `read` | `path`, optional `offset` and `limit` | One-based lines, total line count, and `next_offset` for paging. Defaults to 200 lines; maximum 2000 (`limit = 0` means 2000). |
+| `read` | `path`, optional `offset` and `limit` | Numbered text and continuation hints with an offset for paging. Defaults to 200 lines; maximum 2000 (`limit = 0` means 2000). |
 | `grep` | `pattern`, optional `path`, `glob`, `case_sensitive`, `literal`, `max_matches` | Line-based Rust regex search, or literal matching. Defaults to the whole workspace, case-sensitive, at most 100 matching lines (maximum 1000). |
 | `edit` | `path`, `old_string`, `new_string`, optional `replace_all` or `occurrence` | Exact replacement in an existing file. Ambiguous matches fail unless disambiguated by a one-based occurrence or replace-all. No fuzzy matching or file creation. |
 | `delete` | `path` | Permanently removes one existing regular file. No directories, recursion, or undo. Missing files are errors. |
 
-Reads and searches bound returned text to 64 KiB and individual line excerpts
-to 2048 bytes, with explicit truncation markers. Grep respects workspace and
+Reads and searches bound source excerpts to 64 KiB and individual line excerpts
+to 2048 bytes, before adding line numbers and notices. Grep respects workspace and
 nested ignore rules even when a glob or path narrows the search. It skips hidden
 files, symlinks, binary/non-UTF-8 files, non-Unicode filenames, and oversized files; skipped content files
 are counted. Search stops at 10000 candidate files or its 64 MiB scan budget
 and reports incomplete results rather than implying the search was exhaustive.
-Grep excerpts include the first match and report one-based byte columns for both
-the match and excerpt start; read output starts each line at its beginning.
+Clipped grep excerpts include the first match and report one-based byte columns
+for both the match and excerpt start; read output starts each line at its beginning.
 
 Edits stage beside the destination and atomically replace it, preserving basic
 file permissions and bytes outside the exact replacement. A final content check

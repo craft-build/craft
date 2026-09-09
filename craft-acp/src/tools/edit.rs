@@ -1,7 +1,8 @@
 use std::{fs, io::Write};
 
+use rig::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::{
     MAX_FILE_BYTES, Result, Workspace, denied, failure, impl_tool, invalid, io_error, read_bytes,
@@ -22,11 +23,17 @@ pub struct EditArgs {
     pub occurrence: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct EditOutput {
     pub path: String,
     pub replacements: usize,
     pub bytes_written: usize,
+}
+
+impl IntoToolOutput for EditOutput {
+    fn into_tool_output(self) -> Result<ToolOutput> {
+        Ok(ToolOutput::text(format!("edited {}", self.path)))
+    }
 }
 
 #[derive(Clone)]
