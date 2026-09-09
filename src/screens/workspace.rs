@@ -407,25 +407,36 @@ fn main_column(app: &mut App, _window: &mut Window, cx: &mut Context<App>) -> im
                 .id("thread-scroll")
                 .track_scroll(&scroll_handle)
                 .flex_1()
+                .min_h(px(0.))
                 .overflow_y_scroll()
                 .px(px(18.))
                 .py(px(14.))
                 .flex()
-                .flex_col()
-                .gap(px(16.))
-                .children(messages.into_iter().enumerate().map(|(index, message)| {
-                    let is_streaming = app.thinking
-                        && index == last_index
-                        && matches!(message.role, Role::Assistant);
-                    message_view(message, is_streaming, app, cx)
-                }))
-                .when(app.pending_permission.is_some(), |d| {
-                    d.child(permission_view(app, cx))
-                })
-                .when(app.pending_elicitation.is_some(), |d| {
-                    d.child(elicitation_view(app, cx))
-                })
-                .child(composer_view(app, cx)),
+                .items_start()
+                .child(
+                    // Shrink only horizontally: the row resolves the thread's width
+                    // before measuring wrapped text. A max-width constraint can leave
+                    // GPUI's card heights or scroll extent measured at the wrong width.
+                    div()
+                        .w(px(760.))
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(16.))
+                        .children(messages.into_iter().enumerate().map(|(index, message)| {
+                            let is_streaming = app.thinking
+                                && index == last_index
+                                && matches!(message.role, Role::Assistant);
+                            message_view(message, is_streaming, app, cx)
+                        }))
+                        .when(app.pending_permission.is_some(), |d| {
+                            d.child(permission_view(app, cx))
+                        })
+                        .when(app.pending_elicitation.is_some(), |d| {
+                            d.child(elicitation_view(app, cx))
+                        })
+                        .child(composer_view(app, cx)),
+                ),
         )
 }
 
@@ -447,7 +458,6 @@ fn permission_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .unwrap_or_default();
     div()
         .w_full()
-        .max_w(px(760.))
         .border_1()
         .border_color(rgb(theme::ACCENT))
         .rounded(px(8.))
@@ -522,7 +532,6 @@ fn elicitation_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
         .unwrap_or_else(|| (String::new(), None, None, vec![], vec![], false));
     div()
         .w_full()
-        .max_w(px(760.))
         .border_1()
         .border_color(rgb(theme::ACCENT))
         .rounded(px(8.))
@@ -830,6 +839,7 @@ fn action_button(
 
 fn running_indicator(cx: &mut Context<App>) -> impl IntoElement {
     div()
+        .debug_selector(|| "running-indicator".into())
         .flex()
         .items_center()
         .justify_between()
@@ -855,6 +865,7 @@ fn running_indicator(cx: &mut Context<App>) -> impl IntoElement {
         .child(
             div()
                 .id("cancel-turn")
+                .debug_selector(|| "cancel-turn".into())
                 .px(px(8.))
                 .py(px(3.))
                 .border_1()
@@ -900,7 +911,6 @@ fn user_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl IntoEl
     let comment_key = app.comment_key(&format!("msg_{}", m.id));
     div()
         .w_full()
-        .max_w(px(760.))
         .flex()
         .flex_col()
         .gap(px(4.))
@@ -989,8 +999,8 @@ fn assistant_message(
     let toggle_comment_key = comment_key.clone();
 
     let mut col = div()
+        .debug_selector(|| format!("assistant-card-{msg_id}"))
         .w_full()
-        .max_w(px(760.))
         .min_w(px(0.))
         .border_1()
         .border_color(rgb(theme::BORDER))
@@ -1072,6 +1082,7 @@ fn assistant_message(
     if let Some(cp) = &m.checkpoint_label {
         col = col.child(
             div()
+                .debug_selector(|| format!("checkpoint-{msg_id}"))
                 .min_h(px(25.))
                 .flex()
                 .items_end()
@@ -1426,9 +1437,9 @@ fn composer_view(app: &mut App, cx: &mut Context<App>) -> impl IntoElement {
     let composer = app.composer.clone();
 
     div()
+        .debug_selector(|| "composer".into())
         .w_full()
         .min_w(px(0.))
-        .max_w(px(760.))
         .flex()
         .flex_col()
         .gap(px(4.))

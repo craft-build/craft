@@ -2079,6 +2079,132 @@ mod session_config_tests {
     };
 
     #[gpui::test]
+    fn assistant_content_and_footers_stay_inside_scrollable_cards(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, cx| {
+            let mut app = App::from_state(PersistedState::default(), vec![], None, cx);
+            let project = Project {
+                id: "project".into(),
+                name: "Test".into(),
+                path: ".".into(),
+                desc: String::new(),
+                updated: String::new(),
+                checkpoint_label: String::new(),
+                model: String::new(),
+            };
+            let messages = ["completed", "streaming"]
+                .into_iter()
+                .map(|id| Message {
+                    id: id.into(),
+                    role: Role::Assistant,
+                    text: format!(
+                        "## Root cause\n\n{}\n\n1. The read tool returns structured output with a path and numbered lines.\n2. Render the JSON rather than its **Debug representation**.\n\n## Fix\n\n```json\n{{\n  \"path\": \"Cargo.lock\",\n  \"lines\": [],\n  \"total_lines\": 11485,\n  \"next_offset\": 35\n}}\n```\n\n**One caveat:** {}",
+                        "A paragraph with **formatted text** and `inline code` that wraps across many lines in a narrow conversation pane. ".repeat(5),
+                        "This final paragraph after the code block must stay inside the card and remain reachable by scrolling. ".repeat(5),
+                    ),
+                    time: None,
+                    context: vec![],
+                    attached_comments: vec![],
+                    checkpoint_label: (id == "completed").then(|| "Checkpoint 11".into()),
+                    steps: None,
+                    diff: None,
+                    terminal: Some(Terminal {
+                        cmd: "Agent operation".into(),
+                        output: "Long tool output ".repeat(100),
+                    }),
+                })
+                .collect();
+            app.sessions_by_project.insert(
+                project.id.clone(),
+                vec![Session {
+                    id: "session".into(),
+                    name: "Test".into(),
+                    messages,
+                    acp_session_id: None,
+                    archived: false,
+                    agent_profile_id: None,
+                }],
+            );
+            app.active_project = Some(project);
+            app.active_session_id = Some("session".into());
+            app.screen = Screen::Workspace;
+            app.thinking = true;
+            app
+        });
+
+        for width in [1600., 1100., 800.] {
+            cx.simulate_resize(gpui::size(px(width), px(2000.)));
+            cx.run_until_parked();
+            let completed_height = cx
+                .debug_bounds("assistant-card-completed")
+                .unwrap()
+                .size
+                .height;
+            let streaming_height = cx
+                .debug_bounds("assistant-card-streaming")
+                .unwrap()
+                .size
+                .height;
+            cx.simulate_resize(gpui::size(px(width), px(600.)));
+            cx.run_until_parked();
+            // Bring each footer into view using the real thread scroll handle.
+            for (card_selector, footer_selector, last_paragraph_selector) in [
+                (
+                    "assistant-card-completed",
+                    "checkpoint-completed",
+                    "assistant-markdown-completed-paragraph-6",
+                ),
+                (
+                    "assistant-card-streaming",
+                    "running-indicator",
+                    "assistant-markdown-streaming-paragraph-6",
+                ),
+            ] {
+                let footer = cx.debug_bounds(footer_selector).unwrap();
+                let initial_card = cx.debug_bounds(card_selector).unwrap();
+                assert!(footer.bottom() <= initial_card.bottom() - px(16.));
+                assert_eq!(
+                    initial_card.size.height,
+                    if card_selector == "assistant-card-completed" {
+                        completed_height
+                    } else {
+                        streaming_height
+                    },
+                    "Scrolling must not compress a card"
+                );
+                app.update(cx, |app, cx| {
+                    let offset = app.thread_scroll.offset();
+                    app.thread_scroll
+                        .set_offset(gpui::point(px(0.), offset.y - footer.bottom() + px(450.)));
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let card = cx.debug_bounds(card_selector).unwrap();
+                let footer = cx.debug_bounds(footer_selector).unwrap();
+                assert!(
+                    footer.bottom() <= card.bottom() - px(16.),
+                    "{footer_selector} must fit inside the card's bottom padding: {footer:?}, {card:?}"
+                );
+                assert!(footer.origin.y >= card.origin.y + px(16.));
+                let last_paragraph = cx.debug_bounds(last_paragraph_selector).unwrap();
+                assert!(last_paragraph.bottom() <= footer.origin.y - px(12.));
+                // The actual end of the text, not just its parent, is visible after
+                // scrolling: below the top bar and above the window's status bar.
+                let viewport = app.read_with(cx, |app, _| app.thread_scroll.bounds());
+                assert!(last_paragraph.bottom() > viewport.origin.y);
+                assert!(
+                    footer.bottom() < viewport.bottom(),
+                    "{width} {footer_selector}: {footer:?}, card: {card:?}"
+                );
+            }
+            let card = cx.debug_bounds("assistant-card-streaming").unwrap();
+            let stop = cx.debug_bounds("cancel-turn").unwrap();
+            let composer = cx.debug_bounds("composer").unwrap();
+            assert!(stop.bottom() <= card.bottom() - px(16.));
+            assert!(composer.origin.y >= card.bottom() + px(16.));
+        }
+    }
+
+    #[gpui::test]
     fn selecting_markdown_then_typing_opens_and_focuses_a_comment(cx: &mut gpui::TestAppContext) {
         assert_type_to_comment("assistant", cx);
     }

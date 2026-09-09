@@ -335,6 +335,7 @@ fn block_view(block: MarkdownBlock, id: &str, index: usize, target: &CommentTarg
     let inline_id = format!("{id}-inline-{index}");
     match block.kind {
         BlockKind::Paragraph => div()
+            .debug_selector(|| format!("{id}-paragraph-{index}"))
             .w_full()
             .min_w(px(0.))
             .whitespace_normal()
