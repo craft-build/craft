@@ -10,14 +10,19 @@ mod delete;
 mod edit;
 mod grep;
 mod read;
+mod write;
 
 #[cfg(test)]
 mod tests;
 
 pub use delete::{Delete, DeleteArgs, DeleteOutput};
-pub use edit::{Edit, EditArgs, EditOutput};
+pub use edit::{
+    Edit, EditArgs, EditLines, EditLinesArgs, EditLinesOutput, EditOutput, InsertLines,
+    InsertLinesArgs, InsertLinesOutput,
+};
 pub use grep::{Grep, GrepArgs, GrepMatch, GrepOutput};
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
+pub use write::{Write, WriteArgs, WriteOutput};
 
 use std::{
     fs::{self, File},
@@ -51,7 +56,7 @@ impl Workspace {
         if !root.is_dir() {
             return Err(invalid("workspace root must be a directory"));
         }
-        if root.components().any(is_git_component) {
+        if root.components().any(|c| is_git_component(c.as_os_str())) {
             return Err(denied("workspace must not be inside Git metadata"));
         }
         Ok(Self {
@@ -69,6 +74,9 @@ impl Workspace {
             .tool(Read(self.clone()))
             .tool(Grep(self.clone()))
             .tool(Edit(self.clone()))
+            .tool(EditLines(self.clone()))
+            .tool(InsertLines(self.clone()))
+            .tool(Write(self.clone()))
             .tool(Delete(self.clone()))
     }
 
@@ -106,7 +114,7 @@ impl Workspace {
         for component in relative.components() {
             match component {
                 Component::CurDir => continue,
-                Component::Normal(_) if is_git_component(component) => {
+                Component::Normal(name) if is_git_component(name) => {
                     return Err(denied("access to Git metadata is not allowed"));
                 }
                 Component::Normal(name) => path.push(name),
@@ -135,6 +143,71 @@ impl Workspace {
         Ok(path)
     }
 
+    /// Resolution for writes: like [`Self::resolve`], but the final component
+    /// may not exist yet, missing parent directories are created, and an
+    /// existing destination must be a regular file (never a symlink).
+    pub(crate) fn target(&self, requested: &str) -> Result<PathBuf> {
+        if requested.is_empty() {
+            return Err(invalid("path must not be empty"));
+        }
+        let requested = Path::new(requested);
+        let relative = if requested.is_absolute() {
+            requested
+                .strip_prefix(self.root())
+                .map_err(|_| denied("path is outside the workspace"))?
+        } else {
+            requested
+        };
+        let mut components: Vec<Component<'_>> = relative.components().collect();
+        let Some(name) = components.pop() else {
+            return Err(invalid("path must name a file, not a directory"));
+        };
+        match name {
+            Component::Normal(name) if !is_git_component(name) => {
+                if name.is_empty() {
+                    return Err(invalid("path must name a file, not a directory"));
+                }
+            }
+            _ => {
+                return Err(denied(
+                    "paths must remain inside the workspace; '..', '.', and Git metadata are not allowed",
+                ));
+            }
+        }
+        let mut path = self.root().to_path_buf();
+        for component in components {
+            match component {
+                Component::CurDir => continue,
+                Component::Normal(dir) if !is_git_component(dir) => path.push(dir),
+                _ => {
+                    return Err(denied(
+                        "paths must remain inside the workspace; '..', '.', and Git metadata are not allowed",
+                    ));
+                }
+            }
+            if let Err(error) = fs::create_dir(&path)
+                && error.kind() != io::ErrorKind::AlreadyExists
+            {
+                return Err(io_error(error));
+            }
+            if fs::symlink_metadata(&path)
+                .map_err(io_error)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(denied("symlink paths are not supported"));
+            }
+        }
+        path.push(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(invalid("path must identify a regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+        }
+        Ok(path)
+    }
+
     pub(crate) fn display(&self, path: &Path) -> String {
         path.strip_prefix(self.root())
             .unwrap_or(path)
@@ -145,8 +218,8 @@ impl Workspace {
     }
 }
 
-fn is_git_component(component: Component<'_>) -> bool {
-    matches!(component, Component::Normal(name) if name.to_string_lossy().eq_ignore_ascii_case(".git"))
+fn is_git_component(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().eq_ignore_ascii_case(".git")
 }
 
 pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>> {

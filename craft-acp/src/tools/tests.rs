@@ -473,6 +473,9 @@ fn schemas_match_strict_arguments() {
         Read(workspace.clone()).parameters(),
         Grep(workspace.clone()).parameters(),
         Edit(workspace.clone()).parameters(),
+        EditLines(workspace.clone()).parameters(),
+        InsertLines(workspace.clone()).parameters(),
+        Write(workspace.clone()).parameters(),
         Delete(workspace).parameters(),
     ];
     for schema in schemas {
@@ -484,10 +487,10 @@ fn schemas_match_strict_arguments() {
 }
 
 #[tokio::test]
-async fn rig_loop_executes_all_four_tools_and_returns_results_to_model() {
+async fn rig_loop_executes_all_seven_tools_and_returns_results_to_model() {
     let (_dir, workspace) = workspace();
     let path = workspace.root().join("file.txt");
-    fs::write(&path, "old text\n").unwrap();
+    fs::write(&path, "old text\nsecond\n").unwrap();
     let model = MockCompletionModel::new([
         MockTurn::tool_call("1", "read", json!({"path":"file.txt"})),
         MockTurn::tool_call("2", "grep", json!({"pattern":"old"})),
@@ -496,11 +499,26 @@ async fn rig_loop_executes_all_four_tools_and_returns_results_to_model() {
             "edit",
             json!({"path":"file.txt","old_string":"old","new_string":"new"}),
         ),
-        MockTurn::tool_call("4", "delete", json!({"path":"file.txt"})),
+        MockTurn::tool_call(
+            "4",
+            "edit_lines",
+            json!({"path":"file.txt","start":2,"end":2,"new_string":"SECOND"}),
+        ),
+        MockTurn::tool_call(
+            "5",
+            "insert_lines",
+            json!({"path":"file.txt","line":2,"new_string":"inserted"}),
+        ),
+        MockTurn::tool_call(
+            "6",
+            "write",
+            json!({"path":"nested/dir/new.txt","content":"fresh\n"}),
+        ),
+        MockTurn::tool_call("7", "delete", json!({"path":"file.txt"})),
         MockTurn::text("done"),
     ]);
     let agent = workspace
-        .register(AgentBuilder::new(model.clone()).default_max_turns(8))
+        .register(AgentBuilder::new(model.clone()).default_max_turns(10))
         .build();
     let response = agent
         .runner("read, search, edit, then delete file.txt")
@@ -508,8 +526,12 @@ async fn rig_loop_executes_all_four_tools_and_returns_results_to_model() {
         .await
         .unwrap();
     assert_eq!(response.output(), "done");
-    assert_eq!(response.requests(), 5);
+    assert_eq!(response.requests(), 8);
     assert!(!path.exists());
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("nested/dir/new.txt")).unwrap(),
+        "fresh\n"
+    );
     let requests = model.requests();
     let mut names: Vec<_> = requests[0]
         .tools
@@ -517,8 +539,19 @@ async fn rig_loop_executes_all_four_tools_and_returns_results_to_model() {
         .map(|tool| tool.name.as_str())
         .collect();
     names.sort();
-    assert_eq!(names, ["delete", "edit", "grep", "read"]);
-    let transcript = serde_json::to_string(&requests[4].chat_history).unwrap();
+    assert_eq!(
+        names,
+        [
+            "delete",
+            "edit",
+            "edit_lines",
+            "grep",
+            "insert_lines",
+            "read",
+            "write"
+        ]
+    );
+    let transcript = serde_json::to_string(&requests[7].chat_history).unwrap();
     assert!(transcript.contains("old text"));
     assert!(transcript.contains("edited file.txt"));
     assert!(transcript.contains("deleted"));
@@ -617,4 +650,120 @@ async fn grep_skips_non_unicode_names() {
         .unwrap();
     assert!(result.matches.is_empty());
     assert_eq!(result.skipped_files, 1);
+}
+
+#[tokio::test]
+async fn edit_lines_replaces_and_deletes_ranges() {
+    let (_dir, workspace) = workspace();
+    let path = workspace.root().join("file");
+    fs::write(&path, "aaa\nbbb\nccc\nddd\n").unwrap();
+    let tool = EditLines(workspace.clone());
+    let output = invoke(
+        &tool,
+        json!({"path":"file","start":2,"end":3,"new_string":"XXX\nYYY"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.path, "file");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nXXX\nYYY\nddd\n");
+    invoke(
+        &tool,
+        json!({"path":"file","start":2,"end":3,"new_string":""}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nddd\n");
+    let error = invoke(
+        &tool,
+        json!({"path":"file","start":9,"end":9,"new_string":"x"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nddd\n");
+}
+
+#[tokio::test]
+async fn insert_lines_works_on_empty_and_existing_files() {
+    let (_dir, workspace) = workspace();
+    fs::write(workspace.root().join("empty"), "").unwrap();
+    fs::write(workspace.root().join("file"), "aaa\nbbb\n").unwrap();
+    let tool = InsertLines(workspace.clone());
+    invoke(
+        &tool,
+        json!({"path":"empty","line":0,"new_string":"seed\nmore"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("empty")).unwrap(),
+        "seed\nmore\n"
+    );
+    invoke(&tool, json!({"path":"file","line":2,"new_string":"tail"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("file")).unwrap(),
+        "aaa\nbbb\ntail\n"
+    );
+    assert!(
+        invoke(&tool, json!({"path":"file","line":4,"new_string":"x"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        invoke(&tool, json!({"path":"file","line":0,"new_string":""}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn write_creates_overwrites_and_refuses_bad_targets() {
+    let (_dir, workspace) = workspace();
+    let tool = Write(workspace.clone());
+    let output = invoke(
+        &tool,
+        json!({"path":"nested/dir/new.txt","content":"fresh\n"}),
+    )
+    .await
+    .unwrap();
+    assert!(output.created);
+    assert_eq!(output.bytes_written, 6);
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("nested/dir/new.txt")).unwrap(),
+        "fresh\n"
+    );
+    let output = invoke(
+        &tool,
+        json!({"path":"nested/dir/new.txt","content":"replace"}),
+    )
+    .await
+    .unwrap();
+    assert!(!output.created);
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("nested/dir/new.txt")).unwrap(),
+        "replace"
+    );
+    fs::create_dir(workspace.root().join("dir")).unwrap();
+    assert!(
+        invoke(&tool, json!({"path":"../outside","content":"x"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        invoke(&tool, json!({"path":".git/config","content":"x"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        invoke(&tool, json!({"path":"dir","content":"x"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        invoke(&tool, json!({"path":"ok","content":"\u{0}"}))
+            .await
+            .is_err()
+    );
 }
