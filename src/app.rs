@@ -123,6 +123,7 @@ pub struct App {
     pub toast_generation: u64,
 
     pub expanded_steps: HashSet<String>,
+    pub expanded_tool_calls: HashSet<String>,
     pub comment_drafts: HashMap<String, CommentDraft>,
     pub comments: HashMap<String, Vec<Comment>>,
     pub selection_focus: gpui::FocusHandle,
@@ -221,6 +222,7 @@ impl App {
             toast: config_error,
             toast_generation: 0,
             expanded_steps: HashSet::new(),
+            expanded_tool_calls: HashSet::new(),
             comment_drafts: HashMap::new(),
             comments: persisted.comments,
             selection_focus: cx.focus_handle(),
@@ -965,6 +967,13 @@ impl App {
     pub fn toggle_steps(&mut self, msg_id: &str, cx: &mut Context<Self>) {
         if !self.expanded_steps.insert(msg_id.to_string()) {
             self.expanded_steps.remove(msg_id);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_tool_call(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.expanded_tool_calls.insert(id.to_string()) {
+            self.expanded_tool_calls.remove(id);
         }
         cx.notify();
     }
@@ -2232,6 +2241,11 @@ mod session_config_tests {
                 vec![tool_text("1: second file"), tool_text("2: more output")]
             );
             assert!(message.terminal.is_none());
+            // Layout assertions below read content bounds, so expand the calls.
+            app.expanded_tool_calls.extend([
+                "tool-call-tools-first".to_owned(),
+                "tool-call-tools-second".to_owned(),
+            ]);
             cx.notify();
         });
         cx.run_until_parked();
@@ -2307,6 +2321,9 @@ mod session_config_tests {
             let saved = serde_json::to_string(&messages).unwrap();
             let restored: Vec<Message> = serde_json::from_str(&saved).unwrap();
             assert_eq!(calls(&restored[0]), calls(&messages[0]));
+            // The diff assertions below require the collapsed call to be open.
+            app.expanded_tool_calls
+                .insert("tool-call-tools-edit".to_owned());
             cx.notify();
         });
         cx.run_until_parked();

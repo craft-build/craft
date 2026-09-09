@@ -1183,6 +1183,8 @@ fn tool_call_view(
     cx: &mut Context<App>,
 ) -> gpui::AnyElement {
     let id = format!("tool-call-{message_id}-{}", call.tool_call_id);
+    let expanded = app.expanded_tool_calls.contains(&id);
+    let toggle_id = id.clone();
     let (status, color) = match call.status {
         ToolCallStatus::Pending => ("Pending", theme::TEXT_MUTED),
         ToolCallStatus::InProgress => ("Running", theme::ACCENT),
@@ -1206,11 +1208,23 @@ fn tool_call_view(
         .py(px(8.))
         .child(
             div()
+                .id(SharedString::from(format!("{id}-header")))
                 .flex()
                 .items_start()
                 .gap(px(8.))
                 .text_size(px(12.))
                 .line_height(px(18.))
+                .cursor_pointer()
+                .hover(|style| style.text_color(rgb(theme::TEXT_PRIMARY)))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.toggle_tool_call(&toggle_id, cx)
+                }))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .child(if expanded { "▾" } else { "▸" }),
+                )
                 .child(
                     div()
                         .flex_1()
@@ -1227,6 +1241,9 @@ fn tool_call_view(
                         .child(status),
                 ),
         );
+    if !expanded {
+        return card.into_any_element();
+    }
     for (index, content) in call.content.iter().enumerate() {
         let content_id = format!("{id}-content-{index}");
         match content {
