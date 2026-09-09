@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use agent_client_protocol::schema::v1::{
     ContentBlock, ElicitationMode, ElicitationPropertySchema, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionUpdate, ToolCall, ToolCallContent, ToolCallUpdate,
+    SessionConfigSelectOptions, SessionUpdate, ToolCallContent, ToolCallUpdate,
 };
 use gpui::prelude::*;
 use gpui::{Context, Entity, PathPromptOptions, ScrollHandle, Window, div, px, rgb};
@@ -1177,7 +1177,7 @@ impl App {
         thread.push(Message {
             id,
             role: Role::User,
-            text,
+            body: text.into(),
             time: None,
             context: chips,
             attached_comments,
@@ -1185,15 +1185,15 @@ impl App {
             steps: None,
             diff: None,
             terminal: None,
-            tool_calls: vec![],
         });
         self.update_active_messages(thread);
         self.thread_scroll.scroll_to_bottom();
         let session_title: String = self
             .active_messages()
             .last()
-            .map(|message| message.text.trim())
-            .unwrap_or("Session")
+            .map(|message| message.body.text())
+            .unwrap_or_else(|| "Session".into())
+            .trim()
             .chars()
             .take(48)
             .collect();
@@ -1225,7 +1225,7 @@ impl App {
             text: self
                 .active_messages()
                 .last()
-                .map(|message| message.text.clone())
+                .map(|message| message.body.text())
                 .unwrap_or_default(),
             context_files: self
                 .active_messages()
@@ -1286,7 +1286,7 @@ impl App {
                 thread.push(Message {
                     id: format!("a{}", now_ms()),
                     role: Role::Assistant,
-                    text: String::new(),
+                    body: MessageBody::default(),
                     time: Some("Just now".into()),
                     context: vec![],
                     attached_comments: vec![],
@@ -1294,7 +1294,6 @@ impl App {
                     steps: None,
                     diff: None,
                     terminal: None,
-                    tool_calls: vec![],
                 });
                 self.update_active_messages(thread);
                 self.thread_scroll.scroll_to_bottom();
@@ -1346,7 +1345,7 @@ impl App {
                         .rev()
                         .find(|message| matches!(message.role, Role::Assistant))
                     {
-                        message.text.push_str(&text.text);
+                        message.body.push_text(&text.text);
                     }
                     self.update_active_messages(thread);
                 }
@@ -1384,8 +1383,8 @@ impl App {
             .iter()
             .rposition(|message| {
                 message
-                    .tool_calls
-                    .iter()
+                    .body
+                    .tool_calls()
                     .any(|call| call.tool_call_id == update.tool_call_id)
             })
             .or_else(|| {
@@ -1394,17 +1393,6 @@ impl App {
                     .rposition(|message| matches!(message.role, Role::Assistant))
             });
         let Some(owner) = owner else { return };
-        let calls = &mut thread[owner].tool_calls;
-        let index = calls
-            .iter()
-            .position(|call| call.tool_call_id == update.tool_call_id)
-            .unwrap_or_else(|| {
-                calls.push(ToolCall::new(
-                    update.tool_call_id.clone(),
-                    "Agent operation",
-                ));
-                calls.len() - 1
-            });
         for item in update.fields.content.iter().flatten() {
             if let ToolCallContent::Diff(diff) = item {
                 let rendered = render_acp_diff(diff.clone());
@@ -1412,7 +1400,7 @@ impl App {
             }
         }
         // ACP collections replace previous contents; omitted fields stay intact.
-        calls[index].update(update.fields);
+        thread[owner].body.update_tool_call(update);
         self.update_active_messages(thread);
     }
 
@@ -2070,9 +2058,13 @@ fn json_elicitation_value(
 mod session_config_tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        Content, Diff as AcpDiff, ElicitationContentValue, SessionConfigSelectOption, TextContent,
-        ToolCallStatus, ToolCallUpdateFields,
+        Content, ContentChunk, Diff as AcpDiff, ElicitationContentValue, SessionConfigSelectOption,
+        TextContent, ToolCall, ToolCallStatus, ToolCallUpdateFields,
     };
+
+    fn calls(message: &Message) -> Vec<ToolCall> {
+        message.body.tool_calls().cloned().collect()
+    }
 
     fn tool_text(text: &str) -> ToolCallContent {
         ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
@@ -2097,7 +2089,7 @@ mod session_config_tests {
                 messages: vec![Message {
                     id: "tools".into(),
                     role: Role::Assistant,
-                    text: String::new(),
+                    body: MessageBody::default(),
                     time: None,
                     context: vec![],
                     attached_comments: vec![],
@@ -2105,7 +2097,6 @@ mod session_config_tests {
                     steps: None,
                     diff: None,
                     terminal: None,
-                    tool_calls: vec![],
                 }],
                 acp_session_id: None,
                 archived: false,
@@ -2116,6 +2107,87 @@ mod session_config_tests {
         app.active_session_id = Some("session".into());
         app.screen = Screen::Workspace;
         app
+    }
+
+    fn assistant_text(text: &str) -> SessionUpdate {
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            text,
+        ))))
+    }
+
+    #[gpui::test]
+    fn assistant_text_and_tools_keep_stream_order_after_updates_and_reload(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|_, cx| tool_test_app(cx));
+        app.update(cx, |app, cx| {
+            app.apply_session_update(assistant_text("**Before"));
+            app.apply_session_update(assistant_text(" reading**."));
+            app.apply_session_update(SessionUpdate::ToolCall(
+                ToolCall::new("first", "read a.rs").status(ToolCallStatus::InProgress),
+            ));
+            app.apply_session_update(assistant_text("Between "));
+            app.apply_session_update(assistant_text("`calls`."));
+            app.apply_session_update(SessionUpdate::ToolCall(
+                ToolCall::new("second", "read b.rs").status(ToolCallStatus::InProgress),
+            ));
+            app.apply_session_update(assistant_text(""));
+            // Completion events update the original slot, not the current tail.
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "second",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .content(vec![tool_text("second result")]),
+            )));
+            app.apply_session_update(assistant_text("After "));
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "first",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .content(vec![tool_text("first result")]),
+            )));
+            app.apply_session_update(assistant_text("both."));
+            let messages = app.active_messages();
+            let tool_calls = calls(&messages[0]);
+            assert_eq!(
+                messages[0].body.parts,
+                vec![
+                    MessagePart::Text("**Before reading**.".into()),
+                    MessagePart::ToolCall(Box::new(tool_calls[0].clone())),
+                    MessagePart::Text("Between `calls`.".into()),
+                    MessagePart::ToolCall(Box::new(tool_calls[1].clone())),
+                    MessagePart::Text("After both.".into()),
+                ]
+            );
+            assert_eq!(tool_calls[0].content, vec![tool_text("first result")]);
+            assert_eq!(tool_calls[1].content, vec![tool_text("second result")]);
+            let saved = serde_json::to_value(&messages).unwrap();
+            assert!(saved[0].get("text").is_none());
+            assert!(saved[0].get("tool_calls").is_none());
+            let restored: Vec<Message> = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored[0].body, messages[0].body);
+            app.update_active_messages(restored);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for width in [1600., 800.] {
+            cx.simulate_resize(gpui::size(px(width), px(600.)));
+            cx.run_until_parked();
+            let card = cx.debug_bounds("assistant-card-tools").unwrap();
+            let mut bottom = card.origin.y;
+            for selector in [
+                "assistant-markdown-tools",
+                "tool-call-tools-first",
+                "assistant-markdown-tools-text-1",
+                "tool-call-tools-second",
+                "assistant-markdown-tools-text-2",
+            ] {
+                let bounds = cx.debug_bounds(selector).unwrap();
+                assert!(bounds.origin.y >= bottom, "out of order: {selector}");
+                bottom = bounds.bottom();
+            }
+            assert!(bottom < card.bottom());
+        }
     }
 
     #[gpui::test]
@@ -2150,16 +2222,13 @@ mod session_config_tests {
                 ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
             )));
             let message = app.active_messages().remove(0);
-            assert_eq!(message.tool_calls.len(), 2);
-            assert_eq!(message.tool_calls[0].title, "read a.rs");
+            assert_eq!(calls(&message).len(), 2);
+            assert_eq!(calls(&message)[0].title, "read a.rs");
+            assert_eq!(calls(&message)[0].content, vec![tool_text("1: first file")]);
+            assert_eq!(calls(&message)[1].title, "read b.rs");
+            assert_eq!(calls(&message)[1].status, ToolCallStatus::Failed);
             assert_eq!(
-                message.tool_calls[0].content,
-                vec![tool_text("1: first file")]
-            );
-            assert_eq!(message.tool_calls[1].title, "read b.rs");
-            assert_eq!(message.tool_calls[1].status, ToolCallStatus::Failed);
-            assert_eq!(
-                message.tool_calls[1].content,
+                calls(&message)[1].content,
                 vec![tool_text("1: second file"), tool_text("2: more output")]
             );
             assert!(message.terminal.is_none());
@@ -2186,14 +2255,14 @@ mod session_config_tests {
                 ToolCallUpdateFields::new().title("renamed read"),
             )));
             assert_eq!(
-                app.active_messages()[0].tool_calls[0].content,
+                calls(&app.active_messages()[0])[0].content,
                 vec![tool_text("1: first file")]
             );
             app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "first",
                 ToolCallUpdateFields::new().content(vec![]),
             )));
-            let calls = app.active_messages().remove(0).tool_calls;
+            let calls = calls(&app.active_messages().remove(0));
             assert_eq!(calls.len(), 2);
             assert_eq!(calls[0].title, "renamed read");
             assert!(calls[0].content.is_empty());
@@ -2215,14 +2284,14 @@ mod session_config_tests {
                 ]),
             )));
             let mut messages = app.active_messages();
-            assert_eq!(messages[0].tool_calls[0].title, "Agent operation");
-            assert_eq!(messages[0].tool_calls[0].content.len(), 3);
+            assert_eq!(calls(&messages[0])[0].title, "Agent operation");
+            assert_eq!(calls(&messages[0])[0].content.len(), 3);
             assert!(messages[0].diff.is_none());
             assert!(app.file_diffs.contains_key("a.rs"));
             assert!(app.file_diffs.contains_key("b.rs"));
             let mut later = messages[0].clone();
             later.id = "later".into();
-            later.tool_calls.clear();
+            later.body.parts.clear();
             messages.push(later);
             app.update_active_messages(messages);
             app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
@@ -2232,12 +2301,12 @@ mod session_config_tests {
                     .status(ToolCallStatus::Completed),
             )));
             let messages = app.active_messages();
-            assert_eq!(messages[0].tool_calls[0].title, "edit two files");
-            assert_eq!(messages[0].tool_calls[0].content.len(), 3);
-            assert!(messages[1].tool_calls.is_empty());
+            assert_eq!(calls(&messages[0])[0].title, "edit two files");
+            assert_eq!(calls(&messages[0])[0].content.len(), 3);
+            assert!(calls(&messages[1]).is_empty());
             let saved = serde_json::to_string(&messages).unwrap();
             let restored: Vec<Message> = serde_json::from_str(&saved).unwrap();
-            assert_eq!(restored[0].tool_calls, messages[0].tool_calls);
+            assert_eq!(calls(&restored[0]), calls(&messages[0]));
             cx.notify();
         });
         cx.run_until_parked();
@@ -2272,14 +2341,14 @@ mod session_config_tests {
                 ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
             )));
             let sessions = &app.sessions_by_project["project"];
-            assert_eq!(sessions[0].messages[0].tool_calls[0].title, "first session");
+            assert_eq!(calls(&sessions[0].messages[0])[0].title, "first session");
             assert_eq!(
-                sessions[0].messages[0].tool_calls[0].status,
+                calls(&sessions[0].messages[0])[0].status,
                 ToolCallStatus::Pending
             );
-            assert_eq!(sessions[1].messages[0].tool_calls[0].title, "other session");
+            assert_eq!(calls(&sessions[1].messages[0])[0].title, "other session");
             assert_eq!(
-                sessions[1].messages[0].tool_calls[0].status,
+                calls(&sessions[1].messages[0])[0].status,
                 ToolCallStatus::Completed
             );
         });
@@ -2300,29 +2369,35 @@ mod session_config_tests {
             };
             let messages = ["completed", "streaming"]
                 .into_iter()
-                .map(|id| Message {
-                    id: id.into(),
-                    role: Role::Assistant,
-                    text: format!(
-                        "## Root cause\n\n{}\n\n1. The read tool returns structured output with a path and numbered lines.\n2. Render the JSON rather than its **Debug representation**.\n\n## Fix\n\n```json\n{{\n  \"path\": \"Cargo.lock\",\n  \"lines\": [],\n  \"total_lines\": 11485,\n  \"next_offset\": 35\n}}\n```\n\n**One caveat:** {}",
-                        "A paragraph with **formatted text** and `inline code` that wraps across many lines in a narrow conversation pane. ".repeat(5),
-                        "This final paragraph after the code block must stay inside the card and remain reachable by scrolling. ".repeat(5),
-                    ),
-                    time: None,
-                    context: vec![],
-                    attached_comments: vec![],
-                    checkpoint_label: (id == "completed").then(|| "Checkpoint 11".into()),
-                    steps: None,
-                    diff: None,
-                    terminal: None,
-                    tool_calls: vec![
+                .map(|id| {
+                    let mut body = MessageBody::default();
+                    for call in [
                         ToolCall::new("read", "read long output")
                             .status(ToolCallStatus::Completed)
                             .content(vec![tool_text(&"Long tool output ".repeat(100))]),
                         ToolCall::new("grep", "grep results")
                             .status(ToolCallStatus::Completed)
                             .content(vec![tool_text(&"src/main.rs:\n  1: matching line\n".repeat(12))]),
-                    ],
+                    ] {
+                        body.update_tool_call(call.into());
+                    }
+                    body.push_text(&format!(
+                        "## Root cause\n\n{}\n\n1. The read tool returns structured output with a path and numbered lines.\n2. Render the JSON rather than its **Debug representation**.\n\n## Fix\n\n```json\n{{\n  \"path\": \"Cargo.lock\",\n  \"lines\": [],\n  \"total_lines\": 11485,\n  \"next_offset\": 35\n}}\n```\n\n**One caveat:** {}",
+                        "A paragraph with **formatted text** and `inline code` that wraps across many lines in a narrow conversation pane. ".repeat(5),
+                        "This final paragraph after the code block must stay inside the card and remain reachable by scrolling. ".repeat(5),
+                    ));
+                    Message {
+                        id: id.into(),
+                        role: Role::Assistant,
+                        body,
+                        time: None,
+                        context: vec![],
+                        attached_comments: vec![],
+                        checkpoint_label: (id == "completed").then(|| "Checkpoint 11".into()),
+                        steps: None,
+                        diff: None,
+                        terminal: None,
+                    }
                 })
                 .collect();
             app.sessions_by_project.insert(
@@ -2422,6 +2497,11 @@ mod session_config_tests {
     }
 
     #[gpui::test]
+    fn selecting_text_after_a_tool_call_opens_a_comment(cx: &mut gpui::TestAppContext) {
+        assert_type_to_comment("interleaved", cx);
+    }
+
+    #[gpui::test]
     fn selecting_user_text_then_typing_opens_a_comment(cx: &mut gpui::TestAppContext) {
         assert_type_to_comment("user", cx);
     }
@@ -2461,7 +2541,7 @@ mod session_config_tests {
                         } else {
                             Role::Assistant
                         },
-                        text: "**selected text**".into(),
+                        body: String::from("**selected text**").into(),
                         time: None,
                         context: vec![],
                         attached_comments: vec![],
@@ -2469,7 +2549,6 @@ mod session_config_tests {
                         steps: None,
                         diff: None,
                         terminal: None,
-                        tool_calls: vec![],
                     }],
                     acp_session_id: None,
                     archived: false,
@@ -2494,11 +2573,23 @@ mod session_config_tests {
             } else if surface == "file-diff" {
                 app.file_diffs.insert(diff.file.clone(), diff);
                 app.active_diff_file = Some("main.rs".into());
+            } else if surface == "interleaved" {
+                let body =
+                    &mut app.sessions_by_project.get_mut("project").unwrap()[0].messages[0].body;
+                body.parts.insert(
+                    0,
+                    MessagePart::ToolCall(Box::new(
+                        ToolCall::new("read", "read main.rs").status(ToolCallStatus::Completed),
+                    )),
+                );
+                body.parts
+                    .insert(0, MessagePart::Text("Before reading.".into()));
             }
             app
         });
         let (selector, anchor) = match surface {
             "user" => ("user-markdown-selection", "msg_selection"),
+            "interleaved" => ("assistant-markdown-selection-text-1", "msg_selection"),
             "inline-diff" => ("diff-text-session:session:selection_0", "selection_0"),
             "file-diff" => ("diff-text-session:session:f_main.rs_0", "f_main.rs_0"),
             _ => ("assistant-markdown-selection", "msg_selection"),

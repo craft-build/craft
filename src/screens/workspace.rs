@@ -9,7 +9,9 @@ use crate::app::{App, CommentDraft, SessionConfigControl, render_acp_diff};
 use crate::chrome;
 use crate::markdown::markdown_view;
 use crate::selectable_text::{CommentTarget, SelectableText};
-use crate::state::{Comment, Diff, DiffLine, DiffLineKind, Message, Role, Steps, Terminal};
+use crate::state::{
+    Comment, Diff, DiffLine, DiffLineKind, Message, MessagePart, Role, Steps, Terminal,
+};
 use crate::theme;
 
 pub fn render(app: &mut App, window: &mut Window, cx: &mut Context<App>) -> impl IntoElement {
@@ -923,7 +925,7 @@ fn user_message(m: Message, app: &mut App, cx: &mut Context<App>) -> impl IntoEl
                 .child("you"),
         )
         .child(markdown_view(
-            &m.text,
+            &m.body.text(),
             markdown_id,
             CommentTarget {
                 key: comment_key.clone(),
@@ -1065,20 +1067,33 @@ fn assistant_message(
     if let Some(term) = &m.terminal {
         col = col.child(terminal_view(term, &msg_id));
     }
-    for call in &m.tool_calls {
-        col = col.child(tool_call_view(call, &msg_id, app, cx));
-    }
-    if !m.text.is_empty() {
-        col = col.child(markdown_view(
-            &m.text,
-            format!("assistant-markdown-{msg_id}"),
-            CommentTarget {
-                key: comment_key.clone(),
-                label: "assistant reply".to_string(),
-                scroll_handle: app.thread_scroll.clone(),
-                focus_handle: app.selection_focus.clone(),
-            },
-        ));
+    let mut text_index = 0;
+    for part in &m.body.parts {
+        match part {
+            MessagePart::ToolCall(call) => {
+                col = col.child(tool_call_view(call, &msg_id, app, cx));
+            }
+            MessagePart::Text(text) => {
+                // Keep the original first-text ID and give each later block its
+                // own selection state. Appending content never renumbers blocks.
+                let markdown_id = if text_index == 0 {
+                    format!("assistant-markdown-{msg_id}")
+                } else {
+                    format!("assistant-markdown-{msg_id}-text-{text_index}")
+                };
+                text_index += 1;
+                col = col.child(markdown_view(
+                    text,
+                    markdown_id,
+                    CommentTarget {
+                        key: comment_key.clone(),
+                        label: "assistant reply".to_string(),
+                        scroll_handle: app.thread_scroll.clone(),
+                        focus_handle: app.selection_focus.clone(),
+                    },
+                ));
+            }
+        }
     }
     if is_streaming {
         col = col.child(running_indicator(cx));
