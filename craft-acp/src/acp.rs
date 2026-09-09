@@ -686,16 +686,27 @@ fn tool_kind(name: &str) -> ToolKind {
 }
 
 fn tool_result_content(result: &rig::core::completion::message::ToolResult) -> ToolCallContent {
-    let text = result
-        .content
+    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+        tool_result_text(&result.content),
+    ))))
+}
+
+/// Tool results arrive as Rig content blocks: text passes through verbatim,
+/// while JSON payloads (serialized tool outputs such as `ReadOutput`) are
+/// pretty-printed so clients show the data itself rather than the enum's
+/// Debug rendering (`Json { value: Object {...} }`).
+fn tool_result_text(items: &[rig::core::completion::message::ToolResultContent]) -> String {
+    items
         .iter()
         .map(|item| match item {
             rig::core::completion::message::ToolResultContent::Text(text) => text.text.clone(),
+            rig::core::completion::message::ToolResultContent::Json { value, .. } => {
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+            }
             other => format!("{other:?}"),
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -762,5 +773,16 @@ mod tests {
         assert_eq!(tool_kind("edit"), ToolKind::Edit);
         assert_eq!(tool_kind("delete"), ToolKind::Delete);
         assert_eq!(tool_kind("other"), ToolKind::Other);
+    }
+
+    #[test]
+    fn tool_result_text_pretty_prints_json_results() {
+        let items = vec![rig::core::completion::message::ToolResultContent::Json {
+            value: serde_json::json!({ "path": "Cargo.lock", "total_lines": 2 }),
+        }];
+        let text = tool_result_text(&items);
+        assert!(text.contains("\"path\": \"Cargo.lock\""), "unexpected: {text}");
+        assert!(text.contains("\"total_lines\": 2"), "unexpected: {text}");
+        assert!(!text.contains("Json {"), "Debug rendering leaked: {text}");
     }
 }
