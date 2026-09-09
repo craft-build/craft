@@ -1,10 +1,11 @@
 use agent_client_protocol::schema::v1::{
-    ElicitationMode, ElicitationPropertySchema, MultiSelectItems,
+    ContentBlock, ElicitationMode, ElicitationPropertySchema, MultiSelectItems, ToolCall,
+    ToolCallContent, ToolCallStatus,
 };
 use gpui::prelude::*;
 use gpui::{Context, FontWeight, SharedString, Window, div, px, rgb, rgba};
 
-use crate::app::{App, CommentDraft, SessionConfigControl};
+use crate::app::{App, CommentDraft, SessionConfigControl, render_acp_diff};
 use crate::chrome;
 use crate::markdown::markdown_view;
 use crate::selectable_text::{CommentTarget, SelectableText};
@@ -1064,6 +1065,9 @@ fn assistant_message(
     if let Some(term) = &m.terminal {
         col = col.child(terminal_view(term, &msg_id));
     }
+    for call in &m.tool_calls {
+        col = col.child(tool_call_view(call, &msg_id, app, cx));
+    }
     if !m.text.is_empty() {
         col = col.child(markdown_view(
             &m.text,
@@ -1155,6 +1159,112 @@ fn steps_view(
                     })),
             )
         })
+}
+
+fn tool_call_view(
+    call: &ToolCall,
+    message_id: &str,
+    app: &mut App,
+    cx: &mut Context<App>,
+) -> gpui::AnyElement {
+    let id = format!("tool-call-{message_id}-{}", call.tool_call_id);
+    let (status, color) = match call.status {
+        ToolCallStatus::Pending => ("Pending", theme::TEXT_MUTED),
+        ToolCallStatus::InProgress => ("Running", theme::ACCENT),
+        ToolCallStatus::Completed => ("Completed", theme::TEXT_MUTED),
+        ToolCallStatus::Failed => ("Failed", theme::DIFF_DEL_TEXT),
+        _ => ("", theme::TEXT_MUTED),
+    };
+    let mut card = div()
+        .id(SharedString::from(id.clone()))
+        .debug_selector(|| id.clone())
+        .w_full()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .bg(rgb(theme::TERMINAL_BG))
+        .border_1()
+        .border_color(rgb(theme::TERMINAL_BORDER))
+        .rounded(px(6.))
+        .px(px(10.))
+        .py(px(8.))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .text_size(px(12.))
+                .line_height(px(18.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .whitespace_normal()
+                        .text_color(rgb(theme::TEXT_SECONDARY))
+                        .child(call.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(11.))
+                        .text_color(rgb(color))
+                        .child(status),
+                ),
+        );
+    for (index, content) in call.content.iter().enumerate() {
+        let content_id = format!("{id}-content-{index}");
+        match content {
+            ToolCallContent::Diff(diff) => {
+                let diff = render_acp_diff(diff.clone());
+                let file = diff.file.clone();
+                let key_prefix = content_id.clone();
+                card = card.child(diff_view(
+                    &diff,
+                    content_id,
+                    move |line| {
+                        (
+                            format!("{key_prefix}_{line}"),
+                            format!("{file} line {}", line + 1),
+                        )
+                    },
+                    app,
+                    cx,
+                ));
+            }
+            _ => {
+                let text = match content {
+                    ToolCallContent::Content(content) => match &content.content {
+                        ContentBlock::Text(text) => text.text.clone(),
+                        _ => continue,
+                    },
+                    ToolCallContent::Terminal(_) => {
+                        "Interactive terminal is managed by the connected agent".into()
+                    }
+                    _ => continue,
+                };
+                card = card.child(
+                    div()
+                        .id(SharedString::from(content_id.clone()))
+                        .debug_selector(|| content_id)
+                        .w_full()
+                        .min_w(px(0.))
+                        .overflow_x_scroll()
+                        .font_family(theme::MONO_FONT_FAMILY)
+                        .text_size(px(12.))
+                        .line_height(px(18.))
+                        .whitespace_nowrap()
+                        .text_color(rgb(if call.status == ToolCallStatus::Failed {
+                            theme::DIFF_DEL_TEXT
+                        } else {
+                            theme::DIFF_ADD_TEXT
+                        }))
+                        .child(text),
+                );
+            }
+        }
+    }
+    card.into_any_element()
 }
 
 fn terminal_view(term: &Terminal, message_id: &str) -> impl IntoElement {

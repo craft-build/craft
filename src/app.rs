@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use agent_client_protocol::schema::v1::{
     ContentBlock, ElicitationMode, ElicitationPropertySchema, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionUpdate, ToolCallContent,
+    SessionConfigSelectOptions, SessionUpdate, ToolCall, ToolCallContent, ToolCallUpdate,
 };
 use gpui::prelude::*;
 use gpui::{Context, Entity, PathPromptOptions, ScrollHandle, Window, div, px, rgb};
@@ -1185,6 +1185,7 @@ impl App {
             steps: None,
             diff: None,
             terminal: None,
+            tool_calls: vec![],
         });
         self.update_active_messages(thread);
         self.thread_scroll.scroll_to_bottom();
@@ -1293,6 +1294,7 @@ impl App {
                     steps: None,
                     diff: None,
                     terminal: None,
+                    tool_calls: vec![],
                 });
                 self.update_active_messages(thread);
                 self.thread_scroll.scroll_to_bottom();
@@ -1349,18 +1351,8 @@ impl App {
                     self.update_active_messages(thread);
                 }
             }
-            SessionUpdate::ToolCall(call) => {
-                self.apply_tool_content(call.title, call.content);
-            }
-            SessionUpdate::ToolCallUpdate(update) => {
-                self.apply_tool_content(
-                    update
-                        .fields
-                        .title
-                        .unwrap_or_else(|| "Agent operation".into()),
-                    update.fields.content.unwrap_or_default(),
-                );
-            }
+            SessionUpdate::ToolCall(call) => self.apply_tool_update(call.into()),
+            SessionUpdate::ToolCallUpdate(update) => self.apply_tool_update(update),
             SessionUpdate::UsageUpdate(usage) => {
                 self.context_usage = (usage.size > 0)
                     .then_some(((usage.used.saturating_mul(100) / usage.size).min(100)) as u8);
@@ -1384,40 +1376,43 @@ impl App {
         }
     }
 
-    fn apply_tool_content(&mut self, title: String, content: Vec<ToolCallContent>) {
+    fn apply_tool_update(&mut self, update: ToolCallUpdate) {
         let mut thread = self.active_messages();
-        let Some(message) = thread
-            .iter_mut()
-            .rev()
-            .find(|message| matches!(message.role, Role::Assistant))
-        else {
-            return;
-        };
-        for item in content {
-            match item {
-                ToolCallContent::Diff(diff) => {
-                    let rendered = render_acp_diff(diff);
-                    self.file_diffs
-                        .insert(rendered.file.clone(), rendered.clone());
-                    message.diff = Some(rendered);
-                }
-                ToolCallContent::Content(content) => {
-                    if let ContentBlock::Text(text) = content.content {
-                        message.terminal = Some(Terminal {
-                            cmd: title.clone(),
-                            output: text.text,
-                        });
-                    }
-                }
-                ToolCallContent::Terminal(_) => {
-                    message.terminal.get_or_insert(Terminal {
-                        cmd: title.clone(),
-                        output: "Interactive terminal is managed by the connected agent".into(),
-                    });
-                }
-                _ => {}
+        // IDs are session-scoped. A late update must still reach its original
+        // assistant message rather than being attached to the newest reply.
+        let owner = thread
+            .iter()
+            .rposition(|message| {
+                message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.tool_call_id == update.tool_call_id)
+            })
+            .or_else(|| {
+                thread
+                    .iter()
+                    .rposition(|message| matches!(message.role, Role::Assistant))
+            });
+        let Some(owner) = owner else { return };
+        let calls = &mut thread[owner].tool_calls;
+        let index = calls
+            .iter()
+            .position(|call| call.tool_call_id == update.tool_call_id)
+            .unwrap_or_else(|| {
+                calls.push(ToolCall::new(
+                    update.tool_call_id.clone(),
+                    "Agent operation",
+                ));
+                calls.len() - 1
+            });
+        for item in update.fields.content.iter().flatten() {
+            if let ToolCallContent::Diff(diff) = item {
+                let rendered = render_acp_diff(diff.clone());
+                self.file_diffs.insert(rendered.file.clone(), rendered);
             }
         }
+        // ACP collections replace previous contents; omitted fields stay intact.
+        calls[index].update(update.fields);
         self.update_active_messages(thread);
     }
 
@@ -1940,7 +1935,7 @@ fn scoped_comment_key(session_id: Option<&str>, anchor: &str) -> String {
     format!("{}{anchor}", comment_scope_prefix(session_id))
 }
 
-fn render_acp_diff(diff: agent_client_protocol::schema::v1::Diff) -> Diff {
+pub(crate) fn render_acp_diff(diff: agent_client_protocol::schema::v1::Diff) -> Diff {
     use similar::{ChangeTag, TextDiff};
 
     let old = diff.old_text.unwrap_or_default();
@@ -2075,8 +2070,220 @@ fn json_elicitation_value(
 mod session_config_tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        Diff as AcpDiff, ElicitationContentValue, SessionConfigSelectOption,
+        Content, Diff as AcpDiff, ElicitationContentValue, SessionConfigSelectOption, TextContent,
+        ToolCallStatus, ToolCallUpdateFields,
     };
+
+    fn tool_text(text: &str) -> ToolCallContent {
+        ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
+    }
+
+    fn tool_test_app(cx: &mut Context<App>) -> App {
+        let mut app = App::from_state(PersistedState::default(), vec![], None, cx);
+        let project = Project {
+            id: "project".into(),
+            name: "Test".into(),
+            path: ".".into(),
+            desc: String::new(),
+            updated: String::new(),
+            checkpoint_label: String::new(),
+            model: String::new(),
+        };
+        app.sessions_by_project.insert(
+            project.id.clone(),
+            vec![Session {
+                id: "session".into(),
+                name: "Test".into(),
+                messages: vec![Message {
+                    id: "tools".into(),
+                    role: Role::Assistant,
+                    text: String::new(),
+                    time: None,
+                    context: vec![],
+                    attached_comments: vec![],
+                    checkpoint_label: None,
+                    steps: None,
+                    diff: None,
+                    terminal: None,
+                    tool_calls: vec![],
+                }],
+                acp_session_id: None,
+                archived: false,
+                agent_profile_id: None,
+            }],
+        );
+        app.active_project = Some(project);
+        app.active_session_id = Some("session".into());
+        app.screen = Screen::Workspace;
+        app
+    }
+
+    #[gpui::test]
+    fn multiple_tool_calls_render_separately_and_updates_preserve_other_calls(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|_, cx| tool_test_app(cx));
+        app.update(cx, |app, cx| {
+            for (id, title) in [("first", "read a.rs"), ("second", "read b.rs")] {
+                app.apply_session_update(SessionUpdate::ToolCall(
+                    ToolCall::new(id, title).status(ToolCallStatus::InProgress),
+                ));
+            }
+            // Finish in reverse order; one call can contain several content blocks.
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "second",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .content(vec![
+                        tool_text("1: second file"),
+                        tool_text("2: more output"),
+                    ]),
+            )));
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "first",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .content(vec![tool_text("1: first file")]),
+            )));
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "second",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
+            )));
+            let message = app.active_messages().remove(0);
+            assert_eq!(message.tool_calls.len(), 2);
+            assert_eq!(message.tool_calls[0].title, "read a.rs");
+            assert_eq!(
+                message.tool_calls[0].content,
+                vec![tool_text("1: first file")]
+            );
+            assert_eq!(message.tool_calls[1].title, "read b.rs");
+            assert_eq!(message.tool_calls[1].status, ToolCallStatus::Failed);
+            assert_eq!(
+                message.tool_calls[1].content,
+                vec![tool_text("1: second file"), tool_text("2: more output")]
+            );
+            assert!(message.terminal.is_none());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for width in [1600., 800.] {
+            cx.simulate_resize(gpui::size(px(width), px(600.)));
+            cx.run_until_parked();
+            let first = cx.debug_bounds("tool-call-tools-first").unwrap();
+            let second = cx.debug_bounds("tool-call-tools-second").unwrap();
+            let first_text = cx.debug_bounds("tool-call-tools-first-content-0").unwrap();
+            let second_text = cx.debug_bounds("tool-call-tools-second-content-1").unwrap();
+            let assistant = cx.debug_bounds("assistant-card-tools").unwrap();
+            assert!(first.bottom() <= second.origin.y);
+            assert!(first_text.bottom() < first.bottom());
+            assert!(second_text.bottom() < second.bottom());
+            assert!(second.bottom() < assistant.bottom());
+        }
+        // Title-only updates preserve content, while an explicit empty list clears it.
+        app.update(cx, |app, _| {
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "first",
+                ToolCallUpdateFields::new().title("renamed read"),
+            )));
+            assert_eq!(
+                app.active_messages()[0].tool_calls[0].content,
+                vec![tool_text("1: first file")]
+            );
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "first",
+                ToolCallUpdateFields::new().content(vec![]),
+            )));
+            let calls = app.active_messages().remove(0).tool_calls;
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].title, "renamed read");
+            assert!(calls[0].content.is_empty());
+            assert_eq!(calls[1].content.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn tool_updates_keep_their_message_owner_and_multiple_diffs(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, cx| tool_test_app(cx));
+        app.update(cx, |app, cx| {
+            // Missing start notifications still get their own placeholder call.
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "edit",
+                ToolCallUpdateFields::new().content(vec![
+                    ToolCallContent::Diff(AcpDiff::new("a.rs", "new a").old_text("old a")),
+                    tool_text("edited files"),
+                    ToolCallContent::Diff(AcpDiff::new("b.rs", "new b").old_text("old b")),
+                ]),
+            )));
+            let mut messages = app.active_messages();
+            assert_eq!(messages[0].tool_calls[0].title, "Agent operation");
+            assert_eq!(messages[0].tool_calls[0].content.len(), 3);
+            assert!(messages[0].diff.is_none());
+            assert!(app.file_diffs.contains_key("a.rs"));
+            assert!(app.file_diffs.contains_key("b.rs"));
+            let mut later = messages[0].clone();
+            later.id = "later".into();
+            later.tool_calls.clear();
+            messages.push(later);
+            app.update_active_messages(messages);
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "edit",
+                ToolCallUpdateFields::new()
+                    .title("edit two files")
+                    .status(ToolCallStatus::Completed),
+            )));
+            let messages = app.active_messages();
+            assert_eq!(messages[0].tool_calls[0].title, "edit two files");
+            assert_eq!(messages[0].tool_calls[0].content.len(), 3);
+            assert!(messages[1].tool_calls.is_empty());
+            let saved = serde_json::to_string(&messages).unwrap();
+            let restored: Vec<Message> = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored[0].tool_calls, messages[0].tool_calls);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let first = cx
+            .debug_bounds("diff-text-session:session:tool-call-tools-edit-content-0_0")
+            .unwrap();
+        let second = cx
+            .debug_bounds("diff-text-session:session:tool-call-tools-edit-content-2_0")
+            .unwrap();
+        assert!(first.bottom() < second.origin.y);
+    }
+
+    #[gpui::test]
+    fn tool_call_ids_are_scoped_to_the_active_session(cx: &mut gpui::TestAppContext) {
+        let (app, cx) = cx.add_window_view(|_, cx| tool_test_app(cx));
+        app.update(cx, |app, _| {
+            let mut other = app.sessions_by_project["project"][0].clone();
+            other.id = "other".into();
+            app.sessions_by_project
+                .get_mut("project")
+                .unwrap()
+                .push(other);
+            app.apply_session_update(SessionUpdate::ToolCall(
+                ToolCall::new("read", "first session").content(vec![tool_text("first")]),
+            ));
+            app.active_session_id = Some("other".into());
+            app.apply_session_update(SessionUpdate::ToolCall(
+                ToolCall::new("read", "other session").content(vec![tool_text("other")]),
+            ));
+            app.apply_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "read",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )));
+            let sessions = &app.sessions_by_project["project"];
+            assert_eq!(sessions[0].messages[0].tool_calls[0].title, "first session");
+            assert_eq!(
+                sessions[0].messages[0].tool_calls[0].status,
+                ToolCallStatus::Pending
+            );
+            assert_eq!(sessions[1].messages[0].tool_calls[0].title, "other session");
+            assert_eq!(
+                sessions[1].messages[0].tool_calls[0].status,
+                ToolCallStatus::Completed
+            );
+        });
+    }
 
     #[gpui::test]
     fn assistant_content_and_footers_stay_inside_scrollable_cards(cx: &mut gpui::TestAppContext) {
@@ -2107,10 +2314,15 @@ mod session_config_tests {
                     checkpoint_label: (id == "completed").then(|| "Checkpoint 11".into()),
                     steps: None,
                     diff: None,
-                    terminal: Some(Terminal {
-                        cmd: "Agent operation".into(),
-                        output: "Long tool output ".repeat(100),
-                    }),
+                    terminal: None,
+                    tool_calls: vec![
+                        ToolCall::new("read", "read long output")
+                            .status(ToolCallStatus::Completed)
+                            .content(vec![tool_text(&"Long tool output ".repeat(100))]),
+                        ToolCall::new("grep", "grep results")
+                            .status(ToolCallStatus::Completed)
+                            .content(vec![tool_text(&"src/main.rs:\n  1: matching line\n".repeat(12))]),
+                    ],
                 })
                 .collect();
             app.sessions_by_project.insert(
@@ -2257,6 +2469,7 @@ mod session_config_tests {
                         steps: None,
                         diff: None,
                         terminal: None,
+                        tool_calls: vec![],
                     }],
                     acp_session_id: None,
                     archived: false,
