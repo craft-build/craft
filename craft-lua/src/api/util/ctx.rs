@@ -4,24 +4,50 @@ use std::time::{Duration, Instant};
 
 use craft_agent::agent::LoadedInstructions;
 use craft_agent::cancel::CancelToken;
-use craft_agent::tools::{FileAccess, FileKey};
+use craft_agent::tools::{FileAccess, FileKey, MAIN_TASK_ID};
 use craft_config::{AgentConfig, ToolOutputLines};
 use mlua::{LuaSerdeExt, MultiValue, UserData, UserDataMethods, Value as LuaValue};
 
 use crate::api::tool::ToolCallReply;
 use crate::api::util::pair::Pair;
+use crate::runtime::RestoreReason;
 use crate::runtime::active_task;
 
 const DEADLINE_ALREADY_SET_MSG: &str = "ctx:set_deadline() already called";
 
 pub(crate) struct RestoreCtx {
     pub(crate) tool_output_lines: ToolOutputLines,
+    pub(crate) session_id: Option<String>,
+    pub(crate) task_id: Option<Arc<str>>,
+    pub(crate) reason: RestoreReason,
 }
 
 impl UserData for RestoreCtx {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("tool_output_lines", |lua, this, ()| {
             lua.to_value(&this.tool_output_lines)
+        });
+
+        // The session whose transcript a restore re-renders, which under
+        // concurrent sessions is not always the focused one
+        // `craft.session.current()` reports. Nil when the run has no session.
+        methods.add_method("session_id", |_, this, ()| {
+            let pair: Pair<String> = this
+                .session_id
+                .as_ref()
+                .map(|id| (Some(id.clone()), None))
+                .unwrap_or((None, None));
+            Ok(pair)
+        });
+
+        methods.add_method("task_id", |_, this, ()| {
+            Ok(this.task_id.as_deref().unwrap_or(MAIN_TASK_ID).to_owned())
+        });
+
+        // Side effects on load are opt-in, never the fallback.
+        methods.add_method("restore_reason", |_, this, ()| {
+            let pair: Pair<&str> = (Some(<&str>::from(this.reason)), None);
+            Ok(pair)
         });
     }
 }
@@ -34,6 +60,9 @@ pub(crate) struct LuaCtx {
     pub(crate) file_access: Arc<FileAccess>,
     pub(crate) loaded_instructions: LoadedInstructions,
     pub(crate) session_id: Option<String>,
+    /// Which chat the run serves, see [`ToolContext::task_id`]. Restore
+    /// takes it from the chat being re-rendered.
+    pub(crate) task_id: Option<Arc<str>>,
 }
 
 impl UserData for LuaCtx {
@@ -127,6 +156,10 @@ impl UserData for LuaCtx {
                 .map(|id| (Some(id.clone()), None))
                 .unwrap_or((None, None));
             Ok(pair)
+        });
+
+        methods.add_method("task_id", |_, this, ()| {
+            Ok(this.task_id.as_deref().unwrap_or(MAIN_TASK_ID).to_owned())
         });
 
         methods.add_method_mut("finish", |_lua, this, val: LuaValue| {

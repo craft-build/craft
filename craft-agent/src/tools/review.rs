@@ -140,6 +140,10 @@ impl Review {
                 tool_output_lines: ToolOutputLines::default(),
                 permissions: Arc::clone(&ctx.permissions),
                 session_id: Some(session_id),
+                task_id: ctx
+                    .tool_use_id
+                    .as_ref()
+                    .map(|id| std::sync::Arc::from(id.as_str())),
                 mailbox: None,
                 timeouts: ctx.timeouts,
                 file_access: Arc::clone(&ctx.file_access),

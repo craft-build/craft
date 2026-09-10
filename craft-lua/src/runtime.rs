@@ -304,6 +304,27 @@ pub struct RestoreItem {
     pub tool_output_lines: craft_config::ToolOutputLines,
     pub theme_gen: Option<u64>,
     pub expanded: bool,
+    /// The session whose transcript holds the call. Restore has no
+    /// `ToolContext`, so this is how a tool keying per-session state files a
+    /// restored call where the live one went.
+    pub session_id: Option<String>,
+    /// See [`craft_agent::tools::ToolContext::task_id`].
+    pub task_id: Option<Arc<str>>,
+    pub reason: RestoreReason,
+}
+
+/// Why a call is being restored. A tool whose restore has side effects (the
+/// todo panel refilling itself) acts on `Load` only: a rerender replays a
+/// single call whose state the tool already holds, possibly an old one.
+/// Lua sees the lowercase variant names through `ctx:restore_reason()`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase")]
+pub enum RestoreReason {
+    /// A session's transcript is being rebuilt, every call in order.
+    Load,
+    /// A click or theme change re-renders one call for its buf.
+    #[default]
+    Rerender,
 }
 
 pub(crate) struct RestoreReply {
@@ -2561,6 +2582,9 @@ impl LuaRuntime {
             .lua
             .create_userdata(crate::api::util::ctx::RestoreCtx {
                 tool_output_lines: item.tool_output_lines,
+                session_id: item.session_id,
+                task_id: item.task_id,
+                reason: item.reason,
             })
             .ok()?;
         let inner = thread

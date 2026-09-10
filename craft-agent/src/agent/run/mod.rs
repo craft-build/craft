@@ -66,6 +66,7 @@ pub struct AgentParams {
     pub tool_output_lines: ToolOutputLines,
     pub permissions: Arc<PermissionManager>,
     pub session_id: Option<craft_storage::id::SessionRef>,
+    pub task_id: Option<std::sync::Arc<str>>,
     pub mailbox: Option<SessionMailbox>,
     pub timeouts: craft_providers::Timeouts,
     pub file_access: Arc<FileAccess>,
@@ -172,6 +173,7 @@ impl<'h> Agent<'h> {
                 interrupt_source: None,
                 user_response_rx: None,
                 session_id: params.session_id,
+                task_id: params.task_id,
                 reauth_attempts: 0,
             },
             tool_state: AgentTools {

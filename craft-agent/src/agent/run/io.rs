@@ -25,6 +25,11 @@ pub(super) struct AgentIo {
     pub(super) interrupt_source: Option<Arc<dyn InterruptSource>>,
     pub(super) user_response_rx: Option<Arc<tokio::sync::Mutex<flume::Receiver<String>>>>,
     pub(super) session_id: Option<SessionRef>,
+    /// `None` in the agent that owns the session ([`MAIN_TASK_ID`]), the
+    /// spawning call's `tool_use_id` in a subagent. A subagent shares
+    /// `session_id` with its parent on purpose (provider affinity, hooks,
+    /// otel), so this is what tells their chats apart.
+    pub(super) task_id: Option<Arc<str>>,
     pub(super) reauth_attempts: u32,
 }
 

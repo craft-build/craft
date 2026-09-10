@@ -1,20 +1,23 @@
 local helpers = require("todo_helpers")
 
--- One Lua runtime serves every session, so todos are keyed by the session
--- that wrote them and the panel only renders for the focused session.
+local MAIN_TASK = "main"
+
+-- `todos[session_id][task_id]`: a subagent shares its session id with the
+-- parent, only the task id tells them apart.
 local todos = {}
-local focused = nil
+-- Sessions that ran a turn since they were loaded. Restores of their
+-- transcript are still in flight while the turn runs, so they are stale.
+local live = {}
+-- Nothing is focused until the first TaskFocusChanged; restores that land
+-- before it still file under their own session, so they show up then.
+local focused = { session = "", task = MAIN_TASK }
 local state = {
   win = nil,
   buf = nil,
 }
 
-local function items_of(sid)
-  return todos[sid or ""] or {}
-end
-
-local function is_focused(sid)
-  return not focused or sid == focused
+local function items_of(sid, task)
+  return todos[sid] and todos[sid][task] or {}
 end
 
 local function hide_panel()
@@ -24,28 +27,22 @@ local function hide_panel()
   craft.ui.set_status_hint(nil)
 end
 
-local function ensure_panel()
-  if state.buf and state.win then
-    return
-  end
-
-  state.buf = craft.ui.buf()
-  state.win = craft.ui.open_win(state.buf, {
-    split = "panel",
-    visible = false,
-    focus = false,
-    height = "30%",
-    width = "50%",
-    title = "Todos",
-    footer = nil,
-    footer_content = nil,
-    col = nil,
-    row = nil,
-  })
-end
-
 local function update_panel(items)
-  ensure_panel()
+  if not state.buf or not state.win then
+    state.buf = craft.ui.buf()
+    state.win = craft.ui.open_win(state.buf, {
+      split = "panel",
+      visible = false,
+      focus = false,
+      height = "30%",
+      width = "50%",
+      title = "Todos",
+      footer = nil,
+      footer_content = nil,
+      col = nil,
+      row = nil,
+    })
+  end
   helpers.render_todos(state.buf, items)
 
   local done = 0
@@ -65,11 +62,23 @@ local function update_panel(items)
   state.win:show()
 end
 
-local function sync_panel(items)
+-- Derived from the focused list on every change: gone when empty, open
+-- otherwise. A hidden window stays open, so a show-on-every-change panel
+-- would resurrect a list the turn already cleared.
+local function sync_panel()
+  local items = items_of(focused.session, focused.task)
   if #items == 0 then
     hide_panel()
   else
     update_panel(items)
+  end
+end
+
+local function store(sid, task, items)
+  todos[sid] = todos[sid] or {}
+  todos[sid][task] = items
+  if sid == focused.session and task == focused.task then
+    sync_panel()
   end
 end
 
@@ -117,63 +126,72 @@ craft.api.register_tool({
       },
     },
   },
+
+  -- A session load replays the transcript in order, so the last call wins
+  -- and the panel picks up where the session left off. A rerender (click,
+  -- theme change) replays one call that may be long superseded.
+  restore = function(input, _output, _is_error, ctx)
+    local items = input.todos or {}
+    local sid = ctx:session_id() or ""
+    if ctx:restore_reason() == "load" and not live[sid] then
+      store(sid, ctx:task_id(), items)
+    end
+    if #items == 0 then
+      return nil
+    end
+    local body = craft.ui.buf()
+    helpers.render_todos(body, items)
+    return body
+  end,
+
   handler = function(input, ctx)
     if not input.todos then
       return "error: todos array is required"
     end
 
-    local sid = (ctx and ctx:session_id()) or ""
-    if #input.todos == 0 then
-      todos[sid] = nil
-      if is_focused(sid) then
+    local items = input.todos
+    if #items == 0 then
+      local sid = ctx:session_id() or ""
+      local task = ctx:task_id()
+      if todos[sid] then
+        todos[sid][task] = nil
+      end
+      if sid == focused.session and task == focused.task then
         hide_panel()
       end
       return "Todos cleared"
     end
 
-    todos[sid] = input.todos
-    if is_focused(sid) then
-      update_panel(input.todos)
-    end
+    store(ctx:session_id() or "", ctx:task_id(), items)
     return ""
   end,
 })
 
-craft.api.create_autocmd("SessionStart", {
+craft.api.create_autocmd("TurnStart", {
   callback = function(ev)
-    local sid = ev.data and ev.data.session_id
-    if sid then
-      todos[sid] = nil
-    end
-    if is_focused(sid) then
-      if state.win then
-        state.win:hide()
-        state.win = nil
-      end
-      state.buf = nil
-      craft.ui.set_status_hint(nil)
-    end
+    live[ev.data.session_id] = true
   end,
 })
 
-craft.api.create_autocmd({ "TurnEnd", "SessionReset" }, {
+-- Subagents run inside the parent's turn, so its end clears their lists too.
+craft.api.create_autocmd({ "TurnEnd", "SessionReset", "SessionEnd" }, {
   callback = function(ev)
     local sid = ev.data and ev.data.session_id or ""
     todos[sid] = nil
-    if is_focused(sid) then
-      hide_panel()
+    if ev.event ~= "TurnEnd" then
+      live[sid] = nil
+    end
+    if sid == focused.session then
+      sync_panel()
     end
   end,
 })
 
-craft.api.create_autocmd("SessionFocusChanged", {
+-- Fires on a session switch too, so this is the one focus event the panel
+-- needs to follow.
+craft.api.create_autocmd("TaskFocusChanged", {
   callback = function(ev)
-    focused = ev.data and ev.data.session_id
-    -- Startup restore lands before the first focus event, so its items sit
-    -- under the "" key; the first focused session is the one they belong to.
-    if focused and todos[""] and not todos[focused] then
-      todos[focused], todos[""] = todos[""], nil
-    end
-    sync_panel(items_of(focused))
+    focused = { session = ev.data.session_id, task = ev.data.id }
+    sync_panel()
   end,
 })

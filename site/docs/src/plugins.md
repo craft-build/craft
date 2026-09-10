@@ -379,6 +379,7 @@ Every host event carries `data.session_id`. `ToolStart` and `ToolDone` also carr
 - `AutoCompacting` carries `data.context_size` and `data.context_window` at trigger time.
 - `CompactionDone` carries `data.context_size_before`, `data.context_size_after`, and `data.context_window`.
 - `PlanReady` (TUI only) carries `data.path`, the plan file the agent just wrote. Fires once per draft.
+- `TaskFocusChanged` (TUI only) carries `data.id`, the task whose transcript is now on screen (`"main"` or a subagent's id, what `ctx:task_id()` reports inside a tool). Fires for the chat cycling keys, the task picker's focus command, and a session switch that lands on another task.
 
 ```lua
 craft.create_autocmd("TurnEnd", {

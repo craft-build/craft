@@ -322,6 +322,7 @@ impl ToolInvocation for LuaToolInvocation {
                 file_access: ctx.file_access.clone(),
                 loaded_instructions: ctx.loaded_instructions.clone(),
                 session_id: ctx.session_id.clone(),
+                task_id: ctx.task_id.clone(),
             };
 
             if tx

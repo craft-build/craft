@@ -184,6 +184,8 @@ pub fn is_tool_enabled(config: &AgentConfig, name: &str) -> bool {
 }
 
 pub const BASH_TOOL_NAME: &str = "bash";
+/// What the `task` tool calls the session's own chat.
+pub const MAIN_TASK_ID: &str = "main";
 pub const BATCH_TOOL_NAME: &str = batch::Batch::NAME;
 pub const BROWSER_TOOL_NAME: &str = browser::Browser::NAME;
 pub const APPLY_PATCH_TOOL_NAME: &str = apply_patch::ApplyPatch::NAME;
@@ -317,6 +319,11 @@ pub struct ToolContext {
     /// so a tool can always tell which conversation it is serving. `None`
     /// when there is no session at all, like the `craft index` one-shot.
     pub session_id: Option<String>,
+    /// `None` in the agent that owns the session ([`MAIN_TASK_ID`]), the
+    /// spawning call's `tool_use_id` in a subagent. A subagent shares
+    /// `session_id` with its parent on purpose (provider affinity, hooks,
+    /// otel), so this is what tells their chats apart.
+    pub task_id: Option<Arc<str>>,
     pub registry: Arc<ToolRegistry>,
     /// Semantic-search backend for Flow mode. `Some` when running under a
     /// Flow stage; `None` everywhere else, so the `flow_search` tool errors cleanly.
@@ -978,6 +985,7 @@ pub(crate) fn providerless_ctx(
         snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
         pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
         session_id: None,
+        task_id: None,
         registry,
         flow_search: None,
         host_question_routing: false,
@@ -1048,6 +1056,7 @@ pub fn flow_runner_ctx(env: &FlowRunnerEnv, workstream_id: &str, stage_id: &str)
         snapshot_store: crate::tools::safety::SnapshotStore::fresh(),
         pending_edits: crate::tools::ast_edit::PendingEditStore::fresh(),
         session_id: None,
+        task_id: None,
         flow_search: env.flow_search.clone(),
         flow_thread_manager: None,
         flow_thread_id: None,

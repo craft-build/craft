@@ -423,6 +423,7 @@ impl<'h> Agent<'h> {
             snapshot_store: Arc::clone(&self.tool_state.snapshot_store),
             pending_edits: Arc::clone(&self.tool_state.pending_edits),
             session_id: self.io.session_id.as_ref().map(|s| s.as_str().to_string()),
+            task_id: self.io.task_id.clone(),
             flow_search,
             host_question_routing: self.tool_state.host_question_routing,
             flow_thread_manager: self.flow.thread_manager.clone(),

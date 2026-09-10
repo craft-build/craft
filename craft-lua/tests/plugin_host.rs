@@ -228,6 +228,40 @@ async fn handler_without_a_session_gets_nil_and_no_error() {
     );
 }
 
+const TASK_PLUGIN: &str = r#"
+craft.api.register_tool({
+    name = "which_task",
+    description = "reports the calling task",
+    schema = { type = "object", properties = {}, additionalProperties = false },
+    handler = function(_, ctx)
+        return "task:" .. ctx:task_id()
+    end,
+})
+"#;
+
+const SUBAGENT_TASK_ID: &str = "toolu_sub";
+
+/// A subagent shares the parent's session id, so the task id is what a
+/// plugin keys per-chat state on.
+#[test_case::test_case(None, "task:main" ; "session_owner")]
+#[test_case::test_case(Some(SUBAGENT_TASK_ID), "task:toolu_sub" ; "subagent")]
+#[tokio::test]
+async fn ctx_task_id_names_the_calling_chat(task_id: Option<&str>, expected: &str) {
+    let reg = fresh_registry();
+    let host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_source("task_plugin", TASK_PLUGIN).unwrap();
+
+    let mut ctx = craft_agent::tools::test_support::stub_ctx(&craft_agent::AgentMode::Build);
+    ctx.task_id = task_id.map(std::sync::Arc::from);
+
+    assert_eq!(
+        exec_with_ctx(&reg, "which_task", serde_json::json!({}), &ctx)
+            .await
+            .unwrap(),
+        expected
+    );
+}
+
 #[test]
 fn unload_round_trip() {
     let reg = fresh_registry();
@@ -2745,6 +2779,9 @@ async fn bash_timeout_round_trip() {
             tool_output_lines: ToolOutputLines::default(),
             theme_gen: None,
             expanded: false,
+            session_id: None,
+            task_id: None,
+            reason: craft_lua::RestoreReason::default(),
         },
         event_tx,
     );
@@ -2791,6 +2828,9 @@ async fn restore_snapshot_text(src: &str, tool: &str, expanded: bool) -> String 
             tool_output_lines: ToolOutputLines::default(),
             theme_gen: None,
             expanded,
+            session_id: None,
+            task_id: None,
+            reason: craft_lua::RestoreReason::default(),
         },
         craft_agent::EventSender::new(tx, 0),
     );

@@ -175,6 +175,7 @@ async fn run_flow(
                 plugin_host.plugin_rules(),
             )),
             session_id: None,
+            task_id: None,
             mailbox: None,
             timeouts,
             file_access: craft_agent::tools::FileAccess::fresh(),

@@ -330,6 +330,8 @@ impl App {
         };
         let mut app = Self {
             chats: vec![Chat::new(
+                state.session.id.as_str().to_string(),
+                None,
                 "Main".into(),
                 ui_config.clone(),
                 lua_event_handle.clone(),
@@ -441,17 +443,9 @@ impl App {
     }
 
     pub(crate) fn dispatch_pending_restores(&mut self) {
-        let items: Vec<_> = self
-            .chats
-            .iter_mut()
-            .flat_map(|c| c.drain_pending_restores())
-            .collect();
-        let Some(event_tx) = &self.restore_event_tx else {
-            return;
-        };
-        for item in items {
-            self.lua_event_handle
-                .request_restore(item, event_tx.clone());
+        for chat in &mut self.chats {
+            let items: Vec<_> = chat.drain_pending_restores();
+            chat.request_restores(items);
         }
     }
 
@@ -1594,8 +1588,9 @@ impl App {
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
         }
-        let mut chat = Chat::subagent(
-            id,
+        let mut chat = Chat::new(
+            self.state.session.id.as_str().to_string(),
+            Some(id),
             subagent.name.clone(),
             self.ui_config.clone(),
             self.lua_event_handle.clone(),

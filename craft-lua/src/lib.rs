@@ -31,7 +31,9 @@ pub use pack::{
     lockfile_path, prepare_pack_command, sanitize_message, site_dir,
 };
 pub use plugin_permissions::{Permission, PluginPermissions, Requested, denied_error};
-pub use runtime::{KILL_GRACE, MAX_INFLIGHT_TOOLS, RestoreItem, SharedSandboxConfig};
+pub use runtime::{
+    KILL_GRACE, MAX_INFLIGHT_TOOLS, RestoreItem, RestoreReason, SharedSandboxConfig,
+};
 pub use session_snapshot::{SessionQueueSnapshot, SessionSnapshot};
 pub use terminal_backend::{
     JobEvent as TerminalEvent, LocalTerminal, TerminalBackend, TerminalFuture, TerminalHandle,

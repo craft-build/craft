@@ -187,9 +187,13 @@ impl App {
         }
     }
 
+    /// Call only once `state.session` is final: the chats it builds are
+    /// stamped with that session for life.
     pub(super) fn reset_ui_chrome(&mut self) {
         self.chats.clear();
         self.chats.push(Chat::new(
+            self.state.session.id.as_str().to_string(),
+            None,
             "Main".into(),
             self.ui_config.clone(),
             self.lua_event_handle.clone(),
@@ -239,7 +243,7 @@ impl App {
             self.input_box.buffer.move_to_end();
         }
 
-        self.fire_restore_items(restore_items);
+        self.chats[0].request_restores(restore_items);
 
         // Read, not taken: the live chats below are the source `sync_subagents`
         // mirrors back, so emptying the session here would only make the next
@@ -260,8 +264,9 @@ impl App {
             );
             self.chat_index
                 .insert(sa.tool_use_id.clone(), self.chats.len());
-            let mut chat = Chat::subagent(
-                &sa.tool_use_id,
+            let mut chat = Chat::new(
+                self.state.session.id.as_str().to_string(),
+                Some(&sa.tool_use_id),
                 sa.name,
                 self.ui_config.clone(),
                 self.lua_event_handle.clone(),
@@ -272,7 +277,7 @@ impl App {
             // The session file keeps the transcript but never how it ended,
             // so a reload admits that instead of guessing.
             chat.mark_finished(TaskOutcome::Unknown, DONE_TEXT);
-            self.fire_restore_items(items);
+            chat.request_restores(items);
             self.chats.push(chat);
         }
 
@@ -295,18 +300,6 @@ impl App {
         self.flush_restored_queue();
         for w in self.state.warnings.drain(..) {
             self.status_bar.flash(w);
-        }
-    }
-
-    fn fire_restore_items(&self, items: Vec<craft_lua::RestoreItem>) {
-        let Some(tx) = &self.restore_event_tx else {
-            return;
-        };
-        let eh = &self.lua_event_handle;
-        let theme_gen = crate::theme::generation();
-        for mut item in items {
-            item.theme_gen = Some(theme_gen);
-            eh.request_restore(item, tx.clone());
         }
     }
 
@@ -355,7 +348,6 @@ impl App {
 
     pub(super) fn reset_session(&mut self) -> Vec<Action> {
         self.checkpoint_now();
-        self.reset_ui_chrome();
         let ended = self.state.session.id.id();
         self.lua_event_handle
             .end_session(ended, SessionEndReason::Reset);
@@ -380,6 +372,9 @@ impl App {
         self.apply_stored_permissions(&session.meta);
         self.state.session = Arc::new(session);
         self.install_local_history();
+        // After the swap: the chats `reset_ui_chrome` builds are stamped
+        // with the session for life.
+        self.reset_ui_chrome();
         self.lua_event_handle.fire_autocmd(
             "SessionStart",
             serde_json::json!({ "session_id": self.state.session.id }),

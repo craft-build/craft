@@ -69,17 +69,21 @@ pub struct Chat {
     /// The ending and the index of the bubble announcing it, so a later, better
     /// informed outcome can fix that bubble instead of appending a second one.
     finish: Option<(TaskOutcome, usize)>,
-    /// `None` for the main chat, the subagent's `tool_use_id` otherwise. That
-    /// is the handle `craft.task` addresses a task by, see `app::tasks`.
-    task_id: Option<Arc<str>>,
 }
 
 impl Chat {
+    /// A chat belongs to one session for life: every path that changes
+    /// `App::state.session` rebuilds the chats after the swap. `task_id` is
+    /// `None` for the main chat, the subagent's `tool_use_id` otherwise.
     pub fn new(
+        session_id: String,
+        task_id: Option<&str>,
         name: String,
         ui_config: UiConfig,
         lua_event_handle: craft_lua::EventHandle,
     ) -> Self {
+        let mut messages_panel = MessagesPanel::new(ui_config, lua_event_handle);
+        messages_panel.set_chat(session_id, task_id.map(Arc::from));
         Self {
             name,
             token_usage: TokenUsage::default(),
@@ -87,26 +91,23 @@ impl Chat {
             context_size: 0,
             model_id: None,
             pending_turn_usage: None,
-            messages_panel: MessagesPanel::new(ui_config, lua_event_handle),
+            messages_panel,
             finish: None,
-            task_id: None,
         }
     }
 
-    pub(crate) fn subagent(
-        task_id: &str,
-        name: String,
-        ui_config: UiConfig,
-        lua_event_handle: craft_lua::EventHandle,
-    ) -> Self {
-        Self {
-            task_id: Some(Arc::from(task_id)),
-            ..Self::new(name, ui_config, lua_event_handle)
-        }
-    }
-
+    /// The handle `craft.task` addresses a task by, see `app::tasks`.
     pub(crate) fn task_id(&self) -> Option<&Arc<str>> {
-        self.task_id.as_ref()
+        self.messages_panel.task_id()
+    }
+
+    pub(crate) fn task_id_or_main(&self) -> Arc<str> {
+        self.task_id()
+            .map_or_else(|| Arc::from(craft_agent::tools::MAIN_TASK_ID), Arc::clone)
+    }
+
+    pub(crate) fn request_restores(&self, items: Vec<craft_lua::RestoreItem>) {
+        self.messages_panel.request_restores(items);
     }
 
     pub(crate) fn task_status(&self) -> TaskStatus {
@@ -604,6 +605,9 @@ pub fn history_to_display(
                                 tool_output_lines: *tool_output_lines,
                                 theme_gen: None,
                                 expanded: false,
+                                session_id: None,
+                                task_id: None,
+                                reason: craft_lua::RestoreReason::Load,
                             });
                             let theme_gen = 0;
                             display.push(DisplayMessage {
@@ -786,6 +790,10 @@ mod tests {
 
     fn chat() -> Chat {
         Chat::new(
+            craft_storage::id::SessionRef::generate()
+                .as_str()
+                .to_string(),
+            None,
             MAIN_NAME.into(),
             UiConfig::default(),
             craft_lua::EventHandle::disconnected_for_test(),
@@ -793,8 +801,11 @@ mod tests {
     }
 
     fn subagent_chat() -> Chat {
-        Chat::subagent(
-            TASK_ID,
+        Chat::new(
+            craft_storage::id::SessionRef::generate()
+                .as_str()
+                .to_string(),
+            Some(TASK_ID),
             SUBAGENT_NAME.into(),
             UiConfig::default(),
             craft_lua::EventHandle::disconnected_for_test(),

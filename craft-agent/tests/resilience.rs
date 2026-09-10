@@ -344,6 +344,7 @@ fn make_agent_params(model: Model, provider: Arc<dyn Provider>) -> AgentParams {
             Arc::default(),
         )),
         session_id: None,
+        task_id: None,
         mailbox: None,
         timeouts: craft_providers::Timeouts::default(),
         file_access: FileAccess::fresh(),

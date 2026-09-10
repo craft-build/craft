@@ -96,6 +96,10 @@ pub struct MessagesPanel {
     pending_restores: Vec<RestoreItem>,
     lua_event_handle: EventHandle,
     restore_event_tx: Option<craft_agent::EventSender>,
+    /// The chat this panel shows, stamped on every restore it requests so a
+    /// plugin files the call where the live one went.
+    session_id: Option<String>,
+    task_id: Option<Arc<str>>,
     image_picker: crate::image_render::ImagePicker,
     show_thinking: bool,
     thinking_collapsed: bool,
@@ -143,6 +147,8 @@ impl MessagesPanel {
             pending_restores: Vec::new(),
             lua_event_handle,
             restore_event_tx: None,
+            session_id: None,
+            task_id: None,
             image_picker: crate::image_render::ImagePicker::new(),
             show_thinking: ui_config.show_thinking,
             thinking_collapsed: !ui_config.show_thinking,
@@ -190,6 +196,32 @@ impl MessagesPanel {
 
     pub fn set_restore_event_tx(&mut self, tx: Option<craft_agent::EventSender>) {
         self.restore_event_tx = tx;
+    }
+
+    pub(crate) fn set_chat(&mut self, session_id: String, task_id: Option<Arc<str>>) {
+        self.session_id = Some(session_id);
+        self.task_id = task_id;
+    }
+
+    fn stamp_chat(&self, item: &mut RestoreItem) {
+        item.session_id = self.session_id.clone();
+        item.task_id = self.task_id.clone();
+    }
+
+    pub(crate) fn task_id(&self) -> Option<&Arc<str>> {
+        self.task_id.as_ref()
+    }
+
+    pub(crate) fn request_restores(&self, items: Vec<RestoreItem>) {
+        let Some(tx) = &self.restore_event_tx else {
+            return;
+        };
+        let theme_gen = theme::generation();
+        for mut item in items {
+            item.theme_gen = Some(theme_gen);
+            self.stamp_chat(&mut item);
+            self.lua_event_handle.request_restore(item, tx.clone());
+        }
     }
 
     pub fn thinking_delta(&mut self, text: &str) {
@@ -1305,7 +1337,7 @@ impl MessagesPanel {
                 .as_ref()
                 .map(|o| o.as_text())
                 .unwrap_or_default();
-            Some(RestoreItem {
+            let mut item = RestoreItem {
                 tool: Arc::from(entry.tool.as_str()),
                 tool_use_id: tool_id.to_owned(),
                 output: output_text,
@@ -1314,7 +1346,12 @@ impl MessagesPanel {
                 tool_output_lines: tol,
                 theme_gen: Some(self.theme_generation),
                 expanded: false,
-            })
+                session_id: None,
+                task_id: None,
+                reason: craft_lua::RestoreReason::Rerender,
+            };
+            self.stamp_chat(&mut item);
+            Some(item)
         } else {
             let msg = self
                 .messages
@@ -1328,7 +1365,7 @@ impl MessagesPanel {
                 .as_deref()
                 .map(|o| o.as_text())
                 .unwrap_or_default();
-            Some(RestoreItem {
+            let mut item = RestoreItem {
                 tool: Arc::clone(&t.name),
                 tool_use_id: t.id.clone(),
                 output: output_text,
@@ -1337,7 +1374,12 @@ impl MessagesPanel {
                 tool_output_lines: tol,
                 theme_gen: Some(self.theme_generation),
                 expanded: false,
-            })
+                session_id: None,
+                task_id: None,
+                reason: craft_lua::RestoreReason::Rerender,
+            };
+            self.stamp_chat(&mut item);
+            Some(item)
         }
     }
 
@@ -1397,6 +1439,9 @@ impl MessagesPanel {
                     tool_output_lines: self.tool_output_lines,
                     theme_gen: Some(current_gen),
                     expanded: self.lua_expanded.contains(&t.id),
+                    session_id: None,
+                    task_id: None,
+                    reason: craft_lua::RestoreReason::Rerender,
                 });
             }
         }
