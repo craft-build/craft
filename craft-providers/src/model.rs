@@ -329,6 +329,13 @@ impl Model {
     }
 
     /// Gates vision-only tools (`view_image`) and image blocks at request time.
+    ///
+    /// Vision support, most specific first:
+    /// 1. per-model override
+    /// 2. discovery
+    /// 3. manifest entry
+    /// 4. warm models.dev metadata (builtins skip the catalog in from_spec)
+    /// 5. the family default
     pub fn supports_vision(&self) -> bool {
         if let Some(vision) = self.supports_vision_override {
             return vision;
@@ -342,6 +349,12 @@ impl Model {
                 manifest
                     .and_then(|m| lookup_entry(m.models, &self.id).ok())
                     .map(|e| e.supports_vision)
+            })
+            .or_else(|| {
+                crate::providers::opencode::model_supports_vision_if_available(
+                    &self.provider,
+                    &self.id,
+                )
             })
             .unwrap_or_else(|| self.family.supports_vision())
     }

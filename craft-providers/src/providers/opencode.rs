@@ -69,6 +69,16 @@ struct CatalogModel {
     cost: Option<CatalogCost>,
     #[serde(default)]
     provider: Option<CatalogShape>,
+    #[serde(default)]
+    attachment: bool,
+    #[serde(default)]
+    modalities: Option<CatalogModalities>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct CatalogModalities {
+    #[serde(default)]
+    input: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -288,6 +298,7 @@ pub struct CatalogMeta {
     pub output_price: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    pub supports_vision: bool,
 }
 
 #[derive(Clone)]
@@ -392,6 +403,12 @@ impl CatalogData {
                     .and_then(|c| c.cache_write)
                     .unwrap_or(0.0);
 
+                let supports_vision = model_data.attachment
+                    || model_data
+                        .modalities
+                        .as_ref()
+                        .is_some_and(|m| m.input.iter().any(|s| s == "image"));
+
                 models.insert(
                     model_id.clone(),
                     CatalogMeta {
@@ -401,6 +418,7 @@ impl CatalogData {
                         output_price,
                         cache_read,
                         cache_write,
+                        supports_vision,
                     },
                 );
             }
@@ -769,6 +787,22 @@ pub fn catalog_provider(provider_id: &str) -> Option<ProviderData> {
     guard.providers.get(provider_id).cloned()
 }
 
+/// Vision support from the warm models.dev catalog, most specific source
+/// before the family guess. `None` when the catalog is cold or the model is
+/// not listed, so a cold catalog keeps the old answer.
+pub fn model_supports_vision_if_available(slug: &str, model_id: &str) -> Option<bool> {
+    CATALOG
+        .get()
+        .and_then(|catalog| catalog.lock().ok())
+        .and_then(|guard| {
+            guard
+                .providers
+                .get(slug)
+                .and_then(|data| data.models.get(model_id))
+                .map(|meta| meta.supports_vision)
+        })
+}
+
 /// True when the model is an OpenCode-family catalog entry that is free by
 /// the same [`is_free_model`] definition gating `enable_free_models` (zero
 /// input and output price). Never triggers a catalog fetch.
@@ -935,6 +969,8 @@ mod tests {
                 cache_write: None,
             }),
             provider: None,
+            attachment: false,
+            modalities: None,
         }
     }
 
@@ -966,6 +1002,71 @@ mod tests {
 
         let model = super::Model::from_spec(&format!("opencode/{model_id}")).unwrap();
         assert_eq!(model.is_free(), expected);
+    }
+
+    fn bare_catalog_model(attachment: bool) -> CatalogModel {
+        CatalogModel {
+            limit: None,
+            cost: None,
+            provider: None,
+            attachment,
+            modalities: None,
+        }
+    }
+
+    fn opencode_go_index(models: HashMap<String, CatalogModel>) -> CatalogIndex {
+        HashMap::from([(
+            "opencode-go".into(),
+            CatalogProvider {
+                name: "Opencode Go".into(),
+                env: vec!["OPENCODE_API_KEY".into()],
+                npm: "@ai-sdk/openai-compatible".into(),
+                api: Some("https://opencode.ai/zen/go/v1".into()),
+                models,
+            },
+        )])
+    }
+
+    #[test_case("vision-model", true; "catalog_marks_model_as_vision")]
+    #[test_case("text-model", false; "catalog_marks_model_as_text_only")]
+    fn supports_vision_falls_back_to_catalog_for_builtins(model_id: &str, expected: bool) {
+        let (_tmp, state_dir) = temp_state_dir();
+        let models = HashMap::from([
+            ("vision-model".into(), bare_catalog_model(true)),
+            ("text-model".into(), bare_catalog_model(false)),
+        ]);
+        super::seed_catalog_for_tests(opencode_go_index(models), state_dir);
+
+        let model = super::Model::from_spec(&format!("opencode-go/{model_id}")).unwrap();
+        assert_eq!(model.supports_vision(), expected);
+    }
+
+    #[test]
+    fn catalog_miss_falls_back_to_family() {
+        let (_tmp, state_dir) = temp_state_dir();
+        super::seed_catalog_for_tests(HashMap::new(), state_dir);
+
+        let model = super::Model::from_spec("opencode-go/unlisted-model").unwrap();
+        assert!(!model.supports_vision());
+    }
+
+    /// The catalog is the last word before the family guess, so anything more
+    /// specific still wins. Only discovery can be exercised here: the builtins
+    /// the catalog keeps (`opencode`, `opencode-go`) list no manifest models.
+    #[test]
+    fn discovery_beats_catalog_vision() {
+        let (_tmp, state_dir) = temp_state_dir();
+        let models = HashMap::from([("omen-alpha".into(), bare_catalog_model(true))]);
+        super::seed_catalog_for_tests(opencode_go_index(models), state_dir);
+        let mut discovered = crate::model::ModelInfo::new("omen-alpha".into());
+        discovered.supports_vision = Some(false);
+        crate::model_registry::set_known_models("opencode-go", vec![discovered]);
+
+        let model = super::Model::from_spec("opencode-go/omen-alpha").unwrap();
+        assert!(
+            !model.supports_vision(),
+            "discovery must win over catalog metadata"
+        );
     }
 
     #[test]
@@ -1006,6 +1107,8 @@ mod tests {
                         cache_write: Some(0.2),
                     }),
                     provider: None,
+                    attachment: false,
+                    modalities: None,
                 },
             )]),
         };
@@ -1038,6 +1141,8 @@ mod tests {
                         limit: None,
                         cost: None,
                         provider: None,
+                        attachment: false,
+                        modalities: None,
                     },
                 )]),
             },
@@ -1235,6 +1340,7 @@ mod tests {
                     output_price: 2.0,
                     cache_read: 0.0,
                     cache_write: 0.0,
+                    supports_vision: false,
                 },
             ),
             (
@@ -1246,6 +1352,7 @@ mod tests {
                     output_price: 0.0,
                     cache_read: 0.0,
                     cache_write: 0.0,
+                    supports_vision: false,
                 },
             ),
         ]);
@@ -1321,6 +1428,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         models.insert(
@@ -1334,6 +1443,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
 
@@ -1369,6 +1480,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         models.insert(
@@ -1382,6 +1495,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
 
@@ -1421,6 +1536,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         models.insert(
@@ -1434,6 +1551,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
 
@@ -1475,6 +1594,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         models.insert(
@@ -1488,6 +1609,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         let mut providers = HashMap::new();
@@ -1551,6 +1674,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         models.insert(
@@ -1564,6 +1689,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
 
@@ -1639,6 +1766,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
 
@@ -1707,6 +1836,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         let mut providers = HashMap::new();
@@ -1741,6 +1872,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         let mut providers = HashMap::new();
@@ -1778,6 +1911,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         let mut providers = HashMap::new();
@@ -1816,6 +1951,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         let mut providers = HashMap::new();
@@ -1860,6 +1997,8 @@ mod tests {
                         limit: None,
                         cost: None,
                         provider: None,
+                        attachment: false,
+                        modalities: None,
                     },
                 )]),
             },
@@ -1882,6 +2021,8 @@ mod tests {
                             cache_write: None,
                         }),
                         provider: None,
+                        attachment: false,
+                        modalities: None,
                     },
                 )]),
             },
@@ -1915,6 +2056,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
         models.insert(
@@ -1928,6 +2071,8 @@ mod tests {
                     cache_write: None,
                 }),
                 provider: None,
+                attachment: false,
+                modalities: None,
             },
         );
 
@@ -2013,6 +2158,8 @@ mod tests {
                         cache_write: None,
                     }),
                     provider: None,
+                    attachment: false,
+                    modalities: None,
                 },
             )]),
         };
@@ -2036,6 +2183,8 @@ mod tests {
                         cache_write: None,
                     }),
                     provider: None,
+                    attachment: false,
+                    modalities: None,
                 },
             )]),
         };
