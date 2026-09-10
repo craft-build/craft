@@ -123,6 +123,8 @@ Remappable actions:
 | `next_chat` |
 | `scroll_half_up` |
 | `scroll_half_down` |
+| `scroll_page_up` |
+| `scroll_page_down` |
 | `scroll_line_up` |
 | `scroll_line_down` |
 | `scroll_to_top` |

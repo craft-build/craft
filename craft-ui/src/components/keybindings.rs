@@ -132,6 +132,16 @@ pub mod key {
     pub const HELP: Bind = ctrl_bind!('h');
     pub const PREV_CHAT: Bind = ctrl_bind!('p');
     pub const NEXT_CHAT: Bind = ctrl_bind!('n');
+    pub const SCROLL_PAGE_UP: Bind = Bind {
+        code: KeyCode::PageUp,
+        modifiers: KeyModifiers::NONE,
+        label: "PageUp",
+    };
+    pub const SCROLL_PAGE_DOWN: Bind = Bind {
+        code: KeyCode::PageDown,
+        modifiers: KeyModifiers::NONE,
+        label: "PageDown",
+    };
     pub const SCROLL_HALF_UP: Bind = ctrl_bind!('u');
     pub const SCROLL_HALF_DOWN: Bind = ctrl_bind!('d');
     pub const SCROLL_LINE_UP: Bind = ctrl_bind!('y');
@@ -165,6 +175,8 @@ pub enum ActionId {
     NextChat,
     ScrollHalfUp,
     ScrollHalfDown,
+    ScrollPageUp,
+    ScrollPageDown,
     ScrollLineUp,
     ScrollLineDown,
     ScrollTop,
@@ -192,6 +204,8 @@ impl ActionId {
             Self::NextChat => "next_chat",
             Self::ScrollHalfUp => "scroll_half_up",
             Self::ScrollHalfDown => "scroll_half_down",
+            Self::ScrollPageUp => "scroll_page_up",
+            Self::ScrollPageDown => "scroll_page_down",
             Self::ScrollLineUp => "scroll_line_up",
             Self::ScrollLineDown => "scroll_line_down",
             Self::ScrollTop => "scroll_to_top",
@@ -223,6 +237,8 @@ impl ActionId {
             Self::NextChat => &[key::NEXT_CHAT],
             Self::ScrollHalfUp => &[key::SCROLL_HALF_UP],
             Self::ScrollHalfDown => &[key::SCROLL_HALF_DOWN],
+            Self::ScrollPageUp => &[key::SCROLL_PAGE_UP],
+            Self::ScrollPageDown => &[key::SCROLL_PAGE_DOWN],
             Self::ScrollLineUp => &[key::SCROLL_LINE_UP],
             Self::ScrollLineDown => &[key::SCROLL_LINE_DOWN],
             Self::ScrollTop => &[key::SCROLL_TOP],
@@ -522,6 +538,13 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
+        action_id: Some(ActionId::ScrollPageUp),
+        label: KeyLabel::Alt(key::SCROLL_PAGE_UP.label, key::SCROLL_PAGE_DOWN.label),
+        description: "Scroll page up / down",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
         action_id: Some(ActionId::ScrollHalfUp),
         label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
         description: "Scroll half page up / down",
@@ -622,7 +645,7 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         action_id: None,
         label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
-        description: "Scroll page up / down",
+        description: "Scroll half page up / down",
         context: KeybindContext::Picker,
         platform: Platform::All,
     },

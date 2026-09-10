@@ -26,6 +26,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Alt+←` / `Alt+→` | Move word left / right |
 | `Ctrl+A` | Jump to start of line |
 | `Home` / `End` | Jump to start/end of line |
+| `PageUp` / `PageDown` | Scroll page up / down |
 | `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
 | `Ctrl+E` | Jump to end of line |
 | `Ctrl+G` | Scroll to top |
@@ -62,7 +63,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 |-----|--------|
 | `↑` / `↓` | Navigate |
 | `PageUp` / `PageDown` | Scroll page up / down |
-| `Ctrl+U` / `Ctrl+D` | Scroll page up / down |
+| `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
 | `Enter` | Select |
 | `Esc` | Close |
 | `Type` | Filter |

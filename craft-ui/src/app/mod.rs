@@ -1083,6 +1083,17 @@ impl App {
             return actions;
         }
 
+        if self.keybindings.matches(ActionId::ScrollPageUp, key) {
+            let page = self.chats[self.active_chat].page();
+            self.active_chat().scroll(page);
+            return vec![];
+        }
+        if self.keybindings.matches(ActionId::ScrollPageDown, key) {
+            let page = self.chats[self.active_chat].page();
+            self.active_chat().scroll(-page);
+            return vec![];
+        }
+
         if !self.is_main_chat() {
             return match key.code {
                 KeyCode::Tab if !self.is_bash_input() => self.toggle_mode(),
