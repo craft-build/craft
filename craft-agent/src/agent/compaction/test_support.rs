@@ -15,6 +15,7 @@ pub(super) const IMAGE_PLACEHOLDER: &str = "[image]";
 pub(super) struct MockProvider {
     pub responses: Mutex<Vec<Result<StreamResponse, AgentError>>>,
     pub requests: Mutex<Vec<Vec<Message>>>,
+    pub sessions: Mutex<Vec<Option<String>>>,
 }
 
 impl MockProvider {
@@ -22,6 +23,7 @@ impl MockProvider {
         Self {
             responses: Mutex::new(responses),
             requests: Mutex::new(Vec::new()),
+            sessions: Mutex::new(Vec::new()),
         }
     }
 }
@@ -36,9 +38,13 @@ impl Provider for MockProvider {
         _: &Value,
         _: &flume::Sender<ProviderEvent>,
         _: RequestOptions,
-        _: Option<&craft_storage::id::SessionRef>,
+        session_id: Option<&craft_storage::id::SessionRef>,
     ) -> Result<StreamResponse, AgentError> {
         self.requests.lock().unwrap().push(messages.to_vec());
+        self.sessions
+            .lock()
+            .unwrap()
+            .push(session_id.map(|s| s.as_str().to_string()));
         let mut responses = self.responses.lock().unwrap();
         assert!(!responses.is_empty(), "MockProvider: no more responses");
         responses.remove(0)

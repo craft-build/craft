@@ -218,6 +218,7 @@ impl AgentLoop {
             event_tx,
             &self.config,
             instructions,
+            self.session_id.as_ref(),
         )
         .await
     }

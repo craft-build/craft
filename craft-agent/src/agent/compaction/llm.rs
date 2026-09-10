@@ -1,4 +1,5 @@
 use craft_providers::{ContentBlock, Message, Model, RequestOptions, Role, TokenUsage};
+use craft_storage::id::SessionRef;
 use tracing::info;
 
 use super::super::history::{History, remove_orphaned_tool_results};
@@ -82,6 +83,7 @@ pub(crate) async fn compact_history(
     config: &craft_config::AgentConfig,
     instructions: Option<&str>,
     carry_len: usize,
+    session_id: Option<&SessionRef>,
 ) -> Result<TokenUsage, AgentError> {
     let compact_start = std::time::Instant::now();
 
@@ -125,7 +127,7 @@ pub(crate) async fn compact_history(
             // The compaction prompt is built here, so the estimate is all we
             // have and the session's measured size describes other messages.
             0,
-            None,
+            session_id,
             &[],
             None,
             0,
@@ -204,6 +206,7 @@ pub async fn compact(
     event_tx: &EventSender,
     config: &craft_config::AgentConfig,
     instructions: Option<&str>,
+    session_id: Option<&SessionRef>,
 ) -> Result<(), AgentError> {
     let cancel = CancelToken::none();
     let usage = compact_history(
@@ -216,6 +219,7 @@ pub async fn compact(
         config,
         instructions,
         0,
+        session_id,
     )
     .await?;
     if let Some(post) = normalize(config.post_compaction_instructions.as_deref()) {
@@ -327,6 +331,34 @@ mod tests {
     const CONFIG_EXTRA: &str = "Record anything that belongs in plan.md";
     const REQUEST_EXTRA: &str = "Keep the failing test names";
 
+    /// OpenCode Go rejects requests without `x-opencode-session`, so the
+    /// summariser must ride the conversation's id like every other turn.
+    #[tokio::test]
+    async fn compact_history_sends_the_conversations_session_id() {
+        let provider = MockProvider::new(vec![Ok(text_response(StopReason::EndTurn))]);
+        let mut history = History::new(vec![Message::user("work".into())]);
+        let (raw_tx, _rx) = flume::unbounded();
+        let session = craft_storage::id::SessionRef::generate();
+
+        compact_history(
+            &provider,
+            &default_model(),
+            &mut history,
+            &EventSender::new(raw_tx, 0),
+            &CancelToken::none(),
+            None,
+            &craft_config::AgentConfig::default(),
+            None,
+            0,
+            Some(&session),
+        )
+        .await
+        .unwrap();
+
+        let sessions = provider.sessions.lock().unwrap();
+        assert_eq!(sessions[0].as_deref(), Some(session.as_str()));
+    }
+
     #[tokio::test]
     async fn compact_history_carries_the_tail_past_the_summary() {
         let provider = MockProvider::new(vec![Ok(text_response(StopReason::EndTurn))]);
@@ -346,6 +378,7 @@ mod tests {
             &craft_config::AgentConfig::default(),
             None,
             1,
+            None,
         )
         .await
         .unwrap();
@@ -388,6 +421,7 @@ mod tests {
             &EventSender::new(raw_tx, 0),
             &craft_config::AgentConfig::default(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -418,6 +452,7 @@ mod tests {
             &EventSender::new(raw_tx, 0),
             &config,
             Some(REQUEST_EXTRA),
+            None,
         )
         .await
         .unwrap();
@@ -492,6 +527,7 @@ mod tests {
             &craft_config::AgentConfig::default(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -553,6 +589,7 @@ mod tests {
             &craft_config::AgentConfig::default(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -611,6 +648,7 @@ mod tests {
             &craft_config::AgentConfig::default(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -660,6 +698,7 @@ mod tests {
             &craft_config::AgentConfig::default(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
