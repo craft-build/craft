@@ -4,7 +4,7 @@
 use rig::{
     agent::ModelHandle,
     client::{CompletionClient, ModelListingClient, ProviderClient},
-    model::ModelList,
+    model::{Model, ModelList},
     providers::*,
 };
 use serde::Deserialize;
@@ -145,6 +145,16 @@ macro_rules! providers {
             /// Discovery errors propagate instead of masquerading as an empty
             /// catalog. Set `discover_models = false` for manual-only catalogs.
             pub async fn models(&self, config: &ProviderConfig) -> Result<ModelList> {
+                self.models_with(config, &credential).await
+            }
+
+            // Injectable credential lookup keeps environment access out of
+            // multithreaded async tests.
+            async fn models_with(
+                &self,
+                config: &ProviderConfig,
+                credential: &(dyn Fn(&str) -> Result<String> + Send + Sync),
+            ) -> Result<ModelList> {
                 config.validate()?;
                 if config.kind != self.kind() {
                     return InvalidSnafu {
@@ -153,8 +163,12 @@ macro_rules! providers {
                     .fail();
                 }
                 let discovered = if config.discover_models {
-                    match self {
-                        $(Self::$variant(client) => list_models!(client, $listing),)+
+                    if matches!(self, Self::OpenaiCompatible(_)) && config.base_url.is_some() {
+                        list_openai_compatible_models(config, credential).await?
+                    } else {
+                        match self {
+                            $(Self::$variant(client) => list_models!(client, $listing),)+
+                        }
                     }
                 } else {
                     ModelList::new(vec![])
@@ -194,6 +208,77 @@ providers! {
     Xai, "xai", xai::Client, "XAI_API_KEY", no, yes;
     Xiaomimimo, "xiaomimimo", xiaomimimo::Client, "XIAOMI_MIMO_API_KEY", yes, yes;
     Zai, "zai", zai::Client, "ZAI_API_KEY", no, yes;
+}
+
+/// `GET {base_url}/models` for OpenAI-compatible servers, keeping the optional
+/// metadata (`context_length`, `description`, output limits) that Rig's shared
+/// listing DTO drops. Third-party servers (synthetic, vLLM, LM Studio, ...)
+/// frequently publish these; without `context_length` the ACP layer cannot
+/// report context usage or trigger compaction. Used only when `base_url` is
+/// configured; otherwise Rig's lister covers the default OpenAI endpoint.
+async fn list_openai_compatible_models(
+    config: &ProviderConfig,
+    credential: &(dyn Fn(&str) -> Result<String> + Send + Sync),
+) -> Result<ModelList> {
+    let key = credential(config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY"))?;
+    let base = config
+        .base_url
+        .as_deref()
+        .expect("caller guarantees base_url")
+        .trim_end_matches('/');
+    let url = format!("{base}/models");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(crate::error::client_error)?;
+    let status = response.status();
+    let body = response.text().await.map_err(crate::error::client_error)?;
+    if !status.is_success() {
+        return InvalidSnafu {
+            reason: format!("GET {url} returned {status}: {body}"),
+        }
+        .fail();
+    }
+    let envelope: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
+        crate::error::Error::Invalid {
+            reason: format!("GET {url} returned a malformed models listing"),
+        }
+    })?;
+    let models = envelope
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| crate::error::Error::Invalid {
+            reason: format!("GET {url} returned no models data"),
+        })?
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("id")?.as_str()?;
+            let mut model = Model::from_id(id);
+            model.name = string_field(entry, "name");
+            model.description = string_field(entry, "description");
+            model.created_at = number_field(entry, "created")
+                .or_else(|| number_field(entry, "created_at"));
+            model.owned_by = string_field(entry, "owned_by");
+            model.context_length = number_field(entry, "context_length")
+                .or_else(|| number_field(entry, "context_window"))
+                .map(|value| value.min(u32::MAX as u64) as u32);
+            model.max_output_tokens = number_field(entry, "max_output_tokens")
+                .or_else(|| number_field(entry, "max_output_length"))
+                .map(|value| value.min(u32::MAX as u64) as u32);
+            Some(model)
+        })
+        .collect();
+    Ok(ModelList::new(models))
+}
+
+fn string_field(entry: &serde_json::Value, field: &str) -> Option<String> {
+    entry.get(field)?.as_str().map(str::to_owned)
+}
+
+fn number_field(entry: &serde_json::Value, field: &str) -> Option<u64> {
+    entry.get(field)?.as_u64()
 }
 
 fn build_llamafile(
@@ -364,7 +449,10 @@ mod tests {
             config.discover_models = false;
             let provider = build(&config);
             assert_eq!(provider.kind(), kind);
-            let models = provider.models(&config).await.unwrap();
+            let models = provider
+                .models_with(&config, &|_| Ok("test-key".into()))
+                .await
+                .unwrap();
             assert_eq!(models.len(), 1, "{}", kind.as_str());
             if kind != ProviderKind::Voyageai {
                 let agent = crate::agent::build(
@@ -383,7 +471,14 @@ mod tests {
     async fn unsupported_discovery_uses_configured_models() {
         let config = config(ProviderKind::Voyageai, "http://127.0.0.1:1");
         assert!(config.discover_models);
-        assert_eq!(build(&config).models(&config).await.unwrap().len(), 1);
+        assert_eq!(
+            build(&config)
+                .models_with(&config, &|_| Ok("test-key".into()))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -461,7 +556,10 @@ mod tests {
     async fn custom_openai_discovers_and_merges_models() {
         let (base, task) = server("200 OK", r#"{"data":[{"id":"discovered"}]}"#);
         let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/custom/v1"));
-        let models = build(&config).models(&config).await.unwrap();
+        let models = build(&config)
+            .models_with(&config, &|_| Ok("test-key".into()))
+            .await
+            .unwrap();
         assert_eq!(models.len(), 2);
         let request = task.join().unwrap();
         assert!(request.starts_with("GET /custom/v1/models "));
@@ -470,6 +568,32 @@ mod tests {
                 .to_lowercase()
                 .contains("authorization: bearer test-key")
         );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_discovery_preserves_listing_metadata() {
+        let (base, task) = server(
+            "200 OK",
+            r#"{"data":[
+                {"id":"rich","name":"Rich","description":"a dense model","owned_by":"acme",
+                 "created":1,"context_length":524288,"max_output_length":65536},
+                {"id":"plain"}
+            ]}"#,
+        );
+        let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/v1"));
+        let models = build(&config)
+            .models_with(&config, &|_| Ok("test-key".into()))
+            .await
+            .unwrap();
+        let rich = models.iter().find(|model| model.id == "rich").unwrap();
+        assert_eq!(rich.context_length, Some(524288));
+        assert_eq!(rich.description.as_deref(), Some("a dense model"));
+        assert_eq!(rich.owned_by.as_deref(), Some("acme"));
+        assert_eq!(rich.created_at, Some(1));
+        assert_eq!(rich.max_output_tokens, Some(65536));
+        let plain = models.iter().find(|model| model.id == "plain").unwrap();
+        assert_eq!(plain.context_length, None);
+        task.join().unwrap();
     }
 
     #[tokio::test]
@@ -489,7 +613,12 @@ mod tests {
     async fn discovery_errors_are_not_hidden_by_manual_models() {
         let (base, task) = server("401 Unauthorized", r#"{"error":"unauthorized"}"#);
         let config = config(ProviderKind::OpenaiCompatible, &base);
-        assert!(build(&config).models(&config).await.is_err());
+        assert!(
+            build(&config)
+                .models_with(&config, &|_| Ok("test-key".into()))
+                .await
+                .is_err()
+        );
         task.join().unwrap();
     }
 

@@ -59,11 +59,15 @@ overrides one returned by discovery. Supported fields are `name`, `description`,
 IDs containing dots or slashes should be quoted.
 
 `Provider::models` queries Rig's models API where supported, merges by exact ID,
-and sorts by ID. Only explicitly configured fields replace discovered values;
-unmentioned models and metadata remain intact. Providers without a listing API
-use only configured models. Discovery errors propagate: they are not silently
-treated as an empty catalog. Set `discover_models = false` for manual-only use
-or compatible endpoints that do not implement model listing.
+and sorts by ID. `openai-compatible` providers with a configured `base_url` use
+a direct listing that keeps the optional server metadata (`context_length`,
+`description`, output limits) Rig's shared DTO drops — that metadata feeds the
+ACP context-usage updates and compaction thresholds. Only explicitly configured
+fields replace discovered values; unmentioned models and metadata remain
+intact. Providers without a listing API use only configured models. Discovery
+errors propagate: they are not silently treated as an empty catalog. Set
+`discover_models = false` for manual-only use or compatible endpoints that do
+not implement model listing.
 
 Token limits are catalog metadata, not request parameters. They do not silently
 set a generation cap. Set `[agent].max_tokens` for a request-level output cap.

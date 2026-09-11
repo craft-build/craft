@@ -10,6 +10,7 @@ dirs.workspace = true
 futures.workspace = true
 ignore.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 rig.workspace = true
 schemars.workspace = true
 serde.workspace = true

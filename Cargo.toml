@@ -9,6 +9,7 @@ dirs = "6"
 futures = "0.3"
 ignore = "0.4"
 regex = "1"
+reqwest = "0.12"
 rig = "0.42.0"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
