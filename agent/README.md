@@ -111,11 +111,11 @@ Providers without completion support (Voyage AI) return an error before running.
 The provider still validates whether a particular model supports chat at request time.
 
 ```rust
-use craft_acp::{agent, config::Config, providers::Provider, tools::Workspace};
+use craft::{agent, config::Config, providers::Provider, tools::Workspace};
 use rig::completion::{Chat, Message};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().await?;
     let provider = Provider::from_config(&config.providers["openai"])?;
     let workspace = Workspace::new("/path/to/project")?;

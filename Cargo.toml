@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.dependencies]
 agent-client-protocol = "2.1.0"
-anyhow = "1"
+snafu = "0.9"
 dirs = "6"
 futures = "0.3"
 ignore = "0.4"

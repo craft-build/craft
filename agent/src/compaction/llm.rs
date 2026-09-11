@@ -2,12 +2,13 @@
 //! head; the recent tail is preserved verbatim (ported from Craft's
 //! `compaction/llm.rs`, simplified to craft-acp's caller-owned history).
 
-use anyhow::Result;
 use rig::completion::message::{AssistantContent, Text, UserContent};
 use rig::completion::{CompletionModel, Message};
+use snafu::ResultExt;
 
 use super::estimate::estimate_tokens;
 use super::vcc::find_cut;
+use crate::error::{Result, SummarizeSnafu};
 
 /// Marker identifying an LLM compaction summary in history. Distinct from the
 /// VCC summary prefix so each strategy recognizes only its own summaries.
@@ -132,7 +133,8 @@ async fn summarize<M: CompletionModel + Clone>(model: &M, head: &[Message]) -> R
         .preamble(COMPACT_SYSTEM.to_string())
         .messages(messages)
         .send()
-        .await?;
+        .await
+        .context(SummarizeSnafu)?;
     let text: String = response
         .choice
         .iter()

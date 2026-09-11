@@ -145,18 +145,18 @@ impl AppState {
                 "provider {name:?} does not support completion models"
             ));
         }
-        let provider = Provider::from_config(config).map_err(|e| format!("{e:#}"))?;
+        let provider = Provider::from_config(config).map_err(report)?;
         let models: Vec<Model> = provider
             .models(config)
             .await
-            .map_err(|e| format!("{e:#}"))?
+            .map_err(report)?
             .into_iter()
             .collect();
         Ok((provider, models))
     }
 
     async fn open_session(&self, cwd: &Path) -> std::result::Result<Session, String> {
-        let workspace = Workspace::new(cwd).map_err(|e| format!("{e:#}"))?;
+        let workspace = Workspace::new(cwd).map_err(|e| e.to_string())?;
         let provider_name = self
             .config
             .providers
@@ -381,6 +381,11 @@ fn respond_setup_error<T: JsonRpcResponse>(
     responder.respond_with_error(invalid_params(message))
 }
 
+/// Render an error and its sources as one client-facing message.
+fn report(error: crate::error::Error) -> String {
+    snafu::Report::from_error(error).to_string()
+}
+
 fn invalid_params(message: impl Into<String>) -> Error {
     let mut error = Error::invalid_params();
     error.message = message.into();
@@ -523,7 +528,7 @@ async fn run_turn(
 
     let agent = match crate::agent::build(&provider, &model, &state.config.agent, &workspace) {
         Ok(agent) => agent,
-        Err(error) => fail!(format!("{error:#}")),
+        Err(error) => fail!(report(error)),
     };
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {

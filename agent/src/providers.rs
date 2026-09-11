@@ -1,7 +1,6 @@
 //! Config-driven native Rig clients. Keep concrete clients available so future
 //! inference, embeddings, tools, and streaming can use their full capabilities.
 
-use anyhow::{Context, Result, bail};
 use rig::{
     agent::ModelHandle,
     client::{CompletionClient, ModelListingClient, ProviderClient},
@@ -9,15 +8,24 @@ use rig::{
     providers::*,
 };
 use serde::Deserialize;
+use snafu::{OptionExt, ResultExt};
 
 use crate::config::ProviderConfig;
+use crate::error::{
+    AzureApiVersionMissingSnafu, AzureEndpointMissingSnafu, CreateProviderSnafu,
+    CredentialEmptySnafu, CredentialMissingSnafu, InvalidSnafu, NoCompletionSnafu, Result,
+    SelectModelSnafu,
+};
 
 fn credential(name: &str) -> Result<String> {
-    let value = std::env::var(name).with_context(|| {
-        format!("credential environment variable {name:?} is not set or not Unicode")
+    let value = std::env::var(name).context(CredentialMissingSnafu {
+        name: name.to_string(),
     })?;
     if value.trim().is_empty() {
-        bail!("credential environment variable {name:?} is empty");
+        return CredentialEmptySnafu {
+            name: name.to_string(),
+        }
+        .fail();
     }
     Ok(value)
 }
@@ -27,7 +35,10 @@ fn credential(name: &str) -> Result<String> {
 // capabilities at compile time, so unsupported listers must not be called.
 macro_rules! list_models {
     ($client:expr, yes) => {
-        $client.list_models().await?
+        $client
+            .list_models()
+            .await
+            .map_err(crate::error::client_error)?
     };
     ($client:expr, no) => {{
         let _ = $client;
@@ -41,7 +52,7 @@ macro_rules! completion_model {
     };
     ($client:expr, $model:expr, no) => {{
         let _ = ($client, $model);
-        bail!("provider does not support completion models");
+        NoCompletionSnafu.fail()?
     }};
 }
 
@@ -49,14 +60,14 @@ macro_rules! build_client {
     ($config:expr, $client:ty, $env:literal, $credential:expr) => {{
         let config = $config;
         if config.api_key_env.is_none() && config.base_url.is_none() {
-            <$client>::from_env()?
+            <$client>::from_env().map_err(crate::error::client_error)?
         } else {
             let key = $credential(config.api_key_env.as_deref().unwrap_or($env))?;
             let mut builder = <$client>::builder().api_key(key);
             if let Some(base_url) = &config.base_url {
                 builder = builder.base_url(base_url);
             }
-            builder.build()?
+            builder.build().map_err(crate::error::client_error)?
         }
     }};
     ($config:expr, $client:ty, $factory:ident, $credential:expr) => {
@@ -102,7 +113,9 @@ macro_rules! providers {
                             build_client!(config, $client, $auth, credential)
                         ),)+
                     })
-                })().with_context(|| format!("creating {} provider", config.kind.as_str()))
+                })().with_context(|_| CreateProviderSnafu {
+                    kind: config.kind.as_str(),
+                })
             }
 
             pub fn kind(&self) -> ProviderKind {
@@ -113,15 +126,19 @@ macro_rules! providers {
             /// Rig erases the concrete model once, retaining its native protocol.
             pub fn completion_model(&self, model: &str) -> Result<ModelHandle> {
                 if model.trim().is_empty() {
-                    bail!("model ID must not be empty");
+                    return InvalidSnafu {
+                        reason: "model ID must not be empty",
+                    }
+                    .fail();
                 }
                 (|| -> Result<ModelHandle> {
                     Ok(match self {
                         $(Self::$variant(client) => completion_model!(client, model, $completion),)+
                     })
-                })().with_context(|| format!(
-                    "selecting model {model:?} on {} provider", self.kind().as_str()
-                ))
+                })().with_context(|_| SelectModelSnafu {
+                    model: model.to_string(),
+                    kind: self.kind().as_str(),
+                })
             }
 
             /// Providers without listing support return the configured models.
@@ -130,7 +147,10 @@ macro_rules! providers {
             pub async fn models(&self, config: &ProviderConfig) -> Result<ModelList> {
                 config.validate()?;
                 if config.kind != self.kind() {
-                    bail!("model config kind does not match the provider");
+                    return InvalidSnafu {
+                        reason: "model config kind does not match the provider",
+                    }
+                    .fail();
                 }
                 let discovered = if config.discover_models {
                     match self {
@@ -186,7 +206,7 @@ fn build_llamafile(
     } else if let Ok(base) = std::env::var("LLAMAFILE_API_BASE_URL") {
         builder = builder.base_url(base);
     }
-    Ok(builder.build()?)
+    builder.build().map_err(crate::error::client_error)
 }
 
 fn build_ollama(
@@ -194,7 +214,7 @@ fn build_ollama(
     credential: &dyn Fn(&str) -> Result<String>,
 ) -> Result<ollama::Client> {
     if config.api_key_env.is_none() && config.base_url.is_none() {
-        return Ok(ollama::Client::from_env()?);
+        return ollama::Client::from_env().map_err(crate::error::client_error);
     }
     let key = match &config.api_key_env {
         Some(name) => credential(name)?,
@@ -206,7 +226,7 @@ fn build_ollama(
     } else if let Ok(base) = std::env::var("OLLAMA_API_BASE_URL") {
         builder = builder.base_url(base);
     }
-    Ok(builder.build()?)
+    builder.build().map_err(crate::error::client_error)
 }
 
 fn build_azure(
@@ -224,17 +244,18 @@ fn build_azure(
         .base_url
         .clone()
         .or_else(|| std::env::var("AZURE_ENDPOINT").ok())
-        .context("azure requires base_url or AZURE_ENDPOINT")?;
+        .context(AzureEndpointMissingSnafu)?;
     let version = config
         .api_version
         .clone()
         .or_else(|| std::env::var("AZURE_API_VERSION").ok())
-        .context("azure requires api_version or AZURE_API_VERSION")?;
-    Ok(azure::Client::builder()
+        .context(AzureApiVersionMissingSnafu)?;
+    azure::Client::builder()
         .api_key(auth)
         .azure_endpoint(endpoint)
         .api_version(&version)
-        .build()?)
+        .build()
+        .map_err(crate::error::client_error)
 }
 
 fn build_chatgpt(
@@ -242,7 +263,7 @@ fn build_chatgpt(
     credential: &dyn Fn(&str) -> Result<String>,
 ) -> Result<chatgpt::Client> {
     if config.api_key_env.is_none() && config.base_url.is_none() {
-        return Ok(chatgpt::Client::from_env()?);
+        return chatgpt::Client::from_env().map_err(crate::error::client_error);
     }
     let auth = if let Some(name) = &config.api_key_env {
         chatgpt::ChatGPTAuth::AccessToken {
@@ -261,7 +282,7 @@ fn build_chatgpt(
     if let Some(base) = &config.base_url {
         builder = builder.base_url(base);
     }
-    Ok(builder.build()?)
+    builder.build().map_err(crate::error::client_error)
 }
 
 fn build_copilot(
@@ -269,21 +290,22 @@ fn build_copilot(
     credential: &dyn Fn(&str) -> Result<String>,
 ) -> Result<copilot::Client> {
     if config.api_key_env.is_none() && config.base_url.is_none() {
-        return Ok(copilot::Client::from_env()?);
+        return copilot::Client::from_env().map_err(crate::error::client_error);
     }
     let mut builder = copilot::Client::builder();
     if let Some(base) = &config.base_url {
         builder = builder.base_url(base);
     }
     if let Some(name) = &config.api_key_env {
-        Ok(builder.api_key(credential(name)?).build()?)
+        builder.api_key(credential(name)?).build()
     } else if let Some(key) = first_env(&["GITHUB_COPILOT_API_KEY", "COPILOT_API_KEY"]) {
-        Ok(builder.api_key(key).build()?)
+        builder.api_key(key).build()
     } else if let Some(token) = first_env(&["COPILOT_GITHUB_ACCESS_TOKEN", "GITHUB_TOKEN"]) {
-        Ok(builder.github_access_token(token).build()?)
+        builder.github_access_token(token).build()
     } else {
-        Ok(builder.oauth().build()?)
+        builder.oauth().build()
     }
+    .map_err(crate::error::client_error)
 }
 
 fn first_env(names: &[&str]) -> Option<String> {
@@ -369,11 +391,16 @@ mod tests {
         let config =
             Config::parse("[providers.test]\nkind = 'openai'\napi_key_env = 'CRAFT_TEST_KEY'")
                 .unwrap();
-        let result =
-            Provider::from_config_with(&config.providers["test"], &|name| bail!("missing {name}"));
+        let result = Provider::from_config_with(&config.providers["test"], &|name| {
+            InvalidSnafu {
+                reason: format!("missing {name}"),
+            }
+            .fail()
+        });
         let error = result.err().unwrap();
-        assert!(format!("{error:#}").contains("missing CRAFT_TEST_KEY"));
-        assert!(format!("{error:#}").contains("creating openai provider"));
+        let report = snafu::Report::from_error(error).to_string();
+        assert!(report.contains("missing CRAFT_TEST_KEY"), "{report}");
+        assert!(report.contains("creating openai provider"), "{report}");
     }
 
     /// One-request local HTTP server with bounded accept/read times. Captures the

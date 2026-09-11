@@ -4,10 +4,10 @@
 //! Rig's `AgentRunner` drives model calls, hooks, and future tool execution.
 //!
 //! ```no_run
-//! use craft_acp::{agent, config::Config, providers::Provider, tools::Workspace};
+//! use craft::{agent, config::Config, providers::Provider, tools::Workspace};
 //! use rig::completion::{Chat, Message};
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = Config::load().await?;
 //! let provider = Provider::from_config(&config.providers["openai"])?;
 //! let workspace = Workspace::new("/path/to/project")?;
@@ -27,10 +27,9 @@
 //! # }
 //! ```
 
-use anyhow::Result;
 use rig::agent::{Agent, AgentBuilder, ModelHandle, WithBuilderTools};
 
-use crate::{config::AgentConfig, providers::Provider, tools::Workspace};
+use crate::{config::AgentConfig, error::Result, providers::Provider, tools::Workspace};
 
 /// Build an agent with read, grep, edit, and delete tools in an explicit workspace.
 ///
@@ -270,7 +269,8 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(format!("{error:#}").contains("does not support completion"));
-        assert!(format!("{error:#}").contains("voyageai"));
+        let report = snafu::Report::from_error(error).to_string();
+        assert!(report.contains("does not support completion"), "{report}");
+        assert!(report.contains("voyageai"), "{report}");
     }
 }

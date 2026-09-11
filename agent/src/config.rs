@@ -5,10 +5,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
 use rig::model::{Model, ModelList};
 use serde::Deserialize;
+use snafu::{OptionExt, ResultExt};
 
+use crate::error::{
+    HomeDirectorySnafu, InvalidBaseUrlSnafu, InvalidProviderSnafu, InvalidSnafu, InvalidTomlSnafu,
+    LoadConfigSnafu, ReadConfigSnafu, Result,
+};
 use crate::providers::ProviderKind;
 
 #[derive(Debug, Default, Deserialize)]
@@ -99,10 +103,16 @@ impl Default for AgentConfig {
 impl AgentConfig {
     pub fn validate(&self) -> Result<()> {
         if self.max_turns == 0 {
-            bail!("agent.max_turns must be positive");
+            return InvalidSnafu {
+                reason: "agent.max_turns must be positive",
+            }
+            .fail();
         }
         if self.max_tokens == Some(0) {
-            bail!("agent.max_tokens must be positive");
+            return InvalidSnafu {
+                reason: "agent.max_tokens must be positive",
+            }
+            .fail();
         }
         // Providers have different upper bounds (and some disallow temperature).
         // Validate the portable constraint here; leave model-specific rules to Rig.
@@ -110,7 +120,10 @@ impl AgentConfig {
             .temperature
             .is_some_and(|value| !value.is_finite() || value < 0.0)
         {
-            bail!("agent.temperature must be finite and nonnegative");
+            return InvalidSnafu {
+                reason: "agent.temperature must be finite and nonnegative",
+            }
+            .fail();
         }
         Ok(())
     }
@@ -154,7 +167,7 @@ impl Config {
     pub fn path() -> Result<PathBuf> {
         // Deliberately use the specified path, even on macOS and Windows.
         Ok(dirs::home_dir()
-            .context("cannot determine home directory for agent configuration")?
+            .context(HomeDirectorySnafu)?
             .join(".config/craft/agent.toml"))
     }
 
@@ -169,36 +182,51 @@ impl Config {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
             }
-            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+            Err(error) => {
+                return Err(error).context(ReadConfigSnafu {
+                    path: path.to_path_buf(),
+                });
+            }
         };
-        Self::parse(&text).with_context(|| format!("loading {}", path.display()))
+        Self::parse(&text).with_context(|_| LoadConfigSnafu {
+            path: path.to_path_buf(),
+        })
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Self = toml::from_str(text).context("invalid agent TOML")?;
+        let config: Self = toml::from_str(text).context(InvalidTomlSnafu)?;
         config.agent.validate()?;
         let mut seen_kinds = std::collections::BTreeSet::new();
         for stage in &config.compaction {
             if !stage.context.is_finite() || stage.context <= 0.0 || stage.context >= 1.0 {
-                bail!(
-                    "compaction stage {:?}: context must be between 0 and 1",
-                    stage.kind
-                );
+                return InvalidSnafu {
+                    reason: format!(
+                        "compaction stage {:?}: context must be between 0 and 1",
+                        stage.kind
+                    ),
+                }
+                .fail();
             }
             if !seen_kinds.insert(stage.kind) {
-                bail!(
-                    "compaction stage {:?}: each kind may appear at most once",
-                    stage.kind
-                );
+                return InvalidSnafu {
+                    reason: format!(
+                        "compaction stage {:?}: each kind may appear at most once",
+                        stage.kind
+                    ),
+                }
+                .fail();
             }
         }
         for (name, provider) in &config.providers {
             if name.trim().is_empty() {
-                bail!("provider names must not be empty");
+                return InvalidSnafu {
+                    reason: "provider names must not be empty",
+                }
+                .fail();
             }
             provider
                 .validate()
-                .with_context(|| format!("provider {name:?}"))?;
+                .with_context(|_| InvalidProviderSnafu { name: name.clone() })?;
         }
         Ok(config)
     }
@@ -208,14 +236,20 @@ impl ProviderConfig {
     pub fn validate(&self) -> Result<()> {
         if let Some(name) = &self.api_key_env {
             if name.trim().is_empty() || name.contains(['=', '\0']) {
-                bail!("api_key_env must be a nonempty environment variable name");
+                return InvalidSnafu {
+                    reason: "api_key_env must be a nonempty environment variable name",
+                }
+                .fail();
             }
             if self.kind == ProviderKind::Llamafile {
-                bail!("llamafile does not accept credentials");
+                return InvalidSnafu {
+                    reason: "llamafile does not accept credentials",
+                }
+                .fail();
             }
         }
         if let Some(base) = &self.base_url {
-            let url = url::Url::parse(base).context("base_url must be an absolute HTTP(S) URL")?;
+            let url = url::Url::parse(base).context(InvalidBaseUrlSnafu)?;
             if !matches!(url.scheme(), "http" | "https")
                 || url.host_str().is_none()
                 || !url.username().is_empty()
@@ -223,30 +257,48 @@ impl ProviderConfig {
                 || url.query().is_some()
                 || url.fragment().is_some()
             {
-                bail!("base_url must be HTTP(S), without credentials, query, or fragment");
+                return InvalidSnafu {
+                    reason: "base_url must be HTTP(S), without credentials, query, or fragment",
+                }
+                .fail();
             }
         }
         if self.api_version.is_some() && self.kind != ProviderKind::Azure {
-            bail!("api_version is only supported by azure");
+            return InvalidSnafu {
+                reason: "api_version is only supported by azure",
+            }
+            .fail();
         }
         if self
             .api_version
             .as_ref()
             .is_some_and(|v| v.trim().is_empty())
         {
-            bail!("api_version must not be empty");
+            return InvalidSnafu {
+                reason: "api_version must not be empty",
+            }
+            .fail();
         }
         if self.account_id.is_some()
             && (self.kind != ProviderKind::Chatgpt || self.api_key_env.is_none())
         {
-            bail!("account_id requires chatgpt with api_key_env pointing to an access token");
+            return InvalidSnafu {
+                reason: "account_id requires chatgpt with api_key_env pointing to an access token",
+            }
+            .fail();
         }
         for (id, model) in &self.models {
             if id.trim().is_empty() {
-                bail!("model IDs must not be empty");
+                return InvalidSnafu {
+                    reason: "model IDs must not be empty",
+                }
+                .fail();
             }
             if model.context_length == Some(0) || model.max_output_tokens == Some(0) {
-                bail!("model {id:?}: token limits must be positive");
+                return InvalidSnafu {
+                    reason: format!("model {id:?}: token limits must be positive"),
+                }
+                .fail();
             }
         }
         Ok(())
