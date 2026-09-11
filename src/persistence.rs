@@ -123,6 +123,7 @@ mod tests {
             vec![Checkpoint {
                 label: "Before tests".into(),
                 commit: "abc123".into(),
+                session_id: Some("session-1".into()),
             }],
         );
 
@@ -143,11 +144,29 @@ mod tests {
             loaded.checkpoints_by_project["project-1"][0].commit,
             "abc123"
         );
+        assert_eq!(
+            loaded.checkpoints_by_project["project-1"][0]
+                .session_id
+                .as_deref(),
+            Some("session-1")
+        );
         assert!(
             !store.path.with_extension("json.tmp").exists(),
             "the atomic-save temporary file should be renamed away"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkpoints_saved_before_sessions_load_without_one() {
+        // Older state files have no session on checkpoints; they must still
+        // load so their data is not silently dropped.
+        let checkpoint: Checkpoint =
+            serde_json::from_str(r#"{"label":"Before tests","commit":"abc123"}"#).unwrap();
+
+        assert_eq!(checkpoint.label, "Before tests");
+        assert_eq!(checkpoint.commit, "abc123");
+        assert!(checkpoint.session_id.is_none());
     }
 
     #[test]

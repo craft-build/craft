@@ -1710,16 +1710,15 @@ impl App {
         };
         let project_id = project.id.clone();
         let local_workspace = PathBuf::from(&project.path);
-        let label = format!(
-            "Checkpoint {}",
-            self.checkpoints_by_project
-                .get(&project_id)
-                .map_or(1, |checkpoints| checkpoints.len() + 1)
-        );
+        let session_id = self.active_session_id.clone();
+        // Numbering belongs to the session: its first checkpoint is
+        // "Checkpoint 0" even when earlier sessions already made checkpoints.
+        let label = next_checkpoint_label(&self.active_messages());
         let (sender, receiver) = tokio::sync::oneshot::channel();
         async_runtime::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                CheckpointManager::new(config, local_workspace).create(&label)
+                CheckpointManager::new(config, local_workspace)
+                    .create(&label, session_id.as_deref())
             })
             .await
             .unwrap_or_else(|error| Err(format!("checkpoint task failed: {error}")));
@@ -1782,15 +1781,11 @@ impl App {
 
     pub fn restore_checkpoint(&mut self, label: &str, cx: &mut Context<Self>) {
         let project_id = self.current_thread_key();
+        let session_id = self.active_session_id.clone();
         let Some(checkpoint) = self
             .checkpoints_by_project
             .get(&project_id)
-            .and_then(|checkpoints| {
-                checkpoints
-                    .iter()
-                    .rev()
-                    .find(|checkpoint| checkpoint.label == label)
-            })
+            .and_then(|checkpoints| find_checkpoint(checkpoints, label, session_id.as_deref()))
             .cloned()
         else {
             self.toast = Some(format!("Checkpoint data is unavailable for {label}"));
@@ -1844,6 +1839,43 @@ impl App {
     pub fn changed_files(&self) -> &[WorkspaceFile] {
         &self.changed_files
     }
+}
+
+/// Checkpoint labels are numbered within the session that made them, so a
+/// session's first checkpoint is "Checkpoint 0" no matter how many
+/// checkpoints other sessions created. Counting the labeled messages of the
+/// thread gives the index of the next checkpoint.
+fn next_checkpoint_label(messages: &[Message]) -> String {
+    let count = messages
+        .iter()
+        .filter(|message| {
+            matches!(message.role, Role::Assistant) && message.checkpoint_label.is_some()
+        })
+        .count();
+    format!("Checkpoint {count}")
+}
+
+/// Find a checkpoint by label within the session that created it. Labels
+/// repeat across sessions (each session counts from 0), so the session id
+/// picks the right one. Checkpoints saved before per-session numbering carry
+/// no session and remain restorable by label alone.
+fn find_checkpoint<'a>(
+    checkpoints: &'a [Checkpoint],
+    label: &str,
+    session_id: Option<&str>,
+) -> Option<&'a Checkpoint> {
+    checkpoints
+        .iter()
+        .rev()
+        .find(|checkpoint| {
+            checkpoint.label == label && checkpoint.session_id.as_deref() == session_id
+        })
+        .or_else(|| {
+            checkpoints
+                .iter()
+                .rev()
+                .find(|checkpoint| checkpoint.label == label && checkpoint.session_id.is_none())
+        })
 }
 
 impl Render for App {
@@ -2824,5 +2856,84 @@ mod session_config_tests {
         let legacy_key = "f_src/main.rs_4";
 
         assert!(!legacy_key.starts_with(&comment_scope_prefix(Some("session-1"))));
+    }
+
+    fn assistant_message(id: &str, checkpoint_label: Option<&str>) -> Message {
+        Message {
+            id: id.into(),
+            role: Role::Assistant,
+            body: String::from("done").into(),
+            time: None,
+            context: vec![],
+            attached_comments: vec![],
+            checkpoint_label: checkpoint_label.map(str::to_string),
+            steps: None,
+            diff: None,
+            terminal: None,
+        }
+    }
+
+    #[test]
+    fn checkpoint_numbering_restarts_per_session() {
+        // A session's first checkpoint is numbered 0.
+        assert_eq!(next_checkpoint_label(&[]), "Checkpoint 0");
+
+        // Numbers follow the checkpoints made in this session alone; the
+        // labels other sessions used do not leak in.
+        let messages = vec![
+            Message {
+                id: "user".into(),
+                role: Role::User,
+                body: String::from("hello").into(),
+                time: None,
+                context: vec![],
+                attached_comments: vec![],
+                checkpoint_label: None,
+                steps: None,
+                diff: None,
+                terminal: None,
+            },
+            assistant_message("a1", Some("Checkpoint 0")),
+            assistant_message("a2", Some("Checkpoint 1")),
+        ];
+        assert_eq!(next_checkpoint_label(&messages), "Checkpoint 2");
+    }
+
+    #[test]
+    fn restore_finds_the_checkpoint_made_in_the_active_session() {
+        let checkpoint = |label: &str, session: Option<&str>, commit: &str| Checkpoint {
+            label: label.into(),
+            commit: commit.into(),
+            session_id: session.map(str::to_string),
+        };
+        // Every session counts from 0, so labels repeat across sessions.
+        let checkpoints = vec![
+            checkpoint("Checkpoint 0", Some("session-1"), "commit-1"),
+            checkpoint("Checkpoint 0", Some("session-2"), "commit-2"),
+        ];
+
+        assert_eq!(
+            find_checkpoint(&checkpoints, "Checkpoint 0", Some("session-1"))
+                .unwrap()
+                .commit,
+            "commit-1"
+        );
+        assert_eq!(
+            find_checkpoint(&checkpoints, "Checkpoint 0", Some("session-2"))
+                .unwrap()
+                .commit,
+            "commit-2"
+        );
+        assert!(find_checkpoint(&checkpoints, "Checkpoint 9", Some("session-1")).is_none());
+
+        // Checkpoints saved before per-session numbering have no session and
+        // stay restorable by label.
+        let legacy = vec![checkpoint("Checkpoint 1", None, "legacy")];
+        assert_eq!(
+            find_checkpoint(&legacy, "Checkpoint 1", Some("session-1"))
+                .unwrap()
+                .commit,
+            "legacy"
+        );
     }
 }

@@ -12,6 +12,12 @@ use crate::config::{AgentConfig, TransportConfig};
 pub struct Checkpoint {
     pub label: String,
     pub commit: String,
+    /// Session that created the checkpoint. Labels are numbered within their
+    /// session, so restore resolves them in the session that made them.
+    /// Checkpoints saved before per-session numbering carry no session and
+    /// stay restorable through the legacy label-only lookup.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 pub struct CheckpointManager {
@@ -29,7 +35,7 @@ impl CheckpointManager {
 
     /// Snapshot tracked and untracked, non-ignored files through a temporary
     /// Git index. The real index and working tree are not changed.
-    pub fn create(&self, label: &str) -> Result<Checkpoint, String> {
+    pub fn create(&self, label: &str, session_id: Option<&str>) -> Result<Checkpoint, String> {
         let id = uuid::Uuid::new_v4().simple().to_string();
         // Retain the legacy Git namespace; existing checkpoint refs must stay reachable.
         let index = format!(".git/forge/checkpoint-index-{id}");
@@ -55,6 +61,7 @@ impl CheckpointManager {
         Ok(Checkpoint {
             label: label.into(),
             commit: commit.trim().into(),
+            session_id: session_id.map(str::to_string),
         })
     }
 
@@ -63,7 +70,7 @@ impl CheckpointManager {
     pub fn restore(&self, checkpoint: &Checkpoint) -> Result<(), String> {
         let status = self.run_git(&["status", "--porcelain"])?;
         if !status.trim().is_empty() {
-            self.create("Before checkpoint restore")?;
+            self.create("Before checkpoint restore", None)?;
         }
         self.run_git(&["clean", "-fd"])?;
         self.run_git(&["read-tree", "--reset", "-u", &checkpoint.commit])?;
@@ -305,7 +312,7 @@ mod tests {
         std::fs::write(workspace.join("ignored.txt"), "secret\n").unwrap();
         let manager = local_manager(&workspace);
 
-        let checkpoint = manager.create("Developer's checkpoint").unwrap();
+        let checkpoint = manager.create("Developer's checkpoint", None).unwrap();
 
         assert_eq!(
             manager

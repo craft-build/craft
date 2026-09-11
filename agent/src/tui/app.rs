@@ -1,0 +1,923 @@
+//! Application state and input handling. The App renders whatever the
+//! provider streams in and translates key presses into provider commands.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+use tokio::sync::mpsc;
+
+use crate::provider::{
+    AgentEvent, Command, PlanItem, Status, ToolCallData, ToolKind, ToolLine, TouchedFile,
+};
+
+pub const MODELS: [(&str, &str); 4] = [
+    ("GLM-5.3", "Zhipu AI Coding Plan"),
+    ("Claude Sonnet 4.5", "Anthropic"),
+    ("Claude Opus 4.1", "Anthropic"),
+    ("DeepSeek V3.2", "DeepSeek"),
+];
+
+pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
+
+pub const SLASH_COMMANDS: [(&str, &str); 6] = [
+    ("/clear", "Clear conversation context"),
+    ("/compact", "Compact context to save tokens"),
+    ("/undo", "Revert the last edit"),
+    ("/model", "Switch model"),
+    ("/sessions", "List sessions"),
+    ("/help", "Show keybindings"),
+];
+
+/// Palette entries: (id, label, hint).
+pub const PALETTE_COMMANDS: [(&str, &str, &str); 6] = [
+    ("new", "New session", ""),
+    ("sessions", "Switch session", ""),
+    ("toggle-sidebar", "Toggle context panel", "ctrl+b"),
+    ("model", "Change model", "ctrl+l"),
+    ("clear", "Clear context", "/clear"),
+    ("copy", "Copy last message", ""),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DiffState {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+pub enum Message {
+    User(String),
+    Assistant(String),
+    Tool {
+        id: String,
+        kind: ToolKind,
+        lines: Vec<ToolLine>,
+        diff: Option<DiffState>,
+    },
+}
+
+impl Message {
+    fn is_collapsible_tool(&self) -> bool {
+        matches!(self, Message::Tool { kind, .. } if kind.collapsible())
+    }
+
+    fn is_pending_diff(&self) -> bool {
+        matches!(self, Message::Tool { diff: Some(DiffState::Pending), .. })
+    }
+}
+
+/// Glyphs that are UI chrome rather than content: accent bars, focus markers,
+/// box drawing. Never highlighted or copied as text.
+pub(crate) const DECORATION_CHARS: [char; 8] = ['▎', '▌', '│', '─', '┌', '└', '┐', '┘'];
+
+/// App-side text selection (terminal-native selection is disabled by mouse
+/// capture, so we highlight and copy ourselves, like opencode's TUI).
+#[derive(Clone, Copy)]
+pub struct Selection {
+    pub anchor: (u16, u16), // (row, col) where the drag started
+    pub head: (u16, u16),   // (row, col) of the current drag position
+    /// The region the drag started in — the selection can never leave it, so
+    /// a chat selection can't roll into the composer and vice versa.
+    pub region: Rect,
+}
+
+impl Selection {
+    /// Corners normalized so `top` precedes `bottom` in reading order.
+    pub fn normalized(&self) -> ((u16, u16), (u16, u16)) {
+        if (self.anchor.0, self.anchor.1) <= (self.head.0, self.head.1) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+}
+
+pub struct App {
+    // --- provider-driven state ---
+    pub messages: Vec<Message>,
+    pub plan: Vec<PlanItem>,
+    pub files: Vec<TouchedFile>,
+    pub status: Status,
+    pub token_label: String,
+
+    // --- session chrome ---
+    pub model_idx: usize,
+    pub effort_idx: usize,
+    pub cwd: String,
+    pub branch: String,
+    pub sidebar_open: bool,
+
+    // --- composer ---
+    pub composer: String,
+    pub composer_cursor: usize, // char index into composer
+
+    // --- message view ---
+    pub scroll: u16,
+    pub follow: bool,
+    pub max_scroll: u16,
+    pub view_height: u16,
+    /// Line offset where each message starts (filled by the renderer).
+    pub msg_starts: Vec<usize>,
+    /// Text of the last rendered frame, one entry per terminal row (filled by
+    /// the renderer; used to extract selection text on copy).
+    pub frame_text: Vec<String>,
+    /// Selectable regions of the last frame: chat messages and composer input.
+    pub msg_area: Rect,
+    pub composer_area: Rect,
+    pub selection: Option<Selection>,
+    /// Screen rects of collapsible tool cards in the last frame: (message
+    /// index, rect). Used for hover highlight and click-to-toggle.
+    pub tool_regions: Vec<(usize, Rect)>,
+    /// Tool card under the pointer (hover state).
+    pub hover_tool: Option<usize>,
+    /// Card the current click started on; a press without drag toggles it.
+    pub pending_click: Option<usize>,
+    pub collapsed: Vec<String>, // tool ids currently collapsed
+    pub focused: Option<usize>, // message index of focused tool block
+
+    // --- overlays ---
+    pub palette: Option<(String, usize)>, // (query, selected)
+    pub model_menu: Option<usize>,        // selected row
+    pub slash_selected: usize,            // row in the slash popup
+    pub confirm_reject: Option<String>,   // tool id awaiting confirm
+
+    pub should_quit: bool,
+}
+
+impl App {
+    pub fn new() -> Self {
+        App {
+            messages: Vec::new(),
+            plan: Vec::new(),
+            files: Vec::new(),
+            status: Status::Done,
+            token_label: "…".into(),
+            model_idx: 0,
+            effort_idx: 2, // "high", the prototype default
+            cwd: "~/Projects/craft-web".into(),
+            branch: "fix/session-refresh".into(),
+            sidebar_open: true,
+            composer: String::new(),
+            composer_cursor: 0,
+            scroll: 0,
+            follow: true,
+            max_scroll: 0,
+            view_height: 0,
+            msg_starts: Vec::new(),
+            frame_text: Vec::new(),
+            msg_area: Rect::default(),
+            composer_area: Rect::default(),
+            selection: None,
+            tool_regions: Vec::new(),
+            hover_tool: None,
+            pending_click: None,
+            collapsed: Vec::new(),
+            focused: None,
+            palette: None,
+            model_menu: None,
+            slash_selected: 0,
+            confirm_reject: None,
+            should_quit: false,
+        }
+    }
+
+    pub fn model(&self) -> (&'static str, &'static str) {
+        MODELS[self.model_idx]
+    }
+
+    pub fn effort(&self) -> &'static str {
+        EFFORTS[self.effort_idx]
+    }
+
+    pub fn busy(&self) -> bool {
+        matches!(self.status, Status::Thinking | Status::Running)
+    }
+
+    // ------------------------------------------------------------------
+    // Provider events
+    // ------------------------------------------------------------------
+
+    pub fn handle_event(&mut self, ev: AgentEvent) {
+        let was_following = self.follow;
+        match ev {
+            AgentEvent::StatusChanged(s) => self.status = s,
+            AgentEvent::AssistantText(text) => self.messages.push(Message::Assistant(text)),
+            AgentEvent::ToolCall(ToolCallData { id, kind, lines }) => {
+                let diff = if matches!(kind, ToolKind::Edit { .. }) {
+                    Some(DiffState::Pending)
+                } else {
+                    None
+                };
+                let collapsible = kind.collapsible();
+                self.messages.push(Message::Tool { id: id.clone(), kind, lines, diff });
+                if collapsible {
+                    self.collapsed.push(id);
+                }
+            }
+            AgentEvent::PlanSet(plan) => self.plan = plan,
+            AgentEvent::FilesSet(files) => self.files = files,
+            AgentEvent::TokenUsage(label) => self.token_label = label,
+        }
+        if was_following {
+            self.follow = true;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    /// Indices of tool blocks that can be focused: collapsible blocks and
+    /// pending diffs, in display order.
+    fn focus_targets(&self) -> Vec<usize> {
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.is_collapsible_tool() || m.is_pending_diff())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn focused_pending_diff(&self) -> Option<usize> {
+        self.focused.filter(|&i| {
+            self.messages.get(i).map(|m| m.is_pending_diff()).unwrap_or(false)
+        })
+    }
+
+    fn last_pending_diff(&self) -> Option<usize> {
+        self.messages.iter().rposition(|m| m.is_pending_diff())
+    }
+
+    pub fn slash_matches(&self) -> Vec<(&'static str, &'static str)> {
+        let q = self.composer.as_str();
+        if !q.starts_with('/') {
+            return Vec::new();
+        }
+        SLASH_COMMANDS
+            .iter()
+            .copied()
+            .filter(|(cmd, _)| q == "/" || cmd.starts_with(q))
+            .collect()
+    }
+
+    pub fn slash_open(&self) -> bool {
+        self.palette.is_none() && !self.slash_matches().is_empty()
+    }
+
+    pub fn palette_items(&self) -> Vec<(&'static str, &'static str, &'static str)> {
+        let (query, _) = self.palette.clone().unwrap_or_default();
+        let q = query.to_lowercase();
+        PALETTE_COMMANDS
+            .iter()
+            .copied()
+            .filter(|(_, label, _)| label.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    // ------------------------------------------------------------------
+    // Actions
+    // ------------------------------------------------------------------
+
+    fn submit(&mut self, tx: &mpsc::UnboundedSender<Command>) {
+        let text = self.composer.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        // Enter on an open slash menu executes the highlighted command.
+        let slash = self.slash_matches();
+        if text.starts_with('/') && !slash.is_empty() {
+            let (cmd, _) = slash[self.slash_selected.min(slash.len() - 1)];
+            self.composer.clear();
+            self.composer_cursor = 0;
+            self.run_slash(cmd, tx);
+            return;
+        }
+        self.messages.push(Message::User(text.clone()));
+        let _ = tx.send(Command::SendMessage(text));
+        self.composer.clear();
+        self.composer_cursor = 0;
+        self.follow = true;
+    }
+
+    fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
+        match cmd {
+            "/clear" => {
+                self.messages.clear();
+                self.collapsed.clear();
+                self.focused = None;
+                let _ = tx.send(Command::Clear);
+            }
+            "/model" => self.model_menu = Some(self.model_idx),
+            // Compact/undo/help/sessions are no-ops under the mock provider.
+            _ => {}
+        }
+    }
+
+    fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
+        match id {
+            "new" => {
+                self.messages.clear();
+                self.collapsed.clear();
+                self.focused = None;
+                let _ = tx.send(Command::Reset);
+                self.follow = true;
+            }
+            "toggle-sidebar" => self.sidebar_open = !self.sidebar_open,
+            "model" => self.model_menu = Some(self.model_idx),
+            "clear" => {
+                self.messages.clear();
+                self.collapsed.clear();
+                self.focused = None;
+                let _ = tx.send(Command::Clear);
+            }
+            // Copy/sessions are no-ops under the mock provider.
+            _ => {}
+        }
+    }
+
+    fn approve(&mut self, idx: usize, tx: &mpsc::UnboundedSender<Command>) {
+        if let Some(Message::Tool { id, diff, .. }) = self.messages.get_mut(idx) {
+            *diff = Some(DiffState::Approved);
+            let _ = tx.send(Command::Approve(id.clone()));
+        }
+        self.focused = None;
+    }
+
+    fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>) {
+        if let Some(id) = self.confirm_reject.take() {
+            if let Some(Message::Tool { diff, .. }) =
+                self.messages.iter_mut().find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id))
+            {
+                *diff = Some(DiffState::Rejected);
+            }
+            let _ = tx.send(Command::Reject(id));
+        }
+        self.focused = None;
+    }
+
+    pub fn scroll_by(&mut self, delta: i32) {
+        let new = self.scroll as i32 + delta;
+        self.scroll = new.clamp(0, self.max_scroll as i32) as u16;
+        self.follow = self.scroll >= self.max_scroll;
+        // Card rects move with the scroll; stale hover/click state is dropped.
+        self.hover_tool = None;
+        self.pending_click = None;
+    }
+
+    /// Collapsible tool card (message index) at a screen position, if any.
+    pub fn tool_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.tool_regions
+            .iter()
+            .find(|(_, r)| rect_contains(*r, row, col))
+            .map(|(i, _)| *i)
+    }
+
+    fn toggle_tool(&mut self, idx: usize) {
+        if let Some(Message::Tool { id, kind, .. }) = self.messages.get(idx) {
+            if kind.collapsible() {
+                if let Some(pos) = self.collapsed.iter().position(|c| c == id) {
+                    self.collapsed.remove(pos);
+                } else {
+                    self.collapsed.push(id.clone());
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Mouse: wheel scroll + app-side text selection
+    // ------------------------------------------------------------------
+
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_by(-3),
+            MouseEventKind::ScrollDown => self.scroll_by(3),
+            MouseEventKind::Moved => {
+                self.hover_tool = self.tool_at(mouse.row, mouse.column);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                // A selection starts only inside a selectable region (chat
+                // messages or the composer input) and is confined to it; a
+                // click elsewhere (sidebar, chrome) just clears the highlight.
+                let pos = (mouse.row, mouse.column);
+                self.selection = [self.msg_area, self.composer_area]
+                    .iter()
+                    .copied()
+                    .find(|r| rect_contains(*r, mouse.row, mouse.column))
+                    .map(|region| Selection { anchor: pos, head: pos, region });
+                self.pending_click = self.tool_at(mouse.row, mouse.column);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                // A drag is a text selection, not a card press.
+                self.pending_click = None;
+                if let Some(sel) = &mut self.selection {
+                    sel.head = clamp_to(sel.region, mouse.row, mouse.column);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let no_drag = self.selection.map(|s| s.is_empty()).unwrap_or(true);
+                match (self.pending_click.take(), no_drag) {
+                    // Press without drag on a card: toggle it.
+                    (Some(idx), true) => {
+                        self.selection = None;
+                        self.toggle_tool(idx);
+                    }
+                    _ => self.copy_selection(),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Extract the selected text from the last rendered frame and copy it to
+    /// the system clipboard. Tiny (single-cell) "selections" are treated as
+    /// plain clicks and just clear the highlight.
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.selection else { return };
+        if sel.is_empty() {
+            self.selection = None;
+            return;
+        }
+        let text = extract_selection_text(&self.frame_text, sel);
+        self.selection = None;
+        if !text.is_empty() {
+            copy_to_clipboard(&text);
+        }
+    }
+
+    /// After focus changes, make sure the focused block is in view.
+    fn ensure_focus_visible(&mut self) {
+        let Some(i) = self.focused else { return };
+        let Some(&start) = self.msg_starts.get(i) else { return };
+        let start = start as i32;
+        let top = self.scroll as i32;
+        let bottom = top + self.view_height as i32;
+        if start < top || start >= bottom {
+            self.scroll = (start - 2).max(0).min(self.max_scroll as i32) as u16;
+            self.follow = false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Key handling
+    // ------------------------------------------------------------------
+
+    pub fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // 1. Confirm dialog swallows everything.
+        if self.confirm_reject.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => self.reject_confirmed(tx),
+                _ => self.confirm_reject = None,
+            }
+            return;
+        }
+
+        // 2. Command palette.
+        if let Some((query, selected)) = self.palette.clone() {
+            let items = self.palette_items();
+            match key.code {
+                KeyCode::Esc => self.palette = None,
+                KeyCode::Up => {
+                    self.palette = Some((query, selected.saturating_sub(1)));
+                }
+                KeyCode::Down => {
+                    let max = items.len().saturating_sub(1);
+                    self.palette = Some((query, (selected + 1).min(max)));
+                }
+                KeyCode::Enter => {
+                    if let Some((id, ..)) = items.get(selected) {
+                        let id = *id;
+                        self.palette = None;
+                        self.run_palette(id, tx);
+                    } else {
+                        self.palette = None;
+                    }
+                }
+                KeyCode::Backspace => {
+                    let mut q = query;
+                    q.pop();
+                    self.palette = Some((q, 0));
+                }
+                KeyCode::Char(c) => {
+                    let mut q = query;
+                    q.push(c);
+                    self.palette = Some((q, 0));
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // 3. Model menu.
+        if let Some(sel) = self.model_menu {
+            match key.code {
+                KeyCode::Esc => self.model_menu = None,
+                KeyCode::Up => self.model_menu = Some(sel.saturating_sub(1)),
+                KeyCode::Down => self.model_menu = Some((sel + 1).min(MODELS.len() - 1)),
+                KeyCode::Enter => {
+                    self.model_idx = sel;
+                    self.model_menu = None;
+                }
+                _ => self.model_menu = None,
+            }
+            return;
+        }
+
+        // 4. Global chords.
+        if ctrl {
+            match key.code {
+                KeyCode::Char('c') | KeyCode::Char('q') => {
+                    self.should_quit = true;
+                    return;
+                }
+                KeyCode::Char('p') => {
+                    self.palette = Some((String::new(), 0));
+                    return;
+                }
+                KeyCode::Char('b') => {
+                    self.sidebar_open = !self.sidebar_open;
+                    return;
+                }
+                KeyCode::Char('l') => {
+                    self.model_menu = Some(self.model_idx);
+                    return;
+                }
+                KeyCode::Char('e') => {
+                    self.effort_idx = (self.effort_idx + 1) % EFFORTS.len();
+                    return;
+                }
+                KeyCode::Char('u') => {
+                    self.scroll_by(-(self.view_height as i32 / 2).max(1));
+                    return;
+                }
+                KeyCode::Char('d') => {
+                    self.scroll_by((self.view_height as i32 / 2).max(1));
+                    return;
+                }
+                KeyCode::Char('o') => {
+                    self.toggle_focused();
+                    return;
+                }
+                KeyCode::Char('y') => {
+                    if let Some(i) = self.focused_pending_diff().or_else(|| self.last_pending_diff())
+                    {
+                        self.approve(i, tx);
+                    }
+                    return;
+                }
+                KeyCode::Char('n') => {
+                    if let Some(i) = self.focused_pending_diff().or_else(|| self.last_pending_diff())
+                    {
+                        if let Message::Tool { id, .. } = &self.messages[i] {
+                            self.confirm_reject = Some(id.clone());
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                // Close slash menu → clear focus → interrupt a running turn.
+                if self.composer.starts_with('/') {
+                    self.composer.clear();
+                    self.composer_cursor = 0;
+                } else if self.focused.is_some() {
+                    self.focused = None;
+                } else if self.busy() {
+                    let _ = tx.send(Command::Interrupt);
+                }
+            }
+            KeyCode::Tab => {
+                let targets = self.focus_targets();
+                if !targets.is_empty() {
+                    self.focused = Some(match self.focused {
+                        None => targets[0],
+                        Some(cur) => {
+                            let pos = targets.iter().position(|&t| t == cur).unwrap_or(0);
+                            targets[(pos + 1) % targets.len()]
+                        }
+                    });
+                    self.ensure_focus_visible();
+                }
+            }
+            KeyCode::BackTab => {
+                let targets = self.focus_targets();
+                if !targets.is_empty() {
+                    self.focused = Some(match self.focused {
+                        None => targets[targets.len() - 1],
+                        Some(cur) => {
+                            let pos = targets.iter().position(|&t| t == cur).unwrap_or(0);
+                            targets[(pos + targets.len() - 1) % targets.len()]
+                        }
+                    });
+                    self.ensure_focus_visible();
+                }
+            }
+            KeyCode::Up => {
+                if self.slash_open() {
+                    self.slash_selected = self.slash_selected.saturating_sub(1);
+                } else {
+                    self.scroll_by(-1);
+                }
+            }
+            KeyCode::Down => {
+                if self.slash_open() {
+                    let max = self.slash_matches().len().saturating_sub(1);
+                    self.slash_selected = (self.slash_selected + 1).min(max);
+                } else {
+                    self.scroll_by(1);
+                }
+            }
+            KeyCode::PageUp => self.scroll_by(-(self.view_height as i32).max(1)),
+            KeyCode::PageDown => self.scroll_by(self.view_height as i32),
+            KeyCode::Enter => {
+                // Enter on a focused collapsible block (empty composer) toggles it.
+                if self.composer.is_empty()
+                    && self
+                        .focused
+                        .map(|i| {
+                            self.messages
+                                .get(i)
+                                .map(|m| m.is_collapsible_tool())
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+                {
+                    self.toggle_focused();
+                } else {
+                    self.submit(tx);
+                }
+            }
+            KeyCode::Char(c) => {
+                let idx = self.byte_index(self.composer_cursor);
+                self.composer.insert(idx, c);
+                self.composer_cursor += 1;
+                self.slash_selected = 0;
+            }
+            KeyCode::Backspace => {
+                if self.composer_cursor > 0 {
+                    let idx = self.byte_index(self.composer_cursor - 1);
+                    self.composer.remove(idx);
+                    self.composer_cursor -= 1;
+                    self.slash_selected = 0;
+                }
+            }
+            KeyCode::Left => self.composer_cursor = self.composer_cursor.saturating_sub(1),
+            KeyCode::Right => {
+                self.composer_cursor =
+                    (self.composer_cursor + 1).min(self.composer.chars().count())
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_focused(&mut self) {
+        if let Some(i) = self.focused {
+            self.toggle_tool(i);
+        }
+    }
+
+    /// Insert bracketed-paste content into the composer as one unit —
+    /// crucially it never triggers submit (raw newlines would have arrived as
+    /// Enter keypresses and sent the message line by line). Newlines are kept:
+    /// the composer wraps and renders multi-line input.
+    pub fn insert_paste(&mut self, text: &str) {
+        // Ignore pastes while a modal text input owns the keyboard.
+        if self.palette.is_some() || self.confirm_reject.is_some() || self.model_menu.is_some() {
+            return;
+        }
+        // Bracketed paste delivers line breaks as \r or \r\n depending on the
+        // terminal; normalize both to \n.
+        let clean = text.replace("\r\n", "\n").replace('\r', "\n");
+        if clean.trim().is_empty() {
+            return;
+        }
+        let chars_added = clean.chars().count();
+        let idx = self.byte_index(self.composer_cursor);
+        self.composer.insert_str(idx, &clean);
+        self.composer_cursor += chars_added;
+        self.slash_selected = 0;
+    }
+
+    /// Byte index of the `char_idx`-th char in the composer.
+    fn byte_index(&self, char_idx: usize) -> usize {
+        self.composer
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.composer.len())
+    }
+}
+
+fn rect_contains(r: Rect, row: u16, col: u16) -> bool {
+    r.width > 0
+        && r.height > 0
+        && row >= r.y
+        && row < r.y + r.height
+        && col >= r.x
+        && col < r.x + r.width
+}
+
+fn clamp_to(r: Rect, row: u16, col: u16) -> (u16, u16) {
+    (
+        row.clamp(r.y, r.y + r.height.saturating_sub(1)),
+        col.clamp(r.x, r.x + r.width.saturating_sub(1)),
+    )
+}
+
+/// First/last column (absolute, inclusive) of real text in a frame row,
+/// within `region`. Whitespace padding and decoration glyphs are not text.
+pub(crate) fn text_extent(row: &str, region: Rect) -> Option<(usize, usize)> {
+    let x0 = region.x as usize;
+    let x1 = (region.x + region.width) as usize;
+    let mut first = None;
+    let mut last = 0;
+    for (i, ch) in row.chars().enumerate().take(x1).skip(x0) {
+        if ch != ' ' && !DECORATION_CHARS.contains(&ch) {
+            if first.is_none() {
+                first = Some(i);
+            }
+            last = i;
+        }
+    }
+    first.map(|f| (f, last))
+}
+
+/// Extract the selected text from a rendered frame. Rows are clamped to the
+/// selection's region and to their real text bounds, decoration glyphs are
+/// dropped, and rows without text are skipped — the clipboard gets clean
+/// content with no padding, sidebar text, or accent bars.
+fn extract_selection_text(frame_text: &[String], sel: Selection) -> String {
+    let ((r1, c1), (r2, c2)) = sel.normalized();
+    let region = sel.region;
+    let mut parts: Vec<String> = Vec::new();
+    for r in r1..=r2 {
+        if r < region.y || r >= region.y + region.height {
+            continue;
+        }
+        let Some(row) = frame_text.get(r as usize) else { continue };
+        let chars: Vec<char> = row.chars().collect();
+        let Some((first, last)) = text_extent(row, region) else { continue };
+        let row_from = if r == r1 { c1 as usize } else { region.x as usize };
+        let row_to = if r == r2 { c2 as usize } else { region.x as usize + region.width as usize - 1 };
+        let from = row_from.max(first);
+        let to = row_to.min(last);
+        if from > to || to >= chars.len() {
+            continue;
+        }
+        let text: String = chars[from..=to]
+            .iter()
+            .filter(|ch| !DECORATION_CHARS.contains(ch))
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    parts.join("\n")
+}
+
+/// Copy text to the system clipboard (macOS `pbcopy`).
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|r| r.to_string()).collect()
+    }
+
+    fn sel(anchor: (u16, u16), head: (u16, u16), region: Rect) -> Selection {
+        Selection { anchor, head, region }
+    }
+
+    #[test]
+    fn extraction_strips_bars_padding_and_sidebar() {
+        let region = Rect { x: 0, y: 0, width: 30, height: 4 };
+        let ft = frame(&[
+            "  ▎ > fix the flaky refresh     SIDEBAR-NOT-COPIED",
+            "  Looking at the refresh path.  more sidebar",
+            "  ▎                             even more sidebar",
+            "                                trailing sidebar",
+        ]);
+        // Full-region select (rows 0..3, all region columns).
+        let text = extract_selection_text(&ft, sel((0, 0), (3, 29), region));
+        assert_eq!(text, "> fix the flaky refresh\nLooking at the refresh path.");
+    }
+
+    #[test]
+    fn extraction_partial_row_binds_to_text() {
+        let region = Rect { x: 0, y: 0, width: 40, height: 1 };
+        let ft = frame(&["  Looking at the refresh path first.    "]);
+        // Drag inside the text, right-to-left.
+        let text = extract_selection_text(&ft, sel((0, 15), (0, 8), region));
+        assert_eq!(text, "g at the");
+    }
+
+    #[test]
+    fn extraction_skips_whitespace_only_rows() {
+        let region = Rect { x: 0, y: 0, width: 20, height: 3 };
+        let ft = frame(&["first line          ", "                    ", "last line           "]);
+        let text = extract_selection_text(&ft, sel((0, 0), (2, 19), region));
+        assert_eq!(text, "first line\nlast line");
+    }
+
+    #[test]
+    fn drag_positions_clamp_to_selection_region() {
+        let region = Rect { x: 2, y: 1, width: 10, height: 5 };
+        assert_eq!(clamp_to(region, 0, 0), (1, 2));
+        assert_eq!(clamp_to(region, 99, 99), (5, 11));
+        assert!(rect_contains(region, 3, 3));
+        assert!(!rect_contains(region, 6, 3));
+        assert!(!rect_contains(region, 3, 12));
+    }
+
+    #[test]
+    fn paste_preserves_line_breaks_and_moves_cursor() {
+        let mut app = App::new();
+        // Multi-line paste with both \r\n and \r line endings (how bracketed
+        // paste can deliver breaks) lands as \n-separated text in one unit.
+        app.insert_paste("one\r\ntwo\rthree");
+        assert_eq!(app.composer, "one\ntwo\nthree");
+        assert_eq!(app.composer_cursor, app.composer.chars().count());
+        // Nothing was submitted.
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn paste_ignored_when_modal_open() {
+        let mut app = App::new();
+        app.palette = Some(("x".into(), 0));
+        app.insert_paste("nope");
+        assert!(app.composer.is_empty());
+    }
+
+    fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
+        MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE }
+    }
+
+    fn app_with_collapsible_tool() -> App {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "r1".into(),
+            kind: ToolKind::Read { path: "src/x.ts".into(), summary: "10 lines".into() },
+            lines: vec![],
+        }));
+        // Card spans rows 2..6, columns 2..40 (as the renderer would report).
+        app.tool_regions = vec![(0, Rect { x: 2, y: 2, width: 38, height: 4 })];
+        assert!(app.collapsed.contains(&"r1".to_string()));
+        app
+    }
+
+    #[test]
+    fn hover_tracks_tool_card() {
+        let mut app = app_with_collapsible_tool();
+        app.handle_mouse(mouse(MouseEventKind::Moved, 3, 10));
+        assert_eq!(app.hover_tool, Some(0));
+        app.handle_mouse(mouse(MouseEventKind::Moved, 3, 80));
+        assert_eq!(app.hover_tool, None);
+    }
+
+    #[test]
+    fn click_toggles_collapsible_card() {
+        let mut app = app_with_collapsible_tool();
+        let down = mouse(MouseEventKind::Down(MouseButton::Left), 3, 10);
+        let up = mouse(MouseEventKind::Up(MouseButton::Left), 3, 10);
+        app.handle_mouse(down);
+        app.handle_mouse(up);
+        assert!(!app.collapsed.contains(&"r1".to_string()), "press expands");
+        app.handle_mouse(down);
+        app.handle_mouse(up);
+        assert!(app.collapsed.contains(&"r1".to_string()), "press again collapses");
+    }
+
+    #[test]
+    fn drag_selects_instead_of_toggling() {
+        let mut app = app_with_collapsible_tool();
+        app.msg_area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 10));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 4, 20));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 20));
+        // Still collapsed: the drag became a selection, not a card press.
+        assert!(app.collapsed.contains(&"r1".to_string()));
+    }
+}
