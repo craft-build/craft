@@ -15,7 +15,7 @@ futures = "0.3"
 ignore = "0.4"
 ratatui = "0.29"
 regex = "1"
-reqwest = "0.12"
+reqwest = "0.13"
 rig = "0.42.0"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -38,7 +38,7 @@ pulldown-cmark = "0.13"
 serde.workspace = true
 serde_json.workspace = true
 shell-words = "1"
-similar = "2"
+similar = "3"
 tokio.workspace = true
 uuid = { version = "1", features = ["v4"] }
 
