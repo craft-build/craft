@@ -9,6 +9,19 @@ max_turns = 16
 # temperature = 0.2
 # max_tokens = 8192
 
+# Compaction stages, ascending by context fill ratio. Omitted entirely, this
+# defaults to vcc at 0.6 then llm at 0.8. "vcc" is a deterministic no-LLM
+# summary; "llm" runs a one-shot summarization call. A stage whose last run
+# saved under 10% of the context is skipped until another stage compacts
+# effectively.
+[[compaction]]
+kind = "vcc"
+context = "0.6"
+
+[[compaction]]
+kind = "llm"
+context = "0.8"
+
 [providers.openai]
 kind = "openai"
 api_key_env = "OPENAI_API_KEY"

@@ -66,6 +66,8 @@ struct Session {
     models: Vec<Model>,
     model: String,
     context_length: Option<u32>,
+    /// Effectiveness state for the configured compaction stages.
+    compaction: crate::compaction::CompactionState,
     cancel: watch::Sender<bool>,
 }
 
@@ -178,6 +180,7 @@ impl AppState {
             models,
             model,
             context_length,
+            compaction: Default::default(),
             cancel,
         })
     }
@@ -274,7 +277,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         }
                     }
                     MODEL_OPTION_ID => {
-                        if session.models.iter().any(|model| model.id == value) {
+                        if let Some(model) = session.models.iter().find(|model| model.id == value) {
+                            session.context_length = model.context_length;
                             session.model = value;
                             Ok(())
                         } else {
@@ -468,7 +472,7 @@ async fn run_turn(
     connection: ConnectionTo<AcpClient>,
     session_id: SessionId,
     text: String,
-    history: Vec<Message>,
+    mut history: Vec<Message>,
     workspace: Workspace,
     provider_name: String,
     model: String,
@@ -488,6 +492,35 @@ async fn run_turn(
     if model.trim().is_empty() {
         fail!("no model is selected; set the model session configuration option");
     }
+
+    // Run configured compaction stages whose context-fill threshold is
+    // crossed before the history is sent to the model. Only the
+    // effectiveness state is persisted here; the compacted history is
+    // committed by the turn's success path (merge_history), matching the
+    // loop's "failed runs leave session history untouched" semantics.
+    let (mut compaction_state, context_length) = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .get(session_id.0.as_ref())
+            .map(|session| (session.compaction.clone(), session.context_length))
+            .unwrap_or_default()
+    };
+    if let Ok(compaction_model) = provider.completion_model(&model) {
+        let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone());
+        engine
+            .maybe_compact(
+                &mut compaction_state,
+                &compaction_model,
+                &mut history,
+                context_length,
+            )
+            .await;
+        let mut sessions = state.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
+            session.compaction = compaction_state;
+        }
+    }
+
     let agent = match crate::agent::build(&provider, &model, &state.config.agent, &workspace) {
         Ok(agent) => agent,
         Err(error) => fail!(format!("{error:#}")),
@@ -741,6 +774,7 @@ mod tests {
     #[test]
     fn config_options_expose_provider_then_model() {
         let session = Session {
+            compaction: Default::default(),
             workspace: Workspace::new(std::env::temp_dir()).unwrap(),
             history: Vec::new(),
             provider_name: "openai".into(),

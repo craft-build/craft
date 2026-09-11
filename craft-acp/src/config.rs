@@ -16,6 +16,59 @@ use crate::providers::ProviderKind;
 pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     pub agent: AgentConfig,
+    /// Compaction stages, ascending by context fill ratio.
+    #[serde(default = "default_compaction")]
+    pub compaction: Vec<CompactionConfig>,
+}
+
+/// Which compaction strategy runs when a stage's threshold is crossed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompactionKind {
+    /// LLM-powered summary of the conversation head.
+    Llm,
+    /// Deterministic no-LLM summary (ported from Craft's VCC compaction).
+    Vcc,
+}
+
+/// One `[[compaction]]` stage: run `kind` once history reaches `context`
+/// (a fill ratio of the model's context window, 0-1).
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionConfig {
+    pub kind: CompactionKind,
+    /// Accepts a number or a quoted string ("0.8").
+    #[serde(deserialize_with = "de_ratio")]
+    pub context: f64,
+}
+
+fn de_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Ratio {
+        Number(f64),
+        String(String),
+    }
+    match Ratio::deserialize(deserializer)? {
+        Ratio::Number(value) => Ok(value),
+        Ratio::String(text) => text
+            .trim()
+            .parse()
+            .map_err(|_| serde::de::Error::custom("context must be a ratio between 0 and 1")),
+    }
+}
+
+fn default_compaction() -> Vec<CompactionConfig> {
+    vec![
+        CompactionConfig {
+            kind: CompactionKind::Vcc,
+            context: 0.6,
+        },
+        CompactionConfig {
+            kind: CompactionKind::Llm,
+            context: 0.8,
+        },
+    ]
 }
 
 /// Defaults for each agent run, independent of provider/model selection.
@@ -124,6 +177,21 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text).context("invalid agent TOML")?;
         config.agent.validate()?;
+        let mut seen_kinds = std::collections::BTreeSet::new();
+        for stage in &config.compaction {
+            if !stage.context.is_finite() || stage.context <= 0.0 || stage.context >= 1.0 {
+                bail!(
+                    "compaction stage {:?}: context must be between 0 and 1",
+                    stage.kind
+                );
+            }
+            if !seen_kinds.insert(stage.kind) {
+                bail!(
+                    "compaction stage {:?}: each kind may appear at most once",
+                    stage.kind
+                );
+            }
+        }
         for (name, provider) in &config.providers {
             if name.trim().is_empty() {
                 bail!("provider names must not be empty");
@@ -221,6 +289,57 @@ mod tests {
         let config = Config::parse(include_str!("../agent.example.toml")).unwrap();
         assert_eq!(config.providers.len(), 4);
         assert_eq!(config.agent.max_turns, 16);
+        assert_eq!(
+            config.compaction,
+            vec![
+                CompactionConfig {
+                    kind: CompactionKind::Vcc,
+                    context: 0.6,
+                },
+                CompactionConfig {
+                    kind: CompactionKind::Llm,
+                    context: 0.8,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn compaction_defaults_to_vcc_then_llm() {
+        let config = Config::parse("").unwrap();
+        assert_eq!(config.compaction.len(), 2);
+        assert_eq!(config.compaction[0].kind, CompactionKind::Vcc);
+        assert!((config.compaction[0].context - 0.6).abs() < 1e-9);
+        assert_eq!(config.compaction[1].kind, CompactionKind::Llm);
+        assert!((config.compaction[1].context - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compaction_accepts_string_or_number_ratios() {
+        let config = Config::parse(
+            "[[compaction]]\nkind = \"llm\"\ncontext = \"0.75\"\n\
+             [[compaction]]\nkind = \"vcc\"\ncontext = 0.5",
+        )
+        .unwrap();
+        assert_eq!(config.compaction.len(), 2);
+        assert!((config.compaction[0].context - 0.75).abs() < 1e-9);
+        assert!((config.compaction[1].context - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rejects_invalid_compaction_settings() {
+        for text in [
+            "[[compaction]]\nkind = \"unknown\"\ncontext = 0.5",
+            "[[compaction]]\nkind = \"llm\"\ncontext = 0",
+            "[[compaction]]\nkind = \"llm\"\ncontext = 1.0",
+            "[[compaction]]\nkind = \"llm\"\ncontext = \"not a number\"",
+            "[[compaction]]\nkind = \"llm\"",
+            "[[compaction]]\nkind = \"llm\"\ncontext = 0.5\nextra = true",
+            "[[compaction]]\nkind = \"vcc\"\ncontext = 0.5\n\
+             [[compaction]]\nkind = \"vcc\"\ncontext = 0.7",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
     }
 
     #[test]

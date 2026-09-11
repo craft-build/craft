@@ -68,6 +68,38 @@ or compatible endpoints that do not implement model listing.
 Token limits are catalog metadata, not request parameters. They do not silently
 set a generation cap. Set `[agent].max_tokens` for a request-level output cap.
 
+## Compaction
+
+`[[compaction]]` array-of-table entries configure staged conversation-history
+compaction, each with a `kind` and a `context` fill ratio of the model's
+`context_length` (a number or a quoted string):
+
+```toml
+[[compaction]]
+kind = "vcc"
+context = "0.6"
+
+[[compaction]]
+kind = "llm"
+context = "0.8"
+```
+
+Before each turn the harness estimates the history's token size and runs every
+armed stage whose threshold is crossed, lowest ratio first:
+
+- `vcc` — deterministic, no-LLM compaction (ported from Craft's VCC): the head
+  of the history is replaced by a structured summary message and the recent
+  tail is kept verbatim. Repeated runs merge with the previous VCC summary.
+- `llm` — one-shot summarization call on the session's model replaces the
+  head with a handoff summary (with a deterministic static-summary fallback
+  if the call fails); the tail is kept verbatim.
+
+Effectiveness gating avoids cyclical compaction: a stage whose last run saved
+less than 10% of the estimated context is skipped when its threshold is
+crossed again, until another stage compacts effectively (which re-arms all
+stages). Omitting `[[compaction]]` entirely defaults to vcc at 0.6 then llm
+at 0.8. Sessions without a known `context_length` never compact.
+
 ## Agent loop
 
 `agent::build(&provider, model_id, &config.agent, &workspace)` returns a native Rig
