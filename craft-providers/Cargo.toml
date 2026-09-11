@@ -39,6 +39,7 @@ wait-timeout = { workspace = true }
 fastrand = { workspace = true }
 getrandom = { workspace = true }
 open = { workspace = true }
+url = { workspace = true }
 craft-config = { workspace = true }
 inventory = { workspace = true }
 jiff = { workspace = true }

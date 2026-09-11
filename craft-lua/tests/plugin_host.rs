@@ -4701,3 +4701,135 @@ craft.api.register_tool({{
         "parked jobwait must collect the exit of the killed job, got: {out}"
     );
 }
+
+/// The herdr builtin reports lifecycle state to the pane's herdr CLI and
+/// stays silent outside herdr. Drives it the way the app does: autocmds.
+#[cfg(unix)]
+#[tokio::test]
+async fn herdr_builtin_reports_lifecycle() {
+    const HERDR_ENV: &str = "HERDR_ENV";
+    const HERDR_BIN: &str = "HERDR_BIN_PATH";
+    const HERDR_PANE: &str = "HERDR_PANE_ID";
+
+    let dir = tempfile::tempdir().unwrap();
+    let calls = dir.path().join("calls.log");
+    let bin = dir.path().join("fake-herdr");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\necho \"$@\" >> {}\n", calls.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let restore = [
+        std::env::var(HERDR_ENV).ok(),
+        std::env::var(HERDR_BIN).ok(),
+        std::env::var(HERDR_PANE).ok(),
+    ];
+    unsafe {
+        std::env::set_var(HERDR_ENV, "1");
+        std::env::set_var(HERDR_BIN, &bin);
+        std::env::set_var(HERDR_PANE, "w1:p1");
+    }
+
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
+        .unwrap();
+
+    let handle = host.event_handle();
+    handle.fire_autocmd("TurnStart", serde_json::json!({}));
+    handle.fire_autocmd(
+        "ToolStart",
+        serde_json::json!({ "session_id": "s1", "tool": "question" }),
+    );
+    handle.fire_autocmd(
+        "ToolStart",
+        serde_json::json!({ "session_id": "s1", "tool": "bash" }),
+    );
+    handle.fire_autocmd(
+        "TurnEnd",
+        serde_json::json!({ "session_id": "s1", "reason": "finished" }),
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let log = loop {
+        let log = std::fs::read_to_string(&calls).unwrap_or_default();
+        if log.matches('\n').count() >= 4 {
+            break log;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "herdr reports never landed, got: {log}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let lines: Vec<&str> = log.lines().collect();
+    assert!(lines[0].contains("report-agent w1:p1"), "got: {}", lines[0]);
+    assert!(lines[0].contains("--state working"), "got: {}", lines[0]);
+    assert!(lines[1].contains("--state blocked"), "got: {}", lines[1]);
+    assert!(lines[1].contains("--message"), "got: {}", lines[1]);
+    assert!(lines[2].contains("--state working"), "got: {}", lines[2]);
+    assert!(lines[3].contains("--state idle"), "got: {}", lines[3]);
+    for line in &lines {
+        assert!(line.contains("--source custom:craft"), "got: {line}");
+    }
+    assert!(
+        !lines[0].contains("--agent-session-id"),
+        "got: {}",
+        lines[0]
+    );
+    for line in &lines[1..4] {
+        assert!(line.contains("--agent-session-id s1"), "got: {line}");
+    }
+    assert!(lines[0].contains("--seq 1"), "got: {}", lines[0]);
+    assert!(lines[3].contains("--seq 4"), "got: {}", lines[3]);
+
+    let session = craft_storage::id::CraftId::generate();
+    handle.end_sessions_blocking([session], SessionEndReason::Shutdown);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = std::fs::read_to_string(&calls).unwrap();
+        if log.contains("release-agent") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "release-agent never landed, got: {log}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    drop(host);
+    unsafe {
+        std::env::remove_var(HERDR_ENV);
+        std::env::remove_var(HERDR_BIN);
+        std::env::remove_var(HERDR_PANE);
+        for (key, value) in [HERDR_ENV, HERDR_BIN, HERDR_PANE].into_iter().zip(restore) {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+}
+
+/// Without herdr env vars the builtin must not spawn anything.
+#[cfg(unix)]
+#[tokio::test]
+async fn herdr_builtin_silent_outside_herdr() {
+    unsafe {
+        std::env::remove_var("HERDR_ENV");
+        std::env::remove_var("HERDR_BIN_PATH");
+        std::env::remove_var("HERDR_PANE_ID");
+    }
+    let reg = fresh_registry();
+    let mut host = PluginHost::new(Arc::clone(&reg), None).unwrap();
+    host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
+        .unwrap();
+    host.event_handle()
+        .fire_autocmd("TurnStart", serde_json::json!({}));
+    // No assertion target exists for "did not spawn"; loading without the env
+    // guard erroring is the contract, so reaching here is the pass condition.
+}

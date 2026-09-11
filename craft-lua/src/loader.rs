@@ -85,6 +85,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/task"),
     },
     BundledPlugin {
+        name: "herdr",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/herdr"),
+    },
+    BundledPlugin {
         name: "lib",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/lib"),
     },
