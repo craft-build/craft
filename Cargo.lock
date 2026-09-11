@@ -7,11 +7,9 @@ name = "CraftCode"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
- "crossterm",
  "gpui",
  "once_cell",
  "pulldown-cmark",
- "ratatui",
  "serde",
  "serde_json",
  "shell-words",
@@ -1858,9 +1856,11 @@ name = "craft"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "crossterm",
  "dirs 6.0.0",
  "futures",
  "ignore",
+ "ratatui",
  "regex",
  "reqwest 0.12.28",
  "rig",
