@@ -1,4 +1,4 @@
-use craft_acp::{acp, config::Config};
+use craft::{acp, config::Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

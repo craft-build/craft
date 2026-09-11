@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "CraftCode"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "gpui",
+ "once_cell",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "similar",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1817,22 +1833,6 @@ dependencies = [
 
 [[package]]
 name = "craft"
-version = "0.1.0"
-dependencies = [
- "agent-client-protocol",
- "gpui",
- "once_cell",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "shell-words",
- "similar",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "craft-acp"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
