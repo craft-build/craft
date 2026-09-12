@@ -31,10 +31,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use rig::{
-    agent::{AgentBuilder, WithBuilderTools},
-    tool::{ToolErrorKind, ToolExecutionError},
-};
+use rig_core::tool::{PortableDynamicTool, PortableTool, ToolErrorKind, ToolExecutionError};
 
 pub(crate) type Result<T> = std::result::Result<T, ToolExecutionError>;
 pub(crate) const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -69,15 +66,17 @@ impl Workspace {
         &self.root
     }
 
-    pub fn register(&self, builder: AgentBuilder) -> AgentBuilder<WithBuilderTools> {
-        builder
-            .tool(Read(self.clone()))
-            .tool(Grep(self.clone()))
-            .tool(Edit(self.clone()))
-            .tool(EditLines(self.clone()))
-            .tool(InsertLines(self.clone()))
-            .tool(Write(self.clone()))
-            .tool(Delete(self.clone()))
+    /// Register the workspace's tools into our dispatch executor.
+    pub fn register(&self) -> crate::run::ToolDispatch {
+        crate::run::ToolDispatch::new([
+            dynamic(Read(self.clone())),
+            dynamic(Grep(self.clone())),
+            dynamic(Edit(self.clone())),
+            dynamic(EditLines(self.clone())),
+            dynamic(InsertLines(self.clone())),
+            dynamic(Write(self.clone())),
+            dynamic(Delete(self.clone())),
+        ])
     }
 
     pub(crate) async fn run<T: Send + 'static>(
@@ -273,14 +272,15 @@ pub(crate) fn io_error(error: io::Error) -> ToolExecutionError {
     ToolExecutionError::new(kind, error.to_string())
 }
 
-// Keep typed argument schemas and Rig's tool boundary identical for each tool.
+// Keep typed argument schemas and a portable, context-free tool boundary for
+// each tool. `dynamic` adapts them into the erased executor's tool set.
 macro_rules! impl_tool {
     ($tool:ident, $args:ty, $output:ty, $name:literal, $description:literal) => {
-        impl rig::tool::Tool for $tool {
+        impl rig_core::tool::PortableTool for $tool {
             const NAME: &'static str = $name;
             type Args = $args;
             type Output = $output;
-            type Error = rig::tool::ToolExecutionError;
+            type Error = rig_core::tool::ToolExecutionError;
 
             fn description(&self) -> String {
                 $description.into()
@@ -291,15 +291,7 @@ macro_rules! impl_tool {
                     .expect("JSON Schema is serializable")
             }
 
-            fn map_error(&self, error: Self::Error) -> rig::tool::ToolExecutionError {
-                error
-            }
-
-            async fn call(
-                &self,
-                _: &mut rig::tool::ToolContext,
-                args: Self::Args,
-            ) -> super::Result<Self::Output> {
+            async fn call(&self, args: Self::Args) -> super::Result<Self::Output> {
                 self.0
                     .run(move |workspace| Self::execute(workspace, args))
                     .await
@@ -308,3 +300,28 @@ macro_rules! impl_tool {
     };
 }
 pub(crate) use impl_tool;
+
+/// Adapt a typed portable tool into the erased tool the dispatcher executes.
+fn dynamic<T>(tool: T) -> PortableDynamicTool
+where
+    T: PortableTool + Clone + Send + Sync + 'static,
+    T::Args: serde::de::DeserializeOwned + Send + Sync + 'static,
+    T::Output: rig_core::tool::IntoToolOutput,
+{
+    PortableDynamicTool::new(
+        T::NAME,
+        tool.description(),
+        tool.parameters(),
+        move |arguments| {
+            let tool = tool.clone();
+            Box::pin(async move {
+                let args = serde_json::from_value(arguments)
+                    .map_err(|error| invalid(format!("invalid arguments: {error}")))?;
+                match tool.call(args).await {
+                    Ok(output) => rig_core::tool::IntoToolOutput::into_tool_output(output),
+                    Err(error) => Err(tool.map_error(error)),
+                }
+            })
+        },
+    )
+}

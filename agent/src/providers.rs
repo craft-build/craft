@@ -1,8 +1,17 @@
 //! Config-driven native Rig clients. Keep concrete clients available so future
 //! inference, embeddings, tools, and streaming can use their full capabilities.
+//! [`DynamicModel`] erases the concrete model type behind rig-core's
+//! `CompletionModel` so the rest of the crate never names a provider type.
 
-use rig::{
-    agent::ModelHandle,
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use rig_core::completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+};
+use rig_core::streaming::StreamingCompletionResponse;
+use rig_core::{
     client::{CompletionClient, ModelListingClient, ProviderClient},
     model::{Model, ModelList},
     providers::*,
@@ -48,7 +57,7 @@ macro_rules! list_models {
 
 macro_rules! completion_model {
     ($client:expr, $model:expr, yes) => {
-        ModelHandle::named($model, $client.completion_model($model))
+        DynamicModel::wrap(Some($model), $client.completion_model($model))
     };
     ($client:expr, $model:expr, no) => {{
         let _ = ($client, $model);
@@ -123,15 +132,16 @@ macro_rules! providers {
             }
 
             /// Select an exact provider model/deployment ID without discovery.
-            /// Rig erases the concrete model once, retaining its native protocol.
-            pub fn completion_model(&self, model: &str) -> Result<ModelHandle> {
+            /// The concrete model is erased once behind [`DynamicModel`],
+            /// retaining its native protocol.
+            pub fn completion_model(&self, model: &str) -> Result<DynamicModel> {
                 if model.trim().is_empty() {
                     return InvalidSnafu {
                         reason: "model ID must not be empty",
                     }
                     .fail();
                 }
-                (|| -> Result<ModelHandle> {
+                (|| -> Result<DynamicModel> {
                     Ok(match self {
                         $(Self::$variant(client) => completion_model!(client, model, $completion),)+
                     })
@@ -144,7 +154,7 @@ macro_rules! providers {
             /// Providers without listing support return the configured models.
             /// Discovery errors propagate instead of masquerading as an empty
             /// catalog. Set `discover_models = false` for manual-only catalogs.
-            pub async fn models(&self, config: &ProviderConfig) -> Result<ModelList> {
+            pub async fn models(&self, config: &ProviderConfig) -> Result<Vec<CatalogModel>> {
                 self.models_with(config, &credential).await
             }
 
@@ -154,7 +164,7 @@ macro_rules! providers {
                 &self,
                 config: &ProviderConfig,
                 credential: &(dyn Fn(&str) -> Result<String> + Send + Sync),
-            ) -> Result<ModelList> {
+            ) -> Result<Vec<CatalogModel>> {
                 config.validate()?;
                 if config.kind != self.kind() {
                     return InvalidSnafu {
@@ -173,7 +183,7 @@ macro_rules! providers {
                 } else {
                     ModelList::new(vec![])
                 };
-                Ok(config.merge_models(discovered))
+                Ok(merge_catalog(config, discovered))
             }
         }
     };
@@ -208,6 +218,124 @@ providers! {
     Xai, "xai", xai::Client, "XAI_API_KEY", no, yes;
     Xiaomimimo, "xiaomimimo", xiaomimimo::Client, "XIAOMI_MIMO_API_KEY", yes, yes;
     Zai, "zai", zai::Client, "ZAI_API_KEY", no, yes;
+}
+
+/// One selectable model in a provider catalog, in crate-owned form (the rig
+/// listing DTO stays inside this module).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub context_length: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl CatalogModel {
+    /// Display label: the catalog name, falling back to the model id.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    fn from_rig(model: Model) -> Self {
+        Self {
+            id: model.id,
+            name: model.name,
+            description: model.description,
+            context_length: model.context_length,
+            max_output_tokens: model.max_output_tokens,
+        }
+    }
+}
+
+/// Configured fields win; omitted fields preserve discovery metadata. New IDs
+/// are added, and the final catalog is sorted by ID.
+fn merge_catalog(config: &ProviderConfig, discovered: ModelList) -> Vec<CatalogModel> {
+    let mut models: std::collections::BTreeMap<String, CatalogModel> = discovered
+        .into_iter()
+        .map(|model| {
+            let id = model.id.clone();
+            (id, CatalogModel::from_rig(model))
+        })
+        .collect();
+    for (id, settings) in &config.models {
+        let model = models.entry(id.clone()).or_insert_with(|| CatalogModel {
+            id: id.clone(),
+            name: None,
+            description: None,
+            context_length: None,
+            max_output_tokens: None,
+        });
+        if let Some(name) = &settings.name {
+            model.name = Some(name.clone());
+        }
+        if let Some(description) = &settings.description {
+            model.description = Some(description.clone());
+        }
+        if let Some(context_length) = settings.context_length {
+            model.context_length = Some(context_length);
+        }
+        if let Some(max_output_tokens) = settings.max_output_tokens {
+            model.max_output_tokens = Some(max_output_tokens);
+        }
+    }
+    models.into_values().collect()
+}
+
+/// A type-erased completion model: clones cheaply, implements rig-core's
+/// `CompletionModel` by forwarding to the provider's concrete model behind an
+/// `Arc`. This is the only model type the rest of the crate sees.
+#[derive(Clone)]
+pub struct DynamicModel {
+    label: Option<String>,
+    inner: Arc<dyn ErasedModel>,
+}
+
+type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CompletionError>> + Send + 'a>>;
+
+trait ErasedModel: Send + Sync + 'static {
+    fn completion(&self, request: CompletionRequest) -> ModelFuture<'_, CompletionResponse>;
+    fn stream(&self, request: CompletionRequest) -> ModelFuture<'_, StreamingCompletionResponse>;
+}
+
+impl<M: CompletionModel + Send + Sync + 'static> ErasedModel for M {
+    fn completion(&self, request: CompletionRequest) -> ModelFuture<'_, CompletionResponse> {
+        Box::pin(async move { CompletionModel::completion(self, request).await })
+    }
+
+    fn stream(&self, request: CompletionRequest) -> ModelFuture<'_, StreamingCompletionResponse> {
+        Box::pin(async move { CompletionModel::stream(self, request).await })
+    }
+}
+
+impl DynamicModel {
+    fn wrap<M: CompletionModel + Send + Sync + 'static>(label: Option<&str>, model: M) -> Self {
+        Self {
+            label: label.map(str::to_owned),
+            inner: Arc::new(model),
+        }
+    }
+
+    /// The model/deployment ID this handle was built for, when known.
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+}
+
+impl CompletionModel for DynamicModel {
+    async fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, CompletionError> {
+        self.inner.completion(request).await
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
+        self.inner.stream(request).await
+    }
 }
 
 /// `GET {base_url}/models` for OpenAI-compatible servers, keeping the optional
@@ -284,7 +412,7 @@ fn build_llamafile(
     config: &ProviderConfig,
     _: &dyn Fn(&str) -> Result<String>,
 ) -> Result<llamafile::Client> {
-    let mut builder = llamafile::Client::builder().api_key(rig::client::Nothing);
+    let mut builder = llamafile::Client::builder().api_key(rig_core::client::Nothing);
     if let Some(base) = &config.base_url {
         builder = builder.base_url(base);
     } else if let Ok(base) = std::env::var("LLAMAFILE_API_BASE_URL") {
@@ -439,10 +567,31 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn merges_partial_overrides_and_manual_models() {
+        let config = Config::parse(
+            "[providers.x]\nkind = 'openai'\n\
+             [providers.x.models.existing]\nmax_output_tokens = 2048\n\
+             [providers.x.models.new]\nname = 'Manual model'",
+        )
+        .unwrap();
+        let mut existing = Model::new("existing", "Discovered name");
+        existing.context_length = Some(8192);
+        let merged = merge_catalog(
+            &config.providers["x"],
+            ModelList::new(vec![existing, Model::from_id("untouched")]),
+        );
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].name.as_deref(), Some("Discovered name"));
+        assert_eq!(merged[0].context_length, Some(8192));
+        assert_eq!(merged[0].max_output_tokens, Some(2048));
+        assert_eq!(merged[1].id, "new");
+        assert_eq!(merged[2].id, "untouched");
+    }
+
     #[tokio::test]
     async fn constructs_every_kind_and_supports_manual_catalogs_without_network() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = crate::tools::Workspace::new(dir.path()).unwrap();
+        let _dir = tempfile::tempdir().unwrap();
         for &kind in ProviderKind::ALL {
             let mut config = config(kind, "http://127.0.0.1:1");
             config.discover_models = false;
@@ -454,14 +603,8 @@ mod tests {
                 .unwrap();
             assert_eq!(models.len(), 1, "{}", kind.as_str());
             if kind != ProviderKind::Voyageai {
-                let agent = crate::agent::build(
-                    &provider,
-                    "unlisted-model",
-                    &crate::config::AgentConfig::default(),
-                    &workspace,
-                )
-                .unwrap();
-                assert_eq!(agent.model_handle().label(), Some("unlisted-model"));
+                let model = provider.completion_model("unlisted-model").unwrap();
+                assert_eq!(model.label(), Some("unlisted-model"));
             }
         }
     }
@@ -503,8 +646,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        let content_type = if body.starts_with("data:") || body.starts_with("event:") {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len(),
         );
@@ -587,8 +735,6 @@ mod tests {
         let rich = models.iter().find(|model| model.id == "rich").unwrap();
         assert_eq!(rich.context_length, Some(524288));
         assert_eq!(rich.description.as_deref(), Some("a dense model"));
-        assert_eq!(rich.owned_by.as_deref(), Some("acme"));
-        assert_eq!(rich.created_at, Some(1));
         assert_eq!(rich.max_output_tokens, Some(65536));
         let plain = models.iter().find(|model| model.id == "plain").unwrap();
         assert_eq!(plain.context_length, None);
@@ -623,27 +769,33 @@ mod tests {
 
     #[tokio::test]
     async fn custom_openai_can_perform_inference() {
+        // The driver streams, so the server must speak SSE.
         let (base, task) = server(
             "200 OK",
-            r#"{
-            "id":"test","object":"chat.completion","created":0,"model":"manual",
-            "choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],
-            "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
-        }"#,
+            "data: {\"id\":\"test\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"manual\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"test\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"manual\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\ndata: [DONE]\n\n",
         );
         let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/v1"));
         let dir = tempfile::tempdir().unwrap();
         let workspace = crate::tools::Workspace::new(dir.path()).unwrap();
-        let agent = crate::agent::build(
-            &build(&config),
-            "manual",
-            &crate::config::AgentConfig::default(),
-            &workspace,
+        let model = build(&config).completion_model("manual").unwrap();
+        let tools = workspace.register();
+        let (_, cancel) = crate::run::cancel_channel();
+        let mut history = Vec::new();
+        let outcome = crate::run::run(
+            &model,
+            &crate::run::RunParams::default(),
+            &tools,
+            &mut history,
+            "hi",
+            &cancel,
+            &|_| {},
         )
-        .unwrap();
-        let response = agent.runner("hi").run().await.unwrap();
-        assert_eq!(response.output(), "hello");
-        assert_eq!(response.requests(), 1);
+        .await;
+        match outcome {
+            crate::run::RunOutcome::Done { reply } => assert_eq!(reply, "hello"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert_eq!(history.len(), 2);
         let request = task.join().unwrap();
         assert!(request.starts_with("POST /v1/chat/completions "));
         assert!(request.contains("\"model\":\"manual\""));
@@ -651,25 +803,36 @@ mod tests {
 
     #[tokio::test]
     async fn custom_anthropic_can_perform_inference() {
+        // The driver streams, so the server must speak SSE.
         let (base, task) = server(
             "200 OK",
-            r#"{
-            "id":"test","type":"message","role":"assistant","model":"manual",
-            "content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","stop_sequence":null,
-            "usage":{"input_tokens":1,"output_tokens":1}
-        }"#,
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"test\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"manual\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         );
         let config = config(ProviderKind::Anthropic, &format!("{base}/custom"));
-        let settings = crate::config::AgentConfig {
-            max_tokens: Some(32),
-            ..crate::config::AgentConfig::default()
-        };
         let dir = tempfile::tempdir().unwrap();
         let workspace = crate::tools::Workspace::new(dir.path()).unwrap();
-        let agent = crate::agent::build(&build(&config), "manual", &settings, &workspace).unwrap();
-        let response = agent.runner("hi").run().await.unwrap();
-        assert_eq!(response.output(), "hello");
-        assert_eq!(response.requests(), 1);
+        let model = build(&config).completion_model("manual").unwrap();
+        let tools = workspace.register();
+        let (_, cancel) = crate::run::cancel_channel();
+        let mut history = Vec::new();
+        let params = crate::run::RunParams {
+            max_tokens: Some(32),
+            ..crate::run::RunParams::default()
+        };
+        let outcome = crate::run::run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
+            "hi",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        match outcome {
+            crate::run::RunOutcome::Done { reply } => assert_eq!(reply, "hello"),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
         let request = task.join().unwrap();
         assert!(request.starts_with("POST /custom/v1/messages "));
         assert!(request.contains("\"model\":\"manual\""));

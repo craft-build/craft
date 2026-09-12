@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rig::model::{Model, ModelList};
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 
@@ -294,33 +293,6 @@ impl ProviderConfig {
         }
         Ok(())
     }
-
-    /// Configured fields win; omitted fields preserve discovery metadata.
-    /// New IDs are added, and the final catalog is sorted by ID.
-    pub fn merge_models(&self, discovered: ModelList) -> ModelList {
-        let mut models: BTreeMap<_, _> = discovered
-            .into_iter()
-            .map(|model| (model.id.clone(), model))
-            .collect();
-        for (id, settings) in &self.models {
-            let model = models
-                .entry(id.clone())
-                .or_insert_with(|| Model::from_id(id));
-            if let Some(name) = &settings.name {
-                model.name = Some(name.clone());
-            }
-            if let Some(description) = &settings.description {
-                model.description = Some(description.clone());
-            }
-            if let Some(context_length) = settings.context_length {
-                model.context_length = Some(context_length);
-            }
-            if let Some(max_output_tokens) = settings.max_output_tokens {
-                model.max_output_tokens = Some(max_output_tokens);
-            }
-        }
-        ModelList::new(models.into_values().collect())
-    }
 }
 
 #[cfg(test)]
@@ -428,27 +400,6 @@ mod tests {
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
-    }
-
-    #[test]
-    fn merges_partial_overrides_and_manual_models() {
-        let config = Config::parse(
-            "[providers.x]\nkind = 'openai'\n\
-             [providers.x.models.existing]\nmax_output_tokens = 2048\n\
-             [providers.x.models.new]\nname = 'Manual model'",
-        )
-        .unwrap();
-        let mut existing = Model::new("existing", "Discovered name");
-        existing.context_length = Some(8192);
-        let merged = config.providers["x"]
-            .merge_models(ModelList::new(vec![existing, Model::from_id("untouched")]));
-        let models: Vec<_> = merged.into_iter().collect();
-        assert_eq!(models.len(), 3);
-        assert_eq!(models[0].name.as_deref(), Some("Discovered name"));
-        assert_eq!(models[0].context_length, Some(8192));
-        assert_eq!(models[0].max_output_tokens, Some(2048));
-        assert_eq!(models[1].id, "new");
-        assert_eq!(models[2].id, "untouched");
     }
 
     #[tokio::test]

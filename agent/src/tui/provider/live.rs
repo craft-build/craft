@@ -1,31 +1,28 @@
-//! CraftProvider: the TUI's real backend, driving the same provider/config/
-//! agent loop the ACP server uses.
+//! CraftProvider: the TUI's real backend, driving the shared run loop the
+//! ACP server uses.
 //!
 //! Turn semantics mirror `acp::run_turn`: a per-turn provider rebuild, the
-//! configured compaction stages ahead of the model call, watch-flag
-//! cancellation through `agent::CancelHook`, and history committed only on a
-//! successful run. Approvals are a documented no-op: the workspace tools apply
-//! edits inline, so the UI's approve/reject affordance only appears when a
-//! backend explicitly stages a diff (`awaiting_approval`).
+//! configured compaction stages ahead of the model call, cancellation through
+//! the run loop's `CancelToken`, and history committed only on a successful
+//! run. Edit-family tools are gated behind the UI's approve/reject seam via
+//! the dispatch `BeforeExecute` hook: no workspace mutation runs without an
+//! explicit user decision.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use futures::StreamExt;
-use rig::agent::hook::{HookContext, ToolCall as ToolCallEvent, ToolCallAction};
-use rig::agent::{Agent, AgentHook, MultiTurnStreamItem, PromptResponse, StreamingError};
-use rig::completion::{Message, PromptError};
-use rig::model::Model;
-use rig::streaming::{StreamedAssistantContent, StreamedUserContent};
-use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::AbortHandle;
 
-use crate::agent::{CancelHook, merge_history};
 use crate::compaction::{CompactionEngine, CompactionState};
 use crate::config::Config;
 use crate::error::{InvalidSnafu, Result, client_error};
-use crate::providers::{Provider as ClientProvider, ProviderKind};
+use crate::history;
+use crate::providers::{CatalogModel, Provider as ClientProvider, ProviderKind};
+use crate::run::{self, BeforeExecute, BoxFuture, CancelToken, Decision, RunOutcome};
 use crate::tools::Workspace;
 
 use super::{
@@ -67,13 +64,15 @@ impl FileStatus {
     }
 }
 
+/// Files touched by edit-family tools, keyed by path. A plain mutex: it is
+/// only locked briefly from the run's synchronous event callback.
+type Files = Arc<StdMutex<BTreeMap<String, FileStatus>>>;
+
 /// Session shared between the command loop and the (single) running turn.
 #[derive(Default)]
 struct SessionState {
-    history: Vec<Message>,
+    history: Vec<history::Message>,
     compaction: CompactionState,
-    /// Files touched by edit-family tools, keyed by path.
-    files: BTreeMap<String, FileStatus>,
     /// Edit-family call awaiting the user's decision, by tool-call id.
     pending_approval: Option<(String, oneshot::Sender<bool>)>,
 }
@@ -91,7 +90,7 @@ pub struct CraftProvider {
     config: Arc<Config>,
     workspace: Workspace,
     /// Per-provider discovered models, config key order.
-    catalogs: BTreeMap<String, Vec<Model>>,
+    catalogs: BTreeMap<String, Vec<CatalogModel>>,
     /// Discovery problems surfaced to the user as notes at startup.
     notes: Vec<String>,
     selection: Selection,
@@ -112,7 +111,7 @@ impl CraftProvider {
         let cwd = cwd.as_ref();
         let workspace = Workspace::new(cwd).map_err(client_error)?;
 
-        let mut catalogs: BTreeMap<String, Vec<Model>> = BTreeMap::new();
+        let mut catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::new();
         let mut notes = Vec::new();
         for (name, provider_config) in &config.providers {
             if provider_config.kind == ProviderKind::Voyageai {
@@ -122,7 +121,6 @@ impl CraftProvider {
             match ClientProvider::from_config(provider_config) {
                 Ok(provider) => match provider.models(provider_config).await {
                     Ok(models) => {
-                        let models: Vec<Model> = models.into_iter().collect();
                         if models.is_empty() {
                             notes.push(format!("{name}: no models discovered"));
                         } else {
@@ -172,7 +170,8 @@ impl Provider for CraftProvider {
 
         tokio::spawn(async move {
             let state = Arc::new(Mutex::new(SessionState::default()));
-            let (cancel, _guard) = watch::channel(false);
+            let files: Files = Arc::new(StdMutex::new(BTreeMap::new()));
+            let (cancel_flag, cancel_token) = run::cancel_channel();
             let mut current_turn: Option<AbortHandle> = None;
             let mut selection = self.selection;
             let workspace = self.workspace;
@@ -192,7 +191,7 @@ impl Provider for CraftProvider {
                         choices.push(ModelChoice {
                             provider: provider.clone(),
                             model: model.id.clone(),
-                            label: model.name.clone().unwrap_or_else(|| model.id.clone()),
+                            label: model.label().to_owned(),
                             provider_label: provider.clone(),
                         });
                     }
@@ -221,14 +220,15 @@ impl Provider for CraftProvider {
                         if let Some(h) = current_turn.take() {
                             h.abort();
                         }
-                        let _ = cancel.send(false);
+                        cancel_flag.set(false);
                         let handle = tokio::spawn(run_turn(
                             config.clone(),
                             workspace.clone(),
                             selection.clone(),
                             text,
                             state.clone(),
-                            cancel.subscribe(),
+                            files.clone(),
+                            cancel_token.clone(),
                             evt_tx.clone(),
                         ));
                         current_turn = Some(handle.abort_handle());
@@ -236,7 +236,7 @@ impl Provider for CraftProvider {
                     Command::Approve(id) => decide(&state, id, true).await,
                     Command::Reject(id) => decide(&state, id, false).await,
                     Command::Interrupt => {
-                        let _ = cancel.send(true);
+                        cancel_flag.set(true);
                         if let Some(h) = current_turn.take() {
                             h.abort();
                         }
@@ -256,6 +256,7 @@ impl Provider for CraftProvider {
                             h.abort();
                         }
                         *state.lock().await = SessionState::default();
+                        files.lock().expect("files lock").clear();
                         let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                         let _ = evt_tx.send(AgentEvent::TokenUsage("0 (0%)".into()));
@@ -293,53 +294,56 @@ impl Provider for CraftProvider {
 /// Gates edit-family tool calls behind the UI's approve/reject seam: no
 /// workspace mutation runs without an explicit user decision. Approval runs
 /// the tool; rejection skips it and reports the decision back to the model.
-struct ApprovalHook {
+struct ApprovalGate {
     state: Arc<Mutex<SessionState>>,
     tx: mpsc::UnboundedSender<AgentEvent>,
-    cancel_rx: watch::Receiver<bool>,
+    cancel: CancelToken,
 }
 
-impl AgentHook for ApprovalHook {
-    async fn on_tool_call(&self, _: &HookContext, call: ToolCallEvent<'_>) -> ToolCallAction {
-        if !EDIT_TOOLS.contains(&call.tool_name) {
-            return ToolCallAction::Run;
-        }
-        if *self.cancel_rx.borrow() {
-            return ToolCallAction::Stop("cancelled by client".into());
-        }
-        let id = call.internal_call_id.to_string();
-        let arguments = serde_json::from_str(call.args).unwrap_or_default();
-        let _ = self.tx.send(AgentEvent::AssistantEnd);
-        let _ = self.tx.send(AgentEvent::ToolCall(ToolCallData {
-            id: id.clone(),
-            kind: tool_head(call.tool_name, &arguments),
-            lines: Vec::new(),
-            awaiting_approval: true,
-        }));
-        let _ = self
-            .tx
-            .send(AgentEvent::StatusChanged(Status::WaitingApproval));
-
-        let (decision_tx, decision_rx) = oneshot::channel();
-        self.state.lock().await.pending_approval = Some((id, decision_tx));
-        let mut cancel_rx = self.cancel_rx.clone();
-        let approved = tokio::select! {
-            biased;
-            changed = cancel_rx.changed() => {
-                if matches!(changed, Ok(())) && *cancel_rx.borrow_and_update() {
-                    self.state.lock().await.pending_approval = None;
-                    return ToolCallAction::Stop("cancelled by client".into());
-                }
-                false
+impl BeforeExecute for ApprovalGate {
+    fn decide(&self, call: history::ToolCall) -> BoxFuture<Decision> {
+        let state = self.state.clone();
+        let tx = self.tx.clone();
+        let cancel = self.cancel.clone();
+        Box::pin(async move {
+            if !EDIT_TOOLS.contains(&call.function.name.as_str()) {
+                return Decision::Run;
             }
-            decision = decision_rx => decision.unwrap_or(false),
-        };
-        let _ = self.tx.send(AgentEvent::StatusChanged(Status::Running));
-        if approved {
-            ToolCallAction::Run
-        } else {
-            ToolCallAction::Skip("the user rejected this change; it was not applied".into())
-        }
+            if cancel.cancelled() {
+                return Decision::Stop("cancelled by client".into());
+            }
+            let id = call.id.clone();
+            let _ = tx.send(AgentEvent::AssistantEnd);
+            let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+                id: id.clone(),
+                kind: tool_head(&call.function.name, &call.function.arguments),
+                lines: Vec::new(),
+                awaiting_approval: true,
+            }));
+            let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
+
+            let (decision_tx, decision_rx) = oneshot::channel();
+            state.lock().await.pending_approval = Some((id, decision_tx));
+            let mut cancel_rx = cancel.subscribe();
+            let approved = tokio::select! {
+                biased;
+                changed = cancel_rx.changed() => {
+                    if matches!(changed, Ok(())) && *cancel_rx.borrow_and_update() {
+                        state.lock().await.pending_approval = None;
+                        return Decision::Stop("cancelled by client".into());
+                    }
+                    // A dropped flag means the session is gone: stop the call.
+                    return Decision::Stop("cancelled by client".into());
+                }
+                decision = decision_rx => decision.unwrap_or(false),
+            };
+            let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
+            if approved {
+                Decision::Run
+            } else {
+                Decision::Skip("the user rejected this change; it was not applied".into())
+            }
+        })
     }
 }
 
@@ -354,7 +358,7 @@ async fn decide(state: &Arc<Mutex<SessionState>>, id: String, approved: bool) {
     }
 }
 
-/// One agent turn: mirrors `acp::run_turn`, rendering to the TUI seam.
+/// One agent turn: drives the shared run loop, rendering to the TUI seam.
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
     config: Arc<Config>,
@@ -362,7 +366,8 @@ async fn run_turn(
     selection: Selection,
     text: String,
     state: Arc<Mutex<SessionState>>,
-    cancel_rx: watch::Receiver<bool>,
+    files: Files,
+    cancel: CancelToken,
     tx: mpsc::UnboundedSender<AgentEvent>,
 ) {
     macro_rules! fail {
@@ -382,17 +387,21 @@ async fn run_turn(
         Ok(provider) => provider,
         Err(error) => fail!(report(error)),
     };
+    let model = match provider.completion_model(&selection.model) {
+        Ok(model) => model,
+        Err(error) => fail!(report(error)),
+    };
 
     let mut history = state.lock().await.history.clone();
 
     // Run configured compaction stages whose context-fill threshold is crossed
     // before the history is sent to the model; commit effectiveness state only.
-    if let Ok(compaction_model) = provider.completion_model(&selection.model) {
+    {
         let mut compaction = state.lock().await.compaction.clone();
         CompactionEngine::new(config.compaction.clone())
             .maybe_compact(
                 &mut compaction,
-                &compaction_model,
+                &model,
                 &mut history,
                 selection.context_length,
             )
@@ -400,9 +409,16 @@ async fn run_turn(
         state.lock().await.compaction = compaction;
     }
 
-    let agent = match crate::agent::build(&provider, &selection.model, &config.agent, &workspace) {
-        Ok(agent) => agent,
-        Err(error) => fail!(report(error)),
+    let tools = workspace.register().with_before(Arc::new(ApprovalGate {
+        state: state.clone(),
+        tx: tx.clone(),
+        cancel: cancel.clone(),
+    }));
+    let params = run::RunParams {
+        preamble: Some(config.agent.preamble.clone()),
+        temperature: config.agent.temperature,
+        max_tokens: config.agent.max_tokens,
+        max_turns: run::RunParams::UNBOUNDED,
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
@@ -414,42 +430,120 @@ async fn run_turn(
     let mut prompt = text;
     let mut continuations = MAX_EMPTY_CONTINUATIONS;
     loop {
-        match stream_turn(
-            &agent,
+        let streamed_text = Arc::new(AtomicBool::new(false));
+        let streamed_reasoning = Arc::new(AtomicBool::new(false));
+        let tools_started = Arc::new(AtomicBool::new(false));
+        let emit = {
+            let tx = tx.clone();
+            let files = files.clone();
+            let context_length = selection.context_length;
+            let streamed_text = streamed_text.clone();
+            let streamed_reasoning = streamed_reasoning.clone();
+            let tools_started = tools_started.clone();
+            move |event: run::Event| match event {
+                run::Event::TextDelta(delta) => {
+                    streamed_text.store(true, Ordering::Relaxed);
+                    let _ = tx.send(AgentEvent::AssistantDelta(delta));
+                }
+                run::Event::ReasoningDelta(delta) => {
+                    streamed_reasoning.store(true, Ordering::Relaxed);
+                    let _ = tx.send(AgentEvent::ReasoningDelta(delta));
+                }
+                run::Event::ToolStart {
+                    id,
+                    name,
+                    arguments,
+                } => {
+                    if !tools_started.swap(true, Ordering::Relaxed) {
+                        let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
+                    }
+                    let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+                        id,
+                        kind: tool_head(&name, &arguments),
+                        lines: Vec::new(),
+                        awaiting_approval: false,
+                    }));
+                }
+                run::Event::ToolDone {
+                    id,
+                    name,
+                    arguments,
+                    result,
+                } => {
+                    let done = tool_done(id, &name, &arguments, &result);
+                    if let Some((path, status)) = done.touched {
+                        let panel = {
+                            let mut guard = files.lock().expect("files lock");
+                            guard.insert(path, status);
+                            guard
+                                .iter()
+                                .map(|(path, s)| TouchedFile {
+                                    path: path.clone(),
+                                    status: s.label().to_string(),
+                                    tone: s.tone(),
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let _ = tx.send(AgentEvent::FilesSet(panel));
+                    }
+                    let _ = tx.send(AgentEvent::ToolCall(done.card));
+                }
+                run::Event::Usage(usage) => {
+                    let _ = tx.send(AgentEvent::TokenUsage(usage_label(
+                        usage.input_tokens + usage.output_tokens,
+                        usage.input_tokens,
+                        context_length,
+                    )));
+                }
+            }
+        };
+        let outcome = run::run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
             &prompt,
-            history.clone(),
-            &state,
-            &cancel_rx,
-            &tx,
-            selection.context_length,
+            &cancel,
+            &emit,
         )
-        .await
-        {
-            TurnEnd::Cancelled => {
+        .await;
+        match outcome {
+            RunOutcome::Cancelled => {
                 let _ = tx.send(AgentEvent::AssistantEnd);
                 let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
                 return;
             }
-            TurnEnd::Ended => return,
-            TurnEnd::Final {
-                response,
-                streamed_text,
-                streamed_reasoning,
-            } => {
-                // Commit each successful segment, exactly like the base loop.
-                if let Some(messages) = response.messages() {
-                    history = merge_history(history, messages.to_vec());
-                    state.lock().await.history = history.clone();
+            RunOutcome::Failed(message) => {
+                if streamed_text.load(Ordering::Relaxed)
+                    || streamed_reasoning.load(Ordering::Relaxed)
+                {
+                    let _ = tx.send(AgentEvent::AssistantEnd);
                 }
-                if response.output.is_empty() && continuations > 0 {
+                let _ = tx.send(AgentEvent::AssistantText(message));
+                let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
+                return;
+            }
+            RunOutcome::MaxTurns => {
+                // Keep the partial run: the follow-up prompt continues from
+                // where the budget ran out instead of silently losing it.
+                state.lock().await.history = history.clone();
+                let _ = tx.send(AgentEvent::AssistantText(
+                    "Reached the turn limit. Send another message to continue.".into(),
+                ));
+                break;
+            }
+            RunOutcome::Done { reply } => {
+                if reply.is_empty() && continuations > 0 {
                     continuations -= 1;
                     prompt = CONTINUE_AFTER_EMPTY.into();
                     continue;
                 }
-                if streamed_text || streamed_reasoning {
+                if streamed_text.load(Ordering::Relaxed)
+                    || streamed_reasoning.load(Ordering::Relaxed)
+                {
                     let _ = tx.send(AgentEvent::AssistantEnd);
-                } else if !response.output.is_empty() {
-                    let _ = tx.send(AgentEvent::AssistantText(response.output.clone()));
+                } else if !reply.is_empty() {
+                    let _ = tx.send(AgentEvent::AssistantText(reply.clone()));
                 } else {
                     let _ = tx.send(AgentEvent::AssistantText(
                         "The model returned an empty response. Send another message to continue."
@@ -460,187 +554,8 @@ async fn run_turn(
             }
         }
     }
+    state.lock().await.history = history;
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-}
-
-/// How one runner stream ended.
-enum TurnEnd {
-    /// The user cancelled; the turn's history is not committed.
-    Cancelled,
-    /// The stream errored or ended without a final response; the reason has
-    /// already been sent to the UI.
-    Ended,
-    Final {
-        response: PromptResponse,
-        streamed_text: bool,
-        streamed_reasoning: bool,
-    },
-}
-
-/// Run one runner stream to completion, forwarding every event to the UI.
-async fn stream_turn(
-    agent: &Agent,
-    prompt: &str,
-    history: Vec<Message>,
-    state: &Arc<Mutex<SessionState>>,
-    cancel_rx: &watch::Receiver<bool>,
-    tx: &mpsc::UnboundedSender<AgentEvent>,
-    context_length: Option<u32>,
-) -> TurnEnd {
-    let mut cancel_rx = cancel_rx.clone();
-    let mut stream = agent
-        .runner(prompt)
-        .history(history)
-        .add_hook(CancelHook(cancel_rx.clone()))
-        .add_hook(ApprovalHook {
-            state: state.clone(),
-            tx: tx.clone(),
-            cancel_rx: cancel_rx.clone(),
-        })
-        .stream()
-        .await;
-
-    let mut streamed_text = false;
-    let mut streamed_reasoning = false;
-    let mut tools_started = false;
-    // internal_call_id -> (tool name, arguments), filled at call start.
-    let mut pending_tools: Vec<(String, String, serde_json::Value)> = Vec::new();
-    enum LoopEnd {
-        Cancel,
-        Ended,
-        Final(PromptResponse),
-    }
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            changed = cancel_rx.changed() => {
-                if matches!(changed, Ok(())) && *cancel_rx.borrow_and_update() {
-                    break LoopEnd::Cancel;
-                }
-            }
-            item = stream.next() => match item {
-                None => break LoopEnd::Ended,
-                Some(Ok(item)) => match item {
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(delta),
-                    ) => {
-                        streamed_text = true;
-                        let _ = tx.send(AgentEvent::AssistantDelta(delta.text));
-                    }
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                    ) => {
-                        streamed_reasoning = true;
-                        let _ = tx.send(AgentEvent::ReasoningDelta(reasoning));
-                    }
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ToolCall { tool_call, internal_call_id },
-                    ) => {
-                        if !tools_started {
-                            tools_started = true;
-                            let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
-                        }
-                        pending_tools.push((
-                            internal_call_id.clone(),
-                            tool_call.function.name.clone(),
-                            tool_call.function.arguments.clone(),
-                        ));
-                        let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
-                            id: internal_call_id,
-                            kind: tool_head(&tool_call.function.name, &tool_call.function.arguments),
-                            lines: Vec::new(),
-                            awaiting_approval: false,
-                        }));
-                    }
-                    MultiTurnStreamItem::StreamAssistantItem(_) => {}
-                    MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                        tool_result,
-                        internal_call_id,
-                    }) => {
-                        let done = tool_done(internal_call_id, &tool_result, &mut pending_tools);
-                        if let Some((path, status)) = done.touched {
-                            let mut session = state.lock().await;
-                            session.files.insert(path, status);
-                            let files = session
-                                .files
-                                .iter()
-                                .map(|(path, s)| TouchedFile {
-                                    path: path.clone(),
-                                    status: s.label().to_string(),
-                                    tone: s.tone(),
-                                })
-                                .collect();
-                            let _ = tx.send(AgentEvent::FilesSet(files));
-                        }
-                        let _ = tx.send(AgentEvent::ToolCall(done.card));
-                    }
-                    MultiTurnStreamItem::CompletionCall(call) => {
-                        let _ = tx.send(AgentEvent::TokenUsage(usage_label(
-                            call.usage.input_tokens + call.usage.output_tokens,
-                            call.usage.input_tokens,
-                            context_length,
-                        )));
-                    }
-                    MultiTurnStreamItem::ToolExecutionCommitted { .. } => {}
-                    MultiTurnStreamItem::ModelTurnRetried { .. } => {}
-                    MultiTurnStreamItem::FinalResponse(response) => break LoopEnd::Final(response),
-                },
-                Some(Err(error)) => {
-                    match &error {
-                        StreamingError::Prompt(prompt_error) => match prompt_error.as_ref() {
-                            PromptError::MaxTurnsError { chat_history, .. } => {
-                                // Keep the partial run: the follow-up prompt
-                                // continues from where the budget ran out
-                                // instead of silently losing the whole turn.
-                                state.lock().await.history = chat_history.as_ref().clone();
-                                let _ = tx.send(AgentEvent::AssistantText(
-                                    "Reached the turn limit. Send another message to continue."
-                                        .into(),
-                                ));
-                                let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-                            }
-                            PromptError::PromptCancelled { .. } => {
-                                let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-                            }
-                            _ => {
-                                let _ = tx.send(AgentEvent::AssistantText(error.to_string()));
-                                let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
-                            }
-                        },
-                        _ => {
-                            let _ = tx.send(AgentEvent::AssistantText(error.to_string()));
-                            let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
-                        }
-                    }
-                    break LoopEnd::Ended;
-                }
-            },
-        }
-    };
-
-    // Dropping the stream aborts the in-flight provider request; a cancelled
-    // turn's history is not committed, matching the base loop's semantics.
-    drop(stream);
-    match outcome {
-        LoopEnd::Cancel => TurnEnd::Cancelled,
-        LoopEnd::Ended => {
-            if streamed_text || streamed_reasoning {
-                let _ = tx.send(AgentEvent::AssistantEnd);
-            }
-            // The stream closed without a final response or an error: surface
-            // it instead of ending the turn silently.
-            let _ = tx.send(AgentEvent::AssistantText(
-                "The agent stream ended without a final response.".into(),
-            ));
-            let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
-            TurnEnd::Ended
-        }
-        LoopEnd::Final(response) => TurnEnd::Final {
-            response,
-            streamed_text,
-            streamed_reasoning,
-        },
-    }
 }
 
 /// Card emitted when a tool call starts: kind from the tool name and its
@@ -674,21 +589,20 @@ struct ToolDone {
 /// the body and summary filled from the result text.
 fn tool_done(
     id: String,
-    result: &rig::core::completion::message::ToolResult,
-    pending: &mut Vec<(String, String, serde_json::Value)>,
+    name: &str,
+    arguments: &serde_json::Value,
+    result: &history::ToolResult,
 ) -> ToolDone {
-    let text = tool_result_text(&result.content);
-    let found = pending
+    let text = result
+        .content
         .iter()
-        .position(|(pid, ..)| *pid == id)
-        .map(|i| pending.swap_remove(i));
-    let (name, arguments) = found
-        .map(|(_, name, args)| (Some(name), args))
-        .unwrap_or((None, serde_json::Value::Null));
-    let detail = first_string_argument(&arguments).unwrap_or_default();
+        .map(history::ToolResultContent::to_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let detail = first_string_argument(arguments).unwrap_or_default();
 
-    let (kind, lines, touched) = match name.as_deref() {
-        Some("read") => {
+    let (kind, lines, touched) = match name {
+        "read" => {
             let lines = context_lines(&text);
             let summary = format!("{} lines", lines.len());
             (
@@ -700,7 +614,7 @@ fn tool_done(
                 None,
             )
         }
-        Some("grep") => {
+        "grep" => {
             let lines = context_lines(&text);
             let summary = format!("{} lines of output", lines.len());
             (
@@ -712,7 +626,7 @@ fn tool_done(
                 None,
             )
         }
-        Some(tool) if EDIT_TOOLS.contains(&tool) => {
+        tool if EDIT_TOOLS.contains(&tool) => {
             let status = match tool {
                 "delete" => FileStatus::Deleted,
                 "write" => FileStatus::Created,
@@ -723,22 +637,17 @@ fn tool_done(
                     path: detail.clone(),
                 },
                 diff_lines(&text),
-                if detail.is_empty() {
+                if detail.is_empty() || result.is_error {
                     None
                 } else {
                     Some((detail, status))
                 },
             )
         }
-        Some(other) => (
+        other => (
             ToolKind::Bash {
                 cmd: format!("{other} {detail}").trim().to_string(),
             },
-            context_lines(&text),
-            None,
-        ),
-        None => (
-            ToolKind::Bash { cmd: "tool".into() },
             context_lines(&text),
             None,
         ),
@@ -784,22 +693,6 @@ fn first_string_argument(arguments: &serde_json::Value) -> Option<String> {
         .iter()
         .find(|(_, value)| value.is_string())?;
     value.as_str().map(str::to_owned)
-}
-
-/// Built-in tools produce model-facing text; keep JSON readable for anything
-/// else without interpreting schemas.
-fn tool_result_text(items: &[rig::core::completion::message::ToolResultContent]) -> String {
-    items
-        .iter()
-        .map(|item| match item {
-            rig::core::completion::message::ToolResultContent::Text(text) => text.text.clone(),
-            rig::core::completion::message::ToolResultContent::Json { value, .. } => {
-                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-            }
-            other => format!("{other:?}"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// "45.9K (4%)"-style label; the percentage is the prompt's share of the

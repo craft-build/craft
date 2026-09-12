@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
-use rig::completion::message::UserContent;
-use rig::completion::{AssistantContent, Message};
+use crate::history::{AssistantContent, Message, UserContent};
 
 /// Result of a task-boundary-aware cut: summarize `history[..tail_start]` and
 /// keep `history[tail_start..]` verbatim.
@@ -19,10 +18,10 @@ fn is_prompt_user(msg: &Message) -> bool {
 
 fn tool_use_ids(msg: &Message) -> Vec<String> {
     match msg {
-        Message::Assistant { content, .. } => content
+        Message::Assistant { content } => content
             .iter()
             .filter_map(|b| match b {
-                AssistantContent::ToolCall(call) => Some(call.id.to_string()),
+                AssistantContent::ToolCall(call) => Some(call.id.clone()),
                 _ => None,
             })
             .collect(),
@@ -35,7 +34,7 @@ fn tool_result_ids(msg: &Message) -> Vec<String> {
         Message::User { content } => content
             .iter()
             .filter_map(|b| match b {
-                UserContent::ToolResult(result) => Some(result.call.to_string()),
+                UserContent::ToolResult(result) => Some(result.call.clone()),
                 _ => None,
             })
             .collect(),
@@ -140,7 +139,7 @@ pub(crate) fn find_cut(history: &[Message]) -> Option<Cut> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::vcc::test_support::{assistant_tool, tool_result, user};
+    use crate::compaction::test_support::{assistant_tool, tool_result, user};
 
     #[test]
     fn cut_keeps_tail_after_last_user_prompt() {

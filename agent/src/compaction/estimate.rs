@@ -2,12 +2,9 @@
 //! compaction estimator). Deliberately approximate; the engine's
 //! effectiveness score keeps behavior safe when estimates drift.
 
-use rig::completion::Message;
-use rig::completion::message::{AssistantContent, UserContent};
+use crate::history::{AssistantContent, Message, ReasoningContent, ToolResultContent, UserContent};
 
 const CHARS_PER_TOKEN: usize = 4;
-/// Same weight Craft uses for images in the prompt-size estimate.
-const TOKENS_PER_IMAGE: u64 = 1_500;
 
 fn text_len(text: &str) -> usize {
     // Characters, not bytes: CHARS_PER_TOKEN is calibrated on characters and
@@ -26,7 +23,7 @@ pub fn estimate_tokens(messages: &[Message]) -> u64 {
                 tokens +=
                     (content.iter().map(user_content_chars).sum::<usize>() / CHARS_PER_TOKEN) as u64
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant { content } => {
                 tokens += (content.iter().map(assistant_content_chars).sum::<usize>()
                     / CHARS_PER_TOKEN) as u64
             }
@@ -42,19 +39,10 @@ fn user_content_chars(block: &UserContent) -> usize {
             .content
             .iter()
             .map(|item| match item {
-                rig::completion::message::ToolResultContent::Text(text) => text_len(&text.text),
-                rig::completion::message::ToolResultContent::Image(_) => {
-                    (TOKENS_PER_IMAGE * CHARS_PER_TOKEN as u64) as usize
-                }
-                rig::completion::message::ToolResultContent::Json { value } => {
-                    json_len(value) as usize
-                }
+                ToolResultContent::Text(text) => text_len(&text.text),
+                ToolResultContent::Json { value } => json_len(value) as usize,
             })
             .sum(),
-        UserContent::Image(_)
-        | UserContent::Audio(_)
-        | UserContent::Video(_)
-        | UserContent::Document(_) => (TOKENS_PER_IMAGE * CHARS_PER_TOKEN as u64) as usize,
     }
 }
 
@@ -68,13 +56,10 @@ fn assistant_content_chars(block: &AssistantContent) -> usize {
             .content
             .iter()
             .map(|item| match item {
-                rig::completion::message::ReasoningContent::Text { text, .. } => text_len(text),
-                rig::completion::message::ReasoningContent::Encrypted(data)
-                | rig::completion::message::ReasoningContent::Summary(data) => text_len(data),
-                rig::completion::message::ReasoningContent::Redacted { data } => text_len(data),
+                ReasoningContent::Text { text } => text_len(text),
+                ReasoningContent::Opaque(data) => text_len(data),
             })
             .sum(),
-        AssistantContent::Image(_) => (TOKENS_PER_IMAGE * CHARS_PER_TOKEN as u64) as usize,
     }
 }
 
@@ -85,14 +70,10 @@ fn json_len(value: &serde_json::Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::completion::message::Text;
 
     fn user(text: &str) -> Message {
         Message::User {
-            content: vec![UserContent::Text(Text {
-                text: text.into(),
-                additional_params: None,
-            })],
+            content: vec![UserContent::text(text)],
         }
     }
 

@@ -88,7 +88,7 @@ pub enum Error {
 
     #[snafu(display("summarization request failed"))]
     Summarize {
-        source: rig::completion::CompletionError,
+        source: rig_core::completion::CompletionError,
     },
 
     #[snafu(display("ACP connection failed"))]

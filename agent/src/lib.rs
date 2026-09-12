@@ -1,8 +1,10 @@
 pub mod acp;
-pub mod agent;
 pub mod compaction;
 pub mod config;
+pub mod edge;
 pub mod error;
+pub mod history;
 pub mod providers;
+pub mod run;
 pub mod tools;
 pub mod tui;

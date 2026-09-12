@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
-use rig::completion::message::UserContent;
-use rig::completion::message::{ImageMediaType, ToolResultContent};
-use rig::completion::{AssistantContent, Message};
 use serde_json::Value;
+
+use crate::history::{AssistantContent, Message, ReasoningContent, ToolResultContent, UserContent};
 
 use super::util::sanitize;
 
@@ -66,36 +65,21 @@ fn tool_result_text(content: &[ToolResultContent]) -> String {
         .join("\n")
 }
 
-fn mime_str(media_type: &Option<ImageMediaType>) -> &'static str {
-    match media_type {
-        Some(ImageMediaType::JPEG) => "image/jpeg",
-        Some(ImageMediaType::PNG) => "image/png",
-        Some(ImageMediaType::GIF) => "image/gif",
-        Some(ImageMediaType::WEBP) => "image/webp",
-        Some(ImageMediaType::HEIC) => "image/heic",
-        Some(ImageMediaType::HEIF) => "image/heif",
-        Some(ImageMediaType::SVG) => "image/svg+xml",
-        None => "application/octet-stream",
-    }
-}
-
-/// Normalize rig messages into [`NormalizedBlock`]s.
+/// Normalize history messages into [`NormalizedBlock`]s.
 ///
 /// Bash tool calls are folded into [`NormalizedBlock::Bash`] blocks pairing the
 /// command (from the tool-call arguments) with the output/exit code (from the
-/// paired tool result). Their tool result is not emitted separately.
-///
-/// rig's `ToolResult` carries no error flag, so `is_error` is always `false`
-/// (and bash exit codes default to 0).
+/// paired tool result). Their tool result is not emitted separately. Error
+/// flags come from the recorded tool result.
 pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
     let mut name_by_id: HashMap<String, String> = HashMap::new();
     let mut result_by_id: HashMap<String, (String, bool)> = HashMap::new();
     for msg in messages {
         match msg {
-            Message::Assistant { content, .. } => {
+            Message::Assistant { content } => {
                 for block in content {
                     if let AssistantContent::ToolCall(call) = block {
-                        name_by_id.insert(call.id.to_string(), call.function.name.clone());
+                        name_by_id.insert(call.id.clone(), call.function.name.clone());
                     }
                 }
             }
@@ -103,8 +87,8 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                 for block in content {
                     if let UserContent::ToolResult(result) = block {
                         result_by_id.insert(
-                            result.call.to_string(),
-                            (tool_result_text(&result.content), false),
+                            result.call.clone(),
+                            (tool_result_text(&result.content), result.is_error),
                         );
                     }
                 }
@@ -131,36 +115,27 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                     });
                 }
                 for block in content {
-                    match block {
-                        UserContent::Image(image) => {
-                            out.push(NormalizedBlock::User {
-                                text: format!("[image: {}]", mime_str(&image.media_type)),
-                                source_index: msg_index,
-                            });
+                    if let UserContent::ToolResult(result) = block {
+                        let tool_use_id = result.call.clone();
+                        if bash_ids.contains_key(&tool_use_id) {
+                            continue;
                         }
-                        UserContent::ToolResult(result) => {
-                            let tool_use_id = result.call.to_string();
-                            if bash_ids.contains_key(&tool_use_id) {
-                                continue;
-                            }
-                            let name = name_by_id
-                                .get(&tool_use_id)
-                                .cloned()
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let (text, is_error) =
-                                result_by_id.get(&tool_use_id).cloned().unwrap_or_default();
-                            out.push(NormalizedBlock::ToolResult {
-                                name,
-                                text: sanitize(&text),
-                                is_error,
-                                source_index: msg_index,
-                            });
-                        }
-                        _ => {}
+                        let name = name_by_id
+                            .get(&tool_use_id)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let (text, is_error) =
+                            result_by_id.get(&tool_use_id).cloned().unwrap_or_default();
+                        out.push(NormalizedBlock::ToolResult {
+                            name,
+                            text: sanitize(&text),
+                            is_error,
+                            source_index: msg_index,
+                        });
                     }
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant { content } => {
                 for block in content {
                     match block {
                         AssistantContent::Text(t) => {
@@ -177,10 +152,7 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                                 .content
                                 .iter()
                                 .filter_map(|c| match c {
-                                    rig::completion::message::ReasoningContent::Text {
-                                        text,
-                                        ..
-                                    } => Some(text.as_str()),
+                                    ReasoningContent::Text { text } => Some(text.as_str()),
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>()
@@ -197,7 +169,7 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                         AssistantContent::ToolCall(call) => {
                             let name = &call.function.name;
                             let input = &call.function.arguments;
-                            let id = call.id.to_string();
+                            let id = call.id.clone();
                             if name.eq_ignore_ascii_case("bash") {
                                 let command = input
                                     .get("command")
@@ -222,7 +194,6 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
                                 });
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -235,13 +206,13 @@ pub(crate) fn normalize(messages: &[Message]) -> Vec<NormalizedBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::vcc::test_support::{assistant_tool_args, tool_result_of, user};
+    use crate::compaction::test_support::{assistant_tool_args, tool_result_of, user};
 
     #[test]
     fn normalize_user_and_assistant_text() {
         let msgs = vec![
             user("hello"),
-            crate::compaction::vcc::test_support::assistant_text("hi there"),
+            crate::compaction::test_support::assistant_text("hi there"),
         ];
         let blocks = normalize(&msgs);
         assert!(matches!(&blocks[0], NormalizedBlock::User { text, .. } if text == "hello"));

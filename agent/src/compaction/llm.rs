@@ -2,9 +2,11 @@
 //! head; the recent tail is preserved verbatim (ported from Craft's
 //! `compaction/llm.rs`, simplified to craft-acp's caller-owned history).
 
-use rig::completion::message::{AssistantContent, Text, UserContent};
-use rig::completion::{CompletionModel, Message};
+use rig_core::completion::CompletionModel;
 use snafu::ResultExt;
+
+use crate::edge;
+use crate::history::{AssistantContent, Message, ToolResultContent, UserContent};
 
 use super::estimate::estimate_tokens;
 use super::vcc::find_cut;
@@ -71,27 +73,16 @@ fn message_text(message: &Message) -> Option<String> {
                         let output = result
                             .content
                             .iter()
-                            .map(|item| match item {
-                                rig::completion::message::ToolResultContent::Text(text) => {
-                                    text.text.clone()
-                                }
-                                rig::completion::message::ToolResultContent::Image(_) => {
-                                    "[image]".into()
-                                }
-                                rig::completion::message::ToolResultContent::Json { value } => {
-                                    value.to_string()
-                                }
-                            })
+                            .map(ToolResultContent::to_text)
                             .collect::<Vec<_>>()
                             .join("\n");
                         format!("tool result: {output}")
                     }
-                    _ => "[non-text content]".into(),
                 })
                 .collect();
             Some(parts.join("\n"))
         }
-        Message::Assistant { content, .. } => {
+        Message::Assistant { content } => {
             let parts: Vec<_> = content
                 .iter()
                 .map(|block| match block {
@@ -101,7 +92,6 @@ fn message_text(message: &Message) -> Option<String> {
                         call.function.name, call.function.arguments
                     ),
                     AssistantContent::Reasoning(_) => String::new(),
-                    AssistantContent::Image(_) => "[image]".into(),
                 })
                 .collect();
             Some(parts.join("\n"))
@@ -118,28 +108,19 @@ async fn summarize<M: CompletionModel + Clone>(model: &M, head: &[Message]) -> R
         if text.trim().is_empty() {
             continue;
         }
-        messages.push(Message::User {
-            content: vec![UserContent::Text(Text {
-                text,
-                additional_params: None,
-            })],
-        });
+        messages.push(Message::user(text));
     }
     if messages.is_empty() {
         return Ok(String::new());
     }
-    let response = model
-        .completion_request(COMPACT_USER_PROMPT)
-        .preamble(COMPACT_SYSTEM.to_string())
-        .messages(messages)
-        .send()
-        .await
-        .context(SummarizeSnafu)?;
+    messages.push(Message::user(COMPACT_USER_PROMPT));
+    let request = edge::to_request(&messages, &[], Some(COMPACT_SYSTEM), None, None);
+    let response = model.completion(request).await.context(SummarizeSnafu)?;
     let text: String = response
         .choice
         .iter()
         .filter_map(|block| match block {
-            AssistantContent::Text(text) => Some(text.text.clone()),
+            rig_core::completion::message::AssistantContent::Text(text) => Some(text.text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -149,11 +130,9 @@ async fn summarize<M: CompletionModel + Clone>(model: &M, head: &[Message]) -> R
 
 fn summary_message(summary: String) -> Message {
     Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(Text {
-            text: format!("{LLM_SUMMARY_PREFIX}\n\n{summary}"),
-            additional_params: None,
-        })],
+        content: vec![AssistantContent::text(format!(
+            "{LLM_SUMMARY_PREFIX}\n\n{summary}"
+        ))],
     }
 }
 
@@ -183,14 +162,11 @@ pub(crate) fn build_static_summary(head: &[Message]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::test_utils::{MockCompletionModel, MockTurn};
+    use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
     fn user(text: &str) -> Message {
         Message::User {
-            content: vec![UserContent::Text(Text {
-                text: text.into(),
-                additional_params: None,
-            })],
+            content: vec![UserContent::text(text)],
         }
     }
 
@@ -200,13 +176,7 @@ mod tests {
             messages.push(user(&format!(
                 "task {i}: please do the thing carefully {i}"
             )));
-            messages.push(Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::Text(Text {
-                    text: format!("working on task {i}"),
-                    additional_params: None,
-                })],
-            });
+            messages.push(Message::assistant(format!("working on task {i}")));
         }
         messages
     }
@@ -224,13 +194,14 @@ mod tests {
         assert!(messages.len() > 1, "tail must be preserved");
         assert_eq!(model.requests().len(), 1);
         let request = &model.requests()[0];
-        // Rig renders the preamble as the leading system message.
-        assert!(
-            request
-                .chat_history
-                .iter()
-                .any(|m| matches!(m, rig::completion::Message::System { content } if content == COMPACT_SYSTEM))
-        );
+        // The preamble travels as the request's preamble field.
+        assert_eq!(request.preamble.as_deref(), Some(COMPACT_SYSTEM));
+        assert!(matches!(
+            request.chat_history.last(),
+            Some(rig_core::completion::message::Message::User { content })
+                if matches!(&content[0], rig_core::completion::message::UserContent::Text(t)
+                    if t.text == COMPACT_USER_PROMPT)
+        ));
     }
 
     #[tokio::test]

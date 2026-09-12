@@ -8,10 +8,7 @@ mod normalize;
 mod sections;
 mod util;
 
-use rig::completion::message::Text;
-#[cfg(test)]
-use rig::completion::message::UserContent;
-use rig::completion::{AssistantContent, Message};
+use crate::history::{AssistantContent, Message};
 
 pub(crate) use cut::find_cut;
 use filter::filter_noise;
@@ -72,7 +69,7 @@ const VCC_SUMMARY_PREFIX: &str = "This summary captures";
 pub fn is_vcc_summary(msg: &Message) -> bool {
     matches!(
         msg,
-        Message::Assistant { content, .. } if content.iter().any(
+        Message::Assistant { content } if content.iter().any(
             |b| matches!(b, AssistantContent::Text(t) if t.text.starts_with(VCC_SUMMARY_PREFIX))
         )
     )
@@ -80,7 +77,7 @@ pub fn is_vcc_summary(msg: &Message) -> bool {
 
 fn summary_text(msg: &Message) -> Option<&str> {
     match msg {
-        Message::Assistant { content, .. } => content.iter().find_map(|b| match b {
+        Message::Assistant { content } => content.iter().find_map(|b| match b {
             AssistantContent::Text(t) => Some(t.text.as_str()),
             _ => None,
         }),
@@ -119,91 +116,17 @@ pub fn vcc_compact(
     let tail_start = tail_start.min(live.len());
     let tail_msgs = live.len() - tail_start;
     let mut new_history: Vec<Message> = Vec::with_capacity(1 + tail_msgs);
-    new_history.push(Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(Text {
-            text: summary,
-            additional_params: None,
-        })],
-    });
+    new_history.push(Message::assistant(summary));
     new_history.extend(live.into_iter().skip(tail_start));
     *messages = new_history;
     estimate_tokens(messages) <= token_limit
 }
 
-/// Constructors for tests across the vcc module (rig has no `Message::user`).
-#[cfg(test)]
-pub(crate) mod test_support {
-    use rig::completion::message::UserContent;
-    use rig::completion::message::{
-        Text, ToolCallId, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
-    };
-    use rig::completion::{AssistantContent, Message};
-
-    pub fn user(text: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::Text(Text {
-                text: text.to_string(),
-                additional_params: None,
-            })],
-        }
-    }
-
-    pub fn assistant_text(text: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Text(Text {
-                text: text.to_string(),
-                additional_params: None,
-            })],
-        }
-    }
-
-    pub fn assistant_tool(id: &str, name: &str) -> Message {
-        assistant_tool_args(id, name, serde_json::json!({}))
-    }
-
-    pub fn assistant_tool_args(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(
-                rig::completion::message::ToolCall {
-                    id: ToolCallId::new_or_mint(id),
-                    provider: None,
-                    function: ToolFunction {
-                        name: name.to_string(),
-                        arguments: args,
-                    },
-                    signature: None,
-                    additional_params: None,
-                },
-            )],
-        }
-    }
-
-    pub fn tool_result(id: &str) -> Message {
-        tool_result_of(id, "output")
-    }
-
-    pub fn tool_result_of(id: &str, output: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::ToolResult(RigToolResult {
-                call: ToolCallId::new_or_mint(id),
-                provider: None,
-                name: "bash".to_string(),
-                content: vec![ToolResultContent::Text(Text {
-                    text: output.to_string(),
-                    additional_params: None,
-                })],
-            })],
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::test_support::{assistant_tool_args, tool_result_of, user};
     use super::*;
+    use crate::compaction::test_support::{assistant_tool_args, tool_result_of, user};
+    use crate::history::UserContent;
 
     /// History with a second text prompt mid-way, so the first compaction
     /// leaves a multi-message tail for the second (merging) compaction.
@@ -303,15 +226,12 @@ mod tests {
                     .iter()
                     .map(|b| match b {
                         UserContent::Text(t) => t.text.chars().count() as u64,
-                        UserContent::ToolResult(r) => r
-                            .content
-                            .iter()
-                            .map(|c| c.as_text().map(|t| t.len()).unwrap_or(0) as u64)
-                            .sum(),
-                        _ => 0,
+                        UserContent::ToolResult(r) => {
+                            r.content.iter().map(|c| c.to_text().len() as u64).sum()
+                        }
                     })
                     .sum::<u64>(),
-                Message::Assistant { content, .. } => content
+                Message::Assistant { content } => content
                     .iter()
                     .map(|b| match b {
                         AssistantContent::Text(t) => t.text.chars().count() as u64,

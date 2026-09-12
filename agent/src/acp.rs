@@ -1,6 +1,7 @@
-//! Craft's ACP agent boundary: the CLI loop exposed over agent-client-protocol v1.
+//! Craft's ACP agent boundary: the shared run loop exposed over
+//! agent-client-protocol v1.
 //!
-//! Every capability of the base loop (`agent::build` with read/grep/edit/delete
+//! Every capability of the run loop (`run::run` with read/grep/edit/delete
 //! tools, streaming output, per-turn usage, caller-owned history) is surfaced
 //! here: provider and model selection travel as session config options, model
 //! output streams as `session/update` notifications, and `session/cancel`
@@ -9,15 +10,6 @@
 //!
 //! Deliberately not advertised: `session/load` (the loop keeps history in
 //! memory only), embedded context, image, and audio prompts, and MCP servers.
-
-use std::{
-    collections::BTreeMap,
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
 
 use agent_client_protocol::{
     Agent as AcpRole, Client as AcpClient, ConnectionTo, Error, JsonRpcResponse, Responder, Stdio,
@@ -37,17 +29,21 @@ use agent_client_protocol::{
         },
     },
 };
-use futures::StreamExt;
-use rig::agent::{MultiTurnStreamItem, StreamingError};
-use rig::completion::{Message, PromptError};
-use rig::model::Model;
-use rig::streaming::{StreamedAssistantContent, StreamedUserContent};
-use tokio::sync::{Mutex, watch};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+use tokio::sync::Mutex;
 
 use crate::{
-    agent::{CancelHook, merge_history},
     config::Config,
-    providers::{Provider, ProviderKind},
+    history,
+    providers::{CatalogModel, Provider, ProviderKind},
+    run::{self, RunOutcome},
     tools::Workspace,
 };
 
@@ -56,14 +52,14 @@ pub const MODEL_OPTION_ID: &str = "model";
 
 struct Session {
     workspace: Workspace,
-    history: Vec<Message>,
+    history: Vec<history::Message>,
     provider_name: String,
-    models: Vec<Model>,
+    models: Vec<CatalogModel>,
     model: String,
     context_length: Option<u32>,
     /// Effectiveness state for the configured compaction stages.
     compaction: crate::compaction::CompactionState,
-    cancel: watch::Sender<bool>,
+    cancel: run::CancelFlag,
 }
 
 impl Session {
@@ -85,7 +81,7 @@ impl Session {
     }
 }
 
-fn model_option(models: &[Model], current: &str) -> SessionConfigOption {
+fn model_option(models: &[CatalogModel], current: &str) -> SessionConfigOption {
     SessionConfigOption::select(
         MODEL_OPTION_ID,
         "Model",
@@ -93,8 +89,8 @@ fn model_option(models: &[Model], current: &str) -> SessionConfigOption {
         models
             .iter()
             .map(|model| {
-                let name = model.name.clone().unwrap_or_else(|| model.id.clone());
-                let mut option = SessionConfigSelectOption::new(model.id.clone(), name);
+                let mut option =
+                    SessionConfigSelectOption::new(model.id.clone(), model.label().to_owned());
                 if let Some(description) = &model.description {
                     option = option.description(description.clone());
                 }
@@ -129,7 +125,7 @@ impl AppState {
     async fn provider_catalog(
         &self,
         name: &str,
-    ) -> std::result::Result<(Provider, Vec<Model>), String> {
+    ) -> std::result::Result<(Provider, Vec<CatalogModel>), String> {
         let config = self
             .config
             .providers
@@ -141,12 +137,7 @@ impl AppState {
             ));
         }
         let provider = Provider::from_config(config).map_err(report)?;
-        let models: Vec<Model> = provider
-            .models(config)
-            .await
-            .map_err(report)?
-            .into_iter()
-            .collect();
+        let models: Vec<CatalogModel> = provider.models(config).await.map_err(report)?;
         Ok((provider, models))
     }
 
@@ -167,7 +158,7 @@ impl AppState {
             .map(|model| model.id.clone())
             .unwrap_or_default();
         let context_length = models.first().and_then(|model| model.context_length);
-        let (cancel, _) = watch::channel(false);
+        let (cancel, _) = run::cancel_channel();
         Ok(Session {
             workspace,
             history: Vec::new(),
@@ -312,13 +303,13 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         return respond_setup_error(responder, "unknown session".into());
                     };
                     // Re-arm the session-wide cancellation flag for this turn.
-                    let _ = session.cancel.send(false);
+                    let _ = session.cancel.set(false);
                     (
                         session.workspace.clone(),
                         session.history.clone(),
                         session.provider_name.clone(),
                         session.model.clone(),
-                        session.cancel.subscribe(),
+                        session.cancel.token(),
                     )
                 };
                 let run_state = prompt_state.clone();
@@ -359,7 +350,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
             async move |notification: CancelNotification, _connection| {
                 let sessions = cancel_state.sessions.lock().await;
                 if let Some(session) = sessions.get(notification.session_id.0.as_ref()) {
-                    let _ = session.cancel.send(true);
+                    let _ = session.cancel.set(true);
                 }
                 Ok(())
             },
@@ -429,11 +420,11 @@ async fn run_turn(
     connection: ConnectionTo<AcpClient>,
     session_id: SessionId,
     text: String,
-    mut history: Vec<Message>,
+    mut history: Vec<history::Message>,
     workspace: Workspace,
     provider_name: String,
     model: String,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel: run::CancelToken,
     responder: Responder<AcpPromptResponse>,
 ) {
     macro_rules! fail {
@@ -449,12 +440,16 @@ async fn run_turn(
     if model.trim().is_empty() {
         fail!("no model is selected; set the model session configuration option");
     }
+    let model = match provider.completion_model(&model) {
+        Ok(model) => model,
+        Err(error) => fail!(report(error)),
+    };
 
     // Run configured compaction stages whose context-fill threshold is
     // crossed before the history is sent to the model. Only the
     // effectiveness state is persisted here; the compacted history is
-    // committed by the turn's success path (merge_history), matching the
-    // loop's "failed runs leave session history untouched" semantics.
+    // committed by the run's success path, matching the loop's "failed runs
+    // leave session history untouched" semantics.
     let (mut compaction_state, context_length) = {
         let sessions = state.sessions.lock().await;
         sessions
@@ -462,15 +457,10 @@ async fn run_turn(
             .map(|session| (session.compaction.clone(), session.context_length))
             .unwrap_or_default()
     };
-    if let Ok(compaction_model) = provider.completion_model(&model) {
+    {
         let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone());
         engine
-            .maybe_compact(
-                &mut compaction_state,
-                &compaction_model,
-                &mut history,
-                context_length,
-            )
+            .maybe_compact(&mut compaction_state, &model, &mut history, context_length)
             .await;
         let mut sessions = state.sessions.lock().await;
         if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
@@ -478,179 +468,108 @@ async fn run_turn(
         }
     }
 
-    let agent = match crate::agent::build(&provider, &model, &state.config.agent, &workspace) {
-        Ok(agent) => agent,
-        Err(error) => fail!(report(error)),
+    let tools = workspace.register();
+    let params = run::RunParams {
+        preamble: Some(state.config.agent.preamble.clone()),
+        temperature: state.config.agent.temperature,
+        max_tokens: state.config.agent.max_tokens,
+        max_turns: run::RunParams::UNBOUNDED,
     };
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {
         connection.send_notification(SessionNotification::new(session_id.clone(), update))
     };
-
-    let mut stream = agent
-        .runner(text)
-        .history(history.clone())
-        .add_hook(CancelHook(cancel_rx.clone()))
-        .stream()
-        .await;
-
-    let mut emitted_text = false;
-    let context_length = {
-        let sessions = state.sessions.lock().await;
-        sessions
-            .get(session_id.0.as_ref())
-            .and_then(|session| session.context_length)
-    };
-    let mut cancelled = false;
-    let final_response = loop {
-        tokio::select! {
-            biased;
-            changed = cancel_rx.changed() => {
-                if matches!(changed, Ok(())) && *cancel_rx.borrow_and_update() {
-                    cancelled = true;
-                    break None;
+    let emitted_text = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let emit = {
+        let connection = connection.clone();
+        let session_id = session_id.clone();
+        let emitted_text = emitted_text.clone();
+        move |event: run::Event| {
+            let update = match event {
+                run::Event::TextDelta(delta) => {
+                    emitted_text.store(true, Ordering::Relaxed);
+                    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                        TextContent::new(delta),
+                    )))
                 }
+                run::Event::ReasoningDelta(delta) => SessionUpdate::AgentThoughtChunk(
+                    ContentChunk::new(ContentBlock::Text(TextContent::new(delta))),
+                ),
+                run::Event::ToolStart {
+                    id,
+                    name,
+                    arguments,
+                } => SessionUpdate::ToolCall(tool_call_start(&id, &name, &arguments)),
+                run::Event::ToolDone { id, result, .. } => {
+                    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        ToolCallId::new(id),
+                        ToolCallUpdateFields::new()
+                            .status(ToolCallStatus::Completed)
+                            .content(vec![tool_result_content(&result)]),
+                    ))
+                }
+                run::Event::Usage(usage) => {
+                    let Some(size) = context_length else {
+                        return;
+                    };
+                    SessionUpdate::UsageUpdate(UsageUpdate::new(
+                        usage.input_tokens,
+                        u64::from(size),
+                    ))
+                }
+            };
+            // A dead connection stops the notifications but not the turn; the
+            // responder still answers the request.
+            let _ =
+                connection.send_notification(SessionNotification::new(session_id.clone(), update));
+        }
+    };
+
+    let outcome = run::run(&model, &params, &tools, &mut history, &text, &cancel, &emit).await;
+    match outcome {
+        RunOutcome::Done { reply } => {
+            if !emitted_text.load(Ordering::Relaxed) && !reply.is_empty() {
+                let _ = send(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                    ContentBlock::Text(TextContent::new(reply)),
+                )));
             }
-            item = stream.next() => match item {
-                None => break None,
-                Some(Ok(item)) => match item {
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(delta),
-                    ) => {
-                        emitted_text = true;
-                        if send(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                            ContentBlock::Text(TextContent::new(delta.text)),
-                        )))
-                        .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                    ) => {
-                        if send(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
-                            ContentBlock::Text(TextContent::new(reasoning)),
-                        )))
-                        .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ToolCall {
-                            tool_call,
-                            internal_call_id,
-                        },
-                    ) => {
-                        if send(SessionUpdate::ToolCall(tool_call_start(
-                            &tool_call,
-                            &internal_call_id,
-                        )))
-                        .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    MultiTurnStreamItem::StreamAssistantItem(_) => {}
-                    MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                        tool_result,
-                        internal_call_id,
-                    }) => {
-                        if send(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                            ToolCallId::new(internal_call_id),
-                            ToolCallUpdateFields::new()
-                                .status(ToolCallStatus::Completed)
-                                .content(vec![tool_result_content(&tool_result)]),
-                        )))
-                        .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    MultiTurnStreamItem::CompletionCall(call) => {
-                        if let Some(size) = context_length {
-                            let _ = send(SessionUpdate::UsageUpdate(UsageUpdate::new(
-                                call.usage.input_tokens,
-                                u64::from(size),
-                            )));
-                        }
-                    }
-                    MultiTurnStreamItem::ToolExecutionCommitted { .. } => {}
-                    MultiTurnStreamItem::ModelTurnRetried { .. } => {}
-                    MultiTurnStreamItem::FinalResponse(response) => break Some(response),
-                },
-                Some(Err(error)) => {
-                    match &error {
-                        StreamingError::Prompt(prompt_error) => match prompt_error.as_ref() {
-                            PromptError::MaxTurnsError { chat_history, .. } => {
-                                // Keep the partial run: the next prompt
-                                // continues from where the budget ran out
-                                // instead of silently losing the whole turn.
-                                let mut sessions = state.sessions.lock().await;
-                                if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
-                                    session.history = chat_history.as_ref().clone();
-                                }
-                                drop(sessions);
-                                let _ = responder
-                                    .respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
-                            }
-                            PromptError::PromptCancelled { .. } => {
-                                let _ = responder
-                                    .respond(AcpPromptResponse::new(StopReason::Cancelled));
-                            }
-                            _ => fail!(error.to_string()),
-                        },
-                        _ => fail!(error.to_string()),
-                    }
-                    return;
-                }
-            },
+            // Commit this turn only on success: failed and cancelled runs
+            // leave the session history untouched.
+            let mut sessions = state.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
+                session.history = history;
+            }
+            let _ = responder.respond(AcpPromptResponse::new(StopReason::EndTurn));
         }
-    };
-
-    // Dropping the stream aborts the in-flight provider request; any already
-    // running filesystem tool call finishes and its result is discarded. The
-    // cancelled turn's history is not committed, matching the loop's semantics.
-    drop(stream);
-    if cancelled {
-        let _ = responder.respond(AcpPromptResponse::new(StopReason::Cancelled));
-        return;
-    }
-
-    let Some(response) = final_response else {
-        fail!("the agent stream ended without a final response");
-    };
-    if !emitted_text && !response.output.is_empty() {
-        let _ = send(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-            ContentBlock::Text(TextContent::new(response.output.clone())),
-        )));
-    }
-    // Commit this turn only on success: failed and cancelled runs leave the
-    // session history untouched, exactly like the base loop.
-    if let Some(messages) = response.messages() {
-        let mut sessions = state.sessions.lock().await;
-        if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
-            session.history = merge_history(history, messages.to_vec());
+        // The driver committed the sanitized partial history; the next prompt
+        // continues from where the budget ran out.
+        RunOutcome::MaxTurns => {
+            let mut sessions = state.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
+                session.history = history;
+            }
+            let _ = responder.respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
         }
+        RunOutcome::Cancelled => {
+            let _ = responder.respond(AcpPromptResponse::new(StopReason::Cancelled));
+        }
+        RunOutcome::Failed(message) => fail!(message),
     }
-    let _ = responder.respond(AcpPromptResponse::new(StopReason::EndTurn));
 }
 
-fn tool_call_start(tool_call: &rig::core::completion::message::ToolCall, id: &str) -> AcpToolCall {
-    let mut call = AcpToolCall::new(ToolCallId::new(id), tool_title(tool_call));
-    call.kind = tool_kind(&tool_call.function.name);
+fn tool_call_start(id: &str, name: &str, arguments: &serde_json::Value) -> AcpToolCall {
+    let mut call = AcpToolCall::new(ToolCallId::new(id), tool_title(name, arguments));
+    call.kind = tool_kind(name);
     call.status = ToolCallStatus::InProgress;
-    call.raw_input = Some(tool_call.function.arguments.clone());
+    call.raw_input = Some(arguments.clone());
     call
 }
 
-fn tool_title(tool_call: &rig::core::completion::message::ToolCall) -> String {
-    let name = &tool_call.function.name;
-    if let Some(detail) = first_string_argument(&tool_call.function.arguments) {
+fn tool_title(name: &str, arguments: &serde_json::Value) -> String {
+    if let Some(detail) = first_string_argument(arguments) {
         format!("{name} {detail}")
     } else {
-        name.clone()
+        name.to_owned()
     }
 }
 
@@ -672,7 +591,7 @@ fn tool_kind(name: &str) -> ToolKind {
     }
 }
 
-fn tool_result_content(result: &rig::core::completion::message::ToolResult) -> ToolCallContent {
+fn tool_result_content(result: &history::ToolResult) -> ToolCallContent {
     ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
         tool_result_text(&result.content),
     ))))
@@ -680,16 +599,10 @@ fn tool_result_content(result: &rig::core::completion::message::ToolResult) -> T
 
 /// Built-in tools produce model-facing text, which ACP displays verbatim.
 /// Keep JSON readable for additional tools without interpreting their schemas.
-fn tool_result_text(items: &[rig::core::completion::message::ToolResultContent]) -> String {
+fn tool_result_text(items: &[history::ToolResultContent]) -> String {
     items
         .iter()
-        .map(|item| match item {
-            rig::core::completion::message::ToolResultContent::Text(text) => text.text.clone(),
-            rig::core::completion::message::ToolResultContent::Json { value, .. } => {
-                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-            }
-            other => format!("{other:?}"),
-        })
+        .map(history::ToolResultContent::to_text)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -732,24 +645,21 @@ mod tests {
             workspace: Workspace::new(std::env::temp_dir()).unwrap(),
             history: Vec::new(),
             provider_name: "openai".into(),
-            models: vec![Model::new("gpt-x", "GPT X")],
+            models: vec![CatalogModel {
+                id: "gpt-x".into(),
+                name: Some("GPT X".into()),
+                description: None,
+                context_length: None,
+                max_output_tokens: None,
+            }],
             model: "gpt-x".into(),
             context_length: Some(128_000),
-            cancel: watch::channel(false).0,
+            cancel: run::cancel_channel().0,
         };
         let options = session.config_options(&["openai".into(), "llamafile".into()]);
         assert_eq!(options.len(), 2);
         assert_eq!(options[0].id.0.as_ref(), "provider");
         assert_eq!(options[1].id.0.as_ref(), "model");
-    }
-
-    #[test]
-    fn merge_history_prepends_session_history() {
-        let input = vec![Message::user("earlier")];
-        let run = vec![Message::user("now"), Message::assistant("reply")];
-        let merged = merge_history(input, run);
-        assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0], Message::user("earlier"));
     }
 
     #[test]
@@ -763,11 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_filesystem_results_match_model_and_acp_text() {
-        use rig::{
-            agent::AgentBuilder,
-            core::completion::message::UserContent,
-            test_utils::{MockCompletionModel, MockStreamEvent},
-        };
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
         use serde_json::json;
 
         let dir = tempfile::tempdir().unwrap();
@@ -801,39 +707,39 @@ mod tests {
             MockStreamEvent::final_response_with_total_tokens(1),
         ]);
         let model = MockCompletionModel::from_stream_turns(turns);
-        let agent = Workspace::new(dir.path())
-            .unwrap()
-            .register(AgentBuilder::new(model.clone()).default_max_turns(5))
-            .build();
-        let mut stream = agent.runner("read, search, edit, delete").stream().await;
+        let tools = Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = run::cancel_channel();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut history = Vec::new();
+        let outcome = run::run(
+            &model,
+            &run::RunParams::default(),
+            &tools,
+            &mut history,
+            "read, search, edit, delete",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "done"));
         let mut results = Vec::new();
-        let mut completed = false;
-        while let Some(item) = stream.next().await {
-            match item.unwrap() {
-                MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                    tool_result,
+        let events = events.lock().unwrap();
+        for event in events.iter() {
+            if let run::Event::ToolDone { name, result, .. } = event {
+                // The model-visible text and the ACP display text must match.
+                let ToolCallContent::Content(Content {
+                    content: ContentBlock::Text(display),
                     ..
-                }) => {
-                    assert_eq!(tool_result.content.len(), 1);
-                    let text = tool_result.content[0].as_text().expect("literal tool text");
-                    let ToolCallContent::Content(Content {
-                        content: ContentBlock::Text(display),
-                        ..
-                    }) = tool_result_content(&tool_result)
-                    else {
-                        panic!("ACP must display tool text");
-                    };
-                    assert_eq!(display.text, text);
-                    results.push((tool_result.name.clone(), text.to_owned()));
-                }
-                MultiTurnStreamItem::FinalResponse(response) => {
-                    assert_eq!(response.output, "done");
-                    completed = true;
-                }
-                _ => {}
+                }) = tool_result_content(result)
+                else {
+                    panic!("ACP must display tool text");
+                };
+                assert_eq!(result.content.len(), 1);
+                let model_text = history::ToolResultContent::to_text(&result.content[0]);
+                assert_eq!(display.text, model_text);
+                results.push((name.clone(), model_text));
             }
         }
-        assert!(completed);
         assert_eq!(results, [
             ("read".into(), "2: \n3:     let name = \"βeta\";\n\n...\n\nTruncated lines: 4-4. Use offset=4 to read further.".into()),
             ("grep".into(), "file.rs:\n  3:     let name = \"βeta\";".into()),
@@ -841,21 +747,20 @@ mod tests {
             ("delete".into(), "deleted: file.rs".into()),
         ]);
         // Verify what the next model request actually receives, not only the
-        // stream's display events. All four results must remain literal text.
+        // display events: all four results must remain literal text.
         let requests = model.requests();
         assert_eq!(requests.len(), 5);
-        let model_results = requests[4]
-            .chat_history
+        let model_results = crate::edge::rig_to_own(&requests[4].chat_history)
             .iter()
             .flat_map(|message| match message {
-                Message::User { content } => content
+                history::Message::User { content } => content
                     .iter()
                     .filter_map(|item| {
-                        if let UserContent::ToolResult(result) = item {
+                        if let history::UserContent::ToolResult(result) = item {
                             assert_eq!(result.content.len(), 1);
                             Some((
                                 result.name.clone(),
-                                result.content[0].as_text().unwrap().to_owned(),
+                                history::ToolResultContent::to_text(&result.content[0]),
                             ))
                         } else {
                             None
@@ -871,11 +776,9 @@ mod tests {
 
     #[test]
     fn tool_result_text_preserves_literal_json_and_errors() {
-        use rig::core::completion::message::{Text, ToolResultContent};
-
         for text in [r#"{"lines":[],"total_lines":0}"#, "file not found", ""] {
             assert_eq!(
-                tool_result_text(&[ToolResultContent::Text(Text::from(text))]),
+                tool_result_text(&[history::ToolResultContent::text(text)]),
                 text
             );
         }
@@ -883,7 +786,7 @@ mod tests {
 
     #[test]
     fn tool_result_text_pretty_prints_json_results() {
-        let items = vec![rig::core::completion::message::ToolResultContent::Json {
+        let items = vec![history::ToolResultContent::Json {
             value: serde_json::json!({ "path": "Cargo.lock", "total_lines": 2 }),
         }];
         let text = tool_result_text(&items);

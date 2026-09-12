@@ -5,9 +5,10 @@
 
 use std::collections::HashSet;
 
-use rig::completion::{CompletionModel, Message};
+use rig_core::completion::CompletionModel;
 
 use crate::config::{CompactionConfig, CompactionKind};
+use crate::history::Message;
 
 use super::estimate::estimate_tokens;
 use super::llm::llm_compact;
@@ -99,62 +100,23 @@ impl CompactionEngine {
 mod tests {
     use super::*;
     use crate::compaction::llm::LLM_SUMMARY_PREFIX;
-    use rig::completion::message::{
-        AssistantContent, Text, ToolCall, ToolCallId, ToolFunction, ToolResult as RigToolResult,
-        ToolResultContent, UserContent,
-    };
-    use rig::test_utils::{MockCompletionModel, MockTurn};
+    use crate::compaction::test_support::{assistant_text, tool_result_of, user};
+    use crate::history::AssistantContent;
+    use rig_core::test_utils::{MockCompletionModel, MockTurn};
 
     fn stage(kind: CompactionKind, context: f64) -> CompactionConfig {
         CompactionConfig { kind, context }
     }
 
-    fn user(text: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::Text(Text {
-                text: text.into(),
-                additional_params: None,
-            })],
-        }
-    }
-
-    fn assistant_text(text: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Text(Text {
-                text: text.into(),
-                additional_params: None,
-            })],
-        }
-    }
-
     fn tool_round(i: usize, output: &str) -> Vec<Message> {
         let id = format!("t{i}");
         vec![
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::ToolCall(ToolCall {
-                    id: ToolCallId::new_or_mint(&id),
-                    provider: None,
-                    function: ToolFunction {
-                        name: "bash".into(),
-                        arguments: serde_json::json!({"command": format!("echo {i}")}),
-                    },
-                    signature: None,
-                    additional_params: None,
-                })],
-            },
-            Message::User {
-                content: vec![UserContent::ToolResult(RigToolResult {
-                    call: ToolCallId::new_or_mint(&id),
-                    provider: None,
-                    name: "bash".into(),
-                    content: vec![ToolResultContent::Text(Text {
-                        text: output.into(),
-                        additional_params: None,
-                    })],
-                })],
-            },
+            crate::compaction::test_support::assistant_tool_args(
+                &id,
+                "bash",
+                serde_json::json!({"command": format!("echo {i}")}),
+            ),
+            tool_result_of(&id, output),
         ]
     }
 

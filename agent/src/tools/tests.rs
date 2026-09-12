@@ -1,10 +1,7 @@
 use std::fs;
 
-use rig::{
-    agent::{AgentBuilder, AgentHook, HookContext, ToolResultAction, ToolResultEvent},
-    test_utils::{MockCompletionModel, MockTurn},
-    tool::{IntoToolOutput, Tool, ToolContext, ToolErrorKind},
-};
+use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+use rig_core::tool::{IntoToolOutput, PortableTool, ToolErrorKind};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -16,12 +13,11 @@ fn workspace() -> (TempDir, Workspace) {
     (dir, workspace)
 }
 
-async fn invoke<T: Tool<Error = ToolExecutionError>>(tool: &T, args: Value) -> Result<T::Output> {
-    tool.call(
-        &mut ToolContext::default(),
-        serde_json::from_value(args).unwrap(),
-    )
-    .await
+async fn invoke<T>(tool: &T, args: Value) -> Result<T::Output>
+where
+    T: PortableTool<Error = ToolExecutionError>,
+{
+    tool.call(serde_json::from_value(args).unwrap()).await
 }
 
 #[tokio::test]
@@ -487,46 +483,75 @@ fn schemas_match_strict_arguments() {
 }
 
 #[tokio::test]
-async fn rig_loop_executes_all_seven_tools_and_returns_results_to_model() {
+async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
     let (_dir, workspace) = workspace();
     let path = workspace.root().join("file.txt");
     fs::write(&path, "old text\nsecond\n").unwrap();
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("1", "read", json!({"path":"file.txt"})),
-        MockTurn::tool_call("2", "grep", json!({"pattern":"old"})),
-        MockTurn::tool_call(
-            "3",
-            "edit",
-            json!({"path":"file.txt","old_string":"old","new_string":"new"}),
-        ),
-        MockTurn::tool_call(
-            "4",
-            "edit_lines",
-            json!({"path":"file.txt","start":2,"end":2,"new_string":"SECOND"}),
-        ),
-        MockTurn::tool_call(
-            "5",
-            "insert_lines",
-            json!({"path":"file.txt","line":2,"new_string":"inserted"}),
-        ),
-        MockTurn::tool_call(
-            "6",
-            "write",
-            json!({"path":"nested/dir/new.txt","content":"fresh\n"}),
-        ),
-        MockTurn::tool_call("7", "delete", json!({"path":"file.txt"})),
-        MockTurn::text("done"),
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("1", "read", json!({"path":"file.txt"})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::tool_call("2", "grep", json!({"pattern":"old"})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::tool_call(
+                "3",
+                "edit",
+                json!({"path":"file.txt","old_string":"old","new_string":"new"}),
+            ),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::tool_call(
+                "4",
+                "edit_lines",
+                json!({"path":"file.txt","start":2,"end":2,"new_string":"SECOND"}),
+            ),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::tool_call(
+                "5",
+                "insert_lines",
+                json!({"path":"file.txt","line":2,"new_string":"inserted"}),
+            ),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::tool_call(
+                "6",
+                "write",
+                json!({"path":"nested/dir/new.txt","content":"fresh\n"}),
+            ),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::tool_call("7", "delete", json!({"path":"file.txt"})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
     ]);
-    let agent = workspace
-        .register(AgentBuilder::new(model.clone()).default_max_turns(10))
-        .build();
-    let response = agent
-        .runner("read, search, edit, then delete file.txt")
-        .run()
-        .await
-        .unwrap();
-    assert_eq!(response.output(), "done");
-    assert_eq!(response.requests(), 8);
+    let tools = workspace.register();
+    let (_, cancel) = crate::run::cancel_channel();
+    let mut history = Vec::new();
+    let outcome = crate::run::run(
+        &model,
+        &crate::run::RunParams::default(),
+        &tools,
+        &mut history,
+        "read, search, edit, then delete file.txt",
+        &cancel,
+        &|_| {},
+    )
+    .await;
+    assert!(matches!(outcome, crate::run::RunOutcome::Done { ref reply } if reply == "done"));
+    assert_eq!(model.request_count(), 8);
     assert!(!path.exists());
     assert_eq!(
         fs::read_to_string(workspace.root().join("nested/dir/new.txt")).unwrap(),
@@ -558,42 +583,51 @@ async fn rig_loop_executes_all_seven_tools_and_returns_results_to_model() {
 }
 
 #[tokio::test]
-async fn rig_loop_preserves_permission_refusals() {
-    struct ObserveRefusal;
-    impl AgentHook for ObserveRefusal {
-        async fn on_tool_result(
-            &self,
-            _: &HookContext,
-            event: ToolResultEvent<'_>,
-        ) -> ToolResultAction {
-            let error = event
-                .raw_result
-                .refusal()
-                .expect("outside deletion must be refused");
-            assert_eq!(error.kind(), ToolErrorKind::PermissionDenied);
-            assert!(error.is_refusal());
-            ToolResultAction::Keep
-        }
-    }
+async fn dispatch_loop_preserves_permission_refusals() {
     let (_dir, workspace) = workspace();
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("1", "delete", json!({"path":"../outside"})),
-        MockTurn::text("permission denied"),
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("1", "delete", json!({"path":"../outside"})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
+        vec![
+            MockStreamEvent::text("permission denied"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ],
     ]);
-    let agent = workspace
-        .register(AgentBuilder::new(model.clone()).default_max_turns(2))
-        .build();
-    // Rig records a denied tool result; the next model turn can explain it.
-    let response = agent
-        .runner("delete outside")
-        .add_hook(ObserveRefusal)
-        .run()
-        .await
-        .unwrap();
-    assert_eq!(response.output(), "permission denied");
+    let tools = workspace.register();
+    let (_, cancel) = crate::run::cancel_channel();
+    let mut history = Vec::new();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let outcome = crate::run::run(
+        &model,
+        &crate::run::RunParams::default(),
+        &tools,
+        &mut history,
+        "delete outside",
+        &cancel,
+        &|event| events.lock().unwrap().push(event),
+    )
+    .await;
+    assert!(
+        matches!(outcome, crate::run::RunOutcome::Done { ref reply } if reply == "permission denied")
+    );
     assert_eq!(model.request_count(), 2);
-    let history = serde_json::to_string(&model.requests()[1].chat_history).unwrap();
-    assert!(history.contains("paths must remain inside the workspace"));
+    // The refusal is recorded as an errored tool result; the next model turn
+    // can explain it.
+    let events = events.lock().unwrap();
+    let refused = events
+        .iter()
+        .find_map(|event| match event {
+            crate::run::Event::ToolDone { result, .. } => Some(result),
+            _ => None,
+        })
+        .expect("a tool result event");
+    assert!(refused.is_error);
+    assert!(refused.content.iter().any(|item| {
+        item.to_text()
+            .contains("paths must remain inside the workspace")
+    }));
 }
 
 #[tokio::test]

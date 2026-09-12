@@ -1,6 +1,6 @@
 use std::{fs, io::Write, path::Path};
 
-use rig::tool::{IntoToolOutput, ToolOutput};
+use rig_core::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
