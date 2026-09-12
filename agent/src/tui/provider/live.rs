@@ -533,13 +533,24 @@ async fn run_turn(
         if streamed_text {
             let _ = tx.send(AgentEvent::AssistantEnd);
         }
-        let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+        // The stream closed without a final response or an error: surface it
+        // instead of ending the turn silently.
+        let _ = tx.send(AgentEvent::AssistantText(
+            "The agent stream ended without a final response.".into(),
+        ));
+        let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
         return;
     };
     if streamed_text {
         let _ = tx.send(AgentEvent::AssistantEnd);
     } else if !response.output.is_empty() {
         let _ = tx.send(AgentEvent::AssistantText(response.output.clone()));
+    } else {
+        // A turn that produced nothing visible (a reasoning-only or truncated
+        // response) must not end silently either.
+        let _ = tx.send(AgentEvent::AssistantText(
+            "The model returned an empty response. Send another message to continue.".into(),
+        ));
     }
     // Commit this turn only on success, exactly like the base loop.
     if let Some(messages) = response.messages() {

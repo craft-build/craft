@@ -8,6 +8,7 @@ pub mod provider;
 mod ui;
 
 use std::io;
+use std::time::Duration;
 
 use crossterm::ExecutableCommand;
 use crossterm::event::{
@@ -71,6 +72,11 @@ async fn drive<P: Provider>(
 
     let mut app = App::new();
 
+    // Repaint on a fixed cadence so the status indicator animates even when
+    // nothing is streaming (e.g. a long thinking block).
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             Some(ev) = input_rx.recv() => {
@@ -84,6 +90,7 @@ async fn drive<P: Provider>(
                 }
             }
             Some(ev) = evt_rx.recv() => app.handle_event(ev),
+            _ = tick.tick() => {}
             else => break,
         }
         if app.should_quit {

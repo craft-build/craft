@@ -17,6 +17,7 @@ use crate::tui::app::App;
 const SIDEBAR_WIDTH: u16 = 34;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    app.status_tick = app.status_tick.wrapping_add(1);
     let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(theme::BG_APP)),
@@ -320,6 +321,31 @@ mod tests {
         );
         // And the frame snapshot holds the selectable text.
         assert!(app.frame_text[1].contains("Looking at the refresh path"));
+    }
+
+    #[test]
+    fn status_indicator_reflects_and_animates_with_agent_status() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut app = seeded_app();
+
+        app.handle_event(AgentEvent::StatusChanged(Status::Running));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let first = buffer_text(&terminal);
+        assert!(first.contains("running"));
+
+        // The spinner frame advances with the tick counter.
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let second = buffer_text(&terminal);
+        assert!(second.contains("running"));
+        assert_ne!(first, second, "spinner frame changes between draws");
+
+        app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("awaiting approval"));
+
+        app.handle_event(AgentEvent::StatusChanged(Status::Failed));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("failed"));
     }
 
     #[test]

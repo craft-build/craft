@@ -121,6 +121,8 @@ pub struct App {
     pub plan: Vec<PlanItem>,
     pub files: Vec<TouchedFile>,
     pub status: Status,
+    /// Animation frame counter for the status indicator (advanced per frame).
+    pub status_tick: usize,
     pub token_label: String,
     /// True while a streamed [`Message::Assistant`] is still being appended to.
     assistant_open: bool,
@@ -177,6 +179,7 @@ impl App {
             plan: Vec::new(),
             files: Vec::new(),
             status: Status::Done,
+            status_tick: 0,
             token_label: "…".into(),
             assistant_open: false,
             models: seed_models(),

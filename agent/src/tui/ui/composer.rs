@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Paragraph};
 
 use super::theme;
 use crate::tui::app::App;
+use crate::tui::provider::Status;
 
 /// Max text rows the composer grows to before it scrolls instead of expanding.
 pub const MAX_TEXT_ROWS: usize = 12;
@@ -136,15 +137,35 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let tertiary = Style::default().fg(theme::TEXT_TERTIARY);
     let (model, provider) = app.model();
     let sep = || Span::styled(" · ", tertiary);
-    let left = vec![
-        Span::styled("  ········  esc interrupt", tertiary),
+    const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let indicator: Vec<Span<'_>> = match app.status {
+        Status::Thinking | Status::Running | Status::WaitingApproval => {
+            let frame = SPINNER[app.status_tick % SPINNER.len()];
+            let word = match app.status {
+                Status::Thinking => "thinking",
+                Status::Running => "running",
+                _ => "awaiting approval",
+            };
+            vec![
+                Span::styled(format!("  {frame} "), Style::default().fg(theme::ACCENT)),
+                Span::styled(format!("{word}  esc interrupt"), tertiary),
+            ]
+        }
+        Status::Failed => vec![
+            Span::styled("  ✖ ", Style::default().fg(theme::DANGER)),
+            Span::styled("failed  esc interrupt", tertiary),
+        ],
+        Status::Done => vec![Span::styled("  ········  esc interrupt", tertiary)],
+    };
+    let mut left = indicator;
+    left.extend([
         sep(),
         Span::styled(model, Style::default().fg(theme::BLUE_400)),
         sep(),
         Span::styled(provider, tertiary),
         sep(),
         Span::styled(app.effort(), Style::default().fg(theme::WARNING)),
-    ];
+    ]);
     let right = format!("{}  ctrl+p commands  ", app.token_label);
     let width = area.width as usize;
     let max_left = width.saturating_sub(right.chars().count() + 1);
