@@ -1,13 +1,13 @@
 //! Composer (input box), status bar and footer hint row.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
 
-use crate::app::App;
 use super::theme;
+use crate::tui::app::App;
 
 /// Max text rows the composer grows to before it scrolls instead of expanding.
 pub const MAX_TEXT_ROWS: usize = 12;
@@ -26,14 +26,19 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         width: area.width.saturating_sub(2),
         height: area.height,
     };
-    f.render_widget(Block::default().style(Style::default().bg(theme::BG_SURFACE)), inset);
+    f.render_widget(
+        Block::default().style(Style::default().bg(theme::BG_SURFACE)),
+        inset,
+    );
 
     if inset.height < 3 || inset.width < 9 {
         return;
     }
     let bar_x = inset.x + 1;
     let text_x = inset.x + TEXT_LEFT_PAD as u16;
-    let text_w = inset.width.saturating_sub((TEXT_LEFT_PAD + TEXT_RIGHT_PAD) as u16) as usize;
+    let text_w = inset
+        .width
+        .saturating_sub((TEXT_LEFT_PAD + TEXT_RIGHT_PAD) as u16) as usize;
     let view_rows = (inset.height - 2) as usize; // 1 padding row top and bottom
 
     // Accent bar spanning the full box height, like posted user messages.
@@ -43,7 +48,12 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
                 "▎",
                 Style::default().fg(theme::ACCENT).bg(theme::BG_SURFACE),
             ))),
-            Rect { x: bar_x, y: inset.y + i, width: 1, height: 1 },
+            Rect {
+                x: bar_x,
+                y: inset.y + i,
+                width: 1,
+                height: 1,
+            },
         );
     }
 
@@ -68,18 +78,28 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         .saturating_sub(view_rows.saturating_sub(1))
         .min(rows.len().saturating_sub(view_rows));
 
-    let text_style = Style::default().fg(theme::TEXT_PRIMARY).bg(theme::BG_SURFACE);
+    let text_style = Style::default()
+        .fg(theme::TEXT_PRIMARY)
+        .bg(theme::BG_SURFACE);
     for (i, &(s, e)) in rows.iter().enumerate().skip(offset).take(view_rows) {
         let y = inset.y + 1 + (i - offset) as u16;
         let line: String = chars[s..e].iter().collect();
         let w = line.chars().count();
         let mut spans = vec![Span::styled(line, text_style)];
         if w < text_w {
-            spans.push(Span::styled(" ".repeat(text_w - w), Style::default().bg(theme::BG_SURFACE)));
+            spans.push(Span::styled(
+                " ".repeat(text_w - w),
+                Style::default().bg(theme::BG_SURFACE),
+            ));
         }
         f.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect { x: text_x, y, width: text_w as u16, height: 1 },
+            Rect {
+                x: text_x,
+                y,
+                width: text_w as u16,
+                height: 1,
+            },
         );
     }
 
@@ -88,9 +108,16 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "Message Craft…",
-                Style::default().fg(theme::TEXT_TERTIARY).bg(theme::BG_SURFACE),
+                Style::default()
+                    .fg(theme::TEXT_TERTIARY)
+                    .bg(theme::BG_SURFACE),
             ))),
-            Rect { x: text_x, y: inset.y + 1, width: text_w as u16, height: 1 },
+            Rect {
+                x: text_x,
+                y: inset.y + 1,
+                width: text_w as u16,
+                height: 1,
+            },
         );
     }
 
@@ -130,8 +157,8 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Clip a span list to `max` display cells, ending with an ellipsis if cut.
-fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> (Vec<Span<'static>>, usize) {
-    let mut out: Vec<Span<'static>> = Vec::new();
+fn truncate_spans<'a>(spans: Vec<Span<'a>>, max: usize) -> (Vec<Span<'a>>, usize) {
+    let mut out: Vec<Span<'a>> = Vec::new();
     let mut used = 0;
     for span in spans {
         let len = span.content.chars().count();
@@ -148,5 +175,3 @@ fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> (Vec<Span<'static>>,
     }
     (out, used)
 }
-
-

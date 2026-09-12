@@ -1,13 +1,13 @@
 //! Right sidebar: cwd·branch, Plan checklist, Files touched.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
-use ratatui::Frame;
 
-use crate::app::App;
 use super::theme;
+use crate::tui::app::App;
 
 fn truncate(s: &str, width: usize) -> String {
     let n = s.chars().count();
@@ -22,13 +22,18 @@ fn truncate(s: &str, width: usize) -> String {
 }
 
 fn divider(width: usize) -> Line<'static> {
-    Line::from(Span::styled("─".repeat(width), Style::default().fg(theme::BORDER_SUBTLE)))
+    Line::from(Span::styled(
+        "─".repeat(width),
+        Style::default().fg(theme::BORDER_SUBTLE),
+    ))
 }
 
 fn heading(label: &str) -> Line<'static> {
     Line::from(Span::styled(
         label.to_uppercase(),
-        Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme::TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -45,23 +50,33 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let put = |f: &mut Frame, line: Line<'static>, y: u16| {
-        f.render_widget(Paragraph::new(line), Rect { x, y, width: w as u16, height: 1 });
+        f.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x,
+                y,
+                width: w as u16,
+                height: 1,
+            },
+        );
     };
 
     // cwd · branch
     put(
         f,
-        Line::from(vec![
-            Span::styled(truncate(&app.cwd, w), Style::default().fg(theme::TEXT_TERTIARY)),
-        ]),
+        Line::from(vec![Span::styled(
+            truncate(&app.cwd, w),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )]),
         y,
     );
     y += 1;
     put(
         f,
-        Line::from(vec![
-            Span::styled(truncate(&app.branch, w), Style::default().fg(theme::TEXT_TERTIARY)),
-        ]),
+        Line::from(vec![Span::styled(
+            truncate(&app.branch, w),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )]),
         y,
     );
     y += 2;

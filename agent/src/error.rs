@@ -96,6 +96,13 @@ pub enum Error {
     AcpConnection {
         source: agent_client_protocol::Error,
     },
+
+    #[snafu(display("{context} failed"))]
+    #[snafu(visibility(pub))] // used by the binary's `#[snafu::report]` main
+    Tui {
+        context: &'static str,
+        source: std::io::Error,
+    },
 }
 
 /// Box an arbitrary Rig provider error into [`Error::ProviderClient`].

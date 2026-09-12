@@ -2,7 +2,7 @@
 
 use ratatui::style::Color;
 
-use crate::provider::Tone;
+use crate::tui::provider::Tone;
 
 // Surfaces
 pub const BG_APP: Color = Color::Rgb(0x06, 0x09, 0x11); // ink-950
@@ -46,6 +46,3 @@ pub fn tone_color(tone: Tone) -> Color {
         Tone::Neutral => TEXT_TERTIARY,
     }
 }
-
-
-

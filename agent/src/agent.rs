@@ -27,7 +27,15 @@
 //! # }
 //! ```
 
-use rig::agent::{Agent, AgentBuilder, ModelHandle, WithBuilderTools};
+use rig::agent::{
+    Agent, AgentBuilder, AgentHook, HookContext, ModelHandle, WithBuilderTools,
+    hook::{
+        CompletionCall as CompletionCallEvent, CompletionCallAction, CompletionResponse,
+        ObservationAction, ToolCall as ToolCallEvent, ToolCallAction,
+    },
+};
+use rig::completion::Message;
+use tokio::sync::watch;
 
 use crate::{config::AgentConfig, error::Result, providers::Provider, tools::Workspace};
 
@@ -58,6 +66,60 @@ pub fn builder(
 ) -> Result<AgentBuilder<WithBuilderTools>> {
     config.validate()?;
     Ok(workspace.register(configure(provider.completion_model(model)?, config)))
+}
+
+/// Stops the run at the next hook boundary once the host cancels.
+///
+/// Shared by the interactive surfaces (ACP sessions and the TUI): cancelling
+/// drops the in-flight turn without committing its history, matching the base
+/// loop's "failed runs leave history untouched" semantics.
+pub struct CancelHook(pub watch::Receiver<bool>);
+
+impl CancelHook {
+    fn cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
+}
+
+impl AgentHook for CancelHook {
+    async fn on_completion_call(
+        &self,
+        _: &HookContext,
+        _: CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        if self.cancelled() {
+            CompletionCallAction::stop("cancelled by client")
+        } else {
+            CompletionCallAction::Continue
+        }
+    }
+
+    async fn on_completion_response(
+        &self,
+        _: &HookContext,
+        _: CompletionResponse<'_>,
+    ) -> ObservationAction {
+        if self.cancelled() {
+            ObservationAction::stop("cancelled by client")
+        } else {
+            ObservationAction::Continue
+        }
+    }
+
+    async fn on_tool_call(&self, _: &HookContext, _: ToolCallEvent<'_>) -> ToolCallAction {
+        if self.cancelled() {
+            ToolCallAction::Stop("cancelled by client".into())
+        } else {
+            ToolCallAction::Run
+        }
+    }
+}
+
+/// The run transcript covers only this turn; prepend the caller-owned history.
+pub fn merge_history(input: Vec<Message>, run: Vec<Message>) -> Vec<Message> {
+    let mut merged = input;
+    merged.extend(run);
+    merged
 }
 
 fn configure(model: ModelHandle, config: &AgentConfig) -> AgentBuilder {

@@ -1,14 +1,14 @@
 //! Overlays: slash menu, model menu, command palette, confirm dialog.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
-use ratatui::Frame;
 
-use crate::app::{App, MODELS};
 use super::messages::wrap_text;
 use super::theme;
+use crate::tui::app::App;
 
 fn dim(f: &mut Frame, area: Rect) {
     // Clear first: a bg-only Block would leave the underlying characters visible.
@@ -40,7 +40,11 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
         if i as u16 >= area.height {
             break;
         }
-        let bg = if i == selected { theme::BG_OVERLAY } else { theme::BG_RAISED };
+        let bg = if i == selected {
+            theme::BG_OVERLAY
+        } else {
+            theme::BG_RAISED
+        };
         let mut spans = spans.clone();
         let w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         if w < area.width as usize {
@@ -52,7 +56,12 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
         let style = Style::default().bg(bg);
         f.render_widget(
             Paragraph::new(Line::from(spans)).style(style),
-            Rect { x: area.x, y: area.y + i as u16, width: area.width, height: 1 },
+            Rect {
+                x: area.x,
+                y: area.y + i as u16,
+                width: area.width,
+                height: 1,
+            },
         );
     }
 }
@@ -73,14 +82,20 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
         height: n,
     };
     f.render_widget(Clear, area);
-    f.render_widget(Block::default().style(Style::default().bg(theme::BG_RAISED)), area);
+    f.render_widget(
+        Block::default().style(Style::default().bg(theme::BG_RAISED)),
+        area,
+    );
     let rows: Vec<Vec<Span<'static>>> = items
         .iter()
         .take(6)
         .map(|(cmd, desc)| {
             vec![
                 Span::styled(format!(" {cmd}"), Style::default().fg(theme::CYAN)),
-                Span::styled(format!("  {desc}"), Style::default().fg(theme::TEXT_TERTIARY)),
+                Span::styled(
+                    format!("  {desc}"),
+                    Style::default().fg(theme::TEXT_TERTIARY),
+                ),
             ]
         })
         .collect();
@@ -89,8 +104,19 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
 
 /// Model picker, opened with ctrl+l / /model / palette.
 pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
-    let Some(selected) = app.model_menu else { return };
-    let n = MODELS.len() as u16;
+    let Some(selected) = app.model_menu else {
+        return;
+    };
+    if app.models.is_empty() {
+        return;
+    }
+    // Large real catalogs would otherwise paint over the chat and composer:
+    // cap the menu to the rows above the composer and window it around the
+    // selected row.
+    let available = bottom.y.saturating_sub(chat.y + 2) as usize;
+    let visible = app.models.len().min(available.max(1));
+    let start = selected.min(app.models.len().saturating_sub(visible));
+    let n = visible as u16;
     let area = Rect {
         x: chat.x + 2,
         y: bottom.y.saturating_sub(n + 2),
@@ -101,11 +127,11 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     let block = boxed(area);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let rows: Vec<Vec<Span<'static>>> = MODELS
+    let rows: Vec<Vec<Span<'static>>> = app
+        .models
         .iter()
         .enumerate()
-        .map(|(i, (name, provider))| {
-            let (name, provider) = (*name, *provider);
+        .map(|(i, choice)| {
             let marker = if i == app.model_idx { "● " } else { "  " };
             vec![
                 Span::styled(
@@ -116,20 +142,33 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
                         theme::BG_RAISED
                     }),
                 ),
-                Span::styled(name.to_string(), Style::default().fg(theme::TEXT_PRIMARY)),
                 Span::styled(
-                    format!("  {provider}"),
+                    choice.label.clone(),
+                    Style::default().fg(theme::TEXT_PRIMARY),
+                ),
+                Span::styled(
+                    format!("  {}", choice.provider_label),
                     Style::default().fg(theme::TEXT_TERTIARY),
                 ),
             ]
         })
         .collect();
-    render_rows(f, &rows, selected, Rect { y: inner.y + 1, ..inner });
+    render_rows(
+        f,
+        &rows[start..start + visible],
+        selected - start,
+        Rect {
+            y: inner.y + 1,
+            ..inner
+        },
+    );
 }
 
 /// ctrl+p command palette, centered near the top.
 pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
-    let Some((query, selected)) = app.palette.clone() else { return };
+    let Some((query, selected)) = app.palette.clone() else {
+        return;
+    };
     dim(f, area);
 
     let items = app.palette_items();
@@ -148,12 +187,21 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, rect);
 
     // query row (after the top padding row)
-    let qrow = Rect { x: inner.x + 1, y: inner.y + 1, width: inner.width.saturating_sub(2), height: 1 };
+    let qrow = Rect {
+        x: inner.x + 1,
+        y: inner.y + 1,
+        width: inner.width.saturating_sub(2),
+        height: 1,
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().fg(theme::CYAN)),
             Span::styled(
-                if query.is_empty() { "Type a command…".to_string() } else { query.clone() },
+                if query.is_empty() {
+                    "Type a command…".to_string()
+                } else {
+                    query.clone()
+                },
                 Style::default().fg(if query.is_empty() {
                     theme::TEXT_TERTIARY
                 } else {
@@ -180,7 +228,12 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
             "─".repeat(content.width as usize),
             Style::default().fg(theme::BORDER_SUBTLE),
         ))),
-        Rect { x: content.x, y: div_y, width: content.width, height: 1 },
+        Rect {
+            x: content.x,
+            y: div_y,
+            width: content.width,
+            height: 1,
+        },
     );
 
     let rows: Vec<Vec<Span<'static>>> = items
@@ -202,22 +255,29 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
         f,
         &rows,
         selected.min(items.len().saturating_sub(1)),
-        Rect { x: content.x, y: div_y + 1, width: content.width, height: n },
+        Rect {
+            x: content.x,
+            y: div_y + 1,
+            width: content.width,
+            height: n,
+        },
     );
 }
 
 /// "Reject this diff?" confirmation dialog.
 pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
-    let Some(id) = &app.confirm_reject else { return };
+    let Some(id) = &app.confirm_reject else {
+        return;
+    };
     let file = app
         .messages
         .iter()
         .find_map(|m| match m {
-            crate::app::Message::Tool { id: mid, kind: crate::provider::ToolKind::Edit { path }, .. }
-                if mid == id =>
-            {
-                Some(path.clone())
-            }
+            crate::tui::app::Message::Tool {
+                id: mid,
+                kind: crate::tui::provider::ToolKind::Edit { path },
+                ..
+            } if mid == id => Some(path.clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -235,9 +295,16 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "Reject this diff?",
-            Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
         ))),
-        Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 },
+        Rect {
+            x: inner.x + 1,
+            y,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
     );
     y += 2;
     let body = format!("This discards Craft's proposed changes to {file}.");
@@ -248,7 +315,12 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
                 chunk,
                 Style::default().fg(theme::TEXT_SECONDARY),
             ))),
-            Rect { x: inner.x + 1, y: y + i as u16, width: w as u16, height: 1 },
+            Rect {
+                x: inner.x + 1,
+                y: y + i as u16,
+                width: w as u16,
+                height: 1,
+            },
         );
     }
     // actions, right-aligned on the last row
@@ -268,5 +340,3 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
         },
     );
 }
-
-

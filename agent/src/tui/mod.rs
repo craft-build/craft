@@ -1,25 +1,31 @@
+//! Craft's interactive terminal UI: the default surface of the `craft` binary.
+//!
+//! The UI renders whatever a [`provider::Provider`] streams in; the live
+//! backend is [`provider::live::CraftProvider`].
+
 mod app;
-mod provider;
+pub mod provider;
 mod ui;
 
 use std::io;
 
+use crossterm::ExecutableCommand;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyEventKind,
 };
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::ExecutableCommand;
-use ratatui::backend::CrosstermBackend;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use app::App;
-use provider::mock::MockProvider;
 use provider::{Command, Provider};
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
+/// Run the terminal UI against `provider` until the user quits.
+pub async fn run<P: Provider>(provider: P) -> io::Result<()> {
     enable_raw_mode()?;
     // Mouse capture: terminals then show the standard arrow pointer on hover
     // instead of the I-beam text cursor. Bracketed paste: multi-line pastes
@@ -37,15 +43,21 @@ async fn main() -> io::Result<()> {
         original_hook(info);
     }));
 
-    let result = run(&mut terminal).await;
+    let result = drive(&mut terminal, provider).await;
 
     disable_raw_mode()?;
-    io::stdout().execute(DisableBracketedPaste)?.execute(DisableMouseCapture)?.execute(LeaveAlternateScreen)?;
+    io::stdout()
+        .execute(DisableBracketedPaste)?
+        .execute(DisableMouseCapture)?
+        .execute(LeaveAlternateScreen)?;
     result
 }
 
-async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    let (cmd_tx, mut evt_rx): (mpsc::UnboundedSender<Command>, _) = MockProvider.start();
+async fn drive<P: Provider>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    provider: P,
+) -> io::Result<()> {
+    let (cmd_tx, mut evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Event>();

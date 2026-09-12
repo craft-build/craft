@@ -1,5 +1,5 @@
 //! MockProvider: replays the prototype's scripted "flaky session refresh"
-//! turn so the TUI can be developed without a real agent harness.
+//! turn. Kept for seam and UI tests (compiled in test builds only).
 
 use std::time::Duration;
 
@@ -18,7 +18,11 @@ const FILE: &str = "src/auth/refresh.ts";
 
 fn seed_plan() -> Vec<PlanItem> {
     vec![
-        PlanItem { label: "Read the refresh token path".into(), done: true, active: false },
+        PlanItem {
+            label: "Read the refresh token path".into(),
+            done: true,
+            active: false,
+        },
         PlanItem {
             label: "Find where concurrent refresh calls happen".into(),
             done: true,
@@ -29,19 +33,35 @@ fn seed_plan() -> Vec<PlanItem> {
             done: false,
             active: true,
         },
-        PlanItem { label: "Run the auth test suite".into(), done: true, active: false },
-        PlanItem { label: "Open PR against main".into(), done: false, active: false },
+        PlanItem {
+            label: "Run the auth test suite".into(),
+            done: true,
+            active: false,
+        },
+        PlanItem {
+            label: "Open PR against main".into(),
+            done: false,
+            active: false,
+        },
     ]
 }
 
 fn seed_files() -> Vec<TouchedFile> {
-    vec![TouchedFile { path: FILE.into(), status: "modified".into(), tone: Tone::Warning }]
+    vec![TouchedFile {
+        path: FILE.into(),
+        status: "modified".into(),
+        tone: Tone::Warning,
+    }]
 }
 
 fn read_call(id: &str) -> ToolCallData {
     ToolCallData {
         id: id.into(),
-        kind: ToolKind::Read { path: FILE.into(), summary: "38 lines".into() },
+        awaiting_approval: false,
+        kind: ToolKind::Read {
+            path: FILE.into(),
+            summary: "38 lines".into(),
+        },
         lines: [
             "export async function refreshToken(old: string) {",
             "  const res = await api.post('/auth/refresh', { token: old })",
@@ -50,7 +70,10 @@ fn read_call(id: &str) -> ToolCallData {
             "}",
         ]
         .iter()
-        .map(|t| ToolLine { kind: LineKind::Context, text: t.to_string() })
+        .map(|t| ToolLine {
+            kind: LineKind::Context,
+            text: t.to_string(),
+        })
         .collect(),
     }
 }
@@ -58,6 +81,7 @@ fn read_call(id: &str) -> ToolCallData {
 fn grep_call(id: &str) -> ToolCallData {
     ToolCallData {
         id: id.into(),
+        awaiting_approval: false,
         kind: ToolKind::Grep {
             pattern: "refreshToken(".into(),
             summary: "6 matches in 4 files".into(),
@@ -71,7 +95,10 @@ fn grep_call(id: &str) -> ToolCallData {
             "src/hooks/useAuth.ts:19",
         ]
         .iter()
-        .map(|t| ToolLine { kind: LineKind::Context, text: t.to_string() })
+        .map(|t| ToolLine {
+            kind: LineKind::Context,
+            text: t.to_string(),
+        })
         .collect(),
     }
 }
@@ -80,21 +107,34 @@ fn edit_call(id: &str) -> ToolCallData {
     use LineKind::*;
     ToolCallData {
         id: id.into(),
+        awaiting_approval: true,
         kind: ToolKind::Edit { path: FILE.into() },
         lines: [
             (Context, "export async function refreshToken(old: string) {"),
-            (Del, "  const res = await api.post('/auth/refresh', { token: old })"),
+            (
+                Del,
+                "  const res = await api.post('/auth/refresh', { token: old })",
+            ),
             (Del, "  session.token = res.token"),
             (Del, "  return res.token"),
             (Add, "  if (inflight) return inflight"),
-            (Add, "  inflight = api.post('/auth/refresh', { token: old })"),
-            (Add, "    .then(res => { session.token = res.token; return res.token })"),
+            (
+                Add,
+                "  inflight = api.post('/auth/refresh', { token: old })",
+            ),
+            (
+                Add,
+                "    .then(res => { session.token = res.token; return res.token })",
+            ),
             (Add, "    .finally(() => { inflight = null })"),
             (Add, "  return inflight"),
             (Context, "}"),
         ]
         .iter()
-        .map(|(kind, t)| ToolLine { kind: *kind, text: t.to_string() })
+        .map(|(kind, t)| ToolLine {
+            kind: *kind,
+            text: t.to_string(),
+        })
         .collect(),
     }
 }
@@ -102,7 +142,10 @@ fn edit_call(id: &str) -> ToolCallData {
 fn bash_call(id: &str) -> ToolCallData {
     ToolCallData {
         id: id.into(),
-        kind: ToolKind::Bash { cmd: "pnpm test auth/refresh.spec.ts".into() },
+        awaiting_approval: false,
+        kind: ToolKind::Bash {
+            cmd: "pnpm test auth/refresh.spec.ts".into(),
+        },
         lines: vec![
             ToolLine {
                 kind: LineKind::Muted,
@@ -130,7 +173,12 @@ async fn emit(tx: &mpsc::UnboundedSender<AgentEvent>, ms: u64, ev: AgentEvent) {
 /// The full scripted first turn, ported from the prototype's seed session.
 async fn run_first_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
     emit(&tx, 500, AgentEvent::StatusChanged(Status::Thinking)).await;
-    emit(&tx, 800, AgentEvent::AssistantText("Looking at the refresh path first.".into())).await;
+    emit(
+        &tx,
+        800,
+        AgentEvent::AssistantText("Looking at the refresh path first.".into()),
+    )
+    .await;
     emit(&tx, 500, AgentEvent::StatusChanged(Status::Running)).await;
     emit(&tx, 400, AgentEvent::ToolCall(read_call("mock-1-read"))).await;
     emit(&tx, 700, AgentEvent::ToolCall(grep_call("mock-1-grep"))).await;
@@ -151,8 +199,7 @@ async fn run_first_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
         &tx,
         500,
         AgentEvent::AssistantText(
-            "All 6 tests pass. Diff above is ready — approve it (^Y) and I'll open the PR."
-                .into(),
+            "All 6 tests pass. Diff above is ready — approve it (^Y) and I'll open the PR.".into(),
         ),
     )
     .await;
@@ -163,12 +210,21 @@ async fn run_first_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
 /// Follow-up turns: the same canned acknowledgement the prototype uses.
 async fn run_canned_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
     emit(&tx, 500, AgentEvent::StatusChanged(Status::Thinking)).await;
-    emit(&tx, 900, AgentEvent::AssistantText("Got it — looking into that now.".into())).await;
+    emit(
+        &tx,
+        900,
+        AgentEvent::AssistantText("Got it — looking into that now.".into()),
+    )
+    .await;
     emit(&tx, 300, AgentEvent::StatusChanged(Status::Done)).await;
 }
 
 /// Initial state the provider pushes as soon as it starts.
-fn emit_initial_state(tx: &mpsc::UnboundedSender<AgentEvent>, plan: &[PlanItem], files: &[TouchedFile]) {
+fn emit_initial_state(
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    plan: &[PlanItem],
+    files: &[TouchedFile],
+) {
     let _ = tx.send(AgentEvent::PlanSet(plan.to_vec()));
     let _ = tx.send(AgentEvent::FilesSet(files.to_vec()));
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
@@ -260,6 +316,9 @@ impl Provider for MockProvider {
                     Command::Clear => {
                         // Context cleared conceptually; mock keeps its script state.
                     }
+                    Command::SelectModel { .. } => {
+                        // Fixed script: model selection is outside the demo.
+                    }
                 }
             }
         });
@@ -291,7 +350,8 @@ mod tests {
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, AgentEvent::FilesSet(_)));
 
-        tx.send(Command::SendMessage("fix the flaky refresh".into())).unwrap();
+        tx.send(Command::SendMessage("fix the flaky refresh".into()))
+            .unwrap();
         let mut saw_read = false;
         let mut saw_grep = false;
         let mut saw_edit = false;

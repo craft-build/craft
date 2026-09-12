@@ -1,29 +1,32 @@
 //! Layout composition: chat column (messages / composer / status / footer)
 //! plus the optional right sidebar, with overlays on top.
 
-pub mod theme;
 mod composer;
 mod messages;
 mod overlays;
 mod sidebar;
+pub mod theme;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders};
-use ratatui::Frame;
 
-use crate::app::App;
+use crate::tui::app::App;
 
 const SIDEBAR_WIDTH: u16 = 34;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    f.render_widget(Block::default().style(Style::default().bg(theme::BG_APP)), area);
+    f.render_widget(
+        Block::default().style(Style::default().bg(theme::BG_APP)),
+        area,
+    );
 
     let show_sidebar = app.sidebar_open && area.width >= 80;
     let (chat, side) = if show_sidebar {
-        let cols =
-            Layout::horizontal([Constraint::Min(60), Constraint::Length(SIDEBAR_WIDTH)]).split(area);
+        let cols = Layout::horizontal([Constraint::Min(60), Constraint::Length(SIDEBAR_WIDTH)])
+            .split(area);
         (cols[0], Some(cols[1]))
     } else {
         (area, None)
@@ -51,10 +54,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // Nested layout (instead of manual offsets) so tiny terminals that shrink
     // `bottom` below BOTTOM_HEIGHT can't produce out-of-bounds rows.
     let sub = Layout::vertical([
-        Constraint::Length(1),         // border row
+        Constraint::Length(1),          // border row
         Constraint::Length(composer_h), // composer
-        Constraint::Length(1),         // status row
-        Constraint::Length(1),         // blank row
+        Constraint::Length(1),          // status row
+        Constraint::Length(1),          // blank row
     ])
     .split(bottom);
     let composer_area = sub[1];
@@ -110,11 +113,19 @@ fn render_selection(f: &mut Frame, app: &App) {
         if r < region.y || r >= region.y + region.height {
             continue;
         }
-        let Some(row) = app.frame_text.get(r as usize) else { continue };
-        let Some((first, last)) = crate::app::text_extent(row, region) else { continue };
+        let Some(row) = app.frame_text.get(r as usize) else {
+            continue;
+        };
+        let Some((first, last)) = crate::tui::app::text_extent(row, region) else {
+            continue;
+        };
         let (first, last) = (first as u16, last as u16);
         let row_from = if r == r1 { c1 } else { region.x };
-        let row_to = if r == r2 { c2 } else { region.x + region.width - 1 };
+        let row_to = if r == r2 {
+            c2
+        } else {
+            region.x + region.width - 1
+        };
         let from = row_from.max(first);
         let to = row_to.min(last);
         for c in from..=to {
@@ -128,20 +139,28 @@ fn render_selection(f: &mut Frame, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::App;
-    use crate::provider::{
-        AgentEvent, LineKind, PlanItem, Status, Tone, ToolCallData, ToolKind, ToolLine,
-        TouchedFile,
+    use crate::tui::app::App;
+    use crate::tui::provider::{
+        AgentEvent, LineKind, ModelChoice, PlanItem, Status, Tone, ToolCallData, ToolKind,
+        ToolLine, TouchedFile,
     };
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::Terminal;
 
     fn seeded_app() -> App {
         let mut app = App::new();
         app.handle_event(AgentEvent::PlanSet(vec![
-            PlanItem { label: "Read the refresh token path".into(), done: true, active: false },
-            PlanItem { label: "Guard refreshToken() with a mutex".into(), done: false, active: true },
+            PlanItem {
+                label: "Read the refresh token path".into(),
+                done: true,
+                active: false,
+            },
+            PlanItem {
+                label: "Guard refreshToken() with a mutex".into(),
+                done: false,
+                active: true,
+            },
         ]));
         app.handle_event(AgentEvent::FilesSet(vec![TouchedFile {
             path: "src/auth/refresh.ts".into(),
@@ -150,24 +169,48 @@ mod tests {
         }]));
         app.handle_event(AgentEvent::StatusChanged(Status::Done));
         app.handle_event(AgentEvent::TokenUsage("44.8K (4%)".into()));
-        app.handle_event(AgentEvent::AssistantText("Looking at the refresh path first.".into()));
+        app.handle_event(AgentEvent::AssistantText(
+            "Looking at the refresh path first.".into(),
+        ));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             id: "t1".into(),
-            kind: ToolKind::Read { path: "src/auth/refresh.ts".into(), summary: "38 lines".into() },
-            lines: vec![ToolLine { kind: LineKind::Context, text: "export async function refreshToken() {".into() }],
+            awaiting_approval: false,
+            kind: ToolKind::Read {
+                path: "src/auth/refresh.ts".into(),
+                summary: "38 lines".into(),
+            },
+            lines: vec![ToolLine {
+                kind: LineKind::Context,
+                text: "export async function refreshToken() {".into(),
+            }],
         }));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             id: "t2".into(),
-            kind: ToolKind::Edit { path: "src/auth/refresh.ts".into() },
+            awaiting_approval: true,
+            kind: ToolKind::Edit {
+                path: "src/auth/refresh.ts".into(),
+            },
             lines: vec![
-                ToolLine { kind: LineKind::Del, text: "  session.token = res.token".into() },
-                ToolLine { kind: LineKind::Add, text: "  if (inflight) return inflight".into() },
+                ToolLine {
+                    kind: LineKind::Del,
+                    text: "  session.token = res.token".into(),
+                },
+                ToolLine {
+                    kind: LineKind::Add,
+                    text: "  if (inflight) return inflight".into(),
+                },
             ],
         }));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             id: "t3".into(),
-            kind: ToolKind::Bash { cmd: "pnpm test auth/refresh.spec.ts".into() },
-            lines: vec![ToolLine { kind: LineKind::Success, text: "✓ all 6 tests passed".into() }],
+            awaiting_approval: false,
+            kind: ToolKind::Bash {
+                cmd: "pnpm test auth/refresh.spec.ts".into(),
+            },
+            lines: vec![ToolLine {
+                kind: LineKind::Success,
+                text: "✓ all 6 tests passed".into(),
+            }],
         }));
         app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));
         app
@@ -211,19 +254,70 @@ mod tests {
         assert!(text.contains("src/auth/refresh.ts"));
     }
 
+    /// A catalog larger than the space above the composer windows around the
+    /// selection instead of painting over the chat and composer rows.
+    #[test]
+    fn model_menu_windows_around_selection_for_large_catalogs() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut app = seeded_app();
+        let models: Vec<ModelChoice> = (0..30)
+            .map(|i| ModelChoice {
+                provider: "p".into(),
+                model: format!("m{i:02}"),
+                label: format!("m{i:02}"),
+                provider_label: "p".into(),
+            })
+            .collect();
+        app.handle_event(AgentEvent::CatalogSet {
+            models,
+            current: 25,
+        });
+        app.model_menu = Some(25);
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("m25"), "window keeps the selection visible");
+        assert!(text.contains("m29"), "window extends to the catalog tail");
+        assert!(!text.contains("m00"), "out-of-window rows are clipped");
+        assert!(!text.contains("m01"), "out-of-window rows are clipped");
+    }
+
     #[test]
     fn selection_highlights_cells() {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
         let mut app = seeded_app();
         // Drag right-to-left across part of the first assistant line (row 1).
-        let region = Rect { x: 0, y: 0, width: 120, height: 36 };
-        app.selection = Some(crate::app::Selection { anchor: (1, 12), head: (1, 4), region });
+        let region = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 36,
+        };
+        app.selection = Some(crate::tui::app::Selection {
+            anchor: (1, 12),
+            head: (1, 4),
+            region,
+        });
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
         // Cells inside the range are reversed, outside are not.
-        assert!(buf.cell((4, 1)).unwrap().modifier.contains(ratatui::style::Modifier::REVERSED));
-        assert!(buf.cell((12, 1)).unwrap().modifier.contains(ratatui::style::Modifier::REVERSED));
-        assert!(!buf.cell((13, 1)).unwrap().modifier.contains(ratatui::style::Modifier::REVERSED));
+        assert!(
+            buf.cell((4, 1))
+                .unwrap()
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+        assert!(
+            buf.cell((12, 1))
+                .unwrap()
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+        assert!(
+            !buf.cell((13, 1))
+                .unwrap()
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
         // And the frame snapshot holds the selectable text.
         assert!(app.frame_text[1].contains("Looking at the refresh path"));
     }

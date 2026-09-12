@@ -1,14 +1,14 @@
 //! Message list rendering: user / assistant / tool blocks, plus scrolling.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 
-use crate::app::{App, DiffState, Message};
-use crate::provider::{LineKind, ToolKind};
 use super::theme;
+use crate::tui::app::{App, DiffState, Message};
+use crate::tui::provider::{LineKind, ToolKind};
 
 const MARGIN: u16 = 2;
 const BODY_INDENT: usize = 4;
@@ -169,7 +169,7 @@ fn diff_badge(diff: Option<DiffState>) -> Option<(&'static str, ratatui::style::
 fn tool_block(
     kind: &ToolKind,
     _id: &str,
-    body: &[crate::provider::ToolLine],
+    body: &[crate::tui::provider::ToolLine],
     diff: Option<DiffState>,
     focused: bool,
     collapsed: bool,
@@ -177,7 +177,11 @@ fn tool_block(
     width: usize,
 ) -> Vec<Line<'static>> {
     // Hovered collapsible cards lift to a slightly lighter background.
-    let card_bg = if hovered { theme::BG_OVERLAY } else { theme::BG_SURFACE };
+    let card_bg = if hovered {
+        theme::BG_OVERLAY
+    } else {
+        theme::BG_SURFACE
+    };
     let surf = surface_style_with(card_bg);
     let marker = if focused { "▌" } else { " " };
     let marker_style = if focused {
@@ -215,9 +219,7 @@ fn tool_block(
     let badge = diff_badge(diff);
     let right = match (badge, kind) {
         (Some((text, color)), _) => Some((text.to_string(), color)),
-        (None, k) if k.collapsible() => {
-            Some((tool_summary(k), theme::TEXT_TERTIARY))
-        }
+        (None, k) if k.collapsible() => Some((tool_summary(k), theme::TEXT_TERTIARY)),
         _ => None,
     };
     if let Some((text, color)) = right {
@@ -258,10 +260,7 @@ fn tool_block(
                 ];
                 let w = spans_width(&spans);
                 if w < width {
-                    spans.push(Span::styled(
-                        " ".repeat(width - w),
-                        Style::default().bg(bg),
-                    ));
+                    spans.push(Span::styled(" ".repeat(width - w), Style::default().bg(bg)));
                 }
                 Line::from(spans)
             }
@@ -290,20 +289,22 @@ fn tool_block(
 
     // --- approve / reject actions for pending diffs ---
     if diff == Some(DiffState::Pending) {
-        let hint_fg = if focused { theme::SUCCESS } else { theme::TEXT_TERTIARY };
-        let rej_fg = if focused { theme::DANGER } else { theme::TEXT_TERTIARY };
+        let hint_fg = if focused {
+            theme::SUCCESS
+        } else {
+            theme::TEXT_TERTIARY
+        };
+        let rej_fg = if focused {
+            theme::DANGER
+        } else {
+            theme::TEXT_TERTIARY
+        };
         lines.push(pad_row(
             vec![
                 Span::styled(indent.clone(), surf),
-                Span::styled(
-                    "[ ^y approve ]",
-                    Style::default().fg(hint_fg).bg(card_bg),
-                ),
+                Span::styled("[ ^y approve ]", Style::default().fg(hint_fg).bg(card_bg)),
                 Span::styled("   ", surf),
-                Span::styled(
-                    "[ ^n reject ]",
-                    Style::default().fg(rej_fg).bg(card_bg),
-                ),
+                Span::styled("[ ^n reject ]", Style::default().fg(rej_fg).bg(card_bg)),
             ],
             width,
             surf,
@@ -343,7 +344,10 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // Blank spacer carrying the user-message accent bar, so the block's
     // left border reads as one continuous line.
     let bar_blank = |width: usize| {
-        user_line(vec![Span::styled("▎", Style::default().fg(theme::ACCENT))], width)
+        user_line(
+            vec![Span::styled("▎", Style::default().fg(theme::ACCENT))],
+            width,
+        )
     };
 
     let mut msg_starts = Vec::with_capacity(app.messages.len());
@@ -357,12 +361,19 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         match msg {
             Message::User(text) => lines.extend(user_block(text, width)),
             Message::Assistant(text) => lines.extend(assistant_block(text, width)),
-            Message::Tool { id, kind, lines: body, diff } => {
+            Message::Tool {
+                id,
+                kind,
+                lines: body,
+                diff,
+            } => {
                 let start = lines.len();
                 let collapsed = app.collapsed.iter().any(|c| c == id);
                 let focused = app.focused == Some(idx);
                 let hovered = app.hover_tool == Some(idx);
-                lines.extend(tool_block(kind, id, body, *diff, focused, collapsed, hovered, width));
+                lines.extend(tool_block(
+                    kind, id, body, *diff, focused, collapsed, hovered, width,
+                ));
                 if kind.collapsible() {
                     tool_ranges.push((idx, start, lines.len()));
                 }
@@ -439,7 +450,10 @@ mod tests {
 
     #[test]
     fn respects_explicit_newlines() {
-        assert_eq!(render("one\ntwo\n\nthree", 10), vec!["one", "two", "", "three"]);
+        assert_eq!(
+            render("one\ntwo\n\nthree", 10),
+            vec!["one", "two", "", "three"]
+        );
     }
 
     #[test]

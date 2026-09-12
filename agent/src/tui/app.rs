@@ -5,16 +5,30 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
-use crate::provider::{
-    AgentEvent, Command, PlanItem, Status, ToolCallData, ToolKind, ToolLine, TouchedFile,
+use crate::tui::provider::{
+    AgentEvent, Command, ModelChoice, PlanItem, Status, ToolCallData, ToolKind, ToolLine,
+    TouchedFile,
 };
 
-pub const MODELS: [(&str, &str); 4] = [
+/// Models shown before the provider's catalog arrives (or under the test mock).
+const SEED_MODELS: [(&str, &str); 4] = [
     ("GLM-5.3", "Zhipu AI Coding Plan"),
     ("Claude Sonnet 4.5", "Anthropic"),
     ("Claude Opus 4.1", "Anthropic"),
     ("DeepSeek V3.2", "DeepSeek"),
 ];
+
+fn seed_models() -> Vec<ModelChoice> {
+    SEED_MODELS
+        .iter()
+        .map(|(label, provider)| ModelChoice {
+            provider: provider.to_string(),
+            model: label.to_string(),
+            label: label.to_string(),
+            provider_label: provider.to_string(),
+        })
+        .collect()
+}
 
 pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
@@ -61,7 +75,13 @@ impl Message {
     }
 
     fn is_pending_diff(&self) -> bool {
-        matches!(self, Message::Tool { diff: Some(DiffState::Pending), .. })
+        matches!(
+            self,
+            Message::Tool {
+                diff: Some(DiffState::Pending),
+                ..
+            }
+        )
     }
 }
 
@@ -102,8 +122,11 @@ pub struct App {
     pub files: Vec<TouchedFile>,
     pub status: Status,
     pub token_label: String,
+    /// True while a streamed [`Message::Assistant`] is still being appended to.
+    assistant_open: bool,
 
     // --- session chrome ---
+    pub models: Vec<ModelChoice>,
     pub model_idx: usize,
     pub effort_idx: usize,
     pub cwd: String,
@@ -155,6 +178,8 @@ impl App {
             files: Vec::new(),
             status: Status::Done,
             token_label: "…".into(),
+            assistant_open: false,
+            models: seed_models(),
             model_idx: 0,
             effort_idx: 2, // "high", the prototype default
             cwd: "~/Projects/craft-web".into(),
@@ -184,8 +209,18 @@ impl App {
         }
     }
 
-    pub fn model(&self) -> (&'static str, &'static str) {
-        MODELS[self.model_idx]
+    pub fn model(&self) -> (&str, &str) {
+        self.models
+            .get(self.model_idx)
+            .map(|m| (m.label.as_str(), m.provider_label.as_str()))
+            .unwrap_or(("no model", "no provider"))
+    }
+
+    /// Open the model picker with the current selection highlighted.
+    fn open_model_menu(&mut self) {
+        if !self.models.is_empty() {
+            self.model_menu = Some(self.model_idx.min(self.models.len().saturating_sub(1)));
+        }
     }
 
     pub fn effort(&self) -> &'static str {
@@ -204,22 +239,79 @@ impl App {
         let was_following = self.follow;
         match ev {
             AgentEvent::StatusChanged(s) => self.status = s,
-            AgentEvent::AssistantText(text) => self.messages.push(Message::Assistant(text)),
-            AgentEvent::ToolCall(ToolCallData { id, kind, lines }) => {
-                let diff = if matches!(kind, ToolKind::Edit { .. }) {
-                    Some(DiffState::Pending)
-                } else {
-                    None
-                };
-                let collapsible = kind.collapsible();
-                self.messages.push(Message::Tool { id: id.clone(), kind, lines, diff });
-                if collapsible {
-                    self.collapsed.push(id);
+            AgentEvent::AssistantText(text) => {
+                self.assistant_open = false;
+                self.messages.push(Message::Assistant(text));
+            }
+            AgentEvent::AssistantDelta(text) => {
+                match self.messages.last_mut() {
+                    Some(Message::Assistant(buf)) if self.assistant_open => buf.push_str(&text),
+                    _ => self.messages.push(Message::Assistant(text)),
+                }
+                self.assistant_open = true;
+            }
+            AgentEvent::AssistantEnd => self.assistant_open = false,
+            AgentEvent::ToolCall(ToolCallData {
+                id,
+                kind,
+                lines,
+                awaiting_approval,
+            }) => {
+                // Tool boundaries close any open streamed paragraph.
+                self.assistant_open = false;
+                // Cards merge by id: a start event shows the running card, the
+                // completion event fills in its body.
+                let existing = self
+                    .messages
+                    .iter_mut()
+                    .find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id));
+                match existing {
+                    Some(Message::Tool {
+                        kind: existing_kind,
+                        lines: body,
+                        diff,
+                        ..
+                    }) => {
+                        // Completion events carry the authoritative kind
+                        // (summaries arrive with the result).
+                        *existing_kind = kind;
+                        *body = lines;
+                        if awaiting_approval && matches!(diff, None | Some(DiffState::Pending)) {
+                            *diff = Some(DiffState::Pending);
+                        }
+                    }
+                    _ => {
+                        let diff = if matches!(kind, ToolKind::Edit { .. }) && awaiting_approval {
+                            Some(DiffState::Pending)
+                        } else {
+                            None
+                        };
+                        let collapsible = kind.collapsible();
+                        self.messages.push(Message::Tool {
+                            id: id.clone(),
+                            kind,
+                            lines,
+                            diff,
+                        });
+                        if collapsible {
+                            self.collapsed.push(id);
+                        }
+                    }
                 }
             }
             AgentEvent::PlanSet(plan) => self.plan = plan,
             AgentEvent::FilesSet(files) => self.files = files,
             AgentEvent::TokenUsage(label) => self.token_label = label,
+            AgentEvent::CatalogSet { models, current } => {
+                if !models.is_empty() {
+                    self.models = models;
+                    self.model_idx = current.min(self.models.len() - 1);
+                }
+            }
+            AgentEvent::SessionInfo { cwd, branch } => {
+                self.cwd = cwd;
+                self.branch = branch;
+            }
         }
         if was_following {
             self.follow = true;
@@ -243,7 +335,10 @@ impl App {
 
     fn focused_pending_diff(&self) -> Option<usize> {
         self.focused.filter(|&i| {
-            self.messages.get(i).map(|m| m.is_pending_diff()).unwrap_or(false)
+            self.messages
+                .get(i)
+                .map(|m| m.is_pending_diff())
+                .unwrap_or(false)
         })
     }
 
@@ -295,6 +390,7 @@ impl App {
             self.run_slash(cmd, tx);
             return;
         }
+        self.assistant_open = false;
         self.messages.push(Message::User(text.clone()));
         let _ = tx.send(Command::SendMessage(text));
         self.composer.clear();
@@ -310,8 +406,8 @@ impl App {
                 self.focused = None;
                 let _ = tx.send(Command::Clear);
             }
-            "/model" => self.model_menu = Some(self.model_idx),
-            // Compact/undo/help/sessions are no-ops under the mock provider.
+            "/model" => self.open_model_menu(),
+            // Compact/undo/help/sessions are no-ops for now.
             _ => {}
         }
     }
@@ -326,7 +422,7 @@ impl App {
                 self.follow = true;
             }
             "toggle-sidebar" => self.sidebar_open = !self.sidebar_open,
-            "model" => self.model_menu = Some(self.model_idx),
+            "model" => self.open_model_menu(),
             "clear" => {
                 self.messages.clear();
                 self.collapsed.clear();
@@ -348,8 +444,10 @@ impl App {
 
     fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>) {
         if let Some(id) = self.confirm_reject.take() {
-            if let Some(Message::Tool { diff, .. }) =
-                self.messages.iter_mut().find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id))
+            if let Some(Message::Tool { diff, .. }) = self
+                .messages
+                .iter_mut()
+                .find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id))
             {
                 *diff = Some(DiffState::Rejected);
             }
@@ -407,7 +505,11 @@ impl App {
                     .iter()
                     .copied()
                     .find(|r| rect_contains(*r, mouse.row, mouse.column))
-                    .map(|region| Selection { anchor: pos, head: pos, region });
+                    .map(|region| Selection {
+                        anchor: pos,
+                        head: pos,
+                        region,
+                    });
                 self.pending_click = self.tool_at(mouse.row, mouse.column);
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -451,7 +553,9 @@ impl App {
     /// After focus changes, make sure the focused block is in view.
     fn ensure_focus_visible(&mut self) {
         let Some(i) = self.focused else { return };
-        let Some(&start) = self.msg_starts.get(i) else { return };
+        let Some(&start) = self.msg_starts.get(i) else {
+            return;
+        };
         let start = start as i32;
         let top = self.scroll as i32;
         let bottom = top + self.view_height as i32;
@@ -518,9 +622,17 @@ impl App {
             match key.code {
                 KeyCode::Esc => self.model_menu = None,
                 KeyCode::Up => self.model_menu = Some(sel.saturating_sub(1)),
-                KeyCode::Down => self.model_menu = Some((sel + 1).min(MODELS.len() - 1)),
+                KeyCode::Down => {
+                    self.model_menu = Some((sel + 1).min(self.models.len().saturating_sub(1)))
+                }
                 KeyCode::Enter => {
                     self.model_idx = sel;
+                    if let Some(choice) = self.models.get(sel) {
+                        let _ = tx.send(Command::SelectModel {
+                            provider: choice.provider.clone(),
+                            model: choice.model.clone(),
+                        });
+                    }
                     self.model_menu = None;
                 }
                 _ => self.model_menu = None,
@@ -544,7 +656,7 @@ impl App {
                     return;
                 }
                 KeyCode::Char('l') => {
-                    self.model_menu = Some(self.model_idx);
+                    self.open_model_menu();
                     return;
                 }
                 KeyCode::Char('e') => {
@@ -564,14 +676,18 @@ impl App {
                     return;
                 }
                 KeyCode::Char('y') => {
-                    if let Some(i) = self.focused_pending_diff().or_else(|| self.last_pending_diff())
+                    if let Some(i) = self
+                        .focused_pending_diff()
+                        .or_else(|| self.last_pending_diff())
                     {
                         self.approve(i, tx);
                     }
                     return;
                 }
                 KeyCode::Char('n') => {
-                    if let Some(i) = self.focused_pending_diff().or_else(|| self.last_pending_diff())
+                    if let Some(i) = self
+                        .focused_pending_diff()
+                        .or_else(|| self.last_pending_diff())
                     {
                         if let Message::Tool { id, .. } = &self.messages[i] {
                             self.confirm_reject = Some(id.clone());
@@ -672,8 +788,7 @@ impl App {
             }
             KeyCode::Left => self.composer_cursor = self.composer_cursor.saturating_sub(1),
             KeyCode::Right => {
-                self.composer_cursor =
-                    (self.composer_cursor + 1).min(self.composer.chars().count())
+                self.composer_cursor = (self.composer_cursor + 1).min(self.composer.chars().count())
             }
             _ => {}
         }
@@ -763,11 +878,23 @@ fn extract_selection_text(frame_text: &[String], sel: Selection) -> String {
         if r < region.y || r >= region.y + region.height {
             continue;
         }
-        let Some(row) = frame_text.get(r as usize) else { continue };
+        let Some(row) = frame_text.get(r as usize) else {
+            continue;
+        };
         let chars: Vec<char> = row.chars().collect();
-        let Some((first, last)) = text_extent(row, region) else { continue };
-        let row_from = if r == r1 { c1 as usize } else { region.x as usize };
-        let row_to = if r == r2 { c2 as usize } else { region.x as usize + region.width as usize - 1 };
+        let Some((first, last)) = text_extent(row, region) else {
+            continue;
+        };
+        let row_from = if r == r1 {
+            c1 as usize
+        } else {
+            region.x as usize
+        };
+        let row_to = if r == r2 {
+            c2 as usize
+        } else {
+            region.x as usize + region.width as usize - 1
+        };
         let from = row_from.max(first);
         let to = row_to.min(last);
         if from > to || to >= chars.len() {
@@ -801,18 +928,82 @@ fn copy_to_clipboard(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::provider::LineKind;
+
+    /// Streamed deltas append to one bubble until explicitly closed.
+    #[test]
+    fn assistant_deltas_append_then_close() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::AssistantDelta("Hello".into()));
+        app.handle_event(AgentEvent::AssistantDelta(", world".into()));
+        app.handle_event(AgentEvent::AssistantEnd);
+        app.handle_event(AgentEvent::AssistantDelta("Again".into()));
+        let texts: Vec<&str> = app
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["Hello, world", "Again"]);
+    }
+
+    /// Start and completion events for the same call render one card.
+    #[test]
+    fn tool_call_events_merge_by_id() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "t1".into(),
+            kind: ToolKind::Read {
+                path: "src/a.rs".into(),
+                summary: String::new(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+        }));
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "t1".into(),
+            kind: ToolKind::Read {
+                path: "src/a.rs".into(),
+                summary: "1 lines".into(),
+            },
+            lines: vec![ToolLine {
+                kind: LineKind::Context,
+                text: "fn main() {}".into(),
+            }],
+            awaiting_approval: false,
+        }));
+        assert_eq!(app.messages.len(), 1);
+        match &app.messages[0] {
+            Message::Tool { kind, lines, .. } => {
+                assert!(matches!(kind, ToolKind::Read { summary, .. } if summary == "1 lines"));
+                assert_eq!(lines.len(), 1);
+            }
+            _ => panic!("expected a tool card"),
+        }
+    }
 
     fn frame(rows: &[&str]) -> Vec<String> {
         rows.iter().map(|r| r.to_string()).collect()
     }
 
     fn sel(anchor: (u16, u16), head: (u16, u16), region: Rect) -> Selection {
-        Selection { anchor, head, region }
+        Selection {
+            anchor,
+            head,
+            region,
+        }
     }
 
     #[test]
     fn extraction_strips_bars_padding_and_sidebar() {
-        let region = Rect { x: 0, y: 0, width: 30, height: 4 };
+        let region = Rect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 4,
+        };
         let ft = frame(&[
             "  ▎ > fix the flaky refresh     SIDEBAR-NOT-COPIED",
             "  Looking at the refresh path.  more sidebar",
@@ -821,12 +1012,20 @@ mod tests {
         ]);
         // Full-region select (rows 0..3, all region columns).
         let text = extract_selection_text(&ft, sel((0, 0), (3, 29), region));
-        assert_eq!(text, "> fix the flaky refresh\nLooking at the refresh path.");
+        assert_eq!(
+            text,
+            "> fix the flaky refresh\nLooking at the refresh path."
+        );
     }
 
     #[test]
     fn extraction_partial_row_binds_to_text() {
-        let region = Rect { x: 0, y: 0, width: 40, height: 1 };
+        let region = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 1,
+        };
         let ft = frame(&["  Looking at the refresh path first.    "]);
         // Drag inside the text, right-to-left.
         let text = extract_selection_text(&ft, sel((0, 15), (0, 8), region));
@@ -835,15 +1034,29 @@ mod tests {
 
     #[test]
     fn extraction_skips_whitespace_only_rows() {
-        let region = Rect { x: 0, y: 0, width: 20, height: 3 };
-        let ft = frame(&["first line          ", "                    ", "last line           "]);
+        let region = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 3,
+        };
+        let ft = frame(&[
+            "first line          ",
+            "                    ",
+            "last line           ",
+        ]);
         let text = extract_selection_text(&ft, sel((0, 0), (2, 19), region));
         assert_eq!(text, "first line\nlast line");
     }
 
     #[test]
     fn drag_positions_clamp_to_selection_region() {
-        let region = Rect { x: 2, y: 1, width: 10, height: 5 };
+        let region = Rect {
+            x: 2,
+            y: 1,
+            width: 10,
+            height: 5,
+        };
         assert_eq!(clamp_to(region, 0, 0), (1, 2));
         assert_eq!(clamp_to(region, 99, 99), (5, 11));
         assert!(rect_contains(region, 3, 3));
@@ -872,18 +1085,35 @@ mod tests {
     }
 
     fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
-        MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE }
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     fn app_with_collapsible_tool() -> App {
         let mut app = App::new();
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            awaiting_approval: false,
             id: "r1".into(),
-            kind: ToolKind::Read { path: "src/x.ts".into(), summary: "10 lines".into() },
+            kind: ToolKind::Read {
+                path: "src/x.ts".into(),
+                summary: "10 lines".into(),
+            },
             lines: vec![],
         }));
         // Card spans rows 2..6, columns 2..40 (as the renderer would report).
-        app.tool_regions = vec![(0, Rect { x: 2, y: 2, width: 38, height: 4 })];
+        app.tool_regions = vec![(
+            0,
+            Rect {
+                x: 2,
+                y: 2,
+                width: 38,
+                height: 4,
+            },
+        )];
         assert!(app.collapsed.contains(&"r1".to_string()));
         app
     }
@@ -907,13 +1137,21 @@ mod tests {
         assert!(!app.collapsed.contains(&"r1".to_string()), "press expands");
         app.handle_mouse(down);
         app.handle_mouse(up);
-        assert!(app.collapsed.contains(&"r1".to_string()), "press again collapses");
+        assert!(
+            app.collapsed.contains(&"r1".to_string()),
+            "press again collapses"
+        );
     }
 
     #[test]
     fn drag_selects_instead_of_toggling() {
         let mut app = app_with_collapsible_tool();
-        app.msg_area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        app.msg_area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 10));
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 4, 20));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 20));

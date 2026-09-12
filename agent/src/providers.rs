@@ -241,11 +241,10 @@ async fn list_openai_compatible_models(
         }
         .fail();
     }
-    let envelope: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
-        crate::error::Error::Invalid {
+    let envelope: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| crate::error::Error::Invalid {
             reason: format!("GET {url} returned a malformed models listing"),
-        }
-    })?;
+        })?;
     let models = envelope
         .get("data")
         .and_then(serde_json::Value::as_array)
@@ -258,8 +257,8 @@ async fn list_openai_compatible_models(
             let mut model = Model::from_id(id);
             model.name = string_field(entry, "name");
             model.description = string_field(entry, "description");
-            model.created_at = number_field(entry, "created")
-                .or_else(|| number_field(entry, "created_at"));
+            model.created_at =
+                number_field(entry, "created").or_else(|| number_field(entry, "created_at"));
             model.owned_by = string_field(entry, "owned_by");
             model.context_length = number_field(entry, "context_length")
                 .or_else(|| number_field(entry, "context_window"))

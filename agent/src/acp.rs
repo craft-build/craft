@@ -38,19 +38,14 @@ use agent_client_protocol::{
     },
 };
 use futures::StreamExt;
-use rig::agent::{
-    AgentHook, HookContext, MultiTurnStreamItem, StreamingError,
-    hook::{
-        CompletionCall as CompletionCallEvent, CompletionCallAction, CompletionResponse,
-        ObservationAction, ToolCall as ToolCallEvent, ToolCallAction,
-    },
-};
+use rig::agent::{MultiTurnStreamItem, StreamingError};
 use rig::completion::{Message, PromptError};
 use rig::model::Model;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent};
 use tokio::sync::{Mutex, watch};
 
 use crate::{
+    agent::{CancelHook, merge_history},
     config::Config,
     providers::{Provider, ProviderKind},
     tools::Workspace,
@@ -428,49 +423,6 @@ fn prompt_text(prompt: &[ContentBlock]) -> std::result::Result<String, String> {
     Ok(text)
 }
 
-/// Stops the run at the next hook boundary once the client cancels.
-struct CancelHook(watch::Receiver<bool>);
-
-impl CancelHook {
-    fn cancelled(&self) -> bool {
-        *self.0.borrow()
-    }
-}
-
-impl AgentHook for CancelHook {
-    async fn on_completion_call(
-        &self,
-        _: &HookContext,
-        _: CompletionCallEvent<'_>,
-    ) -> CompletionCallAction {
-        if self.cancelled() {
-            CompletionCallAction::stop("cancelled by client")
-        } else {
-            CompletionCallAction::Continue
-        }
-    }
-
-    async fn on_completion_response(
-        &self,
-        _: &HookContext,
-        _: CompletionResponse<'_>,
-    ) -> ObservationAction {
-        if self.cancelled() {
-            ObservationAction::stop("cancelled by client")
-        } else {
-            ObservationAction::Continue
-        }
-    }
-
-    async fn on_tool_call(&self, _: &HookContext, _: ToolCallEvent<'_>) -> ToolCallAction {
-        if self.cancelled() {
-            ToolCallAction::Stop("cancelled by client".into())
-        } else {
-            ToolCallAction::Run
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
     state: Arc<AppState>,
@@ -679,13 +631,6 @@ async fn run_turn(
         }
     }
     let _ = responder.respond(AcpPromptResponse::new(StopReason::EndTurn));
-}
-
-/// The run transcript covers only this turn; prepend the caller-owned history.
-fn merge_history(input: Vec<Message>, run: Vec<Message>) -> Vec<Message> {
-    let mut merged = input;
-    merged.extend(run);
-    merged
 }
 
 fn tool_call_start(tool_call: &rig::core::completion::message::ToolCall, id: &str) -> AcpToolCall {
