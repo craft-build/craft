@@ -582,21 +582,25 @@ async fn run_turn(
                 },
                 Some(Err(error)) => {
                     match &error {
-                        StreamingError::Prompt(prompt_error)
-                            if matches!(prompt_error.as_ref(), PromptError::MaxTurnsError { .. }) =>
-                        {
-                            let _ = responder
-                                .respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
-                        }
-                        StreamingError::Prompt(prompt_error)
-                            if matches!(
-                                prompt_error.as_ref(),
-                                PromptError::PromptCancelled { .. }
-                            ) =>
-                        {
-                            let _ =
-                                responder.respond(AcpPromptResponse::new(StopReason::Cancelled));
-                        }
+                        StreamingError::Prompt(prompt_error) => match prompt_error.as_ref() {
+                            PromptError::MaxTurnsError { chat_history, .. } => {
+                                // Keep the partial run: the next prompt
+                                // continues from where the budget ran out
+                                // instead of silently losing the whole turn.
+                                let mut sessions = state.sessions.lock().await;
+                                if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
+                                    session.history = chat_history.as_ref().clone();
+                                }
+                                drop(sessions);
+                                let _ = responder
+                                    .respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
+                            }
+                            PromptError::PromptCancelled { .. } => {
+                                let _ = responder
+                                    .respond(AcpPromptResponse::new(StopReason::Cancelled));
+                            }
+                            _ => fail!(error.to_string()),
+                        },
                         _ => fail!(error.to_string()),
                     }
                     return;

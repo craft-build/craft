@@ -3,8 +3,6 @@
 
 [agent]
 preamble = "You are Craft, an AI coding assistant."
-# Total model calls per run, including retries and continuations.
-max_turns = 16
 # Optional generation settings; omitted by default for provider/model defaults.
 # temperature = 0.2
 # max_tokens = 8192

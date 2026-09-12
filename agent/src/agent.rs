@@ -123,9 +123,11 @@ pub fn merge_history(input: Vec<Message>, run: Vec<Message>) -> Vec<Message> {
 }
 
 fn configure(model: ModelHandle, config: &AgentConfig) -> AgentBuilder {
+    // Interactive runs continue until the model stops on its own; Rig
+    // requires an explicit budget (default 1), so opt out with usize::MAX.
     let mut builder = AgentBuilder::from_model_handle(model)
         .name("Craft")
-        .default_max_turns(config.max_turns)
+        .default_max_turns(usize::MAX)
         .record_content_telemetry(false);
     if config.preamble.is_empty() {
         builder = builder.without_preamble();
@@ -167,7 +169,6 @@ mod tests {
             preamble: "Custom instructions".into(),
             temperature: Some(0.4),
             max_tokens: Some(128),
-            ..AgentConfig::default()
         };
         let agent = mock_builder(&model, &config).build();
         let response = agent.runner("hi").run().await.unwrap();
@@ -251,15 +252,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rig_enforces_the_configured_budget_across_hook_retries() {
+    async fn rig_enforces_an_explicit_run_budget_across_hook_retries() {
         let model =
             MockCompletionModel::new([MockTurn::text("rejected"), MockTurn::text("also rejected")]);
-        let config = AgentConfig {
-            max_turns: 2,
-            ..AgentConfig::default()
-        };
-        let agent = mock_builder(&model, &config).add_hook(Retry).build();
-        let error = agent.runner("hi").run().await.unwrap_err();
+        let agent = mock_builder(&model, &AgentConfig::default())
+            .add_hook(Retry)
+            .build();
+        let error = agent.runner("hi").max_turns(2).run().await.unwrap_err();
         assert!(matches!(
             error,
             PromptError::MaxTurnsError { max_turns: 2, .. }
@@ -305,18 +304,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_selection_and_programmatic_config() {
+    fn rejects_invalid_selection_and_noncompletion_provider() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = Workspace::new(dir.path()).unwrap();
         let provider = Provider::Llamafile(
             rig::providers::llamafile::Client::from_url("http://127.0.0.1:1").unwrap(),
         );
         assert!(builder(&provider, " ", &AgentConfig::default(), &workspace).is_err());
-        let config = AgentConfig {
-            max_turns: 0,
-            ..AgentConfig::default()
-        };
-        assert!(builder(&provider, "test", &config, &workspace).is_err());
         let provider = Provider::Voyageai(
             rig::providers::voyageai::Client::builder()
                 .api_key("test-key")

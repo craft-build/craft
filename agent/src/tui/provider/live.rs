@@ -13,12 +13,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use rig::agent::hook::{HookContext, ToolCall as ToolCallEvent, ToolCallAction};
 use rig::agent::{AgentHook, MultiTurnStreamItem, StreamingError};
 use rig::completion::{Message, PromptError};
 use rig::model::Model;
-use rig::agent::hook::{
-    HookContext, ToolCall as ToolCallEvent, ToolCallAction,
-};
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
@@ -318,7 +316,9 @@ impl AgentHook for ApprovalHook {
             lines: Vec::new(),
             awaiting_approval: true,
         }));
-        let _ = self.tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
+        let _ = self
+            .tx
+            .send(AgentEvent::StatusChanged(Status::WaitingApproval));
 
         let (decision_tx, decision_rx) = oneshot::channel();
         self.state.lock().await.pending_approval = Some((id, decision_tx));
@@ -495,23 +495,23 @@ async fn run_turn(
                 },
                 Some(Err(error)) => {
                     match &error {
-                        StreamingError::Prompt(prompt_error)
-                            if matches!(prompt_error.as_ref(), PromptError::MaxTurnsError { .. }) =>
-                        {
-                            let _ = tx.send(AgentEvent::AssistantText(
-                                "Reached the turn limit. Send another message to continue."
-                                    .into(),
-                            ));
-                            let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-                        }
-                        StreamingError::Prompt(prompt_error)
-                            if matches!(
-                                prompt_error.as_ref(),
-                                PromptError::PromptCancelled { .. }
-                            ) =>
-                        {
-                            let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-                        }
+                        StreamingError::Prompt(prompt_error) => match prompt_error.as_ref() {
+                            PromptError::MaxTurnsError { chat_history, .. } => {
+                                // Keep the partial run: the follow-up prompt
+                                // continues from where the budget ran out
+                                // instead of silently losing the whole turn.
+                                state.lock().await.history = chat_history.as_ref().clone();
+                                let _ = tx.send(AgentEvent::AssistantText(
+                                    "Reached the turn limit. Send another message to continue."
+                                        .into(),
+                                ));
+                                let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+                            }
+                            PromptError::PromptCancelled { .. } => {
+                                let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+                            }
+                            _ => fail!(error.to_string()),
+                        },
                         _ => fail!(error.to_string()),
                     }
                     return;

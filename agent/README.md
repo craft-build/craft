@@ -215,17 +215,16 @@ The optional `[agent]` table has these defaults:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `preamble` | `"You are Craft, an AI coding assistant."` | System instructions; `""` disables them |
-| `max_turns` | `16` | Total model calls per run, including initial call, retries, and continuations |
 | `temperature` | Omitted | Provider/model sampling default |
 | `max_tokens` | Omitted | Provider/model output-token default |
 
 Limits must be positive; temperature must be finite and nonnegative. Individual
 providers/models may impose additional limits or reject sampling parameters.
-`max_turns` is a **per-run model-call budget**, not a limit on conversation
-messages. Rig's native per-run overrides remain available through `.runner(...)`.
+Interactive runs have no fixed model-call budget: a turn continues until the
+model stops on its own. Rig enforces a budget of 1 by default, so the loop
+disables it; a caller that needs a bounded run sets `.runner(...).max_turns(n)`.
 Prompt/response content telemetry is disabled; structural metadata and usage
-remain available. The binary remains config-validation-only until CLI/ACP wiring
-is added; the agent module is ready for its caller to select a provider/model.
+remain available.
 
 ## Development
 
