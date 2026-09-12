@@ -5,7 +5,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use rig_core::completion::{
     CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
@@ -338,6 +339,15 @@ impl CompletionModel for DynamicModel {
     }
 }
 
+/// Shared discovery HTTP client with a bounded timeout, so one hung
+/// model-listing endpoint cannot block startup indefinitely.
+static DISCOVERY_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_default()
+});
+
 /// `GET {base_url}/models` for OpenAI-compatible servers, keeping the optional
 /// metadata (`context_length`, `description`, output limits) that Rig's shared
 /// listing DTO drops. Third-party servers (synthetic, vLLM, LM Studio, ...)
@@ -349,13 +359,15 @@ async fn list_openai_compatible_models(
     credential: &(dyn Fn(&str) -> Result<String> + Send + Sync),
 ) -> Result<ModelList> {
     let key = credential(config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY"))?;
-    let base = config
-        .base_url
-        .as_deref()
-        .expect("caller guarantees base_url")
-        .trim_end_matches('/');
+    let Some(base_url) = config.base_url.as_deref() else {
+        return InvalidSnafu {
+            reason: "openai-compatible discovery requires a configured base_url",
+        }
+        .fail();
+    };
+    let base = base_url.trim_end_matches('/');
     let url = format!("{base}/models");
-    let response = reqwest::Client::new()
+    let response = DISCOVERY_CLIENT
         .get(&url)
         .bearer_auth(key)
         .send()

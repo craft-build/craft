@@ -162,7 +162,7 @@ pub async fn run<M: CompletionModel + Clone>(
             return RunOutcome::Cancelled;
         }
         let mut full = history.clone();
-        full.append(&mut turn.clone());
+        full.extend(turn.iter().cloned());
         let request = edge::to_request(
             &full,
             &definitions,

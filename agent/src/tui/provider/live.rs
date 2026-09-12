@@ -33,6 +33,11 @@ use super::{
 /// Mutating workspace tools; their results feed the Files panel.
 const EDIT_TOOLS: [&str; 5] = ["edit", "edit_lines", "insert_lines", "write", "delete"];
 
+/// Read-only tools that run without an explicit user decision. Approval is
+/// default-deny: any tool not listed here — including tools registered after
+/// this gate was written — waits for the user's approve/reject decision.
+const READ_TOOLS: [&str; 2] = ["read", "grep"];
+
 /// Render an error and its sources as one client-facing message.
 fn report(error: crate::error::Error) -> String {
     snafu::Report::from_error(error).to_string()
@@ -153,7 +158,7 @@ impl CraftProvider {
             notes,
             selection,
             cwd_label: display_path(cwd),
-            branch: git_branch(cwd),
+            branch: git_branch(cwd).await,
         })
     }
 }
@@ -244,19 +249,25 @@ impl Provider for CraftProvider {
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
                     Command::Clear => {
+                        cancel_flag.set(true);
                         if let Some(h) = current_turn.take() {
                             h.abort();
                         }
                         let mut session = state.lock().await;
+                        session.pending_approval = None;
                         session.history.clear();
                         session.compaction = CompactionState::default();
+                        let _ = evt_tx.send(AgentEvent::AssistantEnd);
+                        let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
                     Command::Reset => {
+                        cancel_flag.set(true);
                         if let Some(h) = current_turn.take() {
                             h.abort();
                         }
                         *state.lock().await = SessionState::default();
                         files.lock().expect("files lock").clear();
+                        let _ = evt_tx.send(AgentEvent::AssistantEnd);
                         let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                         let _ = evt_tx.send(AgentEvent::TokenUsage("0 (0%)".into()));
@@ -306,7 +317,7 @@ impl BeforeExecute for ApprovalGate {
         let tx = self.tx.clone();
         let cancel = self.cancel.clone();
         Box::pin(async move {
-            if !EDIT_TOOLS.contains(&call.function.name.as_str()) {
+            if READ_TOOLS.contains(&call.function.name.as_str()) {
                 return Decision::Run;
             }
             if cancel.cancelled() {
@@ -721,14 +732,96 @@ fn display_path(path: &Path) -> String {
 }
 
 /// Current git branch for the sidebar, if the workspace is a repository.
-fn git_branch(cwd: &Path) -> String {
-    std::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(cwd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|branch| !branch.is_empty())
-        .unwrap_or_else(|| "no branch".into())
+/// Runs on the blocking pool so a slow git invocation (e.g. an NFS-mounted
+/// repository) cannot stall the async runtime thread.
+async fn git_branch(cwd: &Path) -> String {
+    let cwd = cwd.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "no branch".into())
+    })
+    .await
+    .unwrap_or_else(|_| "no branch".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_call(id: &str, name: &str) -> history::ToolCall {
+        history::ToolCall {
+            id: id.into(),
+            function: history::ToolFunction {
+                name: name.into(),
+                arguments: serde_json::json!({}),
+            },
+        }
+    }
+
+    fn gate(state: &Arc<Mutex<SessionState>>) -> (ApprovalGate, run::CancelFlag) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (flag, cancel) = run::cancel_channel();
+        (
+            ApprovalGate {
+                state: state.clone(),
+                tx,
+                cancel,
+            },
+            flag,
+        )
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_run_without_approval() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        for name in ["read", "grep"] {
+            let (gate, _flag) = gate(&state);
+            let decision = gate.decide(tool_call("t1", name)).await;
+            assert!(matches!(decision, Decision::Run), "{name}");
+        }
+        assert!(state.lock().await.pending_approval.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_and_mutating_tools_require_approval() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        for name in ["write", "delete", "some_future_bash_tool"] {
+            let (gate, _flag) = gate(&state);
+            let call = tool_call("t1", name);
+            let pending = tokio::spawn(async move { gate.decide(call).await });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while state.lock().await.pending_approval.is_none() {
+                assert!(std::time::Instant::now() < deadline, "{name} never parked");
+                tokio::task::yield_now().await;
+            }
+            decide(&state, "t1".into(), false).await;
+            let decision = pending.await.unwrap();
+            assert!(matches!(decision, Decision::Skip(_)), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn decide_ignores_stale_ids_and_delivers_current_one() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, mut rx) = oneshot::channel();
+        state.lock().await.pending_approval = Some(("current".into(), tx));
+
+        decide(&state, "stale".into(), true).await;
+        assert!(matches!(&state.lock().await.pending_approval, Some((id, _)) if id == "current"));
+        assert!(
+            rx.try_recv().is_err(),
+            "stale id must not consume a decision"
+        );
+
+        decide(&state, "current".into(), false).await;
+        assert!(state.lock().await.pending_approval.is_none());
+        assert!(!rx.await.unwrap());
+    }
 }

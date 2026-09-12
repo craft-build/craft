@@ -122,3 +122,43 @@ fn usage_from_response(
         total_tokens: usage.total_tokens,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+    fn request() -> CompletionRequest {
+        crate::edge::to_request(&[], &[], None, None, None)
+    }
+
+    /// A dropped `CancelFlag` must disable the cancel branch instead of
+    /// busy-looping: the stream still completes and aggregates normally.
+    #[tokio::test]
+    async fn dropped_cancel_flag_lets_the_stream_complete() {
+        let model = MockCompletionModel::from_stream_turns(vec![vec![
+            MockStreamEvent::text("hello"),
+            MockStreamEvent::final_response_with_total_tokens(3),
+        ]]);
+        let (flag, cancel) = crate::run::cancel_channel();
+        drop(flag);
+        let output = run_model_stream(&model, request(), &cancel, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(output.assistant.text(), "hello");
+        assert_eq!(output.usage.total_tokens, 3);
+    }
+
+    /// A stream without a `Final` usage event falls back to the response's
+    /// usage report (zero-valued sentinel when the provider sent none).
+    #[tokio::test]
+    async fn missing_final_event_falls_back_to_response_usage() {
+        let model = MockCompletionModel::from_stream_turns(vec![vec![MockStreamEvent::text("hi")]]);
+        let (_flag, cancel) = crate::run::cancel_channel();
+        let output = run_model_stream(&model, request(), &cancel, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(output.assistant.text(), "hi");
+        assert_eq!(output.usage.total_tokens, 0);
+    }
+}
