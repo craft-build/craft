@@ -134,6 +134,19 @@ fn assistant_block(text: &str, width: usize) -> Vec<Line<'static>> {
         .map(|chunk| {
             Line::from(Span::styled(
                 chunk,
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ))
+        })
+        .collect()
+}
+
+fn thinking_block(text: &str, width: usize) -> Vec<Line<'static>> {
+    let wrap_w = width.min(88);
+    wrap_text(text, wrap_w)
+        .into_iter()
+        .map(|chunk| {
+            Line::from(Span::styled(
+                chunk,
                 Style::default().fg(theme::TEXT_SECONDARY),
             ))
         })
@@ -361,6 +374,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         match msg {
             Message::User(text) => lines.extend(user_block(text, width)),
             Message::Assistant(text) => lines.extend(assistant_block(text, width)),
+            Message::Thinking(text) => lines.extend(thinking_block(text, width)),
             Message::Tool {
                 id,
                 kind,

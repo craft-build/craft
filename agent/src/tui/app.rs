@@ -61,6 +61,8 @@ pub enum DiffState {
 pub enum Message {
     User(String),
     Assistant(String),
+    /// Model reasoning (thinking) text, rendered dimmer than replies.
+    Thinking(String),
     Tool {
         id: String,
         kind: ToolKind,
@@ -126,6 +128,8 @@ pub struct App {
     pub token_label: String,
     /// True while a streamed [`Message::Assistant`] is still being appended to.
     assistant_open: bool,
+    /// True while a streamed [`Message::Thinking`] is still being appended to.
+    thinking_open: bool,
 
     // --- session chrome ---
     pub models: Vec<ModelChoice>,
@@ -182,6 +186,7 @@ impl App {
             status_tick: 0,
             token_label: "…".into(),
             assistant_open: false,
+            thinking_open: false,
             models: seed_models(),
             model_idx: 0,
             effort_idx: 2, // "high", the prototype default
@@ -244,16 +249,29 @@ impl App {
             AgentEvent::StatusChanged(s) => self.status = s,
             AgentEvent::AssistantText(text) => {
                 self.assistant_open = false;
+                self.thinking_open = false;
                 self.messages.push(Message::Assistant(text));
             }
             AgentEvent::AssistantDelta(text) => {
+                self.thinking_open = false;
                 match self.messages.last_mut() {
                     Some(Message::Assistant(buf)) if self.assistant_open => buf.push_str(&text),
                     _ => self.messages.push(Message::Assistant(text)),
                 }
                 self.assistant_open = true;
             }
-            AgentEvent::AssistantEnd => self.assistant_open = false,
+            AgentEvent::ReasoningDelta(text) => {
+                self.assistant_open = false;
+                match self.messages.last_mut() {
+                    Some(Message::Thinking(buf)) if self.thinking_open => buf.push_str(&text),
+                    _ => self.messages.push(Message::Thinking(text)),
+                }
+                self.thinking_open = true;
+            }
+            AgentEvent::AssistantEnd => {
+                self.assistant_open = false;
+                self.thinking_open = false;
+            }
             AgentEvent::ToolCall(ToolCallData {
                 id,
                 kind,
@@ -262,6 +280,7 @@ impl App {
             }) => {
                 // Tool boundaries close any open streamed paragraph.
                 self.assistant_open = false;
+                self.thinking_open = false;
                 // Cards merge by id: a start event shows the running card, the
                 // completion event fills in its body.
                 let existing = self
@@ -950,6 +969,29 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["Hello, world", "Again"]);
+    }
+
+    /// Reasoning deltas stream into their own dimmed block, which closes when
+    /// the reply text starts instead of merging into it.
+    #[test]
+    fn reasoning_deltas_form_their_own_block() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ReasoningDelta("considering ".into()));
+        app.handle_event(AgentEvent::ReasoningDelta("options".into()));
+        app.handle_event(AgentEvent::AssistantDelta("Answer".into()));
+        let contents: Vec<(&str, &str)> = app
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Thinking(t) => Some(("thinking", t.as_str())),
+                Message::Assistant(t) => Some(("assistant", t.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            contents,
+            [("thinking", "considering options"), ("assistant", "Answer")]
+        );
     }
 
     /// Start and completion events for the same call render one card.

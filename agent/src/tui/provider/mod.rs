@@ -131,6 +131,8 @@ pub enum AgentEvent {
     AssistantText(String),
     /// Streamed chunk of the assistant reply currently being written.
     AssistantDelta(String),
+    /// Streamed chunk of the model's reasoning (thinking) text.
+    ReasoningDelta(String),
     /// Closes the open streaming message; the next delta starts a new one.
     AssistantEnd,
     /// Tool cards are merged by id: emit once with empty lines when the call

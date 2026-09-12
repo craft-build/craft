@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use rig::agent::hook::{HookContext, ToolCall as ToolCallEvent, ToolCallAction};
-use rig::agent::{AgentHook, MultiTurnStreamItem, StreamingError};
+use rig::agent::{Agent, AgentHook, MultiTurnStreamItem, PromptResponse, StreamingError};
 use rig::completion::{Message, PromptError};
 use rig::model::Model;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent};
@@ -362,7 +362,7 @@ async fn run_turn(
     selection: Selection,
     text: String,
     state: Arc<Mutex<SessionState>>,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel_rx: watch::Receiver<bool>,
     tx: mpsc::UnboundedSender<AgentEvent>,
 ) {
     macro_rules! fail {
@@ -406,9 +406,91 @@ async fn run_turn(
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
+    // A turn that ends with only reasoning (no reply, no tool calls) still
+    // carries real work; nudge the model to continue instead of stopping.
+    const MAX_EMPTY_CONTINUATIONS: usize = 2;
+    const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and no tool \
+         calls. Continue the task with your reply or the next tool call.";
+    let mut prompt = text;
+    let mut continuations = MAX_EMPTY_CONTINUATIONS;
+    loop {
+        match stream_turn(
+            &agent,
+            &prompt,
+            history.clone(),
+            &state,
+            &cancel_rx,
+            &tx,
+            selection.context_length,
+        )
+        .await
+        {
+            TurnEnd::Cancelled => {
+                let _ = tx.send(AgentEvent::AssistantEnd);
+                let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+                return;
+            }
+            TurnEnd::Ended => return,
+            TurnEnd::Final {
+                response,
+                streamed_text,
+                streamed_reasoning,
+            } => {
+                // Commit each successful segment, exactly like the base loop.
+                if let Some(messages) = response.messages() {
+                    history = merge_history(history, messages.to_vec());
+                    state.lock().await.history = history.clone();
+                }
+                if response.output.is_empty() && continuations > 0 {
+                    continuations -= 1;
+                    prompt = CONTINUE_AFTER_EMPTY.into();
+                    continue;
+                }
+                if streamed_text || streamed_reasoning {
+                    let _ = tx.send(AgentEvent::AssistantEnd);
+                } else if !response.output.is_empty() {
+                    let _ = tx.send(AgentEvent::AssistantText(response.output.clone()));
+                } else {
+                    let _ = tx.send(AgentEvent::AssistantText(
+                        "The model returned an empty response. Send another message to continue."
+                            .into(),
+                    ));
+                }
+                break;
+            }
+        }
+    }
+    let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+}
+
+/// How one runner stream ended.
+enum TurnEnd {
+    /// The user cancelled; the turn's history is not committed.
+    Cancelled,
+    /// The stream errored or ended without a final response; the reason has
+    /// already been sent to the UI.
+    Ended,
+    Final {
+        response: PromptResponse,
+        streamed_text: bool,
+        streamed_reasoning: bool,
+    },
+}
+
+/// Run one runner stream to completion, forwarding every event to the UI.
+async fn stream_turn(
+    agent: &Agent,
+    prompt: &str,
+    history: Vec<Message>,
+    state: &Arc<Mutex<SessionState>>,
+    cancel_rx: &watch::Receiver<bool>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    context_length: Option<u32>,
+) -> TurnEnd {
+    let mut cancel_rx = cancel_rx.clone();
     let mut stream = agent
-        .runner(text)
-        .history(history.clone())
+        .runner(prompt)
+        .history(history)
         .add_hook(CancelHook(cancel_rx.clone()))
         .add_hook(ApprovalHook {
             state: state.clone(),
@@ -419,27 +501,37 @@ async fn run_turn(
         .await;
 
     let mut streamed_text = false;
+    let mut streamed_reasoning = false;
     let mut tools_started = false;
     // internal_call_id -> (tool name, arguments), filled at call start.
     let mut pending_tools: Vec<(String, String, serde_json::Value)> = Vec::new();
-    let mut cancelled = false;
-    let final_response = loop {
+    enum LoopEnd {
+        Cancel,
+        Ended,
+        Final(PromptResponse),
+    }
+    let outcome = loop {
         tokio::select! {
             biased;
             changed = cancel_rx.changed() => {
                 if matches!(changed, Ok(())) && *cancel_rx.borrow_and_update() {
-                    cancelled = true;
-                    break None;
+                    break LoopEnd::Cancel;
                 }
             }
             item = stream.next() => match item {
-                None => break None,
+                None => break LoopEnd::Ended,
                 Some(Ok(item)) => match item {
                     MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::Text(delta),
                     ) => {
                         streamed_text = true;
                         let _ = tx.send(AgentEvent::AssistantDelta(delta.text));
+                    }
+                    MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                    ) => {
+                        streamed_reasoning = true;
+                        let _ = tx.send(AgentEvent::ReasoningDelta(reasoning));
                     }
                     MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ToolCall { tool_call, internal_call_id },
@@ -486,12 +578,12 @@ async fn run_turn(
                         let _ = tx.send(AgentEvent::TokenUsage(usage_label(
                             call.usage.input_tokens + call.usage.output_tokens,
                             call.usage.input_tokens,
-                            selection.context_length,
+                            context_length,
                         )));
                     }
                     MultiTurnStreamItem::ToolExecutionCommitted { .. } => {}
                     MultiTurnStreamItem::ModelTurnRetried { .. } => {}
-                    MultiTurnStreamItem::FinalResponse(response) => break Some(response),
+                    MultiTurnStreamItem::FinalResponse(response) => break LoopEnd::Final(response),
                 },
                 Some(Err(error)) => {
                     match &error {
@@ -510,11 +602,17 @@ async fn run_turn(
                             PromptError::PromptCancelled { .. } => {
                                 let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
                             }
-                            _ => fail!(error.to_string()),
+                            _ => {
+                                let _ = tx.send(AgentEvent::AssistantText(error.to_string()));
+                                let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
+                            }
                         },
-                        _ => fail!(error.to_string()),
+                        _ => {
+                            let _ = tx.send(AgentEvent::AssistantText(error.to_string()));
+                            let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
+                        }
                     }
-                    return;
+                    break LoopEnd::Ended;
                 }
             },
         }
@@ -523,40 +621,26 @@ async fn run_turn(
     // Dropping the stream aborts the in-flight provider request; a cancelled
     // turn's history is not committed, matching the base loop's semantics.
     drop(stream);
-    if cancelled {
-        let _ = tx.send(AgentEvent::AssistantEnd);
-        let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-        return;
-    }
-
-    let Some(response) = final_response else {
-        if streamed_text {
-            let _ = tx.send(AgentEvent::AssistantEnd);
+    match outcome {
+        LoopEnd::Cancel => TurnEnd::Cancelled,
+        LoopEnd::Ended => {
+            if streamed_text || streamed_reasoning {
+                let _ = tx.send(AgentEvent::AssistantEnd);
+            }
+            // The stream closed without a final response or an error: surface
+            // it instead of ending the turn silently.
+            let _ = tx.send(AgentEvent::AssistantText(
+                "The agent stream ended without a final response.".into(),
+            ));
+            let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
+            TurnEnd::Ended
         }
-        // The stream closed without a final response or an error: surface it
-        // instead of ending the turn silently.
-        let _ = tx.send(AgentEvent::AssistantText(
-            "The agent stream ended without a final response.".into(),
-        ));
-        let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
-        return;
-    };
-    if streamed_text {
-        let _ = tx.send(AgentEvent::AssistantEnd);
-    } else if !response.output.is_empty() {
-        let _ = tx.send(AgentEvent::AssistantText(response.output.clone()));
-    } else {
-        // A turn that produced nothing visible (a reasoning-only or truncated
-        // response) must not end silently either.
-        let _ = tx.send(AgentEvent::AssistantText(
-            "The model returned an empty response. Send another message to continue.".into(),
-        ));
+        LoopEnd::Final(response) => TurnEnd::Final {
+            response,
+            streamed_text,
+            streamed_reasoning,
+        },
     }
-    // Commit this turn only on success, exactly like the base loop.
-    if let Some(messages) = response.messages() {
-        state.lock().await.history = merge_history(history, messages.to_vec());
-    }
-    let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
 }
 
 /// Card emitted when a tool call starts: kind from the tool name and its
