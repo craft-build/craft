@@ -8,6 +8,7 @@ pub mod history;
 pub mod id;
 pub mod instructions;
 pub mod paths;
+pub mod permissions;
 pub mod prompt;
 pub mod providers;
 pub mod run;

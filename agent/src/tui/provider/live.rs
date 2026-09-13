@@ -20,25 +20,16 @@ use crate::compaction::{CompactionEngine, CompactionState};
 use crate::config::Config;
 use crate::error::{InvalidSnafu, Result, client_error};
 use crate::history;
+use crate::permissions::{
+    ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer, PermissionCheck, PermissionManager,
+    PermissionsConfig, ToolKey,
+};
 use crate::providers::{CatalogModel, Provider as ClientProvider, ProviderKind};
 use crate::run::{self, BeforeExecute, BoxFuture, CancelToken, Decision, RunOutcome};
 use crate::tools::Workspace;
 
 use super::cards::{self, Files};
 use super::{AgentEvent, Command, ModelChoice, Provider, Status, ToolCallData};
-
-/// Read-only tools that run without an explicit user decision. Approval is
-/// default-deny: any tool not listed here — including tools registered after
-/// this gate was written — waits for the user's approve/reject decision.
-const READ_TOOLS: [&str; 7] = [
-    "read",
-    "grep",
-    "glob",
-    "list",
-    "inspect",
-    "retrieve",
-    "list_tools",
-];
 
 /// Render an error and its sources as one client-facing message.
 fn report(error: crate::error::Error) -> String {
@@ -92,6 +83,9 @@ pub struct CraftProvider {
     /// Instruction files (AGENTS.md and friends) discovered at startup;
     /// appended to the system prompt and shared with tool injection.
     instructions: crate::instructions::Instructions,
+    /// Permission rule engine: persistent `permissions.toml` rules, session
+    /// grants, and per-tool defaults; consulted by the approval gate.
+    permissions: Arc<PermissionManager>,
     /// Per-provider discovered models, config key order.
     catalogs: BTreeMap<String, Vec<CatalogModel>>,
     /// Discovery problems surfaced to the user as notes at startup.
@@ -118,6 +112,14 @@ impl CraftProvider {
         })
         .await
         .unwrap_or_default();
+        let permissions = tokio::task::spawn_blocking({
+            let cwd = cwd.to_path_buf();
+            move || PermissionManager::new(crate::permissions::load_permissions(&cwd), cwd)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            PermissionManager::new(PermissionsConfig::default(), cwd.to_path_buf())
+        });
         let workspace = Workspace::new(cwd)
             .map_err(client_error)?
             .with_loaded_instructions(instructions.loaded.clone());
@@ -161,6 +163,7 @@ impl CraftProvider {
             config: Arc::new(config),
             workspace,
             instructions,
+            permissions: Arc::new(permissions),
             catalogs,
             notes,
             selection,
@@ -187,6 +190,7 @@ impl Provider for CraftProvider {
             let mut current_turn: Option<AbortHandle> = None;
             let mut selection = self.selection;
             let workspace = self.workspace;
+            let permissions = self.permissions;
             let snapshots = workspace.snapshots().clone();
             let instructions_text = self.instructions.text;
             let config = self.config;
@@ -245,6 +249,7 @@ impl Provider for CraftProvider {
                                 files: files.clone(),
                                 cancel: cancel_token.clone(),
                                 tx: evt_tx.clone(),
+                                permissions: permissions.clone(),
                             },
                             text,
                         ));
@@ -331,13 +336,52 @@ impl Provider for CraftProvider {
     }
 }
 
-/// Gates edit-family tool calls behind the UI's approve/reject seam: no
-/// workspace mutation runs without an explicit user decision. Approval runs
-/// the tool; rejection skips it and reports the decision back to the model.
+/// Gates tool calls behind the permission engine and, when it asks, the
+/// UI's approve/reject seam: no workspace mutation runs without an explicit
+/// user decision. Approval runs the tool and grants the session; rejection
+/// skips it and reports the denial back to the model.
 struct ApprovalGate {
     state: Arc<Mutex<SessionState>>,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancelToken,
+    permissions: Arc<PermissionManager>,
+}
+
+/// The scope a call is about: the touched path for file tools, `*` otherwise
+/// (scope-less rules still match it; everything else falls to the default).
+fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> Vec<String> {
+    if FILE_WRITE_TOOLS.contains(&name) {
+        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+            return vec![resolve_scope_path(root, path)];
+        }
+        if let Some(files) = args.get("files").and_then(|v| v.as_array()) {
+            return files
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|p| resolve_scope_path(root, p))
+                .collect();
+        }
+    }
+    vec!["*".to_string()]
+}
+
+fn resolve_scope_path(root: &Path, path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        root.join(p).display().to_string()
+    }
+}
+
+fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
+    format!(
+        "{} `{}` ({}). {}",
+        crate::permissions::PERMISSION_DENIED_PREFIX,
+        tool,
+        scopes.join("; "),
+        crate::permissions::DEFAULT_DENY_GUIDANCE
+    )
 }
 
 impl BeforeExecute for ApprovalGate {
@@ -345,12 +389,20 @@ impl BeforeExecute for ApprovalGate {
         let state = self.state.clone();
         let tx = self.tx.clone();
         let cancel = self.cancel.clone();
+        let permissions = self.permissions.clone();
         Box::pin(async move {
-            if READ_TOOLS.contains(&call.function.name.as_str()) {
-                return Decision::Run;
-            }
             if cancel.cancelled() {
                 return Decision::Stop("cancelled by client".into());
+            }
+            let name = call.function.name.as_str();
+            let tool = ToolKey::native(name);
+            let scopes = scope_for_call(permissions.cwd(), name, &call.function.arguments);
+            match permissions.check(&tool, &scopes) {
+                PermissionCheck::Allowed => return Decision::Run,
+                PermissionCheck::Denied => {
+                    return Decision::Skip(denied_message(&tool, &scopes));
+                }
+                PermissionCheck::NeedsPrompt { .. } => {}
             }
             let id = call.id.clone();
             let _ = tx.send(AgentEvent::AssistantEnd);
@@ -375,13 +427,17 @@ impl BeforeExecute for ApprovalGate {
                     // A dropped flag means the session is gone: stop the call.
                     return Decision::Stop("cancelled by client".into());
                 }
-                decision = decision_rx => decision.unwrap_or(false),
+                decision = tokio::time::timeout(ASK_TIMEOUT, decision_rx) => {
+                    state.lock().await.pending_approval = None;
+                    decision.unwrap_or(Ok(false)).unwrap_or(false)
+                }
             };
             let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
             if approved {
+                permissions.apply_decision(&tool, &scopes, &PermissionAnswer::AllowSession);
                 Decision::Run
             } else {
-                Decision::Skip("the user rejected this change; it was not applied".into())
+                Decision::Skip(denied_message(&tool, &scopes))
             }
         })
     }
@@ -409,6 +465,7 @@ struct TurnCtx {
     files: Files,
     cancel: CancelToken,
     tx: mpsc::UnboundedSender<AgentEvent>,
+    permissions: Arc<PermissionManager>,
 }
 
 /// Maps run-loop events to TUI events for one model call. Owns the
@@ -518,6 +575,7 @@ async fn run_turn(ctx: TurnCtx, text: String) {
         files,
         cancel,
         tx,
+        permissions,
     } = ctx;
     macro_rules! fail {
         ($message:expr) => {{
@@ -569,6 +627,7 @@ async fn run_turn(ctx: TurnCtx, text: String) {
             state: state.clone(),
             tx: tx.clone(),
             cancel: cancel.clone(),
+            permissions: permissions.clone(),
         }));
     let params = run::RunParams {
         preamble: Some(crate::prompt::build_system_prompt(
@@ -683,6 +742,10 @@ mod tests {
                 state: state.clone(),
                 tx,
                 cancel,
+                permissions: Arc::new(PermissionManager::new(
+                    PermissionsConfig::default(),
+                    std::env::temp_dir(),
+                )),
             },
             flag,
         )
@@ -691,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_tools_run_without_approval() {
         let state = Arc::new(Mutex::new(SessionState::default()));
-        for name in READ_TOOLS {
+        for name in crate::permissions::READ_ONLY_TOOLS {
             let (gate, _flag) = gate(&state);
             let decision = gate.decide(tool_call("t1", name)).await;
             assert!(matches!(decision, Decision::Run), "{name}");
@@ -733,5 +796,82 @@ mod tests {
         decide(&state, "current".into(), false).await;
         assert!(state.lock().await.pending_approval.is_none());
         assert!(!rx.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn deny_rule_skips_without_asking() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (flag, cancel) = run::cancel_channel();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig {
+                rules: vec![crate::permissions::PermissionRule {
+                    tool: ToolKey::native("write"),
+                    scope: Some("secret/**".to_string()),
+                    effect: crate::permissions::Effect::Deny,
+                }],
+                ..Default::default()
+            },
+            std::env::temp_dir(),
+        ));
+        let gate = ApprovalGate {
+            state: state.clone(),
+            tx,
+            cancel,
+            permissions,
+        };
+        let _flag = flag;
+        let mut call = tool_call("t1", "write");
+        call.function.arguments = serde_json::json!({ "path": "secret/key.pem" });
+        let decision = gate.decide(call).await;
+        let Decision::Skip(message) = decision else {
+            panic!("expected skip");
+        };
+        assert!(
+            message.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
+            "{message}"
+        );
+        assert!(state.lock().await.pending_approval.is_none());
+    }
+
+    #[tokio::test]
+    async fn approval_grants_the_session_scope() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_flag, cancel) = run::cancel_channel();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        let gate = ApprovalGate {
+            state: state.clone(),
+            tx,
+            cancel,
+            permissions: permissions.clone(),
+        };
+
+        let mut call = tool_call("t1", "write");
+        call.function.arguments = serde_json::json!({ "path": "src/lib.rs" });
+        let pending = tokio::spawn(async move { gate.decide(call).await });
+        while state.lock().await.pending_approval.is_none() {
+            tokio::task::yield_now().await;
+        }
+        decide(&state, "t1".into(), true).await;
+        assert!(matches!(pending.await.unwrap(), Decision::Run));
+
+        // The grant generalized to the parent dir and lives in the session:
+        // a sibling write now runs without asking again.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_flag, cancel) = run::cancel_channel();
+        let gate = ApprovalGate {
+            state: state.clone(),
+            tx,
+            cancel,
+            permissions,
+        };
+        let mut sibling = tool_call("t2", "write");
+        sibling.function.arguments = serde_json::json!({ "path": "src/other.rs" });
+        assert!(matches!(gate.decide(sibling).await, Decision::Run));
+        assert!(state.lock().await.pending_approval.is_none());
     }
 }
