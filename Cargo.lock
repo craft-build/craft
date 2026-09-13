@@ -1550,6 +1550,7 @@ name = "craft"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "bs58",
  "clap",
  "crossterm",
  "dirs 7.0.0",
@@ -1568,6 +1569,7 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "url",
+ "uuid",
 ]
 
 [[package]]
