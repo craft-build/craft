@@ -2,7 +2,7 @@
 
 Optimal port order from `comparison.md`: dependencies first, highest leverage-per-effort early, deep subsystems (subagents, Flow, MCP, plugins) last.
 
-## Phase 1 — Foundations (storage, config, small high-value wins)
+## [x] Phase 1 — Foundations (storage, config, small high-value wins)
 
 1. I.1 Path resolution (XDG dirs, data/state/logs/cache split) — everything storage-related builds on this
 2. I.3 CraftId (UUIDv7 base58) — needed by sessions

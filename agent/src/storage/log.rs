@@ -349,5 +349,4 @@ mod tests {
         let lock = RotationLock::acquire(tmp.path());
         assert!(lock.file.is_some());
     }
-
 }

@@ -1216,9 +1216,7 @@ fn tool_call_view(
                 .line_height(px(18.))
                 .cursor_pointer()
                 .hover(|style| style.text_color(rgb(theme::TEXT_PRIMARY)))
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.toggle_tool_call(&toggle_id, cx)
-                }))
+                .on_click(cx.listener(move |app, _, _, cx| app.toggle_tool_call(&toggle_id, cx)))
                 .child(
                     div()
                         .flex_shrink_0()

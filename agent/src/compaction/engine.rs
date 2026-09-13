@@ -147,7 +147,7 @@ impl CompactionEngine {
             let before_len = history.len();
             let _under_limit = match stage.kind {
                 CompactionKind::Vcc => vcc_compact(history, threshold, estimate_tokens),
-                CompactionKind::Llm => llm_compact(model, history, threshold, carry_len)
+                CompactionKind::Llm => llm_compact(model, history, threshold, carry_len, None)
                     .await
                     .unwrap_or(false),
             };
