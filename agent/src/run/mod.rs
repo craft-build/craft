@@ -10,6 +10,7 @@
 
 pub mod dedup;
 pub mod dispatch;
+mod nudge;
 mod read_lifecycle;
 mod recency;
 mod stream;
@@ -52,6 +53,9 @@ pub enum Event {
     },
     /// Token usage reported for one model call.
     Usage(history::Usage),
+    /// The model returned an empty reply after tool calls and was nudged
+    /// to continue.
+    Nudge,
 }
 
 /// Cancellation shared between a surface and its run: set the flag, and the
@@ -188,6 +192,8 @@ pub async fn run<M: CompletionModel + Clone>(
     let definitions = tools.definitions();
     let mut turn = vec![Message::user(prompt)];
     let mut turns = 0;
+    // Nudge budget for this run; real progress (tool results) resets it.
+    let mut nudges: u32 = 0;
     loop {
         if cancel.cancelled() {
             return RunOutcome::Cancelled;
@@ -227,6 +233,31 @@ pub async fn run<M: CompletionModel + Clone>(
         turn.push(output.assistant);
         if tool_calls.is_empty() {
             let reply = turn.last().expect("assistant pushed").text();
+            if reply.trim().is_empty() {
+                // The marker takes the silent reply's place in history.
+                turn.pop();
+                // `full` is the exact view the model just saw (its wire-only
+                // rewrites are shape-preserving); the trailing marker+nudge
+                // pairs this run already pushed are skipped by count.
+                let nudge = nudges < nudge::MAX_NUDGES
+                    && nudge::has_recent_tool_results(
+                        &full,
+                        nudge::RECENT_TOOL_WINDOW,
+                        2 * nudges as usize,
+                    );
+                nudge::stall_turn(&mut turn, nudge);
+                if nudge {
+                    nudges += 1;
+                    emit(Event::Nudge);
+                    turns += 1;
+                    if turns >= params.max_turns {
+                        sanitize_partial(&mut turn);
+                        history.append(&mut turn);
+                        return RunOutcome::MaxTurns;
+                    }
+                    continue;
+                }
+            }
             history.append(&mut turn);
             return RunOutcome::Done { reply };
         }
@@ -251,6 +282,7 @@ pub async fn run<M: CompletionModel + Clone>(
             }
         }
         turns += 1;
+        nudges = 0;
         if turns >= params.max_turns {
             sanitize_partial(&mut turn);
             history.append(&mut turn);
@@ -923,6 +955,122 @@ mod tests {
             panic!("tool result block");
         };
         assert!(result.content[0].to_text().starts_with("[cached]"));
+    }
+
+    #[tokio::test]
+    async fn empty_reply_after_tool_call_is_nudged_to_continue() {
+        // Tool call, then a completely empty reply, then recovery.
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                tool_event("t1", "read", serde_json::json!({"path":"f"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![
+                MockStreamEvent::text("all better now"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), "body\n").unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        assert!(
+            matches!(outcome, RunOutcome::Done { ref reply } if reply == "all better now"),
+            "nudged model must recover: {outcome:?}"
+        );
+        // prompt, tool call, result, empty marker, nudge prompt, final reply
+        assert_eq!(history.len(), 6);
+        assert_eq!(history[3].text(), nudge::EMPTY_RESPONSE_MARKER);
+        assert!(
+            history[4].text().contains("returned an empty response"),
+            "nudge prompt must be committed: {}",
+            history[4].text()
+        );
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::Nudge)),
+            "a nudge event must be emitted"
+        );
+        // The nudged retry carried the marker and the prompt.
+        let requests = model.requests();
+        assert_eq!(requests.len(), 3);
+        let sent = crate::edge::rig_to_own(&requests[2].chat_history);
+        assert_eq!(sent[3].text(), nudge::EMPTY_RESPONSE_MARKER);
+        assert!(sent[4].text().contains("returned an empty response"));
+    }
+
+    #[tokio::test]
+    async fn empty_reply_without_recent_tool_results_ends_the_run() {
+        let (model, _turns) = stream_turns(vec![vec![
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &ToolDispatch::default(),
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply.is_empty()));
+        // prompt + empty marker; no nudge prompt follows
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].text(), nudge::EMPTY_RESPONSE_MARKER);
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_reply_counts_against_the_turn_budget() {
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                tool_event("t1", "read", serde_json::json!({"path":"f"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![MockStreamEvent::final_response_with_total_tokens(1)],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), "body\n").unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let params = RunParams {
+            max_turns: 2,
+            ..RunParams::default()
+        };
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::MaxTurns));
+        assert_eq!(model.request_count(), 2, "nudged retry still ran");
+        // The sanitized tail closes with the end marker.
+        assert_eq!(history.last().unwrap().text(), END_MARKER);
     }
 
     #[tokio::test]

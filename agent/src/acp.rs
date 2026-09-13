@@ -568,6 +568,8 @@ async fn run_turn(
                         u64::from(size),
                     ))
                 }
+                // The nudged retry follows immediately; no ACP notification.
+                run::Event::Nudge => return,
             };
             // A dead connection stops the notifications but not the turn; the
             // responder still answers the request.

@@ -551,6 +551,8 @@ async fn run_turn(
                         context_length,
                     )));
                 }
+                // The nudge is visible in the next model call; nothing to show.
+                run::Event::Nudge => {}
             }
         };
         let outcome = run::run(
