@@ -6,6 +6,7 @@ pub mod error;
 pub mod history;
 pub mod id;
 pub mod paths;
+pub mod prompt;
 pub mod providers;
 pub mod run;
 pub mod tools;

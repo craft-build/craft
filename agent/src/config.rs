@@ -79,7 +79,8 @@ fn default_compaction() -> Vec<CompactionConfig> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
-    /// System instructions. An empty string disables the preamble.
+    /// System instructions. An empty string keeps the built-in defaults; any
+    /// text is appended to the assembled system prompt's instructions slot.
     pub preamble: String,
     /// Omit to preserve the provider/model's default sampling behavior.
     pub temperature: Option<f64>,
@@ -90,7 +91,9 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            preamble: "You are Craft, an AI coding assistant.".into(),
+            // Extra instructions appended to the assembled system prompt's
+            // instructions slot; empty keeps the built-in defaults.
+            preamble: String::new(),
             temperature: None,
             max_tokens: None,
         }
@@ -307,10 +310,7 @@ mod tests {
     fn parses_example() {
         let config = Config::parse(include_str!("../agent.example.toml")).unwrap();
         assert_eq!(config.providers.len(), 4);
-        assert_eq!(
-            config.agent.preamble,
-            "You are Craft, an AI coding assistant."
-        );
+        assert_eq!(config.agent.preamble, "");
         assert_eq!(
             config.compaction,
             vec![

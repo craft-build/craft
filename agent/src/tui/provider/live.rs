@@ -426,7 +426,14 @@ async fn run_turn(
         cancel: cancel.clone(),
     }));
     let params = run::RunParams {
-        preamble: Some(config.agent.preamble.clone()),
+        preamble: Some(crate::prompt::build_system_prompt(
+            &crate::prompt::Vars::new()
+                .set("{cwd}", workspace.root().display().to_string())
+                .set("{platform}", std::env::consts::OS)
+                .set("{date}", crate::prompt::today_utc()),
+            &config.agent.preamble,
+            &crate::prompt::ResolvedSlots::default(),
+        )),
         temperature: config.agent.temperature,
         max_tokens: config.agent.max_tokens,
         max_turns: run::RunParams::UNBOUNDED,

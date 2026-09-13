@@ -469,8 +469,22 @@ async fn run_turn(
     }
 
     let tools = workspace.register();
+    let cwd = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .get(session_id.0.as_ref())
+            .map(|session| session.workspace.root().display().to_string())
+            .unwrap_or_default()
+    };
     let params = run::RunParams {
-        preamble: Some(state.config.agent.preamble.clone()),
+        preamble: Some(crate::prompt::build_system_prompt(
+            &crate::prompt::Vars::new()
+                .set("{cwd}", cwd)
+                .set("{platform}", std::env::consts::OS)
+                .set("{date}", crate::prompt::today_utc()),
+            &state.config.agent.preamble,
+            &crate::prompt::ResolvedSlots::default(),
+        )),
         temperature: state.config.agent.temperature,
         max_tokens: state.config.agent.max_tokens,
         max_turns: run::RunParams::UNBOUNDED,

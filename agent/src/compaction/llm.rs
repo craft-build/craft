@@ -7,6 +7,7 @@ use snafu::ResultExt;
 
 use crate::edge;
 use crate::history::{AssistantContent, Message, ToolResultContent, UserContent};
+use crate::prompt::{COMPACTION_SYSTEM, COMPACTION_USER};
 
 use super::estimate::estimate_tokens;
 use super::vcc::find_cut;
@@ -15,20 +16,6 @@ use crate::error::{Result, SummarizeSnafu};
 /// Marker identifying an LLM compaction summary in history. Distinct from the
 /// VCC summary prefix so each strategy recognizes only its own summaries.
 pub(crate) const LLM_SUMMARY_PREFIX: &str = "Summary of the conversation so far:";
-
-const COMPACT_SYSTEM: &str = "\
-You are a summarizer for a coding agent's conversation history. Produce a \
-dense handoff summary that lets the conversation continue without losing \
-important context. Preserve:
-- The user's original request and any restated goals or requirements
-- Decisions made and their rationale
-- Files examined or modified, and what was learned from each
-- Tool calls and their key results, especially errors and fixes
-- Anything still in progress or explicitly deferred
-Omit pleasantries, redundant tool output, and dead-end exploration that led \
-nowhere. Write in terse bullet points. Output only the summary.";
-
-const COMPACT_USER_PROMPT: &str = "What did we do so far?";
 
 /// LLM compaction of `history`. The head is summarized (via `model`, with a
 /// static fallback if the call fails) and the tail is kept verbatim. Returns
@@ -113,8 +100,8 @@ async fn summarize<M: CompletionModel + Clone>(model: &M, head: &[Message]) -> R
     if messages.is_empty() {
         return Ok(String::new());
     }
-    messages.push(Message::user(COMPACT_USER_PROMPT));
-    let request = edge::to_request(&messages, &[], Some(COMPACT_SYSTEM), None, None);
+    messages.push(Message::user(COMPACTION_USER));
+    let request = edge::to_request(&messages, &[], Some(COMPACTION_SYSTEM), None, None);
     let response = model.completion(request).await.context(SummarizeSnafu)?;
     let text: String = response
         .choice
@@ -195,12 +182,12 @@ mod tests {
         assert_eq!(model.requests().len(), 1);
         let request = &model.requests()[0];
         // The preamble travels as the request's preamble field.
-        assert_eq!(request.preamble.as_deref(), Some(COMPACT_SYSTEM));
+        assert_eq!(request.preamble.as_deref(), Some(COMPACTION_SYSTEM));
         assert!(matches!(
             request.chat_history.last(),
             Some(rig_core::completion::message::Message::User { content })
                 if matches!(&content[0], rig_core::completion::message::UserContent::Text(t)
-                    if t.text == COMPACT_USER_PROMPT)
+                    if t.text == COMPACTION_USER)
         ));
     }
 

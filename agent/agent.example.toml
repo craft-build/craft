@@ -2,7 +2,9 @@
 # Provider table names are your aliases, not fixed Rig provider names.
 
 [agent]
-preamble = "You are Craft, an AI coding assistant."
+# Extra instructions appended to the assembled system prompt's instructions
+# slot. Empty keeps the built-in defaults.
+preamble = ""
 # Optional generation settings; omitted by default for provider/model defaults.
 # temperature = 0.2
 # max_tokens = 8192
