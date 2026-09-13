@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::tui::composer::Composer;
+use crate::tui::modals::Modal;
 use crate::tui::provider::{
     AgentEvent, Command, ModelChoice, PlanItem, Status, ToolCallData, ToolKind, ToolLine,
     TouchedFile,
@@ -141,10 +142,11 @@ pub struct App {
     pub focused: Option<usize>, // message index of focused tool block
 
     // --- overlays ---
-    pub palette: Option<(String, usize)>, // (query, selected)
-    pub model_menu: Option<usize>,        // selected row
-    pub slash_selected: usize,            // row in the slash popup
-    pub confirm_reject: Option<String>,   // tool id awaiting confirm
+    /// The one modal currently open (palette / model menu / confirm),
+    /// exclusive by construction. The slash popup is not a modal: it rides
+    /// on the composer (shown when the composer starts with '/').
+    pub modal: Modal,
+    pub slash_selected: usize, // row in the slash popup
 
     pub should_quit: bool,
 }
@@ -181,10 +183,8 @@ impl App {
             pending_click: None,
             collapsed: Vec::new(),
             focused: None,
-            palette: None,
-            model_menu: None,
+            modal: Modal::None,
             slash_selected: 0,
-            confirm_reject: None,
             should_quit: false,
         }
     }
@@ -196,10 +196,11 @@ impl App {
             .unwrap_or(("no model", "no provider"))
     }
 
-    /// Open the model picker with the current selection highlighted.
+    /// Open the model picker with the current selection highlighted,
+    /// replacing any modal already open.
     fn open_model_menu(&mut self) {
         if !self.models.is_empty() {
-            self.model_menu = Some(self.model_idx.min(self.models.len().saturating_sub(1)));
+            self.modal = Modal::ModelMenu(self.model_idx.min(self.models.len().saturating_sub(1)));
         }
     }
 
@@ -353,12 +354,14 @@ impl App {
     }
 
     pub fn slash_open(&self) -> bool {
-        self.palette.is_none() && !self.slash_matches().is_empty()
+        matches!(self.modal, Modal::None) && !self.slash_matches().is_empty()
     }
 
     pub fn palette_items(&self) -> Vec<(&'static str, &'static str, &'static str)> {
-        let (query, _) = self.palette.clone().unwrap_or_default();
-        let q = query.to_lowercase();
+        let q = match &self.modal {
+            Modal::Palette { query, .. } => query.to_lowercase(),
+            _ => String::new(),
+        };
         PALETTE_COMMANDS
             .iter()
             .copied()
@@ -397,7 +400,7 @@ impl App {
         self.hover_tool = None;
         self.pending_click = None;
         self.tool_regions.clear();
-        self.confirm_reject = None;
+        self.modal = Modal::None;
         self.scroll = 0;
         self.follow = true;
     }
@@ -414,7 +417,7 @@ impl App {
         }
     }
 
-    fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
+    pub(crate) fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
         match id {
             "new" => {
                 self.reset_conversation();
@@ -439,8 +442,8 @@ impl App {
         self.focused = None;
     }
 
-    fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>) {
-        if let Some(id) = self.confirm_reject.take() {
+    pub(crate) fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>) {
+        if let Modal::ConfirmReject(id) = std::mem::replace(&mut self.modal, Modal::None) {
             if let Some(Message::Tool { diff, .. }) = self
                 .messages
                 .iter_mut()
@@ -567,77 +570,20 @@ impl App {
     // ------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
+        // A modal owns the keyboard while open; its keys never fall through
+        // to base chords (so ctrl+q does not quit under an open palette).
+        if !matches!(self.modal, Modal::None) {
+            self.handle_modal_key(key, tx);
+            return;
+        }
+        self.handle_base_key(key, tx);
+    }
+
+    /// Keys for the normal (modal-free) surface: global chords, then
+    /// navigation and composer editing.
+    fn handle_base_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // 1. Confirm dialog swallows everything.
-        if self.confirm_reject.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.reject_confirmed(tx),
-                _ => self.confirm_reject = None,
-            }
-            return;
-        }
-
-        // 2. Command palette.
-        if let Some((query, selected)) = self.palette.clone() {
-            let items = self.palette_items();
-            match key.code {
-                KeyCode::Esc => self.palette = None,
-                KeyCode::Up => {
-                    self.palette = Some((query, selected.saturating_sub(1)));
-                }
-                KeyCode::Down => {
-                    let max = items.len().saturating_sub(1);
-                    self.palette = Some((query, (selected + 1).min(max)));
-                }
-                KeyCode::Enter => {
-                    if let Some((id, ..)) = items.get(selected) {
-                        let id = *id;
-                        self.palette = None;
-                        self.run_palette(id, tx);
-                    } else {
-                        self.palette = None;
-                    }
-                }
-                KeyCode::Backspace => {
-                    let mut q = query;
-                    q.pop();
-                    self.palette = Some((q, 0));
-                }
-                KeyCode::Char(c) => {
-                    let mut q = query;
-                    q.push(c);
-                    self.palette = Some((q, 0));
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        // 3. Model menu.
-        if let Some(sel) = self.model_menu {
-            match key.code {
-                KeyCode::Esc => self.model_menu = None,
-                KeyCode::Up => self.model_menu = Some(sel.saturating_sub(1)),
-                KeyCode::Down => {
-                    self.model_menu = Some((sel + 1).min(self.models.len().saturating_sub(1)))
-                }
-                KeyCode::Enter => {
-                    self.model_idx = sel;
-                    if let Some(choice) = self.models.get(sel) {
-                        let _ = tx.send(Command::SelectModel {
-                            provider: choice.provider.clone(),
-                            model: choice.model.clone(),
-                        });
-                    }
-                    self.model_menu = None;
-                }
-                _ => self.model_menu = None,
-            }
-            return;
-        }
-
-        // 4. Global chords.
         if ctrl {
             match key.code {
                 KeyCode::Char('c') | KeyCode::Char('q') => {
@@ -645,7 +591,10 @@ impl App {
                     return;
                 }
                 KeyCode::Char('p') => {
-                    self.palette = Some((String::new(), 0));
+                    self.modal = Modal::Palette {
+                        query: String::new(),
+                        selected: 0,
+                    };
                     return;
                 }
                 KeyCode::Char('b') => {
@@ -687,7 +636,7 @@ impl App {
                         .or_else(|| self.last_pending_diff())
                     {
                         if let Message::Tool { id, .. } = &self.messages[i] {
-                            self.confirm_reject = Some(id.clone());
+                            self.modal = Modal::ConfirmReject(id.clone());
                         }
                     }
                     return;
@@ -707,32 +656,8 @@ impl App {
                     let _ = tx.send(Command::Interrupt);
                 }
             }
-            KeyCode::Tab => {
-                let targets = self.focus_targets();
-                if !targets.is_empty() {
-                    self.focused = Some(match self.focused {
-                        None => targets[0],
-                        Some(cur) => {
-                            let pos = targets.iter().position(|&t| t == cur).unwrap_or(0);
-                            targets[(pos + 1) % targets.len()]
-                        }
-                    });
-                    self.ensure_focus_visible();
-                }
-            }
-            KeyCode::BackTab => {
-                let targets = self.focus_targets();
-                if !targets.is_empty() {
-                    self.focused = Some(match self.focused {
-                        None => targets[targets.len() - 1],
-                        Some(cur) => {
-                            let pos = targets.iter().position(|&t| t == cur).unwrap_or(0);
-                            targets[(pos + targets.len() - 1) % targets.len()]
-                        }
-                    });
-                    self.ensure_focus_visible();
-                }
-            }
+            KeyCode::Tab => self.cycle_focus(1),
+            KeyCode::BackTab => self.cycle_focus(-1),
             KeyCode::Up => {
                 if self.slash_open() {
                     self.slash_selected = self.slash_selected.saturating_sub(1);
@@ -782,6 +707,31 @@ impl App {
         }
     }
 
+    /// Move focus to the next (dir = 1) / previous (dir = -1) focusable tool
+    /// block, wrapping around.
+    fn cycle_focus(&mut self, dir: i32) {
+        let targets = self.focus_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let len = targets.len() as i32;
+        let next = match self.focused {
+            None => {
+                if dir > 0 {
+                    targets[0]
+                } else {
+                    targets[len as usize - 1]
+                }
+            }
+            Some(cur) => {
+                let pos = targets.iter().position(|&t| t == cur).unwrap_or(0) as i32;
+                targets[(pos + dir).rem_euclid(len) as usize]
+            }
+        };
+        self.focused = Some(next);
+        self.ensure_focus_visible();
+    }
+
     fn toggle_focused(&mut self) {
         if let Some(i) = self.focused {
             self.toggle_tool(i);
@@ -791,7 +741,7 @@ impl App {
     /// Paste lands in the composer as one unit; modal inputs own the
     /// keyboard so pastes are dropped while one is open.
     pub fn insert_paste(&mut self, text: &str) {
-        if self.palette.is_some() || self.confirm_reject.is_some() || self.model_menu.is_some() {
+        if !matches!(self.modal, Modal::None) {
             return;
         }
         self.composer.insert_paste(text);
@@ -884,9 +834,26 @@ mod tests {
     #[test]
     fn paste_ignored_when_modal_open() {
         let mut app = App::new();
-        app.palette = Some(("x".into(), 0));
+        app.modal = Modal::Palette {
+            query: "x".into(),
+            selected: 0,
+        };
         app.insert_paste("nope");
         assert!(app.composer.text.is_empty());
+    }
+
+    /// Modals are exclusive by construction: running the palette's "model"
+    /// item replaces the palette with the model menu instead of stacking.
+    #[test]
+    fn model_menu_replaces_open_palette() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.modal = Modal::Palette {
+            query: "mo".into(),
+            selected: 0,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.modal, Modal::ModelMenu(_)));
     }
 
     fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {

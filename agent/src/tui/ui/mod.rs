@@ -232,23 +232,25 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
         let mut app = seeded_app();
 
-        app.palette = Some(("mo".into(), 0));
+        app.modal = crate::tui::modals::Modal::Palette {
+            query: "mo".into(),
+            selected: 0,
+        };
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("Change model"));
 
-        app.palette = None;
-        app.model_menu = Some(2);
+        app.modal = crate::tui::modals::Modal::ModelMenu(2);
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Claude Opus 4.1"));
 
-        app.model_menu = None;
+        app.modal = crate::tui::modals::Modal::None;
         app.composer.text = "/cl".into();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("/clear"));
 
         app.composer.clear();
-        app.confirm_reject = Some("t2".into());
+        app.modal = crate::tui::modals::Modal::ConfirmReject("t2".into());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Reject this diff?"));
@@ -273,7 +275,7 @@ mod tests {
             models,
             current: 25,
         });
-        app.model_menu = Some(25);
+        app.modal = crate::tui::modals::Modal::ModelMenu(25);
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("m25"), "window keeps the selection visible");

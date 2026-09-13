@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use super::messages::wrap_text;
 use super::theme;
 use crate::tui::app::App;
+use crate::tui::modals::Modal;
 
 fn dim(f: &mut Frame, area: Rect) {
     // Clear first: a bg-only Block would leave the underlying characters visible.
@@ -104,7 +105,7 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
 
 /// Model picker, opened with ctrl+l / /model / palette.
 pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
-    let Some(selected) = app.model_menu else {
+    let Modal::ModelMenu(selected) = app.modal else {
         return;
     };
     if app.models.is_empty() {
@@ -166,9 +167,10 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
 
 /// ctrl+p command palette, centered near the top.
 pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
-    let Some((query, selected)) = app.palette.clone() else {
+    let Modal::Palette { query, selected } = &app.modal else {
         return;
     };
+    let (query, selected) = (query.clone(), *selected);
     dim(f, area);
 
     let items = app.palette_items();
@@ -266,7 +268,7 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
 
 /// "Reject this diff?" confirmation dialog.
 pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
-    let Some(id) = &app.confirm_reject else {
+    let Modal::ConfirmReject(id) = &app.modal else {
         return;
     };
     let file = app

@@ -5,6 +5,7 @@
 
 mod app;
 mod composer;
+mod modals;
 pub mod provider;
 mod selection;
 mod ui;

@@ -122,7 +122,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    if app.palette.is_none() {
+    if !matches!(app.modal, crate::tui::modals::Modal::Palette { .. }) {
         f.set_cursor_position((
             text_x + cursor_col.min(text_w.saturating_sub(1)) as u16,
             inset.y + 1 + (cursor_row - offset) as u16,
