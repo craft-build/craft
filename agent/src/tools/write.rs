@@ -44,6 +44,7 @@ impl Write {
             ));
         }
         let path = workspace.target(&args.path)?;
+        workspace.note_snapshot(&path);
         let existed = path.exists();
         let mut staged =
             tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_error)?;

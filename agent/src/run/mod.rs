@@ -10,6 +10,7 @@
 
 pub mod dedup;
 pub mod dispatch;
+pub mod guardrails;
 mod nudge;
 mod read_lifecycle;
 mod recency;
@@ -19,12 +20,13 @@ pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
 pub use dispatch::{
     AfterExecute, BeforeExecute, BoxFuture, Decision, DispatchOutcome, ToolDispatch,
 };
+pub use guardrails::{SharedGuardrails, shared_guardrails};
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use stream::TurnOutput;
 
 use std::sync::Arc;
 
-use rig_core::completion::CompletionModel;
+use rig_core::completion::{CompletionModel, FinishReason};
 use tokio::sync::watch;
 
 use crate::compression::{self, CompressionConfig};
@@ -116,6 +118,8 @@ pub struct RunParams {
     /// Tool-output pre-compression applied to the request view only;
     /// history and events always keep the raw results.
     pub compression: CompressionConfig,
+    /// Bound on automatic continuations of truncated (`max_tokens`) replies.
+    pub max_continuation_turns: usize,
 }
 
 impl std::fmt::Debug for RunParams {
@@ -127,12 +131,16 @@ impl std::fmt::Debug for RunParams {
             .field("max_turns", &self.max_turns)
             .field("recency", &self.recency.as_ref().map(|_| "<source>"))
             .field("compression", &self.compression)
+            .field("max_continuation_turns", &self.max_continuation_turns)
             .finish()
     }
 }
 
 impl RunParams {
     pub const UNBOUNDED: usize = usize::MAX;
+
+    /// Reference default (`DEFAULT_MAX_CONTINUATION_TURNS`).
+    pub const DEFAULT_MAX_CONTINUATION_TURNS: usize = 3;
 
     pub fn new(preamble: Option<String>) -> Self {
         Self {
@@ -142,6 +150,7 @@ impl RunParams {
             max_turns: Self::UNBOUNDED,
             recency: None,
             compression: CompressionConfig::default(),
+            max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
         }
     }
 }
@@ -155,6 +164,7 @@ impl Default for RunParams {
             max_turns: Self::UNBOUNDED,
             recency: None,
             compression: CompressionConfig::default(),
+            max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
         }
     }
 }
@@ -168,6 +178,10 @@ pub enum RunOutcome {
     /// The turn budget ran out. The sanitized partial history (with an end
     /// marker) was committed; the next prompt continues from there.
     MaxTurns,
+    /// Every continuation of a truncated (`max_tokens`) reply was spent and
+    /// the model still stopped on the output limit. The turn's messages
+    /// (including the truncated tail) were committed, like `Done`.
+    MaxTokens { reply: String },
     /// The run was cancelled; history is not committed.
     Cancelled,
     /// The run failed; history is not committed.
@@ -189,11 +203,34 @@ pub async fn run<M: CompletionModel + Clone>(
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> RunOutcome {
+    let outcome = run_inner(model, params, tools, history, prompt, cancel, emit).await;
+    // Clean (and cancelled) run ends close the capture session onto the
+    // `/undo` stack; a failed run leaves it for the next attempt to merge
+    // into, mirroring the reference's commit points.
+    if !matches!(outcome, RunOutcome::Failed(_))
+        && let Some(snapshots) = tools.snapshots()
+    {
+        snapshots.commit();
+    }
+    outcome
+}
+
+async fn run_inner<M: CompletionModel + Clone>(
+    model: &M,
+    params: &RunParams,
+    tools: &ToolDispatch,
+    history: &mut Vec<Message>,
+    prompt: &str,
+    cancel: &CancelToken,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> RunOutcome {
     let definitions = tools.definitions();
     let mut turn = vec![Message::user(prompt)];
     let mut turns = 0;
     // Nudge budget for this run; real progress (tool results) resets it.
     let mut nudges: u32 = 0;
+    // Continuations spent on truncated (`max_tokens`) replies.
+    let mut continuations: usize = 0;
     loop {
         if cancel.cancelled() {
             return RunOutcome::Cancelled;
@@ -233,7 +270,23 @@ pub async fn run<M: CompletionModel + Clone>(
         turn.push(output.assistant);
         if tool_calls.is_empty() {
             let reply = turn.last().expect("assistant pushed").text();
-            if reply.trim().is_empty() {
+            // A truncated reply continues: the model's cut-off message is
+            // already in `turn`, so the next request resumes from it.
+            let truncated = output.finish_reason == Some(FinishReason::Length);
+            if truncated && continuations < params.max_continuation_turns {
+                continuations += 1;
+                turns += 1;
+                if turns >= params.max_turns {
+                    sanitize_partial(&mut turn);
+                    history.append(&mut turn);
+                    return RunOutcome::MaxTurns;
+                }
+                continue;
+            }
+            // A truncated reply is never "empty-and-stalled": even a
+            // zero-visible-text truncation keeps its cut-off message and
+            // ends MaxTokens, so the nudge path below never swallows it.
+            if reply.trim().is_empty() && !truncated {
                 // The marker takes the silent reply's place in history.
                 turn.pop();
                 // `full` is the exact view the model just saw (its wire-only
@@ -259,6 +312,9 @@ pub async fn run<M: CompletionModel + Clone>(
                 }
             }
             history.append(&mut turn);
+            if truncated {
+                return RunOutcome::MaxTokens { reply };
+            }
             return RunOutcome::Done { reply };
         }
         for call in tool_calls {
@@ -439,6 +495,278 @@ mod tests {
                 .filter(|e| matches!(e, Event::Usage(_)))
                 .count(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshots_commit_on_done_and_undo_restores_files() {
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                tool_event(
+                    "t1",
+                    "write",
+                    serde_json::json!({"path":"f.txt","content":"changed\n"}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "original\n").unwrap();
+        let workspace = crate::tools::Workspace::new(dir.path()).unwrap();
+        let snapshots = workspace.snapshots().clone();
+        let tools = workspace.register();
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "write it",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { .. }));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "changed\n"
+        );
+        assert_eq!(snapshots.undo_depth(), 1, "session committed on Done");
+        let message = snapshots.rollback().await.unwrap();
+        assert!(message.contains("rolled back"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "original\n"
+        );
+    }
+
+    fn length_final(total_tokens: u64) -> MockStreamEvent {
+        use rig_core::streaming::StreamFinal;
+        MockStreamEvent::FinalResponse(
+            StreamFinal::new(
+                "mock",
+                rig_core::completion::Usage {
+                    total_tokens,
+                    ..Default::default()
+                },
+            )
+            .with_finish_reason(rig_core::completion::FinishReason::Length),
+        )
+    }
+
+    #[tokio::test]
+    async fn truncated_reply_continues_then_finishes() {
+        // Truncated, truncated, then a clean stop: the run continues the
+        // truncated replies and ends Done with the final text.
+        let (model, _turns) = stream_turns(vec![
+            vec![MockStreamEvent::text("part one "), length_final(1)],
+            vec![MockStreamEvent::text("part two "), length_final(1)],
+            vec![
+                MockStreamEvent::text("part three"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &ToolDispatch::default(),
+            &mut history,
+            "tell me a long story",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(
+            matches!(outcome, RunOutcome::Done { ref reply } if reply == "part three"),
+            "{outcome:?}"
+        );
+        assert_eq!(model.request_count(), 3);
+        // prompt + three assistant messages, all committed
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[1].text(), "part one ");
+    }
+
+    #[tokio::test]
+    async fn truncation_gives_up_after_the_continuation_budget() {
+        // Every reply truncates: after `max_continuation_turns` continuations
+        // the run ends MaxTokens with the truncated tail committed.
+        let (model, _turns) = stream_turns(vec![
+            vec![MockStreamEvent::text("a"), length_final(1)],
+            vec![MockStreamEvent::text("b"), length_final(1)],
+            vec![MockStreamEvent::text("c"), length_final(1)],
+            vec![MockStreamEvent::text("d"), length_final(1)],
+        ]);
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &ToolDispatch::default(),
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(
+            matches!(outcome, RunOutcome::MaxTokens { ref reply } if reply == "d"),
+            "{outcome:?}"
+        );
+        // 1 initial + 3 continuations (the default budget).
+        assert_eq!(model.request_count(), 4);
+        assert_eq!(history.len(), 5, "truncated tail is committed");
+    }
+
+    #[tokio::test]
+    async fn continuation_budget_is_configurable_to_zero() {
+        let (model, _turns) = stream_turns(vec![vec![
+            MockStreamEvent::text("cut off"),
+            length_final(1),
+        ]]);
+        let (_, cancel) = cancel_channel();
+        let params = RunParams {
+            max_continuation_turns: 0,
+            ..RunParams::default()
+        };
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &params,
+            &ToolDispatch::default(),
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::MaxTokens { .. }));
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn continuations_respect_the_turn_budget() {
+        // One clean turn budget, a truncated first reply: the continuation
+        // counts against `max_turns` and the run ends MaxTurns sanitized.
+        let (model, _turns) = stream_turns(vec![
+            vec![MockStreamEvent::text("a"), length_final(1)],
+            vec![MockStreamEvent::text("b"), length_final(1)],
+        ]);
+        let (_, cancel) = cancel_channel();
+        let params = RunParams {
+            max_turns: 1,
+            ..RunParams::default()
+        };
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &params,
+            &ToolDispatch::default(),
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::MaxTurns));
+        assert_eq!(model.request_count(), 1);
+        assert_eq!(history.last().unwrap().text(), END_MARKER);
+    }
+
+    #[tokio::test]
+    async fn empty_truncated_reply_is_committed_as_max_tokens() {
+        // A truncation with zero visible text is not an empty-and-stalled
+        // turn: the cut-off (empty) assistant message is committed and the
+        // run ends MaxTokens instead of firing the nudge path.
+        let (model, _turns) = stream_turns(vec![vec![length_final(1)]]);
+        let (_, cancel) = cancel_channel();
+        let params = RunParams {
+            max_continuation_turns: 0,
+            ..RunParams::default()
+        };
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &params,
+            &ToolDispatch::default(),
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::MaxTokens { .. }));
+        assert_eq!(model.request_count(), 1, "no nudge was sent");
+        assert_eq!(history.len(), 2);
+        // prompt + the truncated assistant message (empty, not replaced by
+        // the empty-response marker)
+        assert_ne!(history[1].text(), nudge::EMPTY_RESPONSE_MARKER);
+    }
+
+    #[tokio::test]
+    async fn guardrails_warn_then_block_repeated_failures() {
+        // Five identical failing reads: the counters warn at 2 and block at
+        // 4, so the third call carries the warning and the fifth is blocked.
+        let read = || tool_event("t", "read", serde_json::json!({"path": "missing"}));
+        let (model, _turns) = stream_turns(vec![
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path())
+            .unwrap()
+            .register()
+            .with_guardrails(crate::run::shared_guardrails());
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { .. }));
+        let results: Vec<String> = history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|b| match b {
+                        UserContent::ToolResult(r) => Some(r.content[0].to_text()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(results.len(), 5);
+        assert!(!results[0].contains("guardrail"));
+        assert!(
+            results[2].starts_with("[guardrail]"),
+            "warn at the third call: {}",
+            results[2]
+        );
+        assert!(
+            results[4].contains("blocked by guardrails"),
+            "block at the fifth call: {}",
+            results[4]
         );
     }
 

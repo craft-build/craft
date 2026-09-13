@@ -39,6 +39,9 @@ pub struct CompactionState {
     /// Cleared before every compaction run: compacted history may describe a
     /// different world than the one the dedup cache sampled.
     dedup: Option<SharedDedupCache>,
+    /// Cleared with the dedup cache: the compacted conversation no longer
+    /// describes the calls that tripped the guardrail counters.
+    guardrails: Option<crate::run::SharedGuardrails>,
     /// Where the unanswered input starts, as a history index: everything from
     /// here on is held out of the summary and re-appended verbatim, so input
     /// no turn has answered yet is never summarized away (Craft's
@@ -51,6 +54,12 @@ impl CompactionState {
     /// Share the session's tool dedup cache so compaction can clear it.
     pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
         self.dedup = Some(cache);
+        self
+    }
+
+    /// Share the session's tool guardrails so compaction can reset them.
+    pub fn with_guardrails(mut self, guardrails: crate::run::SharedGuardrails) -> Self {
+        self.guardrails = Some(guardrails);
         self
     }
 
@@ -138,6 +147,11 @@ impl CompactionEngine {
                 && let Ok(mut guard) = cache.lock()
             {
                 guard.clear();
+            }
+            if let Some(guardrails) = &state.guardrails
+                && let Ok(mut guard) = guardrails.lock()
+            {
+                guard.reset();
             }
             // Unanswered input is held out of the summary and re-appended
             // verbatim; `carry_len == 0` between turns.

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use futures::StreamExt;
-use rig_core::completion::{CompletionModel, CompletionRequest};
+use rig_core::completion::{CompletionModel, CompletionRequest, FinishReason};
 use rig_core::streaming::{StreamFinal, StreamedAssistantContent};
 
 use crate::edge::{StreamedParts, assistant_from_stream, fold_streamed_event};
@@ -22,6 +22,9 @@ use super::{CancelToken, Event};
 pub struct TurnOutput {
     pub assistant: history::Message,
     pub usage: history::Usage,
+    /// Why the model stopped, when the provider reported it. `Length` means
+    /// the reply was truncated at `max_tokens`.
+    pub finish_reason: Option<FinishReason>,
 }
 
 /// How a model stream ended without producing a turn.
@@ -46,6 +49,7 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
     // provider tool-call id -> run-stable internal id recorded at call time.
     let mut call_ids: HashMap<String, String> = HashMap::new();
     let mut usage: Option<history::Usage> = None;
+    let mut finish_reason: Option<FinishReason> = None;
     let mut cancel_rx = cancel.subscribe();
     // A dropped CancelFlag makes `changed()` ready (with Err) on every poll;
     // polling it forever would busy-loop, so disable the branch once that
@@ -89,6 +93,7 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
                         }
                         StreamedAssistantContent::Final(final_) => {
                             usage = Some(usage_from_final(final_));
+                            finish_reason = final_.finish_reason.clone();
                         }
                         _ => {}
                     }
@@ -100,7 +105,11 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
     let usage = usage.unwrap_or_else(|| usage_from_response(&stream));
     emit(Event::Usage(usage));
     let assistant = assistant_from_stream(stream.choice.as_ref(), &call_ids, &parts);
-    Ok(TurnOutput { assistant, usage })
+    Ok(TurnOutput {
+        assistant,
+        usage,
+        finish_reason,
+    })
 }
 
 fn usage_from_final(final_: &StreamFinal) -> history::Usage {
@@ -147,6 +156,27 @@ mod tests {
             .unwrap();
         assert_eq!(output.assistant.text(), "hello");
         assert_eq!(output.usage.total_tokens, 3);
+        assert_eq!(output.finish_reason, None);
+    }
+
+    /// A `Final` event's finish reason rides the turn output.
+    #[tokio::test]
+    async fn finish_reason_rides_the_turn_output() {
+        let model = MockCompletionModel::from_stream_turns(vec![vec![
+            MockStreamEvent::text("trunc"),
+            MockStreamEvent::FinalResponse(
+                rig_core::streaming::StreamFinal::new("mock", rig_core::completion::Usage::new())
+                    .with_finish_reason(rig_core::completion::FinishReason::Length),
+            ),
+        ]]);
+        let (_flag, cancel) = crate::run::cancel_channel();
+        let output = run_model_stream(&model, request(), &cancel, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            output.finish_reason,
+            Some(rig_core::completion::FinishReason::Length)
+        );
     }
 
     /// A stream without a `Final` usage event falls back to the response's

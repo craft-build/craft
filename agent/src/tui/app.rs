@@ -471,8 +471,11 @@ impl App {
                 self.reset_conversation();
                 let _ = tx.send(Command::Clear);
             }
+            "/undo" => {
+                let _ = tx.send(Command::Undo);
+            }
             "/model" => self.open_model_menu(),
-            // Compact/undo/help/sessions are no-ops for now.
+            // Compact/help/sessions are no-ops for now.
             _ => {}
         }
     }

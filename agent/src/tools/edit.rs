@@ -131,6 +131,7 @@ pub(crate) fn persist(
     if permissions.readonly() {
         return Err(denied("file is read-only"));
     }
+    workspace.note_snapshot(path);
     // Stage beside the destination for same-filesystem atomic replacement.
     // Preserve exact bytes outside the replacement, including CRLF and BOM.
     let mut staged = tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_error)?;

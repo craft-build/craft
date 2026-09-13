@@ -62,6 +62,7 @@ pub struct Workspace {
     loaded_instructions: crate::instructions::LoadedInstructions,
     todos: todo_write::TodoStore,
     compression_store: crate::compression::store::SharedCompressionStore,
+    snapshots: crate::snapshot::SnapshotManager,
 }
 
 impl Workspace {
@@ -74,11 +75,12 @@ impl Workspace {
             return Err(denied("workspace must not be inside Git metadata"));
         }
         Ok(Self {
-            root: Arc::new(root),
+            root: Arc::new(root.clone()),
             lock: Arc::new(Mutex::new(())),
             loaded_instructions: crate::instructions::LoadedInstructions::new(),
             todos: Default::default(),
             compression_store: crate::compression::store::shared_store(),
+            snapshots: crate::snapshot::SnapshotManager::new(root.clone()),
         })
     }
 
@@ -102,6 +104,17 @@ impl Workspace {
         &self.compression_store
     }
 
+    /// The session-shared snapshot manager backing `/undo`.
+    pub fn snapshots(&self) -> &crate::snapshot::SnapshotManager {
+        &self.snapshots
+    }
+
+    /// Capture `path`'s pre-write contents for `/undo`. Write-family tools
+    /// call this after resolving their target and before mutating.
+    pub(crate) fn note_snapshot(&self, path: &Path) {
+        self.snapshots.note(path);
+    }
+
     /// Register the workspace's tools into our dispatch executor.
     pub fn register(&self) -> crate::run::ToolDispatch {
         let mut tools: Vec<PortableDynamicTool> = vec![
@@ -122,7 +135,9 @@ impl Workspace {
         // Introspection snapshot of every other registered tool.
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
-        crate::run::ToolDispatch::new(tools).with_compression_store(self.compression_store.clone())
+        crate::run::ToolDispatch::new(tools)
+            .with_compression_store(self.compression_store.clone())
+            .with_snapshots(self.snapshots.clone())
     }
 
     pub(crate) async fn run<T: Send + 'static>(

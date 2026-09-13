@@ -18,7 +18,9 @@ use rig_core::tool::PortableDynamicTool;
 use crate::history;
 
 use super::dedup::{self, SharedDedupCache, ToolDedupCache};
+use super::guardrails::{GuardrailDecision, SharedGuardrails};
 use crate::compression::store::SharedCompressionStore;
+use crate::snapshot::SnapshotManager;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -56,6 +58,8 @@ pub struct ToolDispatch {
     after: Option<Arc<dyn AfterExecute>>,
     dedup: Option<SharedDedupCache>,
     compression_store: Option<SharedCompressionStore>,
+    snapshots: Option<SnapshotManager>,
+    guardrails: Option<SharedGuardrails>,
 }
 
 /// What executing one call produced.
@@ -80,6 +84,8 @@ impl ToolDispatch {
             after: None,
             dedup: None,
             compression_store: None,
+            snapshots: None,
+            guardrails: None,
         }
     }
 
@@ -110,6 +116,24 @@ impl ToolDispatch {
 
     pub fn compression_store(&self) -> Option<&SharedCompressionStore> {
         self.compression_store.as_ref()
+    }
+
+    /// Share the session's snapshot manager so the run loop can commit
+    /// turn sessions and the surface can drive `/undo`.
+    pub fn with_snapshots(mut self, snapshots: SnapshotManager) -> Self {
+        self.snapshots = Some(snapshots);
+        self
+    }
+
+    pub fn snapshots(&self) -> Option<&SnapshotManager> {
+        self.snapshots.as_ref()
+    }
+
+    /// Share the session's tool guardrails: repeat-failure and no-progress
+    /// counters consulted around every execution.
+    pub fn with_guardrails(mut self, guardrails: SharedGuardrails) -> Self {
+        self.guardrails = Some(guardrails);
+        self
     }
 
     /// Provider-facing definitions for the request.
@@ -150,6 +174,28 @@ impl ToolDispatch {
         }
         let name = call.function.name.clone();
         let read_only = ToolDedupCache::is_read_only(&name);
+        // Guardrails are consulted after approval so a human-approved call
+        // still cannot loop unproductively.
+        let mut pre_warned = false;
+        if let Some(guardrails) = &self.guardrails
+            && let Ok(guard) = guardrails.lock()
+        {
+            match guard.check_before_call(&name, &call.function.arguments, read_only) {
+                GuardrailDecision::Allow => {}
+                GuardrailDecision::Warn => pre_warned = true,
+                GuardrailDecision::Block => {
+                    return Ok(DispatchOutcome::Skipped(history::ToolResult {
+                        call: call.id,
+                        name: call.function.name,
+                        content: vec![history::ToolResultContent::text(
+                            "blocked by guardrails: this tool call keeps repeating without \
+                             progress; change your approach or use a different tool",
+                        )],
+                        is_error: true,
+                    }));
+                }
+            }
+        }
         let dedup_key = read_only.then(|| ToolDedupCache::key(&name, &call.function.arguments));
         let cached = if let (Some(cache), Some(key)) = (&self.dedup, dedup_key) {
             cache.lock().ok().and_then(|guard| guard.get(key).cloned())
@@ -163,6 +209,14 @@ impl ToolDispatch {
             if let Some(after) = &self.after {
                 replayed = after.transform(call.clone(), replayed).await;
             }
+            guardrail_note(
+                self,
+                &name,
+                &call.function.arguments,
+                &mut replayed,
+                read_only,
+                pre_warned,
+            );
             return Ok(DispatchOutcome::Ran(replayed));
         }
         let output = tool.execute(call.function.arguments.clone()).await;
@@ -198,8 +252,56 @@ impl ToolDispatch {
         if let Some(after) = &self.after {
             result = after.transform(call.clone(), result).await;
         }
+        let mut result = result;
+        guardrail_note(
+            self,
+            &name,
+            &call.function.arguments,
+            &mut result,
+            read_only,
+            pre_warned,
+        );
         Ok(DispatchOutcome::Ran(result))
     }
+}
+
+/// Feed one finished result back into the guardrail counters and surface
+/// any warning (from this result, or carried from the pre-call check) as
+/// a prefix on the model-visible text.
+fn guardrail_note(
+    dispatch: &ToolDispatch,
+    name: &str,
+    arguments: &serde_json::Value,
+    result: &mut history::ToolResult,
+    read_only: bool,
+    pre_warned: bool,
+) {
+    let Some(guardrails) = &dispatch.guardrails else {
+        return;
+    };
+    let Ok(mut guard) = guardrails.lock() else {
+        return;
+    };
+    let text = result
+        .content
+        .iter()
+        .map(history::ToolResultContent::to_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let warning = guard
+        .record_result(name, arguments, &text, result.is_error, read_only)
+        .map(|warning| warning.reason);
+    let reason = match (warning, pre_warned) {
+        (Some(reason), _) => reason,
+        (None, true) => {
+            format!("{name} is repeating unproductively; consider a different approach or tool")
+        }
+        (None, false) => return,
+    };
+    result.content.insert(
+        0,
+        history::ToolResultContent::text(format!("[guardrail] {reason}")),
+    );
 }
 
 /// Model-visible content for a failed call: the error's canonical output when

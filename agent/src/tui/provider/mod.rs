@@ -26,6 +26,8 @@ pub enum Command {
     Reset,
     /// Conversation context was cleared by the user.
     Clear,
+    /// Roll back the last committed snapshot session (`/undo`).
+    Undo,
     /// Switch the provider/model used for subsequent turns.
     SelectModel { provider: String, model: String },
 }

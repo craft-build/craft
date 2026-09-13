@@ -81,6 +81,9 @@ struct SessionState {
     /// Session-wide tool dedup cache, shared by the dispatcher and cleared
     /// by the compaction engine.
     dedup: crate::run::SharedDedupCache,
+    /// Session-wide guardrail counters, shared by the dispatcher and reset
+    /// by the compaction engine.
+    guardrails: crate::run::SharedGuardrails,
     /// Edit-family call awaiting the user's decision, by tool-call id.
     pending_approval: Option<(String, oneshot::Sender<bool>)>,
 }
@@ -90,9 +93,13 @@ impl SessionState {
     /// compaction run clears it.
     fn linked() -> Self {
         let dedup = crate::run::shared_cache();
+        let guardrails = crate::run::shared_guardrails();
         Self {
-            compaction: CompactionState::default().with_dedup(dedup.clone()),
+            compaction: CompactionState::default()
+                .with_dedup(dedup.clone())
+                .with_guardrails(guardrails.clone()),
             dedup,
+            guardrails,
             ..Self::default()
         }
     }
@@ -208,6 +215,7 @@ impl Provider for CraftProvider {
             let mut current_turn: Option<AbortHandle> = None;
             let mut selection = self.selection;
             let workspace = self.workspace;
+            let snapshots = workspace.snapshots().clone();
             let instructions_text = self.instructions.text;
             let config = self.config;
             let catalogs = self.catalogs;
@@ -301,6 +309,22 @@ impl Provider for CraftProvider {
                         let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                         let _ = evt_tx.send(AgentEvent::TokenUsage("0 (0%)".into()));
+                    }
+                    Command::Undo => {
+                        if current_turn.is_some() {
+                            // Restoring mid-run would race the turn's writes
+                            // and drain its live capture session.
+                            let _ = evt_tx.send(AgentEvent::AssistantText(
+                                "A turn is still running; wait for it to finish before undoing."
+                                    .into(),
+                            ));
+                            continue;
+                        }
+                        let message = snapshots
+                            .rollback()
+                            .await
+                            .unwrap_or_else(|| "Nothing to undo.".into());
+                        let _ = evt_tx.send(AgentEvent::AssistantText(message));
                     }
                     Command::SelectModel { provider, model } => {
                         let found = catalogs
@@ -436,6 +460,7 @@ async fn run_turn(
 
     let mut history = state.lock().await.history.clone();
     let dedup = state.lock().await.dedup.clone();
+    let guardrails = state.lock().await.guardrails.clone();
 
     // Run configured compaction stages whose context-fill threshold is crossed
     // before the history is sent to the model; commit effectiveness state only.
@@ -456,6 +481,7 @@ async fn run_turn(
     let tools = workspace
         .register()
         .with_dedup(dedup)
+        .with_guardrails(guardrails)
         .with_before(Arc::new(ApprovalGate {
             state: state.clone(),
             tx: tx.clone(),
@@ -475,6 +501,7 @@ async fn run_turn(
         max_turns: run::RunParams::UNBOUNDED,
         recency: None,
         compression: config.compression.clone(),
+        max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
@@ -587,6 +614,21 @@ async fn run_turn(
                 state.lock().await.history = history.clone();
                 let _ = tx.send(AgentEvent::AssistantText(
                     "Reached the turn limit. Send another message to continue.".into(),
+                ));
+                break;
+            }
+            RunOutcome::MaxTokens { reply } => {
+                state.lock().await.history = history.clone();
+                if streamed_text.load(Ordering::Relaxed)
+                    || streamed_reasoning.load(Ordering::Relaxed)
+                {
+                    let _ = tx.send(AgentEvent::AssistantEnd);
+                } else if !reply.is_empty() {
+                    let _ = tx.send(AgentEvent::AssistantText(reply));
+                }
+                let _ = tx.send(AgentEvent::AssistantText(
+                    "The reply hit the output-token limit. Send another message to continue."
+                        .into(),
                 ));
                 break;
             }

@@ -11,6 +11,7 @@ pub mod paths;
 pub mod prompt;
 pub mod providers;
 pub mod run;
+pub mod snapshot;
 pub mod storage;
 pub mod tools;
 pub mod tui;

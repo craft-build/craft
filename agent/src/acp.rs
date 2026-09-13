@@ -525,6 +525,7 @@ async fn run_turn(
         max_turns: run::RunParams::UNBOUNDED,
         recency: None,
         compression: state.config.compression.clone(),
+        max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
     };
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {
@@ -596,6 +597,20 @@ async fn run_turn(
         }
         // The driver committed the sanitized partial history; the next prompt
         // continues from where the budget ran out.
+        // The turn still hit the output-token limit after every continuation;
+        // the committed history includes the truncated tail.
+        RunOutcome::MaxTokens { reply } => {
+            if !emitted_text.load(Ordering::Relaxed) && !reply.is_empty() {
+                let _ = send(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                    ContentBlock::Text(TextContent::new(reply)),
+                )));
+            }
+            let mut sessions = state.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
+                session.history = history;
+            }
+            let _ = responder.respond(AcpPromptResponse::new(StopReason::MaxTokens));
+        }
         RunOutcome::MaxTurns => {
             let mut sessions = state.sessions.lock().await;
             if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {

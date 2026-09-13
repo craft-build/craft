@@ -316,6 +316,10 @@ impl Provider for MockProvider {
                     Command::Clear => {
                         // Context cleared conceptually; mock keeps its script state.
                     }
+                    Command::Undo => {
+                        // No filesystem writes happen under the mock provider.
+                        let _ = evt_tx.send(AgentEvent::AssistantText("Nothing to undo.".into()));
+                    }
                     Command::SelectModel { .. } => {
                         // Fixed script: model selection is outside the demo.
                     }
