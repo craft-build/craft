@@ -4,7 +4,7 @@ pub mod llm;
 pub mod vcc;
 
 pub use engine::{CompactionEngine, CompactionState};
-pub use estimate::estimate_tokens;
+pub use estimate::{TokenEstimator, estimate_prompt_tokens, estimate_tokens};
 
 /// Constructors shared by compaction tests (history has no struct-literal
 /// sugar for the rich shapes these tests need).
