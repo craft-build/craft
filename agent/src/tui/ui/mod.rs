@@ -37,7 +37,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let text_w = (chat.width as usize)
         .saturating_sub(2 + composer::TEXT_LEFT_PAD + composer::TEXT_RIGHT_PAD) // inset + inner pads
         .max(1);
-    let row_count = messages::wrap_rows(&app.composer, text_w).len();
+    let row_count = messages::wrap_rows(&app.composer.text, text_w).len();
     let composer_h = row_count.min(composer::MAX_TEXT_ROWS) as u16 + 2;
     let bottom_h = composer_h + 3; // border(1) + box + status(1) + blank(1)
 
@@ -243,7 +243,7 @@ mod tests {
         assert!(text.contains("Claude Opus 4.1"));
 
         app.model_menu = None;
-        app.composer = "/cl".into();
+        app.composer.text = "/cl".into();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("/clear"));
 

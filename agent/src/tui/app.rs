@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
+use crate::tui::composer::Composer;
 use crate::tui::provider::{
     AgentEvent, Command, ModelChoice, PlanItem, Status, ToolCallData, ToolKind, ToolLine,
     TouchedFile,
@@ -113,8 +114,7 @@ pub struct App {
     pub sidebar_open: bool,
 
     // --- composer ---
-    pub composer: String,
-    pub composer_cursor: usize, // char index into composer
+    pub composer: Composer,
 
     // --- message view ---
     pub scroll: u16,
@@ -166,8 +166,7 @@ impl App {
             cwd: "~/Projects/craft-web".into(),
             branch: "fix/session-refresh".into(),
             sidebar_open: true,
-            composer: String::new(),
-            composer_cursor: 0,
+            composer: Composer::new(),
             scroll: 0,
             follow: true,
             max_scroll: 0,
@@ -342,7 +341,7 @@ impl App {
     }
 
     pub fn slash_matches(&self) -> Vec<(&'static str, &'static str)> {
-        let q = self.composer.as_str();
+        let q = self.composer.text.as_str();
         if !q.starts_with('/') {
             return Vec::new();
         }
@@ -372,7 +371,7 @@ impl App {
     // ------------------------------------------------------------------
 
     fn submit(&mut self, tx: &mpsc::UnboundedSender<Command>) {
-        let text = self.composer.trim().to_string();
+        let text = self.composer.text.trim().to_string();
         if text.is_empty() {
             return;
         }
@@ -381,7 +380,6 @@ impl App {
         if text.starts_with('/') && !slash.is_empty() {
             let (cmd, _) = slash[self.slash_selected.min(slash.len() - 1)];
             self.composer.clear();
-            self.composer_cursor = 0;
             self.run_slash(cmd, tx);
             return;
         }
@@ -389,7 +387,6 @@ impl App {
         self.messages.push(Message::User(text.clone()));
         let _ = tx.send(Command::SendMessage(text));
         self.composer.clear();
-        self.composer_cursor = 0;
         self.follow = true;
     }
 
@@ -702,9 +699,8 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 // Close slash menu → clear focus → interrupt a running turn.
-                if self.composer.starts_with('/') {
+                if self.composer.text.starts_with('/') {
                     self.composer.clear();
-                    self.composer_cursor = 0;
                 } else if self.focused.is_some() {
                     self.focused = None;
                 } else if self.busy() {
@@ -756,7 +752,7 @@ impl App {
             KeyCode::PageDown => self.scroll_by(self.view_height as i32),
             KeyCode::Enter => {
                 // Enter on a focused collapsible block (empty composer) toggles it.
-                if self.composer.is_empty()
+                if self.composer.text.is_empty()
                     && self
                         .focused
                         .map(|i| {
@@ -773,23 +769,15 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
-                let idx = self.byte_index(self.composer_cursor);
-                self.composer.insert(idx, c);
-                self.composer_cursor += 1;
+                self.composer.insert_char(c);
                 self.slash_selected = 0;
             }
             KeyCode::Backspace => {
-                if self.composer_cursor > 0 {
-                    let idx = self.byte_index(self.composer_cursor - 1);
-                    self.composer.remove(idx);
-                    self.composer_cursor -= 1;
-                    self.slash_selected = 0;
-                }
+                self.composer.backspace();
+                self.slash_selected = 0;
             }
-            KeyCode::Left => self.composer_cursor = self.composer_cursor.saturating_sub(1),
-            KeyCode::Right => {
-                self.composer_cursor = (self.composer_cursor + 1).min(self.composer.chars().count())
-            }
+            KeyCode::Left => self.composer.move_left(),
+            KeyCode::Right => self.composer.move_right(),
             _ => {}
         }
     }
@@ -800,35 +788,14 @@ impl App {
         }
     }
 
-    /// Insert bracketed-paste content into the composer as one unit —
-    /// crucially it never triggers submit (raw newlines would have arrived as
-    /// Enter keypresses and sent the message line by line). Newlines are kept:
-    /// the composer wraps and renders multi-line input.
+    /// Paste lands in the composer as one unit; modal inputs own the
+    /// keyboard so pastes are dropped while one is open.
     pub fn insert_paste(&mut self, text: &str) {
-        // Ignore pastes while a modal text input owns the keyboard.
         if self.palette.is_some() || self.confirm_reject.is_some() || self.model_menu.is_some() {
             return;
         }
-        // Bracketed paste delivers line breaks as \r or \r\n depending on the
-        // terminal; normalize both to \n.
-        let clean = text.replace("\r\n", "\n").replace('\r', "\n");
-        if clean.trim().is_empty() {
-            return;
-        }
-        let chars_added = clean.chars().count();
-        let idx = self.byte_index(self.composer_cursor);
-        self.composer.insert_str(idx, &clean);
-        self.composer_cursor += chars_added;
+        self.composer.insert_paste(text);
         self.slash_selected = 0;
-    }
-
-    /// Byte index of the `char_idx`-th char in the composer.
-    fn byte_index(&self, char_idx: usize) -> usize {
-        self.composer
-            .char_indices()
-            .nth(char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or(self.composer.len())
     }
 }
 
@@ -915,23 +882,11 @@ mod tests {
     }
 
     #[test]
-    fn paste_preserves_line_breaks_and_moves_cursor() {
-        let mut app = App::new();
-        // Multi-line paste with both \r\n and \r line endings (how bracketed
-        // paste can deliver breaks) lands as \n-separated text in one unit.
-        app.insert_paste("one\r\ntwo\rthree");
-        assert_eq!(app.composer, "one\ntwo\nthree");
-        assert_eq!(app.composer_cursor, app.composer.chars().count());
-        // Nothing was submitted.
-        assert!(app.messages.is_empty());
-    }
-
-    #[test]
     fn paste_ignored_when_modal_open() {
         let mut app = App::new();
         app.palette = Some(("x".into(), 0));
         app.insert_paste("nope");
-        assert!(app.composer.is_empty());
+        assert!(app.composer.text.is_empty());
     }
 
     fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {

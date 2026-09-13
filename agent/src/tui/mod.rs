@@ -4,6 +4,7 @@
 //! backend is [`provider::live::CraftProvider`].
 
 mod app;
+mod composer;
 pub mod provider;
 mod selection;
 mod ui;

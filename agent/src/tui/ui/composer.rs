@@ -58,9 +58,9 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    let chars: Vec<char> = app.composer.chars().collect();
-    let cursor = app.composer_cursor.min(chars.len());
-    let rows = super::messages::wrap_rows(&app.composer, text_w);
+    let chars: Vec<char> = app.composer.text.chars().collect();
+    let cursor = app.composer.cursor.min(chars.len());
+    let rows = super::messages::wrap_rows(&app.composer.text, text_w);
 
     // (row, col) of the cursor within the wrapped layout.
     let mut cursor_row = rows.len() - 1;
@@ -105,7 +105,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Placeholder on the first visible row.
-    if offset == 0 && app.composer.is_empty() {
+    if offset == 0 && app.composer.text.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "Message Craft…",
