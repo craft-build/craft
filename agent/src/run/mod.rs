@@ -10,6 +10,7 @@
 
 pub mod dedup;
 pub mod dispatch;
+mod read_lifecycle;
 mod recency;
 mod stream;
 
@@ -199,6 +200,7 @@ pub async fn run<M: CompletionModel + Clone>(
         {
             full = with_tail;
         }
+        read_lifecycle::apply_to_request(&mut full);
         compress_request_view(&mut full, &params.compression);
         let request = edge::to_request(
             &full,
@@ -943,6 +945,91 @@ mod tests {
         .await;
         assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "hello"));
         assert_eq!(history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn read_lifecycle_marks_request_view_only() {
+        // read → write the same file, with enough later read turns that the
+        // early read falls outside the working-set lookback. The model's
+        // later requests must see the stale marker; history keeps the raw text.
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                tool_event("t1", "read", serde_json::json!({"path": "f.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                tool_event(
+                    "t2",
+                    "write",
+                    serde_json::json!({"path": "f.txt", "content": "changed\n"}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                tool_event("t3", "read", serde_json::json!({"path": "g.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                tool_event("t4", "read", serde_json::json!({"path": "h.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                tool_event("t5", "read", serde_json::json!({"path": "i.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                tool_event("t6", "read", serde_json::json!({"path": "j.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let long: String = (1..=40)
+            .map(|i| format!("original line {i} of the file\n"))
+            .collect();
+        for name in ["f.txt", "g.txt", "h.txt", "i.txt", "j.txt"] {
+            std::fs::write(dir.path().join(name), &long).unwrap();
+        }
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { .. }));
+        // Committed history keeps the raw read.
+        let Message::User { content } = &history[2] else {
+            panic!("first read result message");
+        };
+        let UserContent::ToolResult(raw) = &content[0] else {
+            panic!("tool result block");
+        };
+        assert!(raw.content[0].to_text().contains("40: original line 40"));
+        // The model's last request carried the stale marker for that read.
+        let requests = model.requests();
+        let sent = crate::edge::rig_to_own(&requests.last().unwrap().chat_history);
+        let Message::User { content } = &sent[2] else {
+            panic!("tool result message on the wire");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("tool result block on the wire");
+        };
+        let wire_text = result.content[0].to_text();
+        assert!(
+            wire_text.starts_with("[Stale read: "),
+            "expected a stale marker, got: {wire_text}"
+        );
+        assert!(wire_text.contains("Re-read the file"));
     }
 
     #[tokio::test]
