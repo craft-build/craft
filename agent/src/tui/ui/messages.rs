@@ -342,16 +342,16 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    if app.messages.is_empty() {
+    if app.conversation.messages.is_empty() {
         lines.push(Line::from(Span::styled(
             "No messages yet.",
             Style::default().fg(theme::TEXT_TERTIARY),
         )));
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            "Send a message — the mock provider will replay the scripted \"session refresh\" scenario.",
-            Style::default().fg(theme::TEXT_DISABLED),
-        )));
+"Send a message — the mock provider will replay the scripted \"session refresh\" scenario.",
+Style::default().fg(theme::TEXT_DISABLED),
+)));
     }
 
     // Blank spacer carrying the user-message accent bar, so the block's
@@ -363,9 +363,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         )
     };
 
-    let mut msg_starts = Vec::with_capacity(app.messages.len());
+    let mut msg_starts = Vec::with_capacity(app.conversation.messages.len());
     let mut tool_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
-    for (idx, msg) in app.messages.iter().enumerate() {
+    for (idx, msg) in app.conversation.messages.iter().enumerate() {
         msg_starts.push(lines.len());
         let is_user = matches!(msg, Message::User(_));
         if is_user {
@@ -382,9 +382,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 diff,
             } => {
                 let start = lines.len();
-                let collapsed = app.collapsed.iter().any(|c| c == id);
-                let focused = app.focused == Some(idx);
-                let hovered = app.hover_tool == Some(idx);
+                let collapsed = app.conversation.collapsed.iter().any(|c| c == id);
+                let focused = app.conversation.focused == Some(idx);
+                let hovered = app.view.hover_tool == Some(idx);
                 lines.extend(tool_block(
                     kind, id, body, *diff, focused, collapsed, hovered, width,
                 ));
@@ -398,21 +398,21 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         }
         lines.push(Line::default());
     }
-    app.msg_starts = msg_starts;
+    app.view.msg_starts = msg_starts;
 
     let total = lines.len();
     let visible = inner.height as usize;
     let max = total.saturating_sub(visible).min(u16::MAX as usize) as u16;
-    if app.follow {
-        app.scroll = max;
+    if app.view.follow {
+        app.view.scroll = max;
     }
-    app.scroll = app.scroll.min(max);
-    app.max_scroll = max;
-    app.view_height = inner.height;
+    app.view.scroll = app.view.scroll.min(max);
+    app.view.max_scroll = max;
+    app.view.view_height = inner.height;
 
     // Visible screen rects of collapsible tool cards (for hover/click).
-    let scroll = app.scroll as i32;
-    app.tool_regions = tool_ranges
+    let scroll = app.view.scroll as i32;
+    app.view.tool_regions = tool_ranges
         .iter()
         .filter_map(|(idx, start, end)| {
             let vis_start = (*start as i32 - scroll).max(0);
@@ -433,7 +433,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let para = Paragraph::new(lines).scroll((app.scroll, 0));
+    let para = Paragraph::new(lines).scroll((app.view.scroll, 0));
     f.render_widget(para, inner);
 }
 

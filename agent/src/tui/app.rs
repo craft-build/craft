@@ -92,134 +92,33 @@ impl Message {
     }
 }
 
-pub struct App {
-    // --- provider-driven state ---
+/// Message-list state: what the provider streams in, plus focus/collapse
+/// chrome that rides on it.
+pub struct Conversation {
     pub messages: Vec<Message>,
-    pub plan: Vec<PlanItem>,
-    pub files: Vec<TouchedFile>,
-    pub status: Status,
-    /// Animation frame counter for the status indicator (advanced per frame).
-    pub status_tick: usize,
-    pub token_label: String,
+    pub collapsed: Vec<String>, // tool ids currently collapsed
+    pub focused: Option<usize>, // message index of focused tool block
     /// True while a streamed [`Message::Assistant`] is still being appended to.
     assistant_open: bool,
     /// True while a streamed [`Message::Thinking`] is still being appended to.
     thinking_open: bool,
-
-    // --- session chrome ---
-    pub models: Vec<ModelChoice>,
-    pub model_idx: usize,
-    pub effort_idx: usize,
-    pub cwd: String,
-    pub branch: String,
-    pub sidebar_open: bool,
-
-    // --- composer ---
-    pub composer: Composer,
-
-    // --- message view ---
-    pub scroll: u16,
-    pub follow: bool,
-    pub max_scroll: u16,
-    pub view_height: u16,
-    /// Line offset where each message starts (filled by the renderer).
-    pub msg_starts: Vec<usize>,
-    /// Text of the last rendered frame, one entry per terminal row (filled by
-    /// the renderer; used to extract selection text on copy).
-    pub frame_text: Vec<String>,
-    /// Selectable regions of the last frame: chat messages and composer input.
-    pub msg_area: Rect,
-    pub composer_area: Rect,
-    pub selection: Option<Selection>,
-    /// Screen rects of collapsible tool cards in the last frame: (message
-    /// index, rect). Used for hover highlight and click-to-toggle.
-    pub tool_regions: Vec<(usize, Rect)>,
-    /// Tool card under the pointer (hover state).
-    pub hover_tool: Option<usize>,
-    /// Card the current click started on; a press without drag toggles it.
-    pub pending_click: Option<usize>,
-    pub collapsed: Vec<String>, // tool ids currently collapsed
-    pub focused: Option<usize>, // message index of focused tool block
-
-    // --- overlays ---
-    /// The one modal currently open (palette / model menu / confirm),
-    /// exclusive by construction. The slash popup is not a modal: it rides
-    /// on the composer (shown when the composer starts with '/').
-    pub modal: Modal,
-    pub slash_selected: usize, // row in the slash popup
-
-    pub should_quit: bool,
 }
 
-impl App {
-    pub fn new() -> Self {
-        App {
+impl Conversation {
+    fn new() -> Self {
+        Conversation {
             messages: Vec::new(),
-            plan: Vec::new(),
-            files: Vec::new(),
-            status: Status::Done,
-            status_tick: 0,
-            token_label: "…".into(),
-            assistant_open: false,
-            thinking_open: false,
-            models: seed_models(),
-            model_idx: 0,
-            effort_idx: 2, // "high", the prototype default
-            cwd: "~/Projects/craft-web".into(),
-            branch: "fix/session-refresh".into(),
-            sidebar_open: true,
-            composer: Composer::new(),
-            scroll: 0,
-            follow: true,
-            max_scroll: 0,
-            view_height: 0,
-            msg_starts: Vec::new(),
-            frame_text: Vec::new(),
-            msg_area: Rect::default(),
-            composer_area: Rect::default(),
-            selection: None,
-            tool_regions: Vec::new(),
-            hover_tool: None,
-            pending_click: None,
             collapsed: Vec::new(),
             focused: None,
-            modal: Modal::None,
-            slash_selected: 0,
-            should_quit: false,
+            assistant_open: false,
+            thinking_open: false,
         }
     }
 
-    pub fn model(&self) -> (&str, &str) {
-        self.models
-            .get(self.model_idx)
-            .map(|m| (m.label.as_str(), m.provider_label.as_str()))
-            .unwrap_or(("no model", "no provider"))
-    }
-
-    /// Open the model picker with the current selection highlighted,
-    /// replacing any modal already open.
-    fn open_model_menu(&mut self) {
-        if !self.models.is_empty() {
-            self.modal = Modal::ModelMenu(self.model_idx.min(self.models.len().saturating_sub(1)));
-        }
-    }
-
-    pub fn effort(&self) -> &'static str {
-        EFFORTS[self.effort_idx]
-    }
-
-    pub fn busy(&self) -> bool {
-        matches!(self.status, Status::Thinking | Status::Running)
-    }
-
-    // ------------------------------------------------------------------
-    // Provider events
-    // ------------------------------------------------------------------
-
-    pub fn handle_event(&mut self, ev: AgentEvent) {
-        let was_following = self.follow;
+    /// Merge a provider event into the message list. Non-message events
+    /// (status, plan, catalog, ...) are ignored; App routes those itself.
+    pub(crate) fn apply(&mut self, ev: AgentEvent) {
         match ev {
-            AgentEvent::StatusChanged(s) => self.status = s,
             AgentEvent::AssistantText(text) => {
                 self.assistant_open = false;
                 self.thinking_open = false;
@@ -294,22 +193,178 @@ impl App {
                     }
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+/// Viewport state: scroll/follow plus the renderer-written frame snapshot
+/// (message starts, per-row text, hit regions) and pointer state.
+pub struct ViewModel {
+    pub scroll: u16,
+    pub follow: bool,
+    pub max_scroll: u16,
+    pub view_height: u16,
+    /// Line offset where each message starts (filled by the renderer).
+    pub msg_starts: Vec<usize>,
+    /// Text of the last rendered frame, one entry per terminal row (filled by
+    /// the renderer; used to extract selection text on copy).
+    pub frame_text: Vec<String>,
+    /// Selectable regions of the last frame: chat messages and composer input.
+    pub msg_area: Rect,
+    pub composer_area: Rect,
+    pub selection: Option<Selection>,
+    /// Screen rects of collapsible tool cards in the last frame: (message
+    /// index, rect). Used for hover highlight and click-to-toggle.
+    pub tool_regions: Vec<(usize, Rect)>,
+    /// Tool card under the pointer (hover state).
+    pub hover_tool: Option<usize>,
+    /// Card the current click started on; a press without drag toggles it.
+    pub pending_click: Option<usize>,
+}
+
+impl ViewModel {
+    fn new() -> Self {
+        ViewModel {
+            scroll: 0,
+            follow: true,
+            max_scroll: 0,
+            view_height: 0,
+            msg_starts: Vec::new(),
+            frame_text: Vec::new(),
+            msg_area: Rect::default(),
+            composer_area: Rect::default(),
+            selection: None,
+            tool_regions: Vec::new(),
+            hover_tool: None,
+            pending_click: None,
+        }
+    }
+}
+
+/// Session chrome: model catalog + selection, cwd/branch, tokens, sidebar.
+pub struct Session {
+    pub models: Vec<ModelChoice>,
+    pub model_idx: usize,
+    pub effort_idx: usize,
+    pub cwd: String,
+    pub branch: String,
+    pub token_label: String,
+    pub sidebar_open: bool,
+}
+
+impl Session {
+    fn new() -> Self {
+        Session {
+            models: seed_models(),
+            model_idx: 0,
+            effort_idx: 2, // "high", the prototype default
+            cwd: "~/Projects/craft-web".into(),
+            branch: "fix/session-refresh".into(),
+            token_label: "…".into(),
+            sidebar_open: true,
+        }
+    }
+}
+
+pub struct App {
+    // --- provider-driven state ---
+    pub plan: Vec<PlanItem>,
+    pub files: Vec<TouchedFile>,
+    pub status: Status,
+    /// Animation frame counter for the status indicator (advanced per frame).
+    pub status_tick: usize,
+
+    // --- state groups (fields stay pub for the renderer for now;
+    // accessor encapsulation is a follow-up) ---
+    pub conversation: Conversation,
+    pub view: ViewModel,
+    pub session: Session,
+
+    // --- composer ---
+    pub composer: Composer,
+
+    // --- overlays ---
+    /// The one modal currently open (palette / model menu / confirm),
+    /// exclusive by construction. The slash popup is not a modal: it rides
+    /// on the composer (shown when the composer starts with '/').
+    pub modal: Modal,
+    pub slash_selected: usize, // row in the slash popup
+
+    pub should_quit: bool,
+}
+
+impl App {
+    pub fn new() -> Self {
+        App {
+            plan: Vec::new(),
+            files: Vec::new(),
+            status: Status::Done,
+            status_tick: 0,
+            conversation: Conversation::new(),
+            view: ViewModel::new(),
+            session: Session::new(),
+            composer: Composer::new(),
+            modal: Modal::None,
+            slash_selected: 0,
+            should_quit: false,
+        }
+    }
+
+    pub fn model(&self) -> (&str, &str) {
+        self.session
+            .models
+            .get(self.session.model_idx)
+            .map(|m| (m.label.as_str(), m.provider_label.as_str()))
+            .unwrap_or(("no model", "no provider"))
+    }
+
+    /// Open the model picker with the current selection highlighted,
+    /// replacing any modal already open.
+    fn open_model_menu(&mut self) {
+        if !self.session.models.is_empty() {
+            self.modal = Modal::ModelMenu(
+                self.session
+                    .model_idx
+                    .min(self.session.models.len().saturating_sub(1)),
+            );
+        }
+    }
+
+    pub fn effort(&self) -> &'static str {
+        EFFORTS[self.session.effort_idx]
+    }
+
+    pub fn busy(&self) -> bool {
+        matches!(self.status, Status::Thinking | Status::Running)
+    }
+
+    // ------------------------------------------------------------------
+    // Provider events
+    // ------------------------------------------------------------------
+
+    pub fn handle_event(&mut self, ev: AgentEvent) {
+        let was_following = self.view.follow;
+        match ev {
+            AgentEvent::StatusChanged(s) => self.status = s,
             AgentEvent::PlanSet(plan) => self.plan = plan,
             AgentEvent::FilesSet(files) => self.files = files,
-            AgentEvent::TokenUsage(label) => self.token_label = label,
+            AgentEvent::TokenUsage(label) => self.session.token_label = label,
             AgentEvent::CatalogSet { models, current } => {
                 if !models.is_empty() {
-                    self.models = models;
-                    self.model_idx = current.min(self.models.len() - 1);
+                    self.session.models = models;
+                    self.session.model_idx = current.min(self.session.models.len() - 1);
                 }
             }
             AgentEvent::SessionInfo { cwd, branch } => {
-                self.cwd = cwd;
-                self.branch = branch;
+                self.session.cwd = cwd;
+                self.session.branch = branch;
             }
+            // Message-bearing events merge into the conversation.
+            ev => self.conversation.apply(ev),
         }
         if was_following {
-            self.follow = true;
+            self.view.follow = true;
         }
     }
 
@@ -320,7 +375,8 @@ impl App {
     /// Indices of tool blocks that can be focused: collapsible blocks and
     /// pending diffs, in display order.
     fn focus_targets(&self) -> Vec<usize> {
-        self.messages
+        self.conversation
+            .messages
             .iter()
             .enumerate()
             .filter(|(_, m)| m.is_collapsible_tool() || m.is_pending_diff())
@@ -329,8 +385,9 @@ impl App {
     }
 
     fn focused_pending_diff(&self) -> Option<usize> {
-        self.focused.filter(|&i| {
-            self.messages
+        self.conversation.focused.filter(|&i| {
+            self.conversation
+                .messages
                 .get(i)
                 .map(|m| m.is_pending_diff())
                 .unwrap_or(false)
@@ -338,7 +395,10 @@ impl App {
     }
 
     fn last_pending_diff(&self) -> Option<usize> {
-        self.messages.iter().rposition(|m| m.is_pending_diff())
+        self.conversation
+            .messages
+            .iter()
+            .rposition(|m| m.is_pending_diff())
     }
 
     pub fn slash_matches(&self) -> Vec<(&'static str, &'static str)> {
@@ -386,23 +446,23 @@ impl App {
             self.run_slash(cmd, tx);
             return;
         }
-        self.assistant_open = false;
-        self.messages.push(Message::User(text.clone()));
+        self.conversation.assistant_open = false;
+        self.conversation.messages.push(Message::User(text.clone()));
         let _ = tx.send(Command::SendMessage(text));
         self.composer.clear();
-        self.follow = true;
+        self.view.follow = true;
     }
 
     fn reset_conversation(&mut self) {
-        self.messages.clear();
-        self.collapsed.clear();
-        self.focused = None;
-        self.hover_tool = None;
-        self.pending_click = None;
-        self.tool_regions.clear();
+        self.conversation.messages.clear();
+        self.conversation.collapsed.clear();
+        self.conversation.focused = None;
+        self.view.hover_tool = None;
+        self.view.pending_click = None;
+        self.view.tool_regions.clear();
         self.modal = Modal::None;
-        self.scroll = 0;
-        self.follow = true;
+        self.view.scroll = 0;
+        self.view.follow = true;
     }
 
     fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
@@ -423,7 +483,7 @@ impl App {
                 self.reset_conversation();
                 let _ = tx.send(Command::Reset);
             }
-            "toggle-sidebar" => self.sidebar_open = !self.sidebar_open,
+            "toggle-sidebar" => self.session.sidebar_open = !self.session.sidebar_open,
             "model" => self.open_model_menu(),
             "clear" => {
                 self.reset_conversation();
@@ -435,16 +495,17 @@ impl App {
     }
 
     fn approve(&mut self, idx: usize, tx: &mpsc::UnboundedSender<Command>) {
-        if let Some(Message::Tool { id, diff, .. }) = self.messages.get_mut(idx) {
+        if let Some(Message::Tool { id, diff, .. }) = self.conversation.messages.get_mut(idx) {
             *diff = Some(DiffState::Approved);
             let _ = tx.send(Command::Approve(id.clone()));
         }
-        self.focused = None;
+        self.conversation.focused = None;
     }
 
     pub(crate) fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>) {
         if let Modal::ConfirmReject(id) = std::mem::replace(&mut self.modal, Modal::None) {
             if let Some(Message::Tool { diff, .. }) = self
+                .conversation
                 .messages
                 .iter_mut()
                 .find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id))
@@ -453,33 +514,34 @@ impl App {
             }
             let _ = tx.send(Command::Reject(id));
         }
-        self.focused = None;
+        self.conversation.focused = None;
     }
 
     pub fn scroll_by(&mut self, delta: i32) {
-        let new = self.scroll as i32 + delta;
-        self.scroll = new.clamp(0, self.max_scroll as i32) as u16;
-        self.follow = self.scroll >= self.max_scroll;
+        let new = self.view.scroll as i32 + delta;
+        self.view.scroll = new.clamp(0, self.view.max_scroll as i32) as u16;
+        self.view.follow = self.view.scroll >= self.view.max_scroll;
         // Card rects move with the scroll; stale hover/click state is dropped.
-        self.hover_tool = None;
-        self.pending_click = None;
+        self.view.hover_tool = None;
+        self.view.pending_click = None;
     }
 
     /// Collapsible tool card (message index) at a screen position, if any.
     pub fn tool_at(&self, row: u16, col: u16) -> Option<usize> {
-        self.tool_regions
+        self.view
+            .tool_regions
             .iter()
             .find(|(_, r)| rect_contains(*r, row, col))
             .map(|(i, _)| *i)
     }
 
     fn toggle_tool(&mut self, idx: usize) {
-        if let Some(Message::Tool { id, kind, .. }) = self.messages.get(idx) {
+        if let Some(Message::Tool { id, kind, .. }) = self.conversation.messages.get(idx) {
             if kind.collapsible() {
-                if let Some(pos) = self.collapsed.iter().position(|c| c == id) {
-                    self.collapsed.remove(pos);
+                if let Some(pos) = self.conversation.collapsed.iter().position(|c| c == id) {
+                    self.conversation.collapsed.remove(pos);
                 } else {
-                    self.collapsed.push(id.clone());
+                    self.conversation.collapsed.push(id.clone());
                 }
             }
         }
@@ -494,14 +556,14 @@ impl App {
             MouseEventKind::ScrollUp => self.scroll_by(-3),
             MouseEventKind::ScrollDown => self.scroll_by(3),
             MouseEventKind::Moved => {
-                self.hover_tool = self.tool_at(mouse.row, mouse.column);
+                self.view.hover_tool = self.tool_at(mouse.row, mouse.column);
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 // A selection starts only inside a selectable region (chat
                 // messages or the composer input) and is confined to it; a
                 // click elsewhere (sidebar, chrome) just clears the highlight.
                 let pos = (mouse.row, mouse.column);
-                self.selection = [self.msg_area, self.composer_area]
+                self.view.selection = [self.view.msg_area, self.view.composer_area]
                     .iter()
                     .copied()
                     .find(|r| rect_contains(*r, mouse.row, mouse.column))
@@ -510,21 +572,21 @@ impl App {
                         head: pos,
                         region,
                     });
-                self.pending_click = self.tool_at(mouse.row, mouse.column);
+                self.view.pending_click = self.tool_at(mouse.row, mouse.column);
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 // A drag is a text selection, not a card press.
-                self.pending_click = None;
-                if let Some(sel) = &mut self.selection {
+                self.view.pending_click = None;
+                if let Some(sel) = &mut self.view.selection {
                     sel.head = clamp_to(sel.region, mouse.row, mouse.column);
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let no_drag = self.selection.map(|s| s.is_empty()).unwrap_or(true);
-                match (self.pending_click.take(), no_drag) {
+                let no_drag = self.view.selection.map(|s| s.is_empty()).unwrap_or(true);
+                match (self.view.pending_click.take(), no_drag) {
                     // Press without drag on a card: toggle it.
                     (Some(idx), true) => {
-                        self.selection = None;
+                        self.view.selection = None;
                         self.toggle_tool(idx);
                     }
                     _ => self.copy_selection(),
@@ -538,13 +600,15 @@ impl App {
     /// the system clipboard. Tiny (single-cell) "selections" are treated as
     /// plain clicks and just clear the highlight.
     fn copy_selection(&mut self) {
-        let Some(sel) = self.selection else { return };
+        let Some(sel) = self.view.selection else {
+            return;
+        };
         if sel.is_empty() {
-            self.selection = None;
+            self.view.selection = None;
             return;
         }
-        let text = extract_selection_text(&self.frame_text, sel);
-        self.selection = None;
+        let text = extract_selection_text(&self.view.frame_text, sel);
+        self.view.selection = None;
         if !text.is_empty() {
             copy_to_clipboard(&text);
         }
@@ -552,16 +616,18 @@ impl App {
 
     /// After focus changes, make sure the focused block is in view.
     fn ensure_focus_visible(&mut self) {
-        let Some(i) = self.focused else { return };
-        let Some(&start) = self.msg_starts.get(i) else {
+        let Some(i) = self.conversation.focused else {
+            return;
+        };
+        let Some(&start) = self.view.msg_starts.get(i) else {
             return;
         };
         let start = start as i32;
-        let top = self.scroll as i32;
-        let bottom = top + self.view_height as i32;
+        let top = self.view.scroll as i32;
+        let bottom = top + self.view.view_height as i32;
         if start < top || start >= bottom {
-            self.scroll = (start - 2).max(0).min(self.max_scroll as i32) as u16;
-            self.follow = false;
+            self.view.scroll = (start - 2).max(0).min(self.view.max_scroll as i32) as u16;
+            self.view.follow = false;
         }
     }
 
@@ -598,7 +664,7 @@ impl App {
                     return;
                 }
                 KeyCode::Char('b') => {
-                    self.sidebar_open = !self.sidebar_open;
+                    self.session.sidebar_open = !self.session.sidebar_open;
                     return;
                 }
                 KeyCode::Char('l') => {
@@ -606,15 +672,15 @@ impl App {
                     return;
                 }
                 KeyCode::Char('e') => {
-                    self.effort_idx = (self.effort_idx + 1) % EFFORTS.len();
+                    self.session.effort_idx = (self.session.effort_idx + 1) % EFFORTS.len();
                     return;
                 }
                 KeyCode::Char('u') => {
-                    self.scroll_by(-(self.view_height as i32 / 2).max(1));
+                    self.scroll_by(-(self.view.view_height as i32 / 2).max(1));
                     return;
                 }
                 KeyCode::Char('d') => {
-                    self.scroll_by((self.view_height as i32 / 2).max(1));
+                    self.scroll_by((self.view.view_height as i32 / 2).max(1));
                     return;
                 }
                 KeyCode::Char('o') => {
@@ -635,7 +701,7 @@ impl App {
                         .focused_pending_diff()
                         .or_else(|| self.last_pending_diff())
                     {
-                        if let Message::Tool { id, .. } = &self.messages[i] {
+                        if let Message::Tool { id, .. } = &self.conversation.messages[i] {
                             self.modal = Modal::ConfirmReject(id.clone());
                         }
                     }
@@ -650,8 +716,8 @@ impl App {
                 // Close slash menu → clear focus → interrupt a running turn.
                 if self.composer.text.starts_with('/') {
                     self.composer.clear();
-                } else if self.focused.is_some() {
-                    self.focused = None;
+                } else if self.conversation.focused.is_some() {
+                    self.conversation.focused = None;
                 } else if self.busy() {
                     let _ = tx.send(Command::Interrupt);
                 }
@@ -673,15 +739,17 @@ impl App {
                     self.scroll_by(1);
                 }
             }
-            KeyCode::PageUp => self.scroll_by(-(self.view_height as i32).max(1)),
-            KeyCode::PageDown => self.scroll_by(self.view_height as i32),
+            KeyCode::PageUp => self.scroll_by(-(self.view.view_height as i32).max(1)),
+            KeyCode::PageDown => self.scroll_by(self.view.view_height as i32),
             KeyCode::Enter => {
                 // Enter on a focused collapsible block (empty composer) toggles it.
                 if self.composer.text.is_empty()
                     && self
+                        .conversation
                         .focused
                         .map(|i| {
-                            self.messages
+                            self.conversation
+                                .messages
                                 .get(i)
                                 .map(|m| m.is_collapsible_tool())
                                 .unwrap_or(false)
@@ -715,7 +783,7 @@ impl App {
             return;
         }
         let len = targets.len() as i32;
-        let next = match self.focused {
+        let next = match self.conversation.focused {
             None => {
                 if dir > 0 {
                     targets[0]
@@ -728,12 +796,12 @@ impl App {
                 targets[(pos + dir).rem_euclid(len) as usize]
             }
         };
-        self.focused = Some(next);
+        self.conversation.focused = Some(next);
         self.ensure_focus_visible();
     }
 
     fn toggle_focused(&mut self) {
-        if let Some(i) = self.focused {
+        if let Some(i) = self.conversation.focused {
             self.toggle_tool(i);
         }
     }
@@ -763,6 +831,7 @@ mod tests {
         app.handle_event(AgentEvent::AssistantEnd);
         app.handle_event(AgentEvent::AssistantDelta("Again".into()));
         let texts: Vec<&str> = app
+            .conversation
             .messages
             .iter()
             .filter_map(|m| match m {
@@ -782,6 +851,7 @@ mod tests {
         app.handle_event(AgentEvent::ReasoningDelta("options".into()));
         app.handle_event(AgentEvent::AssistantDelta("Answer".into()));
         let contents: Vec<(&str, &str)> = app
+            .conversation
             .messages
             .iter()
             .filter_map(|m| match m {
@@ -821,8 +891,8 @@ mod tests {
             }],
             awaiting_approval: false,
         }));
-        assert_eq!(app.messages.len(), 1);
-        match &app.messages[0] {
+        assert_eq!(app.conversation.messages.len(), 1);
+        match &app.conversation.messages[0] {
             Message::Tool { kind, lines, .. } => {
                 assert!(matches!(kind, ToolKind::Read { summary, .. } if summary == "1 lines"));
                 assert_eq!(lines.len(), 1);
@@ -877,7 +947,7 @@ mod tests {
             lines: vec![],
         }));
         // Card spans rows 2..6, columns 2..40 (as the renderer would report).
-        app.tool_regions = vec![(
+        app.view.tool_regions = vec![(
             0,
             Rect {
                 x: 2,
@@ -886,7 +956,7 @@ mod tests {
                 height: 4,
             },
         )];
-        assert!(app.collapsed.contains(&"r1".to_string()));
+        assert!(app.conversation.collapsed.contains(&"r1".to_string()));
         app
     }
 
@@ -894,9 +964,9 @@ mod tests {
     fn hover_tracks_tool_card() {
         let mut app = app_with_collapsible_tool();
         app.handle_mouse(mouse(MouseEventKind::Moved, 3, 10));
-        assert_eq!(app.hover_tool, Some(0));
+        assert_eq!(app.view.hover_tool, Some(0));
         app.handle_mouse(mouse(MouseEventKind::Moved, 3, 80));
-        assert_eq!(app.hover_tool, None);
+        assert_eq!(app.view.hover_tool, None);
     }
 
     #[test]
@@ -906,11 +976,14 @@ mod tests {
         let up = mouse(MouseEventKind::Up(MouseButton::Left), 3, 10);
         app.handle_mouse(down);
         app.handle_mouse(up);
-        assert!(!app.collapsed.contains(&"r1".to_string()), "press expands");
+        assert!(
+            !app.conversation.collapsed.contains(&"r1".to_string()),
+            "press expands"
+        );
         app.handle_mouse(down);
         app.handle_mouse(up);
         assert!(
-            app.collapsed.contains(&"r1".to_string()),
+            app.conversation.collapsed.contains(&"r1".to_string()),
             "press again collapses"
         );
     }
@@ -918,7 +991,7 @@ mod tests {
     #[test]
     fn drag_selects_instead_of_toggling() {
         let mut app = app_with_collapsible_tool();
-        app.msg_area = Rect {
+        app.view.msg_area = Rect {
             x: 0,
             y: 0,
             width: 80,
@@ -928,6 +1001,6 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 4, 20));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 20));
         // Still collapsed: the drag became a selection, not a card press.
-        assert!(app.collapsed.contains(&"r1".to_string()));
+        assert!(app.conversation.collapsed.contains(&"r1".to_string()));
     }
 }

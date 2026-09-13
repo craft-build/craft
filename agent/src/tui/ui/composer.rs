@@ -166,7 +166,7 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
         sep(),
         Span::styled(app.effort(), Style::default().fg(theme::WARNING)),
     ]);
-    let right = format!("{}  ctrl+p commands  ", app.token_label);
+    let right = format!("{}  ctrl+p commands  ", app.session.token_label);
     let width = area.width as usize;
     let max_left = width.saturating_sub(right.chars().count() + 1);
     let (left, left_w) = truncate_spans(left, max_left);

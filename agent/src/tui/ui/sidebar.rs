@@ -65,7 +65,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     put(
         f,
         Line::from(vec![Span::styled(
-            truncate(&app.cwd, w),
+            truncate(&app.session.cwd, w),
             Style::default().fg(theme::TEXT_TERTIARY),
         )]),
         y,
@@ -74,7 +74,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     put(
         f,
         Line::from(vec![Span::styled(
-            truncate(&app.branch, w),
+            truncate(&app.session.branch, w),
             Style::default().fg(theme::TEXT_TERTIARY),
         )]),
         y,

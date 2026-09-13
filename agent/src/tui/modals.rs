@@ -99,11 +99,12 @@ impl App {
         match key.code {
             KeyCode::Up => self.modal = Modal::ModelMenu(sel.saturating_sub(1)),
             KeyCode::Down => {
-                self.modal = Modal::ModelMenu((sel + 1).min(self.models.len().saturating_sub(1)))
+                self.modal =
+                    Modal::ModelMenu((sel + 1).min(self.session.models.len().saturating_sub(1)))
             }
             KeyCode::Enter => {
-                self.model_idx = sel;
-                if let Some(choice) = self.models.get(sel) {
+                self.session.model_idx = sel;
+                if let Some(choice) = self.session.models.get(sel) {
                     let _ = tx.send(Command::SelectModel {
                         provider: choice.provider.clone(),
                         model: choice.model.clone(),

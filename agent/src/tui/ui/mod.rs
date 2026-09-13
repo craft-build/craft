@@ -24,7 +24,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         area,
     );
 
-    let show_sidebar = app.sidebar_open && area.width >= 80;
+    let show_sidebar = app.session.sidebar_open && area.width >= 80;
     let (chat, side) = if show_sidebar {
         let cols = Layout::horizontal([Constraint::Min(60), Constraint::Length(SIDEBAR_WIDTH)])
             .split(area);
@@ -80,8 +80,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Snapshot the frame as plain text (selection copy extracts from this),
     // then draw the current text selection as reversed cells.
-    app.msg_area = msg_area;
-    app.composer_area = composer_area;
+    app.view.msg_area = msg_area;
+    app.view.composer_area = composer_area;
     snapshot_frame(f, app);
     render_selection(f, app);
 }
@@ -89,7 +89,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn snapshot_frame(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let buf = f.buffer_mut();
-    app.frame_text = (0..area.height)
+    app.view.frame_text = (0..area.height)
         .map(|r| {
             (0..area.width)
                 .map(|c| buf.cell((c, r)).map(|cell| cell.symbol()).unwrap_or(" "))
@@ -99,7 +99,9 @@ fn snapshot_frame(f: &mut Frame, app: &mut App) {
 }
 
 fn render_selection(f: &mut Frame, app: &App) {
-    let Some(sel) = &app.selection else { return };
+    let Some(sel) = &app.view.selection else {
+        return;
+    };
     if sel.is_empty() {
         return;
     }
@@ -114,7 +116,7 @@ fn render_selection(f: &mut Frame, app: &App) {
         if r < region.y || r >= region.y + region.height {
             continue;
         }
-        let Some(row) = app.frame_text.get(r as usize) else {
+        let Some(row) = app.view.frame_text.get(r as usize) else {
             continue;
         };
         let Some((first, last)) = crate::tui::selection::text_extent(row, region) else {
@@ -295,7 +297,7 @@ mod tests {
             width: 120,
             height: 36,
         };
-        app.selection = Some(crate::tui::selection::Selection {
+        app.view.selection = Some(crate::tui::selection::Selection {
             anchor: (1, 12),
             head: (1, 4),
             region,
@@ -322,7 +324,7 @@ mod tests {
                 .contains(ratatui::style::Modifier::REVERSED)
         );
         // And the frame snapshot holds the selectable text.
-        assert!(app.frame_text[1].contains("Looking at the refresh path"));
+        assert!(app.view.frame_text[1].contains("Looking at the refresh path"));
     }
 
     #[test]

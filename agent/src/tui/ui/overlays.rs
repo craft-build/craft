@@ -108,15 +108,15 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     let Modal::ModelMenu(selected) = app.modal else {
         return;
     };
-    if app.models.is_empty() {
+    if app.session.models.is_empty() {
         return;
     }
     // Large real catalogs would otherwise paint over the chat and composer:
     // cap the menu to the rows above the composer and window it around the
     // selected row.
     let available = bottom.y.saturating_sub(chat.y + 2) as usize;
-    let visible = app.models.len().min(available.max(1));
-    let start = selected.min(app.models.len().saturating_sub(visible));
+    let visible = app.session.models.len().min(available.max(1));
+    let start = selected.min(app.session.models.len().saturating_sub(visible));
     let n = visible as u16;
     let area = Rect {
         x: chat.x + 2,
@@ -129,15 +129,20 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let rows: Vec<Vec<Span<'static>>> = app
+        .session
         .models
         .iter()
         .enumerate()
         .map(|(i, choice)| {
-            let marker = if i == app.model_idx { "● " } else { "  " };
+            let marker = if i == app.session.model_idx {
+                "● "
+            } else {
+                "  "
+            };
             vec![
                 Span::styled(
                     marker.to_string(),
-                    Style::default().fg(if i == app.model_idx {
+                    Style::default().fg(if i == app.session.model_idx {
                         theme::ACCENT
                     } else {
                         theme::BG_RAISED
@@ -272,6 +277,7 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let file = app
+        .conversation
         .messages
         .iter()
         .find_map(|m| match m {
