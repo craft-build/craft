@@ -801,3 +801,54 @@ async fn write_creates_overwrites_and_refuses_bad_targets() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn read_injects_subdirectory_instructions_once() {
+    let (dir, workspace) = workspace();
+    fs::create_dir_all(dir.path().join("src/api")).unwrap();
+    fs::write(dir.path().join("src/AGENTS.md"), "api rules").unwrap();
+    fs::write(dir.path().join("src/api/handler.rs"), "fn main() {}").unwrap();
+
+    let tool = Read(workspace.clone());
+    let page = invoke(&tool, json!({"path":"src/api/handler.rs"}))
+        .await
+        .unwrap();
+    assert_eq!(page.instructions.len(), 1);
+    assert!(page.instructions[0].0.ends_with("AGENTS.md"));
+    assert_eq!(page.instructions[0].1, "api rules");
+    let text = page.into_tool_output().unwrap().as_text().unwrap().to_string();
+    assert!(text.contains("\n\n---\nInstructions from: "));
+    assert!(text.ends_with("api rules"));
+
+    // Second read of a sibling file: the instruction file is not repeated.
+    fs::write(dir.path().join("src/api/other.rs"), "fn other() {}").unwrap();
+    let page = invoke(&tool, json!({"path":"src/api/other.rs"}))
+        .await
+        .unwrap();
+    assert!(page.instructions.is_empty());
+}
+
+#[tokio::test]
+async fn read_of_instruction_file_injects_nothing() {
+    let (dir, workspace) = workspace();
+    fs::write(dir.path().join("AGENTS.md"), "root rules").unwrap();
+
+    let tool = Read(workspace.clone());
+    let page = invoke(&tool, json!({"path":"AGENTS.md"}))
+        .await
+        .unwrap();
+    assert!(page.instructions.is_empty());
+}
+
+#[tokio::test]
+async fn read_files_at_workspace_root_inject_nothing() {
+    let (dir, workspace) = workspace();
+    fs::write(dir.path().join("AGENTS.md"), "root rules").unwrap();
+    fs::write(dir.path().join("file.txt"), "content").unwrap();
+
+    let tool = Read(workspace.clone());
+    let page = invoke(&tool, json!({"path":"file.txt"}))
+        .await
+        .unwrap();
+    assert!(page.instructions.is_empty());
+}

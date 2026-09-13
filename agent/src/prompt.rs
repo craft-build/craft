@@ -368,9 +368,9 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// Assemble the root agent's system prompt: the env section (cwd, platform,
-/// date) is prepended to `instructions` (currently the user preamble; AGENTS.md
-/// discovery, C.15, lands on top of it later) and substituted into the system
-/// template's `{{instructions}}` slot.
+/// date) is prepended to `instructions` (the user preamble followed by any
+/// discovered AGENTS.md instruction text, C.15) and substituted into the
+/// system template's `{{instructions}}` slot.
 pub fn build_system_prompt(vars: &Vars, instructions: &str, slots: &ResolvedSlots) -> String {
     let env = vars.apply(
         "\n\nEnvironment:\n- Working directory: {cwd}\n- Platform: {platform}\n- Date: {date}",

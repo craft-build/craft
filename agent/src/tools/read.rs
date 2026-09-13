@@ -39,6 +39,9 @@ pub struct ReadOutput {
     pub lines: Vec<ReadLine>,
     pub total_lines: usize,
     pub next_offset: Option<usize>,
+    /// Subdirectory instruction files discovered for the read file's parent
+    /// directory, as `(canonical_path, content)` pairs.
+    pub instructions: Vec<(String, String)>,
 }
 
 impl IntoToolOutput for ReadOutput {
@@ -61,6 +64,9 @@ impl IntoToolOutput for ReadOutput {
                 "\n\n...\n\nTruncated lines: {offset}-{}. Use offset={offset} to read further.",
                 self.total_lines
             ));
+        }
+        for (path, content) in &self.instructions {
+            text.push_str(&format!("\n\n---\nInstructions from: {path}\n{content}"));
         }
         Ok(ToolOutput::text(text))
     }
@@ -105,11 +111,26 @@ impl Read {
             });
         }
         let next = args.offset + lines.len();
+        let instructions = if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::instructions::is_instruction_file)
+        {
+            Vec::new()
+        } else {
+            let parent = path.parent().unwrap_or(&path);
+            crate::instructions::find_subdirectory_instructions(
+                parent,
+                workspace.root(),
+                &workspace.loaded_instructions,
+            )
+        };
         Ok(ReadOutput {
             path: workspace.display(&path),
             lines,
             total_lines,
             next_offset: (next <= total_lines).then_some(next),
+            instructions,
         })
     }
 }

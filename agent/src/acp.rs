@@ -52,6 +52,8 @@ pub const MODEL_OPTION_ID: &str = "model";
 
 struct Session {
     workspace: Workspace,
+    /// Instruction files (AGENTS.md and friends) discovered at session open.
+    instructions: crate::instructions::Instructions,
     history: Vec<history::Message>,
     provider_name: String,
     models: Vec<CatalogModel>,
@@ -142,7 +144,15 @@ impl AppState {
     }
 
     async fn open_session(&self, cwd: &Path) -> std::result::Result<Session, String> {
-        let workspace = Workspace::new(cwd).map_err(|e| e.to_string())?;
+        let instructions = tokio::task::spawn_blocking({
+            let cwd = cwd.display().to_string();
+            move || crate::instructions::load_instructions(&cwd)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let workspace = Workspace::new(cwd)
+            .map_err(|e| e.to_string())?
+            .with_loaded_instructions(instructions.loaded.clone());
         let provider_name = self
             .config
             .providers
@@ -161,6 +171,7 @@ impl AppState {
         let (cancel, _) = run::cancel_channel();
         Ok(Session {
             workspace,
+            instructions,
             history: Vec::new(),
             provider_name,
             models,
@@ -469,12 +480,17 @@ async fn run_turn(
     }
 
     let tools = workspace.register();
-    let cwd = {
+    let (cwd, instructions_text) = {
         let sessions = state.sessions.lock().await;
-        sessions
-            .get(session_id.0.as_ref())
-            .map(|session| session.workspace.root().display().to_string())
-            .unwrap_or_default()
+        let session = sessions.get(session_id.0.as_ref());
+        (
+            session
+                .map(|session| session.workspace.root().display().to_string())
+                .unwrap_or_default(),
+            session
+                .map(|session| session.instructions.text.clone())
+                .unwrap_or_default(),
+        )
     };
     let params = run::RunParams {
         preamble: Some(crate::prompt::build_system_prompt(
@@ -482,7 +498,7 @@ async fn run_turn(
                 .set("{cwd}", cwd)
                 .set("{platform}", std::env::consts::OS)
                 .set("{date}", crate::prompt::today_utc()),
-            &state.config.agent.preamble,
+            &format!("{}{}", state.config.agent.preamble, instructions_text),
             &crate::prompt::ResolvedSlots::default(),
         )),
         temperature: state.config.agent.temperature,
@@ -657,6 +673,7 @@ mod tests {
         let session = Session {
             compaction: Default::default(),
             workspace: Workspace::new(std::env::temp_dir()).unwrap(),
+            instructions: Default::default(),
             history: Vec::new(),
             provider_name: "openai".into(),
             models: vec![CatalogModel {

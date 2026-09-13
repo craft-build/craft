@@ -45,6 +45,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 2048;
 pub struct Workspace {
     root: Arc<PathBuf>,
     lock: Arc<Mutex<()>>,
+    loaded_instructions: crate::instructions::LoadedInstructions,
 }
 
 impl Workspace {
@@ -59,7 +60,18 @@ impl Workspace {
         Ok(Self {
             root: Arc::new(root),
             lock: Arc::new(Mutex::new(())),
+            loaded_instructions: crate::instructions::LoadedInstructions::new(),
         })
+    }
+
+    /// Share the session's instruction-dedupe set so instruction files are
+    /// injected into tool output at most once per session.
+    pub fn with_loaded_instructions(
+        mut self,
+        loaded: crate::instructions::LoadedInstructions,
+    ) -> Self {
+        self.loaded_instructions = loaded;
+        self
     }
 
     pub fn root(&self) -> &Path {

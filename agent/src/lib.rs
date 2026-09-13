@@ -5,6 +5,7 @@ pub mod edge;
 pub mod error;
 pub mod history;
 pub mod id;
+pub mod instructions;
 pub mod paths;
 pub mod prompt;
 pub mod providers;

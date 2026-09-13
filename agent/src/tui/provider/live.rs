@@ -94,6 +94,9 @@ struct Selection {
 pub struct CraftProvider {
     config: Arc<Config>,
     workspace: Workspace,
+    /// Instruction files (AGENTS.md and friends) discovered at startup;
+    /// appended to the system prompt and shared with tool injection.
+    instructions: crate::instructions::Instructions,
     /// Per-provider discovered models, config key order.
     catalogs: BTreeMap<String, Vec<CatalogModel>>,
     /// Discovery problems surfaced to the user as notes at startup.
@@ -114,7 +117,15 @@ impl CraftProvider {
             .fail();
         }
         let cwd = cwd.as_ref();
-        let workspace = Workspace::new(cwd).map_err(client_error)?;
+        let instructions = tokio::task::spawn_blocking({
+            let cwd = cwd.display().to_string();
+            move || crate::instructions::load_instructions(&cwd)
+        })
+        .await
+        .unwrap_or_default();
+        let workspace = Workspace::new(cwd)
+            .map_err(client_error)?
+            .with_loaded_instructions(instructions.loaded.clone());
 
         let mut catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::new();
         let mut notes = Vec::new();
@@ -154,6 +165,7 @@ impl CraftProvider {
         Ok(Self {
             config: Arc::new(config),
             workspace,
+            instructions,
             catalogs,
             notes,
             selection,
@@ -180,6 +192,7 @@ impl Provider for CraftProvider {
             let mut current_turn: Option<AbortHandle> = None;
             let mut selection = self.selection;
             let workspace = self.workspace;
+            let instructions_text = self.instructions.text;
             let config = self.config;
             let catalogs = self.catalogs;
 
@@ -229,6 +242,7 @@ impl Provider for CraftProvider {
                         let handle = tokio::spawn(run_turn(
                             config.clone(),
                             workspace.clone(),
+                            instructions_text.clone(),
                             selection.clone(),
                             text,
                             state.clone(),
@@ -374,6 +388,7 @@ async fn decide(state: &Arc<Mutex<SessionState>>, id: String, approved: bool) {
 async fn run_turn(
     config: Arc<Config>,
     workspace: Workspace,
+    instructions_text: String,
     selection: Selection,
     text: String,
     state: Arc<Mutex<SessionState>>,
@@ -431,7 +446,7 @@ async fn run_turn(
                 .set("{cwd}", workspace.root().display().to_string())
                 .set("{platform}", std::env::consts::OS)
                 .set("{date}", crate::prompt::today_utc()),
-            &config.agent.preamble,
+            &format!("{}{}", config.agent.preamble, instructions_text),
             &crate::prompt::ResolvedSlots::default(),
         )),
         temperature: config.agent.temperature,
