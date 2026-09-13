@@ -578,6 +578,7 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
             "list_tools",
             "multiedit",
             "read",
+            "retrieve",
             "todo_write",
             "write"
         ]

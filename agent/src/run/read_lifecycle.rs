@@ -11,13 +11,14 @@
 //! cache keep the raw results, mirroring request-view compression.
 //!
 //! Ported from the reference's `agent/read_lifecycle.rs` minus the semantic
-//! scorer and compression-store retrieval markers (D.5 lands later); the
-//! original content is still in history, so no retrieval hook is needed.
+//! scorer; superseded reads carry compression-store retrieval markers (D.5)
+//! pointing at the original content held by the shared store.
 
 use std::collections::{HashMap, HashSet};
 
 use std::ops::Range;
 
+use crate::compression::store::SharedCompressionStore;
 use crate::history::{AssistantContent, Message, ToolResultContent, UserContent};
 
 const STALE_MARKER_PREFIX: &str = "[Stale read: ";
@@ -191,7 +192,11 @@ fn classification(op: &FileOperation, state: ReadState) -> ReadClassification {
 
 /// Replace stale/superseded tool result content with compact markers.
 /// Returns total characters removed for observability.
-fn apply_lifecycle(history: &mut [Message], classifications: &[ReadClassification]) -> usize {
+fn apply_lifecycle(
+    history: &mut [Message],
+    classifications: &[ReadClassification],
+    store: Option<&SharedCompressionStore>,
+) -> usize {
     let stale_ids: HashMap<&str, (ReadState, &str)> = classifications
         .iter()
         .filter(|c| !matches!(c.state, ReadState::Fresh))
@@ -217,12 +222,12 @@ fn apply_lifecycle(history: &mut [Message], classifications: &[ReadClassificatio
             let Some(&(state, file_path)) = stale_ids.get(result.call.as_str()) else {
                 continue;
             };
-            let old_len = result
-                .content
-                .iter()
-                .map(|c| c.to_text().len())
-                .sum::<usize>();
-            let marker = match state {
+            let original: String = result.content.iter().map(|c| c.to_text()).collect();
+            let old_len = original.len();
+            let original_lines = original.lines().count();
+            let hash =
+                store.and_then(|store| store.lock().ok().map(|mut guard| guard.put(&original)));
+            let mut marker = match state {
                 ReadState::Stale => {
                     // Actionable stale marker: retrieving old content would be
                     // misleading; the model needs current content.
@@ -247,6 +252,18 @@ fn apply_lifecycle(history: &mut [Message], classifications: &[ReadClassificatio
                 }
                 ReadState::Fresh => continue,
             };
+            // Only superseded reads get a retrieval marker: their content is
+            // still valid (a newer read exists). Retrieving stale content
+            // would mislead the model into editing an outdated file state.
+            if matches!(state, ReadState::Superseded)
+                && let Some(hash) = hash
+            {
+                marker.push_str(&crate::compression::store::retrieval_marker(
+                    original_lines,
+                    1,
+                    &hash,
+                ));
+            }
             total_removed += old_len.saturating_sub(marker.len());
             result.content = vec![ToolResultContent::text(marker)];
         }
@@ -257,9 +274,9 @@ fn apply_lifecycle(history: &mut [Message], classifications: &[ReadClassificatio
 
 /// Run read lifecycle management over a request view, returning total chars
 /// removed. Callers pass the request-only copy: committed history is untouched.
-pub fn apply_to_request(history: &mut [Message]) -> usize {
+pub fn apply_to_request(history: &mut [Message], store: Option<&SharedCompressionStore>) -> usize {
     let classifications = classify_reads(history);
-    apply_lifecycle(history, &classifications)
+    apply_lifecycle(history, &classifications, store)
 }
 
 fn extract_path(input: &serde_json::Value) -> Option<String> {
@@ -475,7 +492,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let removed = apply_to_request(&mut messages);
+        let removed = apply_to_request(&mut messages, None);
         assert!(removed > 0);
         let Message::User { content } = &messages[2] else {
             panic!("tool result message");
@@ -497,7 +514,7 @@ mod tests {
             tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
             tool_result_msg("t1", "fresh content"),
         ];
-        let removed = apply_to_request(&mut messages);
+        let removed = apply_to_request(&mut messages, None);
         assert_eq!(removed, 0);
         let Message::User { content } = &messages[2] else {
             panic!("tool result message");
@@ -506,6 +523,80 @@ mod tests {
             panic!("tool result block");
         };
         assert_eq!(result.content[0].to_text(), "fresh content");
+    }
+
+    #[test]
+    fn superseded_read_gets_retrieval_marker_and_store_roundtrip() {
+        let original_text = "a long superseded line of content that will be replaced by a much \
+                             shorter marker but stays recoverable through the compression store \
+                             even after several additional sentences pad the original well past \
+                             any marker the lifecycle pass could ever produce";
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t1", original_text),
+            tool_use_msg("t2", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg("t2", original_text),
+        ];
+        let store = crate::compression::store::shared_store();
+        let removed = apply_to_request(&mut messages, Some(&store));
+        assert!(removed > 0);
+        let Message::User { content } = &messages[2] else {
+            panic!("tool result message");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("tool result block");
+        };
+        let text = result.content[0].to_text();
+        assert!(text.starts_with(SUPERSEDED_MARKER_PREFIX));
+        let hash_start = text
+            .find("Retrieve original: hash=")
+            .expect("retrieval marker")
+            + "Retrieve original: hash=".len();
+        let hash = text[hash_start..].trim_end_matches(']').to_string();
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get(&hash)
+                .is_some_and(|r| r == original_text),
+            "the stored original must round-trip through the hash in the marker"
+        );
+    }
+
+    #[test]
+    fn stale_read_gets_no_retrieval_marker() {
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/main.rs"})),
+            tool_result_msg(
+                "t1",
+                "a long line of content that should be replaced with something even longer to \
+                 trigger the stale marker path",
+            ),
+            user_msg("edit"),
+            tool_use_msg(
+                "t2",
+                "edit",
+                json!({"path": "/src/main.rs", "old_string": "x", "new_string": "y"}),
+            ),
+            tool_result_msg("t2", "ok"),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let store = crate::compression::store::shared_store();
+        apply_to_request(&mut messages, Some(&store));
+        let Message::User { content } = &messages[2] else {
+            panic!("tool result message");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("tool result block");
+        };
+        let text = result.content[0].to_text();
+        assert!(text.starts_with(STALE_MARKER_PREFIX));
+        assert!(
+            !text.contains("Retrieve original"),
+            "stale content must not be retrievable"
+        );
     }
 
     #[test]
@@ -692,7 +783,7 @@ mod tests {
             tool_result_msg("t2", "ok"),
         ];
         messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
-        let removed = apply_to_request(&mut messages);
+        let removed = apply_to_request(&mut messages, None);
         assert_eq!(removed, 0, "error results are left untouched");
     }
 

@@ -11,6 +11,7 @@ mod json;
 mod keywords;
 mod log;
 mod search;
+pub mod store;
 
 use std::sync::LazyLock;
 

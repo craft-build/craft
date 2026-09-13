@@ -15,6 +15,7 @@ mod list;
 mod list_tools;
 mod multiedit;
 mod read;
+mod retrieve;
 mod todo_write;
 mod write;
 
@@ -33,6 +34,7 @@ pub use list::{List, ListArgs, ListOutput};
 pub use list_tools::{ListTools, ListToolsArgs, ListToolsOutput};
 pub use multiedit::{EditEntry, MultiEdit, MultiEditArgs, MultiEditOutput};
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
+pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
 pub use write::{Write, WriteArgs, WriteOutput};
 
@@ -59,6 +61,7 @@ pub struct Workspace {
     lock: Arc<Mutex<()>>,
     loaded_instructions: crate::instructions::LoadedInstructions,
     todos: todo_write::TodoStore,
+    compression_store: crate::compression::store::SharedCompressionStore,
 }
 
 impl Workspace {
@@ -75,6 +78,7 @@ impl Workspace {
             lock: Arc::new(Mutex::new(())),
             loaded_instructions: crate::instructions::LoadedInstructions::new(),
             todos: Default::default(),
+            compression_store: crate::compression::store::shared_store(),
         })
     }
 
@@ -92,6 +96,12 @@ impl Workspace {
         &self.root
     }
 
+    /// The session-shared reversible-compression store: request-build
+    /// markers and the `retrieve` tool both use this instance.
+    pub fn compression_store(&self) -> &crate::compression::store::SharedCompressionStore {
+        &self.compression_store
+    }
+
     /// Register the workspace's tools into our dispatch executor.
     pub fn register(&self) -> crate::run::ToolDispatch {
         let mut tools: Vec<PortableDynamicTool> = vec![
@@ -107,11 +117,12 @@ impl Workspace {
             dynamic(Delete(self.clone())),
             dynamic(Inspect(self.clone())),
             dynamic(TodoWrite(self.clone())),
+            dynamic(Retrieve(self.compression_store.clone())),
         ];
         // Introspection snapshot of every other registered tool.
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
-        crate::run::ToolDispatch::new(tools)
+        crate::run::ToolDispatch::new(tools).with_compression_store(self.compression_store.clone())
     }
 
     pub(crate) async fn run<T: Send + 'static>(

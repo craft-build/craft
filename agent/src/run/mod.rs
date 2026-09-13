@@ -200,7 +200,7 @@ pub async fn run<M: CompletionModel + Clone>(
         {
             full = with_tail;
         }
-        read_lifecycle::apply_to_request(&mut full);
+        read_lifecycle::apply_to_request(&mut full, tools.compression_store());
         compress_request_view(&mut full, &params.compression);
         let request = edge::to_request(
             &full,

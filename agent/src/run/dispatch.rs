@@ -18,6 +18,7 @@ use rig_core::tool::PortableDynamicTool;
 use crate::history;
 
 use super::dedup::{self, SharedDedupCache, ToolDedupCache};
+use crate::compression::store::SharedCompressionStore;
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -54,6 +55,7 @@ pub struct ToolDispatch {
     before: Option<Arc<dyn BeforeExecute>>,
     after: Option<Arc<dyn AfterExecute>>,
     dedup: Option<SharedDedupCache>,
+    compression_store: Option<SharedCompressionStore>,
 }
 
 /// What executing one call produced.
@@ -77,6 +79,7 @@ impl ToolDispatch {
             before: None,
             after: None,
             dedup: None,
+            compression_store: None,
         }
     }
 
@@ -95,6 +98,18 @@ impl ToolDispatch {
     pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
         self.dedup = Some(cache);
         self
+    }
+
+    /// Share the session's reversible-compression store so the run loop can
+    /// attach retrieval markers to request-view replacements; the retrieve
+    /// tool reads the same instance.
+    pub fn with_compression_store(mut self, store: SharedCompressionStore) -> Self {
+        self.compression_store = Some(store);
+        self
+    }
+
+    pub fn compression_store(&self) -> Option<&SharedCompressionStore> {
+        self.compression_store.as_ref()
     }
 
     /// Provider-facing definitions for the request.
