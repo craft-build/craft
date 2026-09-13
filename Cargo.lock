@@ -1559,6 +1559,7 @@ name = "craft"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "aho-corasick",
  "bs58",
  "clap",
  "clap_complete",

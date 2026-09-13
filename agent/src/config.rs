@@ -23,6 +23,8 @@ pub struct Config {
     /// Compaction stages, ascending by context fill ratio.
     #[serde(default = "default_compaction")]
     pub compaction: Vec<CompactionConfig>,
+    /// Tool-output pre-compression applied to the model's request view.
+    pub compression: crate::compression::CompressionConfig,
 }
 
 /// Which compaction strategy runs when a stage's threshold is crossed.
@@ -193,6 +195,9 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self> {
         let config: Self = toml::from_str(text).context(InvalidTomlSnafu)?;
         config.agent.validate()?;
+        if let Err(reason) = config.compression.validate() {
+            return InvalidSnafu { reason }.fail();
+        }
         let mut seen_kinds = std::collections::BTreeSet::new();
         for stage in &config.compaction {
             if !stage.context.is_finite() || stage.context <= 0.0 || stage.context >= 1.0 {
@@ -312,6 +317,10 @@ mod tests {
         assert_eq!(config.providers.len(), 4);
         assert_eq!(config.agent.preamble, "");
         assert_eq!(
+            config.compression,
+            crate::compression::CompressionConfig::default()
+        );
+        assert_eq!(
             config.compaction,
             vec![
                 CompactionConfig {
@@ -334,6 +343,34 @@ mod tests {
         assert!((config.compaction[0].context - 0.6).abs() < 1e-9);
         assert_eq!(config.compaction[1].kind, CompactionKind::Llm);
         assert!((config.compaction[1].context - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compression_defaults_when_absent() {
+        let config = Config::parse("").unwrap();
+        assert_eq!(
+            config.compression,
+            crate::compression::CompressionConfig::default()
+        );
+    }
+
+    #[test]
+    fn compression_accepts_overrides() {
+        let config = Config::parse(
+            "[compression]\nenabled = false\ncode_compression_rate = 0.5\nmax_log_lines = 25",
+        )
+        .unwrap();
+        assert!(!config.compression.enabled);
+        assert!((config.compression.code_compression_rate - 0.5).abs() < 1e-6);
+        assert_eq!(config.compression.max_log_lines, 25);
+        assert_eq!(config.compression.max_diff_lines, 100);
+    }
+
+    #[test]
+    fn rejects_invalid_compression_rate() {
+        assert!(Config::parse("[compression]\ncode_compression_rate = 0.0").is_err());
+        assert!(Config::parse("[compression]\ncode_compression_rate = 1.5").is_err());
+        assert!(Config::parse("[compression]\nno_such_knob = 1").is_err());
     }
 
     #[test]

@@ -25,6 +25,7 @@ use std::sync::Arc;
 use rig_core::completion::CompletionModel;
 use tokio::sync::watch;
 
+use crate::compression::{self, CompressionConfig};
 use crate::edge;
 use crate::history::{self, Message};
 
@@ -107,6 +108,9 @@ pub struct RunParams {
     /// Per-turn volatile facts, appended to the last user message of each
     /// request (and never committed to history).
     pub recency: Option<Arc<dyn RecencySource>>,
+    /// Tool-output pre-compression applied to the request view only;
+    /// history and events always keep the raw results.
+    pub compression: CompressionConfig,
 }
 
 impl std::fmt::Debug for RunParams {
@@ -117,6 +121,7 @@ impl std::fmt::Debug for RunParams {
             .field("max_tokens", &self.max_tokens)
             .field("max_turns", &self.max_turns)
             .field("recency", &self.recency.as_ref().map(|_| "<source>"))
+            .field("compression", &self.compression)
             .finish()
     }
 }
@@ -131,6 +136,7 @@ impl RunParams {
             max_tokens: None,
             max_turns: Self::UNBOUNDED,
             recency: None,
+            compression: CompressionConfig::default(),
         }
     }
 }
@@ -143,6 +149,7 @@ impl Default for RunParams {
             max_tokens: None,
             max_turns: Self::UNBOUNDED,
             recency: None,
+            compression: CompressionConfig::default(),
         }
     }
 }
@@ -192,6 +199,7 @@ pub async fn run<M: CompletionModel + Clone>(
         {
             full = with_tail;
         }
+        compress_request_view(&mut full, &params.compression);
         let request = edge::to_request(
             &full,
             &definitions,
@@ -245,6 +253,27 @@ pub async fn run<M: CompletionModel + Clone>(
             sanitize_partial(&mut turn);
             history.append(&mut turn);
             return RunOutcome::MaxTurns;
+        }
+    }
+}
+
+/// Rewrite tool-result texts in the request copy through pre-compression.
+/// Only the wire view is affected: `turn` and `history` keep raw results.
+/// Request-time compression is unconditional (per the reference);
+/// `protect_recent_tool_outputs` is a compaction-stage knob, not ours.
+fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
+    for message in full {
+        let Message::User { content } = message else {
+            continue;
+        };
+        for block in content {
+            if let history::UserContent::ToolResult(result) = block {
+                for item in &mut result.content {
+                    if let history::ToolResultContent::Text(text) = item {
+                        text.text = compression::compress_for_llm(&text.text, config);
+                    }
+                }
+            }
         }
     }
 }
@@ -914,5 +943,124 @@ mod tests {
         .await;
         assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "hello"));
         assert_eq!(history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn compression_trims_request_view_but_history_keeps_raw() {
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                tool_event("t1", "read", serde_json::json!({"path": "big.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=100)
+            .map(|i| format!("filler line number {i} for size\n"))
+            .collect();
+        std::fs::write(dir.path().join("big.txt"), body).unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { .. }));
+        // Committed history and the ToolDone event keep the raw result.
+        let Message::User { content } = &history[2] else {
+            panic!("tool result message");
+        };
+        let UserContent::ToolResult(raw) = &content[0] else {
+            panic!("tool result block");
+        };
+        let raw_text = raw.content[0].to_text();
+        assert!(raw_text.len() >= compression::MIN_COMPRESS_LEN);
+        assert!(!raw_text.contains("lines omitted"));
+        assert!(events.lock().unwrap().iter().any(
+            |e| matches!(e, Event::ToolDone { result, .. } if !result.content[0]
+                .to_text()
+                .contains("lines omitted"))
+        ));
+        // The model's second request carried the compressed form.
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2);
+        let sent = crate::edge::rig_to_own(&requests[1].chat_history);
+        let Message::User { content } = &sent[2] else {
+            panic!("tool result message on the wire");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("tool result block on the wire");
+        };
+        let wire_text = result.content[0].to_text();
+        assert!(
+            wire_text.contains("lines omitted"),
+            "model must see the compressed form"
+        );
+        assert!(wire_text.len() < raw_text.len());
+    }
+
+    #[tokio::test]
+    async fn compression_disabled_sends_raw_output() {
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                tool_event("t1", "read", serde_json::json!({"path": "big.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=100)
+            .map(|i| format!("filler line number {i} for size\n"))
+            .collect();
+        std::fs::write(dir.path().join("big.txt"), body).unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let params = RunParams {
+            compression: CompressionConfig {
+                enabled: false,
+                ..CompressionConfig::default()
+            },
+            ..RunParams::default()
+        };
+        let mut history = Vec::new();
+        let _ = run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        let Message::User { content } = &history[2] else {
+            panic!("tool result message");
+        };
+        let UserContent::ToolResult(raw) = &content[0] else {
+            panic!("tool result block");
+        };
+        let requests = model.requests();
+        let sent = crate::edge::rig_to_own(&requests[1].chat_history);
+        let Message::User { content } = &sent[2] else {
+            panic!("tool result message on the wire");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("tool result block on the wire");
+        };
+        assert_eq!(result.content[0].to_text(), raw.content[0].to_text());
     }
 }

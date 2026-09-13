@@ -1,5 +1,6 @@
 pub mod acp;
 pub mod compaction;
+pub mod compression;
 pub mod config;
 pub mod edge;
 pub mod error;

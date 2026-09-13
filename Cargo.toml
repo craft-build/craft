@@ -8,6 +8,7 @@ resolver = "3"
 members = ["agent"]
 
 [workspace.dependencies]
+aho-corasick = "1"
 agent-client-protocol = "2.1.0"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"

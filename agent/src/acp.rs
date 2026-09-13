@@ -523,6 +523,7 @@ async fn run_turn(
         max_tokens: state.config.agent.max_tokens,
         max_turns: run::RunParams::UNBOUNDED,
         recency: None,
+        compression: state.config.compression.clone(),
     };
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {

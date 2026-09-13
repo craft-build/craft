@@ -473,6 +473,7 @@ async fn run_turn(
         max_tokens: config.agent.max_tokens,
         max_turns: run::RunParams::UNBOUNDED,
         recency: None,
+        compression: config.compression.clone(),
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
