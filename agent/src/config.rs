@@ -1,4 +1,5 @@
-//! Configuration for `~/.config/craft/agent.toml`.
+//! Configuration for `~/.config/craft/agent.toml` (legacy `~/.craft/` is
+//! searched first when it exists).
 
 use std::{
     collections::BTreeMap,
@@ -9,8 +10,8 @@ use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    HomeDirectorySnafu, InvalidBaseUrlSnafu, InvalidProviderSnafu, InvalidSnafu, InvalidTomlSnafu,
-    LoadConfigSnafu, ReadConfigSnafu, Result,
+    ConfigDirSnafu, HomeDirectorySnafu, InvalidBaseUrlSnafu, InvalidProviderSnafu, InvalidSnafu,
+    InvalidTomlSnafu, LoadConfigSnafu, ReadConfigSnafu, Result,
 };
 use crate::providers::ProviderKind;
 
@@ -155,10 +156,13 @@ pub struct ModelConfig {
 
 impl Config {
     pub fn path() -> Result<PathBuf> {
-        // Deliberately use the specified path, even on macOS and Windows.
-        Ok(dirs::home_dir()
-            .context(HomeDirectorySnafu)?
-            .join(".config/craft/agent.toml"))
+        // Search legacy `~/.craft/` first when it exists, then the XDG config
+        // dir; a fresh install with no file anywhere defaults to the XDG path.
+        if let Some(found) = crate::paths::find_config_path("agent.toml") {
+            return Ok(found);
+        }
+        let dir = crate::paths::xdg_config_dir().context(ConfigDirSnafu)?;
+        Ok(dir.join("agent.toml"))
     }
 
     pub async fn load() -> Result<Self> {

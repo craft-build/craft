@@ -8,6 +8,7 @@ agent-client-protocol.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
+etcetera.workspace = true
 futures.workspace = true
 ignore.workspace = true
 ratatui.workspace = true

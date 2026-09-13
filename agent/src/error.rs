@@ -16,6 +16,9 @@ pub enum Error {
     #[snafu(display("cannot determine home directory for agent configuration"))]
     HomeDirectory,
 
+    #[snafu(display("cannot determine base directories for agent configuration"))]
+    ConfigDir { source: std::io::Error },
+
     #[snafu(display("reading {}", path.display()))]
     ReadConfig {
         path: PathBuf,

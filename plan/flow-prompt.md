@@ -5,13 +5,13 @@ You are implementing **{{PHASE}} / task #{{TASK}}** from `order.md` in this repo
 
 ## Setup (do this first, every time)
 
-1. Read `order.md` and find the exact task under the given phase (e.g. "Phase 1 — task 12:
+1. Read `plan/order.md` and find the exact task under the given phase (e.g. "Phase 1 — task 12:
    D.1 Token estimation & calibration").
-2. Read the matching entry in `comparison.md` — it gives the **What/why**, **Ref** (where the
+2. Read the matching entry in `plan/comparison.md` — it gives the **What/why**, **Ref** (where the
    feature lives in the reference), **Effort**, and **Depends on**. Honor the dependencies;
    if a listed dependency is not yet ported, stop and report instead of improvising.
 3. The reference implementation lives at `~/Projects/craft` (v0.14.1, ~16 crates). The
-   **Ref** field in `comparison.md` names the crate + path. **Always read the reference
+   **Ref** field in `plan/comparison.md` names the crate + path. **Always read the reference
    code before writing anything** — port the logic, not a from-scratch reimplementation.
    Do not line-by-line copy; adapt to this repo's Rig-based architecture.
 4. Read this repo's existing code where the feature will land (`agent/src/...`) and match

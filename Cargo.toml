@@ -12,6 +12,7 @@ agent-client-protocol = "2.1.0"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 dirs = "7"
+etcetera = "0.11"
 futures = "0.3"
 ignore = "0.4"
 ratatui = "0.30"
