@@ -78,8 +78,24 @@ type Files = Arc<StdMutex<BTreeMap<String, FileStatus>>>;
 struct SessionState {
     history: Vec<history::Message>,
     compaction: CompactionState,
+    /// Session-wide tool dedup cache, shared by the dispatcher and cleared
+    /// by the compaction engine.
+    dedup: crate::run::SharedDedupCache,
     /// Edit-family call awaiting the user's decision, by tool-call id.
     pending_approval: Option<(String, oneshot::Sender<bool>)>,
+}
+
+impl SessionState {
+    /// Link the compaction state to this session's dedup cache so a
+    /// compaction run clears it.
+    fn linked() -> Self {
+        let dedup = crate::run::shared_cache();
+        Self {
+            compaction: CompactionState::default().with_dedup(dedup.clone()),
+            dedup,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -186,7 +202,7 @@ impl Provider for CraftProvider {
         let (evt_tx, evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
         tokio::spawn(async move {
-            let state = Arc::new(Mutex::new(SessionState::default()));
+            let state = Arc::new(Mutex::new(SessionState::linked()));
             let files: Files = Arc::new(StdMutex::new(BTreeMap::new()));
             let (cancel_flag, cancel_token) = run::cancel_channel();
             let mut current_turn: Option<AbortHandle> = None;
@@ -419,6 +435,7 @@ async fn run_turn(
     };
 
     let mut history = state.lock().await.history.clone();
+    let dedup = state.lock().await.dedup.clone();
 
     // Run configured compaction stages whose context-fill threshold is crossed
     // before the history is sent to the model; commit effectiveness state only.
@@ -435,11 +452,14 @@ async fn run_turn(
         state.lock().await.compaction = compaction;
     }
 
-    let tools = workspace.register().with_before(Arc::new(ApprovalGate {
-        state: state.clone(),
-        tx: tx.clone(),
-        cancel: cancel.clone(),
-    }));
+    let tools = workspace
+        .register()
+        .with_dedup(dedup)
+        .with_before(Arc::new(ApprovalGate {
+            state: state.clone(),
+            tx: tx.clone(),
+            cancel: cancel.clone(),
+        }));
     let params = run::RunParams {
         preamble: Some(crate::prompt::build_system_prompt(
             &crate::prompt::Vars::new()
@@ -452,6 +472,7 @@ async fn run_turn(
         temperature: config.agent.temperature,
         max_tokens: config.agent.max_tokens,
         max_turns: run::RunParams::UNBOUNDED,
+        recency: None,
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));

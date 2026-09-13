@@ -17,6 +17,8 @@ use rig_core::tool::PortableDynamicTool;
 
 use crate::history;
 
+use super::dedup::{self, SharedDedupCache, ToolDedupCache};
+
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// What to do with a tool call before it executes.
@@ -51,6 +53,7 @@ pub struct ToolDispatch {
     tools: BTreeMap<String, PortableDynamicTool>,
     before: Option<Arc<dyn BeforeExecute>>,
     after: Option<Arc<dyn AfterExecute>>,
+    dedup: Option<SharedDedupCache>,
 }
 
 /// What executing one call produced.
@@ -73,6 +76,7 @@ impl ToolDispatch {
                 .collect(),
             before: None,
             after: None,
+            dedup: None,
         }
     }
 
@@ -83,6 +87,13 @@ impl ToolDispatch {
 
     pub fn with_after(mut self, hook: Arc<dyn AfterExecute>) -> Self {
         self.after = Some(hook);
+        self
+    }
+
+    /// Share the session's tool dedup cache: read-only hits replay from
+    /// cache, writes invalidate the paths they touch.
+    pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
+        self.dedup = Some(cache);
         self
     }
 
@@ -122,6 +133,23 @@ impl ToolDispatch {
                 Decision::Stop(reason) => return Ok(DispatchOutcome::Stopped(reason)),
             }
         }
+        let name = call.function.name.clone();
+        let read_only = ToolDedupCache::is_read_only(&name);
+        let dedup_key = read_only.then(|| ToolDedupCache::key(&name, &call.function.arguments));
+        let cached = if let (Some(cache), Some(key)) = (&self.dedup, dedup_key) {
+            cache.lock().ok().and_then(|guard| guard.get(key).cloned())
+        } else {
+            None
+        };
+        if let Some(cached) = cached {
+            // Replays re-run the after hook on the cached raw result: the
+            // transform is per-call and must not be baked into the cache.
+            let mut replayed = dedup::cached_result(&cached, &call.id);
+            if let Some(after) = &self.after {
+                replayed = after.transform(call.clone(), replayed).await;
+            }
+            return Ok(DispatchOutcome::Ran(replayed));
+        }
         let output = tool.execute(call.function.arguments.clone()).await;
         let mut result = match output {
             Ok(output) => history::ToolResult {
@@ -137,6 +165,21 @@ impl ToolDispatch {
                 is_error: true,
             },
         };
+        // Cache bookkeeping runs on the raw, pre-transform result so a
+        // call-specific AfterExecute hook cannot poison the cache.
+        if !result.is_error
+            && let Some(cache) = &self.dedup
+            && let Ok(mut guard) = cache.lock()
+        {
+            if let Some(key) = dedup_key {
+                let path = dedup::extract_file_path(&call.function.arguments);
+                guard.insert(key, &result, path.as_deref());
+            } else if ToolDedupCache::is_write(&name) {
+                for path in dedup::extract_write_paths(&name, &call.function.arguments) {
+                    guard.invalidate_path(&path);
+                }
+            }
+        }
         if let Some(after) = &self.after {
             result = after.transform(call.clone(), result).await;
         }

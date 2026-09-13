@@ -61,6 +61,9 @@ struct Session {
     context_length: Option<u32>,
     /// Effectiveness state for the configured compaction stages.
     compaction: crate::compaction::CompactionState,
+    /// Session-wide tool dedup cache, shared by the dispatcher and cleared
+    /// by the compaction engine.
+    dedup: run::SharedDedupCache,
     cancel: run::CancelFlag,
 }
 
@@ -169,6 +172,7 @@ impl AppState {
             .unwrap_or_default();
         let context_length = models.first().and_then(|model| model.context_length);
         let (cancel, _) = run::cancel_channel();
+        let dedup = run::shared_cache();
         Ok(Session {
             workspace,
             instructions,
@@ -177,7 +181,8 @@ impl AppState {
             models,
             model,
             context_length,
-            compaction: Default::default(),
+            compaction: crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
+            dedup,
             cancel,
         })
     }
@@ -461,12 +466,25 @@ async fn run_turn(
     // effectiveness state is persisted here; the compacted history is
     // committed by the run's success path, matching the loop's "failed runs
     // leave session history untouched" semantics.
-    let (mut compaction_state, context_length) = {
+    let (mut compaction_state, context_length, dedup) = {
         let sessions = state.sessions.lock().await;
         sessions
             .get(session_id.0.as_ref())
-            .map(|session| (session.compaction.clone(), session.context_length))
-            .unwrap_or_default()
+            .map(|session| {
+                (
+                    session.compaction.clone(),
+                    session.context_length,
+                    session.dedup.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                let dedup = run::shared_cache();
+                (
+                    crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
+                    None,
+                    dedup,
+                )
+            })
     };
     {
         let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone());
@@ -479,7 +497,7 @@ async fn run_turn(
         }
     }
 
-    let tools = workspace.register();
+    let tools = workspace.register().with_dedup(dedup);
     let (cwd, instructions_text) = {
         let sessions = state.sessions.lock().await;
         let session = sessions.get(session_id.0.as_ref());
@@ -504,6 +522,7 @@ async fn run_turn(
         temperature: state.config.agent.temperature,
         max_tokens: state.config.agent.max_tokens,
         max_turns: run::RunParams::UNBOUNDED,
+        recency: None,
     };
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {
@@ -685,6 +704,7 @@ mod tests {
             }],
             model: "gpt-x".into(),
             context_length: Some(128_000),
+            dedup: run::shared_cache(),
             cancel: run::cancel_channel().0,
         };
         let options = session.config_options(&["openai".into(), "llamafile".into()]);

@@ -9,8 +9,9 @@ use rig_core::completion::CompletionModel;
 
 use crate::config::{CompactionConfig, CompactionKind};
 use crate::history::Message;
+use crate::run::SharedDedupCache;
 
-use super::estimate::estimate_tokens;
+use super::estimate::{TokenEstimator, estimate_tokens};
 use super::llm::llm_compact;
 use super::vcc::vcc_compact;
 
@@ -28,6 +29,27 @@ pub struct CompactionEngine {
 #[derive(Debug, Default, Clone)]
 pub struct CompactionState {
     disarmed: HashSet<CompactionKind>,
+    /// Calibrated token estimator: thresholds are checked against scaled
+    /// estimates once the provider proves the raw ones too low.
+    pub estimator: TokenEstimator,
+    /// Cleared before every compaction run: compacted history may describe a
+    /// different world than the one the dedup cache sampled.
+    dedup: Option<SharedDedupCache>,
+}
+
+impl CompactionState {
+    /// Share the session's tool dedup cache so compaction can clear it.
+    pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
+        self.dedup = Some(cache);
+        self
+    }
+
+    /// Recalibrate the estimator after an overflow: `actual` is the
+    /// provider-reported prompt size for a request estimated at
+    /// `estimated` tokens.
+    pub fn recalibrate(&mut self, actual: u64, estimated: u64) -> bool {
+        self.estimator.recalibrate(actual, estimated)
+    }
 }
 
 impl CompactionEngine {
@@ -58,12 +80,17 @@ impl CompactionEngine {
             if threshold == 0 {
                 continue;
             }
-            let before = estimate_tokens(history);
+            let before = state.estimator.scale(estimate_tokens(history));
             if before < threshold {
                 continue;
             }
             if state.disarmed.contains(&stage.kind) {
                 continue;
+            }
+            if let Some(cache) = &state.dedup
+                && let Ok(mut guard) = cache.lock()
+            {
+                guard.clear();
             }
             let before_len = history.len();
             let _under_limit = match stage.kind {
@@ -75,11 +102,13 @@ impl CompactionEngine {
             // A stage that declined to run (too-short history, empty head)
             // leaves the history untouched; that is not an ineffective run,
             // so the stage stays armed.
-            if history.len() == before_len && estimate_tokens(history) == before {
+            if history.len() == before_len
+                && state.estimator.scale(estimate_tokens(history)) == before
+            {
                 continue;
             }
             ran = true;
-            let after = estimate_tokens(history);
+            let after = state.estimator.scale(estimate_tokens(history));
             let savings = if before > 0 {
                 1.0 - (after as f32 / before as f32)
             } else {
@@ -252,6 +281,75 @@ mod tests {
             .await;
         assert!(!ran);
         assert!(state.disarmed.is_empty(), "declined runs must not disarm");
+    }
+
+    #[tokio::test]
+    async fn calibrated_multiplier_tightens_thresholds() {
+        // The raw estimate sits under the threshold, but a multiplier
+        // recalibrated after an overflow pushes it over: the stage runs.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        let context_length = ((tokens as f64 / 0.5) as u32).max(1);
+        assert!(
+            !engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length)
+                )
+                .await,
+            "raw estimate sits under the threshold"
+        );
+        state.recalibrate(context_length as u64 * 2, tokens);
+        let mut history = long_history();
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length)
+                )
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_clears_dedup_cache() {
+        use crate::run::{ToolDedupCache, shared_cache};
+
+        let cache = shared_cache();
+        let key = ToolDedupCache::key("read", &serde_json::json!({"path": "/x.rs"}));
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key,
+                &crate::history::ToolResult::text("c1", "read", "x"),
+                None,
+            );
+        }
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
+        let mut state = CompactionState::default().with_dedup(cache.clone());
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        let context_length = ((tokens as f64 / 0.9) as u32).max(1);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length)
+                )
+                .await
+        );
+        assert!(
+            cache.lock().unwrap().get(key).is_none(),
+            "a compaction run must clear the dedup cache"
+        );
     }
 
     #[tokio::test]

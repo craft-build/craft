@@ -8,13 +8,19 @@
 //! commits its sanitized partial history with an end marker so the next
 //! prompt continues from where the budget ran out.
 
+pub mod dedup;
 pub mod dispatch;
+mod recency;
 mod stream;
 
+pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
 pub use dispatch::{
     AfterExecute, BeforeExecute, BoxFuture, Decision, DispatchOutcome, ToolDispatch,
 };
+pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use stream::TurnOutput;
+
+use std::sync::Arc;
 
 use rig_core::completion::CompletionModel;
 use tokio::sync::watch;
@@ -90,7 +96,7 @@ impl CancelFlag {
 }
 
 /// Request-level settings for one run.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunParams {
     /// System instructions; `None` or empty omits the preamble.
     pub preamble: Option<String>,
@@ -98,6 +104,21 @@ pub struct RunParams {
     pub max_tokens: Option<u64>,
     /// Bound on model calls per run. Interactive runs use [`RunParams::UNBOUNDED`].
     pub max_turns: usize,
+    /// Per-turn volatile facts, appended to the last user message of each
+    /// request (and never committed to history).
+    pub recency: Option<Arc<dyn RecencySource>>,
+}
+
+impl std::fmt::Debug for RunParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunParams")
+            .field("preamble", &self.preamble)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("max_turns", &self.max_turns)
+            .field("recency", &self.recency.as_ref().map(|_| "<source>"))
+            .finish()
+    }
 }
 
 impl RunParams {
@@ -109,6 +130,7 @@ impl RunParams {
             temperature: None,
             max_tokens: None,
             max_turns: Self::UNBOUNDED,
+            recency: None,
         }
     }
 }
@@ -120,6 +142,7 @@ impl Default for RunParams {
             temperature: None,
             max_tokens: None,
             max_turns: Self::UNBOUNDED,
+            recency: None,
         }
     }
 }
@@ -163,6 +186,12 @@ pub async fn run<M: CompletionModel + Clone>(
         }
         let mut full = history.clone();
         full.extend(turn.iter().cloned());
+        // Volatile recency facts ride only this request; `full` is discarded.
+        if let Some(source) = &params.recency
+            && let Some(with_tail) = recency::recency_view(source, &full, turns as u32)
+        {
+            full = with_tail;
+        }
         let request = edge::to_request(
             &full,
             &definitions,
@@ -636,6 +665,233 @@ mod tests {
             tool_calls[0].function.arguments,
             serde_json::json!({"path": "f", "limit": 1})
         );
+    }
+
+    #[tokio::test]
+    async fn dedup_replays_identical_read_calls() {
+        // Two identical read calls in one run: the second answers from cache.
+        let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
+        let (model, _turns) = stream_turns(vec![
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), "body\n").unwrap();
+        let tools = crate::tools::Workspace::new(dir.path())
+            .unwrap()
+            .register()
+            .with_dedup(crate::run::shared_cache());
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { .. }));
+        let results: Vec<&history::ToolResult> = history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|b| match b {
+                        UserContent::ToolResult(r) => Some(r),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].content[0].to_text(), "1: body");
+        assert!(
+            results[1].content[0]
+                .to_text()
+                .starts_with("[cached] 1: body"),
+            "second identical read must replay from cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_invalidated_by_write_to_same_path() {
+        let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
+        let write = || {
+            tool_event(
+                "t",
+                "write",
+                serde_json::json!({"path": "f", "content": "new\n"}),
+            )
+        };
+        let (model, _turns) = stream_turns(vec![
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![
+                write(),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), "old\n").unwrap();
+        let tools = crate::tools::Workspace::new(dir.path())
+            .unwrap()
+            .register()
+            .with_dedup(crate::run::shared_cache());
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let _ = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        let results: Vec<String> = history
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content } => content
+                    .iter()
+                    .filter_map(|b| match b {
+                        UserContent::ToolResult(r) => Some(r.content[0].to_text()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0], "1: old");
+        assert!(!results[1].contains("cached"), "writes are never cached");
+        assert_eq!(
+            results[2], "1: new",
+            "post-write read must re-execute against fresh contents"
+        );
+    }
+
+    #[tokio::test]
+    async fn recency_tail_rides_the_request_but_not_history() {
+        struct Turns;
+        impl crate::run::RecencySource for Turns {
+            fn collect(&self, ctx: &crate::run::RecencyCtx) -> crate::run::RecencyFacts {
+                let mut facts = crate::run::RecencyFacts::new();
+                facts.push(format!("turn {}", ctx.turn));
+                facts
+            }
+        }
+        let (model, _turns) = stream_turns(vec![vec![
+            MockStreamEvent::text("ok"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let (_, cancel) = cancel_channel();
+        let params = RunParams {
+            recency: Some(std::sync::Arc::new(Turns)),
+            ..RunParams::default()
+        };
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &params,
+            &ToolDispatch::default(),
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { .. }));
+        let requests = model.requests();
+        let sent = crate::edge::rig_to_own(&requests[0].chat_history);
+        assert!(
+            sent[0].text().contains("<turn-context>\n\nturn 0"),
+            "tail must ride the request"
+        );
+        assert!(
+            !history[0].text().contains("turn-context"),
+            "tail must not be committed to history"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_replays_through_after_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // The cache stores the raw result; a replay must re-run the
+        // per-call AfterExecute transform instead of replaying its output.
+        struct Counting {
+            count: std::sync::Arc<AtomicUsize>,
+        }
+        impl AfterExecute for Counting {
+            fn transform(
+                &self,
+                _call: history::ToolCall,
+                result: history::ToolResult,
+            ) -> BoxFuture<history::ToolResult> {
+                let count = self.count.clone();
+                Box::pin(async move {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    result
+                })
+            }
+        }
+        let read = || tool_event("t", "read", serde_json::json!({"path": "f"}));
+        let (model, _turns) = stream_turns(vec![
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), "body\n").unwrap();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tools = crate::tools::Workspace::new(dir.path())
+            .unwrap()
+            .register()
+            .with_dedup(crate::run::shared_cache())
+            .with_after(std::sync::Arc::new(Counting {
+                count: count.clone(),
+            }));
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let _ = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            2,
+            "after hook must run on both the execution and the replay"
+        );
+        assert!(history.len() >= 5);
+        let replayed = &history[history.len() - 2];
+        let Message::User { content } = replayed else {
+            panic!("tool result message");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("tool result block");
+        };
+        assert!(result.content[0].to_text().starts_with("[cached]"));
     }
 
     #[tokio::test]
