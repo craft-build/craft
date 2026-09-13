@@ -1,0 +1,38 @@
+//! Persisted theme name.
+//!
+//! Ported from the reference `craft-storage/src/theme.rs`.
+
+use std::fs;
+
+use super::{StateDir, StorageResult, atomic_write};
+
+const THEME_FILE: &str = "theme";
+
+pub fn persist_theme_name(dir: &StateDir, name: &str) -> StorageResult<()> {
+    atomic_write(&dir.path().join(THEME_FILE), name.as_bytes())
+}
+
+pub fn read_theme_name(dir: &StateDir) -> Option<String> {
+    let name = fs::read_to_string(dir.path().join(THEME_FILE)).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_persistence_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = StateDir::from_path(tmp.path().to_path_buf());
+
+        assert!(read_theme_name(&dir).is_none());
+
+        persist_theme_name(&dir, "gruvbox").unwrap();
+        assert_eq!(read_theme_name(&dir).as_deref(), Some("gruvbox"));
+
+        fs::write(dir.path().join(THEME_FILE), "  \n").unwrap();
+        assert!(read_theme_name(&dir).is_none());
+    }
+}
