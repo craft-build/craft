@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use craft::{
     acp,
     config::Config,
@@ -24,6 +25,8 @@ enum Commands {
     /// Serve the agent loop over the ACP protocol on stdin/stdout (for editors
     /// and other ACP clients).
     Acp,
+    /// Emit shell completion scripts for the given shell to stdout.
+    Completions { shell: Shell },
 }
 
 #[tokio::main]
@@ -31,6 +34,12 @@ enum Commands {
 async fn main() -> Result<(), Error> {
     let cli = Cli::parse();
     match cli.command {
+        Some(Commands::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            let bin = cmd.get_name().to_owned();
+            generate(shell, &mut cmd, bin, &mut std::io::stdout());
+            Ok(())
+        }
         Some(Commands::Acp) => {
             // The ACP client owns provider/model selection through session
             // config options; the config file supplies the provider catalog
