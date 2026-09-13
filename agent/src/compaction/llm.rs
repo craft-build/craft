@@ -18,18 +18,26 @@ use crate::error::{Result, SummarizeSnafu};
 pub(crate) const LLM_SUMMARY_PREFIX: &str = "Summary of the conversation so far:";
 
 /// LLM compaction of `history`. The head is summarized (via `model`, with a
-/// static fallback if the call fails) and the tail is kept verbatim. Returns
-/// whether the compacted history fits within `token_limit`.
+/// static fallback if the call fails) and the tail is kept verbatim. The last
+/// `carry_len` messages are held out of the summary and re-appended after it,
+/// so input no turn has answered yet survives compaction verbatim (Craft's
+/// carry-protection). Returns whether the compacted history fits within
+/// `token_limit`.
 pub async fn llm_compact<M: CompletionModel + Clone>(
     model: &M,
     history: &mut Vec<Message>,
     token_limit: u64,
+    carry_len: usize,
 ) -> Result<bool> {
     if history.len() <= 2 {
         return Ok(false);
     }
     let live = history.clone();
-    let tail_start = find_cut(&live).map_or(0, |cut| cut.tail_start.min(live.len()));
+    // Summarization stops where the protected (unanswered) input begins.
+    let summarize_end = live.len().saturating_sub(carry_len);
+    let tail_start = find_cut(&live)
+        .map_or(0, |cut| cut.tail_start.min(live.len()))
+        .min(summarize_end);
     let head = &live[..tail_start];
     if head.is_empty() {
         return Ok(false);
@@ -172,7 +180,9 @@ mod tests {
     async fn summarizes_head_and_keeps_tail() {
         let model = MockCompletionModel::new([MockTurn::text("condensed summary")]);
         let mut messages = history();
-        let under = llm_compact(&model, &mut messages, u64::MAX).await.unwrap();
+        let under = llm_compact(&model, &mut messages, u64::MAX, 0)
+            .await
+            .unwrap();
         assert!(under);
         assert!(matches!(&messages[0], Message::Assistant { content, .. }
             if matches!(&content[0], AssistantContent::Text(t)
@@ -195,7 +205,9 @@ mod tests {
     async fn falls_back_to_static_summary_on_empty_response() {
         let model = MockCompletionModel::new([MockTurn::text("")]);
         let mut messages = history();
-        let under = llm_compact(&model, &mut messages, u64::MAX).await.unwrap();
+        let under = llm_compact(&model, &mut messages, u64::MAX, 0)
+            .await
+            .unwrap();
         assert!(under);
         assert!(matches!(&messages[0], Message::Assistant { content, .. }
             if matches!(&content[0], AssistantContent::Text(t)

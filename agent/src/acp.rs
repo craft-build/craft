@@ -487,7 +487,8 @@ async fn run_turn(
             })
     };
     {
-        let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone());
+        let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone())
+            .with_buffer(state.config.compaction_buffer);
         engine
             .maybe_compact(&mut compaction_state, &model, &mut history, context_length)
             .await;

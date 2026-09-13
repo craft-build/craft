@@ -442,6 +442,7 @@ async fn run_turn(
     {
         let mut compaction = state.lock().await.compaction.clone();
         CompactionEngine::new(config.compaction.clone())
+            .with_buffer(config.compaction_buffer)
             .maybe_compact(
                 &mut compaction,
                 &model,

@@ -7,11 +7,11 @@ use std::{
 };
 
 use serde::Deserialize;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{
-    ConfigDirSnafu, HomeDirectorySnafu, InvalidBaseUrlSnafu, InvalidProviderSnafu, InvalidSnafu,
-    InvalidTomlSnafu, LoadConfigSnafu, ReadConfigSnafu, Result,
+    ConfigDirSnafu, InvalidBaseUrlSnafu, InvalidProviderSnafu, InvalidSnafu, InvalidTomlSnafu,
+    LoadConfigSnafu, ReadConfigSnafu, Result,
 };
 use crate::providers::ProviderKind;
 
@@ -23,6 +23,9 @@ pub struct Config {
     /// Compaction stages, ascending by context fill ratio.
     #[serde(default = "default_compaction")]
     pub compaction: Vec<CompactionConfig>,
+    /// Context reserved so compaction fires before the window truly fills.
+    #[serde(default = "default_compaction_buffer")]
+    pub compaction_buffer: CompactionBuffer,
     /// Tool-output pre-compression applied to the model's request view.
     pub compression: crate::compression::CompressionConfig,
 }
@@ -61,6 +64,82 @@ fn de_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D:
             .trim()
             .parse()
             .map_err(|_| serde::de::Error::custom("context must be a ratio between 0 and 1")),
+    }
+}
+
+/// Context reserved for compaction: an absolute token count or a percent of
+/// the context window (TOML: `20000` or `"20%"`). Subtracted from the window
+/// when the engine decides whether the context is full, so compaction fires
+/// before the provider would start rejecting requests (ported from Craft's
+/// `craft_config::CompactionBuffer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionBuffer {
+    Tokens(u32),
+    Percent(u8),
+}
+
+/// Tokens below this the buffer is pointless: overflow would arrive before
+/// compaction could react.
+pub const MIN_COMPACTION_BUFFER: u32 = 1_000;
+pub const DEFAULT_COMPACTION_BUFFER: CompactionBuffer = CompactionBuffer::Percent(20);
+
+fn default_compaction_buffer() -> CompactionBuffer {
+    DEFAULT_COMPACTION_BUFFER
+}
+
+impl Default for CompactionBuffer {
+    fn default() -> Self {
+        DEFAULT_COMPACTION_BUFFER
+    }
+}
+
+impl CompactionBuffer {
+    /// Resolve against a context window: percent scales with the window,
+    /// token counts are absolute.
+    pub fn resolve(self, context_window: u32) -> u32 {
+        match self {
+            Self::Tokens(n) => n,
+            Self::Percent(p) => (u64::from(context_window) * u64::from(p) / 100) as u32,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactionBuffer {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = CompactionBuffer;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a token count (>= 1000) or a percent of the window like \"20%\"")
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                u64::try_from(v).map_err(|_| E::custom("compaction_buffer must be nonnegative"))?;
+                self.visit_u64(v as u64)
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                u32::try_from(v)
+                    .ok()
+                    .filter(|n| *n >= MIN_COMPACTION_BUFFER)
+                    .map(CompactionBuffer::Tokens)
+                    .ok_or_else(|| {
+                        E::custom(format!(
+                            "compaction_buffer must be at least {MIN_COMPACTION_BUFFER} tokens"
+                        ))
+                    })
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                let Some(digits) = v.strip_suffix('%') else {
+                    return Err(E::custom("expected a trailing '%' for a percent buffer"));
+                };
+                let percent: u8 = digits.trim().parse().map_err(|_| {
+                    E::custom(format!(
+                        "invalid compaction_buffer {v:?}: expected a percent 0-100"
+                    ))
+                })?;
+                Ok(CompactionBuffer::Percent(percent))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -343,6 +422,30 @@ mod tests {
         assert!((config.compaction[0].context - 0.6).abs() < 1e-9);
         assert_eq!(config.compaction[1].kind, CompactionKind::Llm);
         assert!((config.compaction[1].context - 0.8).abs() < 1e-9);
+        assert_eq!(config.compaction_buffer, DEFAULT_COMPACTION_BUFFER);
+    }
+
+    #[test]
+    fn compaction_buffer_parses_tokens_and_percent() {
+        #[derive(Deserialize)]
+        struct Wrap {
+            #[serde(default = "default_compaction_buffer")]
+            compaction_buffer: CompactionBuffer,
+        }
+        let tokens: Wrap = toml::from_str("compaction_buffer = 20000").unwrap();
+        assert_eq!(tokens.compaction_buffer, CompactionBuffer::Tokens(20000));
+        let percent: Wrap = toml::from_str(r#"compaction_buffer = "20%""#).unwrap();
+        assert_eq!(percent.compaction_buffer, CompactionBuffer::Percent(20));
+        assert!(toml::from_str::<Wrap>("compaction_buffer = 100").is_err());
+        assert!(toml::from_str::<Wrap>(r#"compaction_buffer = "20""#).is_err());
+    }
+
+    #[test]
+    fn compaction_buffer_resolves_against_window() {
+        assert_eq!(CompactionBuffer::Tokens(20000).resolve(100_000), 20_000);
+        assert_eq!(CompactionBuffer::Percent(20).resolve(100_000), 20_000);
+        assert_eq!(CompactionBuffer::Percent(20).resolve(0), 0);
+        assert_eq!(CompactionBuffer::Percent(33).resolve(1000), 330);
     }
 
     #[test]

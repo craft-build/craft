@@ -7,7 +7,10 @@ use std::collections::HashSet;
 
 use rig_core::completion::CompletionModel;
 
-use crate::config::{CompactionConfig, CompactionKind};
+use crate::config::{
+    CompactionBuffer, CompactionConfig, CompactionKind,
+    DEFAULT_COMPACTION_BUFFER as DEFAULT_ENGINE_BUFFER,
+};
 use crate::history::Message;
 use crate::run::SharedDedupCache;
 
@@ -23,6 +26,7 @@ pub const INEFFECTIVE_SAVINGS: f32 = 0.1;
 #[derive(Debug, Clone)]
 pub struct CompactionEngine {
     stages: Vec<CompactionConfig>,
+    buffer: CompactionBuffer,
 }
 
 /// Per-session effectiveness state, persisted across turns.
@@ -35,6 +39,12 @@ pub struct CompactionState {
     /// Cleared before every compaction run: compacted history may describe a
     /// different world than the one the dedup cache sampled.
     dedup: Option<SharedDedupCache>,
+    /// Where the unanswered input starts, as a history index: everything from
+    /// here on is held out of the summary and re-appended verbatim, so input
+    /// no turn has answered yet is never summarized away (Craft's
+    /// `carry_from`). `None` (the default) protects nothing, which is the
+    /// correct state between turns.
+    carry_from: Option<usize>,
 }
 
 impl CompactionState {
@@ -42,6 +52,23 @@ impl CompactionState {
     pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
         self.dedup = Some(cache);
         self
+    }
+
+    /// Mark `index` as where the unanswered input starts; compaction holds
+    /// everything from there on out of the summary.
+    pub fn protect_from(&mut self, index: usize) {
+        self.carry_from = Some(index);
+    }
+
+    /// All input has been answered: nothing to protect (call when a turn
+    /// completes).
+    pub fn mark_answered(&mut self) {
+        self.carry_from = None;
+    }
+
+    /// Where the protected (unanswered) input currently starts, if any.
+    pub fn carry_from(&self) -> Option<usize> {
+        self.carry_from
     }
 
     /// Recalibrate the estimator after an overflow: `actual` is the
@@ -59,11 +86,26 @@ impl CompactionEngine {
                 .partial_cmp(&b.context)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        Self { stages }
+        Self {
+            stages,
+            buffer: DEFAULT_ENGINE_BUFFER,
+        }
+    }
+
+    /// Set the compaction buffer reserved below the context window
+    /// (defaults to 20% of the window, matching Craft).
+    pub fn with_buffer(mut self, buffer: CompactionBuffer) -> Self {
+        self.buffer = buffer;
+        self
     }
 
     /// Run every armed stage whose threshold is crossed, lowest first.
     /// `history` is compacted in place. Returns whether any stage ran.
+    ///
+    /// A stage runs when either its proactive fill threshold is crossed or
+    /// the estimated context has already overflowed the buffer-subtracted
+    /// window — overflow forces every armed stage in order (VCC first, then
+    /// LLM), regardless of its ratio threshold.
     pub async fn maybe_compact<M: CompletionModel + Clone>(
         &self,
         state: &mut CompactionState,
@@ -74,6 +116,10 @@ impl CompactionEngine {
         let Some(context_length) = context_length.filter(|length| *length > 0) else {
             return false;
         };
+        // The buffer is headroom the model needs for its reply, so the fill
+        // checks run against the window minus the buffer (Craft's
+        // `is_overflow`: `usage >= window - buffer`).
+        let usable = u64::from(context_length.saturating_sub(self.buffer.resolve(context_length)));
         let mut ran = false;
         for stage in &self.stages {
             let threshold = (context_length as f64 * stage.context) as u64;
@@ -81,7 +127,8 @@ impl CompactionEngine {
                 continue;
             }
             let before = state.estimator.scale(estimate_tokens(history));
-            if before < threshold {
+            let overflow = before >= usable;
+            if !overflow && before < threshold {
                 continue;
             }
             if state.disarmed.contains(&stage.kind) {
@@ -92,10 +139,15 @@ impl CompactionEngine {
             {
                 guard.clear();
             }
+            // Unanswered input is held out of the summary and re-appended
+            // verbatim; `carry_len == 0` between turns.
+            let carry_len = history
+                .len()
+                .saturating_sub(state.carry_from.unwrap_or(history.len()));
             let before_len = history.len();
             let _under_limit = match stage.kind {
                 CompactionKind::Vcc => vcc_compact(history, threshold, estimate_tokens),
-                CompactionKind::Llm => llm_compact(model, history, threshold)
+                CompactionKind::Llm => llm_compact(model, history, threshold, carry_len)
                     .await
                     .unwrap_or(false),
             };
@@ -108,6 +160,11 @@ impl CompactionEngine {
                 continue;
             }
             ran = true;
+            // The carried input survived verbatim at the tail; re-anchor the
+            // protection to where it now starts.
+            if carry_len > 0 {
+                state.carry_from = Some(history.len().saturating_sub(carry_len));
+            }
             let after = state.estimator.scale(estimate_tokens(history));
             let savings = if before > 0 {
                 1.0 - (after as f32 / before as f32)
@@ -367,5 +424,173 @@ mod tests {
             .await;
         assert!(!ran);
         assert_eq!(history.len(), long_history().len());
+    }
+
+    #[tokio::test]
+    async fn carry_protection_keeps_unanswered_input_verbatim() {
+        // The last two messages are unanswered input; the LLM stage may
+        // summarize everything before them, but must re-append them verbatim.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Llm, 0.6)])
+            .with_buffer(crate::config::CompactionBuffer::Tokens(0));
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let (prompt, followup) = (user("unanswered prompt"), user("queued followup"));
+        history.push(prompt.clone());
+        history.push(followup.clone());
+        state.protect_from(history.len() - 2);
+        let tokens = estimate_tokens(&history);
+        let context_length = ((tokens as f64 / 0.9) as u32).max(1);
+        let model = MockCompletionModel::new([MockTurn::text("summary")]);
+        assert!(
+            engine
+                .maybe_compact(&mut state, &model, &mut history, Some(context_length))
+                .await
+        );
+        // Summary replaced the head, protected tail is intact and last.
+        assert!(matches!(&history[0], Message::Assistant { content, .. }
+            if matches!(&content[0], AssistantContent::Text(t)
+                if t.text.contains(LLM_SUMMARY_PREFIX))));
+        assert_eq!(history[history.len() - 2], prompt);
+        assert_eq!(*history.last().unwrap(), followup);
+        // The protection re-anchored to where the carried input now starts.
+        assert_eq!(state.carry_from(), Some(history.len() - 2));
+        // The summarizer never saw the carried input.
+        let request = &model.requests()[0];
+        let carried = request
+            .chat_history
+            .iter()
+            .filter_map(|m| match m {
+                rig_core::completion::message::Message::User { content } => content.first(),
+                _ => None,
+            })
+            .filter_map(|b| match b {
+                rig_core::completion::message::UserContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .any(|t| t.contains("unanswered prompt") || t.contains("queued followup"));
+        assert!(!carried, "carried input must not be sent to the summarizer");
+    }
+
+    #[tokio::test]
+    async fn mark_answered_clears_protection() {
+        let mut state = CompactionState::default();
+        state.protect_from(3);
+        assert_eq!(state.carry_from(), Some(3));
+        state.mark_answered();
+        assert_eq!(state.carry_from(), None);
+        assert_eq!(CompactionState::default().carry_from(), None);
+    }
+
+    #[tokio::test]
+    async fn fully_protected_history_declines_instead_of_summarizing_input() {
+        // Everything unanswered: the LLM stage must decline rather than
+        // summarize the only input there is.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Llm, 0.1)]);
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        state.protect_from(0);
+        let tokens = estimate_tokens(&history);
+        let context_length = ((tokens as f64 / 0.5) as u32).max(1);
+        let model = MockCompletionModel::new([MockTurn::text("summary")]);
+        assert!(
+            !engine
+                .maybe_compact(&mut state, &model, &mut history, Some(context_length))
+                .await
+        );
+        assert_eq!(history.len(), long_history().len());
+        assert!(model.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn overflow_of_buffer_subtracted_window_forces_stage_below_threshold() {
+        // Fill is under the 0.6 proactive threshold but over the window minus
+        // the buffer: the stage must still run (Craft's is_overflow forcing).
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)])
+            .with_buffer(crate::config::CompactionBuffer::Percent(50));
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        // Window: fill ratio 0.5 (< 0.6 threshold), usable = 0.5 * window
+        // (= tokens) so estimate >= usable -> overflow.
+        let context_length = ((tokens as f64 / 0.5) as u32).max(1);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length)
+                )
+                .await,
+            "overflow must force the stage despite the proactive threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_larger_than_window_saturates_and_forces() {
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.99)])
+            .with_buffer(crate::config::CompactionBuffer::Tokens(u32::MAX));
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let tokens = estimate_tokens(&history);
+        // Fill ratio far below the 0.99 threshold, but the buffer eats the
+        // whole window: the usable limit saturates at 0 and the stage runs.
+        let context_length = ((tokens as f64 / 0.1) as u32).max(1);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length)
+                )
+                .await,
+            "a buffer covering the whole window must force compaction, not underflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_forcing_respects_disarmed_stages() {
+        // Craft skips auto-compaction after ineffective runs even on overflow.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)])
+            .with_buffer(crate::config::CompactionBuffer::Percent(50));
+        let mut state = CompactionState::default();
+        let mut history = vec![
+            user(&"a".repeat(100)),
+            assistant_text(&"b".repeat(100)),
+            user(&"c".repeat(100)),
+            assistant_text(&"d".repeat(100)),
+            user(&"e".repeat(100)),
+            assistant_text(&"f".repeat(100)),
+            user(&"g".repeat(100)),
+            assistant_text(&"h".repeat(100)),
+        ];
+        let tokens = estimate_tokens(&history);
+        // Window so tight vcc's savings fall below 10%: the stage disarms.
+        let tight = ((tokens as f64 / 0.99) as u32).max(1);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(tight)
+                )
+                .await
+        );
+        // A second run with a wide window but a huge buffer: fill is over the
+        // buffer-subtracted usable window (overflow), under the threshold.
+        let overflowing = ((tokens as f64 / 0.9) as u32).max(1);
+        assert!(
+            !engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(overflowing)
+                )
+                .await,
+            "a disarmed stage must not run even on overflow"
+        );
     }
 }
