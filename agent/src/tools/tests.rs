@@ -570,9 +570,15 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
             "delete",
             "edit",
             "edit_lines",
+            "glob",
             "grep",
             "insert_lines",
+            "inspect",
+            "list",
+            "list_tools",
+            "multiedit",
             "read",
+            "todo_write",
             "write"
         ]
     );
@@ -816,7 +822,12 @@ async fn read_injects_subdirectory_instructions_once() {
     assert_eq!(page.instructions.len(), 1);
     assert!(page.instructions[0].0.ends_with("AGENTS.md"));
     assert_eq!(page.instructions[0].1, "api rules");
-    let text = page.into_tool_output().unwrap().as_text().unwrap().to_string();
+    let text = page
+        .into_tool_output()
+        .unwrap()
+        .as_text()
+        .unwrap()
+        .to_string();
     assert!(text.contains("\n\n---\nInstructions from: "));
     assert!(text.ends_with("api rules"));
 
@@ -834,9 +845,7 @@ async fn read_of_instruction_file_injects_nothing() {
     fs::write(dir.path().join("AGENTS.md"), "root rules").unwrap();
 
     let tool = Read(workspace.clone());
-    let page = invoke(&tool, json!({"path":"AGENTS.md"}))
-        .await
-        .unwrap();
+    let page = invoke(&tool, json!({"path":"AGENTS.md"})).await.unwrap();
     assert!(page.instructions.is_empty());
 }
 
@@ -847,8 +856,381 @@ async fn read_files_at_workspace_root_inject_nothing() {
     fs::write(dir.path().join("file.txt"), "content").unwrap();
 
     let tool = Read(workspace.clone());
-    let page = invoke(&tool, json!({"path":"file.txt"}))
+    let page = invoke(&tool, json!({"path":"file.txt"})).await.unwrap();
+    assert!(page.instructions.is_empty());
+}
+
+#[tokio::test]
+async fn glob_finds_matches_newest_first_and_respects_gitignore() {
+    use std::time::{Duration, SystemTime};
+
+    let (dir, workspace) = workspace();
+    fs::write(dir.path().join("old.rs"), "").unwrap();
+    fs::write(dir.path().join("new.rs"), "").unwrap();
+    fs::create_dir_all(dir.path().join("nested")).unwrap();
+    fs::write(dir.path().join("nested/deep.rs"), "").unwrap();
+    fs::write(dir.path().join("ignored.rs"), "").unwrap();
+    fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+    let older = SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::open(dir.path().join("old.rs"))
+        .unwrap()
+        .set_modified(older)
+        .unwrap();
+
+    let tool = Glob(workspace.clone());
+    let output = invoke(&tool, json!({"pattern": "**/*.rs"})).await.unwrap();
+    assert!(
+        output.paths == vec!["nested/deep.rs", "new.rs", "old.rs"]
+            || output.paths == vec!["new.rs", "nested/deep.rs", "old.rs"],
+        "got: {:?}",
+        output.paths
+    );
+    assert_eq!(output.paths.last(), Some(&"old.rs".to_string()));
+
+    // A narrower path only reports matches under it.
+    let output = invoke(&tool, json!({"pattern": "**/*.rs", "path": "nested"}))
         .await
         .unwrap();
-    assert!(page.instructions.is_empty());
+    assert_eq!(output.paths, vec!["nested/deep.rs"]);
+}
+
+#[tokio::test]
+async fn glob_reports_no_files_found_and_rejects_bad_input() {
+    let (_dir, workspace) = workspace();
+    let tool = Glob(workspace.clone());
+    let output = invoke(&tool, json!({"pattern": "**/*.xyzzy"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        output.into_tool_output().unwrap().as_text(),
+        Some("No files found")
+    );
+    let error = invoke(&tool, json!({"pattern": "!"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("pattern must be a nonempty include glob"));
+    fs::write(workspace.root().join("file.txt"), "").unwrap();
+    assert!(
+        invoke(&tool, json!({"pattern": "*", "path": "file.txt"}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn list_sorts_dirs_first_and_hides_instruction_files() {
+    let (dir, workspace) = workspace();
+    fs::write(dir.path().join("b.txt"), "").unwrap();
+    fs::write(dir.path().join("a.rs"), "").unwrap();
+    fs::create_dir(dir.path().join("zdir")).unwrap();
+    fs::create_dir(dir.path().join("adir")).unwrap();
+    fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
+
+    let tool = List(workspace.clone());
+    let output = invoke(&tool, json!({})).await.unwrap();
+    assert_eq!(output.entries, vec!["adir/", "zdir/", "a.rs", "b.txt"]);
+    assert!(output.instructions.is_empty());
+}
+
+#[tokio::test]
+async fn list_injects_subdirectory_instructions_once() {
+    let (dir, workspace) = workspace();
+    fs::create_dir_all(dir.path().join("src/api")).unwrap();
+    fs::write(dir.path().join("src/AGENTS.md"), "sub rules").unwrap();
+    fs::write(dir.path().join("src/api/lib.rs"), "").unwrap();
+
+    let tool = List(workspace.clone());
+    let output = invoke(&tool, json!({"path": "src/api"})).await.unwrap();
+    assert_eq!(output.instructions.len(), 1);
+    assert!(output.instructions[0].0.ends_with("AGENTS.md"));
+    let text = output
+        .into_tool_output()
+        .unwrap()
+        .as_text()
+        .unwrap()
+        .to_string();
+    assert!(text.ends_with("sub rules"));
+
+    // Listing a sibling again does not repeat the instruction file.
+    let output = invoke(&tool, json!({"path": "src/api"})).await.unwrap();
+    assert!(output.instructions.is_empty());
+
+    // Non-directory paths are rejected.
+    assert!(
+        invoke(&tool, json!({"path": "src/api/lib.rs"}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn multiedit_applies_edits_sequentially() {
+    let (_dir, workspace) = workspace();
+    fs::write(
+        workspace.root().join("f.rs"),
+        "fn alpha() {}\nfn beta() {}\n",
+    )
+    .unwrap();
+    let tool = MultiEdit(workspace.clone());
+    let output = invoke(
+        &tool,
+        json!({"path": "f.rs", "edits": [
+            {"old_string": "fn alpha() {}", "new_string": "fn one() {}"},
+            {"old_string": "fn beta() {}", "new_string": "fn two() {}", "replace_all": true}
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        output.into_tool_output().unwrap().as_text(),
+        Some("applied 2 edits to f.rs")
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("f.rs")).unwrap(),
+        "fn one() {}\nfn two() {}\n"
+    );
+}
+
+#[tokio::test]
+async fn multiedit_failure_leaves_file_unchanged_with_snippet() {
+    let (_dir, workspace) = workspace();
+    let original = "let a = 1;\n";
+    fs::write(workspace.root().join("f.rs"), original).unwrap();
+    let tool = MultiEdit(workspace.clone());
+    let error = invoke(
+        &tool,
+        json!({"path": "f.rs", "edits": [
+            {"old_string": "let a = 1;", "new_string": "let a = 9;"},
+            {"old_string": "MISSING", "new_string": "x"}
+        ]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("edits[1] (old_string \"MISSING\")"),
+        "got: {error}"
+    );
+    assert!(error.contains("old_string was not found"));
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("f.rs")).unwrap(),
+        original
+    );
+
+    // A long first line is truncated to 32 chars plus an ellipsis.
+    let long = "X".repeat(64);
+    let error = invoke(
+        &tool,
+        json!({"path": "f.rs", "edits": [{"old_string": long, "new_string": "x"}]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    let snippet = &error[error.find("(old_string \"").unwrap() + 13..];
+    let snippet = &snippet[..snippet.find("\")").unwrap()];
+    assert!(snippet.ends_with('…'));
+    assert_eq!(snippet.chars().count(), 33);
+}
+
+#[tokio::test]
+async fn multiedit_rejects_empty_and_ambiguous_edits() {
+    let (_dir, workspace) = workspace();
+    fs::write(workspace.root().join("f.rs"), "dup\ndup\n").unwrap();
+    let tool = MultiEdit(workspace.clone());
+    let error = invoke(&tool, json!({"path": "f.rs", "edits": []}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("provide at least one edit"));
+    let error = invoke(
+        &tool,
+        json!({"path": "f.rs", "edits": [{"old_string": "dup", "new_string": "x"}]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("matches 2 times"));
+}
+
+#[tokio::test]
+async fn inspect_finds_todos_and_reports_none() {
+    let (dir, workspace) = workspace();
+    fs::write(
+        dir.path().join("a.rs"),
+        "fn main() {\n  // TODO: fix this\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("b.py"), "# FIXME: broken\npass\n").unwrap();
+    let tool = Inspect(workspace.clone());
+    let output = invoke(&tool, json!({"sections": "todos"})).await.unwrap();
+    assert!(output.text.contains("(2 items)"), "got: {}", output.text);
+    assert!(output.text.contains("a.rs:2: fix this"));
+    assert!(output.text.contains("b.py:1: broken"));
+
+    fs::remove_file(dir.path().join("a.rs")).unwrap();
+    fs::remove_file(dir.path().join("b.py")).unwrap();
+    fs::write(dir.path().join("clean.rs"), "fn main() {}\n").unwrap();
+    let output = invoke(&tool, json!({"sections": "todos"})).await.unwrap();
+    assert!(output.text.contains("todos: (none)"));
+}
+
+#[tokio::test]
+async fn inspect_scopes_todos_to_one_file_and_truncates_previews() {
+    let (dir, workspace) = workspace();
+    fs::write(dir.path().join("a.rs"), "// TODO: one\n").unwrap();
+    fs::write(dir.path().join("b.rs"), "// TODO: two\n").unwrap();
+    let tool = Inspect(workspace.clone());
+    let output = invoke(&tool, json!({"sections": "todos", "scope": "a.rs"}))
+        .await
+        .unwrap();
+    assert!(output.text.contains("(1 items)"), "got: {}", output.text);
+    assert!(output.text.contains("one"));
+    assert!(!output.text.contains("two"));
+
+    fs::write(
+        dir.path().join("c.rs"),
+        format!("// TODO: {}\n", "x".repeat(100)),
+    )
+    .unwrap();
+    let output = invoke(&tool, json!({"sections": "todos", "scope": "c.rs"}))
+        .await
+        .unwrap();
+    assert!(output.text.contains("..."), "got: {}", output.text);
+}
+
+#[tokio::test]
+async fn inspect_git_status_scopes_to_pathspec() {
+    let (dir, workspace) = workspace();
+    let root = dir.path();
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(root.join("a.txt"), "a\n").unwrap();
+    fs::write(root.join("b.txt"), "b\n").unwrap();
+    let tool = Inspect(workspace.clone());
+    let output = invoke(&tool, json!({"sections": "git_status", "scope": "b.txt"}))
+        .await
+        .unwrap();
+    assert!(output.text.contains("b.txt"), "got: {}", output.text);
+    assert!(!output.text.contains("a.txt"), "got: {}", output.text);
+}
+
+#[tokio::test]
+async fn inspect_git_status_degrades_outside_a_repo() {
+    let (_dir, workspace) = workspace();
+    let tool = Inspect(workspace.clone());
+    let output = invoke(&tool, json!({"sections": "git_status"}))
+        .await
+        .unwrap();
+    assert!(
+        output.text.contains("not a git repo"),
+        "got: {}",
+        output.text
+    );
+}
+
+#[tokio::test]
+async fn inspect_rejects_unknown_sections() {
+    let (_dir, workspace) = workspace();
+    let tool = Inspect(workspace.clone());
+    assert!(invoke(&tool, json!({"sections": "nope"})).await.is_err());
+}
+
+#[tokio::test]
+async fn todo_write_replaces_renders_and_clears() {
+    let (_dir, workspace) = workspace();
+    let tool = TodoWrite(workspace.clone());
+    let output = invoke(
+        &tool,
+        json!({"todos": [
+            {"id": "T1", "content": "first", "status": "completed", "owner": "scout"},
+            {"id": "T1.1", "parent": "T1", "content": "nested", "status": "in_progress"},
+            {"id": "T2", "content": "later", "status": "pending"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        output.text,
+        "T1 [✓] first (@scout)\n  T1.1 [•] nested\nT2 [ ] later"
+    );
+
+    let output = invoke(&tool, json!({"todos": []})).await.unwrap();
+    assert_eq!(output.text, "Todos cleared");
+
+    let error = invoke(
+        &tool,
+        json!({"todos": [{"id": "T1", "content": "x", "status": "done"}]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("status must be"), "got: {error}");
+}
+
+#[tokio::test]
+async fn list_tools_lists_and_details_registered_tools() {
+    let (_dir, workspace) = workspace();
+    let dispatch = workspace.register();
+    let definitions: Vec<_> = dispatch
+        .definitions()
+        .into_iter()
+        .filter(|definition| definition.name != "list_tools")
+        .collect();
+    let tool = ListTools(std::sync::Arc::new(definitions));
+    let output = invoke(&tool, json!({})).await.unwrap();
+    assert!(
+        output.text.starts_with("Available tools:"),
+        "got: {}",
+        output.text
+    );
+    assert!(output.text.contains("- read: "), "got: {}", output.text);
+    assert!(!output.text.contains("list_tools"), "got: {}", output.text);
+
+    let output = invoke(&tool, json!({"detail": "read"})).await.unwrap();
+    assert!(
+        output.text.starts_with("read:\n\nInput schema:"),
+        "got: {}",
+        output.text
+    );
+    assert!(output.text.contains("\"path\""));
+
+    let error = invoke(&tool, json!({"detail": "nope"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown tool: nope"), "got: {error}");
+}
+
+#[tokio::test]
+async fn inspect_git_status_uses_repo_relative_pathspec_from_subdir_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(root.join("a.txt"), "a\n").unwrap();
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join("sub/b.txt"), "b\n").unwrap();
+
+    let workspace = Workspace::new(root.join("sub")).unwrap();
+    let tool = Inspect(workspace.clone());
+    let output = invoke(&tool, json!({"sections": "git_status"}))
+        .await
+        .unwrap();
+    assert!(output.text.contains("sub"), "got: {}", output.text);
+    assert!(!output.text.contains("a.txt"), "got: {}", output.text);
 }

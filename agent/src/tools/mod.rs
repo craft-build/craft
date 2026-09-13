@@ -8,8 +8,14 @@
 
 mod delete;
 mod edit;
+mod glob;
 mod grep;
+mod inspect;
+mod list;
+mod list_tools;
+mod multiedit;
 mod read;
+mod todo_write;
 mod write;
 
 #[cfg(test)]
@@ -20,8 +26,14 @@ pub use edit::{
     Edit, EditArgs, EditLines, EditLinesArgs, EditLinesOutput, EditOutput, InsertLines,
     InsertLinesArgs, InsertLinesOutput,
 };
+pub use glob::{Glob, GlobArgs, GlobOutput};
 pub use grep::{Grep, GrepArgs, GrepMatch, GrepOutput};
+pub use inspect::{Inspect, InspectArgs, InspectOutput};
+pub use list::{List, ListArgs, ListOutput};
+pub use list_tools::{ListTools, ListToolsArgs, ListToolsOutput};
+pub use multiedit::{EditEntry, MultiEdit, MultiEditArgs, MultiEditOutput};
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
+pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
 pub use write::{Write, WriteArgs, WriteOutput};
 
 use std::{
@@ -46,6 +58,7 @@ pub struct Workspace {
     root: Arc<PathBuf>,
     lock: Arc<Mutex<()>>,
     loaded_instructions: crate::instructions::LoadedInstructions,
+    todos: todo_write::TodoStore,
 }
 
 impl Workspace {
@@ -61,6 +74,7 @@ impl Workspace {
             root: Arc::new(root),
             lock: Arc::new(Mutex::new(())),
             loaded_instructions: crate::instructions::LoadedInstructions::new(),
+            todos: Default::default(),
         })
     }
 
@@ -80,15 +94,24 @@ impl Workspace {
 
     /// Register the workspace's tools into our dispatch executor.
     pub fn register(&self) -> crate::run::ToolDispatch {
-        crate::run::ToolDispatch::new([
+        let mut tools: Vec<PortableDynamicTool> = vec![
             dynamic(Read(self.clone())),
             dynamic(Grep(self.clone())),
+            dynamic(Glob(self.clone())),
+            dynamic(List(self.clone())),
             dynamic(Edit(self.clone())),
             dynamic(EditLines(self.clone())),
             dynamic(InsertLines(self.clone())),
+            dynamic(MultiEdit(self.clone())),
             dynamic(Write(self.clone())),
             dynamic(Delete(self.clone())),
-        ])
+            dynamic(Inspect(self.clone())),
+            dynamic(TodoWrite(self.clone())),
+        ];
+        // Introspection snapshot of every other registered tool.
+        let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
+        tools.push(dynamic(ListTools(Arc::new(definitions))));
+        crate::run::ToolDispatch::new(tools)
     }
 
     pub(crate) async fn run<T: Send + 'static>(
