@@ -273,78 +273,134 @@ async fn run_inner<M: CompletionModel + Clone>(
             // A truncated reply continues: the model's cut-off message is
             // already in `turn`, so the next request resumes from it.
             let truncated = output.finish_reason == Some(FinishReason::Length);
-            if truncated && continuations < params.max_continuation_turns {
-                continuations += 1;
-                turns += 1;
-                if turns >= params.max_turns {
-                    sanitize_partial(&mut turn);
-                    history.append(&mut turn);
-                    return RunOutcome::MaxTurns;
-                }
-                continue;
+            if let Some(outcome) = handle_terminal_reply(
+                history,
+                &mut turn,
+                &full,
+                &reply,
+                truncated,
+                &mut nudges,
+                &mut turns,
+                params,
+                &mut continuations,
+                emit,
+            ) {
+                return outcome;
             }
-            // A truncated reply is never "empty-and-stalled": even a
-            // zero-visible-text truncation keeps its cut-off message and
-            // ends MaxTokens, so the nudge path below never swallows it.
-            if reply.trim().is_empty() && !truncated {
-                // The marker takes the silent reply's place in history.
-                turn.pop();
-                // `full` is the exact view the model just saw (its wire-only
-                // rewrites are shape-preserving); the trailing marker+nudge
-                // pairs this run already pushed are skipped by count.
-                let nudge = nudges < nudge::MAX_NUDGES
-                    && nudge::has_recent_tool_results(
-                        &full,
-                        nudge::RECENT_TOOL_WINDOW,
-                        2 * nudges as usize,
-                    );
-                nudge::stall_turn(&mut turn, nudge);
-                if nudge {
-                    nudges += 1;
-                    emit(Event::Nudge);
-                    turns += 1;
-                    if turns >= params.max_turns {
-                        sanitize_partial(&mut turn);
-                        history.append(&mut turn);
-                        return RunOutcome::MaxTurns;
-                    }
-                    continue;
-                }
-            }
-            history.append(&mut turn);
-            if truncated {
-                return RunOutcome::MaxTokens { reply };
-            }
-            return RunOutcome::Done { reply };
+            continue;
         }
-        for call in tool_calls {
-            if cancel.cancelled() {
-                return RunOutcome::Cancelled;
-            }
-            match tools.execute(call.clone()).await {
-                Ok(DispatchOutcome::Ran(result)) | Ok(DispatchOutcome::Skipped(result)) => {
-                    turn.push(Message::User {
-                        content: vec![history::UserContent::ToolResult(result.clone())],
-                    });
-                    emit(Event::ToolDone {
-                        id: call.id.clone(),
-                        name: call.function.name.clone(),
-                        arguments: call.function.arguments.clone(),
-                        result,
-                    });
-                }
-                Ok(DispatchOutcome::Stopped(_)) => return RunOutcome::Cancelled,
-                Err(unknown) => return RunOutcome::Failed(unknown),
-            }
+        if let Some(outcome) = dispatch_tool_calls(tools, &mut turn, tool_calls, cancel, emit).await
+        {
+            return outcome;
         }
         turns += 1;
         nudges = 0;
         if turns >= params.max_turns {
-            sanitize_partial(&mut turn);
-            history.append(&mut turn);
-            return RunOutcome::MaxTurns;
+            return commit_partial(history, &mut turn);
         }
     }
+}
+
+/// Commit a partial turn and end the run at its budget: sanitized so
+/// dangling tool calls replay cleanly on the next request.
+fn commit_partial(history: &mut Vec<Message>, turn: &mut Vec<Message>) -> RunOutcome {
+    sanitize_partial(turn);
+    history.append(turn);
+    RunOutcome::MaxTurns
+}
+
+/// Handle an assistant turn with no tool calls. Continues truncated and
+/// empty replies while their budgets allow; otherwise commits history and
+/// returns the run outcome. `None` means "keep looping".
+fn handle_terminal_reply(
+    history: &mut Vec<Message>,
+    turn: &mut Vec<Message>,
+    full: &[Message],
+    reply: &str,
+    truncated: bool,
+    nudges: &mut u32,
+    turns: &mut usize,
+    params: &RunParams,
+    continuations: &mut usize,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> Option<RunOutcome> {
+    if truncated && *continuations < params.max_continuation_turns {
+        *continuations += 1;
+        *turns += 1;
+        if *turns >= params.max_turns {
+            return Some(commit_partial(history, turn));
+        }
+        return None;
+    }
+    // A truncated reply is never "empty-and-stalled": even a
+    // zero-visible-text truncation keeps its cut-off message and
+    // ends MaxTokens, so the nudge path below never swallows it.
+    if reply.trim().is_empty() && !truncated {
+        // The marker takes the silent reply's place in history.
+        turn.pop();
+        // `full` is the exact view the model just saw (its wire-only
+        // rewrites are shape-preserving); the trailing marker+nudge
+        // pairs this run already pushed are skipped by count.
+        let nudge = *nudges < nudge::MAX_NUDGES
+            && nudge::has_recent_tool_results(
+                full,
+                nudge::RECENT_TOOL_WINDOW,
+                2 * *nudges as usize,
+            );
+        nudge::stall_turn(turn, nudge);
+        if nudge {
+            *nudges += 1;
+            emit(Event::Nudge);
+            *turns += 1;
+            if *turns >= params.max_turns {
+                return Some(commit_partial(history, turn));
+            }
+            return None;
+        }
+    }
+    history.append(turn);
+    Some(if truncated {
+        RunOutcome::MaxTokens {
+            reply: reply.to_owned(),
+        }
+    } else {
+        RunOutcome::Done {
+            reply: reply.to_owned(),
+        }
+    })
+}
+
+/// Execute the turn's tool calls, appending their results to `turn`.
+/// Returns `Some(outcome)` when the run must stop (cancel or dispatch
+/// failure); `None` means the loop continues.
+async fn dispatch_tool_calls(
+    tools: &ToolDispatch,
+    turn: &mut Vec<Message>,
+    calls: Vec<history::ToolCall>,
+    cancel: &CancelToken,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> Option<RunOutcome> {
+    for call in calls {
+        if cancel.cancelled() {
+            return Some(RunOutcome::Cancelled);
+        }
+        match tools.execute(call.clone()).await {
+            Ok(DispatchOutcome::Ran(result)) | Ok(DispatchOutcome::Skipped(result)) => {
+                turn.push(Message::User {
+                    content: vec![history::UserContent::ToolResult(result.clone())],
+                });
+                emit(Event::ToolDone {
+                    id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                    result,
+                });
+            }
+            Ok(DispatchOutcome::Stopped(_)) => return Some(RunOutcome::Cancelled),
+            Err(unknown) => return Some(RunOutcome::Failed(unknown)),
+        }
+    }
+    None
 }
 
 /// Rewrite tool-result texts in the request copy through pre-compression.
@@ -372,7 +428,7 @@ fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
 /// partial history replays cleanly on the next request.
 pub(crate) fn sanitize_partial(turn: &mut Vec<Message>) {
     let mut dangling: Vec<history::ToolCall> = Vec::new();
-    let mut answered: Vec<String> = Vec::new();
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
     for message in turn.iter() {
         match message {
             Message::Assistant { content } => {
@@ -385,7 +441,7 @@ pub(crate) fn sanitize_partial(turn: &mut Vec<Message>) {
             Message::User { content } => {
                 for block in content {
                     if let history::UserContent::ToolResult(result) = block {
-                        answered.push(result.call.clone());
+                        answered.insert(result.call.clone());
                     }
                 }
             }

@@ -11,7 +11,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -25,53 +24,26 @@ use crate::providers::{CatalogModel, Provider as ClientProvider, ProviderKind};
 use crate::run::{self, BeforeExecute, BoxFuture, CancelToken, Decision, RunOutcome};
 use crate::tools::Workspace;
 
-use super::{
-    AgentEvent, Command, LineKind, ModelChoice, Provider, Status, Tone, ToolCallData, ToolKind,
-    ToolLine, TouchedFile,
-};
-
-/// Mutating workspace tools; their results feed the Files panel.
-const EDIT_TOOLS: [&str; 5] = ["edit", "edit_lines", "insert_lines", "write", "delete"];
+use super::cards::{self, Files};
+use super::{AgentEvent, Command, ModelChoice, Provider, Status, ToolCallData};
 
 /// Read-only tools that run without an explicit user decision. Approval is
 /// default-deny: any tool not listed here — including tools registered after
 /// this gate was written — waits for the user's approve/reject decision.
-const READ_TOOLS: [&str; 2] = ["read", "grep"];
+const READ_TOOLS: [&str; 7] = [
+    "read",
+    "grep",
+    "glob",
+    "list",
+    "inspect",
+    "retrieve",
+    "list_tools",
+];
 
 /// Render an error and its sources as one client-facing message.
 fn report(error: crate::error::Error) -> String {
     snafu::Report::from_error(error).to_string()
 }
-
-/// What an edit-family tool did to a file, for the sidebar badge.
-#[derive(Clone, Copy)]
-enum FileStatus {
-    Modified,
-    Created,
-    Deleted,
-}
-
-impl FileStatus {
-    fn label(self) -> &'static str {
-        match self {
-            FileStatus::Modified => "modified",
-            FileStatus::Created => "created",
-            FileStatus::Deleted => "deleted",
-        }
-    }
-
-    fn tone(self) -> Tone {
-        match self {
-            FileStatus::Modified => Tone::Warning,
-            FileStatus::Created => Tone::Success,
-            FileStatus::Deleted => Tone::Danger,
-        }
-    }
-}
-
-/// Files touched by edit-family tools, keyed by path. A plain mutex: it is
-/// only locked briefly from the run's synchronous event callback.
-type Files = Arc<StdMutex<BTreeMap<String, FileStatus>>>;
 
 /// Session shared between the command loop and the (single) running turn.
 #[derive(Default)]
@@ -192,8 +164,8 @@ impl CraftProvider {
             catalogs,
             notes,
             selection,
-            cwd_label: display_path(cwd),
-            branch: git_branch(cwd).await,
+            cwd_label: cards::display_path(cwd),
+            branch: cards::git_branch(cwd).await,
         })
     }
 }
@@ -210,7 +182,7 @@ impl Provider for CraftProvider {
 
         tokio::spawn(async move {
             let state = Arc::new(Mutex::new(SessionState::linked()));
-            let files: Files = Arc::new(StdMutex::new(BTreeMap::new()));
+            let files: Files = Files::default();
             let (cancel_flag, cancel_token) = run::cancel_channel();
             let mut current_turn: Option<AbortHandle> = None;
             let mut selection = self.selection;
@@ -264,15 +236,17 @@ impl Provider for CraftProvider {
                         }
                         cancel_flag.set(false);
                         let handle = tokio::spawn(run_turn(
-                            config.clone(),
-                            workspace.clone(),
-                            instructions_text.clone(),
-                            selection.clone(),
+                            TurnCtx {
+                                config: config.clone(),
+                                workspace: workspace.clone(),
+                                instructions_text: instructions_text.clone(),
+                                selection: selection.clone(),
+                                state: state.clone(),
+                                files: files.clone(),
+                                cancel: cancel_token.clone(),
+                                tx: evt_tx.clone(),
+                            },
                             text,
-                            state.clone(),
-                            files.clone(),
-                            cancel_token.clone(),
-                            evt_tx.clone(),
                         ));
                         current_turn = Some(handle.abort_handle());
                     }
@@ -291,10 +265,11 @@ impl Provider for CraftProvider {
                         if let Some(h) = current_turn.take() {
                             h.abort();
                         }
-                        let mut session = state.lock().await;
-                        session.pending_approval = None;
-                        session.history.clear();
-                        session.compaction = CompactionState::default();
+                        // Reset through `linked` so the fresh session's
+                        // compaction state keeps working dedup/guardrails
+                        // handles; a bare default would strand the caches the
+                        // dispatcher still points at.
+                        *state.lock().await = SessionState::linked();
                         let _ = evt_tx.send(AgentEvent::AssistantEnd);
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
@@ -303,7 +278,7 @@ impl Provider for CraftProvider {
                         if let Some(h) = current_turn.take() {
                             h.abort();
                         }
-                        *state.lock().await = SessionState::default();
+                        *state.lock().await = SessionState::linked();
                         files.lock().expect("files lock").clear();
                         let _ = evt_tx.send(AgentEvent::AssistantEnd);
                         let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
@@ -381,7 +356,7 @@ impl BeforeExecute for ApprovalGate {
             let _ = tx.send(AgentEvent::AssistantEnd);
             let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
                 id: id.clone(),
-                kind: tool_head(&call.function.name, &call.function.arguments),
+                kind: cards::tool_head(&call.function.name, &call.function.arguments),
                 lines: Vec::new(),
                 awaiting_approval: true,
             }));
@@ -423,19 +398,127 @@ async fn decide(state: &Arc<Mutex<SessionState>>, id: String, approved: bool) {
     }
 }
 
-/// One agent turn: drives the shared run loop, rendering to the TUI seam.
-#[allow(clippy::too_many_arguments)]
-async fn run_turn(
+/// Everything one agent turn needs, bundled so the turn's helpers avoid a
+/// long parameter list.
+struct TurnCtx {
     config: Arc<Config>,
     workspace: Workspace,
     instructions_text: String,
     selection: Selection,
-    text: String,
     state: Arc<Mutex<SessionState>>,
     files: Files,
     cancel: CancelToken,
     tx: mpsc::UnboundedSender<AgentEvent>,
-) {
+}
+
+/// Maps run-loop events to TUI events for one model call. Owns the
+/// streaming-progress flags the outcome rendering consults afterwards.
+struct TurnRenderer {
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    files: Files,
+    context_length: Option<u32>,
+    streamed_text: Arc<AtomicBool>,
+    streamed_reasoning: Arc<AtomicBool>,
+    tools_started: Arc<AtomicBool>,
+}
+
+impl TurnRenderer {
+    fn new(
+        tx: mpsc::UnboundedSender<AgentEvent>,
+        files: Files,
+        context_length: Option<u32>,
+    ) -> Self {
+        Self {
+            tx,
+            files,
+            context_length,
+            streamed_text: Arc::new(AtomicBool::new(false)),
+            streamed_reasoning: Arc::new(AtomicBool::new(false)),
+            tools_started: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn map(&self, event: run::Event) {
+        match event {
+            run::Event::TextDelta(delta) => {
+                self.streamed_text.store(true, Ordering::Relaxed);
+                let _ = self.tx.send(AgentEvent::AssistantDelta(delta));
+            }
+            run::Event::ReasoningDelta(delta) => {
+                self.streamed_reasoning.store(true, Ordering::Relaxed);
+                let _ = self.tx.send(AgentEvent::ReasoningDelta(delta));
+            }
+            run::Event::ToolStart {
+                id,
+                name,
+                arguments,
+            } => {
+                if !self.tools_started.swap(true, Ordering::Relaxed) {
+                    let _ = self.tx.send(AgentEvent::StatusChanged(Status::Running));
+                }
+                let _ = self.tx.send(AgentEvent::ToolCall(ToolCallData {
+                    id,
+                    kind: cards::tool_head(&name, &arguments),
+                    lines: Vec::new(),
+                    awaiting_approval: false,
+                }));
+            }
+            run::Event::ToolDone {
+                id,
+                name,
+                arguments,
+                result,
+            } => {
+                let done = cards::tool_done(id, &name, &arguments, &result);
+                if let Some((path, status)) = done.touched {
+                    self.files.lock().expect("files lock").insert(path, status);
+                    let _ = self
+                        .tx
+                        .send(AgentEvent::FilesSet(cards::touched_files(&self.files)));
+                }
+                let _ = self.tx.send(AgentEvent::ToolCall(done.card));
+            }
+            run::Event::Usage(usage) => {
+                let _ = self.tx.send(AgentEvent::TokenUsage(cards::usage_label(
+                    usage.input_tokens + usage.output_tokens,
+                    usage.input_tokens,
+                    self.context_length,
+                )));
+            }
+            // The nudge is visible in the next model call; nothing to show.
+            run::Event::Nudge => {}
+        }
+    }
+
+    /// Whether text or reasoning already streamed this call (the reply was
+    /// shown live, so it must not be emitted again).
+    fn streamed(&self) -> bool {
+        self.streamed_text.load(Ordering::Relaxed)
+            || self.streamed_reasoning.load(Ordering::Relaxed)
+    }
+}
+
+/// Emit the model's reply unless streaming already showed it live.
+fn emit_reply(tx: &mpsc::UnboundedSender<AgentEvent>, streamed: bool, reply: &str) {
+    if streamed {
+        let _ = tx.send(AgentEvent::AssistantEnd);
+    } else if !reply.is_empty() {
+        let _ = tx.send(AgentEvent::AssistantText(reply.to_owned()));
+    }
+}
+
+/// One agent turn: drives the shared run loop, rendering to the TUI seam.
+async fn run_turn(ctx: TurnCtx, text: String) {
+    let TurnCtx {
+        config,
+        workspace,
+        instructions_text,
+        selection,
+        state,
+        files,
+        cancel,
+        tx,
+    } = ctx;
     macro_rules! fail {
         ($message:expr) => {{
             let _ = tx.send(AgentEvent::AssistantText($message));
@@ -513,75 +596,7 @@ async fn run_turn(
     let mut prompt = text;
     let mut continuations = MAX_EMPTY_CONTINUATIONS;
     loop {
-        let streamed_text = Arc::new(AtomicBool::new(false));
-        let streamed_reasoning = Arc::new(AtomicBool::new(false));
-        let tools_started = Arc::new(AtomicBool::new(false));
-        let emit = {
-            let tx = tx.clone();
-            let files = files.clone();
-            let context_length = selection.context_length;
-            let streamed_text = streamed_text.clone();
-            let streamed_reasoning = streamed_reasoning.clone();
-            let tools_started = tools_started.clone();
-            move |event: run::Event| match event {
-                run::Event::TextDelta(delta) => {
-                    streamed_text.store(true, Ordering::Relaxed);
-                    let _ = tx.send(AgentEvent::AssistantDelta(delta));
-                }
-                run::Event::ReasoningDelta(delta) => {
-                    streamed_reasoning.store(true, Ordering::Relaxed);
-                    let _ = tx.send(AgentEvent::ReasoningDelta(delta));
-                }
-                run::Event::ToolStart {
-                    id,
-                    name,
-                    arguments,
-                } => {
-                    if !tools_started.swap(true, Ordering::Relaxed) {
-                        let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
-                    }
-                    let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
-                        id,
-                        kind: tool_head(&name, &arguments),
-                        lines: Vec::new(),
-                        awaiting_approval: false,
-                    }));
-                }
-                run::Event::ToolDone {
-                    id,
-                    name,
-                    arguments,
-                    result,
-                } => {
-                    let done = tool_done(id, &name, &arguments, &result);
-                    if let Some((path, status)) = done.touched {
-                        let panel = {
-                            let mut guard = files.lock().expect("files lock");
-                            guard.insert(path, status);
-                            guard
-                                .iter()
-                                .map(|(path, s)| TouchedFile {
-                                    path: path.clone(),
-                                    status: s.label().to_string(),
-                                    tone: s.tone(),
-                                })
-                                .collect::<Vec<_>>()
-                        };
-                        let _ = tx.send(AgentEvent::FilesSet(panel));
-                    }
-                    let _ = tx.send(AgentEvent::ToolCall(done.card));
-                }
-                run::Event::Usage(usage) => {
-                    let _ = tx.send(AgentEvent::TokenUsage(usage_label(
-                        usage.input_tokens + usage.output_tokens,
-                        usage.input_tokens,
-                        context_length,
-                    )));
-                }
-                // The nudge is visible in the next model call; nothing to show.
-                run::Event::Nudge => {}
-            }
-        };
+        let renderer = TurnRenderer::new(tx.clone(), files.clone(), selection.context_length);
         let outcome = run::run(
             &model,
             &params,
@@ -589,7 +604,7 @@ async fn run_turn(
             &mut history,
             &prompt,
             &cancel,
-            &emit,
+            &|event| renderer.map(event),
         )
         .await;
         match outcome {
@@ -599,9 +614,7 @@ async fn run_turn(
                 return;
             }
             RunOutcome::Failed(message) => {
-                if streamed_text.load(Ordering::Relaxed)
-                    || streamed_reasoning.load(Ordering::Relaxed)
-                {
+                if renderer.streamed() {
                     let _ = tx.send(AgentEvent::AssistantEnd);
                 }
                 let _ = tx.send(AgentEvent::AssistantText(message));
@@ -619,13 +632,7 @@ async fn run_turn(
             }
             RunOutcome::MaxTokens { reply } => {
                 state.lock().await.history = history.clone();
-                if streamed_text.load(Ordering::Relaxed)
-                    || streamed_reasoning.load(Ordering::Relaxed)
-                {
-                    let _ = tx.send(AgentEvent::AssistantEnd);
-                } else if !reply.is_empty() {
-                    let _ = tx.send(AgentEvent::AssistantText(reply));
-                }
+                emit_reply(&tx, renderer.streamed(), &reply);
                 let _ = tx.send(AgentEvent::AssistantText(
                     "The reply hit the output-token limit. Send another message to continue."
                         .into(),
@@ -638,12 +645,8 @@ async fn run_turn(
                     prompt = CONTINUE_AFTER_EMPTY.into();
                     continue;
                 }
-                if streamed_text.load(Ordering::Relaxed)
-                    || streamed_reasoning.load(Ordering::Relaxed)
-                {
-                    let _ = tx.send(AgentEvent::AssistantEnd);
-                } else if !reply.is_empty() {
-                    let _ = tx.send(AgentEvent::AssistantText(reply.clone()));
+                if renderer.streamed() || !reply.is_empty() {
+                    emit_reply(&tx, renderer.streamed(), &reply);
                 } else {
                     let _ = tx.send(AgentEvent::AssistantText(
                         "The model returned an empty response. Send another message to continue."
@@ -656,188 +659,6 @@ async fn run_turn(
     }
     state.lock().await.history = history;
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-}
-
-/// Card emitted when a tool call starts: kind from the tool name and its
-/// first string argument; the body stays empty until the result arrives.
-fn tool_head(name: &str, arguments: &serde_json::Value) -> ToolKind {
-    let detail = first_string_argument(arguments).unwrap_or_default();
-    match name {
-        "read" => ToolKind::Read {
-            path: detail,
-            summary: String::new(),
-        },
-        "grep" => ToolKind::Grep {
-            pattern: detail,
-            summary: String::new(),
-        },
-        name if EDIT_TOOLS.contains(&name) => ToolKind::Edit { path: detail },
-        other => ToolKind::Bash {
-            cmd: format!("{other} {detail}").trim().to_string(),
-        },
-    }
-}
-
-/// The state produced by a completed tool call.
-struct ToolDone {
-    card: ToolCallData,
-    /// (path, status) when an edit-family tool succeeded.
-    touched: Option<(String, FileStatus)>,
-}
-
-/// Card emitted when a tool result arrives: same id as the start card, with
-/// the body and summary filled from the result text.
-fn tool_done(
-    id: String,
-    name: &str,
-    arguments: &serde_json::Value,
-    result: &history::ToolResult,
-) -> ToolDone {
-    let text = result
-        .content
-        .iter()
-        .map(history::ToolResultContent::to_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let detail = first_string_argument(arguments).unwrap_or_default();
-
-    let (kind, lines, touched) = match name {
-        "read" => {
-            let lines = context_lines(&text);
-            let summary = format!("{} lines", lines.len());
-            (
-                ToolKind::Read {
-                    path: detail,
-                    summary,
-                },
-                lines,
-                None,
-            )
-        }
-        "grep" => {
-            let lines = context_lines(&text);
-            let summary = format!("{} lines of output", lines.len());
-            (
-                ToolKind::Grep {
-                    pattern: detail,
-                    summary,
-                },
-                lines,
-                None,
-            )
-        }
-        tool if EDIT_TOOLS.contains(&tool) => {
-            let status = match tool {
-                "delete" => FileStatus::Deleted,
-                "write" => FileStatus::Created,
-                _ => FileStatus::Modified,
-            };
-            (
-                ToolKind::Edit {
-                    path: detail.clone(),
-                },
-                diff_lines(&text),
-                if detail.is_empty() || result.is_error {
-                    None
-                } else {
-                    Some((detail, status))
-                },
-            )
-        }
-        other => (
-            ToolKind::Bash {
-                cmd: format!("{other} {detail}").trim().to_string(),
-            },
-            context_lines(&text),
-            None,
-        ),
-    };
-    ToolDone {
-        card: ToolCallData {
-            id,
-            kind,
-            lines,
-            awaiting_approval: false,
-        },
-        touched,
-    }
-}
-
-fn context_lines(text: &str) -> Vec<ToolLine> {
-    text.lines()
-        .map(|line| ToolLine {
-            kind: LineKind::Context,
-            text: line.to_string(),
-        })
-        .collect()
-}
-
-/// Split a diff-formatted tool result into Add/Del lines; anything else is
-/// context.
-fn diff_lines(text: &str) -> Vec<ToolLine> {
-    text.lines()
-        .map(|line| ToolLine {
-            kind: match line.as_bytes().first() {
-                Some(b'+') => LineKind::Add,
-                Some(b'-') => LineKind::Del,
-                _ => LineKind::Context,
-            },
-            text: line.to_string(),
-        })
-        .collect()
-}
-
-fn first_string_argument(arguments: &serde_json::Value) -> Option<String> {
-    let (_, value) = arguments
-        .as_object()?
-        .iter()
-        .find(|(_, value)| value.is_string())?;
-    value.as_str().map(str::to_owned)
-}
-
-/// "45.9K (4%)"-style label; the percentage is the prompt's share of the
-/// context window, omitted when the context length is unknown.
-fn usage_label(tokens: u64, prompt_tokens: u64, context_length: Option<u32>) -> String {
-    let k = tokens as f64 / 1000.0;
-    match context_length {
-        Some(size) if size > 0 => {
-            let pct = (prompt_tokens as f64 / f64::from(size) * 100.0).round();
-            format!("{k:.1}K ({pct:.0}%)")
-        }
-        _ => format!("{k:.1}K"),
-    }
-}
-
-/// "~"-shortened display path for the sidebar.
-fn display_path(path: &Path) -> String {
-    let display = path.display().to_string();
-    if let Some(home) = dirs::home_dir() {
-        let home = home.display().to_string();
-        if let Some(rest) = display.strip_prefix(&home) {
-            return format!("~{rest}");
-        }
-    }
-    display
-}
-
-/// Current git branch for the sidebar, if the workspace is a repository.
-/// Runs on the blocking pool so a slow git invocation (e.g. an NFS-mounted
-/// repository) cannot stall the async runtime thread.
-async fn git_branch(cwd: &Path) -> String {
-    let cwd = cwd.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        std::process::Command::new("git")
-            .args(["branch", "--show-current"])
-            .current_dir(&cwd)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|branch| !branch.is_empty())
-            .unwrap_or_else(|| "no branch".into())
-    })
-    .await
-    .unwrap_or_else(|_| "no branch".into())
 }
 
 #[cfg(test)]
@@ -870,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_tools_run_without_approval() {
         let state = Arc::new(Mutex::new(SessionState::default()));
-        for name in ["read", "grep"] {
+        for name in READ_TOOLS {
             let (gate, _flag) = gate(&state);
             let decision = gate.decide(tool_call("t1", name)).await;
             assert!(matches!(decision, Decision::Run), "{name}");

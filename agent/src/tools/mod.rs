@@ -156,9 +156,17 @@ impl Workspace {
         .map_err(|error| failure(format!("filesystem task failed: {error}")))?
     }
 
-    /// Existing paths only. Reject `..`, Git metadata, and every symlink
-    /// component, including links whose targets are inside the workspace.
-    pub(crate) fn resolve(&self, requested: &str) -> Result<PathBuf> {
+    /// Shared validation walk for the read and write paths: strips the
+    /// workspace prefix from absolute requests, then walks component by
+    /// component rejecting `..`, Git metadata, and symlinked components.
+    /// With `create_dirs` (write path), missing directory components are
+    /// created and the final component is returned as the file name instead
+    /// of being appended.
+    fn walk<'a>(
+        &self,
+        requested: &'a str,
+        create_dirs: bool,
+    ) -> Result<(PathBuf, Option<Component<'a>>)> {
         if requested.is_empty() {
             return Err(invalid("path must not be empty"));
         }
@@ -170,19 +178,36 @@ impl Workspace {
         } else {
             requested
         };
+        let mut components = relative.components().peekable();
         let mut path = self.root().to_path_buf();
-        for component in relative.components() {
+        while let Some(component) = components.next() {
+            if create_dirs && components.peek().is_none() {
+                return match component {
+                    Component::Normal(name) if !is_git_component(name) => {
+                        Ok((path, Some(component)))
+                    }
+                    _ => Err(denied(
+                        "paths must remain inside the workspace; '..', '.', and Git metadata are not allowed",
+                    )),
+                };
+            }
             match component {
                 Component::CurDir => continue,
                 Component::Normal(name) if is_git_component(name) => {
                     return Err(denied("access to Git metadata is not allowed"));
                 }
-                Component::Normal(name) => path.push(name),
+                Component::Normal(_) => path.push(component),
                 _ => {
                     return Err(denied(
                         "paths must remain inside the workspace; '..' is not allowed",
                     ));
                 }
+            }
+            if create_dirs
+                && let Err(error) = fs::create_dir(&path)
+                && error.kind() != io::ErrorKind::AlreadyExists
+            {
+                return Err(io_error(error));
             }
             if fs::symlink_metadata(&path)
                 .map_err(io_error)?
@@ -192,7 +217,13 @@ impl Workspace {
                 return Err(denied("symlink paths are not supported"));
             }
         }
-        Ok(path)
+        Ok((path, None))
+    }
+
+    /// Existing paths only. Reject `..`, Git metadata, and every symlink
+    /// component, including links whose targets are inside the workspace.
+    pub(crate) fn resolve(&self, requested: &str) -> Result<PathBuf> {
+        self.walk(requested, false).map(|(path, _)| path)
     }
 
     pub(crate) fn file(&self, requested: &str) -> Result<PathBuf> {
@@ -207,58 +238,11 @@ impl Workspace {
     /// may not exist yet, missing parent directories are created, and an
     /// existing destination must be a regular file (never a symlink).
     pub(crate) fn target(&self, requested: &str) -> Result<PathBuf> {
-        if requested.is_empty() {
-            return Err(invalid("path must not be empty"));
-        }
-        let requested = Path::new(requested);
-        let relative = if requested.is_absolute() {
-            requested
-                .strip_prefix(self.root())
-                .map_err(|_| denied("path is outside the workspace"))?
-        } else {
-            requested
-        };
-        let mut components: Vec<Component<'_>> = relative.components().collect();
-        let Some(name) = components.pop() else {
+        let (mut path, name) = self.walk(requested, true)?;
+        let Some(component) = name else {
             return Err(invalid("path must name a file, not a directory"));
         };
-        match name {
-            Component::Normal(name) if !is_git_component(name) => {
-                if name.is_empty() {
-                    return Err(invalid("path must name a file, not a directory"));
-                }
-            }
-            _ => {
-                return Err(denied(
-                    "paths must remain inside the workspace; '..', '.', and Git metadata are not allowed",
-                ));
-            }
-        }
-        let mut path = self.root().to_path_buf();
-        for component in components {
-            match component {
-                Component::CurDir => continue,
-                Component::Normal(dir) if !is_git_component(dir) => path.push(dir),
-                _ => {
-                    return Err(denied(
-                        "paths must remain inside the workspace; '..', '.', and Git metadata are not allowed",
-                    ));
-                }
-            }
-            if let Err(error) = fs::create_dir(&path)
-                && error.kind() != io::ErrorKind::AlreadyExists
-            {
-                return Err(io_error(error));
-            }
-            if fs::symlink_metadata(&path)
-                .map_err(io_error)?
-                .file_type()
-                .is_symlink()
-            {
-                return Err(denied("symlink paths are not supported"));
-            }
-        }
-        path.push(name);
+        path.push(component);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() => {}
             Ok(_) => return Err(invalid("path must identify a regular file")),

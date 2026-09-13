@@ -20,7 +20,7 @@ Optimal port order from `comparison.md`: dependencies first, highest leverage-pe
 14. I.7 Misc state (input history, model/theme state, logs, atomic IO)
 15. G.8 Shell completions (S)
 
-## Phase 2 — Context management & reliability
+## [x] Phase 2 — Context management & reliability
 
 16. B.5 Tool-output pre-compression — highest token-savings-per-effort
 17. D.2 Read lifecycle (stale/superseded read marking) — cheapest big context win

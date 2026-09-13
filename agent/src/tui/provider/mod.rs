@@ -4,6 +4,7 @@
 //! backend is [`live::CraftProvider`]; the scripted [`mock::MockProvider`] is
 //! kept for seam and UI tests.
 
+pub mod cards;
 pub mod live;
 
 #[cfg(test)]

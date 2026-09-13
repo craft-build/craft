@@ -634,19 +634,11 @@ fn tool_call_start(id: &str, name: &str, arguments: &serde_json::Value) -> AcpTo
 }
 
 fn tool_title(name: &str, arguments: &serde_json::Value) -> String {
-    if let Some(detail) = first_string_argument(arguments) {
+    if let Some(detail) = crate::tui::provider::cards::first_string_argument(arguments) {
         format!("{name} {detail}")
     } else {
         name.to_owned()
     }
-}
-
-fn first_string_argument(arguments: &serde_json::Value) -> Option<String> {
-    let (_, value) = arguments
-        .as_object()?
-        .iter()
-        .find(|(_, value)| value.is_string())?;
-    value.as_str().map(str::to_owned)
 }
 
 fn tool_kind(name: &str) -> ToolKind {
