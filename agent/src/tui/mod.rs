@@ -5,6 +5,7 @@
 
 mod app;
 pub mod provider;
+mod selection;
 mod ui;
 
 use std::io;

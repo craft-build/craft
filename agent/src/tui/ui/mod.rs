@@ -117,7 +117,7 @@ fn render_selection(f: &mut Frame, app: &App) {
         let Some(row) = app.frame_text.get(r as usize) else {
             continue;
         };
-        let Some((first, last)) = crate::tui::app::text_extent(row, region) else {
+        let Some((first, last)) = crate::tui::selection::text_extent(row, region) else {
             continue;
         };
         let (first, last) = (first as u16, last as u16);
@@ -293,7 +293,7 @@ mod tests {
             width: 120,
             height: 36,
         };
-        app.selection = Some(crate::tui::app::Selection {
+        app.selection = Some(crate::tui::selection::Selection {
             anchor: (1, 12),
             head: (1, 4),
             region,
