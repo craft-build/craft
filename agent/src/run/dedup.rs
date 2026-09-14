@@ -20,6 +20,7 @@ const WRITE_TOOLS: &[&str] = &[
     "insert_lines",
     "multiedit",
     "delete",
+    "apply_patch",
 ];
 const CACHED_PREFIX: &str = "[cached] ";
 const MAX_CACHE_ENTRIES: usize = 64;
@@ -133,6 +134,11 @@ pub fn extract_file_path(input: &Value) -> Option<String> {
 pub fn extract_write_paths(name: &str, input: &Value) -> Vec<String> {
     if !ToolDedupCache::is_write(name) {
         return Vec::new();
+    }
+    if name == "apply_patch"
+        && let Some(patch) = input.get("patch_text").and_then(Value::as_str)
+    {
+        return crate::tools::apply_patch::patch_paths(patch);
     }
     if name == "multiedit"
         && let Some(edits) = input.get("edits").and_then(Value::as_array)
@@ -326,6 +332,13 @@ mod tests {
             vec!["/c.rs".to_string()]
         );
         assert!(extract_write_paths("read", &serde_json::json!({"path": "/c.rs"})).is_empty());
+        assert_eq!(
+            extract_write_paths(
+                "apply_patch",
+                &serde_json::json!({"patch_text": "*** Begin Patch\n*** Update File: /d.rs\n@@\n-a\n+b\n*** End Patch"})
+            ),
+            vec!["/d.rs".to_string()]
+        );
     }
 
     #[test]

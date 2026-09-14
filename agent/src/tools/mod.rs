@@ -6,6 +6,7 @@
 //! Output types implement `IntoToolOutput` rather than `Serialize`: Rig must send
 //! their readable text to both the model and ACP, not serialize the internal fields.
 
+pub(crate) mod apply_patch;
 mod bash;
 mod delete;
 mod edit;
@@ -23,6 +24,7 @@ mod write;
 #[cfg(test)]
 mod tests;
 
+pub use apply_patch::{patch_paths, ApplyPatch, ApplyPatchArgs, ApplyPatchOutput};
 pub use bash::{
     Bash, BashArgs, BashKill, BashKillArgs, BashOutput, BashStatus, BashStatusArgs, BashWatch,
     BashWatchArgs,
@@ -133,6 +135,7 @@ impl Workspace {
             dynamic(EditLines(self.clone())),
             dynamic(InsertLines(self.clone())),
             dynamic(MultiEdit(self.clone())),
+            dynamic(ApplyPatch(self.clone())),
             dynamic(Write(self.clone())),
             dynamic(Delete(self.clone())),
             dynamic(Bash(self.clone())),

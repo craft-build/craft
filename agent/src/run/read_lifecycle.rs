@@ -90,6 +90,28 @@ pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
                         None => continue,
                     }
                 }
+                // Every file a patch touches counts as an edit of that file.
+                "apply_patch" => {
+                    let Some(patch) = call
+                        .function
+                        .arguments
+                        .get("patch_text")
+                        .and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
+                    let paths = crate::tools::patch_paths(patch);
+                    for file_path in paths {
+                        operations.push(FileOperation {
+                            msg_index,
+                            tool_call_id: call.id.clone(),
+                            file_path,
+                            op_kind: OpKind::Edit,
+                            line_range: None,
+                        });
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             let line_range = if matches!(op_kind, OpKind::Read) {
@@ -472,6 +494,28 @@ mod tests {
                 "{tool} must stale-date an earlier read"
             );
         }
+    }
+
+    #[test]
+    fn apply_patch_stales_only_the_files_it_touches() {
+        let mut messages = vec![
+            user_msg("read"),
+            tool_use_msg("t1", "read", json!({"path": "/src/a.rs"})),
+            tool_result_msg("t1", "a content"),
+            tool_use_msg("t2", "read", json!({"path": "/src/b.rs"})),
+            tool_result_msg("t2", "b content"),
+            user_msg("patch a"),
+            tool_use_msg(
+                "t3",
+                "apply_patch",
+                json!({"patch_text": "*** Begin Patch\n*** Update File: /src/a.rs\n@@\n-x\n+y\n*** End Patch"}),
+            ),
+            tool_result_msg("t3", "ok"),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let cls = classify_reads(&messages);
+        assert_eq!(find_by_id(&cls, "t1").state, ReadState::Stale);
+        assert_eq!(find_by_id(&cls, "t2").state, ReadState::Fresh);
     }
 
     #[test]

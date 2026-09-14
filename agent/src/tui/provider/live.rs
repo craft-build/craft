@@ -359,6 +359,17 @@ fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<Str
     {
         return (scopes.scopes, scopes.force_prompt);
     }
+    if name == "apply_patch"
+        && let Some(patch) = args.get("patch_text").and_then(|v| v.as_str())
+    {
+        return (
+            crate::tools::patch_paths(patch)
+                .iter()
+                .map(|p| resolve_scope_path(root, p))
+                .collect(),
+            false,
+        );
+    }
     if FILE_WRITE_TOOLS.contains(&name) {
         if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
             return (vec![resolve_scope_path(root, path)], false);
@@ -762,6 +773,21 @@ mod tests {
             },
             flag,
         )
+    }
+
+    #[test]
+    fn apply_patch_scope_covers_every_patched_file() {
+        let root = std::path::Path::new("/repo");
+        let (scopes, force) = scope_for_call(
+            root,
+            "apply_patch",
+            &serde_json::json!({"patch_text": "*** Begin Patch\n*** Update File: a.rs\n@@\n-x\n+y\n*** Delete File: sub/b.rs\n*** End Patch"}),
+        );
+        assert!(!force);
+        assert_eq!(
+            scopes,
+            vec!["/repo/a.rs".to_string(), "/repo/sub/b.rs".to_string()]
+        );
     }
 
     #[tokio::test]
