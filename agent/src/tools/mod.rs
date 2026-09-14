@@ -6,6 +6,7 @@
 //! Output types implement `IntoToolOutput` rather than `Serialize`: Rig must send
 //! their readable text to both the model and ACP, not serialize the internal fields.
 
+mod bash;
 mod delete;
 mod edit;
 mod glob;
@@ -22,6 +23,10 @@ mod write;
 #[cfg(test)]
 mod tests;
 
+pub use bash::{
+    Bash, BashArgs, BashKill, BashKillArgs, BashOutput, BashStatus, BashStatusArgs, BashWatch,
+    BashWatchArgs,
+};
 pub use delete::{Delete, DeleteArgs, DeleteOutput};
 pub use edit::{
     Edit, EditArgs, EditLines, EditLinesArgs, EditLinesOutput, EditOutput, InsertLines,
@@ -63,6 +68,7 @@ pub struct Workspace {
     todos: todo_write::TodoStore,
     compression_store: crate::compression::store::SharedCompressionStore,
     snapshots: crate::snapshot::SnapshotManager,
+    bash_jobs: bash::BashJobs,
 }
 
 impl Workspace {
@@ -81,6 +87,7 @@ impl Workspace {
             todos: Default::default(),
             compression_store: crate::compression::store::shared_store(),
             snapshots: crate::snapshot::SnapshotManager::new(root.clone()),
+            bash_jobs: Default::default(),
         })
     }
 
@@ -128,6 +135,10 @@ impl Workspace {
             dynamic(MultiEdit(self.clone())),
             dynamic(Write(self.clone())),
             dynamic(Delete(self.clone())),
+            dynamic(Bash(self.clone())),
+            dynamic(BashStatus(self.clone())),
+            dynamic(BashWatch(self.clone())),
+            dynamic(BashKill(self.clone())),
             dynamic(Inspect(self.clone())),
             dynamic(TodoWrite(self.clone())),
             dynamic(Retrieve(self.compression_store.clone())),

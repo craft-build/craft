@@ -567,6 +567,10 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
     assert_eq!(
         names,
         [
+            "bash",
+            "bash_kill",
+            "bash_status",
+            "bash_watch",
             "delete",
             "edit",
             "edit_lines",

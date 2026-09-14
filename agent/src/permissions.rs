@@ -62,6 +62,8 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "inspect",
     "retrieve",
     "list_tools",
+    "bash_status",
+    "bash_watch",
 ];
 
 /// Words that open a block the bash parser keeps as one scope. Their first
