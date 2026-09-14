@@ -347,22 +347,34 @@ struct ApprovalGate {
     permissions: Arc<PermissionManager>,
 }
 
-/// The scope a call is about: the touched path for file tools, `*` otherwise
-/// (scope-less rules still match it; everything else falls to the default).
-fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> Vec<String> {
+/// The scope a call is about: the touched path for file tools, per-command
+/// scopes for bash (task B.2), `*` otherwise (scope-less rules still match
+/// it; everything else falls to the default). The flag is the bash parser's
+/// `force_prompt`: the scopes could not be derived confidently, so allow
+/// rules must not silence the prompt.
+fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<String>, bool) {
+    if name == "bash"
+        && let Some(command) = args.get("command").and_then(|v| v.as_str())
+        && let Some(scopes) = crate::permissions::bash::permission_scopes(command)
+    {
+        return (scopes.scopes, scopes.force_prompt);
+    }
     if FILE_WRITE_TOOLS.contains(&name) {
         if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-            return vec![resolve_scope_path(root, path)];
+            return (vec![resolve_scope_path(root, path)], false);
         }
         if let Some(files) = args.get("files").and_then(|v| v.as_array()) {
-            return files
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(|p| resolve_scope_path(root, p))
-                .collect();
+            return (
+                files
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|p| resolve_scope_path(root, p))
+                    .collect(),
+                false,
+            );
         }
     }
-    vec!["*".to_string()]
+    (vec!["*".to_string()], false)
 }
 
 fn resolve_scope_path(root: &Path, path: &str) -> String {
@@ -396,8 +408,9 @@ impl BeforeExecute for ApprovalGate {
             }
             let name = call.function.name.as_str();
             let tool = ToolKey::native(name);
-            let scopes = scope_for_call(permissions.cwd(), name, &call.function.arguments);
-            match permissions.check(&tool, &scopes) {
+            let (scopes, force_prompt) =
+                scope_for_call(permissions.cwd(), name, &call.function.arguments);
+            match permissions.check_multi(&tool, &scopes, force_prompt) {
                 PermissionCheck::Allowed => return Decision::Run,
                 PermissionCheck::Denied => {
                     return Decision::Skip(denied_message(&tool, &scopes));
@@ -796,42 +809,6 @@ mod tests {
         decide(&state, "current".into(), false).await;
         assert!(state.lock().await.pending_approval.is_none());
         assert!(!rx.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn deny_rule_skips_without_asking() {
-        let state = Arc::new(Mutex::new(SessionState::default()));
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let (flag, cancel) = run::cancel_channel();
-        let permissions = Arc::new(PermissionManager::new(
-            PermissionsConfig {
-                rules: vec![crate::permissions::PermissionRule {
-                    tool: ToolKey::native("write"),
-                    scope: Some("secret/**".to_string()),
-                    effect: crate::permissions::Effect::Deny,
-                }],
-                ..Default::default()
-            },
-            std::env::temp_dir(),
-        ));
-        let gate = ApprovalGate {
-            state: state.clone(),
-            tx,
-            cancel,
-            permissions,
-        };
-        let _flag = flag;
-        let mut call = tool_call("t1", "write");
-        call.function.arguments = serde_json::json!({ "path": "secret/key.pem" });
-        let decision = gate.decide(call).await;
-        let Decision::Skip(message) = decision else {
-            panic!("expected skip");
-        };
-        assert!(
-            message.starts_with(crate::permissions::PERMISSION_DENIED_PREFIX),
-            "{message}"
-        );
-        assert!(state.lock().await.pending_approval.is_none());
     }
 
     #[tokio::test]

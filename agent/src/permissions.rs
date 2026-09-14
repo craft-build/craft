@@ -24,6 +24,10 @@ use crate::paths;
 use crate::storage::StorageError;
 use crate::storage::atomic::atomic_write;
 
+/// Tree-sitter bash parsing that splits compound commands into per-command
+/// scopes (task B.2).
+pub mod bash;
+
 pub const DEFAULT_DENY_GUIDANCE: &str =
     "Do not retry. Try a different approach or ask the user for guidance.";
 
@@ -162,7 +166,14 @@ pub struct PermissionsConfig {
 pub enum PermissionCheck {
     Allowed,
     Denied,
-    NeedsPrompt { tool: ToolKey, scopes: Vec<String> },
+    NeedsPrompt {
+        tool: ToolKey,
+        scopes: Vec<String>,
+        /// Set when the caller could not confidently determine what the
+        /// scopes are (e.g. an unsplittable bash compound command): the
+        /// prompt must be shown even though an allow rule matches.
+        force_prompt: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -344,10 +355,11 @@ impl PermissionManager {
     /// The order of the checks below is the policy itself, not an accident of
     /// how it was written: denies first, then explicit allows, then the
     /// defaults. Moving one moves the rules.
-    fn check_inner(&self, tool: &ToolKey, scopes: &[&str]) -> PermissionCheck {
+    fn check_inner(&self, tool: &ToolKey, scopes: &[&str], force_prompt: bool) -> PermissionCheck {
         let session = self.session_rules();
 
-        // Any matching deny wins, however broadly it was aimed.
+        // Any matching deny wins, however broadly it was aimed. Only allows
+        // are outranked by `force_prompt`.
         let mut unclaimed_scopes: Vec<&str> = Vec::with_capacity(scopes.len());
 
         for scope in scopes {
@@ -366,12 +378,17 @@ impl PermissionManager {
                     Effect::Allow => has_allow = true,
                 }
             }
-            if !has_allow {
+            if !has_allow && !force_prompt {
                 unclaimed_scopes.push(scope);
             }
         }
 
-        if unclaimed_scopes.is_empty() {
+        let pending: Vec<&str> = if force_prompt {
+            scopes.to_vec()
+        } else {
+            unclaimed_scopes
+        };
+        if pending.is_empty() {
             return PermissionCheck::Allowed;
         }
 
@@ -393,20 +410,32 @@ impl PermissionManager {
             .unwrap_or(self.default);
         match eff {
             DefaultEffect::Deny => PermissionCheck::Denied,
-            DefaultEffect::Allow => PermissionCheck::Allowed,
-            DefaultEffect::Prompt => PermissionCheck::NeedsPrompt {
+            DefaultEffect::Allow if !force_prompt => PermissionCheck::Allowed,
+            DefaultEffect::Allow | DefaultEffect::Prompt => PermissionCheck::NeedsPrompt {
                 tool: tool.clone(),
-                scopes: unclaimed_scopes
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
+                scopes: pending.into_iter().map(|s| s.to_string()).collect(),
+                force_prompt,
             },
         }
     }
 
     pub fn check(&self, tool: &ToolKey, scopes: &[String]) -> PermissionCheck {
         let refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
-        self.check_inner(tool, &refs)
+        self.check_inner(tool, &refs, false)
+    }
+
+    /// Multi-scope check used by compound bash commands: every scope must be
+    /// allowed or the uncovered ones are prompted for together. With
+    /// `force_prompt` the allow rules are skipped entirely — the user must
+    /// still see the command.
+    pub fn check_multi(
+        &self,
+        tool: &ToolKey,
+        scopes: &[String],
+        force_prompt: bool,
+    ) -> PermissionCheck {
+        let refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
+        self.check_inner(tool, &refs, force_prompt)
     }
 
     pub fn add_session_rule(&self, rule: PermissionRule) {
@@ -1139,6 +1168,62 @@ mod tests {
 
     fn needs_prompt(check: &PermissionCheck) -> bool {
         matches!(check, PermissionCheck::NeedsPrompt { .. })
+    }
+
+    #[test]
+    fn check_multi_force_prompt_skips_allow_rules() {
+        let mgr = mgr_with(
+            Path::new("/tmp"),
+            vec![
+                allow_rule("bash", Some("cargo *")),
+                allow_rule("bash", Some("git *")),
+            ],
+        );
+        let tool = ToolKey::native("bash");
+        let scopes = vec!["cargo test".to_string(), "git push".to_string()];
+        assert!(matches!(
+            mgr.check_multi(&tool, &scopes, false),
+            PermissionCheck::Allowed
+        ));
+        match mgr.check_multi(&tool, &scopes, true) {
+            PermissionCheck::NeedsPrompt {
+                scopes: s,
+                force_prompt,
+                ..
+            } => {
+                assert_eq!(s, vec!["cargo test", "git push"]);
+                assert!(force_prompt);
+            }
+            other => panic!("expected NeedsPrompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_multi_deny_wins_over_force_prompt() {
+        let mgr = mgr_with(Path::new("/tmp"), vec![deny_rule("bash", Some("rm *"))]);
+        assert!(matches!(
+            mgr.check_multi(&ToolKey::native("bash"), &["rm -rf /".to_string()], true),
+            PermissionCheck::Denied
+        ));
+    }
+
+    #[test]
+    fn check_multi_partial_coverage_prompts_uncovered() {
+        let mgr = mgr_with(Path::new("/tmp"), vec![allow_rule("bash", Some("cargo *"))]);
+        match mgr.check_multi(
+            &ToolKey::native("bash"),
+            &[
+                "cargo test".to_string(),
+                "git push".to_string(),
+                "ls".to_string(),
+            ],
+            false,
+        ) {
+            PermissionCheck::NeedsPrompt { scopes, .. } => {
+                assert_eq!(scopes, vec!["git push", "ls"]);
+            }
+            other => panic!("expected NeedsPrompt, got {other:?}"),
+        }
     }
 
     #[test]

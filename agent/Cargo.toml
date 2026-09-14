@@ -26,6 +26,8 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "macros"] }
 toml.workspace = true
 toml_edit.workspace = true
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
 url.workspace = true
 uuid = { version = "1", features = ["v7"] }
 
