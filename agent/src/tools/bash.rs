@@ -22,9 +22,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::{
     io::AsyncReadExt,
-    process::{Child, Command},
+    process::Command,
     time::{Duration, sleep},
 };
+
+use crate::child_guard::ChildGuard;
 
 use super::{MAX_OUTPUT_BYTES, Result, Workspace, clip, denied, failure, invalid};
 
@@ -66,9 +68,10 @@ pub(crate) struct BgJob {
     pub command: String,
     output: OutputBuf,
     state: Arc<Mutex<BgState>>,
-    /// The live child, if it has neither exited nor been killed. `None`
-    /// once `bash_kill` takes it or the waiter reaps it.
-    child: Arc<Mutex<Option<Child>>>,
+    /// The live child wrapped in a kill-on-drop guard, if it has neither
+    /// exited nor been killed. `None` once `bash_kill` takes it or the
+    /// waiter reaps it.
+    child: Arc<Mutex<Option<ChildGuard>>>,
 }
 
 impl BgJob {
@@ -120,13 +123,11 @@ fn spawn_waiter(job: &BgJob) {
             if matches!(*state.lock().unwrap(), BgState::Killed) {
                 break;
             }
-            let status = slot.lock().unwrap().as_mut().and_then(|child| {
-                child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .map(|s| s.code().unwrap_or(-1))
-            });
+            let status = slot
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|guard| guard.try_status().map(|s| s.code().unwrap_or(-1)));
             match status {
                 Some(code) => {
                     *state.lock().unwrap() = BgState::Exited(code);
@@ -313,21 +314,26 @@ fn prepare(workspace: &Workspace, args: &BashArgs) -> Result<(String, std::path:
     Ok((command, cwd))
 }
 
-fn spawn(workspace_root: &Path, command: &str, cwd: &Path) -> Result<Child> {
-    Command::new("bash")
-        .arg("-c")
+fn spawn(workspace_root: &Path, command: &str, cwd: &Path) -> Result<ChildGuard> {
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            failure(format!(
-                "failed to run command in {}: {error}",
-                workspace_root.display()
-            ))
-        })
+        .stderr(Stdio::piped());
+    // Own process group so a kill takes down the whole command tree,
+    // not just the bash wrapper (pair with ChildGuard's killpg).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child: Command = cmd.into();
+    let child = child.spawn().map_err(|error| {
+        failure(format!(
+            "failed to run command in {}: {error}",
+            workspace_root.display()
+        ))
+    })?;
+    Ok(ChildGuard::new(child))
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +380,7 @@ impl Bash {
             .timeout
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .max(MIN_TIMEOUT_SECS);
-        let mut child = spawn(workspace.root(), &command, &cwd)?;
+        let mut guard = spawn(workspace.root(), &command, &cwd)?;
         let output: OutputBuf = Arc::default();
 
         if args.background {
@@ -382,7 +388,7 @@ impl Bash {
                 command,
                 output: output.clone(),
                 state: Arc::new(Mutex::new(BgState::Running)),
-                child: Arc::new(Mutex::new(Some(child))),
+                child: Arc::new(Mutex::new(Some(guard))),
             };
             // The registry holds the live child; the readers drain its pipes
             // into the shared buffer until EOF.
@@ -398,13 +404,13 @@ impl Bash {
                 ),
             });
         }
-        let mut readers = spawn_readers(&mut child, &output);
+        let mut readers = spawn_readers(&mut guard, &output);
 
         // Reap the child, then join the readers: `wait` can return while the
         // pipe still holds undrained tail bytes.
         let wait_and_drain = async {
-            let status = child
-                .wait()
+            let status = guard
+                .status()
                 .await
                 .map_err(|error| failure(format!("wait failed: {error}")))?;
             for handle in readers.drain(..) {
@@ -425,7 +431,9 @@ impl Bash {
                 }
             }
             Err(_) => {
-                child.start_kill().ok();
+                // Kill the whole process group and reap it before reporting;
+                // dropping the guard would do the same, but unreaped.
+                guard.kill_and_reap().await;
                 let partial = truncate_output(&compress_output(&output.lock().unwrap().clone()));
                 Err(failure(format!(
                     "{partial}\ntool bash timed out after {timeout_secs}s"
@@ -435,12 +443,12 @@ impl Bash {
     }
 }
 
-fn spawn_readers(child: &mut Child, output: &OutputBuf) -> Vec<tokio::task::JoinHandle<()>> {
+fn spawn_readers(guard: &mut ChildGuard, output: &OutputBuf) -> Vec<tokio::task::JoinHandle<()>> {
     let mut readers = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
+    if let Some(stdout) = guard.take_stdout() {
         readers.push(tokio::spawn(drain(stdout, output.clone())));
     }
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = guard.take_stderr() {
         readers.push(tokio::spawn(drain(stderr, output.clone())));
     }
     readers
@@ -658,8 +666,12 @@ impl PortableTool for BashKill {
                 text: format!("task already exited (code: {code})"),
             });
         }
-        if let Some(mut child) = job.child.lock().unwrap().take() {
-            child.start_kill().ok();
+        if let Some(mut guard) = job.child.lock().unwrap().take() {
+            // Kill-and-reap off the hot path so the tool responds
+            // immediately; the guard's Drop is the backstop.
+            tokio::spawn(async move {
+                guard.kill_and_reap().await;
+            });
         }
         *job.state.lock().unwrap() = BgState::Killed;
         Ok(BashStatusOutput {
@@ -814,6 +826,43 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("partial"), "{}", err);
         assert!(err.to_string().contains("timed out after 5s"), "{}", err);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_kills_the_whole_process_group() {
+        let (dir, workspace) = workspace();
+        let tool = Bash(workspace);
+        // Spawn a grandchild `sleep`, record its pid, then hang the
+        // parent: the timeout must take down both via the process group.
+        let err = invoke(
+            &tool,
+            json!({
+                "command": "sleep 30 & echo $!; sleep 30",
+                "timeout": 5
+            }),
+        )
+        .await
+        .unwrap_err();
+        let pid: i32 = err
+            .to_string()
+            .lines()
+            .find_map(|l| l.trim().parse::<i32>().ok())
+            .expect("grandchild pid in partial output");
+        assert!(err.to_string().contains("timed out after 5s"), "{err}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild {pid} survived the timeout kill"
+            );
+            if !alive {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        drop(dir);
     }
 
     #[tokio::test]

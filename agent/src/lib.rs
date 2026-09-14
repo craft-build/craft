@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod child_guard;
 pub mod compaction;
 pub mod compression;
 pub mod config;
