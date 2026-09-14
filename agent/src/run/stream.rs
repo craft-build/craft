@@ -60,10 +60,7 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
             biased;
             changed = cancel_rx.changed(), if cancel_alive => {
                 match changed {
-                    Ok(()) if *cancel_rx.borrow_and_update() => {
-                        return Err(StreamFailure::Cancelled);
-                    }
-                    Ok(()) => {}
+                    Ok(()) => return Err(StreamFailure::Cancelled),
                     Err(_) => cancel_alive = false,
                 }
             }

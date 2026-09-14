@@ -64,41 +64,48 @@ pub enum Event {
 /// run stops at the next stream/dispatch/turn boundary.
 #[derive(Clone)]
 pub struct CancelToken {
-    rx: watch::Receiver<bool>,
+    rx: watch::Receiver<u64>,
+    epoch: u64,
 }
 
 /// The setting half of a [`CancelToken`].
 #[derive(Clone)]
 pub struct CancelFlag {
-    tx: watch::Sender<bool>,
+    tx: watch::Sender<u64>,
 }
 
 /// Create a cancellation pair, initially not cancelled.
 pub fn cancel_channel() -> (CancelFlag, CancelToken) {
-    let (tx, rx) = watch::channel(false);
-    (CancelFlag { tx }, CancelToken { rx })
+    let (tx, rx) = watch::channel(0);
+    (CancelFlag { tx }, CancelToken { rx, epoch: 0 })
 }
 
 impl CancelToken {
     pub fn cancelled(&self) -> bool {
-        *self.rx.borrow()
+        *self.rx.borrow() != self.epoch
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<bool> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.rx.clone()
     }
 }
 
 impl CancelFlag {
-    /// Set or clear the flag. `true` cancels every run sharing the token.
+    /// Cancellation is monotonic and epoch-scoped: `set(true)` bumps the
+    /// generation and can never be overwritten by a concurrent re-arm,
+    /// while `set(false)` is a no-op — a fresh turn starts clean by
+    /// minting a new token at the current generation.
     pub fn set(&self, cancelled: bool) {
-        let _ = self.tx.send(cancelled);
+        if cancelled {
+            self.tx.send_modify(|generation| *generation += 1);
+        }
     }
 
     /// A token sharing this flag's state.
     pub fn token(&self) -> CancelToken {
         CancelToken {
             rx: self.tx.subscribe(),
+            epoch: *self.tx.borrow(),
         }
     }
 }

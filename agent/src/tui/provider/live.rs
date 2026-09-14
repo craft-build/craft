@@ -186,7 +186,7 @@ impl Provider for CraftProvider {
         tokio::spawn(async move {
             let state = Arc::new(Mutex::new(SessionState::linked()));
             let files: Files = Files::default();
-            let (cancel_flag, cancel_token) = run::cancel_channel();
+            let (cancel_flag, mut cancel_token) = run::cancel_channel();
             let mut current_turn: Option<AbortHandle> = None;
             let mut selection = self.selection;
             let workspace = self.workspace;
@@ -238,7 +238,7 @@ impl Provider for CraftProvider {
                         if let Some(h) = current_turn.take() {
                             h.abort();
                         }
-                        cancel_flag.set(false);
+                        cancel_token = cancel_flag.token();
                         let handle = tokio::spawn(run_turn(
                             TurnCtx {
                                 config: config.clone(),
@@ -430,32 +430,19 @@ impl BeforeExecute for ApprovalGate {
             let (decision_tx, mut decision_rx) = oneshot::channel();
             state.lock().await.pending_approval = Some((id, decision_tx));
             let mut cancel_rx = cancel.subscribe();
-            // A watch send bumps the version even when the value is
-            // unchanged: the command loop re-arms the flag with
-            // `set(false)` on every message, so a ready `changed()` must
-            // be inspected. Only a `true` value or a dropped flag
-            // cancels; a re-asserted `false` keeps waiting on the user.
-            let approved = loop {
-                tokio::select! {
-                    biased;
-                    changed = cancel_rx.changed() => {
-                        match changed {
-                            Err(_) => {
-                                // A dropped flag means the session is gone.
-                                state.lock().await.pending_approval = None;
-                                return Decision::Stop("cancelled by client".into());
-                            }
-                            Ok(()) if !*cancel_rx.borrow_and_update() => continue,
-                            Ok(()) => {
-                                state.lock().await.pending_approval = None;
-                                return Decision::Stop("cancelled by client".into());
-                            }
-                        }
-                    }
-                    decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
-                        state.lock().await.pending_approval = None;
-                        break decision.unwrap_or(Ok(false)).unwrap_or(false);
-                    }
+            // Cancellation is epoch-based: `changed()` fires only on a
+            // `set(true)` generation bump or a dropped flag — a re-arm
+            // never writes, so a ready change is always a real cancel.
+            let approved = tokio::select! {
+                biased;
+                changed = cancel_rx.changed() => {
+                    let _ = changed;
+                    state.lock().await.pending_approval = None;
+                    return Decision::Stop("cancelled by client".into());
+                }
+                decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
+                    state.lock().await.pending_approval = None;
+                    decision.unwrap_or(Ok(false)).unwrap_or(false)
                 }
             };
             let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
@@ -867,10 +854,9 @@ mod tests {
 
     #[tokio::test]
     async fn flag_rearm_while_pending_does_not_cancel_the_approval() {
-        // The command loop re-arms the cancel flag with `set(false)` on
-        // every SendMessage. A watch send bumps the version even when the
-        // value is unchanged, so `changed()` fires ready with `false` —
-        // the gate must keep waiting for the user, not stop the call.
+        // A re-arm (`set(false)`) must not disturb a pending approval;
+        // with epoch-based cancellation it never writes, so a ready
+        // `changed()` is always a genuine cancel.
         let state = Arc::new(Mutex::new(SessionState::default()));
         let (tx, _rx) = mpsc::unbounded_channel();
         let (flag, cancel) = run::cancel_channel();
