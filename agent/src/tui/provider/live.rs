@@ -427,22 +427,35 @@ impl BeforeExecute for ApprovalGate {
             }));
             let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
 
-            let (decision_tx, decision_rx) = oneshot::channel();
+            let (decision_tx, mut decision_rx) = oneshot::channel();
             state.lock().await.pending_approval = Some((id, decision_tx));
             let mut cancel_rx = cancel.subscribe();
-            let approved = tokio::select! {
-                biased;
-                changed = cancel_rx.changed() => {
-                    if matches!(changed, Ok(())) && *cancel_rx.borrow_and_update() {
-                        state.lock().await.pending_approval = None;
-                        return Decision::Stop("cancelled by client".into());
+            // A watch send bumps the version even when the value is
+            // unchanged: the command loop re-arms the flag with
+            // `set(false)` on every message, so a ready `changed()` must
+            // be inspected. Only a `true` value or a dropped flag
+            // cancels; a re-asserted `false` keeps waiting on the user.
+            let approved = loop {
+                tokio::select! {
+                    biased;
+                    changed = cancel_rx.changed() => {
+                        match changed {
+                            Err(_) => {
+                                // A dropped flag means the session is gone.
+                                state.lock().await.pending_approval = None;
+                                return Decision::Stop("cancelled by client".into());
+                            }
+                            Ok(()) if !*cancel_rx.borrow_and_update() => continue,
+                            Ok(()) => {
+                                state.lock().await.pending_approval = None;
+                                return Decision::Stop("cancelled by client".into());
+                            }
+                        }
                     }
-                    // A dropped flag means the session is gone: stop the call.
-                    return Decision::Stop("cancelled by client".into());
-                }
-                decision = tokio::time::timeout(ASK_TIMEOUT, decision_rx) => {
-                    state.lock().await.pending_approval = None;
-                    decision.unwrap_or(Ok(false)).unwrap_or(false)
+                    decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
+                        state.lock().await.pending_approval = None;
+                        break decision.unwrap_or(Ok(false)).unwrap_or(false);
+                    }
                 }
             };
             let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
@@ -850,5 +863,39 @@ mod tests {
         sibling.function.arguments = serde_json::json!({ "path": "src/other.rs" });
         assert!(matches!(gate.decide(sibling).await, Decision::Run));
         assert!(state.lock().await.pending_approval.is_none());
+    }
+
+    #[tokio::test]
+    async fn flag_rearm_while_pending_does_not_cancel_the_approval() {
+        // The command loop re-arms the cancel flag with `set(false)` on
+        // every SendMessage. A watch send bumps the version even when the
+        // value is unchanged, so `changed()` fires ready with `false` —
+        // the gate must keep waiting for the user, not stop the call.
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (flag, cancel) = run::cancel_channel();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        let gate = ApprovalGate {
+            state: state.clone(),
+            tx,
+            cancel,
+            permissions,
+        };
+
+        let mut call = tool_call("t1", "bash");
+        call.function.arguments = serde_json::json!({ "command": "echo hi" });
+        let pending = tokio::spawn(async move { gate.decide(call).await });
+        while state.lock().await.pending_approval.is_none() {
+            tokio::task::yield_now().await;
+        }
+        // Version bump with the same (false) value, delivered after the
+        // gate subscribed but before the decision.
+        flag.set(false);
+        tokio::task::yield_now().await;
+        decide(&state, "t1".into(), true).await;
+        assert!(matches!(pending.await.unwrap(), Decision::Run));
     }
 }
