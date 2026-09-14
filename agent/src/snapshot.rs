@@ -8,9 +8,9 @@
 //! journal: captures and restores ride ordinary filesystem operations.
 //! Files a write tool created during the turn are not removed by `/undo`
 //! (matching the reference, which only records pre-existing contents).
-//! Out of scope by design: `delete` has no pre-delete capture, and bash
-//! in-place-edit detection (B.9, Phase 3) should call
-//! [`SnapshotManager::note`] when it lands.
+//! Out of scope by design: `delete` has no pre-delete capture. Bash
+//! in-place edits (`sed -i` / `perl -i`) are detected by
+//! [`crate::inplace_edit`] and noted before execution.
 
 use std::{
     collections::HashMap,

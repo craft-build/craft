@@ -376,6 +376,17 @@ pub struct Bash(pub Workspace);
 impl Bash {
     async fn execute(workspace: &Workspace, args: BashArgs) -> Result<BashOutput> {
         let (command, cwd) = prepare(workspace, &args)?;
+        // Snapshot files targeted by in-place edits (`sed -i` / `perl -i`)
+        // before anything runs, so `/undo` can restore them. Detection fails
+        // open: ambiguity yields no paths and no snapshots.
+        for rel in crate::inplace_edit::detect_inplace_edit_paths(&command) {
+            let abs = if rel.is_absolute() {
+                rel
+            } else {
+                cwd.join(&rel)
+            };
+            workspace.note_snapshot(&abs);
+        }
         let timeout_secs = args
             .timeout
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
@@ -863,6 +874,37 @@ mod tests {
             sleep(Duration::from_millis(50)).await;
         }
         drop(dir);
+    }
+
+    #[tokio::test]
+    async fn inplace_edit_command_snapshots_target_files() {
+        let (dir, workspace) = workspace();
+        std::fs::write(dir.path().join("one.txt"), "a\n").unwrap();
+        std::fs::write(dir.path().join("two.txt"), "c\n").unwrap();
+
+        let tool = Bash(workspace.clone());
+        // perl is available on macOS/Linux CI; the snapshot is taken before
+        // execution regardless of how the command itself fares.
+        let _ = invoke(
+            &tool,
+            json!({"command": "perl -i -pe 's/a/b/' one.txt && perl -i -pe 's/c/d/' two.txt"}),
+        )
+        .await;
+        assert_eq!(workspace.snapshots().snapshot_count(), 2);
+        // A non-editing command captures nothing.
+        let _ = invoke(&tool, json!({"command": "echo hi"})).await;
+        assert_eq!(workspace.snapshots().snapshot_count(), 2);
+        // Restore proves the pre-edit contents were captured.
+        let restored = workspace.snapshots().rollback().await.unwrap();
+        assert!(restored.contains("2/2"), "{restored}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("one.txt")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("two.txt")).unwrap(),
+            "c\n"
+        );
     }
 
     #[tokio::test]
