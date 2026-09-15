@@ -17,6 +17,7 @@ mod grep;
 mod inspect;
 mod list;
 mod list_tools;
+pub(crate) mod move_file;
 mod multiedit;
 mod read;
 mod retrieve;
@@ -42,6 +43,7 @@ pub use grep::{Grep, GrepArgs, GrepMatch, GrepOutput};
 pub use inspect::{Inspect, InspectArgs, InspectOutput};
 pub use list::{List, ListArgs, ListOutput};
 pub use list_tools::{ListTools, ListToolsArgs, ListToolsOutput};
+pub use move_file::{MoveFile, MoveFileArgs, MoveFileOutput};
 pub use multiedit::{EditEntry, MultiEdit, MultiEditArgs, MultiEditOutput};
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
@@ -145,6 +147,7 @@ impl Workspace {
             dynamic(ApplyPatch(self.clone())),
             dynamic(Write(self.clone())),
             dynamic(Delete(self.clone())),
+            dynamic(MoveFile(self.clone())),
             dynamic(Bash(self.clone())),
             dynamic(BashStatus(self.clone())),
             dynamic(BashWatch(self.clone())),

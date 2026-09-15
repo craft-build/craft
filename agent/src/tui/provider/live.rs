@@ -370,6 +370,20 @@ fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<Str
             false,
         );
     }
+    if name == "move"
+        && let (Some(source), Some(destination)) = (
+            args.get("source").and_then(|v| v.as_str()),
+            args.get("destination").and_then(|v| v.as_str()),
+        )
+    {
+        return (
+            vec![source, destination]
+                .iter()
+                .map(|p| resolve_scope_path(root, p))
+                .collect(),
+            false,
+        );
+    }
     if FILE_WRITE_TOOLS.contains(&name) {
         if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
             return (vec![resolve_scope_path(root, path)], false);

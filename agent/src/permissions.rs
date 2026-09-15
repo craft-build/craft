@@ -51,6 +51,7 @@ pub const FILE_WRITE_TOOLS: &[&str] = &[
     "multiedit",
     "delete",
     "apply_patch",
+    "move",
 ];
 
 /// Read-only tools that run without an explicit user decision unless a deny

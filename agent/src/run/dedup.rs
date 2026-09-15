@@ -21,6 +21,7 @@ const WRITE_TOOLS: &[&str] = &[
     "multiedit",
     "delete",
     "apply_patch",
+    "move",
 ];
 const CACHED_PREFIX: &str = "[cached] ";
 const MAX_CACHE_ENTRIES: usize = 64;

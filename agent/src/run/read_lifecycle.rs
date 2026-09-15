@@ -68,6 +68,30 @@ pub struct ReadClassification {
 pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
     let mut operations: Vec<FileOperation> = Vec::new();
 
+    // Files whose imports a `move` rewrote, keyed by the call it answered:
+    // args alone cannot name them, only the executed result can.
+    let move_rewrites: HashMap<&str, Vec<String>> = history
+        .iter()
+        .filter_map(|msg| match msg {
+            Message::User { content } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            UserContent::ToolResult(result) if result.name == "move" && !result.is_error => {
+                let text = result
+                    .content
+                    .iter()
+                    .map(ToolResultContent::to_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let files = crate::tools::move_file::rewritten_files(&text);
+                (!files.is_empty()).then_some((result.call.as_str(), files))
+            }
+            _ => None,
+        })
+        .collect();
+
     for (msg_index, msg) in history.iter().enumerate() {
         let Message::Assistant { content } = msg else {
             continue;
@@ -101,6 +125,34 @@ pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
                         continue;
                     };
                     let paths = crate::tools::patch_paths(patch);
+                    for file_path in paths {
+                        operations.push(FileOperation {
+                            msg_index,
+                            tool_call_id: call.id.clone(),
+                            file_path,
+                            op_kind: OpKind::Edit,
+                            line_range: None,
+                        });
+                    }
+                    continue;
+                }
+                // A move invalidates reads of both the old path (gone) and
+                // the new one (content arrived from elsewhere).
+                "move" => {
+                    let mut paths: Vec<String> = ["source", "destination"]
+                        .iter()
+                        .filter_map(|key| call.function.arguments.get(*key))
+                        .filter_map(|v| v.as_str())
+                        .map(String::from)
+                        .collect();
+                    paths.extend(
+                        move_rewrites
+                            .get(call.id.as_str())
+                            .map(|files| files.as_slice())
+                            .unwrap_or_default()
+                            .iter()
+                            .cloned(),
+                    );
                     for file_path in paths {
                         operations.push(FileOperation {
                             msg_index,
@@ -342,10 +394,12 @@ mod tests {
     }
 
     fn tool_result_msg(id: &str, content: &str) -> Message {
+        tool_result_of_msg(id, "read", content)
+    }
+
+    fn tool_result_of_msg(id: &str, name: &str, content: &str) -> Message {
         Message::User {
-            content: vec![UserContent::ToolResult(ToolResult::text(
-                id, "read", content,
-            ))],
+            content: vec![UserContent::ToolResult(ToolResult::text(id, name, content))],
         }
     }
 
@@ -391,6 +445,31 @@ mod tests {
         assert_eq!(classifications.len(), 1);
         assert_eq!(classifications[0].state, ReadState::Fresh);
         assert_eq!(classifications[0].file_path, "/src/main.rs");
+    }
+
+    #[test]
+    fn move_marks_reads_of_source_destination_and_rewritten_files_stale() {
+        let mut messages = vec![
+            user_msg("read it"),
+            tool_use_msg("t1", "read", json!({"path": "src/main.rs"})),
+            tool_result_msg("t1", "line 1\nline 2\nline 3"),
+            tool_use_msg("t2", "read", json!({"path": "src/other.rs"})),
+            tool_result_msg("t2", "content"),
+            tool_use_msg(
+                "t3",
+                "move",
+                json!({"source": "/src/util/old.rs", "destination": "/src/util/new.rs"}),
+            ),
+            tool_result_of_msg(
+                "t3",
+                "move",
+                "moved src/util/old.rs -> src/util/new.rs\nupdated imports in 1 file(s)\n  src/main.rs: 1 reference(s)",
+            ),
+        ];
+        messages.extend(gap_assistant_turns(WORKING_SET_LOOKBACK + 1));
+        let classifications = classify_reads(&messages);
+        assert_eq!(find_by_id(&classifications, "t1").state, ReadState::Stale);
+        assert_eq!(find_by_id(&classifications, "t2").state, ReadState::Fresh);
     }
 
     #[test]

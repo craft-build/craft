@@ -11,7 +11,14 @@ use crate::history;
 use super::{LineKind, Tone, ToolCallData, ToolKind, ToolLine, TouchedFile};
 
 /// Mutating workspace tools; their results feed the Files panel.
-pub(super) const EDIT_TOOLS: [&str; 5] = ["edit", "edit_lines", "insert_lines", "write", "delete"];
+pub(super) const EDIT_TOOLS: [&str; 6] = [
+    "edit",
+    "edit_lines",
+    "insert_lines",
+    "write",
+    "delete",
+    "move",
+];
 
 /// What an edit-family tool did to a file, for the sidebar badge.
 #[derive(Clone, Copy)]
@@ -130,6 +137,7 @@ pub(super) fn tool_done(
             let status = match tool {
                 "delete" => FileStatus::Deleted,
                 "write" => FileStatus::Created,
+                "move" => FileStatus::Created,
                 _ => FileStatus::Modified,
             };
             (
