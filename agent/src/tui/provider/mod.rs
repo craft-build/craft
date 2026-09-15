@@ -31,6 +31,8 @@ pub enum Command {
     Undo,
     /// Switch the provider/model used for subsequent turns.
     SelectModel { provider: String, model: String },
+    /// Toggle LLM auto-review of permissions (`/auto-review`).
+    ToggleAutoReview,
 }
 
 /// Agent lifecycle status, mirrors the prototype's STATUS_MAP.

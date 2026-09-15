@@ -29,7 +29,9 @@ use crate::run::{self, BeforeExecute, BoxFuture, CancelToken, Decision, RunOutco
 use crate::tools::Workspace;
 
 use super::cards::{self, Files};
-use super::{AgentEvent, Command, ModelChoice, Provider, Status, ToolCallData};
+use super::{
+    AgentEvent, Command, LineKind, ModelChoice, Provider, Status, ToolCallData, ToolKind, ToolLine,
+};
 
 /// Render an error and its sources as one client-facing message.
 fn report(error: crate::error::Error) -> String {
@@ -257,6 +259,13 @@ impl Provider for CraftProvider {
                     }
                     Command::Approve(id) => decide(&state, id, true).await,
                     Command::Reject(id) => decide(&state, id, false).await,
+                    Command::ToggleAutoReview => {
+                        let on = permissions.toggle_auto_review();
+                        let _ = evt_tx.send(AgentEvent::AssistantText(format!(
+                            "auto-review {}.",
+                            if on { "on" } else { "off" }
+                        )));
+                    }
                     Command::Interrupt => {
                         cancel_flag.set(true);
                         if let Some(h) = current_turn.take() {
@@ -339,12 +348,36 @@ impl Provider for CraftProvider {
 /// Gates tool calls behind the permission engine and, when it asks, the
 /// UI's approve/reject seam: no workspace mutation runs without an explicit
 /// user decision. Approval runs the tool and grants the session; rejection
-/// skips it and reports the denial back to the model.
+/// skips it and reports the denial back to the model. With auto-review on,
+/// the prompt is answered by a locked-down reviewer model call (E.7)
+/// instead of the user; the reviewer fails closed.
 struct ApprovalGate {
     state: Arc<Mutex<SessionState>>,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancelToken,
     permissions: Arc<PermissionManager>,
+    /// One-shot reviewer model call; `None` in tests that drive the gate
+    /// without a provider.
+    reviewer: Option<Reviewer>,
+}
+
+/// Injectable reviewer so gate tests run without a live provider.
+type Reviewer = Arc<
+    dyn Fn(
+            String,
+            Vec<String>,
+        ) -> crate::run::BoxFuture<
+            Result<crate::auto_review::Decision, crate::auto_review::ReviewError>,
+        > + Send
+        + Sync,
+>;
+
+/// Production reviewer: one locked-down model call per NeedsPrompt decision.
+fn model_reviewer(model: crate::providers::DynamicModel) -> Reviewer {
+    Arc::new(move |tool, scopes| {
+        let model = model.clone();
+        Box::pin(async move { crate::auto_review::review(&model, &tool, &scopes).await })
+    })
 }
 
 /// The scope a call is about: the touched path for file tools, per-command
@@ -421,12 +454,83 @@ fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
     )
 }
 
+/// Auto-review path for a `NeedsPrompt` decision (E.7): one locked-down
+/// reviewer call answers the prompt, its verdict is recorded as a session
+/// rule, and the outcome is reported back to the model. Reviewer failures
+/// (timeout, provider error, unparseable output) deny without recording a
+/// rule — the reviewer never actually decided.
+async fn auto_review_decide(
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    reviewer: &Reviewer,
+    permissions: &Arc<PermissionManager>,
+    tool: &ToolKey,
+    scopes: &[String],
+    id: String,
+) -> Decision {
+    let review = reviewer(tool.to_string(), scopes.to_vec());
+    let outcome = match review.await {
+        Ok(decision) => {
+            let allow = decision.verdict == crate::auto_review::Verdict::Allow;
+            permissions.apply_auto_review(tool, scopes, allow);
+            let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+                id,
+                kind: ToolKind::Bash {
+                    cmd: "auto-review".to_string(),
+                },
+                lines: vec![ToolLine {
+                    kind: LineKind::Muted,
+                    text: format!(
+                        "auto-review {}: {} — {}",
+                        decision.verdict.as_str(),
+                        decision.risk.as_str(),
+                        decision.rationale
+                    ),
+                }],
+                awaiting_approval: false,
+            }));
+            if allow {
+                return Decision::Run;
+            }
+            format!(
+                "{} `{}` ({}). auto-review: {}. {}",
+                crate::permissions::PERMISSION_DENIED_PREFIX,
+                tool,
+                scopes.join("; "),
+                decision.rationale,
+                crate::permissions::DEFAULT_DENY_GUIDANCE
+            )
+        }
+        Err(err) => {
+            let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+                id,
+                kind: ToolKind::Bash {
+                    cmd: "auto-review".to_string(),
+                },
+                lines: vec![ToolLine {
+                    kind: LineKind::Muted,
+                    text: format!("auto-review failed closed: {err}"),
+                }],
+                awaiting_approval: false,
+            }));
+            format!(
+                "{} `{}` ({}). auto-review denied this action: {err}. {}",
+                crate::permissions::PERMISSION_DENIED_PREFIX,
+                tool,
+                scopes.join("; "),
+                crate::permissions::DEFAULT_DENY_GUIDANCE
+            )
+        }
+    };
+    Decision::Skip(outcome)
+}
+
 impl BeforeExecute for ApprovalGate {
     fn decide(&self, call: history::ToolCall) -> BoxFuture<Decision> {
         let state = self.state.clone();
         let tx = self.tx.clone();
         let cancel = self.cancel.clone();
         let permissions = self.permissions.clone();
+        let reviewer = self.reviewer.clone();
         Box::pin(async move {
             if cancel.cancelled() {
                 return Decision::Stop("cancelled by client".into());
@@ -443,6 +547,11 @@ impl BeforeExecute for ApprovalGate {
                 PermissionCheck::NeedsPrompt { .. } => {}
             }
             let id = call.id.clone();
+            if permissions.is_auto_review()
+                && let Some(reviewer) = reviewer.as_ref()
+            {
+                return auto_review_decide(tx, reviewer, &permissions, &tool, &scopes, id).await;
+            }
             let _ = tx.send(AgentEvent::AssistantEnd);
             let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
                 id: id.clone(),
@@ -666,6 +775,7 @@ async fn run_turn(ctx: TurnCtx, text: String) {
             tx: tx.clone(),
             cancel: cancel.clone(),
             permissions: permissions.clone(),
+            reviewer: Some(model_reviewer(model.clone())),
         }));
     let params = run::RunParams {
         preamble: Some(crate::prompt::build_system_prompt(
@@ -777,6 +887,7 @@ mod tests {
         let (flag, cancel) = run::cancel_channel();
         (
             ApprovalGate {
+                reviewer: None,
                 state: state.clone(),
                 tx,
                 cancel,
@@ -861,6 +972,7 @@ mod tests {
             std::env::temp_dir(),
         ));
         let gate = ApprovalGate {
+            reviewer: None,
             state: state.clone(),
             tx,
             cancel,
@@ -881,6 +993,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let (_flag, cancel) = run::cancel_channel();
         let gate = ApprovalGate {
+            reviewer: None,
             state: state.clone(),
             tx,
             cancel,
@@ -905,6 +1018,7 @@ mod tests {
             std::env::temp_dir(),
         ));
         let gate = ApprovalGate {
+            reviewer: None,
             state: state.clone(),
             tx,
             cancel,
@@ -923,5 +1037,150 @@ mod tests {
         tokio::task::yield_now().await;
         decide(&state, "t1".into(), true).await;
         assert!(matches!(pending.await.unwrap(), Decision::Run));
+    }
+
+    fn scripted_reviewer(
+        result: Result<crate::auto_review::Decision, crate::auto_review::ReviewError>,
+    ) -> (Reviewer, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let reviewer: Reviewer = Arc::new(move |_tool, _scopes| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let result = result.clone();
+            Box::pin(async move { result })
+        });
+        (reviewer, calls)
+    }
+
+    fn auto_review_gate(
+        reviewer: Reviewer,
+    ) -> (
+        ApprovalGate,
+        Arc<Mutex<SessionState>>,
+        Arc<PermissionManager>,
+    ) {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_flag, cancel) = run::cancel_channel();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        permissions.toggle_auto_review();
+        let gate = ApprovalGate {
+            reviewer: Some(reviewer),
+            state: state.clone(),
+            tx,
+            cancel,
+            permissions: permissions.clone(),
+        };
+        (gate, state, permissions)
+    }
+
+    #[tokio::test]
+    async fn auto_review_allow_runs_and_records_a_session_rule() {
+        let (reviewer, calls) = scripted_reviewer(Ok(crate::auto_review::Decision {
+            verdict: crate::auto_review::Verdict::Allow,
+            risk: crate::auto_review::Risk::Low,
+            rationale: "in-project edit".to_string(),
+        }));
+        let (gate, state, _permissions) = auto_review_gate(reviewer);
+        assert!(matches!(
+            gate.decide(tool_call("t1", "write")).await,
+            Decision::Run
+        ));
+        assert!(state.lock().await.pending_approval.is_none());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recorded rule answers the sibling call without the reviewer"
+        );
+        assert!(matches!(
+            gate.decide(tool_call("t2", "write")).await,
+            Decision::Run
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_review_deny_skips_with_rationale_and_records_a_deny_rule() {
+        let (reviewer, _calls) = scripted_reviewer(Ok(crate::auto_review::Decision {
+            verdict: crate::auto_review::Verdict::Deny,
+            risk: crate::auto_review::Risk::High,
+            rationale: "rm -rf outside the project".to_string(),
+        }));
+        let (gate, _state, permissions) = auto_review_gate(reviewer);
+        let mut call = tool_call("t1", "bash");
+        call.function.arguments = serde_json::json!({ "command": "rm -rf /" });
+        let decision = gate.decide(call).await;
+        let Decision::Skip(message) = decision else {
+            panic!("expected skip, got {decision:?}");
+        };
+        assert!(message.contains("rm -rf outside the project"));
+        assert!(message.contains(crate::permissions::DEFAULT_DENY_GUIDANCE));
+        let mut sibling = tool_call("t2", "bash");
+        sibling.function.arguments = serde_json::json!({ "command": "rm -rf /" });
+        assert!(matches!(gate.decide(sibling).await, Decision::Skip(_)));
+        assert!(matches!(
+            permissions.check(&ToolKey::native("bash"), &["rm -rf /".to_string()]),
+            PermissionCheck::Denied
+        ));
+    }
+
+    #[tokio::test]
+    async fn auto_review_failure_fails_closed_without_recording_a_rule() {
+        let (reviewer, _calls) = scripted_reviewer(Err(crate::auto_review::ReviewError::Timeout {
+            deadline: std::time::Duration::from_secs(30),
+        }));
+        let (gate, _state, permissions) = auto_review_gate(reviewer);
+        let mut call = tool_call("t1", "write");
+        call.function.arguments = serde_json::json!({ "path": "src/a.rs" });
+        let Decision::Skip(message) = gate.decide(call).await else {
+            panic!("expected skip");
+        };
+        assert!(message.contains("auto-review denied this action"));
+        // No reviewer decision happened, so nothing was recorded: a retry
+        // still falls through to the prompt (NeedsPrompt), not Denied.
+        let tool = ToolKey::native("write");
+        let scope = permissions.cwd().join("src/a.rs").display().to_string();
+        assert!(matches!(
+            permissions.check(&tool, &[scope]),
+            PermissionCheck::NeedsPrompt { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn pre_decided_calls_never_reach_the_reviewer() {
+        let (reviewer, calls) = scripted_reviewer(Ok(crate::auto_review::Decision {
+            verdict: crate::auto_review::Verdict::Allow,
+            risk: crate::auto_review::Risk::Low,
+            rationale: String::new(),
+        }));
+        let (gate, _state, permissions) = auto_review_gate(reviewer);
+        // Read-only: allowed by defaults.
+        assert!(matches!(
+            gate.decide(tool_call("t1", "read")).await,
+            Decision::Run
+        ));
+        // Explicit deny rule: denied without review.
+        permissions.add_session_rule(crate::permissions::PermissionRule {
+            tool: ToolKey::native("write"),
+            scope: Some(
+                permissions
+                    .cwd()
+                    .join("src/blocked.rs")
+                    .display()
+                    .to_string(),
+            ),
+            effect: crate::permissions::Effect::Deny,
+        });
+        let mut call = tool_call("t2", "write");
+        call.function.arguments = serde_json::json!({ "path": "src/blocked.rs" });
+        assert!(matches!(gate.decide(call).await, Decision::Skip(_)));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "Allowed and Denied must short-circuit before the reviewer"
+        );
     }
 }

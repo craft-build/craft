@@ -37,12 +37,13 @@ fn seed_models() -> Vec<ModelChoice> {
 
 pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
-pub const SLASH_COMMANDS: [(&str, &str); 6] = [
+pub const SLASH_COMMANDS: [(&str, &str); 7] = [
     ("/clear", "Clear conversation context"),
     ("/compact", "Compact context to save tokens"),
     ("/undo", "Revert the last edit"),
     ("/model", "Switch model"),
     ("/sessions", "List sessions"),
+    ("/auto-review", "Toggle LLM auto-review of permissions"),
     ("/help", "Show keybindings"),
 ];
 
@@ -475,6 +476,9 @@ impl App {
                 let _ = tx.send(Command::Undo);
             }
             "/model" => self.open_model_menu(),
+            "/auto-review" => {
+                let _ = tx.send(Command::ToggleAutoReview);
+            }
             // Compact/help/sessions are no-ops for now.
             _ => {}
         }
@@ -824,6 +828,22 @@ impl App {
 mod tests {
     use super::*;
     use crate::tui::provider::LineKind;
+
+    /// `/auto-review` routes a toggle command to the provider.
+    #[test]
+    fn auto_review_slash_sends_toggle_command() {
+        let mut app = App::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.run_slash("/auto-review", &tx);
+        assert!(matches!(rx.try_recv(), Ok(Command::ToggleAutoReview)));
+        // The command stays reachable from the composer's slash popup.
+        app.composer.text = "/auto".into();
+        assert!(
+            app.slash_matches()
+                .iter()
+                .any(|(cmd, _)| *cmd == "/auto-review")
+        );
+    }
 
     /// Streamed deltas append to one bubble until explicitly closed.
     #[test]

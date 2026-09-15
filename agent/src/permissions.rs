@@ -9,12 +9,15 @@
 //!
 //! Ported from the reference `craft-agent/src/permissions.rs` +
 //! `craft-config` permission layer. Deviations: no plugin rule store (no
-//! plugin subsystem yet), no yolo/auto-review toggles (E.7 is a later task),
-//! no plan mode, and no builtin allow for in-project writes — this repo's
-//! approval gate is ask-by-default for mutations, which the engine preserves.
+//! plugin subsystem yet), no yolo toggle, no plan mode, and no builtin
+//! allow for in-project writes — this repo's approval gate is
+//! ask-by-default for mutations, which the engine preserves. Auto-review
+//! (E.7) toggles live here; its reviewer model call lives in
+//! [`crate::auto_review`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -288,6 +291,7 @@ pub struct PermissionManager {
     default: DefaultEffect,
     tool_defaults: HashMap<ToolKey, DefaultEffect>,
     cwd: PathBuf,
+    auto_review: AtomicBool,
 }
 
 impl PermissionManager {
@@ -328,6 +332,7 @@ impl PermissionManager {
             default: config.default,
             tool_defaults,
             cwd,
+            auto_review: AtomicBool::new(false),
         }
     }
 
@@ -346,6 +351,7 @@ impl PermissionManager {
             default: self.default,
             tool_defaults: self.tool_defaults.clone(),
             cwd: self.cwd.clone(),
+            auto_review: AtomicBool::new(self.is_auto_review()),
         }
     }
 
@@ -440,6 +446,32 @@ impl PermissionManager {
     ) -> PermissionCheck {
         let refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
         self.check_inner(tool, &refs, force_prompt)
+    }
+
+    /// Toggle LLM auto-review mode; returns the new state.
+    pub fn toggle_auto_review(&self) -> bool {
+        let prev = self.auto_review.fetch_xor(true, Ordering::Relaxed);
+        !prev
+    }
+
+    pub fn is_auto_review(&self) -> bool {
+        self.auto_review.load(Ordering::Relaxed)
+    }
+
+    /// Persist an auto-review decision as session rules covering the exact
+    /// scopes reviewed. Returns the `allow` flag for callers chaining it
+    /// straight into a run/skip decision. Unlike [`Self::apply_decision`],
+    /// scopes are not generalized — the reviewer only saw the literal scopes.
+    pub fn apply_auto_review(&self, tool: &ToolKey, scopes: &[String], allow: bool) -> bool {
+        let effect = if allow { Effect::Allow } else { Effect::Deny };
+        for s in scopes {
+            self.add_session_rule(PermissionRule {
+                tool: tool.clone(),
+                scope: Some(s.clone()),
+                effect,
+            });
+        }
+        allow
     }
 
     pub fn add_session_rule(&self, rule: PermissionRule) {
@@ -1172,6 +1204,39 @@ mod tests {
 
     fn needs_prompt(check: &PermissionCheck) -> bool {
         matches!(check, PermissionCheck::NeedsPrompt { .. })
+    }
+
+    #[test]
+    fn auto_review_toggles_and_forks() {
+        let mgr = mgr_with(std::env::temp_dir().as_ref(), Vec::new());
+        assert!(!mgr.is_auto_review());
+        assert!(mgr.toggle_auto_review());
+        assert!(mgr.is_auto_review());
+        assert!(!mgr.toggle_auto_review());
+        assert!(!mgr.is_auto_review());
+        mgr.toggle_auto_review();
+        assert!(mgr.fork().is_auto_review(), "fork carries the mode");
+    }
+
+    #[test]
+    fn apply_auto_review_allow_records_allow_rule() {
+        let mgr = mgr_with(std::env::temp_dir().as_ref(), Vec::new());
+        let tool = ToolKey::native("write");
+        let scopes = vec!["/tmp/a".to_string()];
+        assert!(mgr.apply_auto_review(&tool, &scopes, true));
+        assert!(
+            matches!(mgr.check(&tool, &scopes), PermissionCheck::Allowed),
+            "an allow decision must not prompt again"
+        );
+    }
+
+    #[test]
+    fn apply_auto_review_deny_blocks_later_calls() {
+        let mgr = mgr_with(std::env::temp_dir().as_ref(), Vec::new());
+        let tool = ToolKey::native("bash");
+        let scopes = vec!["rm -rf /".to_string()];
+        assert!(!mgr.apply_auto_review(&tool, &scopes, false));
+        assert!(matches!(mgr.check(&tool, &scopes), PermissionCheck::Denied));
     }
 
     #[test]

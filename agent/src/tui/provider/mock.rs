@@ -323,6 +323,11 @@ impl Provider for MockProvider {
                     Command::SelectModel { .. } => {
                         // Fixed script: model selection is outside the demo.
                     }
+                    Command::ToggleAutoReview => {
+                        // The mock has no permission gate to re-route.
+                        let _ =
+                            evt_tx.send(AgentEvent::AssistantText("auto-review toggled.".into()));
+                    }
                 }
             }
         });
