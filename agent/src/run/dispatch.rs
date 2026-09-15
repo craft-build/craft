@@ -198,7 +198,10 @@ impl ToolDispatch {
         }
         let dedup_key = read_only.then(|| ToolDedupCache::key(&name, &call.function.arguments));
         let cached = if let (Some(cache), Some(key)) = (&self.dedup, dedup_key) {
-            cache.lock().ok().and_then(|guard| guard.get(key).cloned())
+            cache
+                .lock()
+                .ok()
+                .and_then(|guard| guard.get(key, &name, &call.function.arguments).cloned())
         } else {
             None
         };
@@ -242,10 +245,21 @@ impl ToolDispatch {
         {
             if let Some(key) = dedup_key {
                 let path = dedup::extract_file_path(&call.function.arguments);
-                guard.insert(key, &result, path.as_deref());
+                guard.insert(
+                    key,
+                    &result,
+                    path.as_deref(),
+                    &name,
+                    &call.function.arguments,
+                );
             } else if ToolDedupCache::is_write(&name) {
-                for path in dedup::extract_write_paths(&name, &call.function.arguments) {
-                    guard.invalidate_path(&path);
+                let paths = dedup::extract_write_paths(&name, &call.function.arguments);
+                if paths.is_empty() {
+                    guard.invalidate_pathless();
+                } else {
+                    for path in paths {
+                        guard.invalidate_path(&path);
+                    }
                 }
             }
         }

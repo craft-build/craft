@@ -26,9 +26,19 @@ const WRITE_TOOLS: &[&str] = &[
 const CACHED_PREFIX: &str = "[cached] ";
 const MAX_CACHE_ENTRIES: usize = 64;
 
+#[derive(Debug, Clone)]
+struct Entry {
+    result: ToolResult,
+    /// The argument path, if any, scoping per-path invalidation.
+    path: Option<String>,
+    /// Canonical `(name, args)` serialization used to verify a hit: a
+    /// 64-bit digest alone cannot prove the entry belongs to this call.
+    check: String,
+}
+
 #[derive(Debug, Default)]
 pub struct ToolDedupCache {
-    entries: HashMap<u64, (ToolResult, Option<String>)>,
+    entries: HashMap<u64, Entry>,
     order: VecDeque<u64>,
 }
 
@@ -52,39 +62,54 @@ impl ToolDedupCache {
         WRITE_TOOLS.contains(&name)
     }
 
-    pub fn get(&self, key: u64) -> Option<&ToolResult> {
-        self.entries.get(&key).map(|(result, _)| result)
+    pub fn get(&self, key: u64, name: &str, input: &Value) -> Option<&ToolResult> {
+        self.entries
+            .get(&key)
+            .filter(|e| e.check == canonical_args(name, input))
+            .map(|e| &e.result)
     }
 
     /// Cache one successful read-only result, evicting the oldest entry at
     /// capacity. `path` (the argument path, if any) scopes invalidation.
-    pub fn insert(&mut self, key: u64, result: &ToolResult, path: Option<&str>) {
+    pub fn insert(
+        &mut self,
+        key: u64,
+        result: &ToolResult,
+        path: Option<&str>,
+        name: &str,
+        input: &Value,
+    ) {
         if result.is_error {
             return;
         }
+        let entry = Entry {
+            result: result.clone(),
+            path: path.map(String::from),
+            check: canonical_args(name, input),
+        };
         if self.entries.len() >= MAX_CACHE_ENTRIES
             && let Some(evict) = self.order.front().copied()
         {
             self.entries.remove(&evict);
             self.order.pop_front();
         }
-        if self
-            .entries
-            .insert(key, (result.clone(), path.map(String::from)))
-            .is_none()
-        {
+        if self.entries.insert(key, entry).is_none() {
             self.order.push_back(key);
         }
     }
 
+    /// Drop the entry for `path`, plus every pathless entry (grep/glob
+    /// sample the whole tree, so any write can change their answer).
     pub fn invalidate_path(&mut self, path: &str) {
-        self.entries.retain(|key, (_, cached_path)| {
-            let keep = cached_path.as_ref().is_none_or(|p| p != path);
-            if !keep {
-                self.order.retain(|other| other != key);
-            }
-            keep
-        });
+        self.entries
+            .retain(|_, e| e.path.is_some() && e.path.as_deref() != Some(path));
+        self.order.retain(|key| self.entries.contains_key(key));
+    }
+
+    /// Drop every pathless entry; used when a write touches no known path.
+    pub fn invalidate_pathless(&mut self) {
+        self.entries.retain(|_, e| e.path.is_some());
+        self.order.retain(|key| self.entries.contains_key(key));
     }
 
     pub fn clear(&mut self) {
@@ -160,6 +185,28 @@ pub fn extract_write_paths(name: &str, input: &Value) -> Vec<String> {
             .collect();
     }
     extract_file_path(input).into_iter().collect()
+}
+
+/// Deterministic canonical form of `(name, input)` for hit verification:
+/// object keys sorted at every level so argument order cannot fork the check.
+fn canonical_args(name: &str, input: &Value) -> String {
+    format!(
+        "{}:{}",
+        name,
+        serde_json::to_string(&sorted(input)).expect("JSON is serializable")
+    )
+}
+
+fn sorted(val: &Value) -> Value {
+    match val {
+        Value::Object(obj) => {
+            let map: std::collections::BTreeMap<String, Value> =
+                obj.iter().map(|(k, v)| (k.clone(), sorted(v))).collect();
+            serde_json::to_value(map).expect("JSON is serializable")
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Session-wide handle: the dispatcher (which clones per turn) and the
@@ -255,52 +302,102 @@ mod tests {
     #[test]
     fn insert_get_clear() {
         let mut cache = ToolDedupCache::new();
-        let key = ToolDedupCache::key("read", &serde_json::json!({"path": "/x.rs"}));
-        cache.insert(key, &result("x"), None);
+        let input = serde_json::json!({"path": "/x.rs"});
+        let key = ToolDedupCache::key("read", &input);
+        cache.insert(key, &result("x"), None, "read", &input);
         assert_eq!(
-            cache.get(key).map(|r| r.content[0].to_text()),
+            cache
+                .get(key, "read", &input)
+                .map(|r| r.content[0].to_text()),
             Some("x".to_string())
         );
         cache.clear();
-        assert!(cache.get(key).is_none());
+        assert!(cache.get(key, "read", &input).is_none());
+    }
+
+    #[test]
+    fn digest_collision_does_not_serve_another_entry() {
+        let mut cache = ToolDedupCache::new();
+        let input_a = serde_json::json!({"path": "/a.rs"});
+        let input_b = serde_json::json!({"path": "/b.rs"});
+        cache.insert(7, &result("a"), None, "read", &input_a);
+        assert!(cache.get(7, "read", &input_b).is_none());
+        assert!(cache.get(7, "grep", &input_a).is_none());
+    }
+
+    #[test]
+    fn argument_key_order_does_not_fork_the_check() {
+        let mut cache = ToolDedupCache::new();
+        let key = ToolDedupCache::key("read", &serde_json::json!({"path": "/x", "offset": 1}));
+        cache.insert(
+            key,
+            &result("x"),
+            None,
+            "read",
+            &serde_json::json!({"offset": 1, "path": "/x"}),
+        );
+        assert!(
+            cache
+                .get(key, "read", &serde_json::json!({"path": "/x", "offset": 1}))
+                .is_some()
+        );
     }
 
     #[test]
     fn errors_are_never_cached() {
         let mut cache = ToolDedupCache::new();
-        let key = 1;
         let mut errored = result("boom");
         errored.is_error = true;
-        cache.insert(key, &errored, None);
-        assert!(cache.get(key).is_none());
+        cache.insert(1, &errored, None, "read", &serde_json::json!({}));
+        assert!(cache.get(1, "read", &serde_json::json!({})).is_none());
     }
 
     #[test]
     fn fifo_eviction_at_capacity() {
         let mut cache = ToolDedupCache::new();
         for i in 0..=MAX_CACHE_ENTRIES {
-            cache.insert(i as u64, &result("v"), None);
+            cache.insert(
+                i as u64,
+                &result("v"),
+                None,
+                "read",
+                &serde_json::json!({"i": i}),
+            );
         }
         assert_eq!(cache.len(), MAX_CACHE_ENTRIES);
-        assert!(cache.get(0).is_none());
-        assert!(cache.get(1).is_some());
+        assert!(cache.get(0, "read", &serde_json::json!({"i": 0})).is_none());
+        assert!(cache.get(1, "read", &serde_json::json!({"i": 1})).is_some());
     }
 
     #[test]
     fn invalidate_path_removes_only_matching() {
         let mut cache = ToolDedupCache::new();
-        let key_a = ToolDedupCache::key("read", &serde_json::json!({"path": "/a.rs"}));
-        let key_b = ToolDedupCache::key("read", &serde_json::json!({"path": "/b.rs"}));
-        let key_g = ToolDedupCache::key("grep", &serde_json::json!({"pattern": "x"}));
-        cache.insert(key_a, &result("a"), Some("/a.rs"));
-        cache.insert(key_b, &result("b"), Some("/b.rs"));
-        cache.insert(key_g, &result("g"), None);
+        let input_a = serde_json::json!({"path": "/a.rs"});
+        let input_b = serde_json::json!({"path": "/b.rs"});
+        let key_a = ToolDedupCache::key("read", &input_a);
+        let key_b = ToolDedupCache::key("read", &input_b);
+        cache.insert(key_a, &result("a"), Some("/a.rs"), "read", &input_a);
+        cache.insert(key_b, &result("b"), Some("/b.rs"), "read", &input_b);
 
         cache.invalidate_path("/a.rs");
 
-        assert!(cache.get(key_a).is_none());
-        assert!(cache.get(key_b).is_some());
-        assert!(cache.get(key_g).is_some(), "pathless entry stays");
+        assert!(cache.get(key_a, "read", &input_a).is_none());
+        assert!(cache.get(key_b, "read", &input_b).is_some());
+    }
+
+    #[test]
+    fn any_write_invalidates_pathless_entries() {
+        let mut cache = ToolDedupCache::new();
+        let grep_input = serde_json::json!({"pattern": "fn foo"});
+        let key_g = ToolDedupCache::key("grep", &grep_input);
+        cache.insert(key_g, &result("g"), None, "grep", &grep_input);
+
+        cache.invalidate_path("/unrelated.rs");
+
+        assert!(
+            cache.get(key_g, "grep", &grep_input).is_none(),
+            "a write can change grep results, so the stale entry must go"
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@ Optimal port order from `comparison.md`: dependencies first, highest leverage-pe
 23. C.9 Per-tool guardrails
 24. E.1 Snapshots & rollback / `/undo` — also unlocks safety for bash later
 
-## Phase 3 — Permissions & bash
+## [x] Phase 3 — Permissions & bash
 
 25. B.1 Permission rule engine — backbone for bash/web/task
 26. B.2 Compound-command permission parsing (tree-sitter bash)

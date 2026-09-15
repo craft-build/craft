@@ -393,13 +393,16 @@ mod tests {
         use crate::run::{ToolDedupCache, shared_cache};
 
         let cache = shared_cache();
-        let key = ToolDedupCache::key("read", &serde_json::json!({"path": "/x.rs"}));
+        let input = serde_json::json!({"path": "/x.rs"});
+        let key = ToolDedupCache::key("read", &input);
         {
             let mut guard = cache.lock().unwrap();
             guard.insert(
                 key,
                 &crate::history::ToolResult::text("c1", "read", "x"),
                 None,
+                "read",
+                &input,
             );
         }
         let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
@@ -418,7 +421,7 @@ mod tests {
                 .await
         );
         assert!(
-            cache.lock().unwrap().get(key).is_none(),
+            cache.lock().unwrap().get(key, "read", &input).is_none(),
             "a compaction run must clear the dedup cache"
         );
     }

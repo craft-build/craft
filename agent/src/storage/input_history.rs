@@ -30,14 +30,27 @@ impl InputHistory {
         let path = dir.path().join(HISTORY_FILE);
         let data = match fs::read(&path) {
             Ok(d) => d,
-            Err(_) => {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Self {
+                    entries: VecDeque::new(),
+                    max_entries,
+                };
+            }
+            Err(error) => {
+                eprintln!("warning: could not read {}: {error}", path.display());
                 return Self {
                     entries: VecDeque::new(),
                     max_entries,
                 };
             }
         };
-        let items: Vec<String> = serde_json::from_slice(&data).unwrap_or_default();
+        let items: Vec<String> = match serde_json::from_slice(&data) {
+            Ok(items) => items,
+            Err(error) => {
+                eprintln!("warning: ignoring unreadable {}: {error}", path.display());
+                Vec::new()
+            }
+        };
         let mut history = Self {
             entries: VecDeque::with_capacity(max_entries),
             max_entries,
@@ -62,10 +75,13 @@ impl InputHistory {
     }
 
     fn push_inner(&mut self, entry: String) {
+        if self.max_entries == 0 {
+            return;
+        }
         if self.entries.back().is_some_and(|last| *last == entry) {
             return;
         }
-        if self.entries.len() == self.max_entries {
+        if self.entries.len() >= self.max_entries {
             self.entries.pop_front();
         }
         self.entries.push_back(entry);
@@ -157,6 +173,15 @@ mod tests {
         let (_tmp, dir) = tmp_dir();
         fs::write(dir.path().join(HISTORY_FILE), b"not json").unwrap();
         let history = InputHistory::load(&dir, MAX_ENTRIES);
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn zero_max_entries_stays_empty() {
+        let mut history = InputHistory::default();
+        history.max_entries = 0;
+        history.push("a".into());
+        history.push("b".into());
         assert!(history.is_empty());
     }
 }

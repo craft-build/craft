@@ -231,6 +231,14 @@ impl Provider for CraftProvider {
             let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
             let _ = evt_tx.send(AgentEvent::TokenUsage("0 (0%)".into()));
 
+            // Signal cancellation and abort any in-flight turn. Callers then
+            // differ only in how much session state they rebuild.
+            let interrupt = |current_turn: &mut Option<AbortHandle>| {
+                cancel_flag.set(true);
+                if let Some(h) = current_turn.take() {
+                    h.abort();
+                }
+            };
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     Command::SendMessage(text) => {
@@ -267,18 +275,12 @@ impl Provider for CraftProvider {
                         )));
                     }
                     Command::Interrupt => {
-                        cancel_flag.set(true);
-                        if let Some(h) = current_turn.take() {
-                            h.abort();
-                        }
+                        interrupt(&mut current_turn);
                         let _ = evt_tx.send(AgentEvent::AssistantEnd);
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
                     Command::Clear => {
-                        cancel_flag.set(true);
-                        if let Some(h) = current_turn.take() {
-                            h.abort();
-                        }
+                        interrupt(&mut current_turn);
                         // Reset through `linked` so the fresh session's
                         // compaction state keeps working dedup/guardrails
                         // handles; a bare default would strand the caches the
@@ -288,10 +290,7 @@ impl Provider for CraftProvider {
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
                     Command::Reset => {
-                        cancel_flag.set(true);
-                        if let Some(h) = current_turn.take() {
-                            h.abort();
-                        }
+                        interrupt(&mut current_turn);
                         *state.lock().await = SessionState::linked();
                         files.lock().expect("files lock").clear();
                         let _ = evt_tx.send(AgentEvent::AssistantEnd);
@@ -712,6 +711,108 @@ fn emit_reply(tx: &mpsc::UnboundedSender<AgentEvent>, streamed: bool, reply: &st
 }
 
 /// One agent turn: drives the shared run loop, rendering to the TUI seam.
+async fn resolve_model(
+    config: &Config,
+    selection: &Selection,
+) -> Result<crate::providers::DynamicModel, String> {
+    let Some(provider_config) = config.providers.get(&selection.provider) else {
+        return Err(format!("unknown provider {:?}", selection.provider));
+    };
+    let provider = ClientProvider::from_config(provider_config).map_err(report)?;
+    provider.completion_model(&selection.model).map_err(report)
+}
+
+/// Run configured compaction stages whose context-fill threshold is crossed
+/// before the history is sent to the model; commit effectiveness state only.
+async fn compact_history(
+    state: &Arc<Mutex<SessionState>>,
+    config: &Config,
+    model: &crate::providers::DynamicModel,
+    history: &mut Vec<history::Message>,
+    context_length: Option<u32>,
+) {
+    let mut compaction = state.lock().await.compaction.clone();
+    CompactionEngine::new(config.compaction.clone())
+        .with_buffer(config.compaction_buffer)
+        .maybe_compact(&mut compaction, model, history, context_length)
+        .await;
+    state.lock().await.compaction = compaction;
+}
+
+/// What the continuation loop does after one outcome: keep looping, stop
+/// and commit the history, or abort the turn leaving history untouched.
+enum TurnFlow {
+    Continue,
+    Commit,
+    Abort,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_outcome(
+    outcome: RunOutcome,
+    renderer: &TurnRenderer,
+    history: &[history::Message],
+    prompt: &mut String,
+    continuations: &mut usize,
+    state: &Arc<Mutex<SessionState>>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> TurnFlow {
+    match outcome {
+        RunOutcome::Cancelled => {
+            let _ = tx.send(AgentEvent::AssistantEnd);
+            let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+            TurnFlow::Abort
+        }
+        RunOutcome::Failed(message) => {
+            if renderer.streamed() {
+                let _ = tx.send(AgentEvent::AssistantEnd);
+            }
+            let _ = tx.send(AgentEvent::AssistantText(message));
+            let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
+            TurnFlow::Abort
+        }
+        RunOutcome::MaxTurns => {
+            // Keep the partial run: the follow-up prompt continues from
+            // where the budget ran out instead of silently losing it.
+            state.lock().await.history = history.to_vec();
+            let _ = tx.send(AgentEvent::AssistantText(
+                "Reached the turn limit. Send another message to continue.".into(),
+            ));
+            TurnFlow::Commit
+        }
+        RunOutcome::MaxTokens { reply } => {
+            state.lock().await.history = history.to_vec();
+            emit_reply(tx, renderer.streamed(), &reply);
+            let _ = tx.send(AgentEvent::AssistantText(
+                "The reply hit the output-token limit. Send another message to continue.".into(),
+            ));
+            TurnFlow::Commit
+        }
+        RunOutcome::Done { reply } => {
+            if reply.is_empty() && *continuations > 0 {
+                *continuations -= 1;
+                *prompt = CONTINUE_AFTER_EMPTY.into();
+                return TurnFlow::Continue;
+            }
+            if renderer.streamed() || !reply.is_empty() {
+                emit_reply(tx, renderer.streamed(), &reply);
+            } else {
+                let _ = tx.send(AgentEvent::AssistantText(
+                    "The model returned an empty response. Send another message to continue."
+                        .into(),
+                ));
+            }
+            TurnFlow::Commit
+        }
+    }
+}
+
+// A turn that ends with only reasoning (no reply, no tool calls) still
+// carries real work; nudge the model to continue instead of stopping.
+const MAX_EMPTY_CONTINUATIONS: usize = 2;
+const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and no tool \
+     calls. Continue the task with your reply or the next tool call.";
+
 async fn run_turn(ctx: TurnCtx, text: String) {
     let TurnCtx {
         config,
@@ -734,37 +835,23 @@ async fn run_turn(ctx: TurnCtx, text: String) {
 
     state.lock().await.pending_approval = None;
 
-    let Some(provider_config) = config.providers.get(&selection.provider) else {
-        fail!(format!("unknown provider {:?}", selection.provider));
-    };
-    let provider = match ClientProvider::from_config(provider_config) {
-        Ok(provider) => provider,
-        Err(error) => fail!(report(error)),
-    };
-    let model = match provider.completion_model(&selection.model) {
+    let model = match resolve_model(&config, &selection).await {
         Ok(model) => model,
-        Err(error) => fail!(report(error)),
+        Err(message) => fail!(message),
     };
 
     let mut history = state.lock().await.history.clone();
     let dedup = state.lock().await.dedup.clone();
     let guardrails = state.lock().await.guardrails.clone();
 
-    // Run configured compaction stages whose context-fill threshold is crossed
-    // before the history is sent to the model; commit effectiveness state only.
-    {
-        let mut compaction = state.lock().await.compaction.clone();
-        CompactionEngine::new(config.compaction.clone())
-            .with_buffer(config.compaction_buffer)
-            .maybe_compact(
-                &mut compaction,
-                &model,
-                &mut history,
-                selection.context_length,
-            )
-            .await;
-        state.lock().await.compaction = compaction;
-    }
+    compact_history(
+        &state,
+        &config,
+        &model,
+        &mut history,
+        selection.context_length,
+    )
+    .await;
 
     let tools = workspace
         .register()
@@ -795,11 +882,6 @@ async fn run_turn(ctx: TurnCtx, text: String) {
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
-    // A turn that ends with only reasoning (no reply, no tool calls) still
-    // carries real work; nudge the model to continue instead of stopping.
-    const MAX_EMPTY_CONTINUATIONS: usize = 2;
-    const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and no tool \
-         calls. Continue the task with your reply or the next tool call.";
     let mut prompt = text;
     let mut continuations = MAX_EMPTY_CONTINUATIONS;
     loop {
@@ -814,54 +896,20 @@ async fn run_turn(ctx: TurnCtx, text: String) {
             &|event| renderer.map(event),
         )
         .await;
-        match outcome {
-            RunOutcome::Cancelled => {
-                let _ = tx.send(AgentEvent::AssistantEnd);
-                let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-                return;
-            }
-            RunOutcome::Failed(message) => {
-                if renderer.streamed() {
-                    let _ = tx.send(AgentEvent::AssistantEnd);
-                }
-                let _ = tx.send(AgentEvent::AssistantText(message));
-                let _ = tx.send(AgentEvent::StatusChanged(Status::Failed));
-                return;
-            }
-            RunOutcome::MaxTurns => {
-                // Keep the partial run: the follow-up prompt continues from
-                // where the budget ran out instead of silently losing it.
-                state.lock().await.history = history.clone();
-                let _ = tx.send(AgentEvent::AssistantText(
-                    "Reached the turn limit. Send another message to continue.".into(),
-                ));
-                break;
-            }
-            RunOutcome::MaxTokens { reply } => {
-                state.lock().await.history = history.clone();
-                emit_reply(&tx, renderer.streamed(), &reply);
-                let _ = tx.send(AgentEvent::AssistantText(
-                    "The reply hit the output-token limit. Send another message to continue."
-                        .into(),
-                ));
-                break;
-            }
-            RunOutcome::Done { reply } => {
-                if reply.is_empty() && continuations > 0 {
-                    continuations -= 1;
-                    prompt = CONTINUE_AFTER_EMPTY.into();
-                    continue;
-                }
-                if renderer.streamed() || !reply.is_empty() {
-                    emit_reply(&tx, renderer.streamed(), &reply);
-                } else {
-                    let _ = tx.send(AgentEvent::AssistantText(
-                        "The model returned an empty response. Send another message to continue."
-                            .into(),
-                    ));
-                }
-                break;
-            }
+        match handle_outcome(
+            outcome,
+            &renderer,
+            &history,
+            &mut prompt,
+            &mut continuations,
+            &state,
+            &tx,
+        )
+        .await
+        {
+            TurnFlow::Continue => continue,
+            TurnFlow::Abort => return,
+            TurnFlow::Commit => break,
         }
     }
     state.lock().await.history = history;
