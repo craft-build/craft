@@ -3,11 +3,14 @@
 //! Per turn: build the request through the provider [`crate::edge`], stream
 //! the model call ([`stream`]), dispatch its tool calls ([`dispatch`]), append
 //! the results, and continue while the model emits tool calls — bounded by
-//! `max_turns`. History is committed to the caller only on success: failed
-//! and cancelled turns leave it untouched; a run that hits the turn budget
+//! `max_turns`. History is committed to the caller on success; a failed run
+//! commits nothing, while a cancelled run commits a sanitized partial
+//! (dangling tool calls closed, cancel marker appended) so the next prompt
+//! replays cleanly; a run that hits the turn budget
 //! commits its sanitized partial history with an end marker so the next
 //! prompt continues from where the budget ran out.
 
+pub mod cancel;
 pub mod dedup;
 pub mod dispatch;
 pub mod events;
@@ -288,7 +291,9 @@ pub enum RunOutcome {
     /// the model still stopped on the output limit. The turn's messages
     /// (including the truncated tail) were committed, like `Done`.
     MaxTokens { reply: String },
-    /// The run was cancelled; history is not committed.
+    /// The run was cancelled; the sanitized partial history (prompt, any
+    /// partial assistant text, closed tool calls, cancel marker) was
+    /// committed so the conversation can continue from the cut-off point.
     Cancelled,
     /// The run failed; history is not committed.
     Failed(String),
@@ -365,7 +370,7 @@ async fn run_inner<M: CompletionModel + Clone>(
     let mut continuations: usize = 0;
     loop {
         if cancel.cancelled() {
-            return (RunOutcome::Cancelled, stats);
+            return (commit_cancelled(history, &mut turn), stats);
         }
         let mut full = history.clone();
         full.extend(turn.iter().cloned());
@@ -386,7 +391,9 @@ async fn run_inner<M: CompletionModel + Clone>(
         );
         let output = match stream::run_model_stream(model, request, cancel, emit).await {
             Ok(output) => output,
-            Err(stream::StreamFailure::Cancelled) => return (RunOutcome::Cancelled, stats),
+            Err(stream::StreamFailure::Cancelled) => {
+                return (commit_cancelled(history, &mut turn), stats);
+            }
             Err(stream::StreamFailure::Error(message)) => {
                 return (RunOutcome::Failed(message), stats);
             }
@@ -435,6 +442,9 @@ async fn run_inner<M: CompletionModel + Clone>(
         }
         if let Some(outcome) = dispatch_tool_calls(tools, &mut turn, tool_calls, cancel, emit).await
         {
+            if matches!(outcome, RunOutcome::Cancelled) {
+                return (commit_cancelled(history, &mut turn), stats);
+            }
             return (outcome, stats);
         }
         turns += 1;
@@ -452,6 +462,20 @@ fn commit_partial(history: &mut Vec<Message>, turn: &mut Vec<Message>) -> RunOut
     sanitize_partial(turn);
     history.append(turn);
     RunOutcome::MaxTurns
+}
+
+/// Marker appended when a run is cancelled by the user, so the model knows
+/// where the turn stopped (reference `history.rs` `CANCEL_MARKER`).
+pub(crate) const CANCEL_MARKER: &str = "[Cancelled by user]";
+
+/// Commit the partial turn of a cancelled run: the prompt and whatever the
+/// model produced are kept, dangling tool calls are closed with an error
+/// result, and the cancel marker records the cut-off.
+fn commit_cancelled(history: &mut Vec<Message>, turn: &mut Vec<Message>) -> RunOutcome {
+    close_dangling_calls(turn, "skipped: cancelled by the user");
+    turn.push(Message::user(CANCEL_MARKER));
+    history.append(turn);
+    RunOutcome::Cancelled
 }
 
 /// Handle an assistant turn with no tool calls. Continues truncated and
@@ -674,6 +698,13 @@ fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
 /// Close dangling tool calls and append the end marker, so the committed
 /// partial history replays cleanly on the next request.
 pub(crate) fn sanitize_partial(turn: &mut Vec<Message>) {
+    close_dangling_calls(turn, "skipped: the turn ended before this call ran");
+    turn.push(Message::user(END_MARKER));
+}
+
+/// Append error results for every tool call in the turn that never got an
+/// answer, so the trailing assistant message is API-valid on replay.
+fn close_dangling_calls(turn: &mut Vec<Message>, note: &str) {
     let mut dangling: Vec<history::ToolCall> = Vec::new();
     let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
     for message in turn.iter() {
@@ -703,16 +734,16 @@ pub(crate) fn sanitize_partial(turn: &mut Vec<Message>) {
         let content = open
             .iter()
             .map(|call| {
-                history::UserContent::ToolResult(history::ToolResult::text(
-                    call.id.clone(),
-                    call.function.name.clone(),
-                    "skipped: the turn ended before this call ran",
-                ))
+                history::UserContent::ToolResult(history::ToolResult {
+                    call: call.id.clone(),
+                    name: call.function.name.clone(),
+                    content: vec![history::ToolResultContent::text(note)],
+                    is_error: true,
+                })
             })
             .collect();
         turn.push(Message::User { content });
     }
-    turn.push(Message::user(END_MARKER));
 }
 
 #[cfg(test)]
@@ -1248,7 +1279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_mid_tool_skips_execution_and_commits_nothing() {
+    async fn cancel_mid_tool_skips_execution_and_commits_sanitized_partial() {
         // The before-execution hook denies the call by stopping the run,
         // standing in for a cancellation arriving at the dispatch boundary.
         struct StopAll;
@@ -1280,7 +1311,36 @@ mod tests {
         )
         .await;
         assert!(matches!(outcome, RunOutcome::Cancelled));
-        assert!(history.is_empty(), "cancelled run must not commit");
+        // The cancelled turn is committed sanitized: the prompt, the
+        // assistant's tool call, an error result closing it, and the marker.
+        assert_eq!(history.len(), 4, "prompt + tool call + closure + marker");
+        assert_eq!(history[0].text(), "go");
+        assert!(matches!(&history[2], Message::User { content }
+            if matches!(&content[0], UserContent::ToolResult(r)
+                if r.is_error && r.name == "read")));
+        assert_eq!(history[3].text(), CANCEL_MARKER);
+    }
+
+    #[tokio::test]
+    async fn cancel_before_the_first_model_call_commits_prompt_and_marker_only() {
+        let (model, _turns) = stream_turns(vec![]);
+        let (flag, cancel) = cancel_channel();
+        flag.set(true);
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &ToolDispatch::default(),
+            &mut history,
+            "stop",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Cancelled));
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].text(), "stop");
+        assert_eq!(history[1].text(), CANCEL_MARKER);
     }
 
     #[tokio::test]
