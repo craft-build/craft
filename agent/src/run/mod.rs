@@ -15,6 +15,7 @@ mod nudge;
 mod read_lifecycle;
 mod recency;
 mod stream;
+mod task_set;
 
 pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
 pub use dispatch::{
@@ -377,9 +378,21 @@ fn handle_terminal_reply(
     })
 }
 
+/// Tools that must never share a wave with another call: `batch` nests its
+/// own parallel dispatch and `question` (not yet ported) blocks on the user.
+fn is_never_parallel(name: &str) -> bool {
+    matches!(name, "batch" | "question")
+}
+
 /// Execute the turn's tool calls, appending their results to `turn`.
 /// Returns `Some(outcome)` when the run must stop (cancel or dispatch
 /// failure); `None` means the loop continues.
+///
+/// Calls run concurrently in waves; a wave is joined and drained before the
+/// next starts whenever two calls write the same path or a
+/// never-parallel tool joins the batch. Results are committed in call
+/// order; a panicking tool future becomes an error result instead of
+/// unwinding the run.
 async fn dispatch_tool_calls(
     tools: &ToolDispatch,
     turn: &mut Vec<Message>,
@@ -387,25 +400,100 @@ async fn dispatch_tool_calls(
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> Option<RunOutcome> {
+    // Spawned tasks need owned state; the dispatch table is cheap to clone.
+    let tools = Arc::new(tools.clone());
+    let mut set = task_set::TaskSet::new();
+    let mut wave: Vec<history::ToolCall> = Vec::new();
+    let mut all_write_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut has_path_conflict = false;
+
     for call in calls {
         if cancel.cancelled() {
-            return Some(RunOutcome::Cancelled);
+            let outcome = commit_wave(join_wave(set, wave.drain(..)).await, turn, emit).await;
+            return Some(outcome.unwrap_or(RunOutcome::Cancelled));
         }
-        match tools.execute(call.clone()).await {
-            Ok(DispatchOutcome::Ran(result)) | Ok(DispatchOutcome::Skipped(result)) => {
-                turn.push(Message::User {
-                    content: vec![history::UserContent::ToolResult(result.clone())],
-                });
-                emit(Event::ToolDone {
-                    id: call.id.clone(),
-                    name: call.function.name.clone(),
-                    arguments: call.function.arguments.clone(),
-                    result,
-                });
+        let name = call.function.name.clone();
+        if is_never_parallel(&name) {
+            has_path_conflict = true;
+        }
+        for path in dedup::extract_write_paths(&name, &call.function.arguments) {
+            if all_write_paths.contains(&path) {
+                has_path_conflict = true;
             }
-            Ok(DispatchOutcome::Stopped(_)) => return Some(RunOutcome::Cancelled),
-            Err(unknown) => return Some(RunOutcome::Failed(unknown)),
+            all_write_paths.insert(path);
         }
+        let executor = Arc::clone(&tools);
+        wave.push(call.clone());
+        set.spawn(async move { executor.execute(call).await });
+        if has_path_conflict {
+            if let Some(outcome) =
+                commit_wave(join_wave(set, wave.drain(..)).await, turn, emit).await
+            {
+                return Some(outcome);
+            }
+            set = task_set::TaskSet::new();
+            all_write_paths.clear();
+            has_path_conflict = false;
+        }
+    }
+    commit_wave(join_wave(set, wave.drain(..)).await, turn, emit).await
+}
+
+/// One finished wave entry: the call paired with its dispatch outcome, or
+/// the panic/cancellation string when the tool task itself failed.
+type WaveEntry = (
+    history::ToolCall,
+    Result<Result<DispatchOutcome, String>, String>,
+);
+
+/// Join a finished wave, pairing each spawn-order result with its call.
+async fn join_wave(
+    set: task_set::TaskSet<Result<DispatchOutcome, String>>,
+    wave: std::vec::Drain<'_, history::ToolCall>,
+) -> Vec<WaveEntry> {
+    let ids: Vec<history::ToolCall> = wave.collect();
+    set.join_all()
+        .await
+        .into_iter()
+        .zip(ids)
+        .map(|(outcome, call)| (call, outcome))
+        .collect()
+}
+
+/// Commit one wave's results to `turn` in call order, emitting `ToolDone`
+/// per call. `Some(outcome)` when the run must stop.
+async fn commit_wave(
+    results: Vec<WaveEntry>,
+    turn: &mut Vec<Message>,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> Option<RunOutcome> {
+    for (call, outcome) in results {
+        let result = match outcome {
+            Ok(Ok(DispatchOutcome::Ran(result))) | Ok(Ok(DispatchOutcome::Skipped(result))) => {
+                result
+            }
+            Ok(Ok(DispatchOutcome::Stopped(_))) => return Some(RunOutcome::Cancelled),
+            Ok(Err(unknown)) => return Some(RunOutcome::Failed(unknown)),
+            // The task itself failed: a panic or cancellation inside the
+            // tool future, reported as a per-call error result.
+            Err(panic) => history::ToolResult {
+                call: call.id.clone(),
+                name: call.function.name.clone(),
+                content: vec![history::ToolResultContent::text(format!(
+                    "internal error: tool panicked: {panic}"
+                ))],
+                is_error: true,
+            },
+        };
+        turn.push(Message::User {
+            content: vec![history::UserContent::ToolResult(result.clone())],
+        });
+        emit(Event::ToolDone {
+            id: call.id.clone(),
+            name: call.function.name.clone(),
+            arguments: call.function.arguments.clone(),
+            result,
+        });
     }
     None
 }
@@ -1688,5 +1776,232 @@ mod tests {
             panic!("tool result block on the wire");
         };
         assert_eq!(result.content[0].to_text(), raw.content[0].to_text());
+    }
+
+    // --- parallel dispatch with write-conflict barrier ---
+
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rig_core::tool::{PortableDynamicTool, ToolOutput};
+
+    use super::dispatch_tool_calls;
+
+    fn call(id: &str, name: &str, args: serde_json::Value) -> crate::history::ToolCall {
+        crate::history::ToolCall {
+            id: id.into(),
+            function: crate::history::ToolFunction {
+                name: name.into(),
+                arguments: args,
+            },
+        }
+    }
+
+    fn tool(name: &str, run: impl Fn() + Send + Sync + Clone + 'static) -> PortableDynamicTool {
+        let run2 = run.clone();
+        PortableDynamicTool::new(name, name, serde_json::json!({}), move |_| {
+            let run = run2.clone();
+            Box::pin(async move {
+                run();
+                Ok(ToolOutput::text("ok"))
+            })
+        })
+    }
+
+    async fn dispatch(
+        tools: &ToolDispatch,
+        calls: Vec<crate::history::ToolCall>,
+    ) -> (
+        Option<RunOutcome>,
+        Vec<Message>,
+        Vec<crate::history::ToolResult>,
+    ) {
+        let (_, cancel) = cancel_channel();
+        let mut turn = Vec::new();
+        let done = std::sync::Arc::new(StdMutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&done);
+        let outcome = dispatch_tool_calls(tools, &mut turn, calls, &cancel, &move |event| {
+            if let Event::ToolDone { result, .. } = event {
+                sink.lock().unwrap().push(result);
+            }
+        })
+        .await;
+        (outcome, turn, done.lock().unwrap().clone())
+    }
+
+    fn results_in_call_order(turn: &[Message]) -> Vec<crate::history::ToolResult> {
+        turn.iter()
+            .filter_map(|m| match m {
+                Message::User { content } => match &content[0] {
+                    UserContent::ToolResult(r) => Some(r.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Two independent read-only calls that each wait for the other to start:
+    /// sequential dispatch would deadlock both on the barrier, parallel
+    /// dispatch passes.
+    #[tokio::test]
+    async fn independent_calls_run_concurrently() {
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let mk_probe = |name: &'static str, barrier: &std::sync::Arc<tokio::sync::Barrier>| {
+            let barrier = std::sync::Arc::clone(barrier);
+            PortableDynamicTool::new(
+                name,
+                name,
+                serde_json::json!({}),
+                move |_: serde_json::Value| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    Box::pin(async move {
+                        barrier.wait().await;
+                        Ok(ToolOutput::text("ok"))
+                    })
+                },
+            )
+        };
+        let tools =
+            ToolDispatch::new([mk_probe("probe_a", &barrier), mk_probe("probe_b", &barrier)]);
+        let dispatched = dispatch(
+            &tools,
+            vec![
+                call("t1", "probe_a", serde_json::json!({})),
+                call("t2", "probe_b", serde_json::json!({})),
+            ],
+        );
+        // Sequential dispatch would deadlock both probes on the barrier.
+        let (outcome, turn, done) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), dispatched)
+                .await
+                .expect("calls must overlap; dispatch looks sequential");
+        assert!(outcome.is_none());
+        assert_eq!(done.len(), 2);
+        let results = results_in_call_order(&turn);
+        assert_eq!(results[0].call, "t1");
+        assert_eq!(results[1].call, "t2");
+    }
+
+    /// Two writes to the same path must not overlap: each records start/end
+    /// markers around a sleep and the log must show one fully nested pair.
+    #[tokio::test]
+    async fn same_path_writes_serialize() {
+        let log = std::sync::Arc::new(StdMutex::new(Vec::new()));
+        let mk = |name: &'static str, log: &std::sync::Arc<StdMutex<Vec<&'static str>>>| {
+            let log = std::sync::Arc::clone(log);
+            tool(name, move || {
+                log.lock().unwrap().push("start");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                log.lock().unwrap().push("end");
+            })
+        };
+        let tools = ToolDispatch::new([mk("write", &log), mk("edit", &log)]);
+        let (outcome, turn, _) = dispatch(
+            &tools,
+            vec![
+                call(
+                    "t1",
+                    "write",
+                    serde_json::json!({"path": "same.txt", "content": "a"}),
+                ),
+                call(
+                    "t2",
+                    "edit",
+                    serde_json::json!({"path": "same.txt", "old_string": "a", "new_string": "b"}),
+                ),
+            ],
+        )
+        .await;
+        assert!(outcome.is_none());
+        assert_eq!(*log.lock().unwrap(), vec!["start", "end", "start", "end"]);
+        assert_eq!(results_in_call_order(&turn)[1].call, "t2");
+    }
+
+    /// A never-parallel tool joins the wave barrier: everything spawned before
+    /// it has finished before it starts. The counter is incremented by the
+    /// earlier call at its end and read by the batch call at its start.
+    #[tokio::test]
+    async fn never_parallel_tool_waits_for_earlier_calls() {
+        let started = std::sync::Arc::new(AtomicUsize::new(0));
+        let finished = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen_before = std::sync::Arc::new(AtomicUsize::new(usize::MAX));
+        let earlier = {
+            let finished = std::sync::Arc::clone(&finished);
+            tool("read", move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                finished.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let batch = {
+            let finished = std::sync::Arc::clone(&finished);
+            let seen = std::sync::Arc::clone(&seen_before);
+            tool("batch", move || {
+                seen.store(finished.load(Ordering::SeqCst), Ordering::SeqCst);
+            })
+        };
+        let tools = ToolDispatch::new([earlier, batch]);
+        let (outcome, _, _) = dispatch(
+            &tools,
+            vec![
+                call("t1", "read", serde_json::json!({"path": "f"})),
+                call("t2", "batch", serde_json::json!({})),
+            ],
+        )
+        .await;
+        assert!(outcome.is_none());
+        assert_eq!(
+            seen_before.load(Ordering::SeqCst),
+            1,
+            "batch must start only after the earlier call finished"
+        );
+    }
+
+    /// A panicking tool future becomes an error result for that call; the
+    /// sibling call still succeeds and the run continues.
+    #[tokio::test]
+    async fn panicking_tool_becomes_error_result() {
+        let tools = ToolDispatch::new([tool("boom", || panic!("kaboom")), tool("fine", || {})]);
+        let (outcome, turn, _) = dispatch(
+            &tools,
+            vec![
+                call("t1", "boom", serde_json::json!({})),
+                call("t2", "fine", serde_json::json!({})),
+            ],
+        )
+        .await;
+        assert!(outcome.is_none(), "panic must not fail the run");
+        let results = results_in_call_order(&turn);
+        assert!(results[0].is_error);
+        let text = results[0].content[0].to_text();
+        assert!(text.contains("tool panicked"), "got: {text}");
+        assert!(text.contains("kaboom"), "got: {text}");
+        assert!(!results[1].is_error);
+    }
+
+    /// Unknown tools still fail the run with the same message as before.
+    #[tokio::test]
+    async fn unknown_tool_still_fails_the_run() {
+        let tools = ToolDispatch::new([tool("read", || {})]);
+        let (outcome, _, _) = dispatch(
+            &tools,
+            vec![call("t1", "nonexistent", serde_json::json!({}))],
+        )
+        .await;
+        match outcome {
+            Some(RunOutcome::Failed(msg)) => {
+                assert!(msg.contains("unknown tool"), "got: {msg}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn never_parallel_classification() {
+        assert!(super::is_never_parallel("batch"));
+        assert!(super::is_never_parallel("question"));
+        assert!(!super::is_never_parallel("read"));
+        assert!(!super::is_never_parallel("write"));
     }
 }
