@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use super::*;
 
-fn workspace() -> (TempDir, Workspace) {
+pub(crate) fn workspace() -> (TempDir, Workspace) {
     let dir = tempfile::tempdir().unwrap();
     let workspace = Workspace::new(dir.path()).unwrap();
     (dir, workspace)
@@ -572,6 +572,7 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
             "bash_kill",
             "bash_status",
             "bash_watch",
+            "batch",
             "delete",
             "edit",
             "edit_lines",

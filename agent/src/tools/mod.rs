@@ -7,7 +7,8 @@
 //! their readable text to both the model and ACP, not serialize the internal fields.
 
 pub(crate) mod apply_patch;
-mod bash;
+pub(crate) mod bash;
+mod batch;
 mod delete;
 mod edit;
 mod glob;
@@ -24,11 +25,12 @@ mod write;
 #[cfg(test)]
 mod tests;
 
-pub use apply_patch::{patch_paths, ApplyPatch, ApplyPatchArgs, ApplyPatchOutput};
+pub use apply_patch::{ApplyPatch, ApplyPatchArgs, ApplyPatchOutput, patch_paths};
 pub use bash::{
     Bash, BashArgs, BashKill, BashKillArgs, BashOutput, BashStatus, BashStatusArgs, BashWatch,
     BashWatchArgs,
 };
+pub use batch::{Batch, BatchArgs, BatchOutput, SharedDispatch};
 pub use delete::{Delete, DeleteArgs, DeleteOutput};
 pub use edit::{
     Edit, EditArgs, EditLines, EditLinesArgs, EditLinesOutput, EditOutput, InsertLines,
@@ -124,8 +126,12 @@ impl Workspace {
         self.snapshots.note(path);
     }
 
-    /// Register the workspace's tools into our dispatch executor.
+    /// Register the workspace's tools into our dispatch executor. The batch
+    /// tool joins the table before the `list_tools` snapshot is taken, then
+    /// receives the finished table through its shared slot so its children
+    /// flow through the same interception pipeline.
     pub fn register(&self) -> crate::run::ToolDispatch {
+        let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
         let mut tools: Vec<PortableDynamicTool> = vec![
             dynamic(Read(self.clone())),
             dynamic(Grep(self.clone())),
@@ -145,13 +151,16 @@ impl Workspace {
             dynamic(Inspect(self.clone())),
             dynamic(TodoWrite(self.clone())),
             dynamic(Retrieve(self.compression_store.clone())),
+            dynamic(batch.clone()),
         ];
         // Introspection snapshot of every other registered tool.
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
-        crate::run::ToolDispatch::new(tools)
+        let dispatch = crate::run::ToolDispatch::new(tools)
             .with_compression_store(self.compression_store.clone())
-            .with_snapshots(self.snapshots.clone())
+            .with_snapshots(self.snapshots.clone());
+        let _ = batch.0.set(dispatch.clone());
+        dispatch
     }
 
     pub(crate) async fn run<T: Send + 'static>(
