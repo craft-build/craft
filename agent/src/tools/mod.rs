@@ -335,6 +335,10 @@ pub(crate) fn failure(message: impl Into<String>) -> ToolExecutionError {
     ToolExecutionError::new(ToolErrorKind::Other, message)
 }
 
+pub(crate) fn not_found(message: impl Into<String>) -> ToolExecutionError {
+    ToolExecutionError::new(ToolErrorKind::NotFound, message)
+}
+
 pub(crate) fn io_error(error: io::Error) -> ToolExecutionError {
     let kind = match error.kind() {
         io::ErrorKind::NotFound => ToolErrorKind::NotFound,

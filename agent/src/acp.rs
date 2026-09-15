@@ -757,7 +757,7 @@ mod tests {
                 "edit",
                 json!({"path":"file.rs", "old_string":"βeta", "new_string":"new"}),
             ),
-            ("4", "delete", json!({"path":"file.rs"})),
+            ("4", "delete", json!({"files":["file.rs"]})),
         ] {
             turns.push(vec![
                 MockStreamEvent::tool_call(id, name, args),

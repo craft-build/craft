@@ -150,6 +150,15 @@ pub fn extract_write_paths(name: &str, input: &Value) -> Vec<String> {
             .map(String::from)
             .collect();
     }
+    if name == "delete"
+        && let Some(files) = input.get("files").and_then(Value::as_array)
+    {
+        return files
+            .iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect();
+    }
     extract_file_path(input).into_iter().collect()
 }
 

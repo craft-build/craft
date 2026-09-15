@@ -418,18 +418,38 @@ async fn concurrent_edits_share_one_workspace_lock() {
 }
 
 #[tokio::test]
-async fn delete_is_nonrecursive_and_missing_files_are_errors() {
+async fn delete_reports_skips_and_requires_recursive_for_dirs() {
     let (_dir, workspace) = workspace();
     fs::create_dir(workspace.root().join("dir")).unwrap();
     fs::write(workspace.root().join("dir/file"), "keep").unwrap();
     let tool = Delete(workspace.clone());
-    assert!(invoke(&tool, json!({"path":"dir"})).await.is_err());
-    assert!(invoke(&tool, json!({"path":"."})).await.is_err());
+    // Non-empty dir without recursive is skipped, not deleted.
+    let error = invoke(&tool, json!({"files":["dir"]})).await.unwrap_err();
+    assert!(error.to_string().contains("set recursive=true"));
     assert!(workspace.root().join("dir/file").exists());
-    let deleted = invoke(&tool, json!({"path":"dir/file"})).await.unwrap();
-    assert!(deleted.deleted);
-    let error = invoke(&tool, json!({"path":"dir/file"})).await.unwrap_err();
+    assert!(invoke(&tool, json!({"files":["."]})).await.is_err());
+    let output = invoke(&tool, json!({"files":["dir/file","missing"]}))
+        .await
+        .unwrap();
+    assert_eq!(output.deleted, ["dir/file"]);
+    assert_eq!(output.skipped, ["missing (not found)"]);
+    // Nothing deleted, all missing -> NotFound.
+    let error = invoke(&tool, json!({"files":["dir/file"]}))
+        .await
+        .unwrap_err();
     assert_eq!(error.kind(), ToolErrorKind::NotFound);
+    // Recursive removes the tree and captures contents for /undo.
+    fs::write(workspace.root().join("dir/file"), "keep").unwrap();
+    let output = invoke(&tool, json!({"files":["dir"],"recursive":true}))
+        .await
+        .unwrap();
+    assert_eq!(output.deleted, ["dir"]);
+    assert!(!workspace.root().join("dir").exists());
+    workspace.snapshots().rollback().await;
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("dir/file")).unwrap(),
+        "keep"
+    );
 }
 
 #[tokio::test]
@@ -459,7 +479,7 @@ async fn all_tools_reject_outside_paths_and_git_metadata() {
         )
         .await
         .unwrap_err();
-        let delete = invoke(&Delete(workspace.clone()), json!({"path":path}))
+        let delete = invoke(&Delete(workspace.clone()), json!({"files":[path]}))
             .await
             .unwrap_err();
         for error in [read, grep, edit, delete] {
@@ -503,7 +523,7 @@ async fn rejects_symlink_components_and_special_files() {
             .is_err()
         );
         assert!(
-            invoke(&Delete(workspace.clone()), json!({"path":path}))
+            invoke(&Delete(workspace.clone()), json!({"files":[path]}))
                 .await
                 .is_err()
         );
@@ -562,7 +582,7 @@ fn schemas_match_strict_arguments() {
         assert_eq!(schema["additionalProperties"], false);
     }
     assert!(serde_json::from_value::<ReadArgs>(json!({"path":"file","typo":true})).is_err());
-    assert!(serde_json::from_value::<DeleteArgs>(json!({"path":"dir","recursive":true})).is_err());
+    assert!(serde_json::from_value::<DeleteArgs>(json!({"files":["dir"],"typo":true})).is_err());
 }
 
 #[tokio::test]
@@ -612,7 +632,7 @@ async fn dispatch_loop_executes_all_seven_tools_and_returns_results_to_model() {
             MockStreamEvent::final_response_with_total_tokens(1),
         ],
         vec![
-            MockStreamEvent::tool_call("7", "delete", json!({"path":"file.txt"})),
+            MockStreamEvent::tool_call("7", "delete", json!({"files":["file.txt"]})),
             MockStreamEvent::final_response_with_total_tokens(1),
         ],
         vec![
@@ -684,7 +704,7 @@ async fn dispatch_loop_preserves_permission_refusals() {
     let (_dir, workspace) = workspace();
     let model = MockCompletionModel::from_stream_turns([
         vec![
-            MockStreamEvent::tool_call("1", "delete", json!({"path":"../outside"})),
+            MockStreamEvent::tool_call("1", "delete", json!({"files":["../outside"]})),
             MockStreamEvent::final_response_with_total_tokens(1),
         ],
         vec![

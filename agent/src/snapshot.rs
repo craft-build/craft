@@ -137,6 +137,11 @@ impl SnapshotManager {
         let restored = tokio::task::spawn_blocking(move || {
             let mut restored = 0;
             for (path, content) in &session.originals {
+                if let Some(parent) = path.parent()
+                    && fs::create_dir_all(parent).is_err()
+                {
+                    continue;
+                }
                 if fs::write(path, content).is_ok() {
                     restored += 1;
                 }
