@@ -11,6 +11,7 @@ pub(crate) mod bash;
 mod batch;
 mod delete;
 mod edit;
+pub(crate) mod fuzzy_replace;
 mod glob;
 mod grep;
 mod inspect;

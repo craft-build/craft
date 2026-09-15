@@ -4,6 +4,7 @@ use rig_core::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use super::fuzzy_replace;
 use super::{
     MAX_FILE_BYTES, Result, Workspace, denied, failure, impl_tool, invalid, io_error, read_bytes,
     text,
@@ -15,7 +16,7 @@ const OUT_OF_RANGE: &str = "out of range";
 #[serde(deny_unknown_fields)]
 pub struct EditArgs {
     pub path: String,
-    /// Nonempty exact text to replace. Read first; do not include line numbers.
+    /// Nonempty text to replace; matched fuzzily (whitespace, indentation, Unicode, and escape differences are tolerated). Read first; do not include line numbers.
     pub old_string: String,
     pub new_string: String,
     /// Replace all non-overlapping matches. Otherwise one unique match is required.
@@ -30,11 +31,16 @@ pub struct EditOutput {
     pub path: String,
     pub replacements: usize,
     pub bytes_written: usize,
+    /// " (fuzzy match pass N)" when a non-exact pass matched, else empty.
+    pub pass: String,
 }
 
 impl IntoToolOutput for EditOutput {
     fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(format!("edited {}", self.path)))
+        Ok(ToolOutput::text(format!(
+            "edited {}{}",
+            self.path, self.pass
+        )))
     }
 }
 
@@ -59,53 +65,37 @@ impl Edit {
         }
         let path = workspace.file(&args.path)?;
         let before = text(read_bytes(&path)?)?;
-        let count = before.match_indices(&args.old_string).count();
-        if count == 0 {
+        let result = fuzzy_replace::replace(
+            &before,
+            &args.old_string,
+            &args.new_string,
+            args.replace_all,
+            args.occurrence,
+        )
+        .map_err(invalid)?;
+        let after = result.content;
+        if after.len() > MAX_FILE_BYTES {
             return Err(invalid(
-                "old_string was not found; read the current file and retry",
+                "edited file would exceed the 8 MiB tool size limit",
             ));
         }
-        let replacements = if args.replace_all { count } else { 1 };
-        let occurrence = match args.occurrence {
-            Some(n) if n == 0 || n > count => {
-                return Err(invalid(format!("occurrence must be between 1 and {count}")));
-            }
-            Some(n) => n,
-            None if !args.replace_all && count > 1 => {
-                return Err(invalid(format!(
-                    "old_string matches {count} times; provide more context, occurrence, or replace_all"
-                )));
-            }
-            None => 1,
-        };
-        let size = before
-            .len()
-            .checked_sub(args.old_string.len() * replacements)
-            .and_then(|size| {
-                args.new_string
-                    .len()
-                    .checked_mul(replacements)
-                    .and_then(|extra| size.checked_add(extra))
-            })
-            .filter(|size| *size <= MAX_FILE_BYTES)
-            .ok_or_else(|| invalid("edited file would exceed the 8 MiB tool size limit"))?;
-        let after = if args.replace_all {
-            before.replace(&args.old_string, &args.new_string)
+        let replacements = if args.replace_all {
+            before.match_indices(&args.old_string).count()
         } else {
-            let index = before
-                .match_indices(&args.old_string)
-                .nth(occurrence - 1)
-                .unwrap()
-                .0;
-            let mut after = before.clone();
-            after.replace_range(index..index + args.old_string.len(), &args.new_string);
-            after
+            1
         };
+        let pass = if result.pass == fuzzy_replace::Pass::Exact {
+            String::new()
+        } else {
+            format!(" (fuzzy match pass {})", result.pass.number())
+        };
+        let size = after.len();
         persist(workspace, &args.path, &path, &before, &after)?;
         Ok(EditOutput {
             path: workspace.display(&path),
             replacements,
             bytes_written: size,
+            pass,
         })
     }
 }
@@ -115,7 +105,7 @@ impl_tool!(
     EditArgs,
     EditOutput,
     "edit",
-    "Atomically replace exact text in an existing UTF-8 file. Read first and exclude line-number prefixes. old_string must be unique unless replace_all or a one-based occurrence is set. Matching is exact, not fuzzy; line endings are preserved. No creation, symlinks, Git metadata, or paths outside the workspace."
+    "Atomically replace text in an existing UTF-8 file. Read first and exclude line-number prefixes. Matching tolerates drift: trailing whitespace, indentation, collapsed whitespace, Unicode, and escaped characters, plus fuzzy block anchoring. old_string must resolve to one match unless replace_all or a one-based occurrence is set. No creation, symlinks, Git metadata, or paths outside the workspace."
 );
 
 /// Stage `after` beside the destination and atomically replace `path` while

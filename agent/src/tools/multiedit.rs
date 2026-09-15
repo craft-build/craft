@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::edit::persist;
+use super::fuzzy_replace;
 use super::{MAX_FILE_BYTES, Result, Workspace, impl_tool, invalid, read_bytes, text};
 
 const SNIPPET_MAX_CHARS: usize = 32;
@@ -10,7 +11,7 @@ const SNIPPET_MAX_CHARS: usize = 32;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditEntry {
-    /// Nonempty exact text to find.
+    /// Nonempty text to find; matched fuzzily like edit.
     pub old_string: String,
     pub new_string: String,
     /// Replace all non-overlapping matches. Otherwise one unique match is required.
@@ -64,20 +65,15 @@ impl MultiEdit {
         ))
     }
 
-    fn apply_exact(content: &str, edit: &EditEntry) -> std::result::Result<String, String> {
-        let count = content.match_indices(&edit.old_string).count();
-        if count == 0 {
-            return Err("old_string was not found; read the current file and retry".into());
-        }
-        if edit.replace_all {
-            Ok(content.replace(&edit.old_string, &edit.new_string))
-        } else if count > 1 {
-            Err(format!(
-                "old_string matches {count} times; provide more context or replace_all"
-            ))
-        } else {
-            Ok(content.replacen(&edit.old_string, &edit.new_string, 1))
-        }
+    fn apply_edit(content: &str, edit: &EditEntry) -> std::result::Result<String, String> {
+        fuzzy_replace::replace(
+            content,
+            &edit.old_string,
+            &edit.new_string,
+            edit.replace_all,
+            None,
+        )
+        .map(|r| r.content)
     }
 
     fn execute(workspace: &Workspace, args: MultiEditArgs) -> Result<MultiEditOutput> {
@@ -101,7 +97,7 @@ impl MultiEdit {
         let before = text(read_bytes(&path)?)?;
         let mut after = before.clone();
         for (index, edit) in args.edits.iter().enumerate() {
-            after = Self::apply_exact(&after, edit)
+            after = Self::apply_edit(&after, edit)
                 .map_err(|reason| Self::edit_error(index, edit, &reason))?;
         }
         if after.len() > MAX_FILE_BYTES {
@@ -124,5 +120,5 @@ impl_tool!(
     MultiEditArgs,
     MultiEditOutput,
     "multiedit",
-    "Apply multiple find/replace edits to one existing UTF-8 file atomically and in sequence; each edit sees the result of the previous one. Matching is exact: old_string must be unique unless replace_all is set. Any failure leaves the file unchanged. No creation, symlinks, Git metadata, or paths outside the workspace."
+    "Apply multiple find/replace edits to one existing UTF-8 file atomically and in sequence; each edit sees the result of the previous one. Matching is fuzzy-tolerant like edit: old_string must resolve to one match unless replace_all is set. Any failure leaves the file unchanged. No creation, symlinks, Git metadata, or paths outside the workspace."
 );

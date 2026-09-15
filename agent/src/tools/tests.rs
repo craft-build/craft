@@ -239,7 +239,7 @@ async fn grep_supports_regex_literal_case_and_limits() {
 }
 
 #[tokio::test]
-async fn edit_requires_exact_unambiguous_matches_and_preserves_bytes() {
+async fn edit_requires_unambiguous_matches_and_preserves_bytes() {
     let (_dir, workspace) = workspace();
     let path = workspace.root().join("file");
     fs::write(&path, "\u{feff}α\r\nsame\r\nsame\r\n").unwrap();
@@ -294,20 +294,103 @@ async fn edit_requires_exact_unambiguous_matches_and_preserves_bytes() {
     );
     let result = invoke(
         &tool,
-        json!({"path":"file","old_string":"\r\n","new_string":"\n","replace_all":true}),
+        json!({"path":"file","old_string":"e","new_string":"E","replace_all":true}),
     )
     .await
     .unwrap();
-    assert_eq!(result.replacements, 3);
+    assert_eq!(result.replacements, 2);
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
-        "\u{feff}α\nsame\nother\n"
+        "\u{feff}α\r\nsamE\r\nothEr\r\n"
     );
     assert_eq!(result.bytes_written, fs::read(&path).unwrap().len());
     assert_eq!(
         fs::read_dir(path.parent().unwrap()).unwrap().count(),
         1,
         "staging file leaked"
+    );
+}
+
+#[tokio::test]
+async fn edit_fuzzy_passes_tolerate_model_drift_and_report_the_pass() {
+    let (_dir, workspace) = workspace();
+    let path = workspace.root().join("f.py");
+    let tool = Edit(workspace.clone());
+
+    // Indentation drift: the engine rebases the replacement into the file's frame.
+    fs::write(&path, "def f():\n    if x:\n        a()\n    return 1\n").unwrap();
+    let result = invoke(
+        &tool,
+        json!({"path":"f.py","old_string":"if x:\na()","new_string":"if x:\n    if y:\n        a()"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "def f():\n    if x:\n        if y:\n            a()\n    return 1\n"
+    );
+    assert_eq!(
+        result.into_tool_output().unwrap().as_text(),
+        Some("edited f.py (fuzzy match pass 2)")
+    );
+
+    // Whitespace collapse.
+    fs::write(&path, "let   x  =   1;\n").unwrap();
+    invoke(
+        &tool,
+        json!({"path":"f.py","old_string":"let x = 1;","new_string":"let y = 2;"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "let y = 2;\n");
+
+    // Escaped quotes in old_string/new_string are unescaped before matching.
+    fs::write(&path, "print(\"hello\")\n").unwrap();
+    let escaped_old = "print(\\\"hello\\\")";
+    let escaped_new = "print(\\\"world\\\")";
+    invoke(
+        &tool,
+        json!({"path":"f.py","old_string": escaped_old, "new_string": escaped_new}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "print(\"world\")\n");
+
+    // Unicode NFKD: FULLWIDTH LATIN CAPITAL LETTER A matches "A".
+    fs::write(&path, "let \u{ff21} = 1;\n").unwrap();
+    invoke(
+        &tool,
+        json!({"path":"f.py","old_string":"let A = 1;","new_string":"let B = 2;"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "let B = 2;\n");
+}
+
+#[tokio::test]
+async fn multiedit_entries_match_fuzzily() {
+    let (_dir, workspace) = workspace();
+    fs::write(
+        workspace.root().join("f.py"),
+        "def g():\n    if x:\n        foo()\n",
+    )
+    .unwrap();
+    let tool = MultiEdit(workspace.clone());
+    let output = invoke(
+        &tool,
+        json!({"path": "f.py", "edits": [
+            {"old_string": "if x:\nfoo()", "new_string": "if x:\n    foo()\n    bar()"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        output.into_tool_output().unwrap().as_text(),
+        Some("applied 1 edit to f.py")
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.root().join("f.py")).unwrap(),
+        "def g():\n    if x:\n        foo()\n        bar()\n"
     );
 }
 
@@ -1019,7 +1102,7 @@ async fn multiedit_failure_leaves_file_unchanged_with_snippet() {
         error.contains("edits[1] (old_string \"MISSING\")"),
         "got: {error}"
     );
-    assert!(error.contains("old_string was not found"));
+    assert!(error.contains("old_string not found in file"));
     assert_eq!(
         fs::read_to_string(workspace.root().join("f.rs")).unwrap(),
         original
@@ -1057,7 +1140,7 @@ async fn multiedit_rejects_empty_and_ambiguous_edits() {
     .await
     .unwrap_err()
     .to_string();
-    assert!(error.contains("matches 2 times"));
+    assert!(error.contains("matches multiple locations"));
 }
 
 #[tokio::test]
