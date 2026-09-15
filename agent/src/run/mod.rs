@@ -10,6 +10,7 @@
 
 pub mod dedup;
 pub mod dispatch;
+pub mod events;
 pub mod guardrails;
 mod nudge;
 mod read_lifecycle;
@@ -21,6 +22,7 @@ pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
 pub use dispatch::{
     AfterExecute, BeforeExecute, BoxFuture, Decision, DispatchOutcome, ToolDispatch,
 };
+pub use events::{Envelope, EventSender, EventStreamGuard, SessionEvents, event_stream};
 pub use guardrails::{SharedGuardrails, shared_guardrails};
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use stream::TurnOutput;
@@ -34,18 +36,33 @@ use crate::compression::{self, CompressionConfig};
 use crate::edge;
 use crate::history::{self, Message};
 
-/// Events emitted as the run progresses; consumed by the TUI and ACP surfaces.
+/// Events emitted as the run progresses; consumed by the TUI and ACP
+/// surfaces. Ported from the reference's `AgentEvent` taxonomy
+/// (`craft-agent/src/types.rs`): variants whose backing subsystem is not yet
+/// ported (retry ladder, stagnation tracker, auto-review plumbing, live tool
+/// buffers) are forward substrate — defined but never emitted here.
+#[allow(dead_code)] // forward substrate for C.2/C.8/auto-review/LiveToolBuf tasks
 #[derive(Clone, Debug)]
 pub enum Event {
     /// A streamed chunk of the assistant reply.
     TextDelta(String),
     /// A streamed chunk of the model's reasoning.
-    ReasoningDelta(String),
+    ThinkingDelta(String),
+    /// A tool call is queued but not yet running.
+    ToolPending {
+        id: String,
+        name: String,
+    },
     /// The model issued a tool call.
     ToolStart {
         id: String,
         name: String,
         arguments: serde_json::Value,
+    },
+    /// `content` is the full accumulated output so far, not a delta.
+    ToolOutput {
+        id: String,
+        content: String,
     },
     /// A tool call finished (ran, failed, or was skipped).
     ToolDone {
@@ -54,11 +71,92 @@ pub enum Event {
         arguments: serde_json::Value,
         result: history::ToolResult,
     },
-    /// Token usage reported for one model call.
-    Usage(history::Usage),
+    /// A wave of tool results was appended to the turn; `message` carries
+    /// every result of the wave in call order.
+    ToolResultsSubmitted {
+        message: Message,
+    },
+    /// One model call completed: its usage report and the estimated size of
+    /// the context the model just saw.
+    TurnComplete {
+        usage: history::Usage,
+        context_size: u64,
+    },
+    /// The run ended. `context_window` is a `0` sentinel until window sizes
+    /// reach the run seam (model-registry work).
+    Done {
+        usage: history::Usage,
+        context_size: u64,
+        context_window: u64,
+        num_turns: u32,
+        reason: DoneReason,
+    },
+    /// Human-readable, non-fatal status text.
+    Info(String),
+    /// The run failed; paired with a terminal `Done` carrying the reason.
+    Error(String),
+    /// A recoverable stream failure is being retried (attempt is 1-based).
+    Retry {
+        attempt: u32,
+        message: String,
+        delay_ms: u64,
+    },
+    AutoCompacting {
+        context_size: u64,
+        context_window: u64,
+    },
+    CompactionDone {
+        context_size_before: u64,
+        context_size_after: u64,
+        context_window: u64,
+    },
+    StagnationDetected {
+        similarity: f32,
+    },
+    AutoReviewStart {
+        id: String,
+        tool: String,
+        scopes: Vec<String>,
+    },
+    AutoReviewDecision {
+        id: String,
+        tool: String,
+        scopes: Vec<String>,
+        verdict: String,
+        risk: String,
+        rationale: String,
+    },
     /// The model returned an empty reply after tool calls and was nudged
     /// to continue.
     Nudge,
+    /// End-of-stream marker; emitted only by [`EventStreamGuard::drop`] and
+    /// swallowed by [`SessionEvents::next`].
+    StreamClosed,
+}
+
+/// Why a run ended, riding the terminal [`Event::Done`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DoneReason {
+    /// The model finished without pending tool calls.
+    Stop,
+    /// The turn budget ran out (partial history committed).
+    MaxTurns,
+    /// Every continuation of a truncated reply was spent.
+    MaxTokens,
+    Cancelled,
+    Error,
+}
+
+impl From<&RunOutcome> for DoneReason {
+    fn from(outcome: &RunOutcome) -> Self {
+        match outcome {
+            RunOutcome::Done { .. } => Self::Stop,
+            RunOutcome::MaxTurns => Self::MaxTurns,
+            RunOutcome::MaxTokens { .. } => Self::MaxTokens,
+            RunOutcome::Cancelled => Self::Cancelled,
+            RunOutcome::Failed(_) => Self::Error,
+        }
+    }
 }
 
 /// Cancellation shared between a surface and its run: set the flag, and the
@@ -199,6 +297,20 @@ pub enum RunOutcome {
 /// Marker appended when a run is cut short, so the model knows the turn ended.
 pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short.]";
 
+/// Run-wide accumulators for the terminal [`Event::Done`].
+#[derive(Default)]
+struct RunStats {
+    usage: history::Usage,
+    context_size: u64,
+    turns: u32,
+}
+
+impl RunStats {
+    fn add_usage(&mut self, usage: &history::Usage) {
+        self.usage.add(*usage);
+    }
+}
+
 /// Drive one multi-turn run. `history` is the caller-owned conversation; the
 /// prompt is appended as the turn's first user message. `emit` receives every
 /// event as it happens (it must not block).
@@ -211,7 +323,18 @@ pub async fn run<M: CompletionModel + Clone>(
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> RunOutcome {
-    let outcome = run_inner(model, params, tools, history, prompt, cancel, emit).await;
+    let (outcome, stats) = run_inner(model, params, tools, history, prompt, cancel, emit).await;
+    if let RunOutcome::Failed(message) = &outcome {
+        emit(Event::Error(message.clone()));
+    }
+    // `context_window` is a 0 sentinel until window sizes reach this seam.
+    emit(Event::Done {
+        usage: stats.usage,
+        context_size: stats.context_size,
+        context_window: 0,
+        num_turns: stats.turns,
+        reason: DoneReason::from(&outcome),
+    });
     // Clean (and cancelled) run ends close the capture session onto the
     // `/undo` stack; a failed run leaves it for the next attempt to merge
     // into, mirroring the reference's commit points.
@@ -231,17 +354,18 @@ async fn run_inner<M: CompletionModel + Clone>(
     prompt: &str,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
-) -> RunOutcome {
+) -> (RunOutcome, RunStats) {
     let definitions = tools.definitions();
     let mut turn = vec![Message::user(prompt)];
     let mut turns = 0;
+    let mut stats = RunStats::default();
     // Nudge budget for this run; real progress (tool results) resets it.
     let mut nudges: u32 = 0;
     // Continuations spent on truncated (`max_tokens`) replies.
     let mut continuations: usize = 0;
     loop {
         if cancel.cancelled() {
-            return RunOutcome::Cancelled;
+            return (RunOutcome::Cancelled, stats);
         }
         let mut full = history.clone();
         full.extend(turn.iter().cloned());
@@ -262,11 +386,23 @@ async fn run_inner<M: CompletionModel + Clone>(
         );
         let output = match stream::run_model_stream(model, request, cancel, emit).await {
             Ok(output) => output,
-            Err(stream::StreamFailure::Cancelled) => return RunOutcome::Cancelled,
-            Err(stream::StreamFailure::Error(message)) => return RunOutcome::Failed(message),
+            Err(stream::StreamFailure::Cancelled) => return (RunOutcome::Cancelled, stats),
+            Err(stream::StreamFailure::Error(message)) => {
+                return (RunOutcome::Failed(message), stats);
+            }
         };
+        stats.add_usage(&output.usage);
+        stats.context_size = crate::compaction::estimate_tokens(&full);
+        stats.turns = turns as u32 + 1;
+        emit(Event::TurnComplete {
+            usage: output.usage,
+            context_size: stats.context_size,
+        });
         let Message::Assistant { content } = &output.assistant else {
-            return RunOutcome::Failed("model produced a non-assistant message".into());
+            return (
+                RunOutcome::Failed("model produced a non-assistant message".into()),
+                stats,
+            );
         };
         let tool_calls: Vec<history::ToolCall> = content
             .iter()
@@ -293,18 +429,19 @@ async fn run_inner<M: CompletionModel + Clone>(
                 &mut continuations,
                 emit,
             ) {
-                return outcome;
+                return (outcome, stats);
             }
             continue;
         }
         if let Some(outcome) = dispatch_tool_calls(tools, &mut turn, tool_calls, cancel, emit).await
         {
-            return outcome;
+            return (outcome, stats);
         }
         turns += 1;
         nudges = 0;
         if turns >= params.max_turns {
-            return commit_partial(history, &mut turn);
+            let outcome = commit_partial(history, &mut turn);
+            return (outcome, stats);
         }
     }
 }
@@ -467,6 +604,7 @@ async fn commit_wave(
     turn: &mut Vec<Message>,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> Option<RunOutcome> {
+    let mut wave_results: Vec<history::ToolResult> = Vec::new();
     for (call, outcome) in results {
         let result = match outcome {
             Ok(Ok(DispatchOutcome::Ran(result))) | Ok(Ok(DispatchOutcome::Skipped(result))) => {
@@ -488,11 +626,25 @@ async fn commit_wave(
         turn.push(Message::User {
             content: vec![history::UserContent::ToolResult(result.clone())],
         });
+        wave_results.push(result.clone());
         emit(Event::ToolDone {
             id: call.id.clone(),
             name: call.function.name.clone(),
             arguments: call.function.arguments.clone(),
             result,
+        });
+    }
+    if !wave_results.is_empty() {
+        // One submission event per wave, carrying all of its results in
+        // call order (reference semantics), independent of the per-call
+        // messages committed to history above.
+        emit(Event::ToolResultsSubmitted {
+            message: Message::User {
+                content: wave_results
+                    .into_iter()
+                    .map(history::UserContent::ToolResult)
+                    .collect(),
+            },
         });
     }
     None
@@ -629,7 +781,8 @@ mod tests {
         assert_eq!(requests.len(), 2);
         let replayed = crate::edge::rig_to_own(&requests[1].chat_history);
         assert_eq!(replayed[2], history[2]);
-        // Events: tool start, tool done, usage per call.
+        // Events: tool start, tool done, usage per call, results submitted
+        // per wave, one terminal Done.
         assert!(
             guard
                 .iter()
@@ -643,10 +796,22 @@ mod tests {
         assert_eq!(
             guard
                 .iter()
-                .filter(|e| matches!(e, Event::Usage(_)))
+                .filter(|e| matches!(e, Event::TurnComplete { .. }))
                 .count(),
             2
         );
+        assert!(guard.iter().any(|e| matches!(e,
+                Event::ToolResultsSubmitted { message } if matches!(
+                    &message, Message::User { content } if matches!(
+                        &content[0], history::UserContent::ToolResult(_))))));
+        assert!(matches!(
+            guard.iter().last(),
+            Some(Event::Done {
+                reason: DoneReason::Stop,
+                num_turns: 2,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -918,6 +1083,78 @@ mod tests {
             results[4].contains("blocked by guardrails"),
             "block at the fifth call: {}",
             results[4]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_run_emits_error_then_done_with_error_reason() {
+        let (model, _turns) = stream_turns(vec![vec![
+            tool_event("t1", "no_such_tool", serde_json::json!({})),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Failed(_)));
+        let guard = events.lock().unwrap();
+        assert!(
+            guard
+                .iter()
+                .any(|e| matches!(e, Event::Error(message) if message.contains("unknown tool")))
+        );
+        assert!(matches!(
+            guard.iter().last(),
+            Some(Event::Done {
+                reason: DoneReason::Error,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_complete_reports_a_nonzero_context_size() {
+        let (model, _turns) = stream_turns(vec![vec![
+            MockStreamEvent::text("ok"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let (_, cancel) = cancel_channel();
+        let mut history = vec![Message::user(
+            "a sufficiently long prompt to register a nonzero token estimate \
+             beyond the estimator floor, padded out for good measure."
+                .repeat(4),
+        )];
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _ = run(
+            &model,
+            &RunParams::default(),
+            &ToolDispatch::default(),
+            &mut history,
+            "go",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        assert!(
+            events.lock().unwrap().iter().any(|e| matches!(
+                e,
+                Event::TurnComplete {
+                    context_size: size,
+                    ..
+                } if *size > 0
+            )),
+            "context estimate must be reported"
         );
     }
 

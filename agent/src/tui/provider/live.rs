@@ -647,7 +647,7 @@ impl TurnRenderer {
                 self.streamed_text.store(true, Ordering::Relaxed);
                 let _ = self.tx.send(AgentEvent::AssistantDelta(delta));
             }
-            run::Event::ReasoningDelta(delta) => {
+            run::Event::ThinkingDelta(delta) => {
                 self.streamed_reasoning.store(true, Ordering::Relaxed);
                 let _ = self.tx.send(AgentEvent::ReasoningDelta(delta));
             }
@@ -681,7 +681,7 @@ impl TurnRenderer {
                 }
                 let _ = self.tx.send(AgentEvent::ToolCall(done.card));
             }
-            run::Event::Usage(usage) => {
+            run::Event::TurnComplete { usage, .. } => {
                 let _ = self.tx.send(AgentEvent::TokenUsage(cards::usage_label(
                     usage.input_tokens + usage.output_tokens,
                     usage.input_tokens,
@@ -689,7 +689,21 @@ impl TurnRenderer {
                 )));
             }
             // The nudge is visible in the next model call; nothing to show.
-            run::Event::Nudge => {}
+            // The remaining taxonomy variants carry no TUI rendering yet.
+            run::Event::Nudge
+            | run::Event::ToolPending { .. }
+            | run::Event::ToolOutput { .. }
+            | run::Event::ToolResultsSubmitted { .. }
+            | run::Event::Done { .. }
+            | run::Event::Info(_)
+            | run::Event::Error(_)
+            | run::Event::Retry { .. }
+            | run::Event::AutoCompacting { .. }
+            | run::Event::CompactionDone { .. }
+            | run::Event::StagnationDetected { .. }
+            | run::Event::AutoReviewStart { .. }
+            | run::Event::AutoReviewDecision { .. }
+            | run::Event::StreamClosed => {}
         }
     }
 

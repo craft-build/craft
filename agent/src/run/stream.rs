@@ -73,7 +73,7 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
                             emit(Event::TextDelta(delta.text.clone()));
                         }
                         StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                            emit(Event::ReasoningDelta(reasoning.clone()));
+                            emit(Event::ThinkingDelta(reasoning.clone()));
                         }
                         StreamedAssistantContent::ToolCall {
                             tool_call,
@@ -100,7 +100,6 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
         }
     }
     let usage = usage.unwrap_or_else(|| usage_from_response(&stream));
-    emit(Event::Usage(usage));
     let assistant = assistant_from_stream(stream.choice.as_ref(), &call_ids, &parts);
     Ok(TurnOutput {
         assistant,

@@ -544,7 +544,7 @@ async fn run_turn(
                         TextContent::new(delta),
                     )))
                 }
-                run::Event::ReasoningDelta(delta) => SessionUpdate::AgentThoughtChunk(
+                run::Event::ThinkingDelta(delta) => SessionUpdate::AgentThoughtChunk(
                     ContentChunk::new(ContentBlock::Text(TextContent::new(delta))),
                 ),
                 run::Event::ToolStart {
@@ -560,7 +560,7 @@ async fn run_turn(
                             .content(vec![tool_result_content(&result)]),
                     ))
                 }
-                run::Event::Usage(usage) => {
+                run::Event::TurnComplete { usage, .. } => {
                     let Some(size) = context_length else {
                         return;
                     };
@@ -570,7 +570,21 @@ async fn run_turn(
                     ))
                 }
                 // The nudged retry follows immediately; no ACP notification.
-                run::Event::Nudge => return,
+                // The remaining taxonomy variants have no ACP translation yet.
+                run::Event::Nudge
+                | run::Event::ToolPending { .. }
+                | run::Event::ToolOutput { .. }
+                | run::Event::ToolResultsSubmitted { .. }
+                | run::Event::Done { .. }
+                | run::Event::Info(_)
+                | run::Event::Error(_)
+                | run::Event::Retry { .. }
+                | run::Event::AutoCompacting { .. }
+                | run::Event::CompactionDone { .. }
+                | run::Event::StagnationDetected { .. }
+                | run::Event::AutoReviewStart { .. }
+                | run::Event::AutoReviewDecision { .. }
+                | run::Event::StreamClosed => return,
             };
             // A dead connection stops the notifications but not the turn; the
             // responder still answers the request.
