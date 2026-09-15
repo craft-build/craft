@@ -14,6 +14,7 @@ pub mod permissions;
 pub mod prompt;
 pub mod providers;
 pub mod run;
+pub mod sandbox;
 pub mod snapshot;
 pub mod storage;
 pub mod tools;
