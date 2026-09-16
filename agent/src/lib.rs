@@ -10,6 +10,7 @@ pub mod history;
 pub mod id;
 mod inplace_edit;
 pub mod instructions;
+pub mod json_repair;
 pub mod paths;
 pub mod permissions;
 pub mod prompt;

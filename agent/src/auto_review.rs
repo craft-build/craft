@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use rig_core::completion::{CompletionModel, message::AssistantContent};
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 use snafu::Snafu;
 use tokio::time::timeout;
 
@@ -128,10 +127,11 @@ pub fn parse_decision(text: &str) -> Result<Decision, ReviewError> {
     if trimmed.is_empty() {
         return Err(ReviewError::Empty);
     }
-    let json = extract_json(trimmed).ok_or_else(|| ReviewError::Parse {
-        message: "response was not a JSON object".to_string(),
+    let value = crate::json_repair::extract_json(trimmed)
+        .map_err(|message| ReviewError::Parse { message })?;
+    let raw: RawDecision = serde_json::from_value(value).map_err(|e| ReviewError::Parse {
+        message: format!("invalid JSON: {e}"),
     })?;
-    let raw: RawDecision = parse_json(json)?;
     let verdict = Verdict::parse(&raw.verdict).ok_or_else(|| ReviewError::Parse {
         message: format!("unknown verdict: {:?}", raw.verdict),
     })?;
@@ -144,25 +144,6 @@ pub fn parse_decision(text: &str) -> Result<Decision, ReviewError> {
         verdict,
         risk,
         rationale,
-    })
-}
-
-fn extract_json(text: &str) -> Option<&str> {
-    if text.trim_start().starts_with('{') {
-        return Some(text);
-    }
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if start < end {
-        Some(&text[start..=end])
-    } else {
-        None
-    }
-}
-
-fn parse_json<T: DeserializeOwned>(s: &str) -> Result<T, ReviewError> {
-    serde_json::from_str(s).map_err(|e| ReviewError::Parse {
-        message: format!("invalid JSON: {e}"),
     })
 }
 
@@ -239,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn well_formed_allow_is_parsed_from_the_model() {
         let model =
-            MockCompletionModel::new([MockTurn::text(&decision_json("allow", "low", "read-only"))]);
+            MockCompletionModel::new([MockTurn::text(decision_json("allow", "low", "read-only"))]);
         let d = review(&model, "write", &["/tmp/x".into()]).await.unwrap();
         assert_eq!(d.verdict, Verdict::Allow);
         assert_eq!(d.risk, Risk::Low);
@@ -314,6 +295,13 @@ mod tests {
         assert_eq!(d.verdict, Verdict::Allow);
         assert_eq!(d.risk, Risk::Low);
         assert!(d.rationale.contains("no rationale"));
+    }
+
+    #[test]
+    fn malformed_json_is_repaired() {
+        let d = parse_decision("{\"verdict\":\"allow\",\"risk\":\"low\",}").unwrap();
+        assert_eq!(d.verdict, Verdict::Allow);
+        assert_eq!(d.risk, Risk::Low);
     }
 
     #[test]
