@@ -66,22 +66,66 @@ macro_rules! completion_model {
     }};
 }
 
-macro_rules! build_client {
-    ($config:expr, $client:ty, $env:literal, $credential:expr) => {{
-        let config = $config;
-        if config.api_key_env.is_none() && config.base_url.is_none() {
-            <$client>::from_env().map_err(crate::error::client_error)?
-        } else {
-            let key = $credential(config.api_key_env.as_deref().unwrap_or($env))?;
-            let mut builder = <$client>::builder().api_key(key);
-            if let Some(base_url) = &config.base_url {
-                builder = builder.base_url(base_url);
-            }
-            builder.build().map_err(crate::error::client_error)?
+/// Shared timeout policy for every provider HTTP client, ported from the
+/// reference `Timeouts` (craft-providers/src/providers/mod.rs): a quick
+/// connect failure, a bounded overall stream budget, and a low-speed floor
+/// for providers that support per-read timeouts (kept for parity with the
+/// reference, which wires it per-provider rather than on the shared client).
+/// Timeouts that fire surface as transport errors the retry machine
+/// (`run/retry.rs`) classifies as `ErrorKind::Timeout` and retries patiently
+/// up to `MAX_TIMEOUT_RETRIES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    pub connect: Duration,
+    pub stream: Duration,
+    pub low_speed: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            stream: Duration::from_secs(300),
+            low_speed: Duration::from_secs(30),
         }
+    }
+}
+
+/// The shared HTTP backend every configured provider is built on, matching the
+/// reference `http_client`: connect timeout plus an overall stream timeout.
+pub(crate) fn timeout_client(timeouts: Timeouts) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(timeouts.connect)
+        .timeout(timeouts.stream)
+        .build()
+        .map_err(crate::error::client_error)
+}
+
+/// The base-URL env var rig's `from_env` reads for a provider whose key env
+/// is `api_env` (e.g. `ANTHROPIC_API_KEY` → `ANTHROPIC_BASE_URL`).
+fn base_url_env(api_env: &str) -> String {
+    api_env.replace("_API_KEY", "_BASE_URL")
+}
+
+macro_rules! build_client {
+    ($config:expr, $client:ty, $env:literal, $timeouts:expr, $credential:expr) => {{
+        let config = $config;
+        let key = $credential(config.api_key_env.as_deref().unwrap_or($env))?;
+        let mut builder = <$client>::builder()
+            .api_key(key)
+            .http_client(timeout_client($timeouts)?);
+        let base_url = config.base_url.as_deref().map(str::to_owned).or_else(|| {
+            std::env::var(base_url_env($env))
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+        if let Some(base_url) = base_url {
+            builder = builder.base_url(base_url);
+        }
+        builder.build().map_err(crate::error::client_error)?
     }};
-    ($config:expr, $client:ty, $factory:ident, $credential:expr) => {
-        $factory($config, $credential)?
+    ($config:expr, $client:ty, $factory:ident, $timeouts:expr, $credential:expr) => {
+        $factory($config, $timeouts, $credential)?
     };
 }
 
@@ -107,20 +151,30 @@ macro_rules! providers {
 
         impl Provider {
             pub fn from_config(config: &ProviderConfig) -> Result<Self> {
-                Self::from_config_with(config, &credential)
+                Self::from_config_with_timeouts(config, Timeouts::default())
+            }
+
+            /// Build with an explicit timeout policy (the shared HTTP client
+            /// every configured provider runs on).
+            pub fn from_config_with_timeouts(
+                config: &ProviderConfig,
+                timeouts: Timeouts,
+            ) -> Result<Self> {
+                Self::from_config_with(config, timeouts, &credential)
             }
 
             // Inject credential lookup for tests without mutating process-wide
             // environment variables in a multithreaded async test runner.
             fn from_config_with(
                 config: &ProviderConfig,
+                timeouts: Timeouts,
                 credential: &dyn Fn(&str) -> Result<String>,
             ) -> Result<Self> {
                 config.validate()?;
                 (|| -> Result<Self> {
                     Ok(match config.kind {
                         $(ProviderKind::$variant => Self::$variant(
-                            build_client!(config, $client, $auth, credential)
+                            build_client!(config, $client, $auth, timeouts, credential)
                         ),)+
                     })
                 })().with_context(|_| CreateProviderSnafu {
@@ -425,9 +479,12 @@ fn number_field(entry: &serde_json::Value, field: &str) -> Option<u64> {
 
 fn build_llamafile(
     config: &ProviderConfig,
+    timeouts: Timeouts,
     _: &dyn Fn(&str) -> Result<String>,
 ) -> Result<llamafile::Client> {
-    let mut builder = llamafile::Client::builder().api_key(rig_core::client::Nothing);
+    let mut builder = llamafile::Client::builder()
+        .api_key(rig_core::client::Nothing)
+        .http_client(timeout_client(timeouts)?);
     if let Some(base) = &config.base_url {
         builder = builder.base_url(base);
     } else if let Ok(base) = std::env::var("LLAMAFILE_API_BASE_URL") {
@@ -438,16 +495,16 @@ fn build_llamafile(
 
 fn build_ollama(
     config: &ProviderConfig,
+    timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
 ) -> Result<ollama::Client> {
-    if config.api_key_env.is_none() && config.base_url.is_none() {
-        return ollama::Client::from_env().map_err(crate::error::client_error);
-    }
     let key = match &config.api_key_env {
         Some(name) => credential(name)?,
         None => std::env::var("OLLAMA_API_KEY").unwrap_or_default(),
     };
-    let mut builder = ollama::Client::builder().api_key(key);
+    let mut builder = ollama::Client::builder()
+        .api_key(key)
+        .http_client(timeout_client(timeouts)?);
     if let Some(base) = &config.base_url {
         builder = builder.base_url(base);
     } else if let Ok(base) = std::env::var("OLLAMA_API_BASE_URL") {
@@ -458,6 +515,7 @@ fn build_ollama(
 
 fn build_azure(
     config: &ProviderConfig,
+    timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
 ) -> Result<azure::Client> {
     let auth = if let Some(name) = &config.api_key_env {
@@ -481,17 +539,16 @@ fn build_azure(
         .api_key(auth)
         .azure_endpoint(endpoint)
         .api_version(&version)
+        .http_client(timeout_client(timeouts)?)
         .build()
         .map_err(crate::error::client_error)
 }
 
 fn build_chatgpt(
     config: &ProviderConfig,
+    timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
 ) -> Result<chatgpt::Client> {
-    if config.api_key_env.is_none() && config.base_url.is_none() {
-        return chatgpt::Client::from_env().map_err(crate::error::client_error);
-    }
     let auth = if let Some(name) = &config.api_key_env {
         chatgpt::ChatGPTAuth::AccessToken {
             access_token: credential(name)?,
@@ -505,7 +562,9 @@ fn build_chatgpt(
     } else {
         chatgpt::ChatGPTAuth::OAuth
     };
-    let mut builder = chatgpt::Client::builder().api_key(auth);
+    let mut builder = chatgpt::Client::builder()
+        .api_key(auth)
+        .http_client(timeout_client(timeouts)?);
     if let Some(base) = &config.base_url {
         builder = builder.base_url(base);
     }
@@ -514,23 +573,28 @@ fn build_chatgpt(
 
 fn build_copilot(
     config: &ProviderConfig,
+    timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
 ) -> Result<copilot::Client> {
-    if config.api_key_env.is_none() && config.base_url.is_none() {
-        return copilot::Client::from_env().map_err(crate::error::client_error);
-    }
+    let http = || timeout_client(timeouts).map_err(crate::error::client_error);
     let mut builder = copilot::Client::builder();
     if let Some(base) = &config.base_url {
         builder = builder.base_url(base);
     }
     if let Some(name) = &config.api_key_env {
-        builder.api_key(credential(name)?).build()
+        builder
+            .api_key(credential(name)?)
+            .http_client(http()?)
+            .build()
     } else if let Some(key) = first_env(&["GITHUB_COPILOT_API_KEY", "COPILOT_API_KEY"]) {
-        builder.api_key(key).build()
+        builder.api_key(key).http_client(http()?).build()
     } else if let Some(token) = first_env(&["COPILOT_GITHUB_ACCESS_TOKEN", "GITHUB_TOKEN"]) {
-        builder.github_access_token(token).build()
+        builder
+            .github_access_token(token)
+            .http_client(http()?)
+            .build()
     } else {
-        builder.oauth().build()
+        builder.oauth().http_client(http()?).build()
     }
     .map_err(crate::error::client_error)
 }
@@ -575,11 +639,137 @@ mod tests {
     }
 
     fn build(config: &ProviderConfig) -> Provider {
-        Provider::from_config_with(config, &|name| {
+        Provider::from_config_with(config, Timeouts::default(), &|name| {
             assert_eq!(name, "CRAFT_TEST_KEY");
             Ok("test-key".into())
         })
         .unwrap()
+    }
+
+    #[test]
+    fn timeout_defaults_match_the_reference_policy() {
+        let timeouts = Timeouts::default();
+        assert_eq!(timeouts.connect, Duration::from_secs(10));
+        assert_eq!(timeouts.stream, Duration::from_secs(300));
+        assert_eq!(timeouts.low_speed, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn stream_timeout_bounds_a_stalled_provider() {
+        // Accepts the request but never responds, so only the client-side
+        // stream timeout can end the call.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let stall = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            stream.read(&mut buffer).unwrap();
+            thread::sleep(Duration::from_secs(5));
+        });
+        let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/v1"));
+        let provider = Provider::from_config_with(
+            &config,
+            Timeouts {
+                stream: Duration::from_millis(300),
+                ..Timeouts::default()
+            },
+            &|_| Ok("test-key".into()),
+        )
+        .unwrap();
+        let model = provider.completion_model("manual").unwrap();
+        let request = crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            None,
+        );
+        // The response future is polled lazily by the stream, so drain it to
+        // surface the client-side timeout.
+        use futures::StreamExt;
+        let started = Instant::now();
+        let error = match rig_core::completion::CompletionModel::stream(&model, request).await {
+            Err(error) => error,
+            Ok(mut stream) => loop {
+                match stream.next().await {
+                    Some(Err(error)) => break error,
+                    Some(Ok(_)) => continue,
+                    None => panic!("stalled provider stream unexpectedly ended"),
+                }
+            },
+        };
+        assert!(started.elapsed() < Duration::from_secs(3), "{started:?}");
+        let mut chain = String::new();
+        let mut source: Option<&dyn std::error::Error> = Some(&error);
+        while let Some(error) = source {
+            chain.push_str(&error.to_string());
+            source = error.source();
+        }
+        // Rig's error wrapper drops the reqwest source chain, so the proof is
+        // behavioral: the server stalls for 5s and only the 300ms stream
+        // budget can end the call (a connect failure would say "refused").
+        let chain = chain.to_lowercase();
+        assert!(!chain.contains("refused"), "{chain}");
+        stall.join().unwrap();
+    }
+
+    #[test]
+    fn base_url_env_follows_the_key_env_convention() {
+        assert_eq!(base_url_env("ANTHROPIC_API_KEY"), "ANTHROPIC_BASE_URL");
+        assert_eq!(base_url_env("OPENAI_API_KEY"), "OPENAI_BASE_URL");
+    }
+
+    #[tokio::test]
+    async fn env_only_config_also_runs_on_the_timeout_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let stall = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            stream.read(&mut buffer).unwrap();
+            thread::sleep(Duration::from_secs(5));
+        });
+        // No api_key_env/base_url in config: the key and base URL both come
+        // from the environment, and the timeout policy must still apply.
+        let config = Config::parse("[providers.test]\nkind = 'openai'\n")
+            .unwrap()
+            .providers
+            .remove("test")
+            .unwrap();
+        unsafe { std::env::set_var("OPENAI_BASE_URL", format!("{base}/v1")) };
+        let provider = Provider::from_config_with(
+            &config,
+            Timeouts {
+                stream: Duration::from_millis(300),
+                ..Timeouts::default()
+            },
+            &|_| Ok("test-key".into()),
+        )
+        .unwrap();
+        unsafe { std::env::remove_var("OPENAI_BASE_URL") };
+        let model = provider.completion_model("manual").unwrap();
+        let request = crate::edge::to_request(
+            &[crate::history::Message::user("hi")],
+            &[],
+            None,
+            None,
+            None,
+        );
+        use futures::StreamExt;
+        let started = Instant::now();
+        let error = match rig_core::completion::CompletionModel::stream(&model, request).await {
+            Err(error) => error,
+            Ok(mut stream) => loop {
+                match stream.next().await {
+                    Some(Err(error)) => break error,
+                    Some(Ok(_)) => continue,
+                    None => panic!("stalled provider stream unexpectedly ended"),
+                }
+            },
+        };
+        assert!(started.elapsed() < Duration::from_secs(3), "{started:?}");
+        assert!(!error.to_string().to_lowercase().contains("refused"));
+        stall.join().unwrap();
     }
 
     #[test]
@@ -643,12 +833,13 @@ mod tests {
         let config =
             Config::parse("[providers.test]\nkind = 'openai'\napi_key_env = 'CRAFT_TEST_KEY'")
                 .unwrap();
-        let result = Provider::from_config_with(&config.providers["test"], &|name| {
-            InvalidSnafu {
-                reason: format!("missing {name}"),
-            }
-            .fail()
-        });
+        let result =
+            Provider::from_config_with(&config.providers["test"], Timeouts::default(), &|name| {
+                InvalidSnafu {
+                    reason: format!("missing {name}"),
+                }
+                .fail()
+            });
         let error = result.err().unwrap();
         let report = snafu::Report::from_error(error).to_string();
         assert!(report.contains("missing CRAFT_TEST_KEY"), "{report}");
