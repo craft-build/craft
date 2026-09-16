@@ -13,6 +13,7 @@
 pub mod cancel;
 pub mod dedup;
 pub mod dispatch;
+pub(crate) mod doom;
 pub mod events;
 pub mod guardrails;
 mod nudge;
@@ -152,6 +153,9 @@ pub enum DoneReason {
     MaxTokens,
     Cancelled,
     Error,
+    /// The doom-loop score reached the hard-stop threshold; the sanitized
+    /// partial history (with an end marker) was committed.
+    DoomStop,
 }
 
 impl From<&RunOutcome> for DoneReason {
@@ -162,6 +166,7 @@ impl From<&RunOutcome> for DoneReason {
             RunOutcome::MaxTokens { .. } => Self::MaxTokens,
             RunOutcome::Cancelled => Self::Cancelled,
             RunOutcome::Failed(_) => Self::Error,
+            RunOutcome::DoomStop => Self::DoomStop,
         }
     }
 }
@@ -373,6 +378,9 @@ pub enum RunOutcome {
     Cancelled,
     /// The run failed; history is not committed.
     Failed(String),
+    /// The doom-loop score reached the hard-stop threshold; the run ends
+    /// with its sanitized partial history committed, like `MaxTurns`.
+    DoomStop,
 }
 
 /// Marker appended when a run is cut short, so the model knows the turn ended.
@@ -449,9 +457,25 @@ async fn run_inner<M: CompletionModel + Clone>(
     // Measured input tokens from the last completed stream; feeds the
     // output-token clamp a number better than the chars/4 estimate.
     let mut measured_prompt_tokens: u64 = 0;
+    // Doom-loop tracker for this run; a trailing grace prompt from a
+    // previous run must not replay as if the user asked for it.
+    strip_trailing_grace_prompt(history);
+    let mut doom = doom::DoomTracker::new();
+    let mut recent = doom::RecentCalls::default();
     loop {
         if cancel.cancelled() {
             return (commit_cancelled(history, &mut turn), stats);
+        }
+        if doom.should_hard_stop() {
+            return (
+                commit_partial(history, &mut turn, RunOutcome::DoomStop),
+                stats,
+            );
+        }
+        if doom.should_grace() {
+            doom.mark_grace_called();
+            turn.push(Message::user(doom::GRACE_CALL_PROMPT));
+            continue;
         }
         let mut full = history.clone();
         full.extend(turn.iter().cloned());
@@ -506,7 +530,7 @@ async fn run_inner<M: CompletionModel + Clone>(
                     return (RunOutcome::Failed(message), stats);
                 }
                 overflow_recoveries += 1;
-                if !recover_from_overflow(params, model, history, emit).await {
+                if !recover_from_overflow(params, model, history, &mut doom, emit).await {
                     return (RunOutcome::Failed(message), stats);
                 }
                 continue;
@@ -568,17 +592,27 @@ async fn run_inner<M: CompletionModel + Clone>(
             }
             continue;
         }
-        if let Some(outcome) = dispatch_tool_calls(tools, &mut turn, tool_calls, cancel, emit).await
-        {
+        let (stopped, batch) =
+            dispatch_tool_calls(tools, &mut turn, tool_calls, &mut recent, cancel, emit).await;
+        if let Some(outcome) = stopped {
             if matches!(outcome, RunOutcome::Cancelled) {
                 return (commit_cancelled(history, &mut turn), stats);
             }
             return (outcome, stats);
         }
+        for _ in 0..batch.doom_loops {
+            doom.note_doom_loop();
+        }
+        for _ in 0..batch.errors {
+            doom.note_tool_error();
+        }
+        for _ in 0..batch.successes {
+            doom.note_tool_success();
+        }
         turns += 1;
         nudges = 0;
         if turns >= params.max_turns {
-            let outcome = commit_partial(history, &mut turn);
+            let outcome = commit_partial(history, &mut turn, RunOutcome::MaxTurns);
             return (outcome, stats);
         }
     }
@@ -592,6 +626,7 @@ async fn recover_from_overflow<M: CompletionModel + Clone>(
     params: &RunParams,
     model: &M,
     history: &mut Vec<Message>,
+    doom: &mut doom::DoomTracker,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> bool {
     let Some(ctx) = &params.compaction else {
@@ -620,6 +655,18 @@ async fn recover_from_overflow<M: CompletionModel + Clone>(
     let after = state
         .estimator
         .scale(crate::compaction::estimate_tokens(history));
+    // Compaction that barely shrank the context is itself a doom signal;
+    // one that paid off earns a decay.
+    let savings = if before > 0 {
+        1.0 - (after as f32 / before as f32)
+    } else {
+        0.0
+    };
+    if savings < doom::INEFFECTIVE_COMPACTION_THRESHOLD {
+        doom.note_ineffective_compaction();
+    } else {
+        doom.note_effective_compaction();
+    }
     emit(Event::CompactionDone {
         context_size_before: before,
         context_size_after: after,
@@ -631,12 +678,29 @@ async fn recover_from_overflow<M: CompletionModel + Clone>(
     true
 }
 
-/// Commit a partial turn and end the run at its budget: sanitized so
-/// dangling tool calls replay cleanly on the next request.
-fn commit_partial(history: &mut Vec<Message>, turn: &mut Vec<Message>) -> RunOutcome {
+/// Commit a partial turn and end the run at its budget or the doom hard
+/// stop: sanitized so dangling tool calls replay cleanly on the next request.
+fn commit_partial(
+    history: &mut Vec<Message>,
+    turn: &mut Vec<Message>,
+    outcome: RunOutcome,
+) -> RunOutcome {
     sanitize_partial(turn);
     history.append(turn);
-    RunOutcome::MaxTurns
+    outcome
+}
+
+/// Drop a trailing grace prompt left in committed history by a previous
+/// run, so it does not replay as if the user asked for it (reference
+/// `strip_trailing_grace_prompt`).
+fn strip_trailing_grace_prompt(history: &mut Vec<Message>) {
+    if let Some(Message::User { content }) = history.last()
+        && content.len() == 1
+        && let history::UserContent::Text(text) = &content[0]
+        && text.text == doom::GRACE_CALL_PROMPT
+    {
+        history.pop();
+    }
 }
 
 /// Marker appended when a run is cancelled by the user, so the model knows
@@ -672,7 +736,7 @@ fn handle_terminal_reply(
         *continuations += 1;
         *turns += 1;
         if *turns >= params.max_turns {
-            return Some(commit_partial(history, turn));
+            return Some(commit_partial(history, turn, RunOutcome::MaxTurns));
         }
         return None;
     }
@@ -697,7 +761,7 @@ fn handle_terminal_reply(
             emit(Event::Nudge);
             *turns += 1;
             if *turns >= params.max_turns {
-                return Some(commit_partial(history, turn));
+                return Some(commit_partial(history, turn, RunOutcome::MaxTurns));
             }
             return None;
         }
@@ -733,46 +797,75 @@ async fn dispatch_tool_calls(
     tools: &ToolDispatch,
     turn: &mut Vec<Message>,
     calls: Vec<history::ToolCall>,
+    recent: &mut doom::RecentCalls,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
-) -> Option<RunOutcome> {
+) -> (Option<RunOutcome>, doom::ToolBatchOutcome) {
     // Spawned tasks need owned state; the dispatch table is cheap to clone.
     let tools = Arc::new(tools.clone());
     let mut set = task_set::TaskSet::new();
     let mut wave: Vec<history::ToolCall> = Vec::new();
     let mut all_write_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut has_path_conflict = false;
+    let mut batch = doom::ToolBatchOutcome::default();
 
     for call in calls {
         if cancel.cancelled() {
-            let outcome = commit_wave(join_wave(set, wave.drain(..)).await, turn, emit).await;
-            return Some(outcome.unwrap_or(RunOutcome::Cancelled));
+            let outcome =
+                commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
+            return (outcome.or(Some(RunOutcome::Cancelled)), batch);
         }
         let name = call.function.name.clone();
-        if is_never_parallel(&name) {
-            has_path_conflict = true;
-        }
-        for path in dedup::extract_write_paths(&name, &call.function.arguments) {
-            if all_write_paths.contains(&path) {
+        let arguments = call.function.arguments.clone();
+        if recent.is_doom_loop(&name, &arguments) {
+            // The call is blocked, not executed: emit the reference's error
+            // result directly and clear the window so the warning does not
+            // re-fire identically on the next retry.
+            batch.doom_loops += 1;
+            let result = history::ToolResult {
+                call: call.id.clone(),
+                name: name.clone(),
+                content: vec![history::ToolResultContent::text(doom::DOOM_LOOP_MESSAGE)],
+                is_error: true,
+            };
+            turn.push(Message::User {
+                content: vec![history::UserContent::ToolResult(result.clone())],
+            });
+            emit(Event::ToolDone {
+                id: call.id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+                result,
+            });
+            recent.clear();
+        } else {
+            if is_never_parallel(&name) {
                 has_path_conflict = true;
             }
-            all_write_paths.insert(path);
-        }
-        let executor = Arc::clone(&tools);
-        wave.push(call.clone());
-        set.spawn(async move { executor.execute(call).await });
-        if has_path_conflict {
-            if let Some(outcome) =
-                commit_wave(join_wave(set, wave.drain(..)).await, turn, emit).await
-            {
-                return Some(outcome);
+            for path in dedup::extract_write_paths(&name, &call.function.arguments) {
+                if all_write_paths.contains(&path) {
+                    has_path_conflict = true;
+                }
+                all_write_paths.insert(path);
             }
-            set = task_set::TaskSet::new();
-            all_write_paths.clear();
-            has_path_conflict = false;
+            let executor = Arc::clone(&tools);
+            wave.push(call.clone());
+            set.spawn(async move { executor.execute(call).await });
+            if has_path_conflict {
+                if let Some(outcome) =
+                    commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await
+                {
+                    return (Some(outcome), batch);
+                }
+                set = task_set::TaskSet::new();
+                all_write_paths.clear();
+                has_path_conflict = false;
+            }
         }
+        recent.record(name, &arguments);
     }
-    commit_wave(join_wave(set, wave.drain(..)).await, turn, emit).await
+    let stopped = commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
+    (stopped, batch)
 }
 
 /// One finished wave entry: the call paired with its dispatch outcome, or
@@ -801,6 +894,7 @@ async fn join_wave(
 async fn commit_wave(
     results: Vec<WaveEntry>,
     turn: &mut Vec<Message>,
+    batch: &mut doom::ToolBatchOutcome,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> Option<RunOutcome> {
     let mut wave_results: Vec<history::ToolResult> = Vec::new();
@@ -822,6 +916,11 @@ async fn commit_wave(
                 is_error: true,
             },
         };
+        if result.is_error {
+            batch.errors += 1;
+        } else {
+            batch.successes += 1;
+        }
         turn.push(Message::User {
             content: vec![history::UserContent::ToolResult(result.clone())],
         });
@@ -1233,15 +1332,46 @@ mod tests {
 
     #[tokio::test]
     async fn guardrails_warn_then_block_repeated_failures() {
-        // Five identical failing reads: the counters warn at 2 and block at
-        // 4, so the third call carries the warning and the fifth is blocked.
-        let read = || tool_event("t", "read", serde_json::json!({"path": "missing"}));
+        // Seven failing reads with varied arguments (identical arguments
+        // would hit the doom-loop block first): the any-failure counters
+        // warn at 3 and block at 6, so the fourth call carries the warning
+        // and the seventh is blocked.
+        let read = |n: usize| {
+            tool_event(
+                "t",
+                "read",
+                serde_json::json!({ "path": format!("missing{n}") }),
+            )
+        };
         let (model, _turns) = stream_turns(vec![
-            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
-            vec![read(), MockStreamEvent::final_response_with_total_tokens(1)],
+            vec![
+                read(1),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                read(2),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                read(3),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                read(4),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                read(5),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                read(6),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                read(7),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
             vec![
                 MockStreamEvent::text("done"),
                 MockStreamEvent::final_response_with_total_tokens(1),
@@ -1278,17 +1408,117 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect();
-        assert_eq!(results.len(), 5);
+        assert_eq!(results.len(), 7);
         assert!(!results[0].contains("guardrail"));
         assert!(
-            results[2].starts_with("[guardrail]"),
-            "warn at the third call: {}",
-            results[2]
+            results[3].starts_with("[guardrail]"),
+            "warn at the fourth call: {}",
+            results[3]
         );
         assert!(
-            results[4].contains("blocked by guardrails"),
-            "block at the fifth call: {}",
-            results[4]
+            results[6].contains("blocked by guardrails"),
+            "block at the seventh call: {}",
+            results[6]
+        );
+    }
+
+    #[tokio::test]
+    async fn doom_loop_scores_reach_grace_then_summarize() {
+        // One batch of identical failing reads: two errors (+1 each) and one
+        // blocked doom-loop call (+15) put the score at 17 — past the grace
+        // threshold — so the next request carries the one-shot grace prompt.
+        let read = || tool_event("t", "read", serde_json::json!({"path": "missing"}));
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                read(),
+                read(),
+                read(),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("summarized"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "summarized"));
+        let grace_count = history
+            .iter()
+            .filter(|m| m.text() == doom::GRACE_CALL_PROMPT)
+            .count();
+        assert_eq!(grace_count, 1, "grace prompt fired exactly once");
+        // The blocked call's result carries the doom-loop warning.
+        assert!(history.iter().any(|m| {
+            matches!(m, Message::User { content } if matches!(&content[0],
+                UserContent::ToolResult(r) if r.is_error
+                    && r.content[0].to_text().contains("stuck in a loop")))
+        }));
+        // The second request saw the grace prompt as its trailing message.
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2);
+        let replayed = crate::edge::rig_to_own(&requests[1].chat_history);
+        assert_eq!(
+            replayed.last().map(Message::text),
+            Some(doom::GRACE_CALL_PROMPT.to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn doom_score_hard_stops_the_run() {
+        // Two doom-loop batches push the score past the hard-stop threshold
+        // (25); the run ends DoomStop with sanitized partial history.
+        let read = || tool_event("t", "read", serde_json::json!({"path": "missing"}));
+        let (model, _turns) = stream_turns(vec![
+            vec![
+                read(),
+                read(),
+                read(),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                read(),
+                read(),
+                read(),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            // Never requested: the hard stop preempts the third turn.
+            vec![
+                MockStreamEvent::text("never"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::DoomStop));
+        assert_eq!(model.requests().len(), 2, "no request after the hard stop");
+        assert_eq!(
+            history.last().map(Message::text),
+            Some(END_MARKER.to_owned())
         );
     }
 
@@ -2292,13 +2522,20 @@ mod tests {
         let mut turn = Vec::new();
         let done = std::sync::Arc::new(StdMutex::new(Vec::new()));
         let sink = std::sync::Arc::clone(&done);
-        let outcome = dispatch_tool_calls(tools, &mut turn, calls, &cancel, &move |event| {
-            if let Event::ToolDone { result, .. } = event {
-                sink.lock().unwrap().push(result);
-            }
-        })
+        let outcome = dispatch_tool_calls(
+            tools,
+            &mut turn,
+            calls,
+            &mut doom::RecentCalls::default(),
+            &cancel,
+            &move |event| {
+                if let Event::ToolDone { result, .. } = event {
+                    sink.lock().unwrap().push(result);
+                }
+            },
+        )
         .await;
-        (outcome, turn, done.lock().unwrap().clone())
+        (outcome.0, turn, done.lock().unwrap().clone())
     }
 
     fn results_in_call_order(turn: &[Message]) -> Vec<crate::history::ToolResult> {
@@ -2353,6 +2590,52 @@ mod tests {
         let results = results_in_call_order(&turn);
         assert_eq!(results[0].call, "t1");
         assert_eq!(results[1].call, "t2");
+    }
+
+    /// Three identical calls in a row: the first two execute, the third is
+    /// blocked as a doom loop (reference skips execution and errors), and
+    /// the cleared window lets an immediate identical retry through.
+    #[tokio::test]
+    async fn identical_calls_blocked_as_doom_loop() {
+        let runs = std::sync::Arc::new(AtomicUsize::new(0));
+        let runs2 = std::sync::Arc::clone(&runs);
+        let tools = ToolDispatch::new([PortableDynamicTool::new(
+            "probe",
+            "probe",
+            serde_json::json!({}),
+            move |_: serde_json::Value| {
+                let runs = std::sync::Arc::clone(&runs2);
+                Box::pin(async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(ToolOutput::text("ok"))
+                })
+            },
+        )]);
+        let input = serde_json::json!({});
+        let (outcome, turn, done) = dispatch(
+            &tools,
+            vec![
+                call("t1", "probe", input.clone()),
+                call("t2", "probe", input.clone()),
+                call("t3", "probe", input.clone()),
+                // Window was cleared by the block, so this identical retry
+                // executes instead of being re-blocked forever.
+                call("t4", "probe", input.clone()),
+            ],
+        )
+        .await;
+        assert!(outcome.is_none());
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "t3 is blocked, not run");
+        let results = results_in_call_order(&turn);
+        assert_eq!(results.len(), 4);
+        // The blocked call's result is committed immediately, ahead of the
+        // wave's results; the other three ran.
+        let blocked = results.iter().filter(|r| r.is_error).collect::<Vec<_>>();
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].content[0].to_text().contains("stuck in a loop"));
+        assert!(results.iter().any(|r| !r.is_error && r.call == "t1"));
+        assert!(results.iter().any(|r| !r.is_error && r.call == "t4"));
+        assert_eq!(done.len(), 4);
     }
 
     /// Two writes to the same path must not overlap: each records start/end

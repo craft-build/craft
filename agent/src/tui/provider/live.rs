@@ -801,6 +801,16 @@ async fn handle_outcome(
             ));
             TurnFlow::Commit
         }
+        RunOutcome::DoomStop => {
+            // The doom-loop hard stop committed the sanitized partial run;
+            // like MaxTurns, continue from the cut-off on the next message.
+            state.lock().await.history = history.to_vec();
+            let _ = tx.send(AgentEvent::AssistantText(
+                "Stopped: the agent appeared stuck in a loop. Send another message to continue."
+                    .into(),
+            ));
+            TurnFlow::Commit
+        }
         RunOutcome::MaxTokens { reply } => {
             state.lock().await.history = history.to_vec();
             emit_reply(tx, renderer.streamed(), &reply);

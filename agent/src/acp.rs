@@ -644,6 +644,15 @@ async fn run_turn(
             }
             let _ = responder.respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
         }
+        // The doom-loop hard stop committed the sanitized partial history;
+        // like MaxTurns, the next prompt continues from the cut-off.
+        RunOutcome::DoomStop => {
+            let mut sessions = state.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
+                session.history = history;
+            }
+            let _ = responder.respond(AcpPromptResponse::new(StopReason::MaxTurnRequests));
+        }
         RunOutcome::Cancelled => {
             let _ = responder.respond(AcpPromptResponse::new(StopReason::Cancelled));
         }
