@@ -537,6 +537,7 @@ async fn run_turn(
         compression: state.config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
         compaction: Some(compaction_ctx),
+        retry: run::RetryCtx::default(),
     };
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {

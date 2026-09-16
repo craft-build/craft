@@ -14,6 +14,7 @@ use rig_core::streaming::{StreamFinal, StreamedAssistantContent};
 
 use crate::edge::{StreamedParts, assistant_from_stream, fold_streamed_event};
 use crate::history;
+use rig_core::completion::CompletionError;
 
 use super::{CancelToken, Event};
 
@@ -27,11 +28,154 @@ pub struct TurnOutput {
     pub finish_reason: Option<FinishReason>,
 }
 
-/// How a model stream ended without producing a turn.
+/// How a provider stream ended without producing a turn.
 #[derive(Debug, Clone)]
 pub enum StreamFailure {
-    Cancelled,
-    Error(String),
+    /// The user cancelled mid-stream; `streamed` is the reply text that
+    /// already reached the view, kept so history can agree with it.
+    Cancelled {
+        streamed: String,
+    },
+    Error {
+        kind: ErrorKind,
+        message: String,
+    },
+}
+
+impl StreamFailure {
+    /// Classify a bare provider message (no typed error available).
+    #[cfg(test)]
+    pub(crate) fn error(message: impl Into<String>) -> Self {
+        let message = message.into();
+        let kind = classify_string(&message);
+        Self::Error { kind, message }
+    }
+}
+
+/// Recovery taxonomy for provider stream errors, ported from the
+/// reference's `AgentError::{is_retryable, should_rotate_key, should_abort}`
+/// (`craft-providers/src/error.rs`). rig surfaces most failures as strings
+/// or `HttpError`, so classification starts from the HTTP status when one
+/// survived and falls back to message matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorKind {
+    /// 429: retried with backoff; the first remedy is key rotation.
+    RateLimited,
+    /// 5xx / overloaded: retried with backoff.
+    Server,
+    /// Connection-level transport failure: retried with backoff.
+    Transport,
+    /// Timed out: retried with backoff, capped at
+    /// [`crate::run::retry::MAX_TIMEOUT_RETRIES`].
+    Timeout,
+    /// Prompt exceeded the context window: never retried here; the run
+    /// loop's overflow recovery (C.5) owns it.
+    Overflow,
+    /// Content policy / billing: abort immediately, retrying cannot help.
+    Abort,
+    /// Everything else: surface the failure.
+    Fatal,
+}
+
+impl ErrorKind {
+    pub(crate) fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited | Self::Server | Self::Transport | Self::Timeout
+        )
+    }
+
+    /// 429 alone: the reference also lists 401/403 in `should_rotate_key`,
+    /// but rotation is only reachable inside the `is_retryable` branch of
+    /// `stream_with_retry`, so those statuses never rotate there either.
+    pub(crate) fn should_rotate_key(self) -> bool {
+        self == Self::RateLimited
+    }
+
+    pub(crate) fn is_overflow(self) -> bool {
+        self == Self::Overflow
+    }
+
+    /// Human summary for [`Event::Retry`], after the reference's
+    /// `AgentError::retry_message`.
+    pub(crate) fn retry_message(self, message: &str) -> String {
+        match self {
+            Self::RateLimited => "Rate limited".into(),
+            Self::Server => "Provider server error".into(),
+            Self::Transport => "Connection error".into(),
+            Self::Timeout => "Stream timed out".into(),
+            _ => message.to_owned(),
+        }
+    }
+}
+
+/// Classify a typed rig completion error: use the preserved HTTP status when
+/// one exists (non-success statuses surface as `InvalidStatusCodeWithMessage`),
+/// otherwise match on the display string.
+pub(crate) fn classify_error(error: &CompletionError) -> ErrorKind {
+    if let CompletionError::HttpError(http) = error
+        && let rig_core::http_client::Error::InvalidStatusCodeWithMessage(status, _) = http
+    {
+        match status.as_u16() {
+            429 => return ErrorKind::RateLimited,
+            500..=599 => return ErrorKind::Server,
+            // 4xx bodies carry the real reason (overflow, content policy);
+            // keep matching on the message instead of guessing Fatal.
+            _ => {}
+        }
+    }
+    classify_string(&error.to_string())
+}
+
+fn classify_string(message: &str) -> ErrorKind {
+    if is_context_overflow(message) {
+        return ErrorKind::Overflow;
+    }
+    let message = message.to_ascii_lowercase();
+    // Reference `AgentError::should_abort`.
+    if ["content policy", "content_policy", "billing"]
+        .iter()
+        .any(|n| message.contains(n))
+    {
+        return ErrorKind::Abort;
+    }
+    if message.contains("timeout") || message.contains("timed out") {
+        return ErrorKind::Timeout;
+    }
+    if message.contains("rate limit")
+        || message.contains("rate_limit")
+        || message.contains("429")
+        || message.contains("too many requests")
+    {
+        return ErrorKind::RateLimited;
+    }
+    if message.contains("overloaded")
+        || message.contains("503")
+        || message.contains("server error")
+        || ["500", "502", "504"].iter().any(|n| message.contains(n))
+    {
+        return ErrorKind::Server;
+    }
+    if [
+        "connection",
+        "network",
+        "broken pipe",
+        "connection reset",
+        "error sending request",
+    ]
+    .iter()
+    .any(|n| message.contains(n))
+    {
+        return ErrorKind::Transport;
+    }
+    ErrorKind::Fatal
+}
+
+fn failure_from_error(error: &CompletionError) -> StreamFailure {
+    StreamFailure::Error {
+        kind: classify_error(error),
+        message: error.to_string(),
+    }
 }
 
 /// Run one model stream to completion.
@@ -44,7 +188,10 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
     let mut stream = model
         .stream(request)
         .await
-        .map_err(|e| StreamFailure::Error(e.to_string()))?;
+        .map_err(|e| failure_from_error(&e))?;
+    // The reply text streamed so far; carried out on cancellation so the
+    // committed history keeps what the user already saw.
+    let mut streamed = String::new();
     let mut parts = StreamedParts::default();
     // provider tool-call id -> run-stable internal id recorded at call time.
     let mut call_ids: HashMap<String, String> = HashMap::new();
@@ -60,16 +207,17 @@ pub(crate) async fn run_model_stream<M: CompletionModel + Clone>(
             biased;
             changed = cancel_rx.changed(), if cancel_alive => {
                 match changed {
-                    Ok(()) => return Err(StreamFailure::Cancelled),
+                    Ok(()) => return Err(StreamFailure::Cancelled { streamed }),
                     Err(_) => cancel_alive = false,
                 }
             }
             item = stream.next() => match item {
                 None => break,
-                Some(Err(error)) => return Err(StreamFailure::Error(error.to_string())),
+                Some(Err(error)) => return Err(failure_from_error(&error)),
                 Some(Ok(event)) => {
                     match &event {
                         StreamedAssistantContent::Text(delta) => {
+                            streamed.push_str(&delta.text);
                             emit(Event::TextDelta(delta.text.clone()));
                         }
                         StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
@@ -148,7 +296,14 @@ pub(crate) fn is_context_overflow(message: &str) -> bool {
 
 impl StreamFailure {
     pub(crate) fn is_overflow(&self) -> bool {
-        matches!(self, Self::Error(message) if is_context_overflow(message))
+        matches!(self, Self::Error { kind, .. } if kind.is_overflow())
+    }
+
+    pub(crate) fn message(&self) -> Option<&str> {
+        match self {
+            Self::Error { message, .. } => Some(message),
+            Self::Cancelled { .. } => None,
+        }
     }
 }
 
@@ -171,7 +326,7 @@ mod tests {
             "conversation exceeds the model context window",
         ] {
             assert!(is_context_overflow(message), "should match: {message}");
-            assert!(StreamFailure::Error(message.into()).is_overflow());
+            assert!(StreamFailure::error(message).is_overflow());
         }
     }
 
@@ -184,9 +339,91 @@ mod tests {
             "maximum tokens per request is 128000 for this tier",
         ] {
             assert!(!is_context_overflow(message), "must not match: {message}");
-            assert!(!StreamFailure::Error(message.into()).is_overflow());
+            assert!(!StreamFailure::error(message).is_overflow());
         }
-        assert!(!StreamFailure::Cancelled.is_overflow());
+        assert!(
+            !StreamFailure::Cancelled {
+                streamed: String::new()
+            }
+            .is_overflow()
+        );
+    }
+
+    /// The recovery taxonomy mirrors the reference's `AgentError`
+    /// classification: retryable, rotate-worthy, abort, fatal.
+    #[test]
+    fn classifies_error_kinds() {
+        let cases = [
+            (
+                "rate limit exceeded, retry after 30s",
+                ErrorKind::RateLimited,
+            ),
+            ("HTTP 429", ErrorKind::RateLimited),
+            ("Too many requests", ErrorKind::RateLimited),
+            ("provider is overloaded", ErrorKind::Server),
+            ("server error (503)", ErrorKind::Server),
+            ("request timed out", ErrorKind::Timeout),
+            ("operation timeout", ErrorKind::Timeout),
+            (
+                "error sending request: connection reset by peer",
+                ErrorKind::Transport,
+            ),
+            ("network unreachable", ErrorKind::Transport),
+            (
+                "your credit balance is too low (billing hard limit)",
+                ErrorKind::Abort,
+            ),
+            ("request rejected by content policy", ErrorKind::Abort),
+            ("invalid api key", ErrorKind::Fatal),
+        ];
+        for (message, expected) in cases {
+            let StreamFailure::Error { kind, .. } = StreamFailure::error(message) else {
+                panic!("must classify: {message}");
+            };
+            assert_eq!(kind, expected, "message: {message}");
+        }
+    }
+
+    #[test]
+    fn only_transient_kinds_are_retryable_and_rotating() {
+        for kind in [
+            ErrorKind::RateLimited,
+            ErrorKind::Server,
+            ErrorKind::Transport,
+            ErrorKind::Timeout,
+        ] {
+            assert!(kind.is_retryable(), "{kind:?}");
+        }
+        for kind in [ErrorKind::Overflow, ErrorKind::Abort, ErrorKind::Fatal] {
+            assert!(!kind.is_retryable(), "{kind:?}");
+            assert!(!kind.should_rotate_key(), "{kind:?}");
+        }
+        // 429 is the only status that both retries and rotates.
+        assert!(ErrorKind::RateLimited.should_rotate_key());
+        for kind in [ErrorKind::Server, ErrorKind::Transport, ErrorKind::Timeout] {
+            assert!(!kind.should_rotate_key(), "{kind:?}");
+        }
+    }
+
+    /// A typed `HttpError` with a preserved status classifies without string
+    /// matching.
+    #[test]
+    fn classifies_typed_http_status() {
+        for (status, expected) in [
+            (429u16, ErrorKind::RateLimited),
+            (500, ErrorKind::Server),
+            (503, ErrorKind::Server),
+            (400, ErrorKind::Fatal),
+            (401, ErrorKind::Fatal),
+        ] {
+            let error = CompletionError::HttpError(
+                rig_core::http_client::Error::InvalidStatusCodeWithMessage(
+                    http::StatusCode::from_u16(status).unwrap(),
+                    "boom".into(),
+                ),
+            );
+            assert_eq!(classify_error(&error), expected, "status {status}");
+        }
     }
 
     /// A dropped `CancelFlag` must disable the cancel branch instead of

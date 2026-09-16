@@ -310,7 +310,10 @@ impl<M: CompletionModel + Send + Sync + 'static> ErasedModel for M {
 }
 
 impl DynamicModel {
-    fn wrap<M: CompletionModel + Send + Sync + 'static>(label: Option<&str>, model: M) -> Self {
+    pub(crate) fn wrap<M: CompletionModel + Send + Sync + 'static>(
+        label: Option<&str>,
+        model: M,
+    ) -> Self {
         Self {
             label: label.map(str::to_owned),
             inner: Arc::new(model),

@@ -55,9 +55,11 @@ impl TokenEstimator {
 }
 
 fn text_len(text: &str) -> usize {
-    // Characters, not bytes: CHARS_PER_TOKEN is calibrated on characters and
-    // byte length would overestimate multibyte text ~3-4x.
-    text.chars().count()
+    // UTF-8 bytes: multibyte text (CJK, emoji) costs more tokens per
+    // character than the ASCII-calibrated 4-per-unit rule assumes, so
+    // byte length keeps the estimate conservative where characters
+    // would undercount it.
+    text.len()
 }
 
 /// Estimate the prompt tokens for `messages`, image blocks weighted at

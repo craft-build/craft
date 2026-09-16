@@ -13,6 +13,7 @@ crossterm.workspace = true
 dirs.workspace = true
 etcetera.workspace = true
 futures.workspace = true
+http = "1"
 ignore.workspace = true
 libc = "0.2"
 ratatui.workspace = true

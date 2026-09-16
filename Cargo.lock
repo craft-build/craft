@@ -1567,6 +1567,7 @@ dependencies = [
  "dirs 7.0.0",
  "etcetera",
  "futures",
+ "http",
  "ignore",
  "libc",
  "ratatui",

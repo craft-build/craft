@@ -907,6 +907,7 @@ async fn run_turn(ctx: TurnCtx, text: String) {
         compression: config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
         compaction: Some(compaction_ctx),
+        retry: run::RetryCtx::default(),
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));

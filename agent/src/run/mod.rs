@@ -18,6 +18,7 @@ pub mod guardrails;
 mod nudge;
 mod read_lifecycle;
 mod recency;
+mod retry;
 mod stream;
 mod task_set;
 
@@ -28,6 +29,7 @@ pub use dispatch::{
 pub use events::{Envelope, EventSender, EventStreamGuard, SessionEvents, event_stream};
 pub use guardrails::{SharedGuardrails, shared_guardrails};
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
+pub use retry::RetryCtx;
 pub use stream::TurnOutput;
 
 use std::sync::Arc;
@@ -220,6 +222,38 @@ impl CancelFlag {
 /// stream, so a later overflow on another turn still gets its attempt.
 pub(crate) const MAX_OVERFLOW_RECOVERIES: u32 = 1;
 
+/// Floor for [`clamped_max_tokens`], never applied above the configured cap.
+/// Servers like vLLM reject `prompt + max_tokens > window` even when the
+/// prompt alone fits; the floor keeps the clamp from trading that overflow
+/// for a too-small budget (reference `MIN_OUTPUT_TOKENS`).
+pub(crate) const MIN_OUTPUT_TOKENS: u64 = 4096;
+
+/// Reduce the request's output cap to what remains of the context window.
+/// `None` leaves the request alone (no window or no configured cap: the
+/// provider picks its own). `prompt_tokens` should be the larger of the
+/// chars/4 estimate and the last measured input count — the estimate is a
+/// floor that skips the clamp on exactly the long sessions it exists for.
+pub(crate) fn clamped_max_tokens(
+    window: Option<u32>,
+    prompt_tokens: u64,
+    configured: Option<u64>,
+) -> Option<u64> {
+    let window = match window {
+        Some(window) => window as u64,
+        // No known window: leave the configured cap alone.
+        None => return configured,
+    };
+    let cap = configured?;
+    let remaining = window.saturating_sub(prompt_tokens);
+    // The `min` keeps the floor from raising the cap over what was
+    // configured, since the provider would reject a number it never offered.
+    if cap > remaining {
+        Some(remaining.max(MIN_OUTPUT_TOKENS).min(cap))
+    } else {
+        Some(cap)
+    }
+}
+
 /// The session's compaction state shared with the run loop: the caller keeps
 /// the `Arc` so its pre-turn compaction and the run's overflow recovery read
 /// and write the same estimator/effectiveness state.
@@ -256,6 +290,9 @@ pub struct RunParams {
     /// stream error triggers recalibration, forced compaction, and one retry;
     /// `None` surfaces the error as before.
     pub compaction: Option<CompactionCtx>,
+    /// Retry machine inputs: key-rotation hook and fallback model chain.
+    /// Defaults reproduce plain single-model behavior (C.2).
+    pub retry: RetryCtx,
 }
 
 impl std::fmt::Debug for RunParams {
@@ -269,6 +306,7 @@ impl std::fmt::Debug for RunParams {
             .field("compression", &self.compression)
             .field("max_continuation_turns", &self.max_continuation_turns)
             .field("compaction", &self.compaction.is_some())
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -289,6 +327,7 @@ impl RunParams {
             compression: CompressionConfig::default(),
             max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
             compaction: None,
+            retry: RetryCtx::default(),
         }
     }
 
@@ -310,6 +349,7 @@ impl Default for RunParams {
             compression: CompressionConfig::default(),
             max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
             compaction: None,
+            retry: RetryCtx::default(),
         }
     }
 }
@@ -406,6 +446,9 @@ async fn run_inner<M: CompletionModel + Clone>(
     let mut continuations: usize = 0;
     // Overflow recoveries spent in a row; reset by every successful stream.
     let mut overflow_recoveries: u32 = 0;
+    // Measured input tokens from the last completed stream; feeds the
+    // output-token clamp a number better than the chars/4 estimate.
+    let mut measured_prompt_tokens: u64 = 0;
     loop {
         if cancel.cancelled() {
             return (commit_cancelled(history, &mut turn), stats);
@@ -420,16 +463,34 @@ async fn run_inner<M: CompletionModel + Clone>(
         }
         read_lifecycle::apply_to_request(&mut full, tools.compression_store());
         compress_request_view(&mut full, &params.compression);
+        let prompt_tokens = crate::compaction::estimate_tokens(&full).max(measured_prompt_tokens);
+        let window = params.compaction.as_ref().and_then(|c| c.context_length);
         let request = edge::to_request(
             &full,
             &definitions,
             params.preamble.as_deref(),
             params.temperature,
-            params.max_tokens,
+            clamped_max_tokens(window, prompt_tokens, params.max_tokens),
         );
-        let output = match stream::run_model_stream(model, request, cancel, emit).await {
+        let output = match retry::stream_with_retry(
+            model,
+            &params.retry.fallbacks,
+            params.retry.rotate.as_ref(),
+            &request,
+            cancel,
+            emit,
+        )
+        .await
+        {
             Ok(output) => output,
-            Err(stream::StreamFailure::Cancelled) => {
+            Err(stream::StreamFailure::Cancelled { streamed }) => {
+                // Keep the partial reply the user already saw, so the next
+                // prompt replays from what was on screen.
+                if !streamed.is_empty() {
+                    turn.push(Message::Assistant {
+                        content: vec![history::AssistantContent::text(streamed)],
+                    });
+                }
                 return (commit_cancelled(history, &mut turn), stats);
             }
             // The gauge is a chars/4 floor, so a prompt can overflow with the
@@ -438,7 +499,7 @@ async fn run_inner<M: CompletionModel + Clone>(
             // not help and the error is the honest answer (reference
             // `TurnOutcome::Overflow`).
             Err(failure) if failure.is_overflow() => {
-                let stream::StreamFailure::Error(message) = failure else {
+                let Some(message) = failure.message().map(str::to_owned) else {
                     unreachable!("is_overflow only matches Error");
                 };
                 if overflow_recoveries >= MAX_OVERFLOW_RECOVERIES {
@@ -450,11 +511,21 @@ async fn run_inner<M: CompletionModel + Clone>(
                 }
                 continue;
             }
-            Err(stream::StreamFailure::Error(message)) => {
+            Err(failure) => {
+                let message = failure
+                    .message()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "stream cancelled".into());
                 return (RunOutcome::Failed(message), stats);
             }
         };
         overflow_recoveries = 0;
+        // Track the last measured count (zero is the missing-report
+        // sentinel, kept at the previous value); it naturally shrinks
+        // again after compaction, unlike a running max.
+        if output.usage.input_tokens > 0 {
+            measured_prompt_tokens = output.usage.input_tokens;
+        }
         stats.add_usage(&output.usage);
         stats.context_size = crate::compaction::estimate_tokens(&full);
         stats.turns = turns as u32 + 1;
@@ -2585,8 +2656,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_overflow_errors_fail_immediately() {
-        let (model, _turns) = stream_turns(vec![rate_limit_turn()]);
+    async fn fatal_errors_fail_immediately() {
+        // Rate limits are retryable by design since C.2; a fatal error must
+        // still surface without a retry or compaction event.
+        let (model, _turns) = stream_turns(vec![vec![MockStreamEvent::Error(
+            rig_core::test_utils::MockError::provider("invalid api key"),
+        )]]);
         let (params, _shared) = recovery_setup();
         let dir = tempfile::tempdir().unwrap();
         let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
@@ -2605,18 +2680,18 @@ mod tests {
         .await;
         match outcome {
             RunOutcome::Failed(message) => {
-                assert!(message.contains("rate limit"), "got: {message}")
+                assert!(message.contains("api key"), "got: {message}")
             }
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(model.requests().len(), 1);
+        let guard = events.lock().unwrap();
         assert!(
-            !events
-                .lock()
-                .unwrap()
+            !guard
                 .iter()
                 .any(|e| matches!(e, Event::AutoCompacting { .. }))
         );
+        assert!(!guard.iter().any(|e| matches!(e, Event::Retry { .. })));
     }
 
     #[tokio::test]
@@ -2642,5 +2717,115 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    // --- Streaming retry state machine (C.2) ---
+
+    #[tokio::test]
+    async fn rate_limited_stream_is_retried_and_recovers() {
+        let (model, _turns) = stream_turns(vec![rate_limit_turn(), done_turn("recovered")]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = Vec::new();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        assert!(matches!(&outcome, RunOutcome::Done { reply } if reply == "recovered"));
+        assert_eq!(model.requests().len(), 2);
+        let retries: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Retry {
+                    attempt,
+                    message,
+                    delay_ms,
+                } => Some((*attempt, message.clone(), *delay_ms)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].0, 1);
+        assert_eq!(retries[0].1, "Rate limited");
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_stream_commits_the_partial_reply_with_marker() {
+        let (model, _turns) = stream_turns(vec![vec![
+            MockStreamEvent::text("partial answer"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (flag, cancel) = cancel_channel();
+        let emit_flag = flag.clone();
+        let mut history = Vec::new();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|event| {
+                // Cancel as soon as the first text delta reaches the view.
+                if matches!(event, Event::TextDelta(_)) {
+                    emit_flag.set(true);
+                }
+            },
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Cancelled));
+        // The committed history keeps the streamed partial the user saw,
+        // then the cancel marker.
+        assert_eq!(history.len(), 3, "prompt + partial reply + marker");
+        assert_eq!(history[0].text(), "go");
+        assert_eq!(history[1].text(), "partial answer");
+        assert_eq!(history[2].text(), CANCEL_MARKER);
+    }
+
+    /// The clamp mirrors the reference `clamped_output_tokens` table.
+    #[test]
+    fn clamps_output_tokens_to_the_remaining_window() {
+        const WINDOW: u32 = 262_144;
+        let big_cap = 100_000u64;
+        let small_cap = 2_048u64;
+        let crowding = WINDOW as u64 - big_cap + 1;
+        // Cap fits inside the remaining window: unchanged.
+        assert_eq!(
+            clamped_max_tokens(Some(WINDOW), 1_000, Some(big_cap)),
+            Some(big_cap)
+        );
+        // Cap exceeds the remaining window: reduced to what remains.
+        assert_eq!(
+            clamped_max_tokens(Some(WINDOW), crowding, Some(big_cap)),
+            Some(WINDOW as u64 - crowding)
+        );
+        // Prompt over the window: floored at the minimum.
+        assert_eq!(
+            clamped_max_tokens(Some(WINDOW), WINDOW as u64 + 1, Some(big_cap)),
+            Some(MIN_OUTPUT_TOKENS)
+        );
+        // The floor never raises the cap above what was configured.
+        assert_eq!(
+            clamped_max_tokens(Some(WINDOW), WINDOW as u64 + 1, Some(small_cap)),
+            Some(small_cap)
+        );
+        // No window or no configured cap: the provider picks its own.
+        assert_eq!(
+            clamped_max_tokens(None, 1_000, Some(big_cap)),
+            Some(big_cap)
+        );
+        assert_eq!(clamped_max_tokens(Some(WINDOW), 1_000, None), None);
     }
 }
