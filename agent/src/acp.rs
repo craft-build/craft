@@ -537,6 +537,7 @@ async fn run_turn(
         compression: state.config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
         compaction: Some(compaction_ctx),
+        reauth: None,
         retry: run::RetryCtx::default(),
     };
 
@@ -591,6 +592,7 @@ async fn run_turn(
                 | run::Event::Info(_)
                 | run::Event::Error(_)
                 | run::Event::Retry { .. }
+                | run::Event::AuthRequired { .. }
                 | run::Event::AutoCompacting { .. }
                 | run::Event::CompactionDone { .. }
                 | run::Event::StagnationDetected { .. }

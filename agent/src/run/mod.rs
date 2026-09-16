@@ -137,6 +137,13 @@ pub enum Event {
     /// The model returned an empty reply after tool calls and was nudged
     /// to continue.
     Nudge,
+    /// Authentication failed (401) and the run paused for re-authentication
+    /// (E.10); `attempt` is 1-based. The run resumes after the responder
+    /// succeeds or fails with the message.
+    AuthRequired {
+        attempt: u32,
+        message: String,
+    },
     /// End-of-stream marker; emitted only by [`EventStreamGuard::drop`] and
     /// swallowed by [`SessionEvents::next`].
     StreamClosed,
@@ -227,6 +234,10 @@ impl CancelFlag {
 /// stream, so a later overflow on another turn still gets its attempt.
 pub(crate) const MAX_OVERFLOW_RECOVERIES: u32 = 1;
 
+/// Auth errors tolerated per run before the reauth wait gives up and the
+/// error surfaces (reference `MAX_REAUTH_ATTEMPTS`).
+pub(crate) const MAX_REAUTH_ATTEMPTS: u32 = 2;
+
 /// Floor for [`clamped_max_tokens`], never applied above the configured cap.
 /// Servers like vLLM reject `prompt + max_tokens > window` even when the
 /// prompt alone fits; the floor keeps the clamp from trading that overflow
@@ -298,7 +309,19 @@ pub struct RunParams {
     /// Retry machine inputs: key-rotation hook and fallback model chain.
     /// Defaults reproduce plain single-model behavior (C.2).
     pub retry: RetryCtx,
+    /// Re-authentication hook (E.10): when set, a 401 stream error emits
+    /// [`Event::AuthRequired`] and the run waits on this hook (up to
+    /// [`MAX_REAUTH_ATTEMPTS`] times) instead of failing. `None` fails the
+    /// run with the provider's auth error, like the reference's
+    /// no-user-response path. The H.5 auth flows will supply the hook.
+    pub reauth: Option<ReauthHook>,
 }
+
+/// What a surface calls when the model stream reports an auth error: block
+/// until credentials are refreshed (`Ok(())`) or report failure (`Err`).
+pub type ReauthFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+pub type ReauthHook = std::sync::Arc<dyn Fn(u32) -> ReauthFuture + Send + Sync>;
 
 impl std::fmt::Debug for RunParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -312,6 +335,7 @@ impl std::fmt::Debug for RunParams {
             .field("max_continuation_turns", &self.max_continuation_turns)
             .field("compaction", &self.compaction.is_some())
             .field("retry", &self.retry)
+            .field("reauth", &self.reauth.is_some())
             .finish()
     }
 }
@@ -333,6 +357,7 @@ impl RunParams {
             max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
             compaction: None,
             retry: RetryCtx::default(),
+            reauth: None,
         }
     }
 
@@ -355,6 +380,7 @@ impl Default for RunParams {
             max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
             compaction: None,
             retry: RetryCtx::default(),
+            reauth: None,
         }
     }
 }
@@ -454,6 +480,9 @@ async fn run_inner<M: CompletionModel + Clone>(
     let mut continuations: usize = 0;
     // Overflow recoveries spent in a row; reset by every successful stream.
     let mut overflow_recoveries: u32 = 0;
+    // Reauth waits spent this run; reset by every successful stream
+    // (reference resets `reauth_attempts` on every successful stream).
+    let mut reauth_attempts: u32 = 0;
     // Measured input tokens from the last completed stream; feeds the
     // output-token clamp a number better than the chars/4 estimate.
     let mut measured_prompt_tokens: u64 = 0;
@@ -535,6 +564,34 @@ async fn run_inner<M: CompletionModel + Clone>(
                 }
                 continue;
             }
+            // Auth failure: pause for re-authentication instead of failing
+            // (E.10). Without a responder — or past the attempt budget — the
+            // error is the honest answer, like the reference's no-rx path.
+            Err(failure) if failure.is_auth() => {
+                let Some(message) = failure.message().map(str::to_owned) else {
+                    unreachable!("is_auth only matches Error");
+                };
+                let Some(reauth) = params.reauth.clone() else {
+                    return (RunOutcome::Failed(message), stats);
+                };
+                if reauth_attempts >= MAX_REAUTH_ATTEMPTS {
+                    return (RunOutcome::Failed(message), stats);
+                }
+                reauth_attempts += 1;
+                emit(Event::AuthRequired {
+                    attempt: reauth_attempts,
+                    message: message.clone(),
+                });
+                match tokio::select! {
+                    biased;
+                    _ = cancel.wait() => None,
+                    r = reauth(reauth_attempts) => Some(r),
+                } {
+                    Some(Ok(())) => continue,
+                    Some(Err(e)) => return (RunOutcome::Failed(e), stats),
+                    None => return (commit_cancelled(history, &mut turn), stats),
+                }
+            }
             Err(failure) => {
                 let message = failure
                     .message()
@@ -544,6 +601,7 @@ async fn run_inner<M: CompletionModel + Clone>(
             }
         };
         overflow_recoveries = 0;
+        reauth_attempts = 0;
         // Track the last measured count (zero is the missing-report
         // sentinel, kept at the previous value); it naturally shrinks
         // again after compaction, unlike a running max.
@@ -3110,5 +3168,247 @@ mod tests {
             Some(big_cap)
         );
         assert_eq!(clamped_max_tokens(Some(WINDOW), 1_000, None), None);
+    }
+
+    // --- Auth-error reauth wait (E.10) ---
+
+    fn auth_error_turn() -> Vec<MockStreamEvent> {
+        vec![MockStreamEvent::Error(
+            rig_core::test_utils::MockError::provider("401 unauthorized: invalid credentials"),
+        )]
+    }
+
+    fn ok_reauth(attempts: std::sync::Arc<std::sync::atomic::AtomicU32>) -> ReauthHook {
+        std::sync::Arc::new(move |attempt| {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = attempt;
+            Box::pin(std::future::ready(Ok(())))
+        })
+    }
+
+    /// The shared body of the reauth tests: a fresh workspace, a run over
+    /// `turns`, and the emitted events.
+    async fn reauth_run(
+        turns: Vec<Vec<MockStreamEvent>>,
+        params: &RunParams,
+        cancel: &CancelToken,
+    ) -> (
+        MockCompletionModel,
+        RunOutcome,
+        std::sync::Arc<std::sync::Mutex<Vec<Event>>>,
+    ) {
+        let (model, _turns) = stream_turns(turns);
+        let dir = tempfile::tempdir().unwrap();
+        // Some tests use a read tool call; keep a file for it.
+        std::fs::write(dir.path().join("file.txt"), "content\n").unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let mut history = Vec::new();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        let outcome = run(
+            &model,
+            params,
+            &tools,
+            &mut history,
+            "continue",
+            cancel,
+            &move |event| recorded.lock().unwrap().push(event),
+        )
+        .await;
+        (model, outcome, events)
+    }
+
+    fn auth_event_count(events: &[Event]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::AuthRequired { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn auth_error_without_responder_fails_as_before() {
+        let (model, outcome, events) = reauth_run(
+            vec![auth_error_turn()],
+            &RunParams::default(),
+            &cancel_channel().1,
+        )
+        .await;
+        match outcome {
+            RunOutcome::Failed(message) => {
+                assert!(message.contains("401"), "got: {message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(model.requests().len(), 1);
+        assert_eq!(auth_event_count(&events.lock().unwrap()), 0);
+    }
+
+    #[tokio::test]
+    async fn auth_error_with_responder_waits_and_recovers() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let params = RunParams {
+            reauth: Some(ok_reauth(attempts.clone())),
+            ..RunParams::default()
+        };
+        let (model, outcome, events) = reauth_run(
+            vec![auth_error_turn(), done_turn("recovered")],
+            &params,
+            &cancel_channel().1,
+        )
+        .await;
+        assert!(
+            matches!(&outcome, RunOutcome::Done { reply } if reply == "recovered"),
+            "got {outcome:?}"
+        );
+        assert_eq!(model.requests().len(), 2, "the turn was retried");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let guard = events.lock().unwrap();
+        assert_eq!(auth_event_count(&guard), 1);
+        assert!(
+            guard
+                .iter()
+                .any(|e| matches!(e, Event::AuthRequired { attempt: 1, .. }))
+        );
+        assert!(!guard.iter().any(|e| matches!(e, Event::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn persistent_auth_errors_stop_after_max_attempts() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let params = RunParams {
+            reauth: Some(ok_reauth(attempts.clone())),
+            ..RunParams::default()
+        };
+        let (model, outcome, events) = reauth_run(
+            vec![auth_error_turn(), auth_error_turn(), auth_error_turn()],
+            &params,
+            &cancel_channel().1,
+        )
+        .await;
+        assert!(
+            matches!(&outcome, RunOutcome::Failed(m) if m.contains("401")),
+            "got {outcome:?}"
+        );
+        // Two waits, then the third auth error surfaces without waiting.
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            super::MAX_REAUTH_ATTEMPTS
+        );
+        assert_eq!(model.requests().len(), 3);
+        assert_eq!(auth_event_count(&events.lock().unwrap()), 2);
+    }
+
+    #[tokio::test]
+    async fn success_between_auth_errors_rearms_attempts() {
+        let params = RunParams {
+            reauth: Some(ok_reauth(std::sync::Arc::new(
+                std::sync::atomic::AtomicU32::new(0),
+            ))),
+            ..RunParams::default()
+        };
+        let (model, outcome, events) = reauth_run(
+            vec![
+                auth_error_turn(),
+                auth_error_turn(),
+                // A tool call keeps the run alive past this turn (a plain
+                // reply would end it in Done).
+                vec![
+                    tool_event("t1", "read", serde_json::json!({"path":"file.txt"})),
+                    MockStreamEvent::final_response_with_total_tokens(1),
+                ],
+                auth_error_turn(),
+                done_turn("done"),
+            ],
+            &params,
+            &cancel_channel().1,
+        )
+        .await;
+        // Without the reset-on-success the third auth error (fourth request)
+        // would have exceeded the budget.
+        assert_eq!(model.requests().len(), 5);
+        assert_eq!(auth_event_count(&events.lock().unwrap()), 3);
+    }
+
+    // `wait_for` blocks a worker thread while polling, so the run needs a
+    // second thread to make progress toward the reauth wait.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_during_reauth_wait_ends_cancelled() {
+        let (flag, cancel) = cancel_channel();
+        // A responder that never resolves: only cancellation can end it.
+        let params = RunParams {
+            reauth: Some(std::sync::Arc::new(|_attempt| {
+                Box::pin(futures::future::pending::<Result<(), String>>())
+            })),
+            ..RunParams::default()
+        };
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (model, _turns) = stream_turns(vec![auth_error_turn(), done_turn("never")]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let mut history = Vec::new();
+        let recorded = events.clone();
+        // The run must make progress while we poll for the AuthRequired
+        // event, so it runs on its own task instead of an un-polled future.
+        let cancel_spawn = cancel.clone();
+        let task = tokio::spawn(async move {
+            let emit = move |event: Event| recorded.lock().unwrap().push(event);
+            run(
+                &model,
+                &params,
+                &tools,
+                &mut history,
+                "continue",
+                &cancel_spawn,
+                &emit,
+            )
+            .await
+        });
+        // Let the run reach the reauth wait, then cancel the hanging responder.
+        let events_wait = events.clone();
+        wait_for(|| {
+            events_wait
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::AuthRequired { .. }))
+        });
+        flag.set(true);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("run task hung after cancellation")
+            .expect("run task panicked");
+        assert!(matches!(outcome, RunOutcome::Cancelled), "got {outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn failing_responder_fails_the_run() {
+        let params = RunParams {
+            reauth: Some(std::sync::Arc::new(|_attempt| {
+                Box::pin(std::future::ready(Err("reauth failed".to_owned())))
+            })),
+            ..RunParams::default()
+        };
+        let (model, outcome, _) = reauth_run(
+            vec![auth_error_turn(), done_turn("never")],
+            &params,
+            &cancel_channel().1,
+        )
+        .await;
+        assert!(
+            matches!(&outcome, RunOutcome::Failed(m) if m == "reauth failed"),
+            "got {outcome:?}"
+        );
+        assert_eq!(model.requests().len(), 1);
+    }
+
+    /// Poll until `condition` holds, bounded; avoids sleeping on a guess.
+    fn wait_for(condition: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("condition never held");
     }
 }

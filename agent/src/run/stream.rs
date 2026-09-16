@@ -68,6 +68,9 @@ pub(crate) enum ErrorKind {
     /// Timed out: retried with backoff, capped at
     /// [`crate::run::retry::MAX_TIMEOUT_RETRIES`].
     Timeout,
+    /// 401: authentication failed. Never retried here; the run loop's
+    /// reauth wait (E.10) owns it.
+    Auth,
     /// Prompt exceeded the context window: never retried here; the run
     /// loop's overflow recovery (C.5) owns it.
     Overflow,
@@ -117,6 +120,7 @@ pub(crate) fn classify_error(error: &CompletionError) -> ErrorKind {
         && let rig_core::http_client::Error::InvalidStatusCodeWithMessage(status, _) = http
     {
         match status.as_u16() {
+            401 => return ErrorKind::Auth,
             429 => return ErrorKind::RateLimited,
             500..=599 => return ErrorKind::Server,
             // 4xx bodies carry the real reason (overflow, content policy);
@@ -141,6 +145,9 @@ fn classify_string(message: &str) -> ErrorKind {
     }
     if message.contains("timeout") || message.contains("timed out") {
         return ErrorKind::Timeout;
+    }
+    if message.contains("unauthorized") || message.contains("401") {
+        return ErrorKind::Auth;
     }
     if message.contains("rate limit")
         || message.contains("rate_limit")
@@ -299,6 +306,10 @@ impl StreamFailure {
         matches!(self, Self::Error { kind, .. } if kind.is_overflow())
     }
 
+    pub(crate) fn is_auth(&self) -> bool {
+        matches!(self, Self::Error { kind, .. } if *kind == ErrorKind::Auth)
+    }
+
     pub(crate) fn message(&self) -> Option<&str> {
         match self {
             Self::Error { message, .. } => Some(message),
@@ -375,6 +386,9 @@ mod tests {
             ),
             ("request rejected by content policy", ErrorKind::Abort),
             ("invalid api key", ErrorKind::Fatal),
+            ("401 unauthorized: invalid credentials", ErrorKind::Auth),
+            ("Unauthorized", ErrorKind::Auth),
+            ("HTTP status 401", ErrorKind::Auth),
         ];
         for (message, expected) in cases {
             let StreamFailure::Error { kind, .. } = StreamFailure::error(message) else {
@@ -382,6 +396,23 @@ mod tests {
             };
             assert_eq!(kind, expected, "message: {message}");
         }
+    }
+
+    /// Auth failures are never retried here; the run loop's reauth wait
+    /// (E.10) owns them.
+    #[test]
+    fn auth_errors_are_never_retryable_and_match_is_auth() {
+        assert!(!ErrorKind::Auth.is_retryable());
+        assert!(!ErrorKind::Auth.should_rotate_key());
+        assert!(!ErrorKind::Auth.is_overflow());
+        assert!(StreamFailure::error("401 unauthorized").is_auth());
+        assert!(!StreamFailure::error("rate limit exceeded").is_auth());
+        assert!(
+            !StreamFailure::Cancelled {
+                streamed: String::new()
+            }
+            .is_auth()
+        );
     }
 
     #[test]
@@ -414,7 +445,7 @@ mod tests {
             (500, ErrorKind::Server),
             (503, ErrorKind::Server),
             (400, ErrorKind::Fatal),
-            (401, ErrorKind::Fatal),
+            (401, ErrorKind::Auth),
         ] {
             let error = CompletionError::HttpError(
                 rig_core::http_client::Error::InvalidStatusCodeWithMessage(
