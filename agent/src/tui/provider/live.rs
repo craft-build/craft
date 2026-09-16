@@ -42,7 +42,8 @@ fn report(error: crate::error::Error) -> String {
 #[derive(Default)]
 struct SessionState {
     history: Vec<history::Message>,
-    compaction: CompactionState,
+    /// Shared with the run loop for in-run overflow recovery.
+    compaction: crate::run::SharedCompactionState,
     /// Session-wide tool dedup cache, shared by the dispatcher and cleared
     /// by the compaction engine.
     dedup: crate::run::SharedDedupCache,
@@ -60,9 +61,11 @@ impl SessionState {
         let dedup = crate::run::shared_cache();
         let guardrails = crate::run::shared_guardrails();
         Self {
-            compaction: CompactionState::default()
-                .with_dedup(dedup.clone())
-                .with_guardrails(guardrails.clone()),
+            compaction: std::sync::Arc::new(std::sync::Mutex::new(
+                CompactionState::default()
+                    .with_dedup(dedup.clone())
+                    .with_guardrails(guardrails.clone()),
+            )),
             dedup,
             guardrails,
             ..Self::default()
@@ -745,12 +748,16 @@ async fn compact_history(
     history: &mut Vec<history::Message>,
     context_length: Option<u32>,
 ) {
-    let mut compaction = state.lock().await.compaction.clone();
-    CompactionEngine::new(config.compaction.clone())
-        .with_buffer(config.compaction_buffer)
-        .maybe_compact(&mut compaction, model, history, context_length)
-        .await;
-    state.lock().await.compaction = compaction;
+    let shared = state.lock().await.compaction.clone();
+    if let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) {
+        CompactionEngine::new(config.compaction.clone())
+            .with_buffer(config.compaction_buffer)
+            .maybe_compact(&mut compaction, model, history, context_length)
+            .await;
+        if let Ok(mut guard) = shared.lock() {
+            *guard = compaction;
+        }
+    }
 }
 
 /// What the continuation loop does after one outcome: keep looping, stop
@@ -866,6 +873,12 @@ async fn run_turn(ctx: TurnCtx, text: String) {
         selection.context_length,
     )
     .await;
+    let compaction_ctx = run::CompactionCtx {
+        state: state.lock().await.compaction.clone(),
+        stages: config.compaction.clone(),
+        buffer: config.compaction_buffer,
+        context_length: selection.context_length,
+    };
 
     let tools = workspace
         .register()
@@ -893,6 +906,7 @@ async fn run_turn(ctx: TurnCtx, text: String) {
         recency: None,
         compression: config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
+        compaction: Some(compaction_ctx),
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));

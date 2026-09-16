@@ -128,6 +128,30 @@ fn usage_from_response(
     }
 }
 
+/// Whether a provider stream error means the prompt exceeded the context
+/// window (ported from the reference's `AgentError::is_overflow`; ours has
+/// only the provider's message string to classify). Matches the phrasings of
+/// the major providers; deliberately excludes rate limits and output
+/// truncation, which surface as `FinishReason::Length`, not stream errors.
+pub(crate) fn is_context_overflow(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "prompt is too long",                                 // Anthropic
+        "maximum context length",                             // OpenAI
+        "context window",                                     // generic
+        "input length and `max_tokens` exceed context limit", // Anthropic variant
+        "exceeds the maximum number of tokens",               // Gemini
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+impl StreamFailure {
+    pub(crate) fn is_overflow(&self) -> bool {
+        matches!(self, Self::Error(message) if is_context_overflow(message))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +159,34 @@ mod tests {
 
     fn request() -> CompletionRequest {
         crate::edge::to_request(&[], &[], None, None, None)
+    }
+
+    #[test]
+    fn classifies_provider_overflow_messages() {
+        for message in [
+            "Error: prompt is too long: 210744 tokens > 200000 maximum",
+            "This model's maximum context length is 4096 tokens. However, you requested ...",
+            "input length and `max_tokens` exceed context limit: 10922 + 8192 > 8192",
+            "The input token count (524389) exceeds the maximum number of tokens allowed (1048576)",
+            "conversation exceeds the model context window",
+        ] {
+            assert!(is_context_overflow(message), "should match: {message}");
+            assert!(StreamFailure::Error(message.into()).is_overflow());
+        }
+    }
+
+    #[test]
+    fn non_overflow_failures_do_not_match() {
+        for message in [
+            "rate limit exceeded, retry after 30s",
+            "invalid api key",
+            "connection closed before response",
+            "maximum tokens per request is 128000 for this tier",
+        ] {
+            assert!(!is_context_overflow(message), "must not match: {message}");
+            assert!(!StreamFailure::Error(message.into()).is_overflow());
+        }
+        assert!(!StreamFailure::Cancelled.is_overflow());
     }
 
     /// A dropped `CancelFlag` must disable the cancel branch instead of

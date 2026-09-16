@@ -35,7 +35,9 @@ use std::sync::Arc;
 use rig_core::completion::{CompletionModel, FinishReason};
 use tokio::sync::watch;
 
+use crate::compaction::CompactionEngine;
 use crate::compression::{self, CompressionConfig};
+use crate::config::{CompactionBuffer, CompactionConfig};
 use crate::edge;
 use crate::history::{self, Message};
 
@@ -212,6 +214,27 @@ impl CancelFlag {
     }
 }
 
+/// How many times a run recovers from a context-overflow stream error by
+/// compacting and retrying before the error is surfaced (reference
+/// `MAX_OVERFLOW_RECOVERIES`). The counter resets on every successful
+/// stream, so a later overflow on another turn still gets its attempt.
+pub(crate) const MAX_OVERFLOW_RECOVERIES: u32 = 1;
+
+/// The session's compaction state shared with the run loop: the caller keeps
+/// the `Arc` so its pre-turn compaction and the run's overflow recovery read
+/// and write the same estimator/effectiveness state.
+pub type SharedCompactionState = Arc<std::sync::Mutex<crate::compaction::CompactionState>>;
+
+/// Everything the run loop needs to auto-compact and retry on a context
+/// overflow: shared state, configured stages, and the model's window.
+#[derive(Clone)]
+pub struct CompactionCtx {
+    pub state: SharedCompactionState,
+    pub stages: Vec<CompactionConfig>,
+    pub buffer: CompactionBuffer,
+    pub context_length: Option<u32>,
+}
+
 /// Request-level settings for one run.
 #[derive(Clone)]
 pub struct RunParams {
@@ -229,6 +252,10 @@ pub struct RunParams {
     pub compression: CompressionConfig,
     /// Bound on automatic continuations of truncated (`max_tokens`) replies.
     pub max_continuation_turns: usize,
+    /// Compaction context for overflow recovery: when set, a context-overflow
+    /// stream error triggers recalibration, forced compaction, and one retry;
+    /// `None` surfaces the error as before.
+    pub compaction: Option<CompactionCtx>,
 }
 
 impl std::fmt::Debug for RunParams {
@@ -241,6 +268,7 @@ impl std::fmt::Debug for RunParams {
             .field("recency", &self.recency.as_ref().map(|_| "<source>"))
             .field("compression", &self.compression)
             .field("max_continuation_turns", &self.max_continuation_turns)
+            .field("compaction", &self.compaction.is_some())
             .finish()
     }
 }
@@ -260,7 +288,14 @@ impl RunParams {
             recency: None,
             compression: CompressionConfig::default(),
             max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
+            compaction: None,
         }
+    }
+
+    /// Enable in-run overflow recovery with this compaction context.
+    pub fn with_compaction(mut self, compaction: CompactionCtx) -> Self {
+        self.compaction = Some(compaction);
+        self
     }
 }
 
@@ -274,6 +309,7 @@ impl Default for RunParams {
             recency: None,
             compression: CompressionConfig::default(),
             max_continuation_turns: Self::DEFAULT_MAX_CONTINUATION_TURNS,
+            compaction: None,
         }
     }
 }
@@ -368,6 +404,8 @@ async fn run_inner<M: CompletionModel + Clone>(
     let mut nudges: u32 = 0;
     // Continuations spent on truncated (`max_tokens`) replies.
     let mut continuations: usize = 0;
+    // Overflow recoveries spent in a row; reset by every successful stream.
+    let mut overflow_recoveries: u32 = 0;
     loop {
         if cancel.cancelled() {
             return (commit_cancelled(history, &mut turn), stats);
@@ -394,10 +432,29 @@ async fn run_inner<M: CompletionModel + Clone>(
             Err(stream::StreamFailure::Cancelled) => {
                 return (commit_cancelled(history, &mut turn), stats);
             }
+            // The gauge is a chars/4 floor, so a prompt can overflow with the
+            // thresholds unmet. Compaction is the only way out, so run it and
+            // retry once; a second consecutive overflow means compaction did
+            // not help and the error is the honest answer (reference
+            // `TurnOutcome::Overflow`).
+            Err(failure) if failure.is_overflow() => {
+                let stream::StreamFailure::Error(message) = failure else {
+                    unreachable!("is_overflow only matches Error");
+                };
+                if overflow_recoveries >= MAX_OVERFLOW_RECOVERIES {
+                    return (RunOutcome::Failed(message), stats);
+                }
+                overflow_recoveries += 1;
+                if !recover_from_overflow(params, model, history, emit).await {
+                    return (RunOutcome::Failed(message), stats);
+                }
+                continue;
+            }
             Err(stream::StreamFailure::Error(message)) => {
                 return (RunOutcome::Failed(message), stats);
             }
         };
+        overflow_recoveries = 0;
         stats.add_usage(&output.usage);
         stats.context_size = crate::compaction::estimate_tokens(&full);
         stats.turns = turns as u32 + 1;
@@ -454,6 +511,53 @@ async fn run_inner<M: CompletionModel + Clone>(
             return (outcome, stats);
         }
     }
+}
+
+/// Recalibrate and force a compaction after the request overflowed the
+/// context window. Returns whether recovery is possible at all (a run without
+/// a compaction context cannot recover). `history` is compacted in place; the
+/// un-committed turn is left intact and re-appended by the retried request.
+async fn recover_from_overflow<M: CompletionModel + Clone>(
+    params: &RunParams,
+    model: &M,
+    history: &mut Vec<Message>,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> bool {
+    let Some(ctx) = &params.compaction else {
+        return false;
+    };
+    // `maybe_compact` awaits, so the state is cloned out and written back
+    // rather than holding the guard across the await.
+    let Some(mut state) = ctx.state.lock().ok().map(|guard| guard.clone()) else {
+        return false;
+    };
+    let estimated = crate::compaction::estimate_tokens(history);
+    // A failed request reports no usage: `actual = 0` makes recalibration a
+    // safe no-op. The window bound in the error text is never used as the
+    // actual prompt size (it would over-inflate the multiplier).
+    state.recalibrate(0, estimated);
+    let window = ctx.context_length.map(u64::from).unwrap_or(0);
+    let before = state.estimator.scale(estimated);
+    emit(Event::AutoCompacting {
+        context_size: before,
+        context_window: window,
+    });
+    CompactionEngine::new(ctx.stages.clone())
+        .with_buffer(ctx.buffer)
+        .maybe_compact(&mut state, model, history, ctx.context_length)
+        .await;
+    let after = state
+        .estimator
+        .scale(crate::compaction::estimate_tokens(history));
+    emit(Event::CompactionDone {
+        context_size_before: before,
+        context_size_after: after,
+        context_window: window,
+    });
+    if let Ok(mut guard) = ctx.state.lock() {
+        *guard = state;
+    }
+    true
 }
 
 /// Commit a partial turn and end the run at its budget: sanitized so
@@ -2300,5 +2404,243 @@ mod tests {
         assert!(super::is_never_parallel("question"));
         assert!(!super::is_never_parallel("read"));
         assert!(!super::is_never_parallel("write"));
+    }
+
+    // --- Context-overflow recovery (C.5) ---
+
+    fn overflow_error_turn() -> Vec<MockStreamEvent> {
+        vec![MockStreamEvent::Error(
+            rig_core::test_utils::MockError::provider(
+                "This model's maximum context length is 4096 tokens. However, you requested 8192 tokens.",
+            ),
+        )]
+    }
+
+    fn rate_limit_turn() -> Vec<MockStreamEvent> {
+        vec![MockStreamEvent::Error(
+            rig_core::test_utils::MockError::provider("rate limit exceeded, retry after 30s"),
+        )]
+    }
+
+    fn done_turn(text: &str) -> Vec<MockStreamEvent> {
+        vec![
+            MockStreamEvent::text(text),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]
+    }
+
+    fn overflow_history() -> Vec<Message> {
+        use crate::compaction::test_support as ts;
+        let mut messages = Vec::new();
+        for i in 0..8 {
+            messages.push(ts::user(&format!(
+                "do task {i} with a fairly long instruction"
+            )));
+            messages.push(ts::assistant_tool_args(
+                &format!("t{i}"),
+                "bash",
+                serde_json::json!({"command": format!("echo {i}")}),
+            ));
+            messages.push(ts::tool_result_of(&format!("t{i}"), &"x".repeat(200)));
+        }
+        messages
+    }
+
+    fn recovery_setup() -> (RunParams, SharedCompactionState) {
+        let shared: SharedCompactionState = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::compaction::CompactionState::default(),
+        ));
+        let tokens = crate::compaction::estimate_tokens(&overflow_history());
+        // Window sized like the engine tests so the estimate overflows the
+        // buffer-subtracted window and the VCC stage is forced to run.
+        let context_length = ((tokens as f64 / 0.9) as u32).max(1);
+        let params = RunParams::new(None).with_compaction(CompactionCtx {
+            state: shared.clone(),
+            stages: vec![crate::config::CompactionConfig {
+                kind: crate::config::CompactionKind::Vcc,
+                context: 0.6,
+            }],
+            buffer: crate::config::CompactionBuffer::Percent(20),
+            context_length: Some(context_length),
+        });
+        (params, shared)
+    }
+
+    #[tokio::test]
+    async fn overflow_recovers_compacts_and_retries() {
+        let (model, _turns) = stream_turns(vec![overflow_error_turn(), done_turn("recovered")]);
+        let (params, shared) = recovery_setup();
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = overflow_history();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
+            "continue",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        assert!(matches!(&outcome, RunOutcome::Done { reply } if reply == "recovered"));
+        // The retried request was rebuilt from the compacted history.
+        assert_eq!(model.requests().len(), 2);
+        // Compaction events fired around the recovery.
+        let guard = events.lock().unwrap();
+        assert!(
+            guard
+                .iter()
+                .any(|e| matches!(e, Event::AutoCompacting { .. }))
+        );
+        assert!(
+            guard
+                .iter()
+                .any(|e| matches!(e, Event::CompactionDone { .. }))
+        );
+        // No usage is reported on a failed request, so recalibration is a
+        // safe no-op: the multiplier never moved.
+        assert_eq!(
+            shared.lock().unwrap().estimator.multiplier(),
+            1.0,
+            "calibration must no-op without reported input tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_consecutive_overflow_surfaces_the_error() {
+        let (model, _turns) = stream_turns(vec![overflow_error_turn(), overflow_error_turn()]);
+        let (params, _shared) = recovery_setup();
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = overflow_history();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
+            "continue",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        match outcome {
+            RunOutcome::Failed(message) => {
+                assert!(
+                    message.contains("maximum context length"),
+                    "surfaced the original overflow error, got: {message}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // Both requests failed; the budget allowed exactly one recovery
+        // attempt (the second overflow surfaces the error without
+        // compacting again).
+        assert_eq!(model.requests().len(), 2);
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, Event::AutoCompacting { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn success_between_overflows_rearms_recovery() {
+        let (model, _turns) = stream_turns(vec![
+            overflow_error_turn(),
+            vec![
+                tool_event("t1", "read", serde_json::json!({"path":"file.txt"})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            overflow_error_turn(),
+            done_turn("done"),
+        ]);
+        let (params, _shared) = recovery_setup();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "content\n").unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = overflow_history();
+        let outcome = run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
+            "continue",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        // Without the reset-on-success the second overflow would fail.
+        assert!(matches!(&outcome, RunOutcome::Done { reply } if reply == "done"));
+        assert_eq!(model.requests().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn non_overflow_errors_fail_immediately() {
+        let (model, _turns) = stream_turns(vec![rate_limit_turn()]);
+        let (params, _shared) = recovery_setup();
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = overflow_history();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outcome = run(
+            &model,
+            &params,
+            &tools,
+            &mut history,
+            "continue",
+            &cancel,
+            &|event| events.lock().unwrap().push(event),
+        )
+        .await;
+        match outcome {
+            RunOutcome::Failed(message) => {
+                assert!(message.contains("rate limit"), "got: {message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(model.requests().len(), 1);
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::AutoCompacting { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_without_compaction_context_fails_as_before() {
+        let (model, _turns) = stream_turns(vec![overflow_error_turn()]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = overflow_history();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "continue",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        match outcome {
+            RunOutcome::Failed(message) => {
+                assert!(message.contains("maximum context length"), "got: {message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 }

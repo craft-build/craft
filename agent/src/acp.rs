@@ -59,8 +59,9 @@ struct Session {
     models: Vec<CatalogModel>,
     model: String,
     context_length: Option<u32>,
-    /// Effectiveness state for the configured compaction stages.
-    compaction: crate::compaction::CompactionState,
+    /// Effectiveness state for the configured compaction stages, shared
+    /// with the run loop for in-run overflow recovery.
+    compaction: run::SharedCompactionState,
     /// Session-wide tool dedup cache, shared by the dispatcher and cleared
     /// by the compaction engine.
     dedup: run::SharedDedupCache,
@@ -181,7 +182,9 @@ impl AppState {
             models,
             model,
             context_length,
-            compaction: crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
+            compaction: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
+            )),
             dedup,
             cancel,
         })
@@ -466,7 +469,7 @@ async fn run_turn(
     // effectiveness state is persisted here; the compacted history is
     // committed by the run's success path, matching the loop's "failed runs
     // leave session history untouched" semantics.
-    let (mut compaction_state, context_length, dedup) = {
+    let (shared_compaction, context_length, dedup) = {
         let sessions = state.sessions.lock().await;
         sessions
             .get(session_id.0.as_ref())
@@ -480,21 +483,28 @@ async fn run_turn(
             .unwrap_or_else(|| {
                 let dedup = run::shared_cache();
                 (
-                    crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
+                    std::sync::Arc::new(std::sync::Mutex::new(
+                        crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
+                    )),
                     None,
                     dedup,
                 )
             })
     };
-    {
+    let compaction_ctx = run::CompactionCtx {
+        state: shared_compaction.clone(),
+        stages: state.config.compaction.clone(),
+        buffer: state.config.compaction_buffer,
+        context_length,
+    };
+    if let Some(mut compaction_state) = shared_compaction.lock().ok().map(|g| g.clone()) {
         let engine = crate::compaction::CompactionEngine::new(state.config.compaction.clone())
             .with_buffer(state.config.compaction_buffer);
         engine
             .maybe_compact(&mut compaction_state, &model, &mut history, context_length)
             .await;
-        let mut sessions = state.sessions.lock().await;
-        if let Some(session) = sessions.get_mut(session_id.0.as_ref()) {
-            session.compaction = compaction_state;
+        if let Ok(mut guard) = shared_compaction.lock() {
+            *guard = compaction_state;
         }
     }
 
@@ -526,6 +536,7 @@ async fn run_turn(
         recency: None,
         compression: state.config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
+        compaction: Some(compaction_ctx),
     };
 
     let send = |update: SessionUpdate| -> std::result::Result<(), Error> {
