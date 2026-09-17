@@ -140,6 +140,22 @@ pub fn compress(text: &str, content_type: ContentType, config: &CompressionConfi
     }
 }
 
+/// Tools whose output is exactly what the model asked for and must reach it
+/// verbatim. These return caller-selected content that is already bounded by
+/// the tool's own budget, and their `N: ` line numbering trips the code
+/// detector — so pre-compression would delete the very lines requested.
+///
+/// - `read`: a line range chosen via `offset`/`limit`.
+/// - `grep`: matched lines, already capped by `max_matches`/`MAX_OUTPUT_BYTES`.
+/// - `retrieve`: the original text recovered by content hash; re-compressing it
+///   would defeat the point of the reversible-compression store.
+const VERBATIM_TOOLS: &[&str] = &["read", "grep", "retrieve"];
+
+/// Whether a tool result should pass through request-view pre-compression.
+pub fn should_compress_tool(tool: &str) -> bool {
+    !VERBATIM_TOOLS.contains(&tool)
+}
+
 /// The request-side gate the reference applies via `as_text_for_llm`:
 /// short, empty, or disabled outputs pass through; everything else is
 /// detected and compressed.
@@ -199,6 +215,15 @@ mod tests {
     }
 
     #[test]
+    fn verbatim_tools_are_never_compressed() {
+        assert!(!should_compress_tool("read"));
+        assert!(!should_compress_tool("grep"));
+        assert!(!should_compress_tool("retrieve"));
+        assert!(should_compress_tool("bash"));
+        assert!(should_compress_tool("glob"));
+    }
+
+    #[test]
     fn compress_for_llm_passes_short_output_through() {
         assert_eq!(
             compress_for_llm("short content", &config()),
@@ -226,3 +251,4 @@ mod tests {
         assert!(compressed.contains("lines omitted"));
     }
 }
+

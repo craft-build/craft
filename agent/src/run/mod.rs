@@ -1051,6 +1051,11 @@ fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
         };
         for block in content {
             if let history::UserContent::ToolResult(result) = block {
+                // Verbatim tools (e.g. `read`) return caller-selected content;
+                // compressing it would drop lines the model explicitly asked for.
+                if !compression::should_compress_tool(&result.name) {
+                    continue;
+                }
                 for item in &mut result.content {
                     if let history::ToolResultContent::Text(text) = item {
                         text.text = compression::compress_for_llm(&text.text, config);
@@ -2454,7 +2459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compression_trims_request_view_but_history_keeps_raw() {
+    async fn read_output_stays_verbatim_on_wire() {
         let (model, _turns) = stream_turns(vec![
             vec![
                 tool_event("t1", "read", serde_json::json!({"path": "big.txt"})),
@@ -2500,7 +2505,8 @@ mod tests {
                 .to_text()
                 .contains("lines omitted"))
         ));
-        // The model's second request carried the compressed form.
+        // `read` output is caller-selected and must reach the model verbatim,
+        // even though its `N: ` numbering looks like code to the detector.
         let requests = model.requests();
         assert_eq!(requests.len(), 2);
         let sent = crate::edge::rig_to_own(&requests[1].chat_history);
@@ -2512,10 +2518,64 @@ mod tests {
         };
         let wire_text = result.content[0].to_text();
         assert!(
-            wire_text.contains("lines omitted"),
-            "model must see the compressed form"
+            !wire_text.contains("lines omitted"),
+            "read output must not be pre-compressed"
         );
-        assert!(wire_text.len() < raw_text.len());
+        assert_eq!(wire_text, raw_text);
+    }
+
+    #[test]
+    fn compress_request_view_skips_verbatim_tools_but_compresses_the_rest() {
+        let numbered = |n: usize| {
+            (1..=n)
+                .map(|i| format!("{i}: let x = {i};\n"))
+                .collect::<String>()
+        };
+        let raw_read = numbered(60);
+        let raw_grep = numbered(60);
+        let raw_retrieve = numbered(60);
+        let raw_bash = numbered(60);
+        let mut full = vec![Message::User {
+            content: vec![
+                UserContent::ToolResult(crate::history::ToolResult::text(
+                    "c1",
+                    "read",
+                    raw_read.clone(),
+                )),
+                UserContent::ToolResult(crate::history::ToolResult::text(
+                    "c2",
+                    "grep",
+                    raw_grep.clone(),
+                )),
+                UserContent::ToolResult(crate::history::ToolResult::text(
+                    "c3",
+                    "retrieve",
+                    raw_retrieve.clone(),
+                )),
+                UserContent::ToolResult(crate::history::ToolResult::text(
+                    "c4",
+                    "bash",
+                    raw_bash.clone(),
+                )),
+            ],
+        }];
+        compress_request_view(&mut full, &CompressionConfig::default());
+        let Message::User { content } = &full[0] else {
+            panic!("user message");
+        };
+        let text = |i: usize| {
+            let UserContent::ToolResult(result) = &content[i] else {
+                panic!("tool result {i}");
+            };
+            result.content[0].to_text()
+        };
+        assert_eq!(text(0), raw_read, "read stays verbatim");
+        assert_eq!(text(1), raw_grep, "grep stays verbatim");
+        assert_eq!(text(2), raw_retrieve, "retrieve stays verbatim");
+        assert!(
+            text(3).contains("lines omitted"),
+            "non-verbatim tools are still pre-compressed"
+        );
     }
 
     #[tokio::test]
