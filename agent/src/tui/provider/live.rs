@@ -918,7 +918,12 @@ async fn run_turn(ctx: TurnCtx, text: String) {
         compression: config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
         compaction: Some(compaction_ctx),
-        reauth: None,
+        reauth: config
+            .providers
+            .get(&selection.provider)
+            .map(|provider_config| {
+                crate::providers::reauth_hook(provider_config, &selection.model)
+            }),
         retry: run::RetryCtx::default(),
     };
 

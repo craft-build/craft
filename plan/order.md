@@ -49,7 +49,7 @@ Optimal port order from `comparison.md`: dependencies first, highest leverage-pe
 37. B.3 Bash sandbox (macOS Seatbelt + Linux landlock) — can slip later if permission engine is solid
 38. E.7 LLM auto-review of permissions
 
-## Phase 4 — Agent loop hardening
+## [x] Phase 4 — Agent loop hardening
 
 39. C.1 Rich agent event stream — substrate for TUI features below
 40. C.6 Cancellation architecture (CancelToken/CancelMap, history sanitization)

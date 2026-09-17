@@ -459,6 +459,7 @@ async fn run_turn(
     if model.trim().is_empty() {
         fail!("no model is selected; set the model session configuration option");
     }
+    let model_label = model.clone();
     let model = match provider.completion_model(&model) {
         Ok(model) => model,
         Err(error) => fail!(report(error)),
@@ -537,7 +538,11 @@ async fn run_turn(
         compression: state.config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,
         compaction: Some(compaction_ctx),
-        reauth: None,
+        reauth: state
+            .config
+            .providers
+            .get(&provider_name)
+            .map(|provider_config| crate::providers::reauth_hook(provider_config, &model_label)),
         retry: run::RetryCtx::default(),
     };
 

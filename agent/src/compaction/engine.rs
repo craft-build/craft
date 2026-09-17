@@ -86,6 +86,15 @@ impl CompactionState {
     pub fn recalibrate(&mut self, actual: u64, estimated: u64) -> bool {
         self.estimator.recalibrate(actual, estimated)
     }
+
+    /// Merge a compaction run made on a cloned state back into the live
+    /// one, copying only what the engine changes. Recalibration performed
+    /// concurrently on the live state survives the merge (a whole-state
+    /// overwrite would clobber it).
+    pub(crate) fn absorb_run(&mut self, run: &Self) {
+        self.disarmed = run.disarmed.clone();
+        self.carry_from = run.carry_from;
+    }
 }
 
 impl CompactionEngine {

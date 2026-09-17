@@ -311,16 +311,24 @@ pub struct RunParams {
     pub retry: RetryCtx,
     /// Re-authentication hook (E.10): when set, a 401 stream error emits
     /// [`Event::AuthRequired`] and the run waits on this hook (up to
-    /// [`MAX_REAUTH_ATTEMPTS`] times) instead of failing. `None` fails the
-    /// run with the provider's auth error, like the reference's
-    /// no-user-response path. The H.5 auth flows will supply the hook.
+    /// [`MAX_REAUTH_ATTEMPTS`] times) instead of failing. A refreshed model
+    /// returned by the hook replaces the stream's target for the rest of the
+    /// run; `Ok(None)` retries the current one. `None` fails the run with
+    /// the provider's auth error, like the reference's no-user-response
+    /// path.
     pub reauth: Option<ReauthHook>,
 }
 
 /// What a surface calls when the model stream reports an auth error: block
-/// until credentials are refreshed (`Ok(())`) or report failure (`Err`).
-pub type ReauthFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+/// until credentials are refreshed, returning the model rebuilt from them
+/// (`Ok(None)` when the active model needs no swap), or report failure
+/// (`Err`).
+pub type ReauthFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Option<crate::providers::DynamicModel>, String>>
+            + Send,
+    >,
+>;
 pub type ReauthHook = std::sync::Arc<dyn Fn(u32) -> ReauthFuture + Send + Sync>;
 
 impl std::fmt::Debug for RunParams {
@@ -483,6 +491,10 @@ async fn run_inner<M: CompletionModel + Clone>(
     // Reauth waits spent this run; reset by every successful stream
     // (reference resets `reauth_attempts` on every successful stream).
     let mut reauth_attempts: u32 = 0;
+    // Model rebuilt by a successful reauth, used for the rest of the run.
+    let mut refreshed_model: Option<crate::providers::DynamicModel> = None;
+    // Run-wide transient-retry tally shared by every model call.
+    let transient_budget = retry::TransientBudget::default();
     // Measured input tokens from the last completed stream; feeds the
     // output-token clamp a number better than the chars/4 estimate.
     let mut measured_prompt_tokens: u64 = 0;
@@ -525,16 +537,32 @@ async fn run_inner<M: CompletionModel + Clone>(
             params.temperature,
             clamped_max_tokens(window, prompt_tokens, params.max_tokens),
         );
-        let output = match retry::stream_with_retry(
-            model,
-            &params.retry.fallbacks,
-            params.retry.rotate.as_ref(),
-            &request,
-            cancel,
-            emit,
-        )
-        .await
-        {
+        let output = match match refreshed_model.as_ref() {
+            Some(refreshed) => {
+                retry::stream_with_retry(
+                    refreshed,
+                    &[],
+                    params.retry.rotate.as_ref(),
+                    &transient_budget,
+                    &request,
+                    cancel,
+                    emit,
+                )
+                .await
+            }
+            None => {
+                retry::stream_with_retry(
+                    model,
+                    &params.retry.fallbacks,
+                    params.retry.rotate.as_ref(),
+                    &transient_budget,
+                    &request,
+                    cancel,
+                    emit,
+                )
+                .await
+            }
+        } {
             Ok(output) => output,
             Err(stream::StreamFailure::Cancelled { streamed }) => {
                 // Keep the partial reply the user already saw, so the next
@@ -562,6 +590,10 @@ async fn run_inner<M: CompletionModel + Clone>(
                 if !recover_from_overflow(params, model, history, &mut doom, emit).await {
                     return (RunOutcome::Failed(message), stats);
                 }
+                // The pre-compaction measurement no longer describes the
+                // compacted context; drop it so the clamp trusts the
+                // estimate until the next real usage report.
+                measured_prompt_tokens = 0;
                 continue;
             }
             // Auth failure: pause for re-authentication instead of failing
@@ -587,7 +619,10 @@ async fn run_inner<M: CompletionModel + Clone>(
                     _ = cancel.wait() => None,
                     r = reauth(reauth_attempts) => Some(r),
                 } {
-                    Some(Ok(())) => continue,
+                    Some(Ok(refreshed)) => {
+                        refreshed_model = refreshed.or(refreshed_model);
+                        continue;
+                    }
                     Some(Err(e)) => return (RunOutcome::Failed(e), stats),
                     None => return (commit_cancelled(history, &mut turn), stats),
                 }
@@ -690,9 +725,10 @@ async fn recover_from_overflow<M: CompletionModel + Clone>(
     let Some(ctx) = &params.compaction else {
         return false;
     };
-    // `maybe_compact` awaits, so the state is cloned out and written back
-    // rather than holding the guard across the await.
-    let Some(mut state) = ctx.state.lock().ok().map(|guard| guard.clone()) else {
+    // `maybe_compact` awaits, so the engine runs on a clone; recalibration
+    // and the write-back happen in short critical sections against the
+    // live state so a concurrent session-side update is not clobbered.
+    let Some(mut state) = ctx.state.lock().ok().map(|mut guard| guard.clone()) else {
         return false;
     };
     let estimated = crate::compaction::estimate_tokens(history);
@@ -731,7 +767,7 @@ async fn recover_from_overflow<M: CompletionModel + Clone>(
         context_window: window,
     });
     if let Ok(mut guard) = ctx.state.lock() {
-        *guard = state;
+        guard.absorb_run(&state);
     }
     true
 }
@@ -864,7 +900,6 @@ async fn dispatch_tool_calls(
     let mut set = task_set::TaskSet::new();
     let mut wave: Vec<history::ToolCall> = Vec::new();
     let mut all_write_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut has_path_conflict = false;
     let mut batch = doom::ToolBatchOutcome::default();
 
     for call in calls {
@@ -897,19 +932,15 @@ async fn dispatch_tool_calls(
             });
             recent.clear();
         } else {
-            if is_never_parallel(&name) {
-                has_path_conflict = true;
-            }
-            for path in dedup::extract_write_paths(&name, &call.function.arguments) {
-                if all_write_paths.contains(&path) {
-                    has_path_conflict = true;
-                }
-                all_write_paths.insert(path);
-            }
-            let executor = Arc::clone(&tools);
-            wave.push(call.clone());
-            set.spawn(async move { executor.execute(call).await });
-            if has_path_conflict {
+            // A never-parallel tool or a repeat write path must not share a
+            // wave with earlier calls, so the pending wave is flushed
+            // *before* this call is spawned into a fresh one.
+            let write_paths = dedup::extract_write_paths(&name, &call.function.arguments);
+            let conflicts = is_never_parallel(&name)
+                || write_paths
+                    .iter()
+                    .any(|path| all_write_paths.contains(path));
+            if conflicts && !wave.is_empty() {
                 if let Some(outcome) =
                     commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await
                 {
@@ -917,8 +948,11 @@ async fn dispatch_tool_calls(
                 }
                 set = task_set::TaskSet::new();
                 all_write_paths.clear();
-                has_path_conflict = false;
             }
+            all_write_paths.extend(write_paths);
+            let executor = Arc::clone(&tools);
+            wave.push(call.clone());
+            set.spawn(async move { executor.execute(call).await });
         }
         recent.record(name, &arguments);
     }
@@ -3182,7 +3216,7 @@ mod tests {
         std::sync::Arc::new(move |attempt| {
             attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let _ = attempt;
-            Box::pin(std::future::ready(Ok(())))
+            Box::pin(std::future::ready(Ok(None)))
         })
     }
 
@@ -3337,7 +3371,9 @@ mod tests {
         // A responder that never resolves: only cancellation can end it.
         let params = RunParams {
             reauth: Some(std::sync::Arc::new(|_attempt| {
-                Box::pin(futures::future::pending::<Result<(), String>>())
+                Box::pin(futures::future::pending::<
+                    Result<Option<crate::providers::DynamicModel>, String>,
+                >())
             })),
             ..RunParams::default()
         };

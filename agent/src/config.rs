@@ -204,7 +204,7 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub kind: ProviderKind,
@@ -229,7 +229,7 @@ fn default_discover_models() -> bool {
 
 /// Partial metadata overrides, keyed by the exact provider model/deployment ID.
 /// An empty table is sufficient to register an otherwise unlisted model.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
     pub name: Option<String>,
