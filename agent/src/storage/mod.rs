@@ -9,6 +9,7 @@ pub mod atomic;
 pub mod input_history;
 pub mod log;
 pub mod model;
+pub mod stats;
 pub mod theme;
 
 use std::fs;
