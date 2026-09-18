@@ -543,6 +543,7 @@ async fn run_turn(
             .providers
             .get(&provider_name)
             .map(|provider_config| crate::providers::reauth_hook(provider_config, &model_label)),
+        model_spec: Some(format!("{provider_name}/{model_label}").into()),
         retry: run::RetryCtx::default(),
     };
 

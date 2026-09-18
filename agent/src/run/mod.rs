@@ -33,6 +33,7 @@ pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use retry::RetryCtx;
 pub use stream::TurnOutput;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rig_core::completion::{CompletionModel, FinishReason};
@@ -98,6 +99,9 @@ pub enum Event {
         context_window: u64,
         num_turns: u32,
         reason: DoneReason,
+        /// What the run's turns were billed (H.6). `None` when no model in
+        /// the run is priced, so callers show no cost instead of "$0.000".
+        cost: Option<f64>,
     },
     /// Human-readable, non-fatal status text.
     Info(String),
@@ -317,6 +321,9 @@ pub struct RunParams {
     /// the provider's auth error, like the reference's no-user-response
     /// path.
     pub reauth: Option<ReauthHook>,
+    /// `provider/model` spec of the run's model, for usage & cost accounting
+    /// (H.6). `None` disables pricing; usage counters still accumulate.
+    pub model_spec: Option<std::sync::Arc<str>>,
 }
 
 /// What a surface calls when the model stream reports an auth error: block
@@ -344,6 +351,7 @@ impl std::fmt::Debug for RunParams {
             .field("compaction", &self.compaction.is_some())
             .field("retry", &self.retry)
             .field("reauth", &self.reauth.is_some())
+            .field("model_spec", &self.model_spec)
             .finish()
     }
 }
@@ -366,6 +374,7 @@ impl RunParams {
             compaction: None,
             retry: RetryCtx::default(),
             reauth: None,
+            model_spec: None,
         }
     }
 
@@ -389,6 +398,7 @@ impl Default for RunParams {
             compaction: None,
             retry: RetryCtx::default(),
             reauth: None,
+            model_spec: None,
         }
     }
 }
@@ -426,11 +436,66 @@ struct RunStats {
     usage: history::Usage,
     context_size: u64,
     turns: u32,
+    /// Per-model ledger (H.6): turns are priced when they run and their cost
+    /// recorded, so summing is the truth (see `usage::settle_session`).
+    by_model: HashMap<String, crate::usage::StoredTokenUsage>,
+}
+
+/// The spec to bill: the model that actually answered the call. Retry-chain
+/// fallbacks and reauth-refreshed models carry only a bare model id, so the
+/// primary spec's provider prefixes it.
+fn served_spec(
+    primary: Option<&str>,
+    served_fallback: Option<&str>,
+    refreshed: Option<&crate::providers::DynamicModel>,
+) -> Option<Arc<str>> {
+    let primary = primary?;
+    let label = served_fallback
+        .or_else(|| refreshed.and_then(|m| m.label()))
+        .unwrap_or_else(|| primary.rsplit_once('/').map_or(primary, |(_, m)| m));
+    // A label with a slash is already a full spec (possibly cross-provider);
+    // only a bare id borrows the primary's provider.
+    let spec = if label.contains('/') {
+        label.to_owned()
+    } else {
+        let provider = primary.split_once('/').map_or(primary, |(p, _)| p);
+        format!("{provider}/{label}")
+    };
+    Some(spec.into())
+}
+
+#[cfg(test)]
+mod served_spec_tests {
+    use super::served_spec;
+
+    #[test]
+    fn bare_ids_borrow_the_primary_provider_full_specs_do_not() {
+        let primary = "anthropic/claude-sonnet-5";
+        assert_eq!(
+            served_spec(Some(primary), Some("claude-opus-5"), None),
+            Some("anthropic/claude-opus-5".into())
+        );
+        assert_eq!(
+            served_spec(Some(primary), Some("openai/gpt-5.6-sol"), None),
+            Some("openai/gpt-5.6-sol".into())
+        );
+        assert_eq!(served_spec(None, Some("claude-opus-5"), None), None);
+        assert_eq!(
+            served_spec(Some(primary), None, None),
+            Some("anthropic/claude-sonnet-5".into())
+        );
+    }
 }
 
 impl RunStats {
-    fn add_usage(&mut self, usage: &history::Usage) {
+    /// Fold one model call's usage into the ledger, pricing the turn against
+    /// today's table. An unresolvable spec still counts its tokens, unpriced.
+    fn add_usage(&mut self, usage: &history::Usage, spec: Option<&str>) {
         self.usage.add(*usage);
+        let Some(spec) = spec else { return };
+        let tokens = crate::usage::TokenUsage::from(usage);
+        let cost = crate::usage::resolve_spec(spec).and_then(|m| m.billed_cost(&tokens, false));
+        *self.by_model.entry(spec.to_owned()).or_default() += tokens.billed(cost);
     }
 }
 
@@ -446,17 +511,30 @@ pub async fn run<M: CompletionModel + Clone>(
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> RunOutcome {
-    let (outcome, stats) = run_inner(model, params, tools, history, prompt, cancel, emit).await;
+    let (outcome, mut stats) = run_inner(model, params, tools, history, prompt, cancel, emit).await;
     if let RunOutcome::Failed(message) = &outcome {
         emit(Event::Error(message.clone()));
     }
     // `context_window` is a 0 sentinel until window sizes reach this seam.
+    // Cost comes from the per-model ledger: recorded turn costs win;
+    // unpriced models settle to `None`, never a made-up "$0.000".
+    let cost = if stats.by_model.is_empty() {
+        None
+    } else {
+        crate::usage::settle_session(
+            &crate::usage::TokenUsage::default(),
+            &mut stats.by_model,
+            params.model_spec.as_deref().unwrap_or(""),
+            false,
+        )
+    };
     emit(Event::Done {
         usage: stats.usage,
         context_size: stats.context_size,
         context_window: 0,
         num_turns: stats.turns,
         reason: DoneReason::from(&outcome),
+        cost,
     });
     // Clean (and cancelled) run ends close the capture session onto the
     // `/undo` stack; a failed run leaves it for the next attempt to merge
@@ -537,7 +615,7 @@ async fn run_inner<M: CompletionModel + Clone>(
             params.temperature,
             clamped_max_tokens(window, prompt_tokens, params.max_tokens),
         );
-        let output = match match refreshed_model.as_ref() {
+        let (output, served_spec) = match match refreshed_model.as_ref() {
             Some(refreshed) => {
                 retry::stream_with_retry(
                     refreshed,
@@ -563,7 +641,16 @@ async fn run_inner<M: CompletionModel + Clone>(
                 .await
             }
         } {
-            Ok(output) => output,
+            Ok((output, served_fallback)) => {
+                // Bill the model that actually answered: a retry-chain
+                // fallback or a reauth-refreshed model, not the primary.
+                let served_spec = served_spec(
+                    params.model_spec.as_deref(),
+                    served_fallback,
+                    refreshed_model.as_ref(),
+                );
+                (output, served_spec)
+            }
             Err(stream::StreamFailure::Cancelled { streamed }) => {
                 // Keep the partial reply the user already saw, so the next
                 // prompt replays from what was on screen.
@@ -643,7 +730,7 @@ async fn run_inner<M: CompletionModel + Clone>(
         if output.usage.input_tokens > 0 {
             measured_prompt_tokens = output.usage.input_tokens;
         }
-        stats.add_usage(&output.usage);
+        stats.add_usage(&output.usage, served_spec.as_deref());
         stats.context_size = crate::compaction::estimate_tokens(&full);
         stats.turns = turns as u32 + 1;
         emit(Event::TurnComplete {

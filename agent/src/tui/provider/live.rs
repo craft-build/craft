@@ -924,6 +924,7 @@ async fn run_turn(ctx: TurnCtx, text: String) {
             .map(|provider_config| {
                 crate::providers::reauth_hook(provider_config, &selection.model)
             }),
+        model_spec: Some(format!("{}/{}", selection.provider, selection.model).into()),
         retry: run::RetryCtx::default(),
     };
 

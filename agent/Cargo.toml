@@ -15,6 +15,7 @@ etcetera.workspace = true
 futures.workspace = true
 http = "1"
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
+jiff = "0.2"
 ignore.workspace = true
 libc = "0.2"
 ratatui.workspace = true

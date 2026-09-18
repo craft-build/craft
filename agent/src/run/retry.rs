@@ -141,15 +141,15 @@ async fn wait_cancellable(delay: Duration, cancel: &CancelToken) -> Result<(), S
 /// unavailable, and once the chain is spent the last hop keeps retrying.
 /// Context overflow is not retried here — the run loop's recovery owns it.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn stream_with_retry<M>(
+pub(crate) async fn stream_with_retry<'a, M>(
     primary: &M,
-    fallbacks: &[crate::providers::DynamicModel],
+    fallbacks: &'a [crate::providers::DynamicModel],
     rotate: Option<&RotateKey>,
     budget: &TransientBudget,
     request: &CompletionRequest,
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
-) -> Result<TurnOutput, StreamFailure>
+) -> Result<(TurnOutput, Option<&'a str>), StreamFailure>
 where
     M: CompletionModel + Clone,
 {
@@ -169,7 +169,14 @@ where
             run_model_stream(&fallbacks[next_fallback - 1], request.clone(), cancel, emit).await
         };
         let failure = match result {
-            Ok(output) => return Ok(output),
+            Ok(output) => {
+                let served = if next_fallback == 0 {
+                    None
+                } else {
+                    fallbacks[next_fallback - 1].label()
+                };
+                return Ok((output, served));
+            }
             Err(failure) => failure,
         };
         let StreamFailure::Error { kind, message } = &failure else {
@@ -312,7 +319,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "recovered");
+        assert_eq!(output.0.assistant.text(), "recovered");
+        assert_eq!(output.1, None, "the primary model served");
         let retries = retry_events(&events.lock().unwrap());
         assert_eq!(retries.len(), 1);
         assert_eq!(retries[0].0, 1, "attempt is 1-based");
@@ -398,7 +406,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "ok");
+        assert_eq!(output.0.assistant.text(), "ok");
         // Rotation reports itself and waits a brief guard delay.
         let retries = retry_events(&events.lock().unwrap());
         assert_eq!(retries.len(), 1);
@@ -417,9 +425,10 @@ mod tests {
         );
         let (_flag, cancel) = crate::run::cancel_channel();
         let events = std::sync::Mutex::new(Vec::new());
+        let fallbacks = [fallback];
         let output = stream_with_retry(
             &primary,
-            &[fallback],
+            &fallbacks,
             None,
             &TransientBudget::default(),
             &request(),
@@ -428,7 +437,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "fallback");
+        assert_eq!(output.0.assistant.text(), "fallback");
+        assert_eq!(
+            output.1,
+            Some("fallback-model"),
+            "a fallback served the call"
+        );
         let retries = retry_events(&events.lock().unwrap());
         assert_eq!(retries.len(), 1);
         assert_eq!(retries[0].0, 1, "chain hop resets the attempt counter");
@@ -457,7 +471,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "ok");
+        assert_eq!(output.0.assistant.text(), "ok");
         assert_eq!(retry_events(&events.lock().unwrap()).len(), 2);
     }
 
@@ -535,7 +549,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.assistant.text(), "ok");
+        assert_eq!(output.0.assistant.text(), "ok");
         let retries = retry_events(&events.lock().unwrap());
         assert_eq!(retries.len(), MAX_ROTATIONS as usize + 1);
         assert!(retries[MAX_ROTATIONS as usize].1.contains("Rate limited"));

@@ -1569,6 +1569,7 @@ dependencies = [
  "futures",
  "http",
  "ignore",
+ "jiff",
  "jsonrepair",
  "libc",
  "ratatui",

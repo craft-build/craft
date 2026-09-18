@@ -21,3 +21,4 @@ pub mod snapshot;
 pub mod storage;
 pub mod tools;
 pub mod tui;
+pub mod usage;
