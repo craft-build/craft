@@ -357,6 +357,24 @@ pub struct CatalogModel {
     pub max_output_tokens: Option<u32>,
 }
 
+pub trait CatalogEntry {
+    fn id(&self) -> &str;
+    fn context_length_mut(&mut self) -> &mut Option<u32>;
+    fn max_output_tokens_mut(&mut self) -> &mut Option<u32>;
+}
+
+impl CatalogEntry for CatalogModel {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn context_length_mut(&mut self) -> &mut Option<u32> {
+        &mut self.context_length
+    }
+    fn max_output_tokens_mut(&mut self) -> &mut Option<u32> {
+        &mut self.max_output_tokens
+    }
+}
+
 impl CatalogModel {
     /// Display label: the catalog name, falling back to the model id.
     pub fn label(&self) -> &str {

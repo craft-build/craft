@@ -157,6 +157,17 @@ impl CraftProvider {
             .fail();
         }
 
+        // H.2 models.dev catalog: warm the 24h disk cache (best-effort, with
+        // a fetch budget) and fill context/output metadata the Rig listing
+        // lacks. Failures degrade to whatever discovery already provided.
+        let _ =
+            tokio::time::timeout(crate::models_dev::FETCH_BUDGET, crate::models_dev::warm()).await;
+        for (name, provider_config) in &config.providers {
+            if let Some(models) = catalogs.get_mut(name) {
+                crate::models_dev::enrich_catalog(provider_config.kind.as_str(), models);
+            }
+        }
+
         // H.3 model-tier registry: load persisted tier overrides and feed in
         // the discovered catalogs so tier defaults can be resolved.
         if let Ok(state_dir) = crate::storage::StateDir::resolve() {

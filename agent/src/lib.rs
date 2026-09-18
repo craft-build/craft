@@ -12,6 +12,7 @@ mod inplace_edit;
 pub mod instructions;
 pub mod json_repair;
 pub mod model_registry;
+pub mod models_dev;
 pub mod paths;
 pub mod permissions;
 pub mod prompt;

@@ -3,9 +3,11 @@
 //! Ported from the reference `craft-providers/src/model_registry.rs`, adapted
 //! to this repo's Rig-based architecture: the reference's per-provider
 //! `manifest.rs` layer is replaced by a compact static table keyed by
-//! `ProviderKind` string, and Rig's discovery (`CatalogModel`) carries no tier
-//! metadata, so `ModelInfo::tier` stays `None` until the models.dev catalog
-//! lands (task 49) — positional auto-assignment covers the gap.
+//! `ProviderKind` string, and the models.dev catalog (task 49) carries no
+//! tier metadata — verified against the reference, whose catalog fills only
+//! context/pricing/vision — so `ModelInfo::tier` is set by dynamic-provider
+//! scripts there and stays `None` here; positional auto-assignment covers
+//! the gap.
 //!
 //! Three layers, checked in order: user overrides (persisted, a model may hold
 //! several tiers) > static entries from the provider manifest > auto-assignment
@@ -53,8 +55,9 @@ impl std::fmt::Display for ModelTier {
 pub struct ModelInfo {
     pub id: String,
     pub context_window: Option<u32>,
-    /// Tier metadata from the catalog; `None` until the models.dev catalog
-    /// (task 49) fills it in.
+    /// Tier metadata, when a source that knows one supplies it. The models.dev
+    /// catalog has none (matching the reference), so in practice this is
+    /// `None` and positional auto-assignment applies.
     pub tier: Option<ModelTier>,
 }
 

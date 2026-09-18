@@ -251,4 +251,3 @@ mod tests {
         assert!(compressed.contains("lines omitted"));
     }
 }
-
