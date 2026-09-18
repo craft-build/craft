@@ -9,6 +9,7 @@ pub mod atomic;
 pub mod input_history;
 pub mod log;
 pub mod model;
+pub mod plans;
 pub mod sessions;
 pub mod stats;
 pub mod theme;
@@ -52,6 +53,9 @@ pub enum StorageError {
 
     #[snafu(display("path not found: {path}"))]
     NotFound { path: String },
+
+    #[snafu(display("could not generate a unique plan slug after retries"))]
+    SlugCollision,
 
     #[snafu(display("serialization error"))]
     #[snafu(context(false))]

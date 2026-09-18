@@ -35,7 +35,7 @@ tree-sitter = "0.26"
 tree-sitter-bash = "0.25"
 unicode-normalization = "0.1"
 url.workspace = true
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 rig-core = { workspace = true, features = ["test-utils"] }
