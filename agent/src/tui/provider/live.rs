@@ -157,13 +157,48 @@ impl CraftProvider {
             .fail();
         }
 
+        // H.3 model-tier registry: load persisted tier overrides and feed in
+        // the discovered catalogs so tier defaults can be resolved.
+        if let Ok(state_dir) = crate::storage::StateDir::resolve() {
+            crate::model_registry::load_from_storage(&state_dir);
+        }
+        for (name, provider_config) in &config.providers {
+            if let Some(models) = catalogs.get(name) {
+                crate::model_registry::set_known_models(
+                    name,
+                    provider_config.kind.as_str(),
+                    models
+                        .iter()
+                        .map(|m| crate::model_registry::ModelInfo {
+                            context_window: m.context_length,
+                            ..crate::model_registry::ModelInfo::new(m.id.clone())
+                        })
+                        .collect(),
+                );
+            }
+        }
+
         let (provider, models) = catalogs.iter().next().expect("catalogs is non-empty");
         let first = models.first().expect("each catalog is non-empty");
-        let selection = Selection {
-            provider: provider.clone(),
-            model: first.id.clone(),
-            context_length: first.context_length,
-        };
+        // Prefer the Medium-tier default when the registry can resolve one;
+        // otherwise keep the first catalog entry.
+        let selection =
+            crate::model_registry::spec_for_tier_any(crate::model_registry::ModelTier::Medium)
+                .and_then(|spec| {
+                    let (provider, model) = spec.split_once('/')?;
+                    let models = catalogs.get(provider)?;
+                    let entry = models.iter().find(|m| m.id == model)?;
+                    Some(Selection {
+                        provider: provider.to_string(),
+                        model: entry.id.clone(),
+                        context_length: entry.context_length,
+                    })
+                })
+                .unwrap_or(Selection {
+                    provider: provider.clone(),
+                    model: first.id.clone(),
+                    context_length: first.context_length,
+                });
         Ok(Self {
             config: Arc::new(config),
             workspace,
