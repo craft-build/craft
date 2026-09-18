@@ -99,6 +99,75 @@ impl<'de> Deserialize<'de> for CraftId {
     }
 }
 
+/// A session id that preserves the caller's exact string verbatim (legacy
+/// hex ids resume unchanged) while caching the parsed [`CraftId`] so `id()`
+/// is infallible. Canonical (base58) when self-generated via [`SessionRef::from_id`].
+///
+/// Ported from the reference `craft-storage/src/id.rs`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SessionRef {
+    id: CraftId,
+    raw: String,
+}
+
+impl SessionRef {
+    pub fn from_id(id: CraftId) -> Self {
+        Self {
+            id,
+            raw: id.to_string(),
+        }
+    }
+
+    pub fn generate() -> Self {
+        Self::from_id(CraftId::generate())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    pub fn id(&self) -> CraftId {
+        self.id
+    }
+}
+
+impl From<CraftId> for SessionRef {
+    fn from(id: CraftId) -> Self {
+        Self::from_id(id)
+    }
+}
+
+impl fmt::Display for SessionRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
+impl FromStr for SessionRef {
+    type Err = CraftIdParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let id = s.parse::<CraftId>()?;
+        Ok(Self {
+            id,
+            raw: s.to_string(),
+        })
+    }
+}
+
+impl Serialize for SessionRef {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.raw)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionRef {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(de)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

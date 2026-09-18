@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::paths;
 use crate::storage::StorageError;
@@ -79,7 +79,7 @@ const SHELL_KEYWORDS: [&str; 15] = [
     "select", "function", "time",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effect {
     Allow,
@@ -101,7 +101,8 @@ pub enum PermissionTarget {
     Project(PathBuf),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolKey {
     Wildcard,
     Native(Arc<str>),
@@ -155,7 +156,7 @@ impl std::fmt::Display for ToolKey {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionRule {
     pub tool: ToolKey,
     pub scope: Option<String>,
