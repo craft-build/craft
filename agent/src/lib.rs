@@ -6,6 +6,7 @@ pub mod compression;
 pub mod config;
 pub mod edge;
 pub mod error;
+pub mod headless;
 pub mod history;
 pub mod id;
 mod inplace_edit;

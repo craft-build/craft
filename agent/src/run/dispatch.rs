@@ -89,6 +89,11 @@ impl ToolDispatch {
         }
     }
 
+    /// Registered tool names, in dispatch-table (alphabetical) order.
+    pub fn names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
     pub fn with_before(mut self, hook: Arc<dyn BeforeExecute>) -> Self {
         self.before = Some(hook);
         self

@@ -271,6 +271,18 @@ pub trait TitleSource {
     fn first_user_text(&self) -> Option<&str>;
 }
 
+impl TitleSource for crate::history::Message {
+    fn first_user_text(&self) -> Option<&str> {
+        match self {
+            Self::User { content } => content.iter().find_map(|block| match block {
+                crate::history::UserContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// A pasted code block bakes `\n` into a title and skews width-based padding
 /// in single-line UI like the picker, so every title entry point calls this.
 pub fn normalize_title(title: &str) -> String {
@@ -1554,10 +1566,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ARCHIVE_DIR, ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, CWD_INDEX_FILE, DEFAULT_TITLE,
-        LOG_BLOATED, MAX_APPENDS, MAX_TITLE_LEN, MSG_PREFIX, SESSION_VERSION, StoredSubagent,
-        generate_title, json_path, jsonl_path, load_cwd_index, next_epoch, remove_from_cwd_index,
-        update_cwd_index, write_full_session,
+        ARCHIVE_DIR, ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, CWD_INDEX_FILE, DEFAULT_TITLE, LOG_BLOATED,
+        MAX_APPENDS, MAX_TITLE_LEN, MSG_PREFIX, SESSION_VERSION, StoredSubagent, generate_title,
+        json_path, jsonl_path, load_cwd_index, next_epoch, remove_from_cwd_index, update_cwd_index,
+        write_full_session,
     };
     use super::{HistorySnapshot, Session, SessionError, SessionLog, StorageError, TitleSource};
     use crate::id::CraftId;
@@ -2014,7 +2026,9 @@ mod tests {
         let err = TestSession::load_from(id, tmp.path()).unwrap_err();
         assert!(matches!(
             err,
-            SessionError::Storage { source: StorageError::NotFound { .. } }
+            SessionError::Storage {
+                source: StorageError::NotFound { .. }
+            }
         ));
     }
 
@@ -2155,7 +2169,9 @@ mod tests {
         let err = TestSession::delete_from(id, tmp.path()).unwrap_err();
         assert!(matches!(
             err,
-            SessionError::Storage { source: StorageError::NotFound { .. } }
+            SessionError::Storage {
+                source: StorageError::NotFound { .. }
+            }
         ));
     }
 
@@ -2743,7 +2759,9 @@ mod tests {
         let err = TestSession::load_from(id, dir).unwrap_err();
         assert!(matches!(
             err,
-            SessionError::Storage { source: StorageError::NotFound { .. } }
+            SessionError::Storage {
+                source: StorageError::NotFound { .. }
+            }
         ));
     }
 

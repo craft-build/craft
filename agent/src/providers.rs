@@ -752,7 +752,7 @@ mod tests {
         let stall = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0; 4096];
-            stream.read(&mut buffer).unwrap();
+            let _ = stream.read(&mut buffer);
             thread::sleep(Duration::from_secs(5));
         });
         let config = config(ProviderKind::OpenaiCompatible, &format!("{base}/v1"));
@@ -815,7 +815,7 @@ mod tests {
         let stall = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0; 4096];
-            stream.read(&mut buffer).unwrap();
+            let _ = stream.read(&mut buffer);
             thread::sleep(Duration::from_secs(5));
         });
         // No api_key_env/base_url in config: the key and base URL both come
