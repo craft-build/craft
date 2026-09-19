@@ -24,9 +24,9 @@ use crate::run::ToolDispatch;
 use crate::run::dispatch::BeforeExecute;
 use crate::run::events::{SessionEvents, event_stream};
 use crate::run::{Event, RunParams, cancel_channel};
-use crate::storage::sessions::StoredTokenUsage;
+use crate::storage::sessions::{self, SessionError, StoredTokenUsage};
 use crate::storage::stats::{self, CostLedger, CostUsage};
-use crate::storage::{StateDir, sessions};
+use crate::storage::{StateDir, StorageError};
 use crate::tools::Workspace;
 
 /// The persisted shape of a live session: our own message/usage/tool-result
@@ -49,22 +49,32 @@ impl SessionStore {
     /// is unavailable, meaning the session simply will not be persisted.
     pub fn open(session_ref: SessionRef, cwd: &str, model_spec: &str) -> Option<Self> {
         let dir = StateDir::resolve().ok()?;
-        Some(Self::open_in(dir, session_ref, cwd, model_spec))
+        Self::open_in(dir, session_ref, cwd, model_spec).ok()
     }
 
     /// Open (or create) against an explicit dir; a fresh session is saved
     /// immediately so it is loadable before the first turn completes.
-    pub fn open_in(dir: StateDir, session_ref: SessionRef, cwd: &str, model_spec: &str) -> Self {
+    /// Returns `Err` when an existing session cannot be read for any reason
+    /// other than absence — the caller must disable persistence for the run
+    /// so the unreadable file is never overwritten by a later save.
+    pub fn open_in(
+        dir: StateDir,
+        session_ref: SessionRef,
+        cwd: &str,
+        model_spec: &str,
+    ) -> Result<Self, SessionError> {
         // Opened once and reused for every turn's cost append; a failure here
         // only means no cost records, the session itself still persists.
         let ledger = CostLedger::from_state_dir(&dir).ok();
         match StoredSession::load(session_ref.id(), &dir) {
-            Ok(session) => Self {
+            Ok(session) => Ok(Self {
                 dir,
                 ledger,
                 session,
-            },
-            Err(_) => {
+            }),
+            Err(SessionError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => {
                 let mut session = StoredSession::new(model_spec, cwd);
                 session.id = session_ref;
                 let mut store = Self {
@@ -73,8 +83,9 @@ impl SessionStore {
                     session,
                 };
                 store.save();
-                store
+                Ok(store)
             }
+            Err(e) => Err(e),
         }
     }
 
@@ -148,6 +159,8 @@ pub struct HeadlessHandle {
     pub tool_names: Vec<String>,
     pub session_id: SessionRef,
     pub cwd: String,
+    /// Why the session is not being persisted, if persistence failed to open.
+    pub persistence_error: Option<String>,
     pub task: JoinHandle<()>,
 }
 
@@ -166,21 +179,30 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let (guard, events) = event_stream();
     let tool_names = params.workspace.register().names();
 
-    let session_ref_task = session_ref.clone();
-    let cwd_task = cwd.clone();
+    let opened = params
+        .state_dir
+        .map(|dir| {
+            SessionStore::open_in(
+                dir,
+                session_ref.clone(),
+                &cwd,
+                model_spec.as_deref().unwrap_or("unknown"),
+            )
+        })
+        .transpose();
+    let persistence_error = opened.as_ref().err().map(|e| e.to_string());
+    if let Some(e) = &persistence_error {
+        eprintln!("session {session_ref} will not be persisted: {e}");
+    }
+    let mut store = opened.ok().flatten();
+
     let task = tokio::spawn(async move {
         let mut tools = params.workspace.register();
         if let Some(hook) = params.before {
             tools = attach_before(tools, hook);
         }
-        let mut store = params.state_dir.map(|dir| {
-            SessionStore::open_in(
-                dir,
-                session_ref_task.clone(),
-                &cwd_task,
-                model_spec.as_deref().unwrap_or("unknown"),
-            )
-        });
+
+        let mut store = store;
         let mut history = Vec::new();
         let (_flag, cancel) = cancel_channel();
         let mut run_params = params.run;
@@ -222,6 +244,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         tool_names,
         session_id: session_ref,
         cwd,
+        persistence_error,
         task,
     }
 }
@@ -257,6 +280,8 @@ pub struct InteractiveHandle {
     /// Swap the model before the next turn; the last value wins.
     pub model_tx: mpsc::UnboundedSender<(DynamicModel, Option<Arc<str>>)>,
     pub session_id: SessionRef,
+    /// Why the session is not being persisted, if persistence failed to open.
+    pub persistence_error: Option<String>,
     pub task: JoinHandle<()>,
 }
 
@@ -281,21 +306,29 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     let (model_tx, model_rx) = mpsc::unbounded_channel::<(DynamicModel, Option<Arc<str>>)>();
     let cancel_rx = Arc::new(tokio::sync::Mutex::new(cancel_rx));
 
-    let session_ref_task = session_ref.clone();
-    let cwd_task = cwd.clone();
+    let opened = params
+        .state_dir
+        .map(|dir| {
+            SessionStore::open_in(
+                dir,
+                session_ref.clone(),
+                &cwd,
+                model_spec.as_deref().unwrap_or("unknown"),
+            )
+        })
+        .transpose();
+    let persistence_error = opened.as_ref().err().map(|e| e.to_string());
+    if let Some(e) = &persistence_error {
+        eprintln!("session {session_ref} will not be persisted: {e}");
+    }
+    let mut store = opened.ok().flatten();
+
     let task = tokio::spawn(async move {
         let mut model = params.model;
         let mut model_spec = model_spec;
         let mut run_params = params.run;
         let mut history = params.initial_history;
-        let mut store = params.state_dir.map(|dir| {
-            SessionStore::open_in(
-                dir,
-                session_ref_task.clone(),
-                &cwd_task,
-                model_spec.as_deref().unwrap_or("unknown"),
-            )
-        });
+        let mut store = store;
         let mut input_rx = input_rx;
         let mut model_rx = model_rx;
         let mut run_id: u64 = 0;
@@ -382,6 +415,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         cancel_tx,
         model_tx,
         session_id: session_ref,
+        persistence_error,
         task,
     }
 }
@@ -416,7 +450,7 @@ mod tests {
     }
 
     fn store_in(tmp: &tempfile::TempDir) -> SessionStore {
-        SessionStore::open_in(state_dir(tmp), session_ref(), CWD, MODEL_SPEC)
+        SessionStore::open_in(state_dir(tmp), session_ref(), CWD, MODEL_SPEC).unwrap()
     }
 
     fn load(tmp: &tempfile::TempDir) -> StoredSession {
