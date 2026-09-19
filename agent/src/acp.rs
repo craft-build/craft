@@ -523,6 +523,7 @@ async fn run_turn(
         )
     };
     let params = run::RunParams {
+        fast: false,
         preamble: Some(crate::prompt::build_system_prompt(
             &crate::prompt::Vars::new()
                 .set("{cwd}", cwd)

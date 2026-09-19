@@ -49,7 +49,10 @@ pub struct CostRecord {
     pub model: String,
     pub provider: String,
     pub usage: CostUsage,
-    pub cost_usd: f64,
+    /// `None` when the model's cost could not be resolved — real spend that
+    /// must never be flattened to `0.0`, which would silently under-report.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     pub fast: bool,
 }
 
@@ -68,6 +71,7 @@ impl CostSummary {
     }
 }
 
+#[derive(Clone)]
 pub struct CostLedger {
     path: PathBuf,
 }
@@ -148,6 +152,7 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
 
     for r in &records {
         let tokens = r.usage.total();
+        let cost = r.cost_usd.unwrap_or(0.0);
         // Keyed on the full spec so the same model id served by two providers
         // (e.g. anthropic vs an aggregator) stays in separate rows.
         let spec = if r.provider.is_empty() {
@@ -155,22 +160,22 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
         } else {
             format!("{}/{}", r.provider, r.model)
         };
-        total_cost += r.cost_usd;
+        total_cost += cost;
         total_tokens += tokens;
         by_model
             .entry(spec)
             .and_modify(|(c, t)| {
-                *c += r.cost_usd;
+                *c += cost;
                 *t += tokens;
             })
-            .or_insert((r.cost_usd, tokens));
+            .or_insert((cost, tokens));
         by_session
             .entry(r.session_id.clone())
             .and_modify(|(c, t)| {
-                *c += r.cost_usd;
+                *c += cost;
                 *t += tokens;
             })
-            .or_insert((r.cost_usd, tokens));
+            .or_insert((cost, tokens));
     }
 
     let mut by_model: Vec<(String, f64, u64)> =
@@ -202,7 +207,7 @@ pub fn make_record(
     model: impl Into<String>,
     provider: impl Into<String>,
     usage: CostUsage,
-    cost_usd: f64,
+    cost_usd: Option<f64>,
     fast: bool,
 ) -> CostRecord {
     CostRecord {
@@ -254,7 +259,7 @@ mod tests {
                 output: tokens / 2,
                 ..Default::default()
             },
-            cost,
+            Some(cost),
             false,
         )
     }
@@ -267,7 +272,7 @@ mod tests {
         let records = ledger.read_all().unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].model, "claude-sonnet");
-        assert_eq!(records[1].cost_usd, 0.5);
+        assert_eq!(records[1].cost_usd, Some(0.5));
     }
 
     #[test]
@@ -285,7 +290,7 @@ mod tests {
                     output: 50,
                     ..Default::default()
                 },
-                cost_usd: 0.2,
+                cost_usd: Some(0.2),
                 fast: false,
             })
             .unwrap();
@@ -301,7 +306,7 @@ mod tests {
                     output: 0,
                     ..Default::default()
                 },
-                cost_usd: 0.3,
+                cost_usd: Some(0.3),
                 fast: false,
             })
             .unwrap();
@@ -317,7 +322,7 @@ mod tests {
                     output: 1000,
                     ..Default::default()
                 },
-                cost_usd: 1.0,
+                cost_usd: Some(1.0),
                 fast: false,
             })
             .unwrap();

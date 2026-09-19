@@ -180,20 +180,40 @@ fn catalog() -> &'static RwLock<SharedCatalog> {
 pub async fn warm() -> Result<()> {
     let dir: PathBuf = crate::paths::cache_dir().map_err(|e| invalid(e.to_string()))?;
     let path = dir.join(CATALOG_CACHE_FILE);
-    populate(&path, || Box::pin(fetch_remote()) as _).await
+    populate(&path, SystemTime::now(), || Box::pin(fetch_remote()) as _).await
 }
 
 /// Path- and fetch-injectable core of [`warm`], so tests exercise the whole
 /// cache lifecycle without the network.
 async fn populate(
     path: &Path,
+    now: SystemTime,
     fetch: impl FnOnce() -> futures::future::BoxFuture<'static, Result<String>>,
 ) -> Result<()> {
-    if let Some(index) = load_cached(path, SystemTime::now()) {
+    if let Some(index) = load_cached(path, now) {
         *catalog().write().unwrap() = Arc::new(flatten(index));
         return Ok(());
     }
-    let text = fetch().await?;
+    let fetched = fetch().await;
+    let text = match fetched {
+        Ok(text) => text,
+        Err(e) => {
+            // Last resort: a stale (TTL-expired) cache still beats an empty
+            // catalog when the refresh cannot be fetched (offline, models.dev
+            // down). A later successful refresh overwrites it.
+            if let Some(index) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+            {
+                let flattened = flatten(index);
+                if !flattened.is_empty() {
+                    *catalog().write().unwrap() = Arc::new(flattened);
+                }
+                return Ok(());
+            }
+            return Err(e);
+        }
+    };
     let index: CatalogIndex = serde_json::from_str(&text)
         .map_err(|e| invalid(format!("failed to parse models.dev catalog JSON: {e}")))?;
     save_cached(path, &index);
@@ -403,7 +423,7 @@ mod tests {
             Box::pin(async { Ok(sample_catalog_json()) })
                 as futures::future::BoxFuture<'static, Result<String>>
         };
-        populate(&path, fetch).await.unwrap();
+        populate(&path, SystemTime::now(), fetch).await.unwrap();
 
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         // Cache written for next time.
@@ -412,7 +432,7 @@ mod tests {
         assert_eq!(meta.context, 200_000);
 
         // Second populate hits the cache: no new fetch.
-        populate(&path, fetch).await.unwrap();
+        populate(&path, SystemTime::now(), fetch).await.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         swap_catalog(previous.as_ref().clone());
@@ -487,10 +507,33 @@ mod tests {
             Box::pin(async { Err(invalid("network down")) })
                 as futures::future::BoxFuture<'static, Result<String>>
         };
-        assert!(populate(&path, fetch).await.is_err());
+        assert!(populate(&path, SystemTime::now(), fetch).await.is_err());
         assert!(!path.exists());
         // A warm catalog from an earlier run survives a failed refresh.
         assert!(metadata_for("some-vendor", "big").is_some());
+
+        swap_catalog(previous.as_ref().clone());
+    }
+
+    #[tokio::test]
+    async fn populate_fetch_failure_serves_stale_cache() {
+        let _guard = GLOBAL_LOCK.lock().await;
+        let (_tmp, path) = cache_path();
+        let previous = swap_catalog(HashMap::new());
+
+        // Seed a cache, then view it from a `now` far past the TTL so the
+        // fast path rejects it and the fetch is attempted (and fails).
+        std::fs::write(&path, serde_json::to_string(&parsed_index()).unwrap()).unwrap();
+        let stale_now = SystemTime::now() + CATALOG_CACHE_TTL + Duration::from_secs(3_600);
+        let fetch_err = || {
+            Box::pin(async { Err(invalid("network down")) })
+                as futures::future::BoxFuture<'static, Result<String>>
+        };
+        populate(&path, stale_now, fetch_err).await.unwrap();
+        assert!(
+            metadata_for("some-vendor", "big").is_some(),
+            "stale disk cache is served when the refresh fetch fails"
+        );
 
         swap_catalog(previous.as_ref().clone());
     }

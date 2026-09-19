@@ -38,6 +38,11 @@ fn report(error: crate::error::Error) -> String {
     snafu::Report::from_error(error).to_string()
 }
 
+fn lock_sink<T>(sink: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    sink.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Session shared between the command loop and the (single) running turn.
 #[derive(Default)]
 struct SessionState {
@@ -60,6 +65,9 @@ struct SessionState {
     ledger: Option<crate::storage::stats::CostLedger>,
     /// Id under which this TUI session's cost records are filed.
     session_id: String,
+    /// Serializes blocking ledger appends across concurrent runs so records
+    /// reach `cost.jsonl` in completion order.
+    ledger_io: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SessionState {
@@ -1006,6 +1014,7 @@ async fn run_turn(ctx: TurnCtx, text: String) {
             }),
         model_spec: Some(format!("{}/{}", selection.provider, selection.model).into()),
         retry: run::RetryCtx::default(),
+        fast: false,
     };
 
     let _ = tx.send(AgentEvent::StatusChanged(Status::Thinking));
@@ -1026,19 +1035,16 @@ async fn run_turn(ctx: TurnCtx, text: String) {
             &cancel,
             &|event| {
                 if let run::Event::Done { by_model, .. } = event {
-                    *sink.lock().expect("usage sink") = Some(by_model);
+                    lock_sink(&done_by_model).replace(by_model);
                     return;
                 }
                 renderer.map(event);
             },
         )
         .await;
-        let by_model = done_by_model
-            .lock()
-            .expect("usage sink")
-            .take()
-            .unwrap_or_default();
-        record_run_usage(&state, &tx, by_model).await;
+        let by_model = lock_sink(&done_by_model).take().unwrap_or_default();
+        record_run_usage(&state, &tx, by_model, params.fast).await;
+
         match handle_outcome(
             outcome,
             &renderer,
@@ -1061,35 +1067,58 @@ async fn run_turn(ctx: TurnCtx, text: String) {
 
 /// Fold a finished run's per-model usage into the session totals and append
 /// one `cost.jsonl` record per model. Ledger failures warn and never fail the
-/// turn; an unpriced model records `cost_usd: 0.0` (the ledger's cost field
-/// is not optional) with its real token counts.
+/// turn; a model whose cost could not be resolved records `cost_usd: null`
+/// with its real token counts rather than a misleading `$0.00`.
 async fn record_run_usage(
     state: &Arc<Mutex<SessionState>>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     by_model: HashMap<String, crate::usage::StoredTokenUsage>,
+    fast: bool,
 ) {
     if by_model.is_empty() {
         return;
     }
-    let mut session = state.lock().await;
-    for (spec, usage) in by_model {
-        if let Some(ledger) = &session.ledger {
-            let (provider, model) = spec.split_once('/').unwrap_or(("", spec.as_str()));
-            let record = crate::storage::stats::make_record(
-                session.session_id.clone(),
-                model,
-                provider,
-                crate::storage::stats::CostUsage::from_stored(&usage),
-                usage.cost.unwrap_or(0.0),
-                false,
-            );
-            if let Err(e) = ledger.append(&record) {
-                eprintln!("warning: failed to append cost record: {e}");
+    let (records, ledger, ledger_io, rows) = {
+        let mut session = state.lock().await;
+        let mut records = Vec::new();
+        for (spec, usage) in by_model {
+            if session.ledger.is_some() {
+                let (provider, model) = spec.split_once('/').unwrap_or(("", spec.as_str()));
+                records.push(crate::storage::stats::make_record(
+                    session.session_id.clone(),
+                    model,
+                    provider,
+                    crate::storage::stats::CostUsage::from_stored(&usage),
+                    usage.cost,
+                    fast,
+                ));
             }
+            *session.usage_by_model.entry(spec).or_default() += usage;
         }
-        *session.usage_by_model.entry(spec).or_default() += usage;
+        (
+            records,
+            session.ledger.clone(),
+            session.ledger_io.clone(),
+            session.usage_rows(),
+        )
+    };
+    if let Some(ledger) = ledger {
+        // flock + write + fsync are blocking; keep them off the async worker,
+        // outside the session-state lock, and serialized across runs.
+        let _guard = ledger_io.lock().await;
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            for record in &records {
+                if let Err(e) = ledger.append(record) {
+                    eprintln!("warning: failed to append cost record: {e}");
+                }
+            }
+        })
+        .await
+        {
+            eprintln!("warning: cost ledger append task failed: {e}");
+        }
     }
-    let _ = tx.send(AgentEvent::UsageSnapshot(session.usage_rows()));
+    let _ = tx.send(AgentEvent::UsageSnapshot(rows));
 }
 
 #[cfg(test)]
@@ -1445,7 +1474,7 @@ mod tests {
         );
         by_model.insert("mock/free-model".to_owned(), stored(10, 5, None));
 
-        record_run_usage(&state, &tx, by_model).await;
+        record_run_usage(&state, &tx, by_model, false).await;
 
         let session = state.lock().await;
         assert_eq!(session.usage_by_model.len(), 2);
@@ -1457,7 +1486,7 @@ mod tests {
 
         let records = ledger_records(tmp.path());
         assert_eq!(records.len(), 2, "one record per model");
-        let by_spec: std::collections::BTreeMap<(&str, &str), (&f64, u64)> = records
+        let by_spec: std::collections::BTreeMap<(&str, &str), (&Option<f64>, u64)> = records
             .iter()
             .map(|r| {
                 (
@@ -1467,7 +1496,7 @@ mod tests {
             })
             .collect();
         assert_eq!(by_spec[&("anthropic", "claude-sonnet-5")].1, 150);
-        assert_eq!(by_spec[&("mock", "free-model")].0, &0.0);
+        assert_eq!(by_spec[&("mock", "free-model")].0, &None);
         assert!(records.iter().all(|r| r.session_id == "s1"));
 
         assert!(matches!(rx.try_recv(), Ok(AgentEvent::UsageSnapshot(rows)) if rows.len() == 2));
@@ -1486,7 +1515,7 @@ mod tests {
             stored(1, 1, Some(0.0)),
         );
 
-        record_run_usage(&state, &tx, by_model).await;
+        record_run_usage(&state, &tx, by_model, false).await;
 
         // The session totals were still folded; only the ledger write warned.
         assert_eq!(state.lock().await.usage_by_model.len(), 1);

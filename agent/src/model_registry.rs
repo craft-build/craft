@@ -183,11 +183,17 @@ fn manifest(kind: &str) -> Option<ProviderManifest> {
 static REGISTRY: OnceLock<RwLock<ModelRegistry>> = OnceLock::new();
 
 fn read() -> RwLockReadGuard<'static, ModelRegistry> {
-    registry().read().unwrap()
+    // The registry map has no broken invariants, so recover from poisoning
+    // instead of panicking on every later access.
+    registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn write() -> RwLockWriteGuard<'static, ModelRegistry> {
-    registry().write().unwrap()
+    registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn registry() -> &'static RwLock<ModelRegistry> {
@@ -386,7 +392,11 @@ impl ModelRegistry {
             return Some(spec.clone());
         }
 
-        for provider in self.known_models.keys() {
+        // Deterministic order so the cross-provider fallback is stable across
+        // runs regardless of HashMap iteration order.
+        let mut providers: Vec<&String> = self.known_models.keys().collect();
+        providers.sort();
+        for provider in providers {
             let models = &self.known_models[provider];
             if models.is_empty() {
                 continue;

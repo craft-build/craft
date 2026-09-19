@@ -106,10 +106,14 @@ impl SessionStore {
 
     /// Fold a finished run's per-model usage into the session and append one
     /// cost-ledger record per model to `cost.jsonl`. Ledger failures are
-    /// warnings, never fatal. Unpriced models record `cost_usd: 0.0` — the
-    /// ledger's cost field is not optional, so the token counts carry the
-    /// information and callers must not show "$0.00" as a bill.
-    pub fn record_cost(&mut self, by_model: &HashMap<String, crate::usage::StoredTokenUsage>) {
+    /// warnings, never fatal. A model whose cost could not be resolved records
+    /// `cost_usd: null` — the token counts carry the information and callers
+    /// must not show "$0.00" as a bill.
+    pub fn record_cost(
+        &mut self,
+        by_model: &HashMap<String, crate::usage::StoredTokenUsage>,
+        fast: bool,
+    ) {
         if by_model.is_empty() {
             return;
         }
@@ -123,8 +127,8 @@ impl SessionStore {
                     model,
                     provider,
                     CostUsage::from_stored(usage),
-                    usage.cost.unwrap_or(0.0),
-                    false,
+                    usage.cost,
+                    fast,
                 );
                 if let Err(e) = ledger.append(&record) {
                     eprintln!("warning: failed to append cost record: {e}");
@@ -164,17 +168,18 @@ pub struct HeadlessHandle {
     pub task: JoinHandle<()>,
 }
 
+fn lock_sink<T>(sink: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    sink.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Run one prompt to completion in the background. The event stream closes
 /// when the task ends; provider/run failures surface as `Event::Error`
 /// followed by a terminal `Done` (the run driver emits both itself).
 pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     let cwd = params.initial_wd.to_string_lossy().into_owned();
     let session_ref = params.session_id.unwrap_or_else(SessionRef::generate);
-    let model_spec: Option<String> = params
-        .model_spec
-        .as_ref()
-        .map(|s| s.to_string())
-        .or_else(|| params.model.label().map(str::to_owned));
+    let model_spec: Option<String> = params.model_spec.as_ref().map(|s| s.to_string());
 
     let (guard, events) = event_stream();
     let tool_names = params.workspace.register().names();
@@ -221,19 +226,15 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             &cancel,
             &|event| {
                 if let Event::Done { by_model, .. } = &event {
-                    *sink.lock().expect("usage sink") = Some(by_model.clone());
+                    lock_sink(&sink).replace(by_model.clone());
                 }
                 event_tx.send(event);
             },
         )
         .await;
-        let by_model = done_by_model
-            .lock()
-            .expect("usage sink")
-            .take()
-            .unwrap_or_default();
+        let by_model = lock_sink(&done_by_model).take().unwrap_or_default();
         if let Some(store) = &mut store {
-            store.record_cost(&by_model);
+            store.record_cost(&by_model, run_params.fast);
             store.record_turn(&history, model_spec.unwrap_or_else(|| "unknown".into()));
         }
         // `guard` drops here, closing the stream.
@@ -291,11 +292,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
         .session_id
         .clone()
         .unwrap_or_else(SessionRef::generate);
-    let model_spec: Option<String> = params
-        .model_spec
-        .as_ref()
-        .map(|s| s.to_string())
-        .or_else(|| params.model.label().map(str::to_owned));
+    let model_spec: Option<String> = params.model_spec.as_ref().map(|s| s.to_string());
 
     let (guard, events) = event_stream();
     let tools = params.workspace.register();
@@ -392,12 +389,8 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
             watcher.abort();
 
             if let Some(store) = &mut store {
-                let by_model = done_by_model
-                    .lock()
-                    .expect("usage sink")
-                    .take()
-                    .unwrap_or_default();
-                store.record_cost(&by_model);
+                let by_model = lock_sink(&done_by_model).take().unwrap_or_default();
+                store.record_cost(&by_model, run_params.fast);
                 store.record_turn(
                     &history,
                     model_spec.clone().unwrap_or_else(|| "unknown".into()),

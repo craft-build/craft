@@ -327,6 +327,11 @@ pub struct RunParams {
     /// `provider/model` spec of the run's model, for usage & cost accounting
     /// (H.6). `None` disables pricing; usage counters still accumulate.
     pub model_spec: Option<std::sync::Arc<str>>,
+    /// Price turns at the provider's fast/premium tier (2x rates where the
+    /// price table defines one). Pricing is correct only if this matches the
+    /// tier the provider actually billed, so surfaces must set it whenever
+    /// they select fast mode.
+    pub fast: bool,
 }
 
 /// What a surface calls when the model stream reports an auth error: block
@@ -368,6 +373,7 @@ impl RunParams {
     pub fn new(preamble: Option<String>) -> Self {
         Self {
             preamble,
+            fast: false,
             temperature: None,
             max_tokens: None,
             max_turns: Self::UNBOUNDED,
@@ -402,6 +408,7 @@ impl Default for RunParams {
             retry: RetryCtx::default(),
             reauth: None,
             model_spec: None,
+            fast: false,
         }
     }
 }
@@ -493,11 +500,11 @@ mod served_spec_tests {
 impl RunStats {
     /// Fold one model call's usage into the ledger, pricing the turn against
     /// today's table. An unresolvable spec still counts its tokens, unpriced.
-    fn add_usage(&mut self, usage: &history::Usage, spec: Option<&str>) {
+    fn add_usage(&mut self, usage: &history::Usage, spec: Option<&str>, fast: bool) {
         self.usage.add(*usage);
         let Some(spec) = spec else { return };
         let tokens = crate::usage::TokenUsage::from(usage);
-        let cost = crate::usage::resolve_spec(spec).and_then(|m| m.billed_cost(&tokens, false));
+        let cost = crate::usage::resolve_spec(spec).and_then(|m| m.billed_cost(&tokens, fast));
         *self.by_model.entry(spec.to_owned()).or_default() += tokens.billed(cost);
     }
 }
@@ -528,7 +535,7 @@ pub async fn run<M: CompletionModel + Clone>(
             &crate::usage::TokenUsage::default(),
             &mut stats.by_model,
             params.model_spec.as_deref().unwrap_or(""),
-            false,
+            params.fast,
         )
     };
     emit(Event::Done {
@@ -734,7 +741,7 @@ async fn run_inner<M: CompletionModel + Clone>(
         if output.usage.input_tokens > 0 {
             measured_prompt_tokens = output.usage.input_tokens;
         }
-        stats.add_usage(&output.usage, served_spec.as_deref());
+        stats.add_usage(&output.usage, served_spec.as_deref(), params.fast);
         stats.context_size = crate::compaction::estimate_tokens(&full);
         stats.turns = turns as u32 + 1;
         emit(Event::TurnComplete {
