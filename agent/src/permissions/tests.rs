@@ -469,11 +469,13 @@ fn mcp_rules_match_by_server_and_tool() {
 
 #[test]
 fn permission_error_display_has_prefix_and_guidance() {
-    let e = PermissionError::new("bash", "rm -rf /");
+    let e = PermissionError::new("bash", &["rm -rf /".to_string(), "rm -rf /tmp".to_string()]);
     let msg = e.to_string();
     assert!(msg.starts_with(PERMISSION_DENIED_PREFIX), "{msg}");
+    assert!(msg.contains("(rm -rf /; rm -rf /tmp)"), "{msg}");
     assert!(msg.contains(DEFAULT_DENY_GUIDANCE), "{msg}");
 
-    let e = PermissionError::with_guidance("bash", "rm -rf /", "use git clean".into());
+    let e =
+        PermissionError::with_guidance("bash", &["rm -rf /".to_string()], "use git clean".into());
     assert!(e.to_string().contains("User guidance: use git clean"));
 }

@@ -8,14 +8,14 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::history;
 use crate::permissions::{
-    ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer, PermissionCheck, PermissionManager, ToolKey,
+    ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer, PermissionCheck, PermissionError,
+    PermissionManager, ToolKey, append_permission_rule,
 };
 use crate::run::{CancelToken, Decision};
 
 use super::SessionState;
+use crate::tui::provider::cards;
 use crate::tui::provider::{AgentEvent, LineKind, Status, ToolCallData, ToolKind, ToolLine};
-
-use super::super::cards;
 
 /// Gates tool calls behind the permission engine and, when it asks, the
 /// UI's approve/reject seam: no workspace mutation runs without an explicit
@@ -135,13 +135,25 @@ fn resolve_scope_path(root: &Path, path: &str) -> String {
 }
 
 fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
-    format!(
-        "{} `{}` ({}). {}",
-        crate::permissions::PERMISSION_DENIED_PREFIX,
-        tool,
-        scopes.join("; "),
-        crate::permissions::DEFAULT_DENY_GUIDANCE
-    )
+    PermissionError::new(&tool.to_string(), scopes).to_string()
+}
+
+/// Record a user answer, persisting "always" answers to permissions.toml
+/// (project-local for `*AlwaysLocal`). Write failures degrade to the session
+/// grant — the answer still applies now, it just may be asked again later.
+fn record_answer(
+    permissions: &PermissionManager,
+    tool: &ToolKey,
+    scopes: &[String],
+    answer: &PermissionAnswer,
+) -> bool {
+    let allow = answer.is_allow();
+    for (tool, scope, effect, target) in permissions.apply_decision(tool, scopes, answer) {
+        if let Err(err) = append_permission_rule(&tool, scope.as_deref(), effect, &target) {
+            eprintln!("permissions: could not persist always-rule: {err}");
+        }
+    }
+    allow
 }
 
 /// Auto-review path for a `NeedsPrompt` decision (E.7): one locked-down
@@ -181,14 +193,12 @@ async fn auto_review_decide(
             if allow {
                 return Decision::Run;
             }
-            format!(
-                "{} `{}` ({}). auto-review: {}. {}",
-                crate::permissions::PERMISSION_DENIED_PREFIX,
-                tool,
-                scopes.join("; "),
-                decision.rationale,
-                crate::permissions::DEFAULT_DENY_GUIDANCE
+            PermissionError::with_guidance(
+                &tool.to_string(),
+                scopes,
+                format!("auto-review: {}", decision.rationale),
             )
+            .to_string()
         }
         Err(err) => {
             let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
@@ -202,13 +212,12 @@ async fn auto_review_decide(
                 }],
                 awaiting_approval: false,
             }));
-            format!(
-                "{} `{}` ({}). auto-review denied this action: {err}. {}",
-                crate::permissions::PERMISSION_DENIED_PREFIX,
-                tool,
-                scopes.join("; "),
-                crate::permissions::DEFAULT_DENY_GUIDANCE
+            PermissionError::with_guidance(
+                &tool.to_string(),
+                scopes,
+                format!("auto-review denied this action: {err}"),
             )
+            .to_string()
         }
     };
     Decision::Skip(outcome)
@@ -281,7 +290,7 @@ async fn gate_decide(
     // Cancellation is epoch-based: `changed()` fires only on a
     // `set(true)` generation bump or a dropped flag — a re-arm
     // never writes, so a ready change is always a real cancel.
-    let approved = tokio::select! {
+    let answer = tokio::select! {
         biased;
         changed = cancel_rx.changed() => {
             let _ = changed;
@@ -290,12 +299,13 @@ async fn gate_decide(
         }
         decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
             state.lock().await.pending_approval = None;
-            decision.unwrap_or(Ok(false)).unwrap_or(false)
+            decision
+                .unwrap_or(Ok(PermissionAnswer::Deny))
+                .unwrap_or(PermissionAnswer::Deny)
         }
     };
     let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
-    if approved {
-        permissions.apply_decision(&tool, &scopes, &PermissionAnswer::AllowSession);
+    if record_answer(&permissions, &tool, &scopes, &answer) {
         Decision::Run
     } else {
         Decision::Skip(denied_message(&tool, &scopes))
@@ -304,12 +314,12 @@ async fn gate_decide(
 
 /// Deliver the user's decision to a tool call waiting on it, if the id
 /// matches the currently pending one.
-pub(super) async fn decide(state: &Arc<Mutex<SessionState>>, id: String, approved: bool) {
+pub(super) async fn decide(state: &Arc<Mutex<SessionState>>, id: String, answer: PermissionAnswer) {
     let mut session = state.lock().await;
     if matches!(&session.pending_approval, Some((pid, _)) if *pid == id)
         && let Some((_, decision)) = session.pending_approval.take()
     {
-        let _ = decision.send(approved);
+        let _ = decision.send(answer);
     }
 }
 
@@ -385,7 +395,7 @@ mod tests {
                 assert!(std::time::Instant::now() < deadline, "{name} never parked");
                 tokio::task::yield_now().await;
             }
-            decide(&state, "t1".into(), false).await;
+            decide(&state, "t1".into(), PermissionAnswer::Deny).await;
             let decision = pending.await.unwrap();
             assert!(matches!(decision, Decision::Skip(_)), "{name}");
         }
@@ -397,16 +407,16 @@ mod tests {
         let (tx, mut rx) = oneshot::channel();
         state.lock().await.pending_approval = Some(("current".into(), tx));
 
-        decide(&state, "stale".into(), true).await;
+        decide(&state, "stale".into(), PermissionAnswer::AllowSession).await;
         assert!(matches!(&state.lock().await.pending_approval, Some((id, _)) if id == "current"));
         assert!(
             rx.try_recv().is_err(),
             "stale id must not consume a decision"
         );
 
-        decide(&state, "current".into(), false).await;
+        decide(&state, "current".into(), PermissionAnswer::Deny).await;
         assert!(state.lock().await.pending_approval.is_none());
-        assert!(!rx.await.unwrap());
+        assert_eq!(rx.await.unwrap(), PermissionAnswer::Deny);
     }
 
     #[tokio::test]
@@ -434,7 +444,7 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "write never parked");
             tokio::task::yield_now().await;
         }
-        decide(&state, "t1".into(), true).await;
+        decide(&state, "t1".into(), PermissionAnswer::AllowSession).await;
         assert!(matches!(pending.await.unwrap(), Decision::Run));
 
         // The grant generalized to the parent dir and lives in the session:
@@ -470,7 +480,7 @@ mod tests {
         // gate subscribed but before the decision.
         flag.set(false);
         tokio::task::yield_now().await;
-        decide(&state, "t1".into(), true).await;
+        decide(&state, "t1".into(), PermissionAnswer::AllowSession).await;
         assert!(matches!(pending.await.unwrap(), Decision::Run));
     }
 
@@ -552,7 +562,10 @@ mod tests {
             panic!("expected skip, got {decision:?}");
         };
         assert!(message.contains("rm -rf outside the project"));
-        assert!(message.contains(crate::permissions::DEFAULT_DENY_GUIDANCE));
+        assert!(
+            message.contains("auto-review:"),
+            "the reviewer rationale replaces the generic guidance: {message}"
+        );
         let mut sibling = tool_call("t2", "bash");
         sibling.function.arguments = serde_json::json!({ "command": "rm -rf /" });
         assert!(matches!(gate.decide(sibling).await, Decision::Skip(_)));

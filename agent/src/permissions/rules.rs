@@ -104,12 +104,6 @@ pub fn scope_matches(pattern: &str, value: &str) -> bool {
     pattern == value
 }
 
-pub fn normalize_scope_path(path: &str) -> String {
-    paths::normalize_path(&normalize_scope_prefix(path))
-        .to_string_lossy()
-        .into_owned()
-}
-
 pub fn physical_boundary_check(parent: &Path, child: &Path) -> Option<bool> {
     let parent_canon = paths::incremental_canonicalize(parent)?;
     let child_canon = paths::incremental_canonicalize(child).unwrap_or_else(|| child.to_path_buf());

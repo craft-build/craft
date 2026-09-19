@@ -38,7 +38,7 @@ pub mod bash {
 
 pub use rules::{
     append_permission_rule, generalized_scopes, is_universal_scope, load_permissions,
-    normalize_scope_path, physical_boundary_check, scope_matches,
+    physical_boundary_check, scope_matches,
 };
 
 pub const DEFAULT_DENY_GUIDANCE: &str =
@@ -189,7 +189,7 @@ pub enum PermissionCheck {
 #[derive(Debug)]
 pub struct PermissionError {
     tool: String,
-    scope: String,
+    scopes: String,
     guidance: Option<String>,
 }
 
@@ -198,7 +198,7 @@ impl std::fmt::Display for PermissionError {
         write!(
             f,
             "{} `{}` ({}).",
-            PERMISSION_DENIED_PREFIX, self.tool, self.scope
+            PERMISSION_DENIED_PREFIX, self.tool, self.scopes
         )?;
         if let Some(g) = &self.guidance {
             write!(f, " User guidance: {g}")
@@ -209,18 +209,18 @@ impl std::fmt::Display for PermissionError {
 }
 
 impl PermissionError {
-    pub(crate) fn new(tool: &str, scope: &str) -> Self {
+    pub(crate) fn new(tool: &str, scopes: &[String]) -> Self {
         Self {
             tool: tool.to_string(),
-            scope: scope.to_string(),
+            scopes: scopes.join("; "),
             guidance: None,
         }
     }
 
-    pub(crate) fn with_guidance(tool: &str, scope: &str, guidance: String) -> Self {
+    pub(crate) fn with_guidance(tool: &str, scopes: &[String], guidance: String) -> Self {
         Self {
             tool: tool.to_string(),
-            scope: scope.to_string(),
+            scopes: scopes.join("; "),
             guidance: Some(guidance),
         }
     }
@@ -347,7 +347,8 @@ impl PermissionManager {
     /// Fresh manager for a new session runtime: shares config rules but owns
     /// empty session rules so restoring one session never clobbers another's
     /// grants.
-    pub fn fork(&self) -> Self {
+    #[cfg(test)]
+    pub(crate) fn fork(&self) -> Self {
         Self {
             session_rules: Mutex::new(Vec::new()),
             config_rules: self.config_rules.clone(),
@@ -487,18 +488,16 @@ impl PermissionManager {
         }
     }
 
-    pub fn session_rules_snapshot(&self) -> Vec<PermissionRule> {
+    #[cfg(test)]
+    pub(crate) fn session_rules_snapshot(&self) -> Vec<PermissionRule> {
         self.session_rules().clone()
-    }
-
-    pub fn load_session_rules(&self, rules: Vec<PermissionRule>) {
-        *self.session_rules() = rules;
     }
 
     /// Outside-cwd paths are not blocked here. They flow through the normal
     /// permission prompt (which uses the same canonicalization via
     /// [`scope_matches`]). Only unresolvable boundaries are hard-blocked.
-    pub fn boundary_block_reason(&self, path: &Path) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn boundary_block_reason(&self, path: &Path) -> Option<String> {
         match physical_boundary_check(&self.cwd, path) {
             Some(_) => None,
             None => Some(format!(

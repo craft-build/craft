@@ -43,7 +43,8 @@ impl App {
         // 1. Confirm dialog swallows everything.
         if matches!(self.modal, Modal::ConfirmReject(_)) {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.reject_confirmed(tx),
+                KeyCode::Char('Y') => self.reject_confirmed(tx, true),
+                KeyCode::Char('y') | KeyCode::Enter => self.reject_confirmed(tx, false),
                 _ => self.modal = Modal::None,
             }
             return;

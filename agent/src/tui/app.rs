@@ -568,15 +568,18 @@ impl App {
         }
     }
 
-    fn approve(&mut self, idx: usize, tx: &mpsc::UnboundedSender<Command>) {
+    fn approve(&mut self, idx: usize, tx: &mpsc::UnboundedSender<Command>, always: bool) {
         if let Some(Message::Tool { id, diff, .. }) = self.conversation.messages.get_mut(idx) {
             *diff = Some(DiffState::Approved);
-            let _ = tx.send(Command::Approve(id.clone()));
+            let _ = tx.send(Command::Approve {
+                id: id.clone(),
+                always,
+            });
         }
         self.conversation.focused = None;
     }
 
-    pub(crate) fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>) {
+    pub(crate) fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>, always: bool) {
         if let Modal::ConfirmReject(id) = std::mem::replace(&mut self.modal, Modal::None) {
             if let Some(Message::Tool { diff, .. }) = self
                 .conversation
@@ -586,7 +589,7 @@ impl App {
             {
                 *diff = Some(DiffState::Rejected);
             }
-            let _ = tx.send(Command::Reject(id));
+            let _ = tx.send(Command::Reject { id, always });
         }
         self.conversation.focused = None;
     }
@@ -761,12 +764,21 @@ impl App {
                     self.toggle_focused();
                     return;
                 }
+                KeyCode::Char('Y') => {
+                    if let Some(i) = self
+                        .focused_pending_diff()
+                        .or_else(|| self.last_pending_diff())
+                    {
+                        self.approve(i, tx, true);
+                    }
+                    return;
+                }
                 KeyCode::Char('y') => {
                     if let Some(i) = self
                         .focused_pending_diff()
                         .or_else(|| self.last_pending_diff())
                     {
-                        self.approve(i, tx);
+                        self.approve(i, tx, false);
                     }
                     return;
                 }

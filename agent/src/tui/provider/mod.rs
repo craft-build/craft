@@ -17,10 +17,12 @@ use tokio::sync::mpsc;
 pub enum Command {
     /// User submitted a message in the composer.
     SendMessage(String),
-    /// User approved a pending diff (by tool-call id).
-    Approve(String),
-    /// User rejected a pending diff (by tool-call id).
-    Reject(String),
+    /// User approved a pending diff (by tool-call id). `always` persists an
+    /// allow rule to the project's `permissions.toml` instead of the session.
+    Approve { id: String, always: bool },
+    /// User rejected a pending diff (by tool-call id). `always` persists a
+    /// deny rule to the project's `permissions.toml` instead of the session.
+    Reject { id: String, always: bool },
     /// Esc: interrupt the running turn.
     Interrupt,
     /// Start over (new session): abort any turn and reset to the initial state.

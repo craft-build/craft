@@ -22,7 +22,7 @@ use tokio::task::AbortHandle;
 use crate::compaction::CompactionState;
 use crate::config::Config;
 use crate::error::{InvalidSnafu, Result, client_error};
-use crate::permissions::{PermissionManager, PermissionsConfig};
+use crate::permissions::{PermissionAnswer, PermissionManager, PermissionsConfig};
 use crate::providers::{CatalogModel, Provider as ClientProvider, ProviderKind};
 use crate::run;
 use crate::tools::Workspace;
@@ -52,7 +52,10 @@ struct SessionState {
     /// by the compaction engine.
     guardrails: crate::run::SharedGuardrails,
     /// Edit-family call awaiting the user's decision, by tool-call id.
-    pending_approval: Option<(String, tokio::sync::oneshot::Sender<bool>)>,
+    pending_approval: Option<(
+        String,
+        tokio::sync::oneshot::Sender<crate::permissions::PermissionAnswer>,
+    )>,
     /// Per-model usage totals and the cost ledger they feed.
     usage: UsageLedger,
 }
@@ -322,8 +325,22 @@ impl CraftProvider {
                     ));
                     current_turn = Some(handle.abort_handle());
                 }
-                Command::Approve(id) => decide(&state, id, true).await,
-                Command::Reject(id) => decide(&state, id, false).await,
+                Command::Approve { id, always } => {
+                    let answer = if always {
+                        PermissionAnswer::AllowAlwaysLocal
+                    } else {
+                        PermissionAnswer::AllowSession
+                    };
+                    decide(&state, id, answer).await
+                }
+                Command::Reject { id, always } => {
+                    let answer = if always {
+                        PermissionAnswer::DenyAlwaysLocal
+                    } else {
+                        PermissionAnswer::Deny
+                    };
+                    decide(&state, id, answer).await
+                }
                 Command::ToggleAutoReview => {
                     let on = permissions.toggle_auto_review();
                     let _ = evt_tx.send(AgentEvent::AssistantText(format!(

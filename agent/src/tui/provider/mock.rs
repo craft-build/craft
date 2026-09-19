@@ -265,7 +265,7 @@ impl Provider for MockProvider {
                         };
                         current = Some(handle.abort_handle());
                     }
-                    Command::Approve(_) => {
+                    Command::Approve { .. } => {
                         // The scripted diff completes the linked plan step.
                         if let Some(p) = plan.get_mut(2) {
                             p.done = true;
@@ -287,7 +287,7 @@ impl Provider for MockProvider {
                             46.1 + usage_turns as f64 * 0.2
                         )));
                     }
-                    Command::Reject(_) => {
+                    Command::Reject { .. } => {
                         for f in &mut files {
                             f.status = "reverted".into();
                             f.tone = Tone::Neutral;
@@ -383,7 +383,11 @@ mod tests {
         }
         assert!(saw_read && saw_grep && saw_edit && saw_bash);
 
-        tx.send(Command::Approve("mock-1-edit".into())).unwrap();
+        tx.send(Command::Approve {
+            id: "mock-1-edit".into(),
+            always: false,
+        })
+        .unwrap();
         let mut plan_done = false;
         let mut files_approved = false;
         loop {

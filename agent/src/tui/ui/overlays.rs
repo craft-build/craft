@@ -514,6 +514,8 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
     let actions = Line::from(vec![
         Span::styled("[ esc cancel ]", Style::default().fg(theme::TEXT_SECONDARY)),
         Span::raw("  "),
+        Span::styled("[ Y always ]", Style::default().fg(theme::DANGER)),
+        Span::raw("  "),
         Span::styled("[ y reject ]", Style::default().fg(theme::DANGER)),
     ]);
     let aw = actions.width() as u16 + 1;
