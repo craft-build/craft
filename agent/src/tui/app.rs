@@ -6,10 +6,10 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::tui::composer::Composer;
-use crate::tui::modals::Modal;
+use crate::tui::modals::{Modal, StatsView};
 use crate::tui::provider::{
     AgentEvent, Command, ModelChoice, PlanItem, Status, ToolCallData, ToolKind, ToolLine,
-    TouchedFile,
+    TouchedFile, UsageRow,
 };
 use crate::tui::selection::{
     Selection, clamp_to, copy_to_clipboard, extract_selection_text, rect_contains,
@@ -37,12 +37,14 @@ fn seed_models() -> Vec<ModelChoice> {
 
 pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
-pub const SLASH_COMMANDS: [(&str, &str); 7] = [
+pub const SLASH_COMMANDS: [(&str, &str); 9] = [
     ("/clear", "Clear conversation context"),
     ("/compact", "Compact context to save tokens"),
     ("/undo", "Revert the last edit"),
     ("/model", "Switch model"),
     ("/sessions", "List sessions"),
+    ("/usage", "Show this session's tokens and cost"),
+    ("/stats", "Show cost across all sessions"),
     ("/auto-review", "Toggle LLM auto-review of permissions"),
     ("/help", "Show keybindings"),
 ];
@@ -291,6 +293,9 @@ pub struct App {
     /// on the composer (shown when the composer starts with '/').
     pub modal: Modal,
     pub slash_selected: usize, // row in the slash popup
+    /// Latest per-model usage snapshot from the provider (the `/usage`
+    /// overlay's data; refreshed after every completed run).
+    pub usage: Vec<UsageRow>,
 
     pub should_quit: bool,
 }
@@ -308,6 +313,7 @@ impl App {
             composer: Composer::new(),
             modal: Modal::None,
             slash_selected: 0,
+            usage: Vec::new(),
             should_quit: false,
         }
     }
@@ -360,6 +366,13 @@ impl App {
             AgentEvent::SessionInfo { cwd, branch } => {
                 self.session.cwd = cwd;
                 self.session.branch = branch;
+            }
+            AgentEvent::UsageSnapshot(rows) => {
+                self.usage = rows;
+                // Keep an open /usage overlay fresh when a run completes.
+                if matches!(self.modal, Modal::Usage(_)) {
+                    self.modal = Modal::Usage(self.usage.clone());
+                }
             }
             // Message-bearing events merge into the conversation.
             ev => self.conversation.apply(ev),
@@ -465,7 +478,56 @@ impl App {
         self.view.scroll = 0;
         self.view.follow = true;
     }
+}
 
+/// Aggregate `cost.jsonl` for the `/stats` overlay. A missing state dir or
+/// ledger reads as an empty table ("no runs recorded").
+fn load_stats() -> StatsView {
+    let empty = StatsView {
+        empty: true,
+        ..StatsView::default()
+    };
+    let Ok(dir) = crate::storage::StateDir::resolve() else {
+        return empty;
+    };
+    let Ok(ledger) = crate::storage::stats::CostLedger::from_state_dir(&dir) else {
+        return empty;
+    };
+    match ledger.summary() {
+        Ok(summary) if summary.records > 0 => {
+            let sessions = summary.session_count();
+            let total_cost = summary.total_cost;
+            let total_tokens = summary.total_tokens;
+            StatsView {
+                rows: summary
+                    .by_model
+                    .into_iter()
+                    .map(|(model, cost, tokens)| {
+                        // A $0 total on a spec the pricing table does not know
+                        // means unpriced, not free — show "—" like `/usage`.
+                        let cost = if cost == 0.0 && crate::usage::resolve_spec(&model).is_none() {
+                            None
+                        } else {
+                            Some(cost)
+                        };
+                        UsageRow {
+                            model,
+                            tokens,
+                            cost,
+                        }
+                    })
+                    .collect(),
+                total_cost,
+                total_tokens,
+                sessions,
+                empty: false,
+            }
+        }
+        _ => empty,
+    }
+}
+
+impl App {
     fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
         match cmd {
             "/clear" => {
@@ -476,6 +538,11 @@ impl App {
                 let _ = tx.send(Command::Undo);
             }
             "/model" => self.open_model_menu(),
+            "/usage" => {
+                self.modal = Modal::Usage(self.usage.clone());
+                let _ = tx.send(Command::GetUsage);
+            }
+            "/stats" => self.modal = Modal::Stats(load_stats()),
             "/auto-review" => {
                 let _ = tx.send(Command::ToggleAutoReview);
             }
@@ -1025,5 +1092,55 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 20));
         // Still collapsed: the drag became a selection, not a card press.
         assert!(app.conversation.collapsed.contains(&"r1".to_string()));
+    }
+
+    fn usage_rows() -> Vec<UsageRow> {
+        vec![
+            UsageRow {
+                model: "anthropic/claude-sonnet-5".into(),
+                tokens: 12_345,
+                cost: Some(0.0123),
+            },
+            UsageRow {
+                model: "mock/free-model".into(),
+                tokens: 500,
+                cost: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn usage_slash_opens_the_session_overlay() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_event(AgentEvent::UsageSnapshot(usage_rows()));
+        app.run_slash("/usage", &tx);
+        assert!(matches!(&app.modal, Modal::Usage(rows) if rows.len() == 2));
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::GetUsage)),
+            "/usage refreshes the snapshot from the provider"
+        );
+        // Any key dismisses the read-only overlay.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    #[test]
+    fn stats_slash_opens_the_ledger_overlay() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.run_slash("/stats", &tx);
+        assert!(matches!(app.modal, Modal::Stats(_)));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    /// A fresh snapshot while `/usage` is open replaces the overlay's rows.
+    #[test]
+    fn usage_snapshot_refreshes_open_overlay() {
+        let mut app = App::new();
+        app.run_slash("/usage", &mpsc::unbounded_channel().0);
+        app.handle_event(AgentEvent::UsageSnapshot(usage_rows()));
+        assert!(matches!(&app.modal, Modal::Usage(rows) if rows.len() == 2));
     }
 }

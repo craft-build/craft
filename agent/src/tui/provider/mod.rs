@@ -33,6 +33,8 @@ pub enum Command {
     SelectModel { provider: String, model: String },
     /// Toggle LLM auto-review of permissions (`/auto-review`).
     ToggleAutoReview,
+    /// Refresh the per-model usage snapshot shown by `/usage`.
+    GetUsage,
 }
 
 /// Agent lifecycle status, mirrors the prototype's STATUS_MAP.
@@ -127,6 +129,15 @@ pub struct TouchedFile {
     pub tone: Tone,
 }
 
+/// One per-model row of a usage/stats table: token totals and what they
+/// were billed (`None` when the model is unpriced).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageRow {
+    pub model: String,
+    pub tokens: u64,
+    pub cost: Option<f64>,
+}
+
 /// Events streamed provider -> UI.
 #[allow(dead_code)] // `PlanSet` has no real source yet; exercised by the test mock
 #[derive(Clone, Debug)]
@@ -158,6 +169,9 @@ pub enum AgentEvent {
         cwd: String,
         branch: String,
     },
+    /// Per-model usage of the current session (`/usage`); pushed after each
+    /// completed run and in answer to [`Command::GetUsage`].
+    UsageSnapshot(Vec<UsageRow>),
 }
 
 /// An agent backend. `start` consumes the provider and returns the two halves

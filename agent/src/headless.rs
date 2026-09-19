@@ -10,6 +10,7 @@
 //! run seam actually takes; MCP handles, Flow attachments, and plugin rule
 //! stores from the reference have no counterpart here (yet).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,8 +23,9 @@ use crate::providers::DynamicModel;
 use crate::run::ToolDispatch;
 use crate::run::dispatch::BeforeExecute;
 use crate::run::events::{SessionEvents, event_stream};
-use crate::run::{RunParams, cancel_channel};
+use crate::run::{Event, RunParams, cancel_channel};
 use crate::storage::sessions::StoredTokenUsage;
+use crate::storage::stats::{self, CostLedger, CostUsage};
 use crate::storage::{StateDir, sessions};
 use crate::tools::Workspace;
 
@@ -36,6 +38,9 @@ pub type StoredSession = sessions::Session<Message, StoredTokenUsage, history::T
 /// when the disk is unhappy.
 pub struct SessionStore {
     dir: StateDir,
+    /// Cost ledger handle, opened once so per-turn appends don't re-resolve
+    /// the path. `None` when the state dir cannot host it.
+    ledger: Option<CostLedger>,
     session: StoredSession,
 }
 
@@ -50,12 +55,23 @@ impl SessionStore {
     /// Open (or create) against an explicit dir; a fresh session is saved
     /// immediately so it is loadable before the first turn completes.
     pub fn open_in(dir: StateDir, session_ref: SessionRef, cwd: &str, model_spec: &str) -> Self {
+        // Opened once and reused for every turn's cost append; a failure here
+        // only means no cost records, the session itself still persists.
+        let ledger = CostLedger::from_state_dir(&dir).ok();
         match StoredSession::load(session_ref.id(), &dir) {
-            Ok(session) => Self { dir, session },
+            Ok(session) => Self {
+                dir,
+                ledger,
+                session,
+            },
             Err(_) => {
                 let mut session = StoredSession::new(model_spec, cwd);
                 session.id = session_ref;
-                let mut store = Self { dir, session };
+                let mut store = Self {
+                    dir,
+                    ledger,
+                    session,
+                };
                 store.save();
                 store
             }
@@ -74,6 +90,36 @@ impl SessionStore {
         self.session.replace_messages(messages.to_vec());
         self.session.set_model(model_spec);
         self.session.update_title_if_default();
+        self.save();
+    }
+
+    /// Fold a finished run's per-model usage into the session and append one
+    /// cost-ledger record per model to `cost.jsonl`. Ledger failures are
+    /// warnings, never fatal. Unpriced models record `cost_usd: 0.0` — the
+    /// ledger's cost field is not optional, so the token counts carry the
+    /// information and callers must not show "$0.00" as a bill.
+    pub fn record_cost(&mut self, by_model: &HashMap<String, crate::usage::StoredTokenUsage>) {
+        if by_model.is_empty() {
+            return;
+        }
+        for (spec, usage) in by_model {
+            let stored = sessions::StoredTokenUsage::from(*usage);
+            self.session.add_model_usage(spec, stored);
+            if let Some(ledger) = &self.ledger {
+                let (provider, model) = spec.split_once('/').unwrap_or(("", spec.as_str()));
+                let record = stats::make_record(
+                    self.session.id.id().to_string(),
+                    model,
+                    provider,
+                    CostUsage::from_stored(usage),
+                    usage.cost.unwrap_or(0.0),
+                    false,
+                );
+                if let Err(e) = ledger.append(&record) {
+                    eprintln!("warning: failed to append cost record: {e}");
+                }
+            }
+        }
         self.save();
     }
 }
@@ -140,6 +186,10 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         let mut run_params = params.run;
         run_params.model_spec = params.model_spec;
         let event_tx = guard.sender(0);
+        // The terminal Done's per-model ledger, captured from the event
+        // seam so the store can persist it after the run ends.
+        let done_by_model = Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&done_by_model);
         crate::run::run(
             &params.model,
             &run_params,
@@ -147,10 +197,21 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
             &mut history,
             &params.prompt,
             &cancel,
-            &|event| event_tx.send(event),
+            &|event| {
+                if let Event::Done { by_model, .. } = &event {
+                    *sink.lock().expect("usage sink") = Some(by_model.clone());
+                }
+                event_tx.send(event);
+            },
         )
         .await;
+        let by_model = done_by_model
+            .lock()
+            .expect("usage sink")
+            .take()
+            .unwrap_or_default();
         if let Some(store) = &mut store {
+            store.record_cost(&by_model);
             store.record_turn(&history, model_spec.unwrap_or_else(|| "unknown".into()));
         }
         // `guard` drops here, closing the stream.
@@ -277,6 +338,9 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 })
             };
 
+            // The terminal Done's per-model ledger for this turn.
+            let done_by_model = Arc::new(std::sync::Mutex::new(None));
+            let sink = Arc::clone(&done_by_model);
             crate::run::run(
                 &model,
                 &run_params,
@@ -284,12 +348,23 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                 &mut history,
                 &prompt,
                 &cancel,
-                &|event| event_tx.send(event),
+                &|event| {
+                    if let Event::Done { by_model, .. } = &event {
+                        *sink.lock().expect("usage sink") = Some(by_model.clone());
+                    }
+                    event_tx.send(event);
+                },
             )
             .await;
             watcher.abort();
 
             if let Some(store) = &mut store {
+                let by_model = done_by_model
+                    .lock()
+                    .expect("usage sink")
+                    .take()
+                    .unwrap_or_default();
+                store.record_cost(&by_model);
                 store.record_turn(
                     &history,
                     model_spec.clone().unwrap_or_else(|| "unknown".into()),

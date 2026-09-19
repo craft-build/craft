@@ -328,6 +328,10 @@ impl Provider for MockProvider {
                         let _ =
                             evt_tx.send(AgentEvent::AssistantText("auto-review toggled.".into()));
                     }
+                    Command::GetUsage => {
+                        // The scripted demo tracks no real usage.
+                        let _ = evt_tx.send(AgentEvent::UsageSnapshot(Vec::new()));
+                    }
                 }
             }
         });

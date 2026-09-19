@@ -8,7 +8,7 @@
 //! the dispatch `BeforeExecute` hook: no workspace mutation runs without an
 //! explicit user decision.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +52,14 @@ struct SessionState {
     guardrails: crate::run::SharedGuardrails,
     /// Edit-family call awaiting the user's decision, by tool-call id.
     pending_approval: Option<(String, oneshot::Sender<bool>)>,
+    /// Per-model usage of this session, folded from each finished run's
+    /// `Event::Done` (the `/usage` overlay reads it).
+    usage_by_model: HashMap<String, crate::usage::StoredTokenUsage>,
+    /// Cost ledger in the state dir, opened once; `None` when the state dir
+    /// is unavailable, meaning cost records are simply not written.
+    ledger: Option<crate::storage::stats::CostLedger>,
+    /// Id under which this TUI session's cost records are filed.
+    session_id: String,
 }
 
 impl SessionState {
@@ -68,8 +76,30 @@ impl SessionState {
             )),
             dedup,
             guardrails,
+            ledger: crate::storage::StateDir::resolve()
+                .ok()
+                .and_then(|dir| crate::storage::stats::CostLedger::from_state_dir(&dir).ok()),
+            session_id: crate::id::SessionRef::generate().id().to_string(),
             ..Self::default()
         }
+    }
+
+    /// Per-model usage rows for the `/usage` overlay.
+    fn usage_rows(&self) -> Vec<super::UsageRow> {
+        let mut rows: Vec<super::UsageRow> = self
+            .usage_by_model
+            .iter()
+            .map(|(spec, usage)| {
+                let tokens = crate::usage::TokenUsage::from(*usage);
+                super::UsageRow {
+                    model: spec.clone(),
+                    tokens: u64::from(tokens.total_input().saturating_add(tokens.output)),
+                    cost: usage.cost,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.model.cmp(&b.model));
+        rows
     }
 }
 
@@ -322,6 +352,10 @@ impl Provider for CraftProvider {
                             "auto-review {}.",
                             if on { "on" } else { "off" }
                         )));
+                    }
+                    Command::GetUsage => {
+                        let rows = state.lock().await.usage_rows();
+                        let _ = evt_tx.send(AgentEvent::UsageSnapshot(rows));
                     }
                     Command::Interrupt => {
                         interrupt(&mut current_turn);
@@ -979,6 +1013,10 @@ async fn run_turn(ctx: TurnCtx, text: String) {
     let mut continuations = MAX_EMPTY_CONTINUATIONS;
     loop {
         let renderer = TurnRenderer::new(tx.clone(), files.clone(), selection.context_length);
+        // The terminal Done's per-model ledger, captured from the event seam;
+        // folded into the session and the cost ledger once the run returns.
+        let done_by_model = Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&done_by_model);
         let outcome = run::run(
             &model,
             &params,
@@ -986,9 +1024,21 @@ async fn run_turn(ctx: TurnCtx, text: String) {
             &mut history,
             &prompt,
             &cancel,
-            &|event| renderer.map(event),
+            &|event| {
+                if let run::Event::Done { by_model, .. } = event {
+                    *sink.lock().expect("usage sink") = Some(by_model);
+                    return;
+                }
+                renderer.map(event);
+            },
         )
         .await;
+        let by_model = done_by_model
+            .lock()
+            .expect("usage sink")
+            .take()
+            .unwrap_or_default();
+        record_run_usage(&state, &tx, by_model).await;
         match handle_outcome(
             outcome,
             &renderer,
@@ -1007,6 +1057,39 @@ async fn run_turn(ctx: TurnCtx, text: String) {
     }
     state.lock().await.history = history;
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+}
+
+/// Fold a finished run's per-model usage into the session totals and append
+/// one `cost.jsonl` record per model. Ledger failures warn and never fail the
+/// turn; an unpriced model records `cost_usd: 0.0` (the ledger's cost field
+/// is not optional) with its real token counts.
+async fn record_run_usage(
+    state: &Arc<Mutex<SessionState>>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    by_model: HashMap<String, crate::usage::StoredTokenUsage>,
+) {
+    if by_model.is_empty() {
+        return;
+    }
+    let mut session = state.lock().await;
+    for (spec, usage) in by_model {
+        if let Some(ledger) = &session.ledger {
+            let (provider, model) = spec.split_once('/').unwrap_or(("", spec.as_str()));
+            let record = crate::storage::stats::make_record(
+                session.session_id.clone(),
+                model,
+                provider,
+                crate::storage::stats::CostUsage::from_stored(&usage),
+                usage.cost.unwrap_or(0.0),
+                false,
+            );
+            if let Err(e) = ledger.append(&record) {
+                eprintln!("warning: failed to append cost record: {e}");
+            }
+        }
+        *session.usage_by_model.entry(spec).or_default() += usage;
+    }
+    let _ = tx.send(AgentEvent::UsageSnapshot(session.usage_rows()));
 }
 
 #[cfg(test)]
@@ -1323,5 +1406,89 @@ mod tests {
             0,
             "Allowed and Denied must short-circuit before the reviewer"
         );
+    }
+
+    fn stored(input: u32, output: u32, cost: Option<f64>) -> crate::usage::StoredTokenUsage {
+        crate::usage::StoredTokenUsage {
+            input,
+            output,
+            cost,
+            ..Default::default()
+        }
+    }
+
+    fn session_with_ledger(root: &std::path::Path) -> SessionState {
+        let dir = crate::storage::StateDir::from_path(root.to_path_buf());
+        SessionState {
+            ledger: Some(crate::storage::stats::CostLedger::from_state_dir(&dir).unwrap()),
+            session_id: "s1".into(),
+            ..SessionState::linked()
+        }
+    }
+
+    fn ledger_records(root: &std::path::Path) -> Vec<crate::storage::stats::CostRecord> {
+        let text = std::fs::read_to_string(root.join("cost.jsonl")).unwrap();
+        text.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn run_usage_folds_into_session_and_cost_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(session_with_ledger(tmp.path())));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut by_model = HashMap::new();
+        by_model.insert(
+            "anthropic/claude-sonnet-5".to_owned(),
+            stored(100, 50, Some(0.001)),
+        );
+        by_model.insert("mock/free-model".to_owned(), stored(10, 5, None));
+
+        record_run_usage(&state, &tx, by_model).await;
+
+        let session = state.lock().await;
+        assert_eq!(session.usage_by_model.len(), 2);
+        assert_eq!(
+            session.usage_by_model["anthropic/claude-sonnet-5"].cost,
+            Some(0.001)
+        );
+        assert_eq!(session.usage_by_model["mock/free-model"].cost, None);
+
+        let records = ledger_records(tmp.path());
+        assert_eq!(records.len(), 2, "one record per model");
+        let by_spec: std::collections::BTreeMap<(&str, &str), (&f64, u64)> = records
+            .iter()
+            .map(|r| {
+                (
+                    (r.provider.as_str(), r.model.as_str()),
+                    (&r.cost_usd, r.usage.total()),
+                )
+            })
+            .collect();
+        assert_eq!(by_spec[&("anthropic", "claude-sonnet-5")].1, 150);
+        assert_eq!(by_spec[&("mock", "free-model")].0, &0.0);
+        assert!(records.iter().all(|r| r.session_id == "s1"));
+
+        assert!(matches!(rx.try_recv(), Ok(AgentEvent::UsageSnapshot(rows)) if rows.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn ledger_failure_never_breaks_the_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory where cost.jsonl should live makes every append fail.
+        std::fs::create_dir(tmp.path().join("cost.jsonl")).unwrap();
+        let state = Arc::new(Mutex::new(session_with_ledger(tmp.path())));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut by_model = HashMap::new();
+        by_model.insert(
+            "anthropic/claude-sonnet-5".to_owned(),
+            stored(1, 1, Some(0.0)),
+        );
+
+        record_run_usage(&state, &tx, by_model).await;
+
+        // The session totals were still folded; only the ledger write warned.
+        assert_eq!(state.lock().await.usage_by_model.len(), 1);
     }
 }

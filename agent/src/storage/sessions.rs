@@ -118,6 +118,20 @@ pub struct StoredTokenUsage {
     pub cost: Option<f64>,
 }
 
+/// From the in-memory accounting type of `usage.rs` (what `Event::Done`
+/// carries) into this persisted shape.
+impl From<crate::usage::StoredTokenUsage> for StoredTokenUsage {
+    fn from(u: crate::usage::StoredTokenUsage) -> Self {
+        Self {
+            input: u.input,
+            output: u.output,
+            cache_creation: u.cache_creation,
+            cache_read: u.cache_read,
+            cost: u.cost,
+        }
+    }
+}
+
 impl StoredTokenUsage {
     pub fn total_input(&self) -> u32 {
         self.input

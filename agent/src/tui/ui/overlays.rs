@@ -271,6 +271,185 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Shared table renderer for the /usage and /stats read-only overlays.
+fn render_usage_table(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    rows: &[crate::tui::provider::UsageRow],
+    footer: Vec<Span<'static>>,
+) {
+    use crate::storage::stats::format_usd;
+    use crate::usage::format_tokens;
+
+    dim(f, area);
+    let n = rows.len().min(12) as u16;
+    let height = (n + 4).min(area.height); // title + header + rows + footer
+    let width = 56.min(area.width.saturating_sub(4));
+    let rect = centered(width, height, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let w = inner.width.saturating_sub(2) as usize;
+    // Rows must fit inside the box: title + header + footer already claim
+    // three lines of `inner`, so clip before painting to avoid spilling
+    // over the dimmed chat on short terminals.
+    let max_rows = 12.min(inner.height.saturating_sub(3) as usize);
+    let line = |spans: Vec<Span<'static>>| Paragraph::new(Line::from(spans));
+    let mut y = inner.y + 1;
+    f.render_widget(
+        line(vec![Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Rect {
+            x: inner.x + 1,
+            y,
+            width: w as u16,
+            height: 1,
+        },
+    );
+    y += 1;
+    f.render_widget(
+        line(vec![
+            Span::styled(" model", Style::default().fg(theme::TEXT_TERTIARY)),
+            Span::styled("  tokens  cost ", Style::default().fg(theme::TEXT_TERTIARY)),
+        ]),
+        Rect {
+            x: inner.x + 1,
+            y,
+            width: w as u16,
+            height: 1,
+        },
+    );
+    y += 1;
+    for row in rows.iter().take(max_rows) {
+        let label = format!(" {}", row.model);
+        let tokens = format_tokens(row.tokens);
+        let cost = match row.cost {
+            Some(cost) => format_usd(cost),
+            None => "—".to_string(),
+        };
+        let gap = w.saturating_sub(
+            label.chars().count() + tokens.chars().count() + cost.chars().count() + 4,
+        );
+        f.render_widget(
+            line(vec![
+                Span::styled(label, Style::default().fg(theme::TEXT_PRIMARY)),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(
+                    format!("{tokens}  {cost}"),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
+            ]),
+            Rect {
+                x: inner.x + 1,
+                y,
+                width: w as u16,
+                height: 1,
+            },
+        );
+        y += 1;
+    }
+    f.render_widget(
+        line(footer),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: w as u16,
+            height: 1,
+        },
+    );
+}
+
+/// `/usage`: this session's per-model tokens and cost.
+pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
+    let Modal::Usage(rows) = &app.modal else {
+        return;
+    };
+    if rows.is_empty() {
+        render_usage_table(
+            f,
+            area,
+            "Session usage",
+            &[],
+            vec![Span::styled(
+                " no usage recorded yet — esc to close ",
+                Style::default().fg(theme::TEXT_TERTIARY),
+            )],
+        );
+        return;
+    }
+    let total_tokens: u64 = rows.iter().map(|r| r.tokens).sum();
+    // Costs sum like the session ledger: `None` until a priced model shows up.
+    let total_cost = rows.iter().filter_map(|r| r.cost).reduce(|a, b| a + b);
+    let footer_cost = match total_cost {
+        Some(cost) => crate::storage::stats::format_usd(cost),
+        None => "—".to_string(),
+    };
+    render_usage_table(
+        f,
+        area,
+        "Session usage",
+        rows,
+        vec![
+            Span::styled(
+                format!(" total {}", crate::usage::format_tokens(total_tokens)),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+            Span::styled(
+                format!("  {}", footer_cost),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+            Span::styled("  esc to close", Style::default().fg(theme::TEXT_TERTIARY)),
+        ],
+    );
+}
+
+/// `/stats`: cross-session cost totals from the cost ledger.
+pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
+    let Modal::Stats(view) = &app.modal else {
+        return;
+    };
+    if view.empty {
+        render_usage_table(
+            f,
+            area,
+            "Cost stats",
+            &[],
+            vec![Span::styled(
+                " no runs recorded — esc to close ",
+                Style::default().fg(theme::TEXT_TERTIARY),
+            )],
+        );
+        return;
+    }
+    render_usage_table(
+        f,
+        area,
+        "Cost stats",
+        &view.rows,
+        vec![
+            Span::styled(
+                format!(" total {}", crate::usage::format_tokens(view.total_tokens)),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+            Span::styled(
+                format!("  {}", crate::storage::stats::format_usd(view.total_cost)),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+            Span::styled(
+                format!("  {} sessions  esc to close", view.sessions),
+                Style::default().fg(theme::TEXT_TERTIARY),
+            ),
+        ],
+    );
+}
+
 /// "Reject this diff?" confirmation dialog.
 pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
     let Modal::ConfirmReject(id) = &app.modal else {

@@ -77,6 +77,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     overlays::render_model_menu(f, app, chat, bottom);
     overlays::render_palette(f, app, area);
     overlays::render_confirm(f, app, area);
+    overlays::render_usage(f, app, area);
+    overlays::render_stats(f, app, area);
 
     // Snapshot the frame as plain text (selection copy extracts from this),
     // then draw the current text selection as reversed cells.
@@ -257,6 +259,55 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Reject this diff?"));
         assert!(text.contains("src/auth/refresh.ts"));
+    }
+
+    #[test]
+    fn usage_and_stats_overlays_render_rows_and_costs() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut app = seeded_app();
+        app.handle_event(AgentEvent::UsageSnapshot(vec![
+            crate::tui::provider::UsageRow {
+                model: "anthropic/claude-sonnet-5".into(),
+                tokens: 12_345,
+                cost: Some(0.0123),
+            },
+            crate::tui::provider::UsageRow {
+                model: "mock/free-model".into(),
+                tokens: 500,
+                cost: None,
+            },
+        ]));
+        app.modal = crate::tui::modals::Modal::Usage(app.usage.clone());
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Session usage"));
+        assert!(text.contains("claude-sonnet-5"));
+        assert!(text.contains("$0.01"), "priced model shows its cost");
+        assert!(text.contains("\u{2014}"), "unpriced model shows an em dash");
+
+        app.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
+            rows: vec![crate::tui::provider::UsageRow {
+                model: "claude-sonnet-5".into(),
+                tokens: 100_000,
+                cost: Some(1.5),
+            }],
+            total_cost: 1.5,
+            total_tokens: 100_000,
+            sessions: 3,
+            empty: false,
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Cost stats"));
+        assert!(text.contains("$1.50"));
+        assert!(text.contains("3 sessions"));
+
+        app.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
+            empty: true,
+            ..Default::default()
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("no runs recorded"));
     }
 
     /// A catalog larger than the space above the composer windows around the

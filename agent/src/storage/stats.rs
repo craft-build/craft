@@ -30,6 +30,15 @@ impl CostUsage {
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_creation + self.cache_read
     }
+
+    pub fn from_stored(u: &crate::usage::StoredTokenUsage) -> Self {
+        Self {
+            input: u64::from(u.input),
+            output: u64::from(u.output),
+            cache_creation: u64::from(u.cache_creation),
+            cache_read: u64::from(u.cache_read),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,10 +148,17 @@ fn summary_from(records: Vec<CostRecord>) -> Result<CostSummary, StorageError> {
 
     for r in &records {
         let tokens = r.usage.total();
+        // Keyed on the full spec so the same model id served by two providers
+        // (e.g. anthropic vs an aggregator) stays in separate rows.
+        let spec = if r.provider.is_empty() {
+            r.model.clone()
+        } else {
+            format!("{}/{}", r.provider, r.model)
+        };
         total_cost += r.cost_usd;
         total_tokens += tokens;
         by_model
-            .entry(r.model.clone())
+            .entry(spec)
             .and_modify(|(c, t)| {
                 *c += r.cost_usd;
                 *t += tokens;
@@ -311,9 +327,9 @@ mod tests {
         assert_eq!(s.session_count(), 2);
         assert!((s.total_cost - 1.5).abs() < 1e-9);
         assert_eq!(s.total_tokens, 1350);
-        assert_eq!(s.by_model[0].0, "opus");
+        assert_eq!(s.by_model[0].0, "anthropic/opus");
         assert!((s.by_model[0].1 - 1.0).abs() < 1e-9);
-        assert_eq!(s.by_model[1].0, "sonnet");
+        assert_eq!(s.by_model[1].0, "anthropic/sonnet");
         assert!((s.by_model[1].1 - 0.5).abs() < 1e-9);
         assert_eq!(s.by_session[0].0, "s2");
         assert!((s.by_session[0].1 - 1.0).abs() < 1e-9);

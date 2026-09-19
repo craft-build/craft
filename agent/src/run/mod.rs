@@ -102,6 +102,9 @@ pub enum Event {
         /// What the run's turns were billed (H.6). `None` when no model in
         /// the run is priced, so callers show no cost instead of "$0.000".
         cost: Option<f64>,
+        /// Per-model usage with each model's recorded (billed) cost, for the
+        /// session ledger and `cost.jsonl`. Unpriced models carry `None`.
+        by_model: HashMap<String, crate::usage::StoredTokenUsage>,
     },
     /// Human-readable, non-fatal status text.
     Info(String),
@@ -535,6 +538,7 @@ pub async fn run<M: CompletionModel + Clone>(
         num_turns: stats.turns,
         reason: DoneReason::from(&outcome),
         cost,
+        by_model: stats.by_model,
     });
     // Clean (and cancelled) run ends close the capture session onto the
     // `/undo` stack; a failed run leaves it for the next attempt to merge
@@ -3582,6 +3586,61 @@ mod tests {
             "got {outcome:?}"
         );
         assert_eq!(model.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn done_by_model_carries_priced_and_unpriced_models() {
+        async fn collect_by_model(spec: &str) -> HashMap<String, crate::usage::StoredTokenUsage> {
+            let (model, _turns) = stream_turns(vec![vec![
+                MockStreamEvent::text("hi"),
+                MockStreamEvent::final_response(rig_core::completion::Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                    ..rig_core::completion::Usage::new()
+                }),
+            ]]);
+            let tools = crate::tools::Workspace::new(std::env::temp_dir())
+                .unwrap()
+                .register();
+            let (_, cancel) = cancel_channel();
+            let mut history = Vec::new();
+            let params = RunParams {
+                model_spec: Some(spec.into()),
+                ..RunParams::default()
+            };
+            let by_model = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let sink = std::sync::Arc::clone(&by_model);
+            run(
+                &model,
+                &params,
+                &tools,
+                &mut history,
+                "hello",
+                &cancel,
+                &|event| {
+                    if let Event::Done { by_model, .. } = event {
+                        *sink.lock().unwrap() = Some(by_model);
+                    }
+                },
+            )
+            .await;
+            sink.lock().unwrap().take().unwrap()
+        }
+
+        let priced = collect_by_model("anthropic/claude-sonnet-5").await;
+        let usage = priced
+            .get("anthropic/claude-sonnet-5")
+            .expect("priced model recorded");
+        assert!(usage.cost.is_some_and(|c| c > 0.0));
+        assert!(usage.input + usage.output > 0);
+
+        let unpriced = collect_by_model("mock/no-such-model").await;
+        let usage = unpriced
+            .get("mock/no-such-model")
+            .expect("unpriced model still counts tokens");
+        assert_eq!(usage.cost, None);
+        assert!(usage.input + usage.output > 0);
     }
 
     /// Poll until `condition` holds, bounded; avoids sleeping on a guess.

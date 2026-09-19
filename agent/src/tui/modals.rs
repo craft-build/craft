@@ -22,6 +22,20 @@ pub enum Modal {
     ModelMenu(usize),
     /// "Reject this diff?" confirmation: tool id awaiting the decision.
     ConfirmReject(String),
+    /// `/usage`: this session's per-model tokens and cost.
+    Usage(Vec<crate::tui::provider::UsageRow>),
+    /// `/stats`: cross-session totals from the cost ledger.
+    Stats(StatsView),
+}
+
+/// Aggregate cost-ledger state rendered by the `/stats` overlay.
+#[derive(Clone, Debug, Default)]
+pub struct StatsView {
+    pub rows: Vec<crate::tui::provider::UsageRow>,
+    pub total_cost: f64,
+    pub total_tokens: u64,
+    pub sessions: usize,
+    pub empty: bool,
 }
 
 impl App {
@@ -44,6 +58,12 @@ impl App {
         // 3. Model menu.
         if matches!(self.modal, Modal::ModelMenu(_)) {
             self.handle_model_menu_key(key, tx);
+            return;
+        }
+
+        // 4. Read-only usage/stats tables: any key dismisses.
+        if matches!(self.modal, Modal::Usage(_) | Modal::Stats(_)) {
+            self.modal = Modal::None;
         }
     }
 
