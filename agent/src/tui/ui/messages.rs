@@ -348,10 +348,16 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(theme::TEXT_TERTIARY),
         )));
         lines.push(Line::default());
+        #[cfg(test)]
         lines.push(Line::from(Span::styled(
-"Send a message — the mock provider will replay the scripted \"session refresh\" scenario.",
-Style::default().fg(theme::TEXT_DISABLED),
-)));
+            "Send a message — the mock provider will replay the scripted \"session refresh\" scenario.",
+            Style::default().fg(theme::TEXT_DISABLED),
+        )));
+        #[cfg(not(test))]
+        lines.push(Line::from(Span::styled(
+            "Send a message to get started.",
+            Style::default().fg(theme::TEXT_DISABLED),
+        )));
     }
 
     // Blank spacer carrying the user-message accent bar, so the block's
