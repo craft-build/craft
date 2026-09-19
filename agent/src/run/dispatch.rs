@@ -356,3 +356,177 @@ fn rig_content_to_own(
         })
         .collect()
 }
+
+use crate::history::Message;
+
+use super::doom;
+use super::task_set;
+use super::{CancelToken, Event, RunOutcome};
+
+/// Tools that must never share a wave with another call: `batch` nests its
+/// own parallel dispatch and `question` (not yet ported) blocks on the user.
+pub(crate) fn is_never_parallel(name: &str) -> bool {
+    matches!(name, "batch" | "question")
+}
+
+/// Execute the turn's tool calls, appending their results to `turn`.
+/// Returns `Some(outcome)` when the run must stop (cancel or dispatch
+/// failure); `None` means the loop continues.
+///
+/// Calls run concurrently in waves; a wave is joined and drained before the
+/// next starts whenever two calls write the same path or a
+/// never-parallel tool joins the batch. Results are committed in call
+/// order; a panicking tool future becomes an error result instead of
+/// unwinding the run.
+pub(crate) async fn dispatch_tool_calls(
+    tools: &ToolDispatch,
+    turn: &mut Vec<Message>,
+    calls: Vec<history::ToolCall>,
+    recent: &mut doom::RecentCalls,
+    cancel: &CancelToken,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> (Option<RunOutcome>, doom::ToolBatchOutcome) {
+    // Spawned tasks need owned state; the dispatch table is cheap to clone.
+    let tools = Arc::new(tools.clone());
+    let mut set = task_set::TaskSet::new();
+    let mut wave: Vec<history::ToolCall> = Vec::new();
+    let mut all_write_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut batch = doom::ToolBatchOutcome::default();
+
+    for call in calls {
+        if cancel.cancelled() {
+            let outcome =
+                commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
+            return (outcome.or(Some(RunOutcome::Cancelled)), batch);
+        }
+        let name = call.function.name.clone();
+        let arguments = call.function.arguments.clone();
+        if recent.is_doom_loop(&name, &arguments) {
+            // The call is blocked, not executed: emit the reference's error
+            // result directly and clear the window so the warning does not
+            // re-fire identically on the next retry.
+            batch.doom_loops += 1;
+            let result = history::ToolResult {
+                call: call.id.clone(),
+                name: name.clone(),
+                content: vec![history::ToolResultContent::text(doom::DOOM_LOOP_MESSAGE)],
+                is_error: true,
+            };
+            turn.push(Message::User {
+                content: vec![history::UserContent::ToolResult(result.clone())],
+            });
+            emit(Event::ToolDone {
+                id: call.id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+                result,
+            });
+            recent.clear();
+        } else {
+            // A never-parallel tool or a repeat write path must not share a
+            // wave with earlier calls, so the pending wave is flushed
+            // *before* this call is spawned into a fresh one.
+            let write_paths = dedup::extract_write_paths(&name, &call.function.arguments);
+            let conflicts = is_never_parallel(&name)
+                || write_paths
+                    .iter()
+                    .any(|path| all_write_paths.contains(path));
+            if conflicts && !wave.is_empty() {
+                if let Some(outcome) =
+                    commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await
+                {
+                    return (Some(outcome), batch);
+                }
+                set = task_set::TaskSet::new();
+                all_write_paths.clear();
+            }
+            all_write_paths.extend(write_paths);
+            let executor = Arc::clone(&tools);
+            wave.push(call.clone());
+            set.spawn(async move { executor.execute(call).await });
+        }
+        recent.record(name, &arguments);
+    }
+    let stopped = commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
+    (stopped, batch)
+}
+
+/// One finished wave entry: the call paired with its dispatch outcome, or
+/// the panic/cancellation string when the tool task itself failed.
+type WaveEntry = (
+    history::ToolCall,
+    Result<Result<DispatchOutcome, String>, String>,
+);
+
+/// Join a finished wave, pairing each spawn-order result with its call.
+async fn join_wave(
+    set: task_set::TaskSet<Result<DispatchOutcome, String>>,
+    wave: std::vec::Drain<'_, history::ToolCall>,
+) -> Vec<WaveEntry> {
+    let ids: Vec<history::ToolCall> = wave.collect();
+    set.join_all()
+        .await
+        .into_iter()
+        .zip(ids)
+        .map(|(outcome, call)| (call, outcome))
+        .collect()
+}
+
+/// Commit one wave's results to `turn` in call order, emitting `ToolDone`
+/// per call. `Some(outcome)` when the run must stop.
+async fn commit_wave(
+    results: Vec<WaveEntry>,
+    turn: &mut Vec<Message>,
+    batch: &mut doom::ToolBatchOutcome,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> Option<RunOutcome> {
+    let mut wave_results: Vec<history::ToolResult> = Vec::new();
+    for (call, outcome) in results {
+        let result = match outcome {
+            Ok(Ok(DispatchOutcome::Ran(result))) | Ok(Ok(DispatchOutcome::Skipped(result))) => {
+                result
+            }
+            Ok(Ok(DispatchOutcome::Stopped(_))) => return Some(RunOutcome::Cancelled),
+            Ok(Err(unknown)) => return Some(RunOutcome::Failed(unknown)),
+            // The task itself failed: a panic or cancellation inside the
+            // tool future, reported as a per-call error result.
+            Err(panic) => history::ToolResult {
+                call: call.id.clone(),
+                name: call.function.name.clone(),
+                content: vec![history::ToolResultContent::text(format!(
+                    "internal error: tool panicked: {panic}"
+                ))],
+                is_error: true,
+            },
+        };
+        if result.is_error {
+            batch.errors += 1;
+        } else {
+            batch.successes += 1;
+        }
+        turn.push(Message::User {
+            content: vec![history::UserContent::ToolResult(result.clone())],
+        });
+        wave_results.push(result.clone());
+        emit(Event::ToolDone {
+            id: call.id.clone(),
+            name: call.function.name.clone(),
+            arguments: call.function.arguments.clone(),
+            result,
+        });
+    }
+    if !wave_results.is_empty() {
+        // One submission event per wave, carrying all of its results in
+        // call order (reference semantics), independent of the per-call
+        // messages committed to history above.
+        emit(Event::ToolResultsSubmitted {
+            message: Message::User {
+                content: wave_results
+                    .into_iter()
+                    .map(history::UserContent::ToolResult)
+                    .collect(),
+            },
+        });
+    }
+    None
+}

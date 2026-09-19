@@ -1810,10 +1810,10 @@ mod tests {
 
     #[test]
     fn never_parallel_classification() {
-        assert!(crate::run::is_never_parallel("batch"));
-        assert!(crate::run::is_never_parallel("question"));
-        assert!(!crate::run::is_never_parallel("read"));
-        assert!(!crate::run::is_never_parallel("write"));
+        assert!(crate::run::dispatch::is_never_parallel("batch"));
+        assert!(crate::run::dispatch::is_never_parallel("question"));
+        assert!(!crate::run::dispatch::is_never_parallel("read"));
+        assert!(!crate::run::dispatch::is_never_parallel("write"));
     }
 
     // --- Context-overflow recovery (C.5) ---

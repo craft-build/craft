@@ -17,18 +17,27 @@ pub(crate) mod doom;
 pub mod events;
 pub mod guardrails;
 mod nudge;
+mod overflow;
 mod read_lifecycle;
 mod recency;
 mod retry;
 mod stream;
 mod task_set;
+mod turns;
 
 pub use dedup::{SharedDedupCache, ToolDedupCache, shared_cache};
+pub(crate) use dispatch::dispatch_tool_calls;
 pub use dispatch::{
     AfterExecute, BeforeExecute, BoxFuture, Decision, DispatchOutcome, ToolDispatch,
 };
 pub use events::{Envelope, EventSender, EventStreamGuard, SessionEvents, event_stream};
 pub use guardrails::{SharedGuardrails, shared_guardrails};
+#[cfg(test)]
+use overflow::{CANCEL_MARKER, END_MARKER};
+use overflow::{
+    commit_cancelled, commit_partial, handle_terminal_reply, recover_from_overflow,
+    strip_trailing_grace_prompt,
+};
 pub use recency::{RecencyCtx, RecencyFacts, RecencySource, attach_recency_tail};
 pub use retry::RetryCtx;
 pub use stream::TurnOutput;
@@ -36,10 +45,9 @@ pub use stream::TurnOutput;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rig_core::completion::{CompletionModel, FinishReason};
+use rig_core::completion::CompletionModel;
 use tokio::sync::watch;
 
-use crate::compaction::CompactionEngine;
 use crate::compression::{self, CompressionConfig};
 use crate::config::{CompactionBuffer, CompactionConfig};
 use crate::edge;
@@ -437,9 +445,6 @@ pub enum RunOutcome {
     DoomStop,
 }
 
-/// Marker appended when a run is cut short, so the model knows the turn ended.
-pub(crate) const END_MARKER: &str = "[The turn ended here; the run was cut short.]";
-
 /// Run-wide accumulators for the terminal [`Event::Done`].
 #[derive(Default)]
 struct RunStats {
@@ -603,516 +608,54 @@ async fn run_inner<M: CompletionModel + Clone>(
             params.temperature,
             clamped_max_tokens(window, prompt_tokens, params.max_tokens),
         );
-        let (output, served_spec) = match match refreshed_model.as_ref() {
-            Some(refreshed) => {
-                retry::stream_with_retry(
-                    refreshed,
-                    &[],
-                    params.retry.rotate.as_ref(),
-                    &transient_budget,
-                    &request,
-                    cancel,
-                    emit,
-                )
-                .await
-            }
-            None => {
-                retry::stream_with_retry(
-                    model,
-                    &params.retry.fallbacks,
-                    params.retry.rotate.as_ref(),
-                    &transient_budget,
-                    &request,
-                    cancel,
-                    emit,
-                )
-                .await
-            }
-        } {
-            Ok((output, served_fallback)) => {
-                // Bill the model that actually answered: a retry-chain
-                // fallback or a reauth-refreshed model, not the primary.
-                let served_spec = served_spec(
-                    params.model_spec.as_deref(),
-                    served_fallback,
-                    refreshed_model.as_ref(),
-                );
-                (output, served_spec)
-            }
-            Err(stream::StreamFailure::Cancelled { streamed }) => {
-                // Keep the partial reply the user already saw, so the next
-                // prompt replays from what was on screen.
-                if !streamed.is_empty() {
-                    turn.push(Message::Assistant {
-                        content: vec![history::AssistantContent::text(streamed)],
-                    });
-                }
-                return (commit_cancelled(history, &mut turn), stats);
-            }
-            // The gauge is a chars/4 floor, so a prompt can overflow with the
-            // thresholds unmet. Compaction is the only way out, so run it and
-            // retry once; a second consecutive overflow means compaction did
-            // not help and the error is the honest answer (reference
-            // `TurnOutcome::Overflow`).
-            Err(failure) if failure.is_overflow() => {
-                let Some(message) = failure.message().map(str::to_owned) else {
-                    unreachable!("is_overflow only matches Error");
-                };
-                if overflow_recoveries >= MAX_OVERFLOW_RECOVERIES {
-                    return (RunOutcome::Failed(message), stats);
-                }
-                overflow_recoveries += 1;
-                if !recover_from_overflow(params, model, history, &mut doom, emit).await {
-                    return (RunOutcome::Failed(message), stats);
-                }
-                // The pre-compaction measurement no longer describes the
-                // compacted context; drop it so the clamp trusts the
-                // estimate until the next real usage report.
-                measured_prompt_tokens = 0;
-                continue;
-            }
-            // Auth failure: pause for re-authentication instead of failing
-            // (E.10). Without a responder — or past the attempt budget — the
-            // error is the honest answer, like the reference's no-rx path.
-            Err(failure) if failure.is_auth() => {
-                let Some(message) = failure.message().map(str::to_owned) else {
-                    unreachable!("is_auth only matches Error");
-                };
-                let Some(reauth) = params.reauth.clone() else {
-                    return (RunOutcome::Failed(message), stats);
-                };
-                if reauth_attempts >= MAX_REAUTH_ATTEMPTS {
-                    return (RunOutcome::Failed(message), stats);
-                }
-                reauth_attempts += 1;
-                emit(Event::AuthRequired {
-                    attempt: reauth_attempts,
-                    message: message.clone(),
-                });
-                match tokio::select! {
-                    biased;
-                    _ = cancel.wait() => None,
-                    r = reauth(reauth_attempts) => Some(r),
-                } {
-                    Some(Ok(refreshed)) => {
-                        refreshed_model = refreshed.or(refreshed_model);
-                        continue;
-                    }
-                    Some(Err(e)) => return (RunOutcome::Failed(e), stats),
-                    None => return (commit_cancelled(history, &mut turn), stats),
-                }
-            }
-            Err(failure) => {
-                let message = failure
-                    .message()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "stream cancelled".into());
-                return (RunOutcome::Failed(message), stats);
-            }
-        };
-        overflow_recoveries = 0;
-        reauth_attempts = 0;
-        // Track the last measured count (zero is the missing-report
-        // sentinel, kept at the previous value); it naturally shrinks
-        // again after compaction, unlike a running max.
-        if output.usage.input_tokens > 0 {
-            measured_prompt_tokens = output.usage.input_tokens;
-        }
-        stats.add_usage(&output.usage, served_spec.as_deref(), params.fast);
-        stats.context_size = crate::compaction::estimate_tokens(&full);
-        stats.turns = turns as u32 + 1;
-        emit(Event::TurnComplete {
-            usage: output.usage,
-            context_size: stats.context_size,
-        });
-        let Message::Assistant { content } = &output.assistant else {
-            return (
-                RunOutcome::Failed("model produced a non-assistant message".into()),
-                stats,
-            );
-        };
-        let tool_calls: Vec<history::ToolCall> = content
-            .iter()
-            .filter_map(|block| match block {
-                history::AssistantContent::ToolCall(call) => Some(call.clone()),
-                _ => None,
-            })
-            .collect();
-        turn.push(output.assistant);
-        if tool_calls.is_empty() {
-            let reply = turn.last().expect("assistant pushed").text();
-            // A truncated reply continues: the model's cut-off message is
-            // already in `turn`, so the next request resumes from it.
-            let truncated = output.finish_reason == Some(FinishReason::Length);
-            if let Some(outcome) = handle_terminal_reply(
-                history,
-                &mut turn,
-                &full,
-                &reply,
-                truncated,
-                &mut nudges,
-                &mut turns,
-                params,
-                &mut continuations,
-                emit,
-            ) {
-                return (outcome, stats);
-            }
-            continue;
-        }
-        let (stopped, batch) =
-            dispatch_tool_calls(tools, &mut turn, tool_calls, &mut recent, cancel, emit).await;
-        if let Some(outcome) = stopped {
-            if matches!(outcome, RunOutcome::Cancelled) {
-                return (commit_cancelled(history, &mut turn), stats);
-            }
-            return (outcome, stats);
-        }
-        for _ in 0..batch.doom_loops {
-            doom.note_doom_loop();
-        }
-        for _ in 0..batch.errors {
-            doom.note_tool_error();
-        }
-        for _ in 0..batch.successes {
-            doom.note_tool_success();
-        }
-        turns += 1;
-        nudges = 0;
-        if turns >= params.max_turns {
-            let outcome = commit_partial(history, &mut turn, RunOutcome::MaxTurns);
-            return (outcome, stats);
-        }
-    }
-}
-
-/// Recalibrate and force a compaction after the request overflowed the
-/// context window. Returns whether recovery is possible at all (a run without
-/// a compaction context cannot recover). `history` is compacted in place; the
-/// un-committed turn is left intact and re-appended by the retried request.
-async fn recover_from_overflow<M: CompletionModel + Clone>(
-    params: &RunParams,
-    model: &M,
-    history: &mut Vec<Message>,
-    doom: &mut doom::DoomTracker,
-    emit: &(dyn Fn(Event) + Send + Sync),
-) -> bool {
-    let Some(ctx) = &params.compaction else {
-        return false;
-    };
-    // `maybe_compact` awaits, so the engine runs on a clone; recalibration
-    // and the write-back happen in short critical sections against the
-    // live state so a concurrent session-side update is not clobbered.
-    let Some(mut state) = ctx.state.lock().ok().map(|mut guard| guard.clone()) else {
-        return false;
-    };
-    let estimated = crate::compaction::estimate_tokens(history);
-    // A failed request reports no usage: `actual = 0` makes recalibration a
-    // safe no-op. The window bound in the error text is never used as the
-    // actual prompt size (it would over-inflate the multiplier).
-    state.recalibrate(0, estimated);
-    let window = ctx.context_length.map(u64::from).unwrap_or(0);
-    let before = state.estimator.scale(estimated);
-    emit(Event::AutoCompacting {
-        context_size: before,
-        context_window: window,
-    });
-    CompactionEngine::new(ctx.stages.clone())
-        .with_buffer(ctx.buffer)
-        .maybe_compact(&mut state, model, history, ctx.context_length)
-        .await;
-    let after = state
-        .estimator
-        .scale(crate::compaction::estimate_tokens(history));
-    // Compaction that barely shrank the context is itself a doom signal;
-    // one that paid off earns a decay.
-    let savings = if before > 0 {
-        1.0 - (after as f32 / before as f32)
-    } else {
-        0.0
-    };
-    if savings < doom::INEFFECTIVE_COMPACTION_THRESHOLD {
-        doom.note_ineffective_compaction();
-    } else {
-        doom.note_effective_compaction();
-    }
-    emit(Event::CompactionDone {
-        context_size_before: before,
-        context_size_after: after,
-        context_window: window,
-    });
-    if let Ok(mut guard) = ctx.state.lock() {
-        guard.absorb_run(&state);
-    }
-    true
-}
-
-/// Commit a partial turn and end the run at its budget or the doom hard
-/// stop: sanitized so dangling tool calls replay cleanly on the next request.
-fn commit_partial(
-    history: &mut Vec<Message>,
-    turn: &mut Vec<Message>,
-    outcome: RunOutcome,
-) -> RunOutcome {
-    sanitize_partial(turn);
-    history.append(turn);
-    outcome
-}
-
-/// Drop a trailing grace prompt left in committed history by a previous
-/// run, so it does not replay as if the user asked for it (reference
-/// `strip_trailing_grace_prompt`).
-fn strip_trailing_grace_prompt(history: &mut Vec<Message>) {
-    if let Some(Message::User { content }) = history.last()
-        && content.len() == 1
-        && let history::UserContent::Text(text) = &content[0]
-        && text.text == doom::GRACE_CALL_PROMPT
-    {
-        history.pop();
-    }
-}
-
-/// Marker appended when a run is cancelled by the user, so the model knows
-/// where the turn stopped (reference `history.rs` `CANCEL_MARKER`).
-pub(crate) const CANCEL_MARKER: &str = "[Cancelled by user]";
-
-/// Commit the partial turn of a cancelled run: the prompt and whatever the
-/// model produced are kept, dangling tool calls are closed with an error
-/// result, and the cancel marker records the cut-off.
-fn commit_cancelled(history: &mut Vec<Message>, turn: &mut Vec<Message>) -> RunOutcome {
-    close_dangling_calls(turn, "skipped: cancelled by the user");
-    turn.push(Message::user(CANCEL_MARKER));
-    history.append(turn);
-    RunOutcome::Cancelled
-}
-
-/// Handle an assistant turn with no tool calls. Continues truncated and
-/// empty replies while their budgets allow; otherwise commits history and
-/// returns the run outcome. `None` means "keep looping".
-fn handle_terminal_reply(
-    history: &mut Vec<Message>,
-    turn: &mut Vec<Message>,
-    full: &[Message],
-    reply: &str,
-    truncated: bool,
-    nudges: &mut u32,
-    turns: &mut usize,
-    params: &RunParams,
-    continuations: &mut usize,
-    emit: &(dyn Fn(Event) + Send + Sync),
-) -> Option<RunOutcome> {
-    if truncated && *continuations < params.max_continuation_turns {
-        *continuations += 1;
-        *turns += 1;
-        if *turns >= params.max_turns {
-            return Some(commit_partial(history, turn, RunOutcome::MaxTurns));
-        }
-        return None;
-    }
-    // A truncated reply is never "empty-and-stalled": even a
-    // zero-visible-text truncation keeps its cut-off message and
-    // ends MaxTokens, so the nudge path below never swallows it.
-    if reply.trim().is_empty() && !truncated {
-        // The marker takes the silent reply's place in history.
-        turn.pop();
-        // `full` is the exact view the model just saw (its wire-only
-        // rewrites are shape-preserving); the trailing marker+nudge
-        // pairs this run already pushed are skipped by count.
-        let nudge = *nudges < nudge::MAX_NUDGES
-            && nudge::has_recent_tool_results(
-                full,
-                nudge::RECENT_TOOL_WINDOW,
-                2 * *nudges as usize,
-            );
-        nudge::stall_turn(turn, nudge);
-        if nudge {
-            *nudges += 1;
-            emit(Event::Nudge);
-            *turns += 1;
-            if *turns >= params.max_turns {
-                return Some(commit_partial(history, turn, RunOutcome::MaxTurns));
-            }
-            return None;
-        }
-    }
-    history.append(turn);
-    Some(if truncated {
-        RunOutcome::MaxTokens {
-            reply: reply.to_owned(),
-        }
-    } else {
-        RunOutcome::Done {
-            reply: reply.to_owned(),
-        }
-    })
-}
-
-/// Tools that must never share a wave with another call: `batch` nests its
-/// own parallel dispatch and `question` (not yet ported) blocks on the user.
-fn is_never_parallel(name: &str) -> bool {
-    matches!(name, "batch" | "question")
-}
-
-/// Execute the turn's tool calls, appending their results to `turn`.
-/// Returns `Some(outcome)` when the run must stop (cancel or dispatch
-/// failure); `None` means the loop continues.
-///
-/// Calls run concurrently in waves; a wave is joined and drained before the
-/// next starts whenever two calls write the same path or a
-/// never-parallel tool joins the batch. Results are committed in call
-/// order; a panicking tool future becomes an error result instead of
-/// unwinding the run.
-async fn dispatch_tool_calls(
-    tools: &ToolDispatch,
-    turn: &mut Vec<Message>,
-    calls: Vec<history::ToolCall>,
-    recent: &mut doom::RecentCalls,
-    cancel: &CancelToken,
-    emit: &(dyn Fn(Event) + Send + Sync),
-) -> (Option<RunOutcome>, doom::ToolBatchOutcome) {
-    // Spawned tasks need owned state; the dispatch table is cheap to clone.
-    let tools = Arc::new(tools.clone());
-    let mut set = task_set::TaskSet::new();
-    let mut wave: Vec<history::ToolCall> = Vec::new();
-    let mut all_write_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut batch = doom::ToolBatchOutcome::default();
-
-    for call in calls {
-        if cancel.cancelled() {
-            let outcome =
-                commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
-            return (outcome.or(Some(RunOutcome::Cancelled)), batch);
-        }
-        let name = call.function.name.clone();
-        let arguments = call.function.arguments.clone();
-        if recent.is_doom_loop(&name, &arguments) {
-            // The call is blocked, not executed: emit the reference's error
-            // result directly and clear the window so the warning does not
-            // re-fire identically on the next retry.
-            batch.doom_loops += 1;
-            let result = history::ToolResult {
-                call: call.id.clone(),
-                name: name.clone(),
-                content: vec![history::ToolResultContent::text(doom::DOOM_LOOP_MESSAGE)],
-                is_error: true,
-            };
-            turn.push(Message::User {
-                content: vec![history::UserContent::ToolResult(result.clone())],
-            });
-            emit(Event::ToolDone {
-                id: call.id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-                result,
-            });
-            recent.clear();
-        } else {
-            // A never-parallel tool or a repeat write path must not share a
-            // wave with earlier calls, so the pending wave is flushed
-            // *before* this call is spawned into a fresh one.
-            let write_paths = dedup::extract_write_paths(&name, &call.function.arguments);
-            let conflicts = is_never_parallel(&name)
-                || write_paths
-                    .iter()
-                    .any(|path| all_write_paths.contains(path));
-            if conflicts && !wave.is_empty() {
-                if let Some(outcome) =
-                    commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await
-                {
-                    return (Some(outcome), batch);
-                }
-                set = task_set::TaskSet::new();
-                all_write_paths.clear();
-            }
-            all_write_paths.extend(write_paths);
-            let executor = Arc::clone(&tools);
-            wave.push(call.clone());
-            set.spawn(async move { executor.execute(call).await });
-        }
-        recent.record(name, &arguments);
-    }
-    let stopped = commit_wave(join_wave(set, wave.drain(..)).await, turn, &mut batch, emit).await;
-    (stopped, batch)
-}
-
-/// One finished wave entry: the call paired with its dispatch outcome, or
-/// the panic/cancellation string when the tool task itself failed.
-type WaveEntry = (
-    history::ToolCall,
-    Result<Result<DispatchOutcome, String>, String>,
-);
-
-/// Join a finished wave, pairing each spawn-order result with its call.
-async fn join_wave(
-    set: task_set::TaskSet<Result<DispatchOutcome, String>>,
-    wave: std::vec::Drain<'_, history::ToolCall>,
-) -> Vec<WaveEntry> {
-    let ids: Vec<history::ToolCall> = wave.collect();
-    set.join_all()
+        match turns::stream_turn(
+            model,
+            params,
+            cancel,
+            emit,
+            history,
+            &mut turn,
+            &mut doom,
+            &mut refreshed_model,
+            &mut overflow_recoveries,
+            &mut reauth_attempts,
+            &mut measured_prompt_tokens,
+            &transient_budget,
+            &request,
+        )
         .await
-        .into_iter()
-        .zip(ids)
-        .map(|(outcome, call)| (call, outcome))
-        .collect()
-}
-
-/// Commit one wave's results to `turn` in call order, emitting `ToolDone`
-/// per call. `Some(outcome)` when the run must stop.
-async fn commit_wave(
-    results: Vec<WaveEntry>,
-    turn: &mut Vec<Message>,
-    batch: &mut doom::ToolBatchOutcome,
-    emit: &(dyn Fn(Event) + Send + Sync),
-) -> Option<RunOutcome> {
-    let mut wave_results: Vec<history::ToolResult> = Vec::new();
-    for (call, outcome) in results {
-        let result = match outcome {
-            Ok(Ok(DispatchOutcome::Ran(result))) | Ok(Ok(DispatchOutcome::Skipped(result))) => {
-                result
+        {
+            turns::Streamed::Retry => continue,
+            turns::Streamed::Stop(outcome) => return (outcome, stats),
+            turns::Streamed::Turn(output, served_spec) => {
+                match turns::finish_turn(
+                    params,
+                    tools,
+                    cancel,
+                    emit,
+                    history,
+                    &mut turn,
+                    &full,
+                    output,
+                    served_spec,
+                    &mut stats,
+                    &mut nudges,
+                    &mut turns,
+                    &mut continuations,
+                    &mut doom,
+                    &mut recent,
+                    &mut overflow_recoveries,
+                    &mut reauth_attempts,
+                    &mut measured_prompt_tokens,
+                )
+                .await
+                {
+                    turns::TurnEnd::Continue => continue,
+                    turns::TurnEnd::Stop(outcome) => return (outcome, stats),
+                }
             }
-            Ok(Ok(DispatchOutcome::Stopped(_))) => return Some(RunOutcome::Cancelled),
-            Ok(Err(unknown)) => return Some(RunOutcome::Failed(unknown)),
-            // The task itself failed: a panic or cancellation inside the
-            // tool future, reported as a per-call error result.
-            Err(panic) => history::ToolResult {
-                call: call.id.clone(),
-                name: call.function.name.clone(),
-                content: vec![history::ToolResultContent::text(format!(
-                    "internal error: tool panicked: {panic}"
-                ))],
-                is_error: true,
-            },
-        };
-        if result.is_error {
-            batch.errors += 1;
-        } else {
-            batch.successes += 1;
         }
-        turn.push(Message::User {
-            content: vec![history::UserContent::ToolResult(result.clone())],
-        });
-        wave_results.push(result.clone());
-        emit(Event::ToolDone {
-            id: call.id.clone(),
-            name: call.function.name.clone(),
-            arguments: call.function.arguments.clone(),
-            result,
-        });
     }
-    if !wave_results.is_empty() {
-        // One submission event per wave, carrying all of its results in
-        // call order (reference semantics), independent of the per-call
-        // messages committed to history above.
-        emit(Event::ToolResultsSubmitted {
-            message: Message::User {
-                content: wave_results
-                    .into_iter()
-                    .map(history::UserContent::ToolResult)
-                    .collect(),
-            },
-        });
-    }
-    None
 }
 
 /// Rewrite tool-result texts in the request copy through pre-compression.
@@ -1138,57 +681,6 @@ fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
                 }
             }
         }
-    }
-}
-
-/// Close dangling tool calls and append the end marker, so the committed
-/// partial history replays cleanly on the next request.
-pub(crate) fn sanitize_partial(turn: &mut Vec<Message>) {
-    close_dangling_calls(turn, "skipped: the turn ended before this call ran");
-    turn.push(Message::user(END_MARKER));
-}
-
-/// Append error results for every tool call in the turn that never got an
-/// answer, so the trailing assistant message is API-valid on replay.
-fn close_dangling_calls(turn: &mut Vec<Message>, note: &str) {
-    let mut dangling: Vec<history::ToolCall> = Vec::new();
-    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for message in turn.iter() {
-        match message {
-            Message::Assistant { content } => {
-                for block in content {
-                    if let history::AssistantContent::ToolCall(call) = block {
-                        dangling.push(call.clone());
-                    }
-                }
-            }
-            Message::User { content } => {
-                for block in content {
-                    if let history::UserContent::ToolResult(result) = block {
-                        answered.insert(result.call.clone());
-                    }
-                }
-            }
-            Message::System { .. } => {}
-        }
-    }
-    let open: Vec<history::ToolCall> = dangling
-        .into_iter()
-        .filter(|call| !answered.contains(&call.id))
-        .collect();
-    if !open.is_empty() {
-        let content = open
-            .iter()
-            .map(|call| {
-                history::UserContent::ToolResult(history::ToolResult {
-                    call: call.id.clone(),
-                    name: call.function.name.clone(),
-                    content: vec![history::ToolResultContent::text(note)],
-                    is_error: true,
-                })
-            })
-            .collect();
-        turn.push(Message::User { content });
     }
 }
 
