@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 
 use rig_core::completion::message::{
-    AssistantContent, Message as RigMessage, Reasoning as RigReasoning, Text as RigText,
-    ToolCall as RigToolCall, ToolCallId, ToolFunction, ToolResult as RigToolResult,
-    ToolResultContent as RigToolResultContent, UserContent,
+    AssistantContent, ImageMediaType, Message as RigMessage, Reasoning as RigReasoning,
+    Text as RigText, ToolCall as RigToolCall, ToolCallId, ToolFunction,
+    ToolResult as RigToolResult, ToolResultContent as RigToolResultContent, UserContent,
 };
 use rig_core::completion::{CompletionRequest, ToolDefinition};
 use rig_core::streaming::StreamedAssistantContent;
@@ -76,6 +76,11 @@ fn own_user_block_to_rig(block: &history::UserContent) -> UserContent {
                     history::ToolResultContent::Json { value } => RigToolResultContent::Json {
                         value: value.clone(),
                     },
+                    history::ToolResultContent::Image(image) => RigToolResultContent::image_base64(
+                        image.data.clone(),
+                        Some(media_own_to_rig(image.media_type)),
+                        None,
+                    ),
                 })
                 .collect(),
         }),
@@ -281,9 +286,41 @@ fn rig_result_content_to_own(item: &RigToolResultContent) -> history::ToolResult
         RigToolResultContent::Json { value, .. } => history::ToolResultContent::Json {
             value: value.clone(),
         },
-        RigToolResultContent::Image(_) => history::ToolResultContent::Json {
-            value: serde_json::json!({ "image": "[image content]" }),
-        },
+        RigToolResultContent::Image(image) => {
+            history::ToolResultContent::Image(history::ImageBlock {
+                media_type: image
+                    .media_type
+                    .as_ref()
+                    .map(|media| media_rig_to_own(media.clone()))
+                    .unwrap_or(history::ImageMedia::Png),
+                data: match &image.data {
+                    rig_core::completion::message::DocumentSourceKind::Base64(data) => data.clone(),
+                    _ => String::new(),
+                },
+                caption: "[image]".into(),
+            })
+        }
+    }
+}
+
+fn media_own_to_rig(media: history::ImageMedia) -> ImageMediaType {
+    match media {
+        history::ImageMedia::Png => ImageMediaType::PNG,
+        history::ImageMedia::Jpeg => ImageMediaType::JPEG,
+        history::ImageMedia::Gif => ImageMediaType::GIF,
+        history::ImageMedia::Webp => ImageMediaType::WEBP,
+    }
+}
+
+fn media_rig_to_own(media: ImageMediaType) -> history::ImageMedia {
+    match media {
+        ImageMediaType::PNG => history::ImageMedia::Png,
+        ImageMediaType::JPEG => history::ImageMedia::Jpeg,
+        ImageMediaType::GIF => history::ImageMedia::Gif,
+        ImageMediaType::WEBP => history::ImageMedia::Webp,
+        // Unsupported formats (HEIC/HEIF/SVG) cannot be replayed by our
+        // tools; keep an inert placeholder.
+        _ => history::ImageMedia::Png,
     }
 }
 
@@ -329,6 +366,51 @@ mod tests {
                 ],
             },
         ]
+    }
+
+    #[test]
+    fn image_tool_result_round_trips_data_and_media_type() {
+        let own = vec![history::Message::User {
+            content: vec![history::UserContent::ToolResult(history::ToolResult {
+                call: "t1".into(),
+                name: "view_image".into(),
+                content: vec![history::ToolResultContent::Image(history::ImageBlock {
+                    media_type: history::ImageMedia::Webp,
+                    data: "aGVsbG8=".into(),
+                    caption: "[image: shot.webp 1KB 32x32]".into(),
+                })],
+                is_error: false,
+            })],
+        }];
+        let rig = own_to_rig(&own);
+        let back = rig_to_own(&rig);
+        match &back[0] {
+            history::Message::User { content } => {
+                let history::UserContent::ToolResult(result) = &content[0] else {
+                    panic!("expected tool result");
+                };
+                let history::ToolResultContent::Image(image) = &result.content[0] else {
+                    panic!("expected image block, got {:?}", result.content[0]);
+                };
+                assert_eq!(image.media_type, history::ImageMedia::Webp);
+                assert_eq!(image.data, "aGVsbG8=");
+                // rig carries no caption field; the text stand-in is generic.
+                assert_eq!(image.caption, "[image]");
+            }
+            _ => panic!("expected user message"),
+        }
+        // The provider-bound replay keeps the image block as real vision input.
+        let RigMessage::User { content } = &rig[0] else {
+            panic!("expected user message");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("expected tool result");
+        };
+        assert!(matches!(
+            result.content.first(),
+            Some(RigToolResultContent::Image(image))
+                if image.media_type == Some(ImageMediaType::WEBP)
+        ));
     }
 
     #[test]

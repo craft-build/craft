@@ -23,6 +23,7 @@ mod read;
 mod retrieve;
 pub(crate) mod ssrf;
 mod todo_write;
+mod view_image;
 mod webfetch;
 mod websearch;
 mod write;
@@ -51,6 +52,7 @@ pub use multiedit::{EditEntry, MultiEdit, MultiEditArgs, MultiEditOutput};
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
+pub use view_image::{ViewImage, ViewImageArgs, ViewImageOutput};
 pub use webfetch::{Webfetch, WebfetchArgs, WebfetchOutput};
 pub use websearch::{Websearch, WebsearchArgs, WebsearchOutput};
 pub use write::{Write, WriteArgs, WriteOutput};
@@ -162,6 +164,7 @@ impl Workspace {
             dynamic(Retrieve(self.compression_store.clone())),
             dynamic(Webfetch),
             dynamic(Websearch),
+            dynamic(ViewImage(self.clone())),
             dynamic(batch.clone()),
         ];
         // Introspection snapshot of every other registered tool.

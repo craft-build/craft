@@ -62,6 +62,10 @@ fn text_len(text: &str) -> usize {
     text.len()
 }
 
+/// Flat token weight for one image block (Anthropic's pricing for images
+/// sent as vision input, per the reference's D.1 estimator).
+pub const TOKENS_PER_IMAGE: u64 = 1500;
+
 /// Estimate the prompt tokens for `messages`, image blocks weighted at
 /// `TOKENS_PER_IMAGE`.
 pub fn estimate_tokens(messages: &[Message]) -> u64 {
@@ -91,6 +95,9 @@ fn user_content_chars(block: &UserContent) -> usize {
             .map(|item| match item {
                 ToolResultContent::Text(text) => text_len(&text.text),
                 ToolResultContent::Json { value } => json_len(value) as usize,
+                // Flat weight expressed in chars so the `/4` division lands
+                // on `TOKENS_PER_IMAGE`.
+                ToolResultContent::Image(_) => TOKENS_PER_IMAGE as usize * CHARS_PER_TOKEN,
             })
             .sum(),
     }

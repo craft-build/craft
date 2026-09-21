@@ -248,7 +248,12 @@ impl ToolDispatch {
             && let Some(cache) = &self.dedup
             && let Ok(mut guard) = cache.lock()
         {
-            if let Some(key) = dedup_key {
+            if let Some(key) = dedup_key
+                && !result
+                    .content
+                    .iter()
+                    .any(|item| matches!(item, history::ToolResultContent::Image(_)))
+            {
                 let path = dedup::extract_file_path(&call.function.arguments);
                 guard.insert(
                     key,
@@ -350,8 +355,31 @@ fn rig_content_to_own(
                     value: value.clone(),
                 }
             }
-            rig_core::completion::message::ToolResultContent::Image(_) => {
-                history::ToolResultContent::text("[image content]")
+            rig_core::completion::message::ToolResultContent::Image(image) => {
+                let media_type = match image.media_type {
+                    Some(rig_core::completion::message::ImageMediaType::PNG) => {
+                        history::ImageMedia::Png
+                    }
+                    Some(rig_core::completion::message::ImageMediaType::JPEG) => {
+                        history::ImageMedia::Jpeg
+                    }
+                    Some(rig_core::completion::message::ImageMediaType::GIF) => {
+                        history::ImageMedia::Gif
+                    }
+                    Some(rig_core::completion::message::ImageMediaType::WEBP) => {
+                        history::ImageMedia::Webp
+                    }
+                    _ => history::ImageMedia::Png,
+                };
+                let data = match &image.data {
+                    rig_core::completion::message::DocumentSourceKind::Base64(data) => data.clone(),
+                    _ => String::new(),
+                };
+                history::ToolResultContent::Image(history::ImageBlock {
+                    media_type,
+                    data,
+                    caption: "[image]".into(),
+                })
             }
         })
         .collect()

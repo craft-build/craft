@@ -1560,6 +1560,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "aho-corasick",
+ "base64 0.22.1",
  "bs58",
  "clap",
  "clap_complete",
@@ -1570,6 +1571,7 @@ dependencies = [
  "htmd",
  "http",
  "ignore",
+ "image",
  "jiff",
  "jsonrepair",
  "libc",

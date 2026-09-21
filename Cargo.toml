@@ -10,12 +10,14 @@ members = ["agent"]
 [workspace.dependencies]
 aho-corasick = "1"
 agent-client-protocol = "2.1.0"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 dirs = "7"
 etcetera = "0.11"
 futures = "0.3"
 ignore = "0.4"
+image = "0.25"
 ratatui = "0.30"
 regex = "1"
 reqwest = "0.13"

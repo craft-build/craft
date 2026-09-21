@@ -153,7 +153,42 @@ impl ToolResult {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ToolResultContent {
     Text(Text),
-    Json { value: serde_json::Value },
+    Json {
+        value: serde_json::Value,
+    },
+    /// Base64-encoded image returned to a vision-capable model. `caption` is
+    /// the model/telemetry-visible text stand-in for this block.
+    Image(ImageBlock),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImageBlock {
+    pub media_type: ImageMedia,
+    /// Base64-encoded image bytes.
+    pub data: String,
+    pub caption: String,
+}
+
+/// Image formats a provider message can carry, mirroring the subset the
+/// `view_image` tool accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageMedia {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+
+impl ImageMedia {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
 }
 
 impl ToolResultContent {
@@ -169,6 +204,7 @@ impl ToolResultContent {
             Self::Json { value } => {
                 serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
             }
+            Self::Image(image) => image.caption.clone(),
         }
     }
 }

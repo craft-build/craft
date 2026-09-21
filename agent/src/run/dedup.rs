@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::history::{ToolResult, ToolResultContent};
 
-const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob"];
+const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob", "view_image"];
 const WRITE_TOOLS: &[&str] = &[
     "write",
     "edit",
@@ -140,6 +140,9 @@ pub fn cached_result(cached: &ToolResult, call_id: &str) -> ToolResult {
             }
             .to_text();
             content[0] = ToolResultContent::text(format!("{CACHED_PREFIX}{rendered}"));
+        }
+        Some(ToolResultContent::Image(image)) => {
+            image.caption = format!("{CACHED_PREFIX}{}", image.caption);
         }
         None => content.push(ToolResultContent::text(CACHED_PREFIX.trim_end())),
     }
