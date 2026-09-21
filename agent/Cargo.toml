@@ -28,7 +28,7 @@ serde_json.workspace = true
 similar = "3"
 snafu.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["fs", "macros", "process", "rt"] }
+tokio = { workspace = true, features = ["fs", "macros", "net", "process", "rt"] }
 toml.workspace = true
 toml_edit.workspace = true
 tree-sitter = "0.26"

@@ -21,6 +21,7 @@ pub(crate) mod move_file;
 mod multiedit;
 mod read;
 mod retrieve;
+pub(crate) mod ssrf;
 mod todo_write;
 mod write;
 
