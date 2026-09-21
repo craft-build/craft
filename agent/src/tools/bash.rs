@@ -220,7 +220,7 @@ fn truncate_output(text: &str) -> String {
 /// mistaken for tool/framework instructions in the model's context.
 /// Any `</untrusted-content>` inside the payload is zero-width-broken so it
 /// cannot terminate the wrapper early.
-fn wrap_untrusted(text: &str) -> String {
+pub(crate) fn wrap_untrusted(text: &str) -> String {
     if text.is_empty() {
         String::new()
     } else {

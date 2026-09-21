@@ -24,6 +24,7 @@ mod retrieve;
 pub(crate) mod ssrf;
 mod todo_write;
 mod webfetch;
+mod websearch;
 mod write;
 
 #[cfg(test)]
@@ -51,6 +52,7 @@ pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
 pub use webfetch::{Webfetch, WebfetchArgs, WebfetchOutput};
+pub use websearch::{Websearch, WebsearchArgs, WebsearchOutput};
 pub use write::{Write, WriteArgs, WriteOutput};
 
 use std::{
@@ -159,6 +161,7 @@ impl Workspace {
             dynamic(TodoWrite(self.clone())),
             dynamic(Retrieve(self.compression_store.clone())),
             dynamic(Webfetch),
+            dynamic(Websearch),
             dynamic(batch.clone()),
         ];
         // Introspection snapshot of every other registered tool.

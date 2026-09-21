@@ -18,6 +18,7 @@ use rig_core::tool::{IntoToolOutput, PortableTool, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use super::bash::wrap_untrusted;
 use super::ssrf::{self, GuardedDns};
 use super::{MAX_OUTPUT_BYTES, Result, invalid};
 
@@ -120,7 +121,7 @@ impl PortableTool for Webfetch {
 
         let body = fetch(&url, format, timeout).await.map_err(invalid)?;
         Ok(WebfetchOutput {
-            text: truncate_output(&body),
+            text: wrap_untrusted(&truncate_output(&body)),
         })
     }
 }
