@@ -23,6 +23,7 @@ mod read;
 mod retrieve;
 pub(crate) mod ssrf;
 mod todo_write;
+mod webfetch;
 mod write;
 
 #[cfg(test)]
@@ -49,6 +50,7 @@ pub use multiedit::{EditEntry, MultiEdit, MultiEditArgs, MultiEditOutput};
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
+pub use webfetch::{Webfetch, WebfetchArgs, WebfetchOutput};
 pub use write::{Write, WriteArgs, WriteOutput};
 
 use std::{
@@ -156,6 +158,7 @@ impl Workspace {
             dynamic(Inspect(self.clone())),
             dynamic(TodoWrite(self.clone())),
             dynamic(Retrieve(self.compression_store.clone())),
+            dynamic(Webfetch),
             dynamic(batch.clone()),
         ];
         // Introspection snapshot of every other registered tool.
