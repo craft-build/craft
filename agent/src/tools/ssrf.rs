@@ -68,6 +68,9 @@ pub fn extract_host(url: &str) -> Option<&str> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     let host_port = rest.split('/').next()?;
+    if host_port.contains('@') {
+        return None; // userinfo (user:pass@) is not supported; reject clearly
+    }
     if let Some(bracketed) = host_port.strip_prefix('[') {
         bracketed.split(']').next()
     } else {
@@ -97,6 +100,13 @@ pub fn extract_port(url: &str) -> Option<u16> {
 /// `addrs` on its client so the connection cannot be re-resolved to a
 /// different (possibly private) address between check and connect.
 pub async fn resolve_and_check_ssrf(url: &str) -> Result<GuardedDns, String> {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        && rest.split('/').next().is_some_and(|hp| hp.contains('@'))
+    {
+        return Err("userinfo (user:pass@) is not allowed in URLs".into());
+    }
     let host = extract_host(url).ok_or("cannot extract host from URL")?;
 
     if let Some(ip) = parse_literal_ip(host)? {
@@ -322,6 +332,16 @@ mod tests {
         assert_eq!(extract_host("https://[::1]:8080/path"), Some("::1"));
         assert_eq!(extract_host("https://192.168.1.1:443"), Some("192.168.1.1"));
         assert_eq!(extract_host("not-a-url"), None);
+        assert_eq!(extract_host("https://user:pass@127.0.0.1/"), None);
+        assert_eq!(extract_host("https://@192.168.1.1/"), None);
+    }
+
+    #[tokio::test]
+    async fn userinfo_urls_are_rejected_clearly() {
+        let err = resolve_and_check_ssrf("https://user:pass@127.0.0.1/")
+            .await
+            .unwrap_err();
+        assert!(err.contains("userinfo"), "{err}");
     }
 
     #[test]

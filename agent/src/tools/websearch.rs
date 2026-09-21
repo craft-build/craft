@@ -122,14 +122,19 @@ impl PortableTool for Websearch {
             return Err(invalid(format!("HTTP {status}: {preview}")));
         }
 
-        let body = response
-            .bytes()
+        let mut body = Vec::new();
+        let mut stream = response;
+        while let Some(chunk) = stream
+            .chunk()
             .await
-            .map_err(|e| invalid(format!("read error: {e}")))?;
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(invalid(format!(
-                "response too large: over {MAX_RESPONSE_BYTES} bytes"
-            )));
+            .map_err(|e| invalid(format!("read error: {e}")))?
+        {
+            body.extend_from_slice(&chunk);
+            if body.len() > MAX_RESPONSE_BYTES {
+                return Err(invalid(format!(
+                    "response too large: over {MAX_RESPONSE_BYTES} bytes"
+                )));
+            }
         }
 
         let text = parse_sse_response(&String::from_utf8_lossy(&body)).map_err(invalid)?;

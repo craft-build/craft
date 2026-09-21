@@ -170,7 +170,7 @@ async fn fetch(
             if redirects > ssrf::MAX_REDIRECTS {
                 return Err("too many redirects".into());
             }
-            url = next.to_string();
+            url = ssrf::validate_and_upgrade_url(&next.to_string())?;
             continue;
         }
 
