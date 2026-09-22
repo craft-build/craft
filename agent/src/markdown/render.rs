@@ -219,7 +219,7 @@ impl RenderState<'_> {
         if self.code_idx >= self.highlighters.len() {
             self.highlighters.push(CodeHighlighter::new(lang));
         }
-        self.highlighters[self.code_idx].update(code).to_vec()
+        self.highlighters[self.code_idx].update(code)
     }
 }
 
@@ -1072,15 +1072,13 @@ mod tests {
     /// the content cache is in play, and that cache ignores width, so revisiting
     /// a width must not hand back the wrapping of the one in between.
     /// The reference also pinned a language mixup at the same block index;
-    /// that case renders byte-identical under the mono-colored highlight
-    /// facade and becomes visible again when task 61 lands syntect.
+    /// with syntect the fence language reaches the highlighter, so the
+    /// language half of that pin lives in `highlight.rs` (where a fixed
+    /// comment-rule theme makes the diff deterministic).
     #[test_case(SAME_BODY_AS_RUST, SAME_BODY_AS_PYTHON; "content_cache_ignores_width")]
     #[test_case(LONG_RUST_BLOCK, SHORT_RUST_BLOCK; "code_body_shrinks_at_the_same_block_index")]
     fn a_reused_renderer_renders_each_text_like_a_fresh_one(first: &str, second: &str) {
         let fresh = |text: &str, width| Renderer::unwrapped().render(text, width);
-        // The reference distinguished languages via color; the mono-colored
-        // facade renders them identically, so this collapses to a pure
-        // width-vs-content reuse check until task 61 restores the assert_ne.
         assert!(
             fresh(first, NARROW_WIDTH).len() > fresh(first, TEST_WIDTH).len(),
             "the code must actually wrap at the narrow width"
@@ -1136,16 +1134,19 @@ mod tests {
         }
     }
 
-    /// Task 61 replaces the highlight facade with syntect; until then a
-    /// theme change cannot land mid-stream. The facade contract that matters
-    /// (a fresh CodeHighlighter re-emits every line, so a generation flush
-    /// repaints completed code) is covered in `highlight.rs`.
+    /// A theme change mid-stream flushes highlighter state; the contract that
+    /// matters (a fresh CodeHighlighter re-emits every line, so a generation
+    /// flush repaints completed code) is covered in `highlight.rs`.
     #[test]
     fn a_fresh_highlighter_repaints_completed_lines() {
+        let _theme = crate::markdown::highlight::pin_default_theme_for_tests();
         let code = "fn main() {\n    let x = 1;\n}\n";
         let mut h = CodeHighlighter::new("rust");
         let _ = h.update(&code[..code.len() / 2]);
-        assert_eq!(h.update(code), crate::markdown::highlight::highlight_block("rust", code));
+        assert_eq!(
+            h.update(code),
+            crate::markdown::highlight::highlight_block("rust", code)
+        );
     }
 
     #[test]
