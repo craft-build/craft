@@ -11,6 +11,7 @@ use crate::tui::provider::{
     AgentEvent, Command, ModelChoice, PlanItem, Status, ToolCallData, ToolKind, ToolLine,
     TouchedFile, UsageRow,
 };
+use crate::tui::repaint;
 use crate::tui::selection::{
     Selection, clamp_to, copy_to_clipboard, extract_selection_text, rect_contains,
 };
@@ -349,6 +350,19 @@ impl App {
     // ------------------------------------------------------------------
     // Provider events
     // ------------------------------------------------------------------
+
+    /// How soon the loop must wake for this app's screen, and whether the
+    /// clock alone owes a frame. Only the spinner statuses animate; every
+    /// other status paints pixels that a timeout cannot change.
+    pub fn cadence(&self) -> repaint::Cadence {
+        repaint::Cadence::when(
+            matches!(
+                self.status,
+                Status::Thinking | Status::Running | Status::WaitingApproval
+            ),
+            repaint::Cadence::SPINNER,
+        )
+    }
 
     pub fn handle_event(&mut self, ev: AgentEvent) {
         let was_following = self.view.follow;
@@ -907,6 +921,22 @@ impl App {
 mod tests {
     use super::*;
     use crate::tui::provider::LineKind;
+    use crate::tui::repaint::Cadence;
+
+    /// Only the statuses that render the spinner glyph owe cadence frames;
+    /// settled statuses sleep until a real event wakes the loop.
+    #[test]
+    fn cadence_tracks_animating_statuses() {
+        let mut app = App::new();
+        for status in [Status::Done, Status::Failed] {
+            app.handle_event(AgentEvent::StatusChanged(status));
+            assert_eq!(app.cadence(), Cadence::IDLE, "{status:?} is static");
+        }
+        for status in [Status::Thinking, Status::Running, Status::WaitingApproval] {
+            app.handle_event(AgentEvent::StatusChanged(status));
+            assert_eq!(app.cadence(), Cadence::SPINNER, "{status:?} animates");
+        }
+    }
 
     /// `/auto-review` routes a toggle command to the provider.
     #[test]
