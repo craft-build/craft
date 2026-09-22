@@ -402,16 +402,14 @@ impl Element for SelectableText {
                                 range.clone(),
                                 comment_target.as_ref(),
                             );
-                            if range.is_empty() {
-                                if let Some((range_index, _)) = clickable_ranges
+                            if range.is_empty()
+                                && let Some((range_index, _)) = clickable_ranges
                                     .iter()
                                     .enumerate()
                                     .find(|(_, link_range)| link_range.contains(&index))
-                                {
-                                    if let Some(listener) = click_listener.as_ref() {
-                                        listener(range_index, window, cx);
-                                    }
-                                }
+                                && let Some(listener) = click_listener.as_ref()
+                            {
+                                listener(range_index, window, cx);
                             }
                             cx.notify(current_view);
                             window.refresh();

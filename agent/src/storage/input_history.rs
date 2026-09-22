@@ -178,8 +178,10 @@ mod tests {
 
     #[test]
     fn zero_max_entries_stays_empty() {
-        let mut history = InputHistory::default();
-        history.max_entries = 0;
+        let mut history = InputHistory {
+            max_entries: 0,
+            ..Default::default()
+        };
         history.push("a".into());
         history.push("b".into());
         assert!(history.is_empty());

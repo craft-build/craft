@@ -248,7 +248,7 @@ impl CraftProvider {
     ) {
         let state = Arc::new(Mutex::new(SessionState::linked()));
         let files: Files = Files::default();
-        let (cancel_flag, mut cancel_token) = run::cancel_channel();
+        let (cancel_flag, _) = run::cancel_channel();
         let mut current_turn: Option<AbortHandle> = None;
         let mut selection = self.selection;
         let workspace = self.workspace;
@@ -308,7 +308,7 @@ impl CraftProvider {
                     if let Some(h) = current_turn.take() {
                         h.abort();
                     }
-                    cancel_token = cancel_flag.token();
+                    let cancel_token = cancel_flag.token();
                     let handle = tokio::spawn(run_turn(
                         TurnCtx {
                             config: config.clone(),

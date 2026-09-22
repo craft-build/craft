@@ -748,6 +748,7 @@ mod tests {
         tool.call(serde_json::from_value(args).unwrap()).await
     }
 
+    #[allow(dead_code)]
     fn bash_text(result: Result<BashOutput>) -> String {
         match result {
             Ok(out) => out

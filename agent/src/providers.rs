@@ -13,7 +13,7 @@ use rig_core::completion::{
 };
 use rig_core::streaming::StreamingCompletionResponse;
 use rig_core::{
-    client::{CompletionClient, ModelListingClient, ProviderClient},
+    client::{CompletionClient, ModelListingClient},
     model::{Model, ModelList},
     providers::*,
 };

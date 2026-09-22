@@ -2304,7 +2304,7 @@ mod tests {
             ))),
             ..RunParams::default()
         };
-        let (model, outcome, events) = reauth_run(
+        let (model, _outcome, events) = reauth_run(
             vec![
                 auth_error_turn(),
                 auth_error_turn(),

@@ -114,10 +114,11 @@ mod tests {
         let verbatim = vec![tool_result(), Message::user(NUDGE_PROMPT)];
         assert!(has_recent_tool_results(&verbatim, 2, 0));
         assert!(!has_recent_tool_results(&verbatim, 1, 0));
-        assert_eq!(
-            has_recent_tool_results(&vec![Message::user(EMPTY_RESPONSE_MARKER)], 1, 0),
-            false
-        );
+        assert!(!has_recent_tool_results(
+            &[Message::user(EMPTY_RESPONSE_MARKER)],
+            1,
+            0
+        ));
     }
 
     #[test]

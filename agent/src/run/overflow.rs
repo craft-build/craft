@@ -115,6 +115,7 @@ pub(super) fn commit_cancelled(history: &mut Vec<Message>, turn: &mut Vec<Messag
 /// Handle an assistant turn with no tool calls. Continues truncated and
 /// empty replies while their budgets allow; otherwise commits history and
 /// returns the run outcome. `None` means "keep looping".
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_terminal_reply(
     history: &mut Vec<Message>,
     turn: &mut Vec<Message>,
