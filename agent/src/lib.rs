@@ -12,6 +12,7 @@ pub mod id;
 mod inplace_edit;
 pub mod instructions;
 pub mod json_repair;
+pub mod markdown;
 pub mod model_registry;
 pub mod models_dev;
 pub mod paths;

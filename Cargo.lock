@@ -1567,6 +1567,7 @@ dependencies = [
  "crossterm",
  "dirs 7.0.0",
  "etcetera",
+ "fastrand 2.5.0",
  "futures",
  "htmd",
  "http",
@@ -1592,6 +1593,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "unicode-normalization",
+ "unicode-width",
  "url",
  "uuid",
 ]
