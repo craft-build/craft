@@ -73,6 +73,7 @@ fn read_call(id: &str) -> ToolCallData {
         .map(|t| ToolLine {
             kind: LineKind::Context,
             text: t.to_string(),
+            ..Default::default()
         })
         .collect(),
     }
@@ -98,6 +99,7 @@ fn grep_call(id: &str) -> ToolCallData {
         .map(|t| ToolLine {
             kind: LineKind::Context,
             text: t.to_string(),
+            ..Default::default()
         })
         .collect(),
     }
@@ -134,6 +136,7 @@ fn edit_call(id: &str) -> ToolCallData {
         .map(|(kind, t)| ToolLine {
             kind: *kind,
             text: t.to_string(),
+            ..Default::default()
         })
         .collect(),
     }
@@ -150,15 +153,18 @@ fn bash_call(id: &str) -> ToolCallData {
             ToolLine {
                 kind: LineKind::Muted,
                 text: "Running 6 tests in auth/refresh.spec.ts".into(),
+                ..Default::default()
             },
             ToolLine {
                 kind: LineKind::Success,
                 text: "✓ refreshToken() returns cached promise for concurrent calls (4 passed)"
                     .into(),
+                ..Default::default()
             },
             ToolLine {
                 kind: LineKind::Success,
                 text: "✓ refreshToken() clears inflight after resolution (2 passed)".into(),
+                ..Default::default()
             },
         ],
     }

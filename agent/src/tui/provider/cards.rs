@@ -173,26 +173,123 @@ pub(super) fn tool_done(
 
 fn context_lines(text: &str) -> Vec<ToolLine> {
     text.lines()
-        .map(|line| ToolLine {
-            kind: LineKind::Context,
-            text: line.to_string(),
-        })
+        .map(|line| ToolLine::new(LineKind::Context, line))
         .collect()
 }
 
-/// Split a diff-formatted tool result into Add/Del lines; anything else is
-/// context.
+/// Parse a unified diff (as produced by [`crate::diff::unified_text`]) into
+/// structured card lines: `@@` hunk headers set the before-side line counter
+/// and separate hunks with a [`LineKind::Gap`] marker, `- `/`+ `/`  ` prefixes
+/// classify lines, and adjacent removed/added line pairs get word-level
+/// emphasis ranges. Results without `@@` headers (legacy or foreign formats)
+/// fall back to prefix-only classification starting at line 1.
 fn diff_lines(text: &str) -> Vec<ToolLine> {
-    text.lines()
-        .map(|line| ToolLine {
-            kind: match line.as_bytes().first() {
-                Some(b'+') => LineKind::Add,
-                Some(b'-') => LineKind::Del,
-                _ => LineKind::Context,
-            },
-            text: line.to_string(),
-        })
-        .collect()
+    let mut lines: Vec<ToolLine> = Vec::new();
+    let mut before_line = 0usize;
+    let mut saw_hunk = false;
+    for line in text.lines() {
+        if line.starts_with("--- ") || line.starts_with("+++") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            // "@@ -<b> +<a> @@"
+            if let Some(b) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.strip_prefix('-'))
+                .and_then(|t| t.parse::<usize>().ok())
+            {
+                if saw_hunk {
+                    lines.push(ToolLine::new(LineKind::Gap, "..."));
+                }
+                before_line = b;
+                saw_hunk = true;
+            }
+            continue;
+        }
+        let (kind, body) = match line.as_bytes().first() {
+            Some(b'+') if !line.starts_with("+++") => (LineKind::Add, &line[1..]),
+            Some(b'-') if !line.starts_with("---") => (LineKind::Del, &line[1..]),
+            Some(b' ') => (LineKind::Context, &line[1..]),
+            _ => {
+                // Summary header line before the first hunk.
+                if !saw_hunk {
+                    lines.push(ToolLine::new(LineKind::Context, line));
+                }
+                continue;
+            }
+        };
+        let body = body.strip_prefix(' ').unwrap_or(body);
+        let nr = if kind == LineKind::Add {
+            0
+        } else {
+            before_line
+        };
+        if kind != LineKind::Add {
+            before_line += 1;
+        }
+        lines.push(ToolLine {
+            kind,
+            text: body.to_string(),
+            nr,
+            emph: Vec::new(),
+        });
+    }
+    emphasize_pairs(&mut lines);
+    lines
+}
+
+/// Word-level emphasis for adjacent removed/added line pairs, mirroring the
+/// reference's inline-change `DiffSpan.emphasized` from the unified text
+/// alone: the i-th removed line of a run is paired with the i-th added line
+/// of the run that follows it.
+fn emphasize_pairs(lines: &mut [ToolLine]) {
+    use similar::TextDiff;
+
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].kind != LineKind::Del {
+            i += 1;
+            continue;
+        }
+        let del_start = i;
+        while i < lines.len() && lines[i].kind == LineKind::Del {
+            i += 1;
+        }
+        let add_start = i;
+        while i < lines.len() && lines[i].kind == LineKind::Add {
+            i += 1;
+        }
+        let pairs = (i - add_start).min(add_start - del_start);
+        for k in 0..pairs {
+            let (del, add) = lines.split_at_mut(add_start);
+            let d = &mut del[del_start + k];
+            let a = &mut add[k];
+            let diff = TextDiff::from_words(&d.text, &a.text);
+            let (mut doff, mut aoff) = (0usize, 0usize);
+            for change in diff.iter_all_changes() {
+                let len = change.value().chars().count();
+                match change.tag() {
+                    similar::ChangeTag::Equal => {
+                        doff += len;
+                        aoff += len;
+                    }
+                    similar::ChangeTag::Delete => {
+                        if len > 0 {
+                            d.emph.push((doff, doff + len));
+                        }
+                        doff += len;
+                    }
+                    similar::ChangeTag::Insert => {
+                        if len > 0 {
+                            a.emph.push((aoff, aoff + len));
+                        }
+                        aoff += len;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The most descriptive string argument of a tool call, for card labels.
@@ -284,5 +381,56 @@ mod tests {
         );
         assert!(matches!(done.card.kind, ToolKind::Edit { ref path } if path == "a.txt"));
         assert_eq!(done.touched.map(|(p, _)| p).as_deref(), Some("a.txt"));
+    }
+    #[test]
+    fn diff_lines_parses_hunks_gaps_and_numbers() {
+        let text = "edited f\n--- f\n+++ f\n@@ -2 +2 @@\n  ctx\n- old\n+ new\n@@ -9 +9 @@\n  far";
+        let lines = diff_lines(text);
+        let kinds: Vec<LineKind> = lines.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                LineKind::Context, // summary line
+                LineKind::Context, // ctx
+                LineKind::Del,
+                LineKind::Add,
+                LineKind::Gap,
+                LineKind::Context,
+            ]
+        );
+        // Before-side numbering: ctx=2, old=3, add=0; second hunk restarts at 9.
+        assert_eq!(
+            lines.iter().map(|l| l.nr).collect::<Vec<_>>(),
+            vec![0, 2, 3, 0, 0, 9]
+        );
+        assert_eq!(lines[2].text, "old");
+        assert_eq!(lines[3].text, "new");
+    }
+
+    #[test]
+    fn diff_lines_pairs_removed_and_added_for_word_emphasis() {
+        let text = "@@ -1 +1 @@\n- fn a() { one }\n+ fn a() { two }";
+        let lines = diff_lines(text);
+        let (del, add) = (&lines[0], &lines[1]);
+        assert_eq!(del.text, "fn a() { one }");
+        assert_eq!(add.text, "fn a() { two }");
+        let slice = |l: &ToolLine| {
+            l.emph
+                .iter()
+                .map(|&(s, e)| l.text.chars().skip(s).take(e - s).collect::<String>())
+                .collect::<String>()
+        };
+        assert_eq!(slice(del), "one");
+        assert_eq!(slice(add), "two");
+    }
+
+    #[test]
+    fn diff_lines_legacy_prefix_only_results_start_unnumbered() {
+        let lines = diff_lines("+added\n-removed\nplain");
+        assert_eq!(
+            lines.iter().map(|l| l.kind).collect::<Vec<_>>(),
+            vec![LineKind::Add, LineKind::Del, LineKind::Context]
+        );
+        assert!(lines.iter().all(|l| l.nr == 0));
     }
 }

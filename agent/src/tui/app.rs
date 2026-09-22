@@ -627,13 +627,13 @@ impl App {
     }
 
     fn toggle_tool(&mut self, idx: usize) {
-        if let Some(Message::Tool { id, kind, .. }) = self.conversation.messages.get(idx) {
-            if kind.collapsible() {
-                if let Some(pos) = self.conversation.collapsed.iter().position(|c| c == id) {
-                    self.conversation.collapsed.remove(pos);
-                } else {
-                    self.conversation.collapsed.push(id.clone());
-                }
+        if let Some(Message::Tool { id, kind, .. }) = self.conversation.messages.get(idx)
+            && kind.collapsible()
+        {
+            if let Some(pos) = self.conversation.collapsed.iter().position(|c| c == id) {
+                self.conversation.collapsed.remove(pos);
+            } else {
+                self.conversation.collapsed.push(id.clone());
             }
         }
     }
@@ -800,10 +800,9 @@ impl App {
                     if let Some(i) = self
                         .focused_pending_diff()
                         .or_else(|| self.last_pending_diff())
+                        && let Message::Tool { id, .. } = &self.conversation.messages[i]
                     {
-                        if let Message::Tool { id, .. } = &self.conversation.messages[i] {
-                            self.modal = Modal::ConfirmReject(id.clone());
-                        }
+                        self.modal = Modal::ConfirmReject(id.clone());
                     }
                     return;
                 }
@@ -1020,6 +1019,7 @@ mod tests {
             lines: vec![ToolLine {
                 kind: LineKind::Context,
                 text: "fn main() {}".into(),
+                ..Default::default()
             }],
             awaiting_approval: false,
         }));

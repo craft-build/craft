@@ -100,7 +100,7 @@ fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<Str
         )
     {
         return (
-            vec![source, destination]
+            [source, destination]
                 .iter()
                 .map(|p| resolve_scope_path(root, p))
                 .collect(),
@@ -187,6 +187,7 @@ async fn auto_review_decide(
                         decision.risk.as_str(),
                         decision.rationale
                     ),
+                    ..Default::default()
                 }],
                 awaiting_approval: false,
             }));
@@ -209,6 +210,7 @@ async fn auto_review_decide(
                 lines: vec![ToolLine {
                     kind: LineKind::Muted,
                     text: format!("auto-review failed closed: {err}"),
+                    ..Default::default()
                 }],
                 awaiting_approval: false,
             }));

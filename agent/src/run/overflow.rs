@@ -29,7 +29,7 @@ pub(super) async fn recover_from_overflow<M: CompletionModel + Clone>(
     // `maybe_compact` awaits, so the engine runs on a clone; recalibration
     // and the write-back happen in short critical sections against the
     // live state so a concurrent session-side update is not clobbered.
-    let Some(mut state) = ctx.state.lock().ok().map(|mut guard| guard.clone()) else {
+    let Some(mut state) = ctx.state.lock().ok().map(|guard| guard.clone()) else {
         return false;
     };
     let estimated = crate::compaction::estimate_tokens(history);

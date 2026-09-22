@@ -28,7 +28,7 @@ rig-core.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-similar = "3"
+similar = { version = "3", features = ["inline", "unicode"] }
 snafu.workspace = true
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 tempfile.workspace = true

@@ -331,7 +331,9 @@ async fn edit_fuzzy_passes_tolerate_model_drift_and_report_the_pass() {
     );
     assert_eq!(
         result.into_tool_output().unwrap().as_text(),
-        Some("edited f.py (fuzzy match pass 2)")
+        Some(
+            "edited f.py (fuzzy match pass 2)\n--- f.py\n+++ f.py\n@@ -1 +1 @@\n  def f():\n      if x:\n-         a()\n+         if y:\n+             a()\n      return 1"
+        )
     );
 
     // Whitespace collapse.

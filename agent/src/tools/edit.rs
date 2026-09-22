@@ -4,6 +4,8 @@ use rig_core::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::diff::unified_text;
+
 use super::fuzzy_replace;
 use super::{
     MAX_FILE_BYTES, Result, Workspace, denied, failure, impl_tool, invalid, io_error, read_bytes,
@@ -33,13 +35,17 @@ pub struct EditOutput {
     pub bytes_written: usize,
     /// " (fuzzy match pass N)" when a non-exact pass matched, else empty.
     pub pass: String,
+    pub before: String,
+    pub after: String,
 }
 
 impl IntoToolOutput for EditOutput {
     fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(format!(
-            "edited {}{}",
-            self.path, self.pass
+        Ok(ToolOutput::text(unified_text(
+            &self.before,
+            &self.after,
+            &format!("edited {}{}", self.path, self.pass),
+            &self.path,
         )))
     }
 }
@@ -96,6 +102,8 @@ impl Edit {
             replacements,
             bytes_written: size,
             pass,
+            before,
+            after,
         })
     }
 }
@@ -175,11 +183,18 @@ pub struct EditLinesArgs {
 pub struct EditLinesOutput {
     pub path: String,
     pub bytes_written: usize,
+    pub before: String,
+    pub after: String,
 }
 
 impl IntoToolOutput for EditLinesOutput {
     fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(format!("edited lines in {}", self.path)))
+        Ok(ToolOutput::text(unified_text(
+            &self.before,
+            &self.after,
+            &format!("edited lines in {}", self.path),
+            &self.path,
+        )))
     }
 }
 
@@ -228,6 +243,8 @@ impl EditLines {
         Ok(EditLinesOutput {
             path: workspace.display(&path),
             bytes_written: size,
+            before,
+            after,
         })
     }
 }
@@ -254,11 +271,18 @@ pub struct InsertLinesArgs {
 pub struct InsertLinesOutput {
     pub path: String,
     pub bytes_written: usize,
+    pub before: String,
+    pub after: String,
 }
 
 impl IntoToolOutput for InsertLinesOutput {
     fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(format!("inserted lines in {}", self.path)))
+        Ok(ToolOutput::text(unified_text(
+            &self.before,
+            &self.after,
+            &format!("inserted lines in {}", self.path),
+            &self.path,
+        )))
     }
 }
 
@@ -305,6 +329,8 @@ impl InsertLines {
         Ok(InsertLinesOutput {
             path: workspace.display(&path),
             bytes_written: size,
+            before,
+            after,
         })
     }
 }

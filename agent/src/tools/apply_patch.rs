@@ -10,7 +10,6 @@ use std::io::Write as _;
 use rig_core::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use similar::{ChangeTag, TextDiff};
 
 use super::edit::persist;
 use super::{
@@ -94,13 +93,12 @@ impl ApplyPatch {
                 PatchHunk::DeleteFile { path } => {
                     let resolved = workspace.file(path)?;
                     let before = text(read_bytes(&resolved)?)?;
-                    let summary = diff_summary(&before, "");
+                    let display = workspace.display(&resolved);
+                    let summary =
+                        diff_summary(&before, "", &format!("{display}: deleted"), &display);
                     workspace.note_snapshot(&resolved);
                     std::fs::remove_file(&resolved).map_err(io_error)?;
-                    results.push(format!(
-                        "{}: deleted\n{summary}",
-                        workspace.display(&resolved)
-                    ));
+                    results.push(summary);
                 }
                 PatchHunk::UpdateFile { path, chunks } => {
                     let resolved = workspace.file(path)?;
@@ -111,13 +109,15 @@ impl ApplyPatch {
                             "patched file would exceed the 8 MiB tool size limit",
                         ));
                     }
-                    let summary = diff_summary(&before, &after);
+                    let display = workspace.display(&resolved);
+                    let summary = diff_summary(
+                        &before,
+                        &after,
+                        &format!("{display}: modified ({} hunks)", chunks.len()),
+                        &display,
+                    );
                     persist(workspace, path, &resolved, &before, &after)?;
-                    results.push(format!(
-                        "{}: modified ({} hunks)\n{summary}",
-                        workspace.display(&resolved),
-                        chunks.len()
-                    ));
+                    results.push(summary);
                 }
             }
         }
@@ -308,50 +308,16 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
     None
 }
 
-/// Compact line-numbered diff (blank-line changes elided), truncated.
-fn diff_summary(old: &str, new: &str) -> String {
-    let diff = TextDiff::from_lines(old, new);
-    let mut output = String::new();
-    let mut line_count = 0;
-    let mut old_line = 1usize;
-    let mut new_line = 1usize;
-
-    for change in diff.iter_all_changes() {
-        if line_count >= DIFF_MAX_LINES {
-            output.push_str("... (diff truncated)\n");
-            break;
-        }
-
-        let content = change.value().trim_end_matches('\n');
-        let (prefix, line_num) = match change.tag() {
-            ChangeTag::Delete => {
-                let num = old_line;
-                old_line += 1;
-                if content.trim().is_empty() {
-                    continue;
-                }
-                ("-", num)
-            }
-            ChangeTag::Insert => {
-                let num = new_line;
-                new_line += 1;
-                if content.trim().is_empty() {
-                    continue;
-                }
-                ("+", num)
-            }
-            ChangeTag::Equal => {
-                old_line += 1;
-                new_line += 1;
-                continue;
-            }
-        };
-
-        output.push_str(&format!("{line_num}{prefix} {content}\n"));
-        line_count += 1;
+/// Unified diff via [`crate::diff::unified_text`], truncated to a line budget
+/// so large patches cannot blow the context window.
+fn diff_summary(old: &str, new: &str, summary: &str, display_path: &str) -> String {
+    let text = crate::diff::unified_text(old, new, summary, display_path);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.len() > DIFF_MAX_LINES {
+        lines.truncate(DIFF_MAX_LINES);
+        lines.push("... (diff truncated)");
     }
-
-    output.trim_end().to_string()
+    lines.join("\n")
 }
 
 fn parse_apply_patch(input: &str) -> std::result::Result<Vec<PatchHunk>, String> {
@@ -641,13 +607,16 @@ mod tests {
     }
 
     #[test]
-    fn diff_summary_compact_format() {
+    fn diff_summary_unified_format() {
         let old = "line one\nline two\nline three\n";
         let new = "line one\nchanged two\nline three\n";
-        let diff = diff_summary(old, new);
-        assert!(diff.contains("2- line two"), "{diff}");
-        assert!(diff.contains("2+ changed two"), "{diff}");
-        assert!(!diff.contains("line one"), "{diff}");
+        let diff = diff_summary(old, new, "edited f", "f");
+        assert!(diff.contains("edited f"), "{diff}");
+        assert!(diff.contains("@@ -1 +1 @@"), "{diff}");
+        assert!(diff.contains("- line two"), "{diff}");
+        assert!(diff.contains("+ changed two"), "{diff}");
+        // Context lines survive (they anchor the hunk for the TUI gutter).
+        assert!(diff.contains("  line one"), "{diff}");
     }
 
     #[test]

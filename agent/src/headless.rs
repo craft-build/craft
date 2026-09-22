@@ -199,7 +199,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
     if let Some(e) = &persistence_error {
         eprintln!("session {session_ref} will not be persisted: {e}");
     }
-    let mut store = opened.ok().flatten();
+    let store = opened.ok().flatten();
 
     let task = tokio::spawn(async move {
         let mut tools = params.workspace.register();
@@ -318,7 +318,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
     if let Some(e) = &persistence_error {
         eprintln!("session {session_ref} will not be persisted: {e}");
     }
-    let mut store = opened.ok().flatten();
+    let store = opened.ok().flatten();
 
     let task = tokio::spawn(async move {
         let mut model = params.model;

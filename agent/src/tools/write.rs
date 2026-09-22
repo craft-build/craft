@@ -4,7 +4,11 @@ use rig_core::tool::{IntoToolOutput, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{MAX_FILE_BYTES, Result, Workspace, failure, impl_tool, invalid, io_error};
+use crate::diff::unified_text;
+
+use super::{
+    MAX_FILE_BYTES, Result, Workspace, failure, impl_tool, invalid, io_error, read_bytes, text,
+};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -19,13 +23,27 @@ pub struct WriteOutput {
     pub path: String,
     pub created: bool,
     pub bytes_written: usize,
+    /// Previous content when overwriting; empty for created files.
+    pub before: String,
+    pub after: String,
 }
 
 impl IntoToolOutput for WriteOutput {
     fn into_tool_output(self) -> Result<ToolOutput> {
-        Ok(ToolOutput::text(format!(
-            "wrote {} ({} bytes)",
-            self.path, self.bytes_written
+        if self.created {
+            // A full-file add-diff would just duplicate the content the model
+            // already sent; a summary is enough.
+            return Ok(ToolOutput::text(format!(
+                "wrote {} ({} bytes)",
+                self.path, self.bytes_written
+            )));
+        }
+        let summary = format!("overwrote {} ({} bytes)", self.path, self.bytes_written);
+        Ok(ToolOutput::text(unified_text(
+            &self.before,
+            &self.after,
+            &summary,
+            &self.path,
         )))
     }
 }
@@ -46,6 +64,11 @@ impl Write {
         let path = workspace.target(&args.path)?;
         workspace.note_snapshot(&path);
         let existed = path.exists();
+        let before = if existed {
+            text(read_bytes(&path)?)?
+        } else {
+            String::new()
+        };
         let mut staged =
             tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(io_error)?;
         staged
@@ -64,6 +87,8 @@ impl Write {
             path: workspace.display(&path),
             created: !existed,
             bytes_written: args.content.len(),
+            before,
+            after: args.content,
         })
     }
 }

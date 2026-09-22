@@ -159,6 +159,7 @@ fn default_compaction() -> Vec<CompactionConfig> {
 /// Defaults for each agent run, independent of provider/model selection.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct AgentConfig {
     /// System instructions. An empty string keeps the built-in defaults; any
     /// text is appended to the assembled system prompt's instructions slot.
@@ -167,18 +168,6 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     /// Request-level output cap, not a model catalog metadata override.
     pub max_tokens: Option<u64>,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            // Extra instructions appended to the assembled system prompt's
-            // instructions slot; empty keeps the built-in defaults.
-            preamble: String::new(),
-            temperature: None,
-            max_tokens: None,
-        }
-    }
 }
 
 impl AgentConfig {

@@ -39,12 +39,10 @@ fn last_balanced(text: &str) -> Option<&str> {
                 }
                 depth += 1;
             }
-            b'{' | b'[' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(&text[i..=end?]);
-                    }
+            b'{' | b'[' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[i..=end?]);
                 }
             }
             _ => {}

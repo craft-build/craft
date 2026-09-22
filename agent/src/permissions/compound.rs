@@ -45,7 +45,7 @@ fn is_complex(node: Node) -> bool {
 }
 
 fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
-    &source[node.byte_range()].trim()
+    source[node.byte_range()].trim()
 }
 
 /// Anything we don't walk through becomes one scope, its own text. That covers

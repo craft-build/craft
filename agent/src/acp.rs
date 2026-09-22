@@ -322,7 +322,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         return respond_setup_error(responder, "unknown session".into());
                     };
                     // Re-arm the session-wide cancellation flag for this turn.
-                    let _ = session.cancel.set(false);
+                    session.cancel.set(false);
                     (
                         session.workspace.clone(),
                         session.history.clone(),
@@ -369,7 +369,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
             async move |notification: CancelNotification, _connection| {
                 let sessions = cancel_state.sessions.lock().await;
                 if let Some(session) = sessions.get(notification.session_id.0.as_ref()) {
-                    let _ = session.cancel.set(true);
+                    session.cancel.set(true);
                 }
                 Ok(())
             },
@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(results, [
             ("read".into(), "2: \n3:     let name = \"βeta\";\n\n...\n\nTruncated lines: 4-4. Use offset=4 to read further.".into()),
             ("grep".into(), "file.rs:\n  3:     let name = \"βeta\";".into()),
-            ("edit".into(), "edited file.rs".into()),
+            ("edit".into(), "edited file.rs\n--- file.rs\n+++ file.rs\n@@ -1 +1 @@\n  skipped\r\n  \r\n-     let name = \"βeta\";\r\n+     let name = \"new\";\r\n  last".into()),
             ("delete".into(), "deleted: file.rs".into()),
         ]);
         // Verify what the next model request actually receives, not only the

@@ -68,6 +68,8 @@ pub enum LineKind {
     Add,
     Del,
     Context,
+    /// Hunk separator inside a diff body (renders as a dim `...`).
+    Gap,
     Cmd,
     Muted,
     Success,
@@ -77,6 +79,28 @@ pub enum LineKind {
 pub struct ToolLine {
     pub kind: LineKind,
     pub text: String,
+    /// Before-side line number for diff bodies (0 = no gutter, e.g. added
+    /// lines and non-diff tools).
+    pub nr: usize,
+    /// Char ranges of word-level changes, from pairing removed/added lines.
+    pub emph: Vec<(usize, usize)>,
+}
+
+impl ToolLine {
+    pub fn new(kind: LineKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+            nr: 0,
+            emph: Vec::new(),
+        }
+    }
+}
+
+impl Default for ToolLine {
+    fn default() -> Self {
+        Self::new(LineKind::Context, String::new())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -88,9 +112,12 @@ pub enum ToolKind {
 }
 
 impl ToolKind {
-    /// Read/Grep blocks can be collapsed; Bash/Edit are always expanded.
+    /// Read/Grep/Edit blocks can be collapsed; Bash is always expanded.
     pub fn collapsible(&self) -> bool {
-        matches!(self, ToolKind::Read { .. } | ToolKind::Grep { .. })
+        matches!(
+            self,
+            ToolKind::Read { .. } | ToolKind::Grep { .. } | ToolKind::Edit { .. }
+        )
     }
 }
 

@@ -187,6 +187,7 @@ mod tests {
             lines: vec![ToolLine {
                 kind: LineKind::Context,
                 text: "export async function refreshToken() {".into(),
+                ..Default::default()
             }],
         }));
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
@@ -199,10 +200,13 @@ mod tests {
                 ToolLine {
                     kind: LineKind::Del,
                     text: "  session.token = res.token".into(),
+                    nr: 3,
+                    ..Default::default()
                 },
                 ToolLine {
                     kind: LineKind::Add,
                     text: "  if (inflight) return inflight".into(),
+                    ..Default::default()
                 },
             ],
         }));
@@ -215,6 +219,7 @@ mod tests {
             lines: vec![ToolLine {
                 kind: LineKind::Success,
                 text: "✓ all 6 tests passed".into(),
+                ..Default::default()
             }],
         }));
         app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));

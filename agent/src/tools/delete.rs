@@ -4,7 +4,7 @@ use rig_core::tool::{IntoToolOutput, ToolErrorKind, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::{Result, Workspace, failure, impl_tool, invalid, io_error};
+use super::{Result, Workspace, impl_tool, invalid, io_error};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

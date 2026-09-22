@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::theme;
+use crate::markdown::highlight::{Highlighter, SegmentColor, StyledSegment};
 use crate::tui::app::{App, DiffState, Message};
 use crate::tui::provider::{LineKind, ToolKind};
 
@@ -178,6 +179,72 @@ fn diff_badge(diff: Option<DiffState>) -> Option<(&'static str, ratatui::style::
     }
 }
 
+fn seg_color(c: SegmentColor) -> Option<ratatui::style::Color> {
+    match c {
+        SegmentColor::Rgb(r, g, b) => Some(ratatui::style::Color::Rgb(r, g, b)),
+        SegmentColor::Ansi(i) => Some(ratatui::style::Color::Indexed(i)),
+        SegmentColor::Default => None,
+    }
+}
+
+/// Split diff-line content into spans: syntax-highlight colors (when
+/// available) are patched under the diff base style, and char ranges in
+/// `emph` get the emphasized style (bold) on top.
+fn styled_diff_spans(
+    text: &str,
+    segs: Option<&[StyledSegment]>,
+    emph: &[(usize, usize)],
+    base: Style,
+    emph_style: Style,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    fn plain(chars: &[char], start: usize, end: usize, style: Style, out: &mut Vec<Span<'static>>) {
+        if end > start {
+            out.push(Span::styled(
+                chars[start..end].iter().collect::<String>(),
+                style,
+            ));
+        }
+    }
+    let Some(segs) = segs else {
+        let mut cursor = 0usize;
+        for &(es, ee) in emph {
+            plain(&chars, cursor, es, base, &mut out);
+            plain(&chars, es, ee, emph_style, &mut out);
+            cursor = cursor.max(ee);
+        }
+        plain(&chars, cursor, chars.len(), base, &mut out);
+        return out;
+    };
+    let mut cursor = 0usize; // char offset consumed so far in `text`
+    for seg in segs {
+        let seg_len = seg.text.chars().count();
+        let seg_start = cursor;
+        let seg_end = seg_start + seg_len;
+        let mut fg = seg_color(seg.fg).map_or(base, |c| base.fg(c));
+        if seg.bold {
+            fg = fg.bold();
+        }
+        if seg.italic {
+            fg = fg.italic();
+        }
+        let mut piece_start = seg_start;
+        for &(es, ee) in emph {
+            let (s, e) = (es.max(seg_start), ee.min(seg_end));
+            if e <= s {
+                continue;
+            }
+            plain(&chars, piece_start, s, fg, &mut out);
+            plain(&chars, s, e, emph_style, &mut out);
+            piece_start = e;
+        }
+        plain(&chars, piece_start, seg_end, fg, &mut out);
+        cursor = seg_end;
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tool_block(
     kind: &ToolKind,
@@ -219,7 +286,10 @@ fn tool_block(
             ));
         }
         ToolKind::Edit { .. } => {
-            header.push(Span::styled("  ", surf));
+            header.push(Span::styled(
+                if collapsed { "▸ " } else { "▾ " }.to_string(),
+                Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+            ));
         }
     }
     header.push(Span::styled(
@@ -256,10 +326,108 @@ fn tool_block(
         return lines;
     }
 
+    fn gutter_span(nr: usize, w: usize, bg: ratatui::style::Color) -> Span<'static> {
+        let text = if nr == 0 {
+            " ".repeat(w)
+        } else {
+            format!("{nr:>w$}")
+        };
+        Span::styled(
+            format!("{text} "),
+            Style::default().fg(theme::TEXT_TERTIARY).bg(bg),
+        )
+    }
+
+    /// One row of a diff body: line-number gutter, +/- sign, and the content
+    /// split into word-level emphasis with syntax highlighting patched under
+    /// the diff colors.
+    #[allow(clippy::too_many_arguments)]
+    fn diff_row(
+        ln: &crate::tui::provider::ToolLine,
+        is_add: bool,
+        gutter_w: usize,
+        hl: &mut Option<Highlighter>,
+        width: usize,
+        card_bg: ratatui::style::Color,
+        surf: Style,
+    ) -> Line<'static> {
+        let (sign, fg, bg) = if is_add {
+            ("+ ", theme::DIFF_ADD_TEXT, theme::DIFF_ADD_BG)
+        } else {
+            ("- ", theme::DIFF_DEL_TEXT, theme::DIFF_DEL_BG)
+        };
+        let base = Style::default().fg(fg).bg(bg);
+        let emph_style = base.bold();
+
+        let segs = hl
+            .as_mut()
+            .map(|h| h.highlight_line(&ln.text))
+            .filter(|s| !s.is_empty());
+        let content = styled_diff_spans(&ln.text, segs.as_deref(), &ln.emph, base, emph_style);
+
+        let mut spans = vec![Span::styled(" ".repeat(BODY_INDENT), surf)];
+        spans.push(gutter_span(ln.nr, gutter_w, card_bg));
+        spans.push(Span::styled(sign, base));
+        spans.extend(content);
+        let w = spans_width(&spans);
+        if w < width {
+            spans.push(Span::styled(" ".repeat(width - w), Style::default().bg(bg)));
+        }
+        Line::from(spans)
+    }
+
     // --- body rows ---
     let indent = " ".repeat(BODY_INDENT);
+    let is_edit = matches!(kind, ToolKind::Edit { .. });
+    let gutter_w = if is_edit {
+        body.iter()
+            .map(|ln| ln.nr)
+            .max()
+            .unwrap_or(0)
+            .max(1)
+            .ilog10() as usize
+            + 1
+    } else {
+        0
+    };
+    let mut hl = if is_edit {
+        match kind {
+            ToolKind::Edit { path } => Some(Highlighter::for_path(path)),
+            _ => None,
+        }
+    } else {
+        None
+    };
     for ln in body {
         let row = match ln.kind {
+            LineKind::Gap if is_edit => pad_row(
+                vec![
+                    Span::styled(indent.clone(), surf),
+                    Span::styled(
+                        " ...".to_string(),
+                        Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+                    ),
+                ],
+                width,
+                surf,
+            ),
+            LineKind::Add if is_edit => diff_row(ln, true, gutter_w, &mut hl, width, card_bg, surf),
+            LineKind::Del if is_edit => {
+                diff_row(ln, false, gutter_w, &mut hl, width, card_bg, surf)
+            }
+            LineKind::Context if is_edit => {
+                let mut spans = vec![
+                    Span::styled(indent.clone(), surf),
+                    gutter_span(ln.nr, gutter_w, card_bg),
+                    Span::styled("  ".to_string(), surf),
+                    Span::styled(
+                        ln.text.clone(),
+                        Style::default().fg(theme::TEXT_SECONDARY).bg(card_bg),
+                    ),
+                ];
+                let _ = &mut spans;
+                pad_row(spans, width, surf)
+            }
             LineKind::Add | LineKind::Del => {
                 let (sign, fg, bg) = if ln.kind == LineKind::Add {
                     ("+ ", theme::DIFF_ADD_TEXT, theme::DIFF_ADD_BG)
@@ -448,6 +616,82 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::wrap_rows;
+    use super::{Line, tool_block};
+    use crate::tui::provider::ToolLine;
+    use ratatui::style::Modifier;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.clone()).collect()
+    }
+
+    #[test]
+    fn edit_card_renders_gutter_signs_gap_and_emphasis() {
+        let kind = crate::tui::provider::ToolKind::Edit {
+            path: "src/a.rs".into(),
+        };
+        let body = vec![
+            ToolLine {
+                kind: crate::tui::provider::LineKind::Del,
+                text: "fn a() { one }".into(),
+                nr: 2,
+                emph: vec![(9, 12)],
+            },
+            ToolLine {
+                kind: crate::tui::provider::LineKind::Add,
+                text: "fn a() { two }".into(),
+                nr: 0,
+                emph: vec![(9, 12)],
+            },
+            ToolLine::new(crate::tui::provider::LineKind::Gap, "..."),
+            ToolLine {
+                kind: crate::tui::provider::LineKind::Context,
+                text: "}".into(),
+                nr: 4,
+                ..Default::default()
+            },
+        ];
+        let lines = tool_block(&kind, "t1", &body, None, false, false, false, 80);
+        let joined: Vec<String> = lines.iter().map(line_text).collect();
+        // Numbered gutter on removed/context lines, blank on added.
+        assert!(
+            joined.iter().any(|l| l.contains(" 2 - fn a() { one }")),
+            "{joined:?}"
+        );
+        assert!(
+            joined.iter().any(|l| l.contains("   + fn a() { two }")),
+            "{joined:?}"
+        );
+        assert!(joined.iter().any(|l| l.contains(" ...")), "{joined:?}");
+        assert!(joined.iter().any(|l| l.contains(" 4   }")), "{joined:?}");
+        // Word-level emphasis renders bold.
+        let del_line = lines
+            .iter()
+            .find(|l| line_text(l).contains("- fn a() { one }"))
+            .unwrap();
+        assert!(del_line.spans.iter().any(|s| {
+            s.content.contains("one") && s.style.add_modifier.contains(Modifier::BOLD)
+        }));
+    }
+
+    #[test]
+    fn edit_card_collapses_to_header_only() {
+        let kind = crate::tui::provider::ToolKind::Edit {
+            path: "src/a.rs".into(),
+        };
+        let body = vec![ToolLine::new(crate::tui::provider::LineKind::Add, "x")];
+        let expanded = tool_block(&kind, "t1", &body, None, false, false, false, 80);
+        let collapsed = tool_block(&kind, "t1", &body, None, false, true, false, 80);
+        assert!(expanded.len() > collapsed.len());
+        let header: String = collapsed[1]
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+        assert!(header.contains("▸"), "collapsed header shows ▸: {header:?}");
+        assert!(!header.contains("+ x"));
+        let collapsed_text: String = collapsed.iter().map(line_text).collect();
+        assert!(!collapsed_text.contains("+ x"));
+    }
 
     fn render(text: &str, width: usize) -> Vec<String> {
         let chars: Vec<char> = text.chars().collect();

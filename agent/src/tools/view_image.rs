@@ -61,7 +61,7 @@ pub struct ViewImage(pub Workspace);
 impl ViewImage {
     fn execute(workspace: &Workspace, args: ViewImageArgs) -> Result<ViewImageOutput> {
         let path = workspace.file(&args.path)?;
-        let bytes = std::fs::read(&path).map_err(|error| super::io_error(error))?;
+        let bytes = std::fs::read(&path).map_err(super::io_error)?;
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(invalid(format!(
                 "{} is too large to view ({}, limit {})",
