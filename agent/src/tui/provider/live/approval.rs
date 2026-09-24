@@ -15,7 +15,7 @@ use crate::run::{CancelToken, Decision};
 
 use super::SessionState;
 use crate::tui::provider::cards;
-use crate::tui::provider::{AgentEvent, LineKind, Status, ToolCallData, ToolKind, ToolLine};
+use crate::tui::provider::{AgentEvent, Status, Tone, ToolCallData};
 
 /// Gates tool calls behind the permission engine and, when it asks, the
 /// UI's approve/reject seam: no workspace mutation runs without an explicit
@@ -169,42 +169,29 @@ async fn auto_review_decide(
     scopes: &[String],
     id: String,
 ) -> Decision {
-    // In-progress marker with the decision card's id (cards merge by id):
-    // the verdict card below replaces it in place when the review lands.
-    let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+    // In-progress marker carrying the call's id: it renders as a line under
+    // the tool card (not inside it), and the verdict below replaces it in
+    // place, so the card stays focused on the tool's own output.
+    let _ = tx.send(AgentEvent::AutoReview {
         id: id.clone(),
-        kind: ToolKind::Bash {
-            cmd: "auto-review".to_string(),
-        },
-        lines: vec![ToolLine {
-            kind: LineKind::Muted,
-            text: "auto-review: reviewing…".into(),
-            ..Default::default()
-        }],
-        awaiting_approval: false,
-    }));
+        tone: Tone::Neutral,
+        text: "auto-review: reviewing…".into(),
+    });
     let review = reviewer(tool.to_string(), scopes.to_vec());
     let outcome = match review.await {
         Ok(decision) => {
             let allow = decision.verdict == crate::auto_review::Verdict::Allow;
             permissions.apply_auto_review(tool, scopes, allow);
-            let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+            let _ = tx.send(AgentEvent::AutoReview {
                 id,
-                kind: ToolKind::Bash {
-                    cmd: "auto-review".to_string(),
-                },
-                lines: vec![ToolLine {
-                    kind: LineKind::Muted,
-                    text: format!(
-                        "auto-review {}: {} — {}",
-                        decision.verdict.as_str(),
-                        decision.risk.as_str(),
-                        decision.rationale
-                    ),
-                    ..Default::default()
-                }],
-                awaiting_approval: false,
-            }));
+                tone: if allow { Tone::Success } else { Tone::Warning },
+                text: format!(
+                    "auto-review {}: {} — {}",
+                    decision.verdict.as_str(),
+                    decision.risk.as_str(),
+                    decision.rationale
+                ),
+            });
             if allow {
                 return Decision::Run;
             }
@@ -216,18 +203,11 @@ async fn auto_review_decide(
             .to_string()
         }
         Err(err) => {
-            let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+            let _ = tx.send(AgentEvent::AutoReview {
                 id,
-                kind: ToolKind::Bash {
-                    cmd: "auto-review".to_string(),
-                },
-                lines: vec![ToolLine {
-                    kind: LineKind::Muted,
-                    text: format!("auto-review failed closed: {err}"),
-                    ..Default::default()
-                }],
-                awaiting_approval: false,
-            }));
+                tone: Tone::Danger,
+                text: format!("auto-review failed closed: {err}"),
+            });
             PermissionError::with_guidance(
                 &tool.to_string(),
                 scopes,
@@ -538,10 +518,10 @@ mod tests {
         (gate, state, permissions)
     }
 
-    /// The in-progress card precedes the verdict card and shares its id so
-    /// the conversation view merges them (W6).
+    /// The in-progress status line precedes the verdict and shares the call's
+    /// id so the conversation view updates it in place under the tool card.
     #[tokio::test]
-    async fn auto_review_posts_an_in_progress_card_before_the_verdict() {
+    async fn auto_review_posts_an_in_progress_line_before_the_verdict() {
         // The reviewer parks until released.
         let gate_open = Arc::new(tokio::sync::Notify::new());
         let proceed = gate_open.clone();
@@ -569,23 +549,25 @@ mod tests {
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
-            .expect("timed out waiting for the in-progress card")
+            .expect("timed out waiting for the in-progress line")
             .expect("channel closed");
-        let AgentEvent::ToolCall(card) = first else {
-            panic!("expected the in-progress ToolCall card, got {first:?}");
+        let AgentEvent::AutoReview { id, tone, text } = first else {
+            panic!("expected the in-progress AutoReview, got {first:?}");
         };
-        assert_eq!(card.id, "t1");
-        assert_eq!(card.lines[0].text, "auto-review: reviewing…");
+        assert_eq!(id, "t1");
+        assert_eq!(tone, Tone::Neutral);
+        assert_eq!(text, "auto-review: reviewing…");
 
         gate_open.notify_one();
         assert!(matches!(pending.await.unwrap(), Decision::Run));
 
-        let second = rx.recv().await.expect("verdict card");
-        let AgentEvent::ToolCall(card) = second else {
-            panic!("expected the verdict ToolCall card, got {second:?}");
+        let second = rx.recv().await.expect("verdict line");
+        let AgentEvent::AutoReview { id, tone, text } = second else {
+            panic!("expected the verdict AutoReview, got {second:?}");
         };
-        assert_eq!(card.id, "t1", "the verdict replaces the in-progress card");
-        assert!(card.lines[0].text.starts_with("auto-review allow"));
+        assert_eq!(id, "t1", "the verdict replaces the in-progress line");
+        assert_eq!(tone, Tone::Success, "an allow verdict reads as success");
+        assert!(text.starts_with("auto-review allow"));
     }
 
     #[tokio::test]

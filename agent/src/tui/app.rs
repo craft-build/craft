@@ -180,7 +180,18 @@ pub enum Message {
         kind: ToolKind,
         lines: Vec<ToolLine>,
         diff: Option<DiffState>,
+        /// Auto-review status for this call, rendered as a line under the
+        /// card rather than inside it (updated in place by [`AgentEvent::AutoReview`]).
+        review: Option<AutoReviewLine>,
     },
+}
+
+/// One auto-review status line shown beneath a tool card: a tone and text,
+/// e.g. "auto-review allow: low — in-project edit".
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoReviewLine {
+    pub tone: Tone,
+    pub text: String,
 }
 
 impl Message {
@@ -260,6 +271,17 @@ impl Conversation {
                 self.thinking_open = false;
                 self.messages.push(Message::Notice { tone, text });
             }
+            AgentEvent::AutoReview { id, tone, text } => {
+                // Attach to the call's card so the status renders as a line
+                // under it; the card body itself is left to the tool output.
+                let card = self
+                    .messages
+                    .iter_mut()
+                    .find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id));
+                if let Some(Message::Tool { review, .. }) = card {
+                    *review = Some(AutoReviewLine { tone, text });
+                }
+            }
             AgentEvent::ToolCall(ToolCallData {
                 id,
                 kind,
@@ -302,6 +324,7 @@ impl Conversation {
                             kind,
                             lines,
                             diff,
+                            review: None,
                         });
                         if collapsible {
                             self.collapsed.push(id);
@@ -1816,6 +1839,56 @@ mod tests {
             Message::Tool { kind, lines, .. } => {
                 assert!(matches!(kind, ToolKind::Read { summary, .. } if summary == "1 lines"));
                 assert_eq!(lines.len(), 1);
+            }
+            _ => panic!("expected a tool card"),
+        }
+    }
+
+    /// Auto-review attaches under the card by id, leaving the card's own kind
+    /// and body intact, and survives the tool result merge.
+    #[test]
+    fn auto_review_rides_under_the_card() {
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "t1".into(),
+            kind: ToolKind::Bash {
+                cmd: "cargo test".into(),
+            },
+            lines: vec![],
+            awaiting_approval: false,
+        }));
+        app.handle_event(AgentEvent::AutoReview {
+            id: "t1".into(),
+            tone: Tone::Success,
+            text: "auto-review allow: low — in-project".into(),
+        });
+        // The result merge updates the card body without dropping the review.
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "t1".into(),
+            kind: ToolKind::Bash {
+                cmd: "cargo test".into(),
+            },
+            lines: vec![ToolLine {
+                kind: LineKind::Success,
+                text: "test result: ok".into(),
+                ..Default::default()
+            }],
+            awaiting_approval: false,
+        }));
+        match &app.conversation.messages[0] {
+            Message::Tool {
+                kind,
+                lines,
+                review,
+                ..
+            } => {
+                assert!(matches!(kind, ToolKind::Bash { cmd } if cmd == "cargo test"));
+                assert_eq!(lines.len(), 1, "card shows the tool output");
+                assert_eq!(
+                    review.as_ref().map(|r| r.text.as_str()),
+                    Some("auto-review allow: low — in-project"),
+                    "review survives the result merge"
+                );
             }
             _ => panic!("expected a tool card"),
         }

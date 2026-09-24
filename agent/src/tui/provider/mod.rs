@@ -234,6 +234,15 @@ pub enum AgentEvent {
         tone: Tone,
         text: String,
     },
+    /// Auto-review status for the tool call with `id`. Merged by id onto the
+    /// tool card but rendered as a line *under* it, so the card itself stays
+    /// focused on the tool's own output. Emitted once while reviewing and
+    /// again with the verdict, replacing the earlier line in place.
+    AutoReview {
+        id: String,
+        tone: Tone,
+        text: String,
+    },
     /// The session was replaced by a persisted one (`/sessions`); carries
     /// the user/assistant text transcript for display rebuild.
     SessionLoaded {

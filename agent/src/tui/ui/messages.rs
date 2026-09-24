@@ -754,6 +754,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 kind,
                 lines: body,
                 diff,
+                review,
             } => {
                 let collapsed = app.conversation.collapsed.iter().any(|c| c == id);
                 let body_expanded = app.conversation.expanded_bodies.iter().any(|c| c == id);
@@ -785,6 +786,15 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                     ));
                 }
                 app.view.segments.push(Segment::with_lines(lines));
+                // Auto-review rides just below the card, outside its chrome,
+                // so the card itself stays focused on the tool's output.
+                if let Some(review) = review {
+                    app.view.segments.push(Segment::with_lines(notice_block(
+                        review.tone,
+                        &review.text,
+                        width,
+                    )));
+                }
             }
         }
         if is_user {
@@ -978,6 +988,52 @@ mod tests {
         assert_eq!(buf[(gx, y as u16)].fg, theme::DANGER);
     }
 
+    /// Auto-review renders as its own line *under* the tool card; the card
+    /// keeps showing the tool's own header and output.
+    #[test]
+    fn auto_review_renders_under_the_card_not_inside_it() {
+        use crate::tui::app::App;
+        use crate::tui::provider::{AgentEvent, Tone, ToolCallData, ToolKind};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "t1".into(),
+            kind: ToolKind::Bash {
+                cmd: "cargo test".into(),
+            },
+            lines: Vec::new(),
+            awaiting_approval: false,
+        }));
+        app.handle_event(AgentEvent::AutoReview {
+            id: "t1".into(),
+            tone: Tone::Success,
+            text: "auto-review allow: low — in-project edit".into(),
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(70, 16)).unwrap();
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let cmd_row = rows
+            .iter()
+            .position(|r| r.contains("cargo test"))
+            .expect("tool header still shown");
+        let review_row = rows
+            .iter()
+            .position(|r| r.contains("auto-review allow"))
+            .expect("review line rendered");
+        assert!(
+            review_row > cmd_row,
+            "review must sit under the card, not inside it: {rows:?}"
+        );
+    }
+
     #[test]
     fn assistant_markdown_read_highlight_and_painted_card_header() {
         use super::theme;
@@ -1002,6 +1058,7 @@ mod tests {
                 ToolLine::new(crate::tui::provider::LineKind::Context, "}"),
             ],
             diff: None,
+            review: None,
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal
@@ -1253,6 +1310,7 @@ mod tests {
                 "body",
             )],
             diff: None,
+            review: None,
         });
         // Fill the document past the viewport so a scroll below the card
         // survives the layout clamp instead of snapping back to the top.
@@ -1314,6 +1372,7 @@ mod tests {
             },
             lines: vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")],
             diff: None,
+            review: None,
         });
         narrow_app.view.follow = false;
         let mut narrow = Terminal::new(TestBackend::new(24, 12)).unwrap();
