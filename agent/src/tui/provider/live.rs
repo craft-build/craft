@@ -372,9 +372,11 @@ impl CraftProvider {
         // "provider/model" for pricing and the session header.
         let model_spec =
             |selection: &Selection| format!("{}/{}", selection.provider, selection.model);
-        let state = Arc::new(Mutex::new(
-            SessionState::linked().with_store(state_dir.as_ref(), &cwd, &model_spec(&selection)),
-        ));
+        let state = Arc::new(Mutex::new(SessionState::linked().with_store(
+            state_dir.as_ref(),
+            &cwd,
+            &model_spec(&selection),
+        )));
         let files: Files = Files::default();
         let (cancel_flag, _) = run::cancel_channel();
         let mut current_turn: Option<AbortHandle> = None;
@@ -426,6 +428,12 @@ impl CraftProvider {
             }
         };
         while let Some(cmd) = cmd_rx.recv().await {
+            // A turn that finished on its own leaves its handle behind;
+            // drop it so the turn-running guards (undo/compact/load)
+            // don't refuse forever after the first completed turn.
+            if current_turn.as_ref().is_some_and(AbortHandle::is_finished) {
+                current_turn = None;
+            }
             match cmd {
                 Command::SendMessage(text) => {
                     if text.trim().is_empty() {
@@ -502,8 +510,16 @@ impl CraftProvider {
                         });
                         continue;
                     }
-                    load_session(&state, &files, &id, state_dir.as_ref(), &cwd, &model_spec(&selection), &evt_tx)
-                        .await;
+                    load_session(
+                        &state,
+                        &files,
+                        &id,
+                        state_dir.as_ref(),
+                        &cwd,
+                        &model_spec(&selection),
+                        &evt_tx,
+                    )
+                    .await;
                 }
                 Command::Interrupt => {
                     interrupt(&mut current_turn);

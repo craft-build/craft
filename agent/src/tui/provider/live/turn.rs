@@ -651,7 +651,9 @@ mod tests {
     #[test]
     fn info_maps_to_a_neutral_notice() {
         let (renderer, mut rx) = renderer();
-        renderer.map(run::Event::Info("guardrail blocked read: no progress".into()));
+        renderer.map(run::Event::Info(
+            "guardrail blocked read: no progress".into(),
+        ));
         let (tone, text) = notice(&mut rx);
         assert_eq!(tone, Tone::Neutral);
         assert!(text.contains("guardrail blocked read"), "{text}");
