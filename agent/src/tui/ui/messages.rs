@@ -9,6 +9,7 @@ use ratatui::widgets::Paragraph;
 use super::theme;
 use crate::markdown::highlight::{Highlighter, SegmentColor, StyledSegment};
 use crate::tui::app::{App, DiffState, Message};
+use crate::tui::hyperlink;
 use crate::tui::provider::{LineKind, ToolKind};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
 
@@ -263,7 +264,11 @@ fn tool_block(
     hovered: bool,
     body_expanded: bool,
     width: usize,
-) -> (Vec<Line<'static>>, Option<usize>) {
+) -> (
+    Vec<Line<'static>>,
+    Option<usize>,
+    Option<hyperlink::Hyperlink>,
+) {
     // Hovered collapsible cards lift to a slightly lighter background.
     let card_bg = if hovered {
         theme::BG_OVERLAY
@@ -300,10 +305,28 @@ fn tool_block(
             ));
         }
     }
+    let prefix_w = spans_width(&header);
     header.push(Span::styled(
         tool_label(kind),
         Style::default().fg(theme::TEXT_SECONDARY).bg(card_bg),
     ));
+    // OSC-8 link target: the path text inside the header label. Columns
+    // count from the row start (marker + caret + label prefix). The row
+    // itself is filled in by the renderer once the segment is placed.
+    let link = match kind {
+        ToolKind::Read { path, .. } | ToolKind::Edit { path, .. } => {
+            hyperlink::file_uri(path).map(|uri| {
+                let prefix = prefix_w
+                    + if matches!(kind, ToolKind::Read { .. }) {
+                        cell_len("Read ")
+                    } else {
+                        cell_len("Edit ")
+                    };
+                hyperlink::Hyperlink::new(0, prefix as u16, (prefix + cell_len(path)) as u16, uri)
+            })
+        }
+        ToolKind::Grep { .. } | ToolKind::Bash { .. } => None,
+    };
     let blank = |lines: &mut Vec<Line<'static>>| lines.push(pad_row(Vec::new(), width, surf));
 
     // right-aligned badge / summary
@@ -331,7 +354,7 @@ fn tool_block(
     let expanded = !kind.collapsible() || !collapsed;
     if !expanded {
         blank(&mut lines); // bottom padding
-        return (lines, None);
+        return (lines, None, link);
     }
 
     fn gutter_span(nr: usize, w: usize, bg: ratatui::style::Color) -> Span<'static> {
@@ -548,7 +571,7 @@ fn tool_block(
     }
 
     blank(&mut lines); // bottom padding
-    (lines, notice_row)
+    (lines, notice_row, link)
 }
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
@@ -599,6 +622,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let mut msg_seg_start = Vec::with_capacity(app.conversation.messages.len());
     let mut tool_seg_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
     let mut notice_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
+    // (segment index, link) for card headers carrying an OSC-8 target;
+    // injected into the buffer after layout, once the row is known.
+    let mut card_links: Vec<(usize, hyperlink::Hyperlink)> = Vec::new();
     for (idx, msg) in app.conversation.messages.iter().enumerate() {
         msg_seg_start.push(app.view.segments.len());
         let is_user = matches!(msg, Message::User(_));
@@ -630,7 +656,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 let body_expanded = app.conversation.expanded_bodies.iter().any(|c| c == id);
                 let focused = app.conversation.focused == Some(idx);
                 let hovered = app.view.hover_tool == Some(idx);
-                let (lines, notice_row) = tool_block(
+                let (lines, notice_row, link) = tool_block(
                     kind,
                     id,
                     body,
@@ -644,6 +670,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 let seg = app.view.segments.len();
                 if let Some(row) = notice_row {
                     notice_seg_rows.push((idx, seg, row));
+                }
+                if let Some(hl) = link {
+                    card_links.push((seg, hl));
                 }
                 if kind.collapsible() {
                     tool_seg_ranges.push((
@@ -759,6 +788,37 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
+
+    // Rewrite the linked header cells in place: spans stayed plain text
+    // during layout, so wrap math is unaffected. Skipped under tmux, whose
+    // passthrough mangles OSC-8. The single-row guard mirrors the
+    // reference: a header is one pre-wrapped row, and column bounds keep
+    // any overflow from writing outside the viewport.
+    if !card_links.is_empty() && !hyperlink::is_muxed() {
+        for (seg, hl) in card_links {
+            // The header sits one row under the card's top-padding blank.
+            let doc = layout.doc_row(ScrollPos { seg, row: 1 });
+            // Skip rows scrolled out above (plain subtraction, not
+            // saturating) or pushed out below the viewport.
+            if doc < top_row {
+                continue;
+            }
+            let vis = (doc - top_row) as u16;
+            if vis >= inner.height {
+                continue;
+            }
+            if hl.col_start >= inner.width || hl.col_end > inner.width {
+                continue;
+            }
+            for col in hl.col_start..hl.col_end {
+                let cell = f
+                    .buffer_mut()
+                    .cell_mut((inner.x + col, inner.y + vis))
+                    .expect("col bounded by inner.width, vis by inner.height");
+                hyperlink::apply_to_cell(cell, &hl.uri);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -852,7 +912,8 @@ mod tests {
         let body: Vec<ToolLine> = (0..60)
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("line {i}")))
             .collect();
-        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let (lines, notice, _link) =
+            tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
         // 40 head lines kept; the notice names the hidden count and sits
         // just above the bottom padding row.
         assert_eq!(notice, Some(lines.len() - 2));
@@ -868,7 +929,8 @@ mod tests {
             "{text:?}"
         );
         // Expanded body renders everything, with a fold-back notice.
-        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, true, 80);
+        let (lines, notice, _link) =
+            tool_block(&kind, "t1", &body, None, false, false, false, true, 80);
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(
             text.iter().any(|l| l.contains("line 59")),
@@ -885,7 +947,8 @@ mod tests {
         let body: Vec<ToolLine> = (0..60)
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("out {i}")))
             .collect();
-        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let (lines, notice, _link) =
+            tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
         assert!(notice.is_some(), "tail-kept bodies still carry a notice");
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(text.iter().any(|l| l.contains("out 59")), "tail kept");
@@ -905,10 +968,146 @@ mod tests {
         let body: Vec<ToolLine> = (0..43)
             .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("l {i}")))
             .collect();
-        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let (lines, notice, _link) =
+            tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
         assert_eq!(notice, None, "3 hidden lines buy no notice");
         let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
         assert!(text.contains("l 42"), "full body rendered");
+    }
+
+    #[test]
+    fn read_and_edit_cards_carry_header_link() {
+        let kind = crate::tui::provider::ToolKind::Read {
+            path: "src/a.rs".into(),
+            summary: String::new(),
+        };
+        let body = vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")];
+        let (_, _, link) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        let hl = link.expect("read card carries a link");
+        assert!(hl.uri.starts_with("file://"), "{}", hl.uri);
+        // marker (1) + caret (2) + "Read " (5) precede the path text.
+        assert_eq!(hl.col_start, 8);
+        assert_eq!(hl.col_end, 8 + "src/a.rs".len() as u16);
+
+        let kind = crate::tui::provider::ToolKind::Edit {
+            path: "src/b.rs".into(),
+            summary: String::new(),
+        };
+        let (_, _, link) = tool_block(&kind, "t1", &body, None, false, true, false, false, 80);
+        assert!(link.is_some(), "collapsed edit card still links");
+    }
+
+    #[test]
+    fn bash_and_grep_cards_carry_no_link() {
+        for kind in [
+            crate::tui::provider::ToolKind::Bash { cmd: "ls".into() },
+            crate::tui::provider::ToolKind::Grep {
+                pattern: "x".into(),
+                summary: String::new(),
+            },
+        ] {
+            let body = vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")];
+            let (_, _, link) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+            assert!(link.is_none());
+        }
+    }
+
+    #[test]
+    fn render_injects_osc8_into_visible_header_and_skips_scrolled_out() {
+        use crate::tui::app::{App, Message};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        let path = std::env::temp_dir().join("osc8_probe.rs");
+        app.conversation.messages.push(Message::Tool {
+            id: "t1".into(),
+            kind: crate::tui::provider::ToolKind::Read {
+                path: path.display().to_string(),
+                summary: String::new(),
+            },
+            lines: vec![ToolLine::new(
+                crate::tui::provider::LineKind::Context,
+                "body",
+            )],
+            diff: None,
+        });
+        // Fill the document past the viewport so a scroll below the card
+        // survives the layout clamp instead of snapping back to the top.
+        for i in 0..15 {
+            app.conversation
+                .messages
+                .push(Message::Assistant(format!("filler {i}")));
+        }
+
+        app.view.follow = false;
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row_text: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        let header_row = row_text
+            .iter()
+            .find(|r| r.contains("Read "))
+            .expect("header rendered");
+        assert!(
+            header_row.contains("\u{1b}]8;;"),
+            "header row wrapped: {header_row:?}"
+        );
+        assert!(header_row.contains("file://"));
+        assert!(header_row.contains("\u{1b}]8;;\u{1b}\\"));
+
+        // Scroll the card fully above the viewport: no escapes anywhere.
+        // A fresh terminal, so stale cells from the first draw can't leak
+        // into the assertion (Paragraph only rewrites the rows it fills).
+        app.view.follow = false;
+        app.view.scroll = crate::tui::ui::scrollback::ScrollPos { seg: 1, row: 0 };
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let any_osc8 = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .any(|(x, y)| buf[(x, y)].symbol().contains("\u{1b}]8;;"));
+        assert!(!any_osc8, "scrolled-out link must not be injected");
+
+        // A link whose column range runs past the viewport is skipped, but
+        // its visible text must survive untouched (spans render first;
+        // injection only adds escapes to cells it wraps).
+        let mut narrow_app = App::new();
+        let long = std::env::temp_dir().join("osc8_probe.rs");
+        narrow_app.conversation.messages.push(Message::Tool {
+            id: "t1".into(),
+            kind: crate::tui::provider::ToolKind::Read {
+                path: format!("{}?padpadpadpadpad", long.display()),
+                summary: String::new(),
+            },
+            lines: vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")],
+            diff: None,
+        });
+        narrow_app.view.follow = false;
+        let mut narrow = Terminal::new(TestBackend::new(24, 12)).unwrap();
+        narrow
+            .draw(|f| super::render(f, &mut narrow_app, f.area()))
+            .unwrap();
+        let buf = narrow.backend().buffer();
+        let screen: String = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(
+            screen.contains("Read ") && screen.contains("/var/folders"),
+            "off-screen link's visible text dropped: {screen:?}"
+        );
+        assert!(!screen.contains("\u{1b}]8;;"));
     }
 
     fn render(text: &str, width: usize) -> Vec<String> {

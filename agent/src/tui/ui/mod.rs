@@ -95,7 +95,11 @@ fn snapshot_frame(f: &mut Frame, app: &mut App) {
     app.view.frame_text = (0..area.height)
         .map(|r| {
             (0..area.width)
-                .map(|c| buf.cell((c, r)).map(|cell| cell.symbol()).unwrap_or(" "))
+                .map(|c| {
+                    buf.cell((c, r))
+                        .map(|cell| crate::tui::hyperlink::strip_osc8(cell.symbol()))
+                        .unwrap_or_else(|| " ".to_string())
+                })
                 .collect()
         })
         .collect();

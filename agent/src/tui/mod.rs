@@ -5,6 +5,7 @@
 
 mod app;
 mod composer;
+mod hyperlink;
 mod modals;
 pub mod provider;
 mod repaint;
