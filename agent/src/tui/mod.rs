@@ -134,6 +134,10 @@ async fn drive<P: Provider>(
             // editor left in the diff buffers.
             terminal.borrow_mut().clear().map_err(io::Error::other)
         },
+        || {
+            suspend_terminal(&mut terminal.borrow_mut());
+            Ok(())
+        },
     )
     .await;
 
@@ -147,6 +151,13 @@ async fn drive<P: Provider>(
 // ---------------------------------------------------------------------------
 // $EDITOR handoff (Alt-O)
 // ---------------------------------------------------------------------------
+
+/// True for the Ctrl-Z chord that suspends the process (Unix only). Like
+/// the reference, this binding always wins: it is checked before any modal
+/// or composer handling, and it is not remappable.
+fn is_suspend_key(key: &KeyEvent) -> bool {
+    cfg!(unix) && key.code == KeyCode::Char('z') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
 
 /// True for the Alt-O chord that hands the composer text to $VISUAL/$EDITOR.
 fn is_open_editor_key(key: &KeyEvent) -> bool {
@@ -254,6 +265,30 @@ fn open_in_editor(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Teardown, SIGTSTP, resume: the classic terminal-app suspend cycle. The
+/// foreground job gets the TTY back, the process parks until `fg`, and the
+/// alternate screen is rebuilt from scratch afterwards. Ported from the
+/// reference `terminal::suspend`.
+fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    disable_raw_mode().ok();
+    let _ = io::stdout()
+        .execute(DisableBracketedPaste)
+        .and_then(|o| o.execute(DisableMouseCapture))
+        .and_then(|o| o.execute(LeaveAlternateScreen));
+    #[cfg(unix)]
+    unsafe {
+        libc::raise(libc::SIGTSTP);
+    }
+    enable_raw_mode().ok();
+    let _ = io::stdout()
+        .execute(EnterAlternateScreen)
+        .and_then(|o| o.execute(EnableMouseCapture))
+        .and_then(|o| o.execute(EnableBracketedPaste));
+    // The shell and any job-control echo wrote to the primary screen while
+    // we were away; the alternate screen's diff buffers are stale.
+    let _ = terminal.clear();
+}
+
 /// The dirty-flag event loop: paint only when a frame is owed, and sleep one
 /// cadence frame per turn instead of a fixed interval, so a spinner costs
 /// ~12 paints a second and a settled session none.
@@ -268,6 +303,7 @@ async fn run_loop(
     mut evt_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut paint: impl FnMut(&mut App) -> io::Result<()>,
     mut edit_composer: impl FnMut(&mut App) -> io::Result<()>,
+    mut suspend_ui: impl FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     let mut dirty = Dirty::YES;
     // A closed provider channel just stops being selected on; only the input
@@ -286,7 +322,13 @@ async fn run_loop(
                         // Alt-O hands the composer to $EDITOR; it must run
                         // here, where the terminal is reachable to suspend
                         // and restore the UI around the child process.
-                        if is_open_editor_key(&key)
+                    // Ctrl-Z suspends the process; it must run here, where
+                    // the terminal is reachable to tear down and restore the
+                    // UI around SIGTSTP. It wins over every other handler,
+                    // including open modals (reference semantics).
+                    if is_suspend_key(&key) {
+                        suspend_ui()?;
+                    } else if is_open_editor_key(&key)
                             && matches!(app.modal, modals::Modal::None)
                         {
                             if let Err(e) = edit_composer(app) {
@@ -387,10 +429,21 @@ mod tests {
         input_rx: mpsc::UnboundedReceiver<Event>,
         paints: Arc<AtomicUsize>,
     ) -> tokio::task::JoinHandle<io::Result<()>> {
+        spawn_loop_with_suspend(app, cmd_tx, input_rx, paints, Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn spawn_loop_with_suspend(
+        app: App,
+        cmd_tx: &mpsc::UnboundedSender<Command>,
+        input_rx: mpsc::UnboundedReceiver<Event>,
+        paints: Arc<AtomicUsize>,
+        suspends: Arc<AtomicUsize>,
+    ) -> tokio::task::JoinHandle<io::Result<()>> {
         let (_evt_tx, evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let cmd_tx = cmd_tx.clone();
         tokio::spawn(async move {
             let mut app = app;
+            let suspends = suspends.clone();
             run_loop(
                 &mut app,
                 &cmd_tx,
@@ -399,6 +452,10 @@ mod tests {
                 counting_paint(paints),
                 // The test editor stub: refuse to edit anything.
                 |_| Err(io::Error::other("no editor in tests")),
+                move || {
+                    suspends.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
             )
             .await
         })
@@ -486,6 +543,7 @@ mod tests {
                         .map_err(|e| match e {})
                 },
                 |_| Err(io::Error::other("no editor in tests")),
+                || Ok(()),
             )
             .await
         });
@@ -504,6 +562,79 @@ mod tests {
 
         quit(&input_tx);
         task.await.unwrap().unwrap();
+    }
+
+    /// Ctrl-Z suspends instead of reaching the composer, and the session
+    /// survives the resume.
+    #[tokio::test]
+    async fn ctrl_z_suspends_without_quitting_or_editing_composer() {
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<Event>();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<Command>();
+        let mut app = App::new();
+        app.composer.set_text("draft".to_string());
+        let suspends = Arc::new(AtomicUsize::new(0));
+        let paints = Arc::new(AtomicUsize::new(0));
+        let task = spawn_loop_with_suspend(app, &cmd_tx, input_rx, paints, Arc::clone(&suspends));
+
+        input_tx.send(key(KeyCode::Char('z'), true)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            suspends.load(Ordering::SeqCst),
+            1,
+            "Ctrl-Z ran the suspend hook"
+        );
+
+        // Still running: Ctrl-C needs its full tri-state (input is intact).
+        quit(&input_tx);
+        let _ = task.await;
+    }
+
+    /// Reference semantics: suspend always wins, even under an open modal
+    /// (the palette would otherwise own the keyboard).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ctrl_z_wins_over_open_modal() {
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<Event>();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<Command>();
+        let mut app = App::new();
+        app.modal = modals::Modal::Palette {
+            query: String::new(),
+            selected: 0,
+        };
+        let suspends = Arc::new(AtomicUsize::new(0));
+        let paints = Arc::new(AtomicUsize::new(0));
+        let task = spawn_loop_with_suspend(app, &cmd_tx, input_rx, paints, Arc::clone(&suspends));
+
+        input_tx.send(key(KeyCode::Char('z'), true)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            suspends.load(Ordering::SeqCst),
+            1,
+            "suspend fires before modal key handling"
+        );
+
+        // Under the palette Ctrl-C is captured, so just drop the loop.
+        task.abort();
+    }
+
+    #[test]
+    fn only_ctrl_z_suspends() {
+        assert!(is_suspend_key(&KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_suspend_key(&KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_suspend_key(&KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::ALT
+        )));
+        assert!(!is_suspend_key(&KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL
+        )));
     }
 
     #[test]
