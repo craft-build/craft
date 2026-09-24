@@ -462,7 +462,7 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
         .find_map(|m| match m {
             crate::tui::app::Message::Tool {
                 id: mid,
-                kind: crate::tui::provider::ToolKind::Edit { path },
+                kind: crate::tui::provider::ToolKind::Edit { path, .. },
                 ..
             } if mid == id => Some(path.clone()),
             _ => None,

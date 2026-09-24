@@ -110,7 +110,10 @@ fn edit_call(id: &str) -> ToolCallData {
     ToolCallData {
         id: id.into(),
         awaiting_approval: true,
-        kind: ToolKind::Edit { path: FILE.into() },
+        kind: ToolKind::Edit {
+            path: FILE.into(),
+            summary: String::new(),
+        },
         lines: [
             (Context, "export async function refreshToken(old: string) {"),
             (

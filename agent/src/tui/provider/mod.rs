@@ -108,7 +108,7 @@ pub enum ToolKind {
     Read { path: String, summary: String },
     Grep { pattern: String, summary: String },
     Bash { cmd: String },
-    Edit { path: String },
+    Edit { path: String, summary: String },
 }
 
 impl ToolKind {
@@ -119,6 +119,27 @@ impl ToolKind {
             ToolKind::Read { .. } | ToolKind::Grep { .. } | ToolKind::Edit { .. }
         )
     }
+
+    /// Body-truncation hints for the card, ported from the reference's
+    /// `RenderHintsRegistry`: how many body lines an unexpanded card shows
+    /// and which end survives. Command-style outputs (Bash cards also cover
+    /// generic tools) keep the tail — the interesting part of a log is its
+    /// end; file-shaped tools keep the head.
+    pub fn body_hints(&self) -> (usize, Keep) {
+        const HEAD_CAP: usize = 40;
+        const TAIL_CAP: usize = 30;
+        match self {
+            ToolKind::Bash { .. } => (TAIL_CAP, Keep::Tail),
+            _ => (HEAD_CAP, Keep::Head),
+        }
+    }
+}
+
+/// Which end of a long tool output to keep when truncating its card body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    Head,
+    Tail,
 }
 
 #[derive(Clone, Debug)]

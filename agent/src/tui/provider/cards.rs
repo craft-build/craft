@@ -64,6 +64,68 @@ pub(super) fn touched_files(files: &Files) -> Vec<TouchedFile> {
         .collect()
 }
 
+/// Header annotation for a read result: `N of M lines` when the tool's
+/// "Truncated lines: a-b" marker reports the file total, `N lines` otherwise.
+/// Counts only content rows (`"<nr>: <text>"`), not trailing markers or
+/// discovered-instruction blocks.
+fn read_annotation(text: &str) -> String {
+    let shown = text
+        .lines()
+        .take_while(|l| !l.is_empty())
+        .filter(|l| {
+            l.split_once(": ")
+                .is_some_and(|(nr, _)| !nr.is_empty() && nr.chars().all(|c| c.is_ascii_digit()))
+        })
+        .count();
+    let total = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Truncated lines: "))
+        .and_then(|l| l.split('-').nth(1))
+        .and_then(|m| m.split('.').next())
+        .and_then(|m| m.trim().parse::<usize>().ok());
+    match total {
+        Some(total) if total > shown => format!("{shown} of {total} lines"),
+        _ => format!("{shown} lines"),
+    }
+}
+
+/// Header annotation for a grep result: `N matches in M files`, counting
+/// `path:` headers and indented `<line>: <text>` match rows (the tool's
+/// bracketed notice rows do not count as matches).
+fn grep_annotation(text: &str) -> String {
+    let mut matches = 0usize;
+    let mut files = 0usize;
+    let mut truncated = false;
+    for line in text.lines() {
+        if line.ends_with(':') && !line.starts_with(' ') {
+            files += 1;
+        } else if let Some(rest) = line.strip_prefix("  ") {
+            let is_match = rest
+                .split_once(": ")
+                .is_some_and(|(nr, _)| !nr.is_empty() && nr.chars().all(|c| c.is_ascii_digit()));
+            if is_match {
+                matches += 1;
+            }
+        } else if line.starts_with("[Search truncated") {
+            truncated = true;
+        }
+    }
+    let f = if files == 1 { "file" } else { "files" };
+    let m = if matches == 1 { "match" } else { "matches" };
+    let suffix = if truncated { " (truncated)" } else { "" };
+    format!("{matches} {m} in {files} {f}{suffix}")
+}
+
+/// Header annotation for a write result: bytes of written content.
+fn write_annotation(arguments: &serde_json::Value) -> String {
+    let bytes = arguments
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(str::len)
+        .unwrap_or(0);
+    format!("{bytes} bytes")
+}
+
 /// Card emitted when a tool call starts: kind from the tool name and its
 /// most descriptive string argument; the body stays empty until the result
 /// arrives.
@@ -78,7 +140,10 @@ pub(super) fn tool_head(name: &str, arguments: &serde_json::Value) -> ToolKind {
             pattern: detail,
             summary: String::new(),
         },
-        name if EDIT_TOOLS.contains(&name) => ToolKind::Edit { path: detail },
+        name if EDIT_TOOLS.contains(&name) => ToolKind::Edit {
+            path: detail,
+            summary: String::new(),
+        },
         other => ToolKind::Bash {
             cmd: format!("{other} {detail}").trim().to_string(),
         },
@@ -111,11 +176,10 @@ pub(super) fn tool_done(
     let (kind, lines, touched) = match name {
         "read" => {
             let lines = context_lines(&text);
-            let summary = format!("{} lines", lines.len());
             (
                 ToolKind::Read {
                     path: detail,
-                    summary,
+                    summary: read_annotation(&text),
                 },
                 lines,
                 None,
@@ -123,26 +187,37 @@ pub(super) fn tool_done(
         }
         "grep" => {
             let lines = context_lines(&text);
-            let summary = format!("{} lines of output", lines.len());
             (
                 ToolKind::Grep {
                     pattern: detail,
-                    summary,
+                    summary: grep_annotation(&text),
                 },
                 lines,
                 None,
             )
         }
+        "write" => (
+            ToolKind::Edit {
+                path: detail.clone(),
+                summary: write_annotation(arguments),
+            },
+            diff_lines(&text),
+            if detail.is_empty() || result.is_error {
+                None
+            } else {
+                Some((detail, FileStatus::Created))
+            },
+        ),
         tool if EDIT_TOOLS.contains(&tool) => {
             let status = match tool {
                 "delete" => FileStatus::Deleted,
-                "write" => FileStatus::Created,
                 "move" => FileStatus::Created,
                 _ => FileStatus::Modified,
             };
             (
                 ToolKind::Edit {
                     path: detail.clone(),
+                    summary: String::new(),
                 },
                 diff_lines(&text),
                 if detail.is_empty() || result.is_error {
@@ -356,6 +431,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn read_annotation_counts_content_rows_and_totals() {
+        let full = "1: a\n2: b\n3: c";
+        assert_eq!(read_annotation(full), "3 lines");
+        let truncated = "1: a\n2: b\n\n...\n\nTruncated lines: 3-90. Use offset=3 to read further.";
+        assert_eq!(read_annotation(truncated), "2 of 90 lines");
+    }
+
+    #[test]
+    fn grep_annotation_counts_matches_and_files() {
+        let one = "src/a.rs:\n  12: fn a() {}\n  30: fn b() {}";
+        assert_eq!(grep_annotation(one), "2 matches in 1 file");
+        let two = "src/a.rs:\n  12: x\n\nsrc/b.rs:\n  5: y\n  [line truncated; excerpt starts at byte column 1; match at byte column 1]";
+        assert_eq!(grep_annotation(two), "2 matches in 2 files");
+        let truncated = "src/a.rs:\n  12: x\n\n[Search truncated: more matches may exist.]";
+        assert_eq!(grep_annotation(truncated), "1 match in 1 file (truncated)");
+    }
+
+    #[test]
+    fn write_done_annotates_bytes() {
+        let result = history::ToolResult::text("t1", "write", "+new");
+        let done = tool_done(
+            "t1".into(),
+            "write",
+            &serde_json::json!({"content": "hello", "path": "a.txt"}),
+            &result,
+        );
+        assert!(matches!(&done.card.kind, ToolKind::Edit { summary, .. } if summary == "5 bytes"));
+    }
+
+    #[test]
+    fn grep_done_uses_structured_summary() {
+        let text = "src/a.rs:\n  12: fn a() {}";
+        let result = history::ToolResult::text("t1", "grep", text);
+        let done = tool_done(
+            "t1".into(),
+            "grep",
+            &serde_json::json!({"pattern": "fn"}),
+            &result,
+        );
+        assert!(
+            matches!(&done.card.kind, ToolKind::Grep { summary, .. } if summary == "1 match in 1 file")
+        );
+    }
+
+    #[test]
     fn first_string_argument_prefers_path_over_content() {
         let args = serde_json::json!({
             "content": "fn main() {}",
@@ -379,7 +499,7 @@ mod tests {
             &serde_json::json!({"content": "x".repeat(100), "path": "a.txt"}),
             &result,
         );
-        assert!(matches!(done.card.kind, ToolKind::Edit { ref path } if path == "a.txt"));
+        assert!(matches!(done.card.kind, ToolKind::Edit { ref path, .. } if path == "a.txt"));
         assert_eq!(done.touched.map(|(p, _)| p).as_deref(), Some("a.txt"));
     }
     #[test]

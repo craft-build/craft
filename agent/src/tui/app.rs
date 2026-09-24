@@ -102,6 +102,8 @@ impl Message {
 pub struct Conversation {
     pub messages: Vec<Message>,
     pub collapsed: Vec<String>, // tool ids currently collapsed
+    /// Tool ids whose bodies were expanded past the truncation cap.
+    pub expanded_bodies: Vec<String>,
     pub focused: Option<usize>, // message index of focused tool block
     /// True while a streamed [`Message::Assistant`] is still being appended to.
     assistant_open: bool,
@@ -114,6 +116,7 @@ impl Conversation {
         Conversation {
             messages: Vec::new(),
             collapsed: Vec::new(),
+            expanded_bodies: Vec::new(),
             focused: None,
             assistant_open: false,
             thinking_open: false,
@@ -229,10 +232,21 @@ pub struct ViewModel {
     /// Screen rects of collapsible tool cards in the last frame: (message
     /// index, rect). Used for hover highlight and click-to-toggle.
     pub tool_regions: Vec<(usize, Rect)>,
-    /// Tool card under the pointer (hover state).
+    /// One-row screen rects of "click to expand" notice rows: (message
+    /// index, rect). Checked before card regions on click.
+    pub notice_regions: Vec<(usize, Rect)>,
     pub hover_tool: Option<usize>,
-    /// Card the current click started on; a press without drag toggles it.
-    pub pending_click: Option<usize>,
+    /// Click target the current press started on; a press without drag
+    /// activates it.
+    pub pending_click: Option<PendingClick>,
+}
+
+/// What a card press activates: toggling the whole card's collapse or just
+/// its body's truncation.
+#[derive(Clone, Copy, Debug)]
+pub enum PendingClick {
+    Card(usize),
+    Notice(usize),
 }
 
 impl ViewModel {
@@ -249,6 +263,7 @@ impl ViewModel {
             composer_area: Rect::default(),
             selection: None,
             tool_regions: Vec::new(),
+            notice_regions: Vec::new(),
             hover_tool: None,
             pending_click: None,
         }
@@ -493,10 +508,12 @@ impl App {
     fn reset_conversation(&mut self) {
         self.conversation.messages.clear();
         self.conversation.collapsed.clear();
+        self.conversation.expanded_bodies.clear();
         self.conversation.focused = None;
         self.view.hover_tool = None;
         self.view.pending_click = None;
         self.view.tool_regions.clear();
+        self.view.notice_regions.clear();
         self.modal = Modal::None;
         self.view.scroll = ScrollPos::default();
         self.view.segments.clear();
@@ -673,6 +690,32 @@ impl App {
             .map(|(i, _)| *i)
     }
 
+    /// "Click to expand" notice row (message index) at a screen position.
+    fn notice_at(&self, row: u16, col: u16) -> Option<usize> {
+        self.view
+            .notice_regions
+            .iter()
+            .find(|(_, r)| rect_contains(*r, row, col))
+            .map(|(i, _)| *i)
+    }
+
+    /// Toggle a card body between truncated and fully expanded.
+    fn toggle_body(&mut self, idx: usize) {
+        if let Some(Message::Tool { id, .. }) = self.conversation.messages.get(idx) {
+            let id = id.clone();
+            if let Some(pos) = self
+                .conversation
+                .expanded_bodies
+                .iter()
+                .position(|c| c == &id)
+            {
+                self.conversation.expanded_bodies.remove(pos);
+            } else {
+                self.conversation.expanded_bodies.push(id);
+            }
+        }
+    }
+
     fn toggle_tool(&mut self, idx: usize) {
         if let Some(Message::Tool { id, kind, .. }) = self.conversation.messages.get(idx)
             && kind.collapsible()
@@ -710,7 +753,13 @@ impl App {
                         head: pos,
                         region,
                     });
-                self.view.pending_click = self.tool_at(mouse.row, mouse.column);
+                self.view.pending_click = self
+                    .notice_at(mouse.row, mouse.column)
+                    .map(PendingClick::Notice)
+                    .or_else(|| {
+                        self.tool_at(mouse.row, mouse.column)
+                            .map(PendingClick::Card)
+                    });
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 // A drag is a text selection, not a card press.
@@ -722,10 +771,15 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 let no_drag = self.view.selection.map(|s| s.is_empty()).unwrap_or(true);
                 match (self.view.pending_click.take(), no_drag) {
-                    // Press without drag on a card: toggle it.
-                    (Some(idx), true) => {
+                    // Press without drag on a card: toggle it. A notice-row
+                    // press toggles only the body's truncation.
+                    (Some(PendingClick::Card(idx)), true) => {
                         self.view.selection = None;
                         self.toggle_tool(idx);
+                    }
+                    (Some(PendingClick::Notice(idx)), true) => {
+                        self.view.selection = None;
+                        self.toggle_body(idx);
                     }
                     _ => self.copy_selection(),
                 }
@@ -1357,6 +1411,51 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 4, 20));
         // Still collapsed: the drag became a selection, not a card press.
         assert!(app.conversation.collapsed.contains(&"r1".to_string()));
+    }
+
+    /// A long bash body truncates with a notice row; clicking the notice
+    /// expands the body in place, and clicking the fold-back notice that
+    /// replaces it re-truncates. The card's own collapse is untouched.
+    #[test]
+    fn click_notice_row_expands_and_retruncates_body() {
+        let mut app = App::new();
+        let lines: Vec<ToolLine> = (0..60)
+            .map(|i| ToolLine {
+                kind: LineKind::Context,
+                text: format!("out {i}"),
+                ..Default::default()
+            })
+            .collect();
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "b1".into(),
+            kind: ToolKind::Bash { cmd: "make".into() },
+            lines,
+            awaiting_approval: false,
+        }));
+        draw_app(&mut app, 80, 24);
+        let press = |app: &mut App, row, col| {
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), row, col));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), row, col));
+        };
+        let notice = |app: &App| app.view.notice_regions.first().copied();
+        let (idx, rect) = notice(&app).expect("truncated body carries a notice");
+        press(&mut app, rect.y, rect.x + 4);
+        assert!(
+            app.conversation.expanded_bodies.iter().any(|c| c == "b1"),
+            "notice press expands the body"
+        );
+        assert!(
+            app.conversation.collapsed.is_empty(),
+            "card collapse untouched"
+        );
+        draw_app(&mut app, 80, 24);
+        let (_, rect) = notice(&app).expect("expanded body carries a fold-back notice");
+        press(&mut app, rect.y, rect.x + 4);
+        assert!(
+            app.conversation.expanded_bodies.is_empty(),
+            "fold-back press re-truncates"
+        );
+        let _ = idx;
     }
 
     fn usage_rows() -> Vec<UsageRow> {

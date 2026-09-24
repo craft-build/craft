@@ -196,6 +196,7 @@ mod tests {
             awaiting_approval: true,
             kind: ToolKind::Edit {
                 path: "src/auth/refresh.ts".into(),
+                summary: String::new(),
             },
             lines: vec![
                 ToolLine {

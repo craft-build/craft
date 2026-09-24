@@ -160,13 +160,15 @@ fn tool_label(kind: &ToolKind) -> String {
         ToolKind::Read { path, .. } => format!("Read {path}"),
         ToolKind::Grep { pattern, .. } => format!("Grep \"{pattern}\""),
         ToolKind::Bash { cmd } => cmd.clone(),
-        ToolKind::Edit { path } => format!("Edit {path}"),
+        ToolKind::Edit { path, .. } => format!("Edit {path}"),
     }
 }
 
 fn tool_summary(kind: &ToolKind) -> String {
     match kind {
-        ToolKind::Read { summary, .. } | ToolKind::Grep { summary, .. } => summary.clone(),
+        ToolKind::Read { summary, .. }
+        | ToolKind::Grep { summary, .. }
+        | ToolKind::Edit { summary, .. } => summary.clone(),
         _ => String::new(),
     }
 }
@@ -246,6 +248,10 @@ fn styled_diff_spans(
     out
 }
 
+/// Bodies hiding fewer lines than this render in full; a notice for a
+/// couple of hidden lines buys nothing.
+const MIN_HIDDEN_LINES: usize = 5;
+
 #[allow(clippy::too_many_arguments)]
 fn tool_block(
     kind: &ToolKind,
@@ -255,8 +261,9 @@ fn tool_block(
     focused: bool,
     collapsed: bool,
     hovered: bool,
+    body_expanded: bool,
     width: usize,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Option<usize>) {
     // Hovered collapsible cards lift to a slightly lighter background.
     let card_bg = if hovered {
         theme::BG_OVERLAY
@@ -324,7 +331,7 @@ fn tool_block(
     let expanded = !kind.collapsible() || !collapsed;
     if !expanded {
         blank(&mut lines); // bottom padding
-        return lines;
+        return (lines, None);
     }
 
     fn gutter_span(nr: usize, w: usize, bg: ratatui::style::Color) -> Span<'static> {
@@ -377,8 +384,49 @@ fn tool_block(
         Line::from(spans)
     }
 
-    // --- body rows ---
+    // --- body truncation (ported from the reference's tool display) ---
     let indent = " ".repeat(BODY_INDENT);
+    let (cap, keep) = kind.body_hints();
+    let hidden = body.len().saturating_sub(cap);
+    let truncating = !body_expanded && hidden >= MIN_HIDDEN_LINES;
+    let (shown, notice_before) = if truncating {
+        match keep {
+            crate::tui::provider::Keep::Head => (&body[..cap], false),
+            crate::tui::provider::Keep::Tail => (&body[body.len() - cap..], true),
+        }
+    } else {
+        (body, false)
+    };
+    let notice_text = if truncating {
+        Some(format!("\u{2026} ({hidden} lines) click to expand"))
+    } else if body_expanded && body.len() > cap {
+        // The expanded body keeps a row to fold it back down.
+        Some("\u{2026} click to collapse".to_string())
+    } else {
+        None
+    };
+    let mut notice_row: Option<usize> = None;
+    let mut push_notice = |lines: &mut Vec<Line<'static>>| {
+        if let Some(text) = &notice_text {
+            notice_row = Some(lines.len());
+            lines.push(pad_row(
+                vec![
+                    Span::styled(indent.clone(), surf),
+                    Span::styled(
+                        text.clone(),
+                        Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+                    ),
+                ],
+                width,
+                surf,
+            ));
+        }
+    };
+    if notice_before {
+        push_notice(&mut lines);
+    }
+
+    // --- body rows ---
     let is_edit = matches!(kind, ToolKind::Edit { .. });
     let gutter_w = if is_edit {
         body.iter()
@@ -393,13 +441,13 @@ fn tool_block(
     };
     let mut hl = if is_edit {
         match kind {
-            ToolKind::Edit { path } => Some(Highlighter::for_path(path)),
+            ToolKind::Edit { path, .. } => Some(Highlighter::for_path(path)),
             _ => None,
         }
     } else {
         None
     };
-    for ln in body {
+    for ln in shown {
         let row = match ln.kind {
             LineKind::Gap if is_edit => pad_row(
                 vec![
@@ -469,6 +517,10 @@ fn tool_block(
         lines.push(row);
     }
 
+    if !notice_before {
+        push_notice(&mut lines);
+    }
+
     // --- approve / reject actions for pending diffs ---
     if diff == Some(DiffState::Pending) {
         let hint_fg = if focused {
@@ -496,7 +548,7 @@ fn tool_block(
     }
 
     blank(&mut lines); // bottom padding
-    lines
+    (lines, notice_row)
 }
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
@@ -546,6 +598,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut msg_seg_start = Vec::with_capacity(app.conversation.messages.len());
     let mut tool_seg_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
+    let mut notice_seg_rows: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, seg, row)
     for (idx, msg) in app.conversation.messages.iter().enumerate() {
         msg_seg_start.push(app.view.segments.len());
         let is_user = matches!(msg, Message::User(_));
@@ -574,9 +627,24 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 diff,
             } => {
                 let collapsed = app.conversation.collapsed.iter().any(|c| c == id);
+                let body_expanded = app.conversation.expanded_bodies.iter().any(|c| c == id);
                 let focused = app.conversation.focused == Some(idx);
                 let hovered = app.view.hover_tool == Some(idx);
-                let lines = tool_block(kind, id, body, *diff, focused, collapsed, hovered, width);
+                let (lines, notice_row) = tool_block(
+                    kind,
+                    id,
+                    body,
+                    *diff,
+                    focused,
+                    collapsed,
+                    hovered,
+                    body_expanded,
+                    width,
+                );
+                let seg = app.view.segments.len();
+                if let Some(row) = notice_row {
+                    notice_seg_rows.push((idx, seg, row));
+                }
                 if kind.collapsible() {
                     tool_seg_ranges.push((
                         idx,
@@ -666,6 +734,29 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    // Visible one-row rects of "click to expand" notice rows, addressed the
+    // same way as card regions so they track the scroll position.
+    app.view.notice_regions = notice_seg_rows
+        .iter()
+        .filter_map(|&(idx, seg, row)| {
+            let vis = layout
+                .doc_row(ScrollPos {
+                    seg,
+                    row: row as u16,
+                })
+                .saturating_sub(top_row) as u16;
+            (vis < inner.height).then_some((
+                idx,
+                Rect {
+                    x: inner.x,
+                    y: inner.y + vis,
+                    width: inner.width,
+                    height: 1,
+                },
+            ))
+        })
+        .collect();
+
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
 }
@@ -685,6 +776,7 @@ mod tests {
     fn edit_card_renders_gutter_signs_gap_and_emphasis() {
         let kind = crate::tui::provider::ToolKind::Edit {
             path: "src/a.rs".into(),
+            summary: String::new(),
         };
         let body = vec![
             ToolLine {
@@ -707,7 +799,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let lines = tool_block(&kind, "t1", &body, None, false, false, false, 80);
+        let lines = tool_block(&kind, "t1", &body, None, false, false, false, false, 80).0;
         let joined: Vec<String> = lines.iter().map(line_text).collect();
         // Numbered gutter on removed/context lines, blank on added.
         assert!(
@@ -734,10 +826,11 @@ mod tests {
     fn edit_card_collapses_to_header_only() {
         let kind = crate::tui::provider::ToolKind::Edit {
             path: "src/a.rs".into(),
+            summary: String::new(),
         };
         let body = vec![ToolLine::new(crate::tui::provider::LineKind::Add, "x")];
-        let expanded = tool_block(&kind, "t1", &body, None, false, false, false, 80);
-        let collapsed = tool_block(&kind, "t1", &body, None, false, true, false, 80);
+        let expanded = tool_block(&kind, "t1", &body, None, false, false, false, false, 80).0;
+        let collapsed = tool_block(&kind, "t1", &body, None, false, true, false, false, 80).0;
         assert!(expanded.len() > collapsed.len());
         let header: String = collapsed[1]
             .spans
@@ -748,6 +841,71 @@ mod tests {
         assert!(!header.contains("+ x"));
         let collapsed_text: String = collapsed.iter().map(line_text).collect();
         assert!(!collapsed_text.contains("+ x"));
+    }
+
+    #[test]
+    fn long_head_kept_body_truncates_with_notice() {
+        let kind = crate::tui::provider::ToolKind::Read {
+            path: "big.txt".into(),
+            summary: String::new(),
+        };
+        let body: Vec<ToolLine> = (0..60)
+            .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("line {i}")))
+            .collect();
+        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        // 40 head lines kept; the notice names the hidden count and sits
+        // just above the bottom padding row.
+        assert_eq!(notice, Some(lines.len() - 2));
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(text.iter().any(|l| l.contains("line 39")), "head kept");
+        assert!(
+            !text.iter().any(|l| l.contains("line 40")),
+            "line past the cap hidden"
+        );
+        assert!(
+            text.iter()
+                .any(|l| l.contains("\u{2026} (20 lines) click to expand")),
+            "{text:?}"
+        );
+        // Expanded body renders everything, with a fold-back notice.
+        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, true, 80);
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(text.iter().any(|l| l.contains("line 59")), "full body rendered");
+        assert!(text[notice.unwrap()].contains("click to collapse"));
+    }
+
+    #[test]
+    fn bash_body_keeps_the_tail() {
+        let kind = crate::tui::provider::ToolKind::Bash {
+            cmd: "cargo test".into(),
+        };
+        let body: Vec<ToolLine> = (0..60)
+            .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("out {i}")))
+            .collect();
+        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        assert!(notice.is_some(), "tail-kept bodies still carry a notice");
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(text.iter().any(|l| l.contains("out 59")), "tail kept");
+        assert!(!text.iter().any(|l| l.contains("out 0")), "head hidden");
+        // The notice sits above the kept tail.
+        let notice_idx = notice.unwrap();
+        assert!(text[notice_idx].contains("click to expand"));
+        assert!(text[notice_idx + 1].contains("out 30"));
+    }
+
+    #[test]
+    fn bodies_hiding_too_few_lines_render_in_full() {
+        let kind = crate::tui::provider::ToolKind::Read {
+            path: "small.txt".into(),
+            summary: String::new(),
+        };
+        let body: Vec<ToolLine> = (0..43)
+            .map(|i| ToolLine::new(crate::tui::provider::LineKind::Context, format!("l {i}")))
+            .collect();
+        let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, false, 80);
+        assert_eq!(notice, None, "3 hidden lines buy no notice");
+        let text: String = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("l 42"), "full body rendered");
     }
 
     fn render(text: &str, width: usize) -> Vec<String> {
