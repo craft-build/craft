@@ -7,6 +7,7 @@ mod app;
 mod composer;
 mod hyperlink;
 mod modals;
+mod notify;
 pub mod provider;
 mod repaint;
 mod selection;
@@ -18,8 +19,8 @@ use std::path::Path;
 
 use crossterm::ExecutableCommand;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -29,7 +30,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use app::App;
-use provider::{AgentEvent, Command, Provider};
+use provider::{AgentEvent, Command, Provider, Status};
 use repaint::{Dirty, IDLE_POLL};
 
 /// Run the terminal UI against `provider` until the user quits.
@@ -37,11 +38,13 @@ pub async fn run<P: Provider>(provider: P) -> io::Result<()> {
     enable_raw_mode()?;
     // Mouse capture: terminals then show the standard arrow pointer on hover
     // instead of the I-beam text cursor. Bracketed paste: multi-line pastes
-    // arrive as one Paste event instead of per-line Enter keypresses.
+    // arrive as one Paste event instead of per-line Enter keypresses. Focus
+    // change: bell notifications only fire when the user is not watching.
     io::stdout()
         .execute(EnterAlternateScreen)?
         .execute(EnableMouseCapture)?
-        .execute(EnableBracketedPaste)?;
+        .execute(EnableBracketedPaste)?
+        .execute(EnableFocusChange)?;
     let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     // Make sure the terminal is restored on panic too.
     let original_hook = std::panic::take_hook();
@@ -56,6 +59,7 @@ pub async fn run<P: Provider>(provider: P) -> io::Result<()> {
     disable_raw_mode()?;
     io::stdout()
         .execute(DisableBracketedPaste)?
+        .execute(DisableFocusChange)?
         .execute(DisableMouseCapture)?
         .execute(LeaveAlternateScreen)?;
     result
@@ -95,7 +99,7 @@ async fn drive<P: Provider>(
     let (cmd_tx, evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
-    let (input_tx, input_rx) = mpsc::unbounded_channel::<Event>();
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
             if input_tx.send(ev).is_err() {
@@ -114,6 +118,9 @@ async fn drive<P: Provider>(
     }
 
     let terminal = RefCell::new(terminal);
+    // Startup splash: plays until any key arrives or its budget runs out;
+    // keys pressed here are consumed so they never leak into the composer.
+    run_splash(&terminal, &mut input_rx).await;
     let result = run_loop(
         &mut app,
         &cmd_tx,
@@ -139,6 +146,11 @@ async fn drive<P: Provider>(
             suspend_terminal(&mut terminal.borrow_mut());
             Ok(())
         },
+        || {
+            // Bell: crossterm's `bell()` writes exactly this sequence.
+            let _ = write_and_flush("\u{7}");
+        },
+        notify::Focus::default(),
     )
     .await;
 
@@ -147,6 +159,59 @@ async fn drive<P: Provider>(
         let _ = app.input_history.save(&dir);
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Startup splash
+// ---------------------------------------------------------------------------
+
+/// Play the animated splash until a key arrives or [`ui::splash::SPLASH_SECS`]
+/// elapses. Skipped entirely on terminals too small for it.
+async fn run_splash(
+    terminal: &RefCell<Terminal<CrosstermBackend<io::Stdout>>>,
+    input_rx: &mut mpsc::UnboundedReceiver<Event>,
+) {
+    let splash = ui::splash::Splash::new();
+    let start = std::time::Instant::now();
+    // Too small to draw: don't even take the keypress.
+    let drawable = terminal
+        .borrow()
+        .size()
+        .map(|s| s.width >= ui::splash::MIN_WIDTH && s.height >= ui::splash::MIN_HEIGHT)
+        .unwrap_or(false);
+    if !drawable {
+        return;
+    }
+    loop {
+        let t = start.elapsed().as_secs_f32();
+        if t >= ui::splash::SPLASH_SECS {
+            return;
+        }
+        begin_synchronized_output();
+        let draw = {
+            let mut term = terminal.borrow_mut();
+            term.draw(|f| {
+                let area = f.area();
+                let buf = f.buffer_mut();
+                splash.render(area, buf, t);
+            })
+            .map(|_| ())
+        };
+        end_synchronized_output();
+        if draw.is_err() {
+            return;
+        }
+        tokio::select! {
+            ev = input_rx.recv() => {
+                // Any event (mostly keys) ends the splash; focus reports and
+                // the like are dropped with it.
+                if ev.is_none() {
+                    return;
+                }
+            }
+            _ = tokio::time::sleep(repaint::Cadence::SMOOTH.frame().unwrap()) => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +362,7 @@ fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
 /// Real events always owe a frame (handlers are not asked to prove they
 /// changed something); a pure timeout owes one only when the current cadence
 /// moves pixels on its own (spinner). The first frame always paints.
+#[allow(clippy::too_many_arguments)] // closures + focus seed; event-loop wiring
 async fn run_loop(
     app: &mut App,
     cmd_tx: &mpsc::UnboundedSender<Command>,
@@ -305,11 +371,16 @@ async fn run_loop(
     mut paint: impl FnMut(&mut App) -> io::Result<()>,
     mut edit_composer: impl FnMut(&mut App) -> io::Result<()>,
     mut suspend_ui: impl FnMut() -> io::Result<()>,
+    mut ring: impl FnMut(),
+    focus: notify::Focus,
 ) -> io::Result<()> {
     let mut dirty = Dirty::YES;
     // A closed provider channel just stops being selected on; only the input
     // reader dying ends the session.
     let mut provider_alive = true;
+    // Bell bookkeeping: only rings when the user is not already watching.
+    let mut focus = focus;
+    let mut bells = notify::RunNotificationState::default();
 
     loop {
         let cadence = app.cadence();
@@ -320,6 +391,7 @@ async fn run_loop(
                     // The input reader stopped: the terminal is gone.
                     None => return Ok(()),
                     Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                        focus.note_input();
                         // Alt-O hands the composer to $EDITOR; it must run
                         // here, where the terminal is reachable to suspend
                         // and restore the UI around the child process.
@@ -329,18 +401,30 @@ async fn run_loop(
                     // including open modals (reference semantics).
                     if is_suspend_key(&key) {
                         suspend_ui()?;
+                        focus.on_resume();
                     } else if is_open_editor_key(&key)
                             && matches!(app.modal, modals::Modal::None)
                         {
                             if let Err(e) = edit_composer(app) {
                                 eprintln!("warning: could not open editor: {e}");
                             }
+                            // The editor ate the focus reports we would have
+                            // seen around it.
+                            focus.on_resume();
                         } else {
                             app.handle_key(key, cmd_tx);
                         }
                     }
-                    Some(Event::Paste(text)) => app.insert_paste(&text),
-                    Some(Event::Mouse(mouse)) => app.handle_mouse(mouse),
+                    Some(Event::Paste(text)) => {
+                        focus.note_input();
+                        app.insert_paste(&text);
+                    }
+                    Some(Event::Mouse(mouse)) => {
+                        focus.note_input();
+                        app.handle_mouse(mouse);
+                    }
+                    Some(Event::FocusGained) => focus.report(notify::Focus::Focused),
+                    Some(Event::FocusLost) => focus.report(notify::Focus::Unfocused),
                     Some(_) => {} // Resize etc: still repaints below.
                 }
                 dirty = Dirty::YES;
@@ -348,7 +432,39 @@ async fn run_loop(
             ev = evt_rx.recv(), if provider_alive => {
                 match ev {
                     Some(ev) => {
+                        let was_busy = app.busy();
+                        let was_waiting = app.status == Status::WaitingApproval;
+                        if let AgentEvent::AssistantText(text) = &ev
+                            && was_busy
+                        {
+                            // Candidate bell payload for this turn's
+                            // completion.
+                            bells.on_turn_complete(text);
+                        }
                         app.handle_event(ev);
+                        if !was_busy && app.busy() {
+                            bells.on_new_turn();
+                        }
+                        if app.busy() || app.status == Status::WaitingApproval {
+                            // Still working: nothing can settle yet.
+                        } else if was_busy || was_waiting {
+                            let failed = app.status == Status::Failed;
+                            bells.on_done(failed);
+                            // No queue to drain: the turn settled the moment
+                            // the status landed.
+                            bells.on_drain();
+                        }
+                        let attention =
+                            (!was_waiting && app.status == Status::WaitingApproval).then_some(
+                                notify::Notification::PermissionRequested { tool: None },
+                            );
+                        let settled = !app.busy() && app.status != Status::WaitingApproval;
+                        let fired = bells.reconcile(attention, settled);
+                        if let Some(notification) = fired
+                            && focus.allows(&notification)
+                        {
+                            ring();
+                        }
                         dirty = Dirty::YES;
                     }
                     None => provider_alive = false,
@@ -357,6 +473,7 @@ async fn run_loop(
             _ = sleep => dirty |= Dirty::from(cadence.moves()),
         }
         if app.should_quit {
+            bells.on_manual_exit();
             return Ok(());
         }
         if dirty.take() {
@@ -457,6 +574,8 @@ mod tests {
                     suspends.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 },
+                || (),
+                notify::Focus::default(),
             )
             .await
         })
@@ -545,6 +664,8 @@ mod tests {
                 },
                 |_| Err(io::Error::other("no editor in tests")),
                 || Ok(()),
+                || (),
+                notify::Focus::default(),
             )
             .await
         });
@@ -672,5 +793,89 @@ mod tests {
             KeyCode::Char('p'),
             KeyModifiers::ALT
         )));
+    }
+
+    /// Drive `run_loop` with a fixed initial focus and a scripted turn,
+    /// returning how many bells rang. The initial focus is a parameter (not
+    /// a focus event) so the two channels cannot interleave the setup away.
+    async fn bells_for(focus: notify::Focus, script: Vec<AgentEvent>) -> usize {
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<Event>();
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<Command>();
+        let (evt_tx, evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let rings = Arc::new(AtomicUsize::new(0));
+        let r = Arc::clone(&rings);
+        let task = tokio::spawn(async move {
+            let mut app = App::new();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            run_loop(
+                &mut app,
+                &cmd_tx,
+                input_rx,
+                evt_rx,
+                move |a| {
+                    terminal
+                        .draw(|f| ui::draw(f, a))
+                        .map(|_| ())
+                        .map_err(|e| match e {})
+                },
+                |_| Err(io::Error::other("no editor in tests")),
+                || Ok(()),
+                move || {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                focus,
+            )
+            .await
+        });
+
+        for ev in script {
+            evt_tx.send(ev).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let count = rings.load(Ordering::SeqCst);
+        quit(&input_tx);
+        task.await.unwrap().unwrap();
+        count
+    }
+
+    fn turn(reply: &str) -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::StatusChanged(Status::Running),
+            AgentEvent::AssistantText(reply.into()),
+            AgentEvent::StatusChanged(Status::Done),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_watched_completion_stays_silent() {
+        let count = bells_for(notify::Focus::Focused, turn("all done")).await;
+        assert_eq!(count, 0, "a focused user sees the finish: no bell");
+    }
+
+    #[tokio::test]
+    async fn an_unwatched_completion_rings() {
+        let count = bells_for(notify::Focus::Unfocused, turn("finished")).await;
+        assert_eq!(count, 1, "an unfocused terminal hears the finish");
+    }
+
+    #[tokio::test]
+    async fn a_permission_prompt_rings_even_while_watched() {
+        let script = vec![
+            AgentEvent::StatusChanged(Status::Running),
+            AgentEvent::StatusChanged(Status::WaitingApproval),
+        ];
+        let count = bells_for(notify::Focus::Focused, script).await;
+        assert_eq!(count, 1, "a blocking prompt outranks focus");
+    }
+
+    #[tokio::test]
+    async fn consecutive_turns_each_ring_their_completion() {
+        // The reference suppresses a superseded completion via its explicit
+        // QueueDrained event; without a queue, a turn settles the moment its
+        // Done status lands, so each completion rings.
+        let mut script = turn("first");
+        script.extend(turn("second"));
+        let count = bells_for(notify::Focus::Unfocused, script).await;
+        assert_eq!(count, 2, "each completed turn rings once");
     }
 }

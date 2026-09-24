@@ -130,14 +130,21 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Single bottom row: `········ esc interrupt · model · provider · effort`
-/// on the left, `44.8K (4%)  ctrl+p commands` right-aligned. The left group
-/// is truncated with an ellipsis on narrow terminals.
+/// Single bottom row: `········ esc interrupt · model · provider · effort · cwd`
+/// on the left, `44.8K (4%)  ctrl+p commands` right-aligned. A live flash
+/// toast replaces the right side. The left group is truncated with an
+/// ellipsis on narrow terminals.
 pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let tertiary = Style::default().fg(theme::TEXT_TERTIARY);
     let (model, provider) = app.model();
     let sep = || Span::styled(" · ", tertiary);
     const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    // Prompt-progress: how long the current turn has been running, so a
+    // silent model reads as slow rather than stuck.
+    let elapsed = app
+        .turn_started
+        .map(|at| at.elapsed().as_secs())
+        .unwrap_or(0);
     let indicator: Vec<Span<'_>> = match app.status {
         Status::Thinking | Status::Running | Status::WaitingApproval => {
             let frame = SPINNER[app.status_tick % SPINNER.len()];
@@ -148,7 +155,7 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
             };
             vec![
                 Span::styled(format!("  {frame} "), Style::default().fg(theme::ACCENT)),
-                Span::styled(format!("{word}  esc interrupt"), tertiary),
+                Span::styled(format!("{word} {elapsed}s  esc interrupt"), tertiary),
             ]
         }
         Status::Failed => vec![
@@ -165,16 +172,39 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(provider, tertiary),
         sep(),
         Span::styled(app.effort(), Style::default().fg(theme::WARNING)),
+        sep(),
+        Span::styled(abbreviated_cwd(&app.session.cwd), tertiary),
     ]);
-    let right = format!("{}  ctrl+p commands  ", app.session.token_label);
+    let right = if let Some(flash) = app.flash_text() {
+        format!("  {flash}  ")
+    } else {
+        format!("{}  ctrl+p commands  ", app.session.token_label)
+    };
     let width = area.width as usize;
-    let max_left = width.saturating_sub(right.chars().count() + 1);
+    let right_w = right.chars().count();
+    let max_left = width.saturating_sub(right_w + 1);
     let (left, left_w) = truncate_spans(left, max_left);
-    let gap = width.saturating_sub(left_w + right.chars().count());
+    let gap = width.saturating_sub(left_w + right_w);
     let mut spans = left;
     spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(Span::styled(right, tertiary));
+    let right_style = if app.flash_text().is_some() {
+        Style::default().fg(theme::ACCENT)
+    } else {
+        tertiary
+    };
+    spans.push(Span::styled(right, right_style));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Abbreviate a cwd for the status row: keep the last two components, `…`
+/// prefix when something was cut (reference `cwd_branch_label` shape).
+fn abbreviated_cwd(cwd: &str) -> String {
+    let parts: Vec<&str> = cwd.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.len() {
+        0 => "/".into(),
+        1 => parts[0].into(),
+        _ => format!("…/{}", parts[parts.len() - 1]),
+    }
 }
 
 /// Clip a span list to `max` display cells, ending with an ellipsis if cut.

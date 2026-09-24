@@ -6,6 +6,7 @@ mod messages;
 mod overlays;
 pub mod scrollback;
 mod sidebar;
+pub mod splash;
 pub mod theme;
 
 use ratatui::Frame;
@@ -19,6 +20,7 @@ const SIDEBAR_WIDTH: u16 = 34;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.status_tick = app.status_tick.wrapping_add(1);
+    app.clear_expired_flash();
     let area = f.area();
     f.render_widget(
         Block::default().style(Style::default().bg(theme::BG_APP)),

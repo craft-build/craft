@@ -17,6 +17,10 @@ use crate::tui::selection::{
 };
 use crate::tui::ui::scrollback::{Layout, ScrollPos, SegmentCache};
 
+/// How long a status-row flash toast stays up (reference default,
+/// `DEFAULT_FLASH_DURATION_MS`).
+const FLASH_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// Models shown before the provider's catalog arrives (or under the test mock).
 const SEED_MODELS: [(&str, &str); 4] = [
     ("GLM-5.3", "Zhipu AI Coding Plan"),
@@ -306,6 +310,11 @@ pub struct App {
     pub interrupt_requested: bool,
     /// Animation frame counter for the status indicator (advanced per frame).
     pub status_tick: usize,
+    /// When the current turn started; drives the elapsed-seconds counter
+    /// next to the thinking/running spinner.
+    pub turn_started: Option<std::time::Instant>,
+    /// Timed flash toast for the status row: text plus its expiry.
+    pub flash: Option<(String, std::time::Instant)>,
 
     // --- state groups (fields stay pub for the renderer for now;
     // accessor encapsulation is a follow-up) ---
@@ -344,6 +353,8 @@ impl App {
             status: Status::Done,
             interrupt_requested: false,
             status_tick: 0,
+            turn_started: None,
+            flash: None,
             conversation: Conversation::new(),
             view: ViewModel::new(),
             session: Session::new(),
@@ -386,6 +397,34 @@ impl App {
         matches!(self.status, Status::Thinking | Status::Running) && !self.interrupt_requested
     }
 
+    /// Show `msg` in the status row until [`FLASH_SECS`] elapses or the
+    /// next keypress (e.g. "Copied" after a selection copy).
+    pub fn flash(&mut self, msg: impl Into<String>) {
+        self.flash = Some((msg.into(), std::time::Instant::now()));
+    }
+
+    /// Whether a live flash still holds the status row's right side.
+    pub fn flash_text(&self) -> Option<&str> {
+        self.flash
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < FLASH_TTL)
+            .map(|(s, _)| s.as_str())
+    }
+
+    /// Drop an expired flash; true when the caller owes a repaint.
+    pub fn clear_expired_flash(&mut self) -> bool {
+        if self
+            .flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= FLASH_TTL)
+        {
+            self.flash = None;
+            true
+        } else {
+            false
+        }
+    }
+
     // ------------------------------------------------------------------
     // Provider events
     // ------------------------------------------------------------------
@@ -394,19 +433,33 @@ impl App {
     /// clock alone owes a frame. Only the spinner statuses animate; every
     /// other status paints pixels that a timeout cannot change.
     pub fn cadence(&self) -> repaint::Cadence {
-        repaint::Cadence::when(
-            matches!(
-                self.status,
-                Status::Thinking | Status::Running | Status::WaitingApproval
+        repaint::Cadence::any([
+            repaint::Cadence::when(
+                matches!(
+                    self.status,
+                    Status::Thinking | Status::Running | Status::WaitingApproval
+                ),
+                repaint::Cadence::SPINNER,
             ),
-            repaint::Cadence::SPINNER,
-        )
+            // A live flash expires on the clock: keep waking up so the
+            // status row drops it without waiting for the next event.
+            repaint::Cadence::when(self.flash.is_some(), repaint::Cadence::SPINNER),
+        ])
     }
 
     pub fn handle_event(&mut self, ev: AgentEvent) {
         let was_following = self.view.follow;
         match ev {
             AgentEvent::StatusChanged(s) => {
+                // A fresh busy status starts the elapsed-seconds clock; a
+                // settled status stops it.
+                if matches!(s, Status::Thinking | Status::Running)
+                    && !matches!(self.status, Status::Thinking | Status::Running)
+                {
+                    self.turn_started = Some(std::time::Instant::now());
+                } else if !matches!(s, Status::Thinking | Status::Running) {
+                    self.turn_started = None;
+                }
                 self.status = s;
                 self.interrupt_requested = false;
             }
@@ -872,6 +925,7 @@ impl App {
         self.view.selection = None;
         if !text.is_empty() {
             copy_to_clipboard(&text);
+            self.flash("Copied");
         }
     }
 
@@ -899,6 +953,8 @@ impl App {
     // ------------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
+        // Any keypress dismisses a live flash toast.
+        self.flash = None;
         // A modal owns the keyboard while open; its keys never fall through
         // to base chords (so ctrl+q does not quit under an open palette).
         if !matches!(self.modal, Modal::None) {
@@ -1758,5 +1814,69 @@ mod tests {
             &tx,
         );
         assert_eq!(app.composer.cursor, 5);
+    }
+
+    fn screen_text(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| ui::draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|r| {
+                (0..buf.area.width)
+                    .map(|c| buf[(c, r)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The status row gains the cwd (abbreviated to its last component) and
+    /// the turn's elapsed-seconds prompt progress.
+    #[test]
+    fn status_row_shows_cwd_and_elapsed_seconds() {
+        let mut app = App::new();
+        app.session.sidebar_open = false;
+        app.handle_event(AgentEvent::SessionInfo {
+            cwd: "/Users/x/Projects/craft-code".into(),
+            branch: "main".into(),
+        });
+        app.handle_event(AgentEvent::StatusChanged(Status::Running));
+        let text = screen_text(&mut app, 120, 24);
+        assert!(
+            text.contains("…/craft-code"),
+            "cwd segment missing:\n{text}"
+        );
+        assert!(text.contains("running 0s"), "elapsed missing:\n{text}");
+    }
+
+    /// A flash toast takes over the status row's right side until it
+    /// expires; a keypress clears it early.
+    #[test]
+    fn flash_toast_shows_then_expires() {
+        let mut app = App::new();
+        app.flash("Copied");
+        let text = screen_text(&mut app, 120, 24);
+        assert!(text.contains("Copied"), "flash missing:\n{text}");
+
+        // Deadline already past: the draw path drops it.
+        app.flash = Some((
+            "Copied".into(),
+            std::time::Instant::now() - FLASH_TTL - std::time::Duration::from_secs(1),
+        ));
+        let text = screen_text(&mut app, 120, 24);
+        assert!(!text.contains("Copied"), "expired flash lingers:\n{text}");
+
+        // A live flash is also dismissed by any keypress.
+        app.flash("Copied");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('a')),
+            &tx,
+        );
+        let text = screen_text(&mut app, 120, 24);
+        assert!(
+            !text.contains("Copied"),
+            "keypress must clear the flash:\n{text}"
+        );
     }
 }
