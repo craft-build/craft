@@ -146,6 +146,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
+/// Whether placing `text` in the composer would open the slash-command menu.
+/// Shared by slash completion and history recall so a recalled entry can be
+/// recognized as a command without rebuilding the match list.
+fn opens_slash_menu(text: &str) -> bool {
+    text.starts_with('/')
+        && COMMANDS
+            .iter()
+            .filter_map(|spec| spec.slash)
+            .any(|cmd| text == "/" || cmd.starts_with(text))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DiffState {
     Pending,
@@ -629,7 +640,7 @@ impl App {
 
     pub fn slash_matches(&self) -> Vec<(&'static str, &'static str)> {
         let q = self.composer.text.as_str();
-        if !q.starts_with('/') {
+        if !opens_slash_menu(q) {
             return Vec::new();
         }
         COMMANDS
@@ -685,48 +696,60 @@ impl App {
         self.view.follow = true;
     }
 
-    /// Recall the previous (older) history entry, saving the in-progress
-    /// text as the draft restored by [`Self::history_down`]. Ported from the
-    /// reference `InputBox::history_up`.
+    /// Whether the history entry at `index` is normal text that ↑/↓ may
+    /// recall. Slash commands are skipped so recalling one cannot reopen the
+    /// slash menu and hijack the history keys. Ported from the reference
+    /// `InputBox::history_up`.
+    fn recallable(&self, index: usize) -> bool {
+        self.input_history
+            .get(index)
+            .is_some_and(|entry| !opens_slash_menu(entry))
+    }
+
+    /// Recall the previous (older) normal-text history entry, saving the
+    /// in-progress text as the draft restored by [`Self::history_down`].
     pub fn history_up(&mut self) {
-        if self.input_history.is_empty() {
-            return;
-        }
-        let new_index = match self.history_index {
-            None => {
-                self.history_draft = self.composer.text.clone();
-                self.input_history.len() - 1
-            }
+        let from = match self.history_index {
+            None => self.input_history.len(),
             Some(0) => return,
-            Some(i) => i - 1,
+            Some(i) => i,
         };
+        let Some(new_index) = (0..from).rev().find(|&i| self.recallable(i)) else {
+            return; // no older normal-text entry to recall
+        };
+        if self.history_index.is_none() {
+            self.history_draft = self.composer.text.clone();
+        }
         self.history_index = Some(new_index);
         let entry = self
             .input_history
             .get(new_index)
-            .expect("index derived from len-1 or i-1")
+            .expect("index found by the recallable scan")
             .to_string();
         self.composer.set_text(entry);
     }
 
-    /// Recall the next (newer) history entry; ↓ past the newest restores the
-    /// draft saved on entry.
+    /// Recall the next (newer) normal-text history entry; ↓ past the newest
+    /// restores the draft saved on entry.
     pub fn history_down(&mut self) {
         let Some(i) = self.history_index else {
             return;
         };
-        if i + 1 < self.input_history.len() {
-            self.history_index = Some(i + 1);
-            let entry = self
-                .input_history
-                .get(i + 1)
-                .expect("i + 1 guarded by the len check")
-                .to_string();
-            self.composer.set_text(entry);
-        } else {
-            self.history_index = None;
-            let draft = std::mem::take(&mut self.history_draft);
-            self.composer.set_text(draft);
+        match (i + 1..self.input_history.len()).find(|&j| self.recallable(j)) {
+            Some(new_index) => {
+                self.history_index = Some(new_index);
+                let entry = self
+                    .input_history
+                    .get(new_index)
+                    .expect("index found by the recallable scan")
+                    .to_string();
+                self.composer.set_text(entry);
+            }
+            None => {
+                self.history_index = None;
+                let draft = std::mem::take(&mut self.history_draft);
+                self.composer.set_text(draft);
+            }
         }
     }
 
@@ -2046,6 +2069,50 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_eq!(app.composer.text, "draft", "draft restored past newest");
         assert!(app.history_index.is_none());
+    }
+
+    /// Slash commands are recorded in history but ↑/↓ skip over them, so
+    /// recalling one can never reopen the slash menu and trap the arrows.
+    #[test]
+    fn history_recall_skips_slash_commands() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.input_history.push("old text".into());
+        app.input_history.push("/help".into());
+        app.input_history.push("new text".into());
+        app.composer.set_text("draft".into());
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "new text");
+        assert!(!app.slash_open(), "slash menu stays closed while recalling");
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "old text", "skipped over /help");
+        assert!(!app.slash_open());
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "old text", "clamped at the oldest entry");
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "new text", "skipped over /help");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "draft", "draft restored past newest");
+        assert!(app.history_index.is_none());
+    }
+
+    /// A slash command as the newest entry is never recalled; ↑ stays put and
+    /// the menu does not open.
+    #[test]
+    fn history_up_ignores_a_newest_slash_command() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.input_history.push("/stats".into());
+        app.composer.set_text("draft".into());
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "draft", "nothing but slash commands");
+        assert!(app.history_index.is_none());
+        assert!(!app.slash_open());
     }
 
     /// With an empty composer, ↑/↓ drive the input history straight away —
