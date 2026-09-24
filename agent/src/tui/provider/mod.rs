@@ -206,7 +206,7 @@ pub enum AgentEvent {
     ToolCall(ToolCallData),
     PlanSet(Vec<PlanItem>),
     FilesSet(Vec<TouchedFile>),
-    /// Human label for token usage, e.g. "44.8K (4%)".
+    /// Human label for token usage, e.g. "44.8K/1M (4%)".
     TokenUsage(String),
     /// Model catalog and current selection; sent at startup and after a
     /// [`Command::SelectModel`] switch is confirmed.

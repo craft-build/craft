@@ -403,16 +403,23 @@ pub(crate) fn first_string_argument(arguments: &serde_json::Value) -> Option<Str
     value.as_str().map(str::to_owned)
 }
 
-/// "45.9K (4%)"-style label; the percentage is the prompt's share of the
-/// context window, omitted when the context length is unknown.
+/// "45.9K/200K (23%)"-style label: tokens used over the context window,
+/// with the prompt's share as a percentage. The total and percentage are
+/// omitted when the context length is unknown.
 pub(super) fn usage_label(tokens: u64, prompt_tokens: u64, context_length: Option<u32>) -> String {
-    let k = tokens as f64 / 1000.0;
+    let used = tokens as f64 / 1000.0;
     match context_length {
         Some(size) if size > 0 => {
             let pct = (prompt_tokens as f64 / f64::from(size) * 100.0).round();
-            format!("{k:.1}K ({pct:.0}%)")
+            let total = f64::from(size);
+            let total = if total >= 1_000_000.0 {
+                format!("{:.1}M", total / 1_000_000.0)
+            } else {
+                format!("{:.0}K", total / 1000.0)
+            };
+            format!("{used:.1}K/{total} ({pct:.0}%)")
         }
-        _ => format!("{k:.1}K"),
+        _ => format!("{used:.1}K"),
     }
 }
 

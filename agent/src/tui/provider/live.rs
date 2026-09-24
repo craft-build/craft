@@ -289,7 +289,7 @@ impl CraftProvider {
         let (models, current) = catalog_choices(&selection);
         let _ = evt_tx.send(AgentEvent::CatalogSet { models, current });
         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
-        let _ = evt_tx.send(AgentEvent::TokenUsage("0 (0%)".into()));
+        let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
 
         // Signal cancellation and abort any in-flight turn. Callers then
         // differ only in how much session state they rebuild.
@@ -374,7 +374,7 @@ impl CraftProvider {
                     let _ = evt_tx.send(AgentEvent::AssistantEnd);
                     let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
                     let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
-                    let _ = evt_tx.send(AgentEvent::TokenUsage("0 (0%)".into()));
+                    let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
                 }
                 Command::Undo => {
                     if current_turn.is_some() {

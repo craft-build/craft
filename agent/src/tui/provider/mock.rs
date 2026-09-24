@@ -213,7 +213,7 @@ async fn run_first_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
     )
     .await;
     emit(&tx, 200, AgentEvent::StatusChanged(Status::WaitingApproval)).await;
-    emit(&tx, 0, AgentEvent::TokenUsage("45.9K (4%)".into())).await;
+    emit(&tx, 0, AgentEvent::TokenUsage("45.9K/1M (4%)".into())).await;
 }
 
 /// Follow-up turns: the same canned acknowledgement the prototype uses.
@@ -237,7 +237,7 @@ fn emit_initial_state(
     let _ = tx.send(AgentEvent::PlanSet(plan.to_vec()));
     let _ = tx.send(AgentEvent::FilesSet(files.to_vec()));
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
-    let _ = tx.send(AgentEvent::TokenUsage("44.8K (4%)".into()));
+    let _ = tx.send(AgentEvent::TokenUsage("44.8K/1M (4%)".into()));
 }
 
 impl Provider for MockProvider {
@@ -292,7 +292,7 @@ impl Provider for MockProvider {
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                         usage_turns += 1;
                         let _ = evt_tx.send(AgentEvent::TokenUsage(format!(
-                            "{:.1}K (5%)",
+                            "{:.1}K/1M (5%)",
                             46.1 + usage_turns as f64 * 0.2
                         )));
                     }

@@ -41,7 +41,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .saturating_sub(2 + composer::TEXT_LEFT_PAD + composer::TEXT_RIGHT_PAD) // inset + inner pads
         .max(1);
     let row_count = messages::wrap_rows(&app.composer.text, text_w).len();
-    let composer_h = row_count.min(composer::MAX_TEXT_ROWS) as u16 + 2;
+    // box = text rows + 2 padding + the model/context info line
+    let composer_h = row_count.min(composer::MAX_TEXT_ROWS) as u16 + 3;
     let bottom_h = composer_h + 3; // border(1) + box + status(1) + blank(1)
 
     let rows = Layout::vertical([Constraint::Min(3), Constraint::Length(bottom_h)]).split(chat);
@@ -180,7 +181,7 @@ mod tests {
             tone: Tone::Warning,
         }]));
         app.handle_event(AgentEvent::StatusChanged(Status::Done));
-        app.handle_event(AgentEvent::TokenUsage("44.8K (4%)".into()));
+        app.handle_event(AgentEvent::TokenUsage("44.8K/1M (4%)".into()));
         app.handle_event(AgentEvent::AssistantText(
             "Looking at the refresh path first.".into(),
         ));
@@ -242,6 +243,42 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn composer_info_line_carries_model_provider_and_context_usage() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut app = seeded_app();
+        app.composer.clear();
+        app.handle_event(AgentEvent::CatalogSet {
+            models: vec![ModelChoice {
+                provider: "anthropic".into(),
+                model: "claude-sonnet-5".into(),
+                label: "claude-sonnet-5".into(),
+                provider_label: "anthropic".into(),
+            }],
+            current: 0,
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row =
+            |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
+        let bottom: Vec<String> = (buf.area.height - 4..buf.area.height).map(row).collect();
+        // Composer info line (4th line of the input box): model · provider ·
+        // thinking level on the left, used/total (pct) right-aligned, and
+        // the box's accent bar still on its left edge.
+        let info = &bottom[1];
+        assert!(info.contains("▎"), "accent bar on info line: {info:?}");
+        assert!(info.contains("claude-sonnet-5"), "model: {info:?}");
+        assert!(info.contains("anthropic"), "provider: {info:?}");
+        assert!(info.contains("high"), "thinking level: {info:?}");
+        assert!(info.contains("44.8K/1M (4%)"), "context usage: {info:?}");
+        // Status row below keeps the active status indicator.
+        let status = &bottom[2];
+        assert!(
+            status.contains("awaiting approval") && status.contains("esc interrupt"),
+            "status row: {status:?}"
+        );
     }
 
     #[test]

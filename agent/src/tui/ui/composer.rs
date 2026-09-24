@@ -32,7 +32,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         inset,
     );
 
-    if inset.height < 3 || inset.width < 9 {
+    if inset.height < 4 || inset.width < 9 {
         return;
     }
     let bar_x = inset.x + 1;
@@ -40,7 +40,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let text_w = inset
         .width
         .saturating_sub((TEXT_LEFT_PAD + TEXT_RIGHT_PAD) as u16) as usize;
-    let view_rows = (inset.height - 2) as usize; // 1 padding row top and bottom
+    let view_rows = (inset.height - 3) as usize; // padding top/bottom + info row
 
     // Accent bar spanning the full box height, like posted user messages.
     for i in 0..inset.height {
@@ -128,16 +128,49 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
             inset.y + 1 + (cursor_row - offset) as u16,
         ));
     }
+
+    // Fourth line of the input box: `model · provider · thinking` on the
+    // left, context usage right-aligned. Starts after the accent bar so
+    // the box's left border keeps running through this row.
+    let info = Rect {
+        x: text_x,
+        y: inset.y + inset.height - 1,
+        width: inset.width.saturating_sub(TEXT_LEFT_PAD as u16 + 1),
+        height: 1,
+    };
+    let surf = Style::default().bg(theme::BG_SURFACE);
+    let tertiary = Style::default()
+        .fg(theme::TEXT_TERTIARY)
+        .bg(theme::BG_SURFACE);
+    let sep = || Span::styled(" · ", tertiary);
+    let (model, provider) = app.model();
+    let left = vec![
+        Span::styled(
+            model,
+            Style::default().fg(theme::BLUE_400).bg(theme::BG_SURFACE),
+        ),
+        sep(),
+        Span::styled(provider, tertiary),
+        sep(),
+        Span::styled(
+            app.effort(),
+            Style::default().fg(theme::WARNING).bg(theme::BG_SURFACE),
+        ),
+    ];
+    let right = format!("{}  ", app.session.token_label);
+    let width = info.width as usize;
+    let right_w = right.chars().count();
+    let (left, left_w) = truncate_spans(left, width.saturating_sub(right_w + 1));
+    let gap = width.saturating_sub(left_w + right_w);
+    let mut spans = left;
+    spans.push(Span::styled(" ".repeat(gap), surf));
+    spans.push(Span::styled(right, tertiary));
+    f.render_widget(Paragraph::new(Line::from(spans)), info);
 }
 
-/// Single bottom row: `········ esc interrupt · model · provider · effort · cwd`
-/// on the left, `44.8K (4%)  ctrl+p commands` right-aligned. A live flash
-/// toast replaces the right side. The left group is truncated with an
-/// ellipsis on narrow terminals.
-pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
+/// Spinner / status word with the running timer and interrupt hint.
+fn status_indicator(app: &App) -> Vec<Span<'static>> {
     let tertiary = Style::default().fg(theme::TEXT_TERTIARY);
-    let (model, provider) = app.model();
-    let sep = || Span::styled(" · ", tertiary);
     const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     // Prompt-progress: how long the current turn has been running, so a
     // silent model reads as slow rather than stuck.
@@ -145,7 +178,7 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
         .turn_started
         .map(|at| at.elapsed().as_secs())
         .unwrap_or(0);
-    let indicator: Vec<Span<'_>> = match app.status {
+    match app.status {
         Status::Thinking | Status::Running | Status::WaitingApproval => {
             let frame = SPINNER[app.status_tick % SPINNER.len()];
             let word = match app.status {
@@ -154,31 +187,34 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
                 _ => "awaiting approval",
             };
             vec![
-                Span::styled(format!("  {frame} "), Style::default().fg(theme::ACCENT)),
+                Span::styled(format!("{frame} "), Style::default().fg(theme::ACCENT)),
                 Span::styled(format!("{word} {elapsed}s  esc interrupt"), tertiary),
             ]
         }
         Status::Failed => vec![
-            Span::styled("  ✖ ", Style::default().fg(theme::DANGER)),
+            Span::styled("✖ ", Style::default().fg(theme::DANGER)),
             Span::styled("failed  esc interrupt", tertiary),
         ],
-        Status::Done => vec![Span::styled("  ········  esc interrupt", tertiary)],
-    };
-    let mut left = indicator;
+        Status::Done => vec![Span::styled("········  esc interrupt", tertiary)],
+    }
+}
+
+/// Single bottom row: active status indicator (spinner, elapsed timer,
+/// interrupt hint) and cwd on the left, a live flash toast or
+/// `ctrl+p commands` right-aligned. The model/provider/thinking level and
+/// context usage moved up into the composer's info line.
+pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
+    let tertiary = Style::default().fg(theme::TEXT_TERTIARY);
+    let sep = || Span::styled(" · ", tertiary);
+    let mut left = status_indicator(app);
     left.extend([
-        sep(),
-        Span::styled(model, Style::default().fg(theme::BLUE_400)),
-        sep(),
-        Span::styled(provider, tertiary),
-        sep(),
-        Span::styled(app.effort(), Style::default().fg(theme::WARNING)),
         sep(),
         Span::styled(abbreviated_cwd(&app.session.cwd), tertiary),
     ]);
     let right = if let Some(flash) = app.flash_text() {
         format!("  {flash}  ")
     } else {
-        format!("{}  ctrl+p commands  ", app.session.token_label)
+        "ctrl+p commands  ".to_string()
     };
     let width = area.width as usize;
     let right_w = right.chars().count();
