@@ -360,8 +360,12 @@ mod tests {
         })
     }
 
-    fn quit() -> Event {
-        key(KeyCode::Char('c'), true)
+    fn quit(input_tx: &mpsc::UnboundedSender<Event>) {
+        // Ctrl-C is a tri-state (clear input → cancel turn → quit), so keep
+        // pressing until the loop actually exits.
+        for _ in 0..3 {
+            input_tx.send(key(KeyCode::Char('c'), true)).unwrap();
+        }
     }
 
     /// Paints into a TestBackend while counting frames, so the loop tests can
@@ -424,9 +428,11 @@ mod tests {
             "an event owes exactly one"
         );
 
-        input_tx.send(quit()).unwrap();
+        quit(&input_tx);
         task.await.unwrap().unwrap();
-        assert_eq!(paints.load(Ordering::SeqCst), 2);
+        // The first quit press clears the composer ('a' is still there),
+        // which owes one repaint; the second quits.
+        assert_eq!(paints.load(Ordering::SeqCst), 3);
     }
 
     /// While a spinner status animates, each SPINNER_FRAME timeout moves the
@@ -451,7 +457,7 @@ mod tests {
             "spinner must not pin the frame rate, saw {count}"
         );
 
-        input_tx.send(quit()).unwrap();
+        quit(&input_tx);
         task.await.unwrap().unwrap();
     }
 
@@ -496,7 +502,7 @@ mod tests {
             "input still repaints after the provider ended"
         );
 
-        input_tx.send(quit()).unwrap();
+        quit(&input_tx);
         task.await.unwrap().unwrap();
     }
 

@@ -870,7 +870,10 @@ mod tests {
         // Expanded body renders everything, with a fold-back notice.
         let (lines, notice) = tool_block(&kind, "t1", &body, None, false, false, false, true, 80);
         let text: Vec<String> = lines.iter().map(line_text).collect();
-        assert!(text.iter().any(|l| l.contains("line 59")), "full body rendered");
+        assert!(
+            text.iter().any(|l| l.contains("line 59")),
+            "full body rendered"
+        );
         assert!(text[notice.unwrap()].contains("click to collapse"));
     }
 

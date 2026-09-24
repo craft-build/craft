@@ -300,6 +300,10 @@ pub struct App {
     pub plan: Vec<PlanItem>,
     pub files: Vec<TouchedFile>,
     pub status: Status,
+    /// Set when the user interrupted a running turn; cleared by the next
+    /// provider status change. Keeps `busy()` false so a repeated Ctrl-C
+    /// quits without misreporting the turn as failed.
+    pub interrupt_requested: bool,
     /// Animation frame counter for the status indicator (advanced per frame).
     pub status_tick: usize,
 
@@ -338,6 +342,7 @@ impl App {
             plan: Vec::new(),
             files: Vec::new(),
             status: Status::Done,
+            interrupt_requested: false,
             status_tick: 0,
             conversation: Conversation::new(),
             view: ViewModel::new(),
@@ -378,7 +383,7 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        matches!(self.status, Status::Thinking | Status::Running)
+        matches!(self.status, Status::Thinking | Status::Running) && !self.interrupt_requested
     }
 
     // ------------------------------------------------------------------
@@ -401,7 +406,10 @@ impl App {
     pub fn handle_event(&mut self, ev: AgentEvent) {
         let was_following = self.view.follow;
         match ev {
-            AgentEvent::StatusChanged(s) => self.status = s,
+            AgentEvent::StatusChanged(s) => {
+                self.status = s;
+                self.interrupt_requested = false;
+            }
             AgentEvent::PlanSet(plan) => self.plan = plan,
             AgentEvent::FilesSet(files) => self.files = files,
             AgentEvent::TokenUsage(label) => self.session.token_label = label,
@@ -908,7 +916,14 @@ impl App {
         if ctrl {
             match key.code {
                 KeyCode::Char('c') | KeyCode::Char('q') => {
-                    self.should_quit = true;
+                    if !self.composer.text.is_empty() {
+                        self.composer.clear();
+                    } else if self.busy() {
+                        let _ = tx.send(Command::Interrupt);
+                        self.interrupt_requested = true;
+                    } else {
+                        self.should_quit = true;
+                    }
                     return;
                 }
                 KeyCode::Char('p') => {
@@ -1688,6 +1703,40 @@ mod tests {
         assert_eq!(app.input_history.len(), 1);
         assert_eq!(app.input_history.get(0), Some("hello world"));
         assert!(app.composer.text.is_empty());
+    }
+
+    /// Ctrl-C tri-state (reference `handle_ctrl` Quit branch): text first,
+    /// then the running turn, then the app.
+    #[test]
+    fn ctrl_c_tri_state_clears_then_cancels_then_quits() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("draft".into());
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert!(app.composer.text.is_empty(), "first press clears input");
+        assert!(!app.should_quit);
+        assert!(rx.try_recv().is_err(), "no command sent while text present");
+
+        app.handle_event(AgentEvent::StatusChanged(Status::Running));
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::Interrupt)),
+            "second press cancels the running turn"
+        );
+        assert!(!app.should_quit);
+
+        app.handle_event(AgentEvent::StatusChanged(Status::Done));
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert!(app.should_quit, "idle press quits");
     }
 
     /// Effort lives on Ctrl-F; Ctrl-E moves to the end of the line.
