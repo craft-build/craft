@@ -116,16 +116,6 @@ fn grep_annotation(text: &str) -> String {
     format!("{matches} {m} in {files} {f}{suffix}")
 }
 
-/// Header annotation for a write result: bytes of written content.
-fn write_annotation(arguments: &serde_json::Value) -> String {
-    let bytes = arguments
-        .get("content")
-        .and_then(|c| c.as_str())
-        .map(str::len)
-        .unwrap_or(0);
-    format!("{bytes} bytes")
-}
-
 /// Card emitted when a tool call starts: kind from the tool name and its
 /// most descriptive string argument; the body stays empty until the result
 /// arrives.
@@ -196,30 +186,34 @@ pub(super) fn tool_done(
                 None,
             )
         }
-        "write" => (
-            ToolKind::Edit {
-                path: detail.clone(),
-                summary: write_annotation(arguments),
-            },
-            diff_lines(&text),
-            if detail.is_empty() || result.is_error {
-                None
-            } else {
-                Some((detail, FileStatus::Created))
-            },
-        ),
+        "write" => {
+            let (title, body) = edit_title_body(&text, result.is_error);
+            (
+                ToolKind::Edit {
+                    path: detail.clone(),
+                    summary: title,
+                },
+                diff_lines(body),
+                if detail.is_empty() || result.is_error {
+                    None
+                } else {
+                    Some((detail, FileStatus::Created))
+                },
+            )
+        }
         tool if EDIT_TOOLS.contains(&tool) => {
             let status = match tool {
                 "delete" => FileStatus::Deleted,
                 "move" => FileStatus::Created,
                 _ => FileStatus::Modified,
             };
+            let (title, body) = edit_title_body(&text, result.is_error);
             (
                 ToolKind::Edit {
                     path: detail.clone(),
-                    summary: String::new(),
+                    summary: title,
                 },
-                diff_lines(&text),
+                diff_lines(body),
                 if detail.is_empty() || result.is_error {
                     None
                 } else {
@@ -250,6 +244,34 @@ fn context_lines(text: &str) -> Vec<ToolLine> {
     text.lines()
         .map(|line| ToolLine::new(LineKind::Context, line))
         .collect()
+}
+
+fn edit_title_body(text: &str, is_error: bool) -> (String, &str) {
+    if is_error {
+        (String::new(), text)
+    } else {
+        split_title_line(text)
+    }
+}
+
+/// Split a mutation tool's result into its title line and body. Edit-family
+/// results open with a verb summary (`edited x`, `overwrote x (N bytes)`,
+/// `deleted: x`, `moved a -> b`) that belongs in the card header, not the
+/// body. A line only counts as the title when it can't be mistaken for a
+/// diff row; anything else (errors, foreign formats) stays in the body.
+fn split_title_line(text: &str) -> (String, &str) {
+    let (first, rest) = match text.split_once('\n') {
+        Some((first, rest)) => (first, rest),
+        None => return (String::new(), text),
+    };
+    let is_diff_row = ["--- ", "+++ ", "@@ ", "+", "-", " "]
+        .iter()
+        .any(|p| first.starts_with(p));
+    if first.is_empty() || is_diff_row {
+        (String::new(), text)
+    } else {
+        (first.to_string(), rest)
+    }
 }
 
 /// Parse a unified diff (as produced by [`crate::diff::unified_text`]) into
@@ -449,15 +471,53 @@ mod tests {
     }
 
     #[test]
-    fn write_done_annotates_bytes() {
-        let result = history::ToolResult::text("t1", "write", "+new");
+    fn write_done_titles_with_the_verb_header() {
+        let result = history::ToolResult::text(
+            "t1",
+            "write",
+            "overwrote a.txt (5 bytes)\n--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n- old\n+ new",
+        );
         let done = tool_done(
             "t1".into(),
             "write",
             &serde_json::json!({"content": "hello", "path": "a.txt"}),
             &result,
         );
-        assert!(matches!(&done.card.kind, ToolKind::Edit { summary, .. } if summary == "5 bytes"));
+        assert!(
+            matches!(&done.card.kind, ToolKind::Edit { summary, .. } if summary == "overwrote a.txt (5 bytes)")
+        );
+        // The title line is not duplicated in the body.
+        let body: Vec<&str> = done.card.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(!body.contains(&"overwrote a.txt (5 bytes)"), "{body:?}");
+    }
+
+    #[test]
+    fn delete_done_titles_with_the_verb_header() {
+        let result = history::ToolResult::text("t1", "delete", "deleted: a.txt\nskipped: b.txt");
+        let done = tool_done(
+            "t1".into(),
+            "delete",
+            &serde_json::json!({"path": "a.txt"}),
+            &result,
+        );
+        assert!(
+            matches!(&done.card.kind, ToolKind::Edit { summary, .. } if summary == "deleted: a.txt")
+        );
+    }
+
+    #[test]
+    fn error_results_keep_the_plain_edit_title() {
+        let result = history::ToolResult {
+            is_error: true,
+            ..history::ToolResult::text("t1", "edit", "boom: path missing\n--- a\n+++ a")
+        };
+        let done = tool_done(
+            "t1".into(),
+            "edit",
+            &serde_json::json!({"path": "a.txt"}),
+            &result,
+        );
+        assert!(matches!(&done.card.kind, ToolKind::Edit { summary, .. } if summary.is_empty()));
     }
 
     #[test]

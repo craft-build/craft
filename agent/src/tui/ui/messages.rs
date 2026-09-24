@@ -365,16 +365,21 @@ fn tool_block(
     // OSC-8 link target: the path text inside the header label. Columns
     // count from the row start (marker + caret + label prefix). The row
     // itself is filled in by the renderer once the segment is placed.
+    // Edit labels are verb summaries (`deleted: a.txt`), so the path is
+    // located by search rather than a fixed prefix.
     let link = match kind {
         ToolKind::Read { path, .. } | ToolKind::Edit { path, .. } => {
-            hyperlink::file_uri(path).map(|uri| {
-                let prefix = prefix_w
-                    + if matches!(kind, ToolKind::Read { .. }) {
-                        cell_len("Read ")
-                    } else {
-                        cell_len("Edit ")
-                    };
-                hyperlink::Hyperlink::new(0, prefix as u16, (prefix + cell_len(path)) as u16, uri)
+            let label = tool_label(kind);
+            let path_off = if matches!(kind, ToolKind::Read { .. }) {
+                Some(cell_len("Read "))
+            } else {
+                label
+                    .find(path.as_str())
+                    .map(|byte| label[..byte].chars().count())
+            };
+            hyperlink::file_uri(path).zip(path_off).map(|(uri, off)| {
+                let start = prefix_w + off;
+                hyperlink::Hyperlink::new(0, start as u16, (start + cell_len(path)) as u16, uri)
             })
         }
         ToolKind::Grep { .. } | ToolKind::Bash { .. } => None,
