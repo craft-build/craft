@@ -311,6 +311,13 @@ pub struct App {
 
     // --- composer ---
     pub composer: Composer,
+    /// Rolling user-input history (↑/↓ recall; persisted per state dir).
+    pub input_history: crate::storage::input_history::InputHistory,
+    /// Position in `input_history` while recalling; `None` = live editing.
+    pub history_index: Option<usize>,
+    /// The in-progress text saved when history recall starts, restored on
+    /// ↓ past the newest entry.
+    pub history_draft: String,
 
     // --- overlays ---
     /// The one modal currently open (palette / model menu / confirm),
@@ -336,6 +343,9 @@ impl App {
             view: ViewModel::new(),
             session: Session::new(),
             composer: Composer::new(),
+            input_history: crate::storage::input_history::InputHistory::default(),
+            history_index: None,
+            history_draft: String::new(),
             modal: Modal::None,
             slash_selected: 0,
             usage: Vec::new(),
@@ -495,14 +505,65 @@ impl App {
         if text.starts_with('/') && !slash.is_empty() {
             let (cmd, _) = slash[self.slash_selected.min(slash.len() - 1)];
             self.composer.clear();
+            self.input_history.push(text);
+            self.history_index = None;
+            self.history_draft.clear();
             self.run_slash(cmd, tx);
             return;
         }
         self.conversation.assistant_open = false;
         self.conversation.messages.push(Message::User(text.clone()));
-        let _ = tx.send(Command::SendMessage(text));
+        let _ = tx.send(Command::SendMessage(text.clone()));
+        self.input_history.push(text);
+        self.history_index = None;
+        self.history_draft.clear();
         self.composer.clear();
         self.view.follow = true;
+    }
+
+    /// Recall the previous (older) history entry, saving the in-progress
+    /// text as the draft restored by [`Self::history_down`]. Ported from the
+    /// reference `InputBox::history_up`.
+    pub fn history_up(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        let new_index = match self.history_index {
+            None => {
+                self.history_draft = self.composer.text.clone();
+                self.input_history.len() - 1
+            }
+            Some(0) => return,
+            Some(i) => i - 1,
+        };
+        self.history_index = Some(new_index);
+        let entry = self
+            .input_history
+            .get(new_index)
+            .expect("index derived from len-1 or i-1")
+            .to_string();
+        self.composer.set_text(entry);
+    }
+
+    /// Recall the next (newer) history entry; ↓ past the newest restores the
+    /// draft saved on entry.
+    pub fn history_down(&mut self) {
+        let Some(i) = self.history_index else {
+            return;
+        };
+        if i + 1 < self.input_history.len() {
+            self.history_index = Some(i + 1);
+            let entry = self
+                .input_history
+                .get(i + 1)
+                .expect("i + 1 guarded by the len check")
+                .to_string();
+            self.composer.set_text(entry);
+        } else {
+            self.history_index = None;
+            let draft = std::mem::take(&mut self.history_draft);
+            self.composer.set_text(draft);
+        }
     }
 
     fn reset_conversation(&mut self) {
@@ -865,7 +926,7 @@ impl App {
                     self.open_model_menu();
                     return;
                 }
-                KeyCode::Char('e') => {
+                KeyCode::Char('f') => {
                     self.session.effort_idx = (self.session.effort_idx + 1) % EFFORTS.len();
                     return;
                 }
@@ -909,6 +970,55 @@ impl App {
                     }
                     return;
                 }
+                // Composer editing chords (reference `TextBuffer::handle_key`).
+                // Effort cycling moved to Ctrl-F so Ctrl-E can be line-end.
+                KeyCode::Char('a') => {
+                    self.composer.move_home();
+                    return;
+                }
+                KeyCode::Char('e') => {
+                    self.composer.move_end();
+                    return;
+                }
+                KeyCode::Char('w') | KeyCode::Backspace => {
+                    self.composer.delete_word_back();
+                    return;
+                }
+                KeyCode::Char('k') => {
+                    self.composer.kill_to_end_of_line();
+                    return;
+                }
+                KeyCode::Delete => {
+                    self.composer.delete_word_forward();
+                    return;
+                }
+                KeyCode::Left => {
+                    self.composer.move_word_left();
+                    return;
+                }
+                KeyCode::Right => {
+                    self.composer.move_word_right();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Alt chords: word motions (Alt-←/→, Alt-b/f). Alt-O (editor) is
+        // intercepted one level up, in the event loop, where the terminal
+        // is reachable for the suspend/resume dance.
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            match key.code {
+                KeyCode::Left | KeyCode::Char('b') => {
+                    self.composer.move_word_left();
+                    return;
+                }
+                KeyCode::Right | KeyCode::Char('f') => {
+                    self.composer.move_word_right();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -929,16 +1039,24 @@ impl App {
             KeyCode::Up => {
                 if self.slash_open() {
                     self.slash_selected = self.slash_selected.saturating_sub(1);
-                } else {
+                } else if self.composer.text.is_empty() {
                     self.scroll_by(-1);
+                } else if !self.composer.cursor_on_first_line() {
+                    self.composer.move_up();
+                } else {
+                    self.history_up();
                 }
             }
             KeyCode::Down => {
                 if self.slash_open() {
                     let max = self.slash_matches().len().saturating_sub(1);
                     self.slash_selected = (self.slash_selected + 1).min(max);
-                } else {
+                } else if self.composer.text.is_empty() && self.history_index.is_none() {
                     self.scroll_by(1);
+                } else if !self.composer.cursor_on_last_line() {
+                    self.composer.move_down();
+                } else {
+                    self.history_down();
                 }
             }
             KeyCode::PageUp => self.scroll_by(-(self.view.view_height as i32).max(1)),
@@ -1506,5 +1624,90 @@ mod tests {
         app.run_slash("/usage", &mpsc::unbounded_channel().0);
         app.handle_event(AgentEvent::UsageSnapshot(usage_rows()));
         assert!(matches!(&app.modal, Modal::Usage(rows) if rows.len() == 2));
+    }
+
+    /// The ported composer chords: Ctrl-W deletes a word, Ctrl-K kills to the
+    /// end of the line, Alt-Left moves back a word.
+    #[test]
+    fn composer_chords_edit_words_and_lines() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("foo bar".into());
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert_eq!(app.composer.text, "foo ");
+
+        app.composer.set_text("keep\nkill this".into());
+        app.composer.cursor = "keep\n".chars().count();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert_eq!(app.composer.text, "keep\n");
+
+        app.composer.set_text("one two".into());
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT), &tx);
+        assert_eq!(app.composer.cursor, 4);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT), &tx);
+        assert_eq!(app.composer.cursor, 7);
+    }
+
+    /// ↑ recalls older entries, clamps at the oldest, ↓ walks back toward the
+    /// newest and restores the in-progress draft past it.
+    #[test]
+    fn history_recall_navigates_and_restores_draft() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.input_history.push("first".into());
+        app.input_history.push("second".into());
+        app.composer.set_text("draft".into());
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "second");
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "first");
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "first", "clamped at the oldest entry");
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "second");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "draft", "draft restored past newest");
+        assert!(app.history_index.is_none());
+    }
+
+    /// Submitting a message records it in the rolling input history.
+    #[test]
+    fn submit_records_history() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("hello world".into());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert_eq!(app.input_history.len(), 1);
+        assert_eq!(app.input_history.get(0), Some("hello world"));
+        assert!(app.composer.text.is_empty());
+    }
+
+    /// Effort lives on Ctrl-F; Ctrl-E moves to the end of the line.
+    #[test]
+    fn ctrl_f_cycles_effort_and_ctrl_e_moves_to_line_end() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("hello".into());
+        app.composer.cursor = 0;
+        let before = app.session.effort_idx;
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert_eq!(app.session.effort_idx, (before + 1) % EFFORTS.len());
+        assert_eq!(app.composer.text, "hello", "ctrl-f does not type");
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert_eq!(app.composer.cursor, 5);
     }
 }
