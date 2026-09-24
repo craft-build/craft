@@ -47,10 +47,18 @@ impl Hyperlink {
 
 /// Wraps a cell's existing symbol in an OSC-8 hyperlink to `uri`.
 /// The visible text is preserved; only escape bytes are added.
+///
+/// The symbol's computed width would be the URI's length, which the
+/// buffer diff treats as a multi-width glyph — skipping (and never
+/// painting) the rest of the row, leaving terminal-default background.
+/// `ForcedWidth(1)` keeps the diff advancing one cell per cell.
 pub fn apply_to_cell(cell: &mut ratatui::buffer::Cell, uri: &str) {
     let prev = cell.symbol();
     let wrapped = format!("{OSC8_OPEN}{uri}{OSC8_CLOSE}{prev}{OSC8_EMPTY}");
     cell.set_symbol(&wrapped);
+    cell.set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
+        std::num::NonZeroU16::new(1).expect("nonzero"),
+    ));
 }
 
 /// Builds a `file://` URI from a path string, resolving `~` and

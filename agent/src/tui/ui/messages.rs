@@ -7,7 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::theme;
+use crate::markdown::Emphasis;
 use crate::markdown::highlight::{Highlighter, SegmentColor, StyledSegment};
+use crate::markdown::render::{self, StyleToken};
 use crate::tui::app::{App, DiffState, Message};
 use crate::tui::hyperlink;
 use crate::tui::provider::{LineKind, ToolKind};
@@ -130,15 +132,65 @@ fn user_block(text: &str, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Map the markdown engine's semantic tokens onto the TUI theme.
+fn md_style(token: &StyleToken, emph: &Emphasis) -> Style {
+    let mut style = match token {
+        StyleToken::Text => Style::default().fg(theme::TEXT_PRIMARY),
+        StyleToken::InlineCode => Style::default().fg(theme::CYAN),
+        StyleToken::Highlight {
+            fg,
+            bold,
+            italic,
+            underline,
+        } => {
+            let mut s = Style::default().fg(seg_color(*fg).unwrap_or(theme::TEXT_PRIMARY));
+            if *bold {
+                s = s.bold();
+            }
+            if *italic {
+                s = s.italic();
+            }
+            if *underline {
+                s = s.underlined();
+            }
+            s
+        }
+        StyleToken::Heading => Style::default().fg(theme::ACCENT).bold(),
+        StyleToken::CodeBar | StyleToken::ListMarker => Style::default().fg(theme::TEXT_TERTIARY),
+        StyleToken::TableBorder | StyleToken::HorizontalRule => {
+            Style::default().fg(theme::TEXT_TERTIARY)
+        }
+    };
+    if emph.bold {
+        style = style.bold();
+    }
+    if emph.italic {
+        style = style.italic();
+    }
+    if emph.strike {
+        style = style.crossed_out();
+    }
+    if emph.underline {
+        style = style.underlined();
+    }
+    style
+}
+
+/// Agent text: parsed and rendered through the markdown engine (blocks,
+/// inline styles, highlighted code fences) at the wrap width. Code-block
+/// highlighting hits the global block cache, so re-rendering each frame
+/// stays cheap.
 fn assistant_block(text: &str, width: usize) -> Vec<Line<'static>> {
-    let wrap_w = width.min(88);
-    wrap_text(text, wrap_w)
+    let wrap_w = width.min(88) as u16;
+    render::render(text, wrap_w)
         .into_iter()
-        .map(|chunk| {
-            Line::from(Span::styled(
-                chunk,
-                Style::default().fg(theme::TEXT_PRIMARY),
-            ))
+        .map(|line| {
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|s| Span::styled(s.text, md_style(&s.style, &s.emphasis)))
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect()
 }
@@ -462,13 +514,13 @@ fn tool_block(
     } else {
         0
     };
-    let mut hl = if is_edit {
-        match kind {
-            ToolKind::Edit { path, .. } => Some(Highlighter::for_path(path)),
-            _ => None,
+    let mut hl = match kind {
+        // Edit diffs and Read file bodies both carry source code; one
+        // stateful highlighter walks the card's lines top to bottom.
+        ToolKind::Edit { path, .. } | ToolKind::Read { path, .. } => {
+            Some(Highlighter::for_path(path))
         }
-    } else {
-        None
+        _ => None,
     };
     for ln in shown {
         let row = match ln.kind {
@@ -516,6 +568,28 @@ fn tool_block(
                     spans.push(Span::styled(" ".repeat(width - w), Style::default().bg(bg)));
                 }
                 Line::from(spans)
+            }
+            LineKind::Context => {
+                // Source-bearing Context rows (Read cards, edit context)
+                // get syntax colors patched over the card surface.
+                let base = Style::default().fg(theme::TEXT_SECONDARY).bg(card_bg);
+                let segs = hl
+                    .as_mut()
+                    .map(|h| h.highlight_line(&ln.text))
+                    .filter(|s| !s.is_empty());
+                let mut spans = vec![Span::styled(indent.clone(), surf)];
+                if is_edit {
+                    spans.push(gutter_span(ln.nr, gutter_w, card_bg));
+                    spans.push(Span::styled("  ".to_string(), surf));
+                }
+                spans.extend(styled_diff_spans(
+                    &ln.text,
+                    segs.as_deref(),
+                    &[],
+                    base,
+                    base,
+                ));
+                pad_row(spans, width, surf)
             }
             kind => {
                 let (prefix, fg) = match kind {
@@ -827,6 +901,78 @@ mod tests {
     use super::{Line, tool_block};
     use crate::tui::provider::ToolLine;
     use ratatui::style::Modifier;
+
+    #[test]
+    fn assistant_markdown_read_highlight_and_painted_card_header() {
+        use super::theme;
+        use crate::tui::app::{App, Message};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+
+        let mut app = App::new();
+        app.conversation.messages.push(Message::Assistant(
+            "# Title\n\nsome **bold** and `code`\n\n```rust\nfn main() {}\n```".into(),
+        ));
+        let path = std::env::temp_dir().join("probe.rs");
+        app.conversation.messages.push(Message::Tool {
+            id: "t1".into(),
+            kind: crate::tui::provider::ToolKind::Read {
+                path: path.display().to_string(),
+                summary: "2 lines".into(),
+            },
+            lines: vec![
+                ToolLine::new(crate::tui::provider::LineKind::Context, "fn main() {"),
+                ToolLine::new(crate::tui::provider::LineKind::Context, "}"),
+            ],
+            diff: None,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+
+        // Agent text is markdown: heading rendered in accent bold.
+        let hy = rows.iter().position(|r| r.contains("Title")).unwrap();
+        let hx = rows[hy].find("Title").unwrap() as u16;
+        let c = &buf[(hx, hy as u16)];
+        assert_eq!(c.fg, theme::ACCENT, "heading fg");
+        assert!(c.modifier.contains(Modifier::BOLD), "heading bold");
+
+        // Read card body is syntax highlighted: some source cell carries a
+        // color other than the plain secondary/tertiary card text.
+        let cy = rows.iter().position(|r| r.contains("fn main() {")).unwrap();
+        let hl_found = (0..buf.area.width).any(|x| {
+            let c = &buf[(x, cy as u16)];
+            matches!(c.symbol(), "f" | "m" | "(" | ")")
+                && c.fg != Color::Reset
+                && c.fg != theme::TEXT_SECONDARY
+                && c.fg != theme::TEXT_TERTIARY
+        });
+        assert!(
+            hl_found,
+            "read card code should be syntax colored; row={:?}",
+            rows[cy]
+        );
+
+        // Card header: OSC-8 link present, full path text survives, and no
+        // cell inside the message area falls back to terminal-default bg
+        // (the pre-fix symptom: black sections after the linked cell).
+        let ry = rows.iter().position(|r| r.contains("Read ")).unwrap();
+        assert!(rows[ry].contains("\u{1b}]8;;file://"));
+        assert!(rows[ry].contains("probe.rs"));
+        for x in 2..78u16 {
+            assert_ne!(
+                buf[(x, ry as u16)].bg,
+                Color::Reset,
+                "unpainted cell at x={x}"
+            );
+        }
+    }
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.clone()).collect()
