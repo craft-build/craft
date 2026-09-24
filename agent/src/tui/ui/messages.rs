@@ -10,6 +10,7 @@ use super::theme;
 use crate::markdown::highlight::{Highlighter, SegmentColor, StyledSegment};
 use crate::tui::app::{App, DiffState, Message};
 use crate::tui::provider::{LineKind, ToolKind};
+use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
 
 const MARGIN: u16 = 2;
 const BODY_INDENT: usize = 4;
@@ -510,13 +511,25 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Build the frame's segment document: one segment per block, in
+    // deterministic message order, so stored scroll positions survive the
+    // refill and appended messages.
+    app.view.segments.clear();
+
+    // Blank spacer carrying the user-message accent bar, so the block's
+    // left border reads as one continuous line.
+    let bar_blank = |width: usize| {
+        user_line(
+            vec![Span::styled("▎", Style::default().fg(theme::ACCENT))],
+            width,
+        )
+    };
 
     if app.conversation.messages.is_empty() {
-        lines.push(Line::from(Span::styled(
+        let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(
             "No messages yet.",
             Style::default().fg(theme::TEXT_TERTIARY),
-        )));
+        ))];
         lines.push(Line::default());
         #[cfg(test)]
         lines.push(Line::from(Span::styled(
@@ -528,88 +541,132 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             "Send a message to get started.",
             Style::default().fg(theme::TEXT_DISABLED),
         )));
+        app.view.segments.push(Segment::with_lines(lines));
     }
 
-    // Blank spacer carrying the user-message accent bar, so the block's
-    // left border reads as one continuous line.
-    let bar_blank = |width: usize| {
-        user_line(
-            vec![Span::styled("▎", Style::default().fg(theme::ACCENT))],
-            width,
-        )
-    };
-
-    let mut msg_starts = Vec::with_capacity(app.conversation.messages.len());
-    let mut tool_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
+    let mut msg_seg_start = Vec::with_capacity(app.conversation.messages.len());
+    let mut tool_seg_ranges: Vec<(usize, usize, usize)> = Vec::new(); // (msg idx, start, end)
     for (idx, msg) in app.conversation.messages.iter().enumerate() {
-        msg_starts.push(lines.len());
+        msg_seg_start.push(app.view.segments.len());
         let is_user = matches!(msg, Message::User(_));
         if is_user {
-            lines.push(bar_blank(width));
+            app.view
+                .segments
+                .push(Segment::with_lines(vec![bar_blank(width)]));
         }
         match msg {
-            Message::User(text) => lines.extend(user_block(text, width)),
-            Message::Assistant(text) => lines.extend(assistant_block(text, width)),
-            Message::Thinking(text) => lines.extend(thinking_block(text, width)),
+            Message::User(text) => app
+                .view
+                .segments
+                .push(Segment::with_lines(user_block(text, width))),
+            Message::Assistant(text) => app
+                .view
+                .segments
+                .push(Segment::with_lines(assistant_block(text, width))),
+            Message::Thinking(text) => app
+                .view
+                .segments
+                .push(Segment::with_lines(thinking_block(text, width))),
             Message::Tool {
                 id,
                 kind,
                 lines: body,
                 diff,
             } => {
-                let start = lines.len();
                 let collapsed = app.conversation.collapsed.iter().any(|c| c == id);
                 let focused = app.conversation.focused == Some(idx);
                 let hovered = app.view.hover_tool == Some(idx);
-                lines.extend(tool_block(
-                    kind, id, body, *diff, focused, collapsed, hovered, width,
-                ));
+                let lines = tool_block(kind, id, body, *diff, focused, collapsed, hovered, width);
                 if kind.collapsible() {
-                    tool_ranges.push((idx, start, lines.len()));
+                    tool_seg_ranges.push((
+                        idx,
+                        app.view.segments.len(),
+                        app.view.segments.len() + 1,
+                    ));
                 }
+                app.view.segments.push(Segment::with_lines(lines));
             }
         }
         if is_user {
-            lines.push(bar_blank(width));
+            app.view
+                .segments
+                .push(Segment::with_lines(vec![bar_blank(width)]));
         }
-        lines.push(Line::default());
+        app.view
+            .segments
+            .push(Segment::with_lines(vec![Line::default()]));
     }
-    app.view.msg_starts = msg_starts;
 
-    let total = lines.len();
-    let visible = inner.height as usize;
-    let max = total.saturating_sub(visible).min(u16::MAX as usize) as u16;
+    // Resolve the viewport through the scrollback engine: follow pins to
+    // the bottom, anything else is clamped back inside its segment.
+    let layout = Layout::new(&app.view.segments, inner.width);
     if app.view.follow {
-        app.view.scroll = max;
+        app.view.scroll = layout.bottom(inner.height);
+    } else {
+        app.view.scroll = layout.clamp(app.view.scroll);
     }
-    app.view.scroll = app.view.scroll.min(max);
-    app.view.max_scroll = max;
+    let top_row = layout.doc_row(app.view.scroll);
     app.view.view_height = inner.height;
-
-    // Visible screen rects of collapsible tool cards (for hover/click).
-    let scroll = app.view.scroll as i32;
-    app.view.tool_regions = tool_ranges
+    app.view.view_width = inner.width;
+    app.view.msg_starts = msg_seg_start
         .iter()
-        .filter_map(|(idx, start, end)| {
-            let vis_start = (*start as i32 - scroll).max(0);
-            let vis_end = (*end as i32 - scroll).min(inner.height as i32);
-            if vis_end <= vis_start {
+        .map(|&s| layout.doc_row(ScrollPos { seg: s, row: 0 }) as usize)
+        .collect();
+
+    // Slice the visible rows out of the segments starting at the scroll
+    // position. Lines are pre-wrapped (one display row each), so slicing
+    // rows is slicing lines.
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(inner.height as usize);
+    let mut pos = app.view.scroll;
+    while lines.len() < inner.height as usize && pos.seg < app.view.segments.len() {
+        let seg = app
+            .view
+            .segments
+            .get(pos.seg)
+            .expect("bounds checked above");
+        let h = seg.height(inner.width);
+        let take = (h.saturating_sub(pos.row)).min(inner.height - lines.len() as u16);
+        lines.extend(
+            seg.lines()[pos.row as usize..(pos.row + take) as usize]
+                .iter()
+                .cloned(),
+        );
+        pos.seg += 1;
+        pos.row = 0;
+    }
+
+    // Visible screen rects of collapsible tool cards (for hover/click),
+    // addressed in doc rows so they track the scroll position.
+    app.view.tool_regions = tool_seg_ranges
+        .iter()
+        .filter_map(|&(idx, s_start, s_end)| {
+            let vis_start = layout
+                .doc_row(ScrollPos {
+                    seg: s_start,
+                    row: 0,
+                })
+                .saturating_sub(top_row) as u16;
+            let vis_end = (layout
+                .doc_row(ScrollPos { seg: s_end, row: 0 })
+                .saturating_sub(top_row) as u16)
+                .min(inner.height);
+            if vis_end <= vis_start || vis_start >= inner.height {
                 None
             } else {
                 Some((
-                    *idx,
+                    idx,
                     Rect {
                         x: inner.x,
-                        y: inner.y + vis_start as u16,
+                        y: inner.y + vis_start,
                         width: inner.width,
-                        height: (vis_end - vis_start) as u16,
+                        height: vis_end - vis_start,
                     },
                 ))
             }
         })
         .collect();
 
-    let para = Paragraph::new(lines).scroll((app.view.scroll, 0));
+    let para = Paragraph::new(lines);
     f.render_widget(para, inner);
 }
 

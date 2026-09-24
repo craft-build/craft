@@ -15,6 +15,7 @@ use crate::tui::repaint;
 use crate::tui::selection::{
     Selection, clamp_to, copy_to_clipboard, extract_selection_text, rect_contains,
 };
+use crate::tui::ui::scrollback::{Layout, ScrollPos, SegmentCache};
 
 /// Models shown before the provider's catalog arrives (or under the test mock).
 const SEED_MODELS: [(&str, &str); 4] = [
@@ -202,14 +203,21 @@ impl Conversation {
     }
 }
 
-/// Viewport state: scroll/follow plus the renderer-written frame snapshot
-/// (message starts, per-row text, hit regions) and pointer state.
+/// Viewport state: the scrollback document (segments + the viewport's
+/// position in it) plus the renderer-written frame snapshot (message
+/// doc-row anchors, per-row text, hit regions) and pointer state.
 pub struct ViewModel {
-    pub scroll: u16,
+    /// Top of the viewport as a place in the segment document. Width-
+    /// independent, so a resize keeps the anchor segment.
+    pub scroll: ScrollPos,
     pub follow: bool,
-    pub max_scroll: u16,
+    /// The transcript as rendered segments; refilled by the renderer each
+    /// frame in deterministic message order, so stored positions survive
+    /// refills and appends.
+    pub segments: SegmentCache,
     pub view_height: u16,
-    /// Line offset where each message starts (filled by the renderer).
+    pub view_width: u16,
+    /// Doc row where each message starts (filled by the renderer).
     pub msg_starts: Vec<usize>,
     /// Text of the last rendered frame, one entry per terminal row (filled by
     /// the renderer; used to extract selection text on copy).
@@ -230,10 +238,11 @@ pub struct ViewModel {
 impl ViewModel {
     fn new() -> Self {
         ViewModel {
-            scroll: 0,
+            scroll: ScrollPos::default(),
             follow: true,
-            max_scroll: 0,
+            segments: SegmentCache::new(),
             view_height: 0,
+            view_width: 0,
             msg_starts: Vec::new(),
             frame_text: Vec::new(),
             msg_area: Rect::default(),
@@ -489,7 +498,8 @@ impl App {
         self.view.pending_click = None;
         self.view.tool_regions.clear();
         self.modal = Modal::None;
-        self.view.scroll = 0;
+        self.view.scroll = ScrollPos::default();
+        self.view.segments.clear();
         self.view.follow = true;
     }
 }
@@ -609,9 +619,46 @@ impl App {
     }
 
     pub fn scroll_by(&mut self, delta: i32) {
-        let new = self.view.scroll as i32 + delta;
-        self.view.scroll = new.clamp(0, self.view.max_scroll as i32) as u16;
-        self.view.follow = self.view.scroll >= self.view.max_scroll;
+        let layout = Layout::new(&self.view.segments, self.view.view_width);
+        let pos = if delta >= 0 {
+            layout.advance(self.view.scroll, delta as u32)
+        } else {
+            layout.retreat(self.view.scroll, delta.unsigned_abs())
+        };
+        self.set_scroll_pos(pos);
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.set_scroll_pos(ScrollPos::default());
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        let layout = Layout::new(&self.view.segments, self.view.view_width);
+        // `bottom` (not `end`) so the viewport is exactly filled; `end`
+        // would address rows past the last one and paint a blank screen.
+        let target = if self.view.view_height > 0 {
+            layout.bottom(self.view.view_height)
+        } else {
+            layout.end()
+        };
+        self.set_scroll_pos(target);
+    }
+
+    /// Applies a scroll position: clamped into the document, and re-pins
+    /// follow once the viewport sits at the document bottom.
+    fn set_scroll_pos(&mut self, pos: ScrollPos) {
+        let layout = Layout::new(&self.view.segments, self.view.view_width);
+        let mut clamped = layout.clamp(pos);
+        // Before the first frame (no viewport height) keep the follow flag
+        // as-is: there is no bottom to be at yet. Otherwise, like the
+        // flat-offset model before it, the viewport never scrolls past the
+        // point where the document stops filling it.
+        if self.view.view_height > 0 {
+            let bottom = layout.bottom(self.view.view_height);
+            clamped = clamped.min(bottom);
+            self.view.follow = clamped >= bottom;
+        }
+        self.view.scroll = clamped;
         // Card rects move with the scroll; stale hover/click state is dropped.
         self.view.hover_tool = None;
         self.view.pending_click = None;
@@ -710,14 +757,16 @@ impl App {
         let Some(i) = self.conversation.focused else {
             return;
         };
-        let Some(&start) = self.view.msg_starts.get(i) else {
+        let Some(&doc) = self.view.msg_starts.get(i) else {
             return;
         };
-        let start = start as i32;
-        let top = self.view.scroll as i32;
-        let bottom = top + self.view.view_height as i32;
-        if start < top || start >= bottom {
-            self.view.scroll = (start - 2).max(0).min(self.view.max_scroll as i32) as u16;
+        let doc = doc as u32;
+        let layout = Layout::new(&self.view.segments, self.view.view_width);
+        let top = layout.doc_row(self.view.scroll);
+        if doc < top || doc >= top + u32::from(self.view.view_height) {
+            self.set_scroll_pos(layout.at_row(doc.saturating_sub(2)));
+            // Like the flat-offset code before it: an explicit jump away
+            // from the bottom must not be re-pinned by the next frame.
             self.view.follow = false;
         }
     }
@@ -840,6 +889,8 @@ impl App {
             }
             KeyCode::PageUp => self.scroll_by(-(self.view.view_height as i32).max(1)),
             KeyCode::PageDown => self.scroll_by(self.view.view_height as i32),
+            KeyCode::Home => self.scroll_to_top(),
+            KeyCode::End => self.scroll_to_bottom(),
             KeyCode::Enter => {
                 // Enter on a focused collapsible block (empty composer) toggles it.
                 if self.composer.text.is_empty()
@@ -861,6 +912,21 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
+                // Vim-style scroll keys, only while the composer is empty so
+                // typing a message never eats a character.
+                if self.composer.text.is_empty() {
+                    match c {
+                        'g' => {
+                            self.scroll_to_top();
+                            return;
+                        }
+                        'G' => {
+                            self.scroll_to_bottom();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 self.composer.insert_char(c);
                 self.slash_selected = 0;
             }
@@ -921,6 +987,163 @@ mod tests {
     use super::*;
     use crate::tui::provider::LineKind;
     use crate::tui::repaint::Cadence;
+    use crate::tui::ui;
+    use crate::tui::ui::scrollback::Layout;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Paint the app once so the renderer builds the segment document and
+    /// resolves the viewport, as the real loop does before key handling.
+    fn draw_app(app: &mut App, width: u16, height: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| ui::draw(f, app)).unwrap();
+    }
+
+    fn scrolled_app() -> App {
+        let mut app = App::new();
+        for i in 0..30 {
+            app.handle_event(AgentEvent::AssistantText(format!(
+                "message number {i} with some wrapping text to fill rows"
+            )));
+        }
+        app
+    }
+
+    /// While following, the viewport sits at the document bottom every
+    /// frame, and streaming more content keeps it pinned there.
+    #[test]
+    fn follow_pins_the_viewport_to_the_bottom() {
+        let mut app = scrolled_app();
+        draw_app(&mut app, 80, 24);
+        assert!(app.view.follow);
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(
+            layout.doc_row(app.view.scroll),
+            layout
+                .total_rows()
+                .saturating_sub(u32::from(app.view.view_height)),
+            "follow shows the last viewport-height rows"
+        );
+        app.handle_event(AgentEvent::AssistantText("one more".into()));
+        draw_app(&mut app, 80, 24);
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(
+            layout.doc_row(app.view.scroll),
+            layout
+                .total_rows()
+                .saturating_sub(u32::from(app.view.view_height)),
+            "new content keeps the bottom pinned"
+        );
+    }
+
+    /// Scrolling up breaks follow; appending messages afterwards leaves
+    /// the viewport where it was (append-stable addressable rows).
+    #[test]
+    fn scrolling_up_breaks_follow_and_appends_do_not_jump() {
+        let mut app = scrolled_app();
+        draw_app(&mut app, 80, 24);
+        app.scroll_by(-3);
+        assert!(!app.view.follow, "scrolling up breaks follow");
+        let before = {
+            let layout = Layout::new(&app.view.segments, app.view.view_width);
+            (app.view.scroll, layout.doc_row(app.view.scroll))
+        };
+        app.handle_event(AgentEvent::AssistantText("tail message".into()));
+        draw_app(&mut app, 80, 24);
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(app.view.scroll, before.0, "anchor position survives append");
+        assert_eq!(
+            layout.doc_row(app.view.scroll),
+            before.1,
+            "appended segments do not shift the viewport"
+        );
+        assert!(!app.view.follow);
+    }
+
+    /// The scroll position is width-independent: a resize keeps the anchor
+    /// segment instead of jumping by a row delta.
+    #[test]
+    fn resize_keeps_the_anchor_segment() {
+        let mut app = scrolled_app();
+        draw_app(&mut app, 100, 24);
+        app.scroll_by(-5);
+        draw_app(&mut app, 100, 24);
+        let anchored = app.view.scroll.seg;
+        assert!(anchored > 0, "scrolled off the top of the document");
+        draw_app(&mut app, 50, 24);
+        assert_eq!(
+            app.view.scroll.seg, anchored,
+            "a resize is not a scroll: the anchor segment survives re-wrapping"
+        );
+    }
+
+    /// The full keyboard scroll set: line, half page, page, top, bottom.
+    #[test]
+    fn keyboard_scroll_set_walks_and_clamps() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = scrolled_app();
+        draw_app(&mut app, 80, 24);
+
+        // Top: Home and g.
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
+        assert_eq!(app.view.scroll, ScrollPos::default());
+        app.scroll_by(2);
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.view.scroll, ScrollPos::default());
+
+        // Bottom: End and G re-pin follow.
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &tx);
+        assert!(app.view.follow);
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(
+            layout.doc_row(app.view.scroll) + u32::from(app.view.view_height),
+            layout.total_rows()
+        );
+        app.scroll_by(-2);
+        assert!(!app.view.follow);
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), &tx);
+        assert!(app.view.follow, "G lands at the bottom and re-pins");
+
+        // Line, half page, page: positions move by the expected row counts.
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(layout.doc_row(app.view.scroll), 1, "Down scrolls one row");
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(
+            layout.doc_row(app.view.scroll),
+            1 + u32::from(app.view.view_height) / 2,
+            "Ctrl-D scrolls half a page"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &tx);
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(
+            layout.doc_row(app.view.scroll),
+            1 + u32::from(app.view.view_height) / 2 + u32::from(app.view.view_height),
+            "PageDown scrolls a full page"
+        );
+
+        // Scrolling past the top clamps at the document start.
+        app.scroll_by(-9999);
+        assert_eq!(app.view.scroll, ScrollPos::default());
+    }
+
+    /// g and G still type into the composer when it holds text.
+    #[test]
+    fn vim_scroll_keys_type_when_composer_has_text() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.insert_char('a');
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "agG");
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &tx);
+    }
 
     /// Only the statuses that render the spinner glyph owe cadence frames;
     /// settled statuses sleep until a real event wakes the loop.

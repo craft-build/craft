@@ -4,6 +4,7 @@
 mod composer;
 mod messages;
 mod overlays;
+pub mod scrollback;
 mod sidebar;
 pub mod theme;
 
