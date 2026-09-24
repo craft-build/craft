@@ -99,7 +99,7 @@ async fn drive<P: Provider>(
     let (cmd_tx, evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Event>();
+    let (input_tx, input_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
             if input_tx.send(ev).is_err() {
@@ -118,9 +118,6 @@ async fn drive<P: Provider>(
     }
 
     let terminal = RefCell::new(terminal);
-    // Startup splash: plays until any key arrives or its budget runs out;
-    // keys pressed here are consumed so they never leak into the composer.
-    run_splash(&terminal, &mut input_rx).await;
     let result = run_loop(
         &mut app,
         &cmd_tx,
@@ -162,57 +159,8 @@ async fn drive<P: Provider>(
 }
 
 // ---------------------------------------------------------------------------
-// Startup splash
+// $EDITOR handoff (Alt-O)
 // ---------------------------------------------------------------------------
-
-/// Play the animated splash until a key arrives or [`ui::splash::SPLASH_SECS`]
-/// elapses. Skipped entirely on terminals too small for it.
-async fn run_splash(
-    terminal: &RefCell<Terminal<CrosstermBackend<io::Stdout>>>,
-    input_rx: &mut mpsc::UnboundedReceiver<Event>,
-) {
-    let splash = ui::splash::Splash::new();
-    let start = std::time::Instant::now();
-    // Too small to draw: don't even take the keypress.
-    let drawable = terminal
-        .borrow()
-        .size()
-        .map(|s| s.width >= ui::splash::MIN_WIDTH && s.height >= ui::splash::MIN_HEIGHT)
-        .unwrap_or(false);
-    if !drawable {
-        return;
-    }
-    loop {
-        let t = start.elapsed().as_secs_f32();
-        if t >= ui::splash::SPLASH_SECS {
-            return;
-        }
-        begin_synchronized_output();
-        let draw = {
-            let mut term = terminal.borrow_mut();
-            term.draw(|f| {
-                let area = f.area();
-                let buf = f.buffer_mut();
-                splash.render(area, buf, t);
-            })
-            .map(|_| ())
-        };
-        end_synchronized_output();
-        if draw.is_err() {
-            return;
-        }
-        tokio::select! {
-            ev = input_rx.recv() => {
-                // Any event (mostly keys) ends the splash; focus reports and
-                // the like are dropped with it.
-                if ev.is_none() {
-                    return;
-                }
-            }
-            _ = tokio::time::sleep(repaint::Cadence::SMOOTH.frame().unwrap()) => {}
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // $EDITOR handoff (Alt-O)

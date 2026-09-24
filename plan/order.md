@@ -92,6 +92,12 @@ Optimal port order from `comparison.md`: dependencies first, highest leverage-pe
 68. F.6 OSC-8 hyperlinks (S)
 69. F.7 Status bar deltas, notifications, thinking indicators, splash (all S)
 
+Fixes:
+- [x] Ctrl+E does not jump to bottom in the scrollback engine
+- [x]  We should strip <untrusted-content> in the tui card (not from content AI sees)
+- [x] Up and Down arrows are bound to the scrollback engine we need to remove them from their so that up and down can activate the input history scroll.
+- [x] Remove the splash screen
+
 ## Phase 8 — TUI features & modes
 
 70. F.2 Mode cycling Tab + C.17 Plan mode (skip Flow for now)

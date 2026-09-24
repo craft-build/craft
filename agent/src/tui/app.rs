@@ -1042,13 +1042,18 @@ impl App {
                     return;
                 }
                 // Composer editing chords (reference `TextBuffer::handle_key`).
-                // Effort cycling moved to Ctrl-F so Ctrl-E can be line-end.
+                // Effort cycling moved to Ctrl-F so Ctrl-E can be line-end;
+                // with an empty composer it jumps the scrollback to bottom.
                 KeyCode::Char('a') => {
                     self.composer.move_home();
                     return;
                 }
                 KeyCode::Char('e') => {
-                    self.composer.move_end();
+                    if self.composer.text.is_empty() {
+                        self.scroll_to_bottom();
+                    } else {
+                        self.composer.move_end();
+                    }
                     return;
                 }
                 KeyCode::Char('w') | KeyCode::Backspace => {
@@ -1107,11 +1112,12 @@ impl App {
             }
             KeyCode::Tab => self.cycle_focus(1),
             KeyCode::BackTab => self.cycle_focus(-1),
+            // The arrows never scroll the transcript (PageUp/Down, Ctrl-U/D,
+            // and the wheel do that): on the first/last composer line they
+            // drive the input history, elsewhere they move the cursor.
             KeyCode::Up => {
                 if self.slash_open() {
                     self.slash_selected = self.slash_selected.saturating_sub(1);
-                } else if self.composer.text.is_empty() {
-                    self.scroll_by(-1);
                 } else if !self.composer.cursor_on_first_line() {
                     self.composer.move_up();
                 } else {
@@ -1122,8 +1128,6 @@ impl App {
                 if self.slash_open() {
                     let max = self.slash_matches().len().saturating_sub(1);
                     self.slash_selected = (self.slash_selected + 1).min(max);
-                } else if self.composer.text.is_empty() && self.history_index.is_none() {
-                    self.scroll_by(1);
                 } else if !self.composer.cursor_on_last_line() {
                     self.composer.move_down();
                 } else {
@@ -1348,10 +1352,12 @@ mod tests {
         assert!(app.view.follow, "G lands at the bottom and re-pins");
 
         // Line, half page, page: positions move by the expected row counts.
+        // The arrows are history keys now, so the one-row step goes through
+        // the public API instead of a keypress.
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        app.scroll_by(1);
         let layout = Layout::new(&app.view.segments, app.view.view_width);
-        assert_eq!(layout.doc_row(app.view.scroll), 1, "Down scrolls one row");
+        assert_eq!(layout.doc_row(app.view.scroll), 1, "one row down");
         app.handle_key(
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
             &tx,
@@ -1747,6 +1753,56 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_eq!(app.composer.text, "draft", "draft restored past newest");
         assert!(app.history_index.is_none());
+    }
+
+    /// With an empty composer, ↑/↓ drive the input history straight away —
+    /// the arrows are not scrollback keys.
+    #[test]
+    fn arrows_drive_history_from_an_empty_composer() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = scrolled_app();
+        draw_app(&mut app, 80, 24);
+        app.scroll_by(-3);
+        assert!(!app.view.follow);
+        app.input_history.push("earlier".into());
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "earlier");
+        assert!(!app.view.follow, "Up recalled history instead of scrolling");
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.composer.text, "", "draft (empty) restored past newest");
+        assert!(app.history_index.is_none());
+    }
+
+    /// Ctrl-E: line-end while the composer holds text; with an empty
+    /// composer it jumps the scrollback to the bottom and re-pins follow.
+    #[test]
+    fn ctrl_e_is_both_line_end_and_jump_to_bottom() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("hello".into());
+        app.composer.cursor = 0;
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert_eq!(app.composer.cursor, 5, "line-end with text");
+
+        let mut app = scrolled_app();
+        draw_app(&mut app, 80, 24);
+        app.scroll_by(-5);
+        assert!(!app.view.follow, "scrolled off the bottom");
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert!(app.view.follow, "Ctrl-E on empty composer jumps to bottom");
+        let layout = Layout::new(&app.view.segments, app.view.view_width);
+        assert_eq!(
+            layout.doc_row(app.view.scroll) + u32::from(app.view.view_height),
+            layout.total_rows()
+        );
     }
 
     /// Submitting a message records it in the rolling input history.

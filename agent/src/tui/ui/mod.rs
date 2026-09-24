@@ -6,7 +6,6 @@ mod messages;
 mod overlays;
 pub mod scrollback;
 mod sidebar;
-pub mod splash;
 pub mod theme;
 
 use ratatui::Frame;

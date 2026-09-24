@@ -240,8 +240,21 @@ pub(super) fn tool_done(
     }
 }
 
-fn context_lines(text: &str) -> Vec<ToolLine> {
+/// Model-facing tool output arrives wrapped in `<untrusted-content>` marker
+/// lines (`crate::tools::bash::wrap_untrusted`); on screen they are noise,
+/// so the card drops them. The filter only engages when both markers are
+/// present as full lines, so output that merely quotes a tag keeps it (the
+/// wrapper zero-width-breaks its own payload copies, which never match a
+/// full-line marker anyway).
+fn strip_untrusted_markers(text: &str) -> impl Iterator<Item = &str> {
+    let wrapped = text.lines().any(|l| l == "<untrusted-content>")
+        && text.lines().any(|l| l == "</untrusted-content>");
     text.lines()
+        .filter(move |l| !wrapped || !matches!(*l, "<untrusted-content>" | "</untrusted-content>"))
+}
+
+fn context_lines(text: &str) -> Vec<ToolLine> {
+    strip_untrusted_markers(text)
         .map(|line| ToolLine::new(LineKind::Context, line))
         .collect()
 }
@@ -540,6 +553,37 @@ mod tests {
         assert!(
             matches!(&done.card.kind, ToolKind::Grep { summary, .. } if summary == "1 match in 1 file")
         );
+    }
+
+    #[test]
+    fn bash_done_drops_untrusted_markers_but_keeps_the_payload() {
+        // Same shape as `tools::bash::wrap_untrusted`, including the exit
+        // tail and a zero-width-broken payload copy of the closing tag.
+        let text = "<untrusted-content>\nok: done\n</untrusted-content\u{200b}>\n</untrusted-content>\nExit code: 1";
+        let result = history::ToolResult {
+            is_error: true,
+            ..history::ToolResult::text("t1", "bash", text)
+        };
+        let done = tool_done(
+            "t1".into(),
+            "bash",
+            &serde_json::json!({"command": "false"}),
+            &result,
+        );
+        let body: Vec<&str> = done.card.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            body,
+            vec!["ok: done", "</untrusted-content\u{200b}>", "Exit code: 1"]
+        );
+    }
+
+    #[test]
+    fn content_quoting_a_single_marker_keeps_it() {
+        // No closing marker: this is payload, not the wrapper, so nothing
+        // is filtered.
+        let lines = context_lines("<untrusted-content>\nsome text");
+        let body: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(body, vec!["<untrusted-content>", "some text"]);
     }
 
     #[test]
