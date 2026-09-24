@@ -206,7 +206,10 @@ fn status_indicator(app: &App) -> Vec<Span<'static>> {
 pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let tertiary = Style::default().fg(theme::TEXT_TERTIARY);
     let sep = || Span::styled(" · ", tertiary);
-    let mut left = status_indicator(app);
+    // Two leading spaces line the indicator up under the composer's accent
+    // bar, which sits two cells in from the row's left edge.
+    let mut left = vec![Span::raw("  ")];
+    left.extend(status_indicator(app));
     left.extend([
         sep(),
         Span::styled(abbreviated_cwd(&app.session.cwd), tertiary),

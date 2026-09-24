@@ -454,6 +454,32 @@ mod tests {
         assert!(buffer_text(&terminal).contains("failed"));
     }
 
+    /// The status row's indicator starts two cells in, lined up under the
+    /// composer's accent bar rather than flush with the row's left edge.
+    #[test]
+    fn status_indicator_aligns_under_the_composer_accent_bar() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut app = seeded_app();
+        app.handle_event(AgentEvent::StatusChanged(Status::Running));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = (0..buf.area.height)
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("running")
+            })
+            .expect("status row with the running indicator");
+        assert_eq!(buf[(0, row)].symbol(), " ");
+        assert_eq!(buf[(1, row)].symbol(), " ");
+        assert_ne!(
+            buf[(2, row)].symbol(),
+            " ",
+            "indicator starts under the accent bar"
+        );
+    }
+
     #[test]
     fn narrow_terminal_hides_sidebar() {
         let mut terminal = Terminal::new(TestBackend::new(70, 24)).unwrap();
