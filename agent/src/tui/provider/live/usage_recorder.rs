@@ -23,6 +23,13 @@ pub(super) struct UsageLedger {
 }
 
 impl UsageLedger {
+    /// Rebind the ledger to a specific session id (e.g. a loaded session,
+    /// so its future cost records join the same session's file family).
+    pub(super) fn with_session_id(mut self, id: String) -> Self {
+        self.session_id = id;
+        self
+    }
+
     /// Open the state dir's cost ledger and mint this session's id.
     pub(super) fn open() -> Self {
         Self {

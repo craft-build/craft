@@ -192,10 +192,7 @@ impl ToolDispatch {
                     return Ok(DispatchOutcome::Skipped(history::ToolResult {
                         call: call.id,
                         name: call.function.name,
-                        content: vec![history::ToolResultContent::text(
-                            "blocked by guardrails: this tool call keeps repeating without \
-                             progress; change your approach or use a different tool",
-                        )],
+                        content: vec![history::ToolResultContent::text(GUARDRAIL_BLOCK_MESSAGE)],
                         is_error: true,
                     }));
                 }
@@ -324,7 +321,7 @@ fn guardrail_note(
     };
     result.content.insert(
         0,
-        history::ToolResultContent::text(format!("[guardrail] {reason}")),
+        history::ToolResultContent::text(format!("{GUARDRAIL_WARN_PREFIX}{reason}")),
     );
 }
 
@@ -390,6 +387,14 @@ use crate::history::Message;
 use super::doom;
 use super::task_set;
 use super::{CancelToken, Event, RunOutcome};
+
+/// Model-visible text for a guardrail-blocked call; `commit_wave` also keys
+/// the user-facing `Event::Info` off it, so keep the constant in sync.
+pub(crate) const GUARDRAIL_BLOCK_MESSAGE: &str = "blocked by guardrails: this tool call keeps \
+     repeating without progress; change your approach or use a different tool";
+/// The prefix `guardrail_note` puts on warnings carried by a ran result;
+/// `commit_wave` strips it into the `Event::Info` text.
+const GUARDRAIL_WARN_PREFIX: &str = "[guardrail] ";
 
 /// Tools that must never share a wave with another call: `batch` nests its
 /// own parallel dispatch and `question` (not yet ported) blocks on the user.
@@ -510,23 +515,63 @@ async fn commit_wave(
 ) -> Option<RunOutcome> {
     let mut wave_results: Vec<history::ToolResult> = Vec::new();
     for (call, outcome) in results {
-        let result = match outcome {
-            Ok(Ok(DispatchOutcome::Ran(result))) | Ok(Ok(DispatchOutcome::Skipped(result))) => {
-                result
-            }
+        // `guardrail_blocked` identifies the one Skipped outcome that is an
+        // error (the guardrail block), so its skip surfaces as a warning
+        // rather than silent tool output.
+        let (guardrail_blocked, result) = match outcome {
+            Ok(Ok(DispatchOutcome::Ran(result))) => (false, result),
+            Ok(Ok(DispatchOutcome::Skipped(result))) => (
+                result.is_error
+                    && result
+                        .content
+                        .first()
+                        .map(history::ToolResultContent::to_text)
+                        .as_deref()
+                        == Some(GUARDRAIL_BLOCK_MESSAGE),
+                result,
+            ),
             Ok(Ok(DispatchOutcome::Stopped(_))) => return Some(RunOutcome::Cancelled),
             Ok(Err(unknown)) => return Some(RunOutcome::Failed(unknown)),
             // The task itself failed: a panic or cancellation inside the
             // tool future, reported as a per-call error result.
-            Err(panic) => history::ToolResult {
-                call: call.id.clone(),
-                name: call.function.name.clone(),
-                content: vec![history::ToolResultContent::text(format!(
-                    "internal error: tool panicked: {panic}"
-                ))],
-                is_error: true,
-            },
+            Err(panic) => (
+                false,
+                history::ToolResult {
+                    call: call.id.clone(),
+                    name: call.function.name.clone(),
+                    content: vec![history::ToolResultContent::text(format!(
+                        "internal error: tool panicked: {panic}"
+                    ))],
+                    is_error: true,
+                },
+            ),
         };
+        // Guardrail warn/block statuses ride `Event::Info` so a surface can
+        // show them as warnings instead of silent tool text.
+        if guardrail_blocked {
+            let reason = result
+                .content
+                .first()
+                .map(history::ToolResultContent::to_text)
+                .unwrap_or_default()
+                .trim_start_matches("blocked by guardrails: ")
+                .to_owned();
+            emit(Event::Info(format!(
+                "guardrail blocked {}: {reason}",
+                call.function.name
+            )));
+        } else if let Some(warning) = result
+            .content
+            .first()
+            .map(history::ToolResultContent::to_text)
+            .filter(|text| text.starts_with(GUARDRAIL_WARN_PREFIX))
+        {
+            emit(Event::Info(format!(
+                "guardrail warning on {}: {}",
+                call.function.name,
+                warning.trim_start_matches(GUARDRAIL_WARN_PREFIX)
+            )));
+        }
         if result.is_error {
             batch.errors += 1;
         } else {

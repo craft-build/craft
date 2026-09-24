@@ -26,6 +26,23 @@ pub enum Modal {
     Usage(Vec<crate::tui::provider::UsageRow>),
     /// `/stats`: cross-session totals from the cost ledger.
     Stats(StatsView),
+    /// `/help`: static keybinding/command sheet (throwaway; Phase 8 #80
+    /// replaces it with data-driven keybindings).
+    Help,
+    /// `/sessions`: persisted-session picker; Enter loads the selection.
+    Sessions {
+        entries: Vec<SessionEntry>,
+        selected: usize,
+    },
+}
+
+/// One row of the `/sessions` picker, pre-rendered for display.
+#[derive(Clone, Debug)]
+pub struct SessionEntry {
+    pub id: String,
+    pub title: String,
+    /// Relative update time ("2h ago").
+    pub updated: String,
 }
 
 /// Aggregate cost-ledger state rendered by the `/stats` overlay.
@@ -62,9 +79,46 @@ impl App {
             return;
         }
 
-        // 4. Read-only usage/stats tables: any key dismisses.
-        if matches!(self.modal, Modal::Usage(_) | Modal::Stats(_)) {
+        // 4. Read-only usage/stats/help sheets: any key dismisses.
+        if matches!(self.modal, Modal::Usage(_) | Modal::Stats(_) | Modal::Help) {
             self.modal = Modal::None;
+            return;
+        }
+
+        // 5. Sessions picker.
+        if matches!(self.modal, Modal::Sessions { .. }) {
+            self.handle_sessions_key(key, tx);
+        }
+    }
+
+    fn handle_sessions_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
+        let Modal::Sessions { entries, selected } = std::mem::replace(&mut self.modal, Modal::None)
+        else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => {
+                self.modal = Modal::Sessions {
+                    entries,
+                    selected: selected.saturating_sub(1),
+                }
+            }
+            KeyCode::Down => {
+                let max = entries.len().saturating_sub(1);
+                self.modal = Modal::Sessions {
+                    entries,
+                    selected: (selected + 1).min(max),
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = entries.get(selected) {
+                    let _ = tx.send(Command::LoadSession {
+                        id: entry.id.clone(),
+                    });
+                }
+            }
+            // Esc or any other key closes the picker (already None).
+            _ => {}
         }
     }
 

@@ -12,7 +12,7 @@ use crate::markdown::highlight::{Highlighter, SegmentColor, StyledSegment};
 use crate::markdown::render::{self, StyleToken};
 use crate::tui::app::{App, DiffState, Message};
 use crate::tui::hyperlink;
-use crate::tui::provider::{LineKind, ToolKind};
+use crate::tui::provider::{LineKind, Tone, ToolKind};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
 
 const MARGIN: u16 = 2;
@@ -204,6 +204,26 @@ fn thinking_block(text: &str, width: usize) -> Vec<Line<'static>> {
                 chunk,
                 Style::default().fg(theme::TEXT_SECONDARY),
             ))
+        })
+        .collect()
+}
+
+/// A system notice: one muted line (wrapped when long) with a tone-colored
+/// prefix glyph, without card chrome.
+fn notice_block(tone: Tone, text: &str, width: usize) -> Vec<Line<'static>> {
+    let wrap_w = width.saturating_sub(4).clamp(1, 88);
+    wrap_text(text, wrap_w)
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            Line::from(vec![
+                Span::styled(
+                    if i == 0 { "◆ " } else { "  " },
+                    Style::default().fg(theme::tone_color(tone)),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(chunk, Style::default().fg(theme::TEXT_TERTIARY)),
+            ])
         })
         .collect()
 }
@@ -725,6 +745,10 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 .view
                 .segments
                 .push(Segment::with_lines(thinking_block(text, width))),
+            Message::Notice { tone, text } => app
+                .view
+                .segments
+                .push(Segment::with_lines(notice_block(*tone, text, width))),
             Message::Tool {
                 id,
                 kind,
@@ -906,6 +930,53 @@ mod tests {
     use super::{Line, tool_block};
     use crate::tui::provider::ToolLine;
     use ratatui::style::Modifier;
+
+    /// W1: a notice is one muted line with a tone-colored prefix glyph.
+    #[test]
+    fn notice_renders_tone_glyph_and_muted_text() {
+        use super::{notice_block, theme};
+        use crate::tui::app::{App, Message};
+        use crate::tui::provider::{AgentEvent, Tone};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // Unit shape: glyph + muted text, continuation lines keep the indent.
+        let lines = notice_block(Tone::Warning, "retrying (attempt 1)", 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "◆ ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme::WARNING));
+        assert_eq!(lines[0].spans[2].style.fg, Some(theme::TEXT_TERTIARY));
+
+        // App level: AgentEvent::Notice lands as a Message::Notice and
+        // renders into the transcript.
+        let mut app = App::new();
+        app.handle_event(AgentEvent::Notice {
+            tone: Tone::Danger,
+            text: "agent looks stuck in a loop".into(),
+        });
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(Message::Notice {
+                tone: Tone::Danger,
+                ..
+            })
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let y = rows
+            .iter()
+            .position(|r| r.contains("stuck in a loop"))
+            .expect("notice text rendered");
+        assert!(rows[y].contains('◆'), "tone glyph rendered: {:?}", rows[y]);
+        let gx = rows[y].find('◆').unwrap() as u16;
+        assert_eq!(buf[(gx, y as u16)].fg, theme::DANGER);
+    }
 
     #[test]
     fn assistant_markdown_read_highlight_and_painted_card_header() {

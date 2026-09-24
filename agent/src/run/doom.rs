@@ -82,7 +82,6 @@ impl DoomTracker {
         Self::default()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn score(&self) -> u32 {
         self.score
     }

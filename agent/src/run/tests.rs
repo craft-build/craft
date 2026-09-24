@@ -385,6 +385,7 @@ mod tests {
             .with_guardrails(crate::run::shared_guardrails());
         let (_, cancel) = cancel_channel();
         let mut history = Vec::new();
+        let events = std::sync::Mutex::new(Vec::new());
         let outcome = run(
             &model,
             &RunParams::default(),
@@ -392,10 +393,31 @@ mod tests {
             &mut history,
             "go",
             &cancel,
-            &|_| {},
+            &|ev| events.lock().expect("events lock").push(ev),
         )
         .await;
         assert!(matches!(outcome, RunOutcome::Done { .. }));
+        let events = events.into_inner().expect("events lock");
+        let infos: Vec<&str> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Event::Info(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let warns = infos
+            .iter()
+            .filter(|text| text.starts_with("guardrail warning"))
+            .count();
+        let blocks = infos
+            .iter()
+            .filter(|text| text.starts_with("guardrail blocked"))
+            .count();
+        assert!(warns >= 1, "a guardrail warn emits Event::Info: {infos:?}");
+        assert_eq!(
+            blocks, 1,
+            "the guardrail block emits one Event::Info: {infos:?}"
+        );
         let results: Vec<String> = history
             .iter()
             .flat_map(|m| match m {
@@ -445,6 +467,7 @@ mod tests {
         let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
         let (_, cancel) = cancel_channel();
         let mut history = Vec::new();
+        let events = std::sync::Mutex::new(Vec::new());
         let outcome = run(
             &model,
             &RunParams::default(),
@@ -452,7 +475,7 @@ mod tests {
             &mut history,
             "go",
             &cancel,
-            &|_| {},
+            &|ev| events.lock().expect("events lock").push(ev),
         )
         .await;
         assert!(matches!(outcome, RunOutcome::Done { ref reply } if reply == "summarized"));
@@ -461,6 +484,16 @@ mod tests {
             .filter(|m| m.text() == doom::GRACE_CALL_PROMPT)
             .count();
         assert_eq!(grace_count, 1, "grace prompt fired exactly once");
+        let stagnation_count = events
+            .lock()
+            .expect("events lock")
+            .iter()
+            .filter(|ev| matches!(ev, Event::StagnationDetected { .. }))
+            .count();
+        assert_eq!(
+            stagnation_count, 1,
+            "grace posts exactly one StagnationDetected"
+        );
         // The blocked call's result carries the doom-loop warning.
         assert!(history.iter().any(|m| {
             matches!(m, Message::User { content } if matches!(&content[0],

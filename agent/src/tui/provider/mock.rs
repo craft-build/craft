@@ -188,6 +188,16 @@ async fn run_first_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
         AgentEvent::AssistantText("Looking at the refresh path first.".into()),
     )
     .await;
+    // One scripted notice so app-level tests can assert its rendering.
+    emit(
+        &tx,
+        300,
+        AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: "retrying (attempt 1): stream closed early — next in 500ms".into(),
+        },
+    )
+    .await;
     emit(&tx, 500, AgentEvent::StatusChanged(Status::Running)).await;
     emit(&tx, 400, AgentEvent::ToolCall(read_call("mock-1-read"))).await;
     emit(&tx, 700, AgentEvent::ToolCall(grep_call("mock-1-grep"))).await;
@@ -340,6 +350,18 @@ impl Provider for MockProvider {
                     Command::GetUsage => {
                         // The scripted demo tracks no real usage.
                         let _ = evt_tx.send(AgentEvent::UsageSnapshot(Vec::new()));
+                    }
+                    Command::Compact => {
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Neutral,
+                            text: "context already compact".into(),
+                        });
+                    }
+                    Command::LoadSession { .. } => {
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Neutral,
+                            text: "the mock provider keeps a single scripted session".into(),
+                        });
                     }
                 }
             }

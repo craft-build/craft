@@ -37,6 +37,11 @@ pub enum Command {
     ToggleAutoReview,
     /// Refresh the per-model usage snapshot shown by `/usage`.
     GetUsage,
+    /// Force-run every armed compaction stage on the current history
+    /// (`/compact`), regardless of fill thresholds.
+    Compact,
+    /// Replace the session with a persisted one, by session id (`/sessions`).
+    LoadSession { id: String },
 }
 
 /// Agent lifecycle status, mirrors the prototype's STATUS_MAP.
@@ -222,6 +227,25 @@ pub enum AgentEvent {
     /// Per-model usage of the current session (`/usage`); pushed after each
     /// completed run and in answer to [`Command::GetUsage`].
     UsageSnapshot(Vec<UsageRow>),
+    /// A tone-tagged system line (retry/auth/compaction/doom/guardrail
+    /// status) rendered as scrollback text rather than a card. Notices are
+    /// provider-facing only; they never enter the model-visible history.
+    Notice {
+        tone: Tone,
+        text: String,
+    },
+    /// The session was replaced by a persisted one (`/sessions`); carries
+    /// the user/assistant text transcript for display rebuild.
+    SessionLoaded {
+        messages: Vec<LoadedMessage>,
+    },
+}
+
+/// One displayable message of a loaded session's transcript.
+#[derive(Clone, Debug)]
+pub enum LoadedMessage {
+    User(String),
+    Assistant(String),
 }
 
 /// An agent backend. `start` consumes the provider and returns the two halves

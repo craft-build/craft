@@ -450,6 +450,132 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// `/help`: static keybinding + slash-command sheet, sourced from the same
+/// data as the completion popup (`app::help_rows`).
+pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
+    if !matches!(app.modal, Modal::Help) {
+        return;
+    }
+    dim(f, area);
+    let rows = crate::tui::app::help_rows();
+    let width = 56.min(area.width.saturating_sub(4));
+    let height = (rows.len() as u16 + 4).min(area.height);
+    let rect = centered(width, height, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Help — any key closes",
+            Style::default()
+                .fg(theme::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    let key_w = 22usize;
+    let spans: Vec<Vec<Span<'static>>> = rows
+        .iter()
+        .map(|(key, action)| {
+            if key.is_empty() {
+                return vec![Span::raw("")];
+            }
+            vec![
+                Span::styled(format!(" {key:<key_w$}"), Style::default().fg(theme::CYAN)),
+                Span::styled(action.clone(), Style::default().fg(theme::TEXT_TERTIARY)),
+            ]
+        })
+        .collect();
+    render_rows(
+        f,
+        &spans,
+        usize::MAX,
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(2),
+            height: inner.height.saturating_sub(2),
+        },
+    );
+}
+
+/// `/sessions`: persisted-session picker; Enter loads, Esc closes.
+pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
+    let Modal::Sessions { entries, selected } = &app.modal else {
+        return;
+    };
+    dim(f, area);
+    let n = entries.len().clamp(1, 8) as u16;
+    let width = 60.min(area.width.saturating_sub(4));
+    let rect = centered(width, n + 4, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Sessions — enter to resume, esc to close",
+            Style::default()
+                .fg(theme::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    let content_w = inner.width.saturating_sub(2) as usize;
+    let spans: Vec<Vec<Span<'static>>> = if entries.is_empty() {
+        vec![vec![Span::styled(
+            " no sessions yet".to_string(),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )]]
+    } else {
+        entries
+            .iter()
+            .map(|entry| {
+                let updated = format!("{} ", entry.updated);
+                let title_w = content_w.saturating_sub(updated.chars().count() + 1);
+                let mut title: String = entry.title.chars().take(title_w).collect();
+                if entry.title.chars().count() > title_w && title_w > 1 {
+                    title.truncate(title_w - 1);
+                    title.push('…');
+                }
+                let title = format!(" {title}");
+                let gap = content_w.saturating_sub(title.chars().count() + updated.chars().count());
+                vec![
+                    Span::styled(title, Style::default().fg(theme::TEXT_PRIMARY)),
+                    Span::raw(" ".repeat(gap)),
+                    Span::styled(updated, Style::default().fg(theme::TEXT_TERTIARY)),
+                ]
+            })
+            .collect()
+    };
+    render_rows(
+        f,
+        &spans,
+        if entries.is_empty() {
+            usize::MAX
+        } else {
+            *selected
+        },
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(2),
+            height: n,
+        },
+    );
+}
+
 /// "Reject this diff?" confirmation dialog.
 pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
     let Modal::ConfirmReject(id) = &app.modal else {

@@ -17,7 +17,7 @@ use super::super::cards::{self, Files};
 use super::SessionState;
 use super::approval::{ApprovalGate, model_reviewer};
 use super::usage_recorder::record_run_usage;
-use crate::tui::provider::{AgentEvent, Status, ToolCallData};
+use crate::tui::provider::{AgentEvent, Status, Tone, ToolCallData};
 
 use super::{Selection, report};
 
@@ -114,24 +114,69 @@ impl TurnRenderer {
                     self.context_length,
                 )));
             }
+            run::Event::Retry {
+                attempt,
+                message,
+                delay_ms,
+            } => self.notice(
+                Tone::Warning,
+                format!(
+                    "retrying (attempt {attempt}): {message} — next in {:?}",
+                    std::time::Duration::from_millis(delay_ms)
+                ),
+            ),
+            run::Event::AuthRequired { attempt, .. } => self.notice(
+                Tone::Warning,
+                format!(
+                    "authentication failed (attempt {attempt}); waiting for re-authentication…"
+                ),
+            ),
+            run::Event::AutoCompacting {
+                context_size,
+                context_window,
+            } => self.notice(
+                Tone::Info,
+                format!(
+                    "auto-compacting context ({})…",
+                    usage_label_size(context_size, context_window)
+                ),
+            ),
+            run::Event::CompactionDone {
+                context_size_before,
+                context_size_after,
+                ..
+            } => self.notice(
+                Tone::Success,
+                format!(
+                    "context compacted {} → {} tokens",
+                    fmt_tokens(context_size_before),
+                    fmt_tokens(context_size_after)
+                ),
+            ),
+            run::Event::StagnationDetected { .. } => self.notice(
+                Tone::Danger,
+                "agent looks stuck in a loop; asking it to summarize and stop.".into(),
+            ),
+            run::Event::Info(text) => self.notice(Tone::Neutral, text),
             // The nudge is visible in the next model call; nothing to show.
-            // The remaining taxonomy variants carry no TUI rendering yet.
+            // Live-call rendering of ToolPending/ToolOutput/
+            // ToolResultsSubmitted is Phase 8 tool work; Done is consumed
+            // by the caller; Error rides RunOutcome::Failed; auto-review
+            // renders through its tool card (approval.rs).
             run::Event::Nudge
             | run::Event::ToolPending { .. }
             | run::Event::ToolOutput { .. }
             | run::Event::ToolResultsSubmitted { .. }
             | run::Event::Done { .. }
-            | run::Event::Info(_)
             | run::Event::Error(_)
-            | run::Event::Retry { .. }
-            | run::Event::AuthRequired { .. }
-            | run::Event::AutoCompacting { .. }
-            | run::Event::CompactionDone { .. }
-            | run::Event::StagnationDetected { .. }
             | run::Event::AutoReviewStart { .. }
             | run::Event::AutoReviewDecision { .. }
             | run::Event::StreamClosed => {}
         }
+    }
+
+    fn notice(&self, tone: Tone, text: String) {
+        let _ = self.tx.send(AgentEvent::Notice { tone, text });
     }
 
     /// Whether text or reasoning already streamed this call (the reply was
@@ -140,6 +185,16 @@ impl TurnRenderer {
         self.streamed_text.load(Ordering::Relaxed)
             || self.streamed_reasoning.load(Ordering::Relaxed)
     }
+}
+
+/// Human token count for notices (44.8K-style, matching `cards::usage_label`).
+fn fmt_tokens(tokens: u64) -> String {
+    cards::usage_label(tokens, tokens, None)
+}
+
+/// `size/window (pct)` for the auto-compacting notice.
+fn usage_label_size(size: u64, window: u64) -> String {
+    cards::usage_label(size, size, u32::try_from(window).ok())
 }
 
 /// Emit the model's reply unless streaming already showed it live.
@@ -164,22 +219,120 @@ async fn resolve_model(
 
 /// Run configured compaction stages whose context-fill threshold is crossed
 /// before the history is sent to the model; commit effectiveness state only.
+/// Posts a notice when a stage actually ran; silence remains the default.
 async fn compact_history(
     state: &Arc<Mutex<SessionState>>,
     config: &Config,
     model: &crate::providers::DynamicModel,
     history: &mut Vec<history::Message>,
     context_length: Option<u32>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
 ) {
     let shared = state.lock().await.compaction.clone();
     if let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) {
-        CompactionEngine::new(config.compaction.clone())
+        let before = compaction
+            .estimator
+            .scale(crate::compaction::estimate_tokens(history));
+        let ran = CompactionEngine::new(config.compaction.clone())
             .with_buffer(config.compaction_buffer)
             .maybe_compact(&mut compaction, model, history, context_length)
             .await;
         if let Ok(mut guard) = shared.lock() {
             *guard = compaction;
         }
+        if ran {
+            let after = shared
+                .lock()
+                .map(|guard| {
+                    guard
+                        .estimator
+                        .scale(crate::compaction::estimate_tokens(history))
+                })
+                .unwrap_or_default();
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Info,
+                text: format!(
+                    "context compacted {} → {} tokens",
+                    fmt_tokens(before),
+                    fmt_tokens(after)
+                ),
+            });
+        }
+    }
+}
+
+/// `/compact`: force every armed compaction stage over the session history
+/// and report through notices; also refreshes the token label. An empty or
+/// already-compact history reports a neutral no-op (silence would read as
+/// a lost command).
+pub(super) async fn compact_now(
+    config: &Config,
+    selection: &Selection,
+    state: &Arc<Mutex<SessionState>>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    let model = match resolve_model(config, selection).await {
+        Ok(model) => model,
+        Err(message) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: message,
+            });
+            return;
+        }
+    };
+    let shared = state.lock().await.compaction.clone();
+    let Some(mut compaction) = shared.lock().ok().map(|guard| guard.clone()) else {
+        return;
+    };
+    let mut session = state.lock().await;
+    let before = compaction
+        .estimator
+        .scale(crate::compaction::estimate_tokens(&session.history));
+    let ran = CompactionEngine::new(config.compaction.clone())
+        .with_buffer(config.compaction_buffer)
+        .force_compact(
+            &mut compaction,
+            &model,
+            &mut session.history,
+            selection.context_length,
+        )
+        .await;
+    let after = compaction
+        .estimator
+        .scale(crate::compaction::estimate_tokens(&session.history));
+    if ran {
+        let messages = session.history.clone();
+        if let Some(store) = &mut session.store {
+            store.record_turn(
+                &messages,
+                format!("{}/{}", selection.provider, selection.model),
+            );
+        }
+    }
+    drop(session);
+    if let Ok(mut guard) = shared.lock() {
+        *guard = compaction;
+    }
+    if ran {
+        let _ = tx.send(AgentEvent::Notice {
+            tone: Tone::Success,
+            text: format!(
+                "context compacted {} → {} tokens",
+                fmt_tokens(before),
+                fmt_tokens(after)
+            ),
+        });
+        let _ = tx.send(AgentEvent::TokenUsage(cards::usage_label(
+            after,
+            after,
+            selection.context_length,
+        )));
+    } else {
+        let _ = tx.send(AgentEvent::Notice {
+            tone: Tone::Neutral,
+            text: "context already compact".into(),
+        });
     }
 }
 
@@ -304,6 +457,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
         &model,
         &mut history,
         selection.context_length,
+        &tx,
     )
     .await;
     let compaction_ctx = run::CompactionCtx {
@@ -395,6 +549,111 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
             TurnFlow::Commit => break,
         }
     }
-    state.lock().await.history = history;
+    {
+        let mut session = state.lock().await;
+        session.history = history;
+        // The committed turn is persisted, the same seam headless uses, so
+        // `/sessions` can list and reload this conversation. (The clone is
+        // sequenced before the store borrow: field splits do not apply
+        // through the mutex guard's deref.)
+        let messages = session.history.clone();
+        if let Some(store) = &mut session.store {
+            store.record_turn(
+                &messages,
+                params.model_spec.as_deref().unwrap_or("unknown").to_owned(),
+            );
+        }
+    }
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn renderer() -> (TurnRenderer, mpsc::UnboundedReceiver<AgentEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (TurnRenderer::new(tx, Files::default(), Some(1_000_000)), rx)
+    }
+
+    fn notice(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> (Tone, String) {
+        match rx.try_recv().expect("a notice was sent") {
+            AgentEvent::Notice { tone, text } => (tone, text),
+            other => panic!("expected a notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retry_maps_to_a_warning_notice() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(run::Event::Retry {
+            attempt: 2,
+            message: "stream reset".into(),
+            delay_ms: 1500,
+        });
+        let (tone, text) = notice(&mut rx);
+        assert_eq!(tone, Tone::Warning);
+        assert!(
+            text.contains("attempt 2") && text.contains("stream reset") && text.contains("1.5s"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn auth_required_maps_to_a_warning_notice() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(run::Event::AuthRequired {
+            attempt: 1,
+            message: "401".into(),
+        });
+        let (tone, text) = notice(&mut rx);
+        assert_eq!(tone, Tone::Warning);
+        assert!(
+            text.contains("attempt 1") && text.contains("re-authentication"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn auto_compacting_maps_to_an_info_notice() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(run::Event::AutoCompacting {
+            context_size: 50_000,
+            context_window: 1_000_000,
+        });
+        let (tone, text) = notice(&mut rx);
+        assert_eq!(tone, Tone::Info);
+        assert!(text.starts_with("auto-compacting context ("), "{text}");
+    }
+
+    #[test]
+    fn compaction_done_maps_to_a_success_notice() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(run::Event::CompactionDone {
+            context_size_before: 50_000,
+            context_size_after: 10_000,
+            context_window: 1_000_000,
+        });
+        let (tone, text) = notice(&mut rx);
+        assert_eq!(tone, Tone::Success);
+        assert_eq!(text, "context compacted 50.0K → 10.0K tokens");
+    }
+
+    #[test]
+    fn stagnation_maps_to_a_danger_notice() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(run::Event::StagnationDetected { similarity: 0.68 });
+        let (tone, text) = notice(&mut rx);
+        assert_eq!(tone, Tone::Danger);
+        assert!(text.contains("stuck in a loop"), "{text}");
+    }
+
+    #[test]
+    fn info_maps_to_a_neutral_notice() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(run::Event::Info("guardrail blocked read: no progress".into()));
+        let (tone, text) = notice(&mut rx);
+        assert_eq!(tone, Tone::Neutral);
+        assert!(text.contains("guardrail blocked read"), "{text}");
+    }
 }

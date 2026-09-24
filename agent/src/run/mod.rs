@@ -66,10 +66,7 @@ pub enum Event {
     /// A streamed chunk of the model's reasoning.
     ThinkingDelta(String),
     /// A tool call is queued but not yet running.
-    ToolPending {
-        id: String,
-        name: String,
-    },
+    ToolPending { id: String, name: String },
     /// The model issued a tool call.
     ToolStart {
         id: String,
@@ -77,10 +74,7 @@ pub enum Event {
         arguments: serde_json::Value,
     },
     /// `content` is the full accumulated output so far, not a delta.
-    ToolOutput {
-        id: String,
-        content: String,
-    },
+    ToolOutput { id: String, content: String },
     /// A tool call finished (ran, failed, or was skipped).
     ToolDone {
         id: String,
@@ -90,9 +84,7 @@ pub enum Event {
     },
     /// A wave of tool results was appended to the turn; `message` carries
     /// every result of the wave in call order.
-    ToolResultsSubmitted {
-        message: Message,
-    },
+    ToolResultsSubmitted { message: Message },
     /// One model call completed: its usage report and the estimated size of
     /// the context the model just saw.
     TurnComplete {
@@ -133,9 +125,11 @@ pub enum Event {
         context_size_after: u64,
         context_window: u64,
     },
-    StagnationDetected {
-        similarity: f32,
-    },
+    /// The doom-loop grace prompt was injected (fires exactly once per
+    /// run, at the grace threshold). `similarity` is reference-taxonomy
+    /// residue: here it carries the doom score normalized toward
+    /// `HARD_STOP_THRESHOLD` (1.0 = about to hard-stop).
+    StagnationDetected { similarity: f32 },
     AutoReviewStart {
         id: String,
         tool: String,
@@ -155,10 +149,7 @@ pub enum Event {
     /// Authentication failed (401) and the run paused for re-authentication
     /// (E.10); `attempt` is 1-based. The run resumes after the responder
     /// succeeds or fails with the message.
-    AuthRequired {
-        attempt: u32,
-        message: String,
-    },
+    AuthRequired { attempt: u32, message: String },
     /// End-of-stream marker; emitted only by [`EventStreamGuard::drop`] and
     /// swallowed by [`SessionEvents::next`].
     StreamClosed,
@@ -586,6 +577,12 @@ async fn run_inner<M: CompletionModel + Clone>(
         }
         if doom.should_grace() {
             doom.mark_grace_called();
+            // Fires exactly once per run (the grace flag above): the doom
+            // score normalized toward the hard-stop threshold rides in
+            // `similarity` (see the variant's doc comment).
+            emit(Event::StagnationDetected {
+                similarity: doom.score() as f32 / doom::HARD_STOP_THRESHOLD as f32,
+            });
             turn.push(Message::user(doom::GRACE_CALL_PROMPT));
             continue;
         }

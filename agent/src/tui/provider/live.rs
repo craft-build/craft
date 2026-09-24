@@ -32,7 +32,7 @@ use turn::{TurnCtx, run_turn};
 use usage_recorder::UsageLedger;
 
 use super::cards::{self, Files};
-use super::{AgentEvent, Command, ModelChoice, Provider, Status};
+use super::{AgentEvent, Command, LoadedMessage, ModelChoice, Provider, Status, Tone};
 
 /// Render an error and its sources as one client-facing message.
 pub(super) fn report(error: crate::error::Error) -> String {
@@ -58,11 +58,15 @@ struct SessionState {
     )>,
     /// Per-model usage totals and the cost ledger they feed.
     usage: UsageLedger,
+    /// Persisted session (history + usage), the same store headless uses.
+    /// `None` when the state dir is unavailable: the run is not persisted.
+    store: Option<crate::headless::SessionStore>,
 }
 
 impl SessionState {
     /// Link the compaction state to this session's dedup cache so a
-    /// compaction run clears it.
+    /// compaction run clears it. Persistence is opt-in via
+    /// [`Self::with_store`] so tests never touch the state dir.
     fn linked() -> Self {
         let dedup = crate::run::shared_cache();
         let guardrails = crate::run::shared_guardrails();
@@ -78,6 +82,121 @@ impl SessionState {
             ..Self::default()
         }
     }
+
+    /// Bind a freshly minted persisted session; its id also names this
+    /// session's `cost.jsonl` records. `dir` is the resolved state dir;
+    /// `None` disables persistence.
+    fn with_store(
+        mut self,
+        dir: Option<&crate::storage::StateDir>,
+        cwd: &str,
+        model_spec: &str,
+    ) -> Self {
+        let session_ref = crate::id::SessionRef::generate();
+        self.usage = self.usage.with_session_id(session_ref.id().to_string());
+        self.store = dir.and_then(|dir| {
+            crate::headless::SessionStore::open_in(dir.clone(), session_ref, cwd, model_spec).ok()
+        });
+        self
+    }
+}
+
+/// `/sessions` load: replace the session with a persisted one and push the
+/// rebuilt transcript plus fresh chrome back to the UI. Load failures only
+/// warn; the current session stays put.
+async fn load_session(
+    state: &Arc<Mutex<SessionState>>,
+    files: &Files,
+    id: &str,
+    dir: Option<&crate::storage::StateDir>,
+    cwd: &str,
+    model_spec: &str,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    let Some(dir) = dir else {
+        let _ = tx.send(AgentEvent::Notice {
+            tone: Tone::Neutral,
+            text: "session storage is unavailable".into(),
+        });
+        return;
+    };
+    let craft_id = match id.parse::<crate::id::CraftId>() {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!("unknown session id {id:?}"),
+            });
+            return;
+        }
+    };
+    // Session logs can be large; read off the async worker.
+    let read_dir = dir.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        crate::headless::StoredSession::load(craft_id, &read_dir)
+    })
+    .await;
+    let loaded = match loaded {
+        Ok(Ok(session)) => session,
+        Ok(Err(e)) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!("could not load session: {e}"),
+            });
+            return;
+        }
+        Err(e) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!("could not load session: {e}"),
+            });
+            return;
+        }
+    };
+    let title = loaded.title.clone();
+    let messages = loaded.messages().to_vec();
+    let rendered = transcript(&messages);
+    {
+        // Swap history + persistence in one critical section. Compaction/
+        // dedup/guardrail handles are session-lifetime and stay valid: the
+        // loaded history is what the next turn's engine sees. The store
+        // binds the loaded id so future turns resume the same session file
+        // and its cost records join its ledger id.
+        let mut guard = state.lock().await;
+        guard.history = messages;
+        guard.usage = UsageLedger::open().with_session_id(loaded.id.id().to_string());
+        guard.store =
+            crate::headless::SessionStore::open_in(dir.clone(), loaded.id.clone(), cwd, model_spec)
+                .ok();
+    }
+    files.lock().expect("files lock").clear();
+    let _ = tx.send(AgentEvent::FilesSet(Vec::new()));
+    let _ = tx.send(AgentEvent::AssistantEnd);
+    let _ = tx.send(AgentEvent::SessionLoaded { messages: rendered });
+    let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
+    let _ = tx.send(AgentEvent::Notice {
+        tone: Tone::Success,
+        text: format!("resumed session \"{title}\""),
+    });
+}
+
+/// User/assistant text of a persisted session, for the conversation view's
+/// rebuild: tool calls and results carry no displayable text, so messages
+/// containing only those are skipped (they leave an empty `text()`).
+fn transcript(messages: &[crate::history::Message]) -> Vec<LoadedMessage> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let text = message.text();
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(match message {
+                crate::history::Message::User { .. } => LoadedMessage::User(text),
+                _ => LoadedMessage::Assistant(text),
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -246,12 +365,19 @@ impl CraftProvider {
         mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
         evt_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) {
-        let state = Arc::new(Mutex::new(SessionState::linked()));
+        let mut selection = self.selection;
+        let workspace = self.workspace;
+        let cwd = workspace.root().display().to_string();
+        let state_dir = crate::storage::StateDir::resolve().ok();
+        // "provider/model" for pricing and the session header.
+        let model_spec =
+            |selection: &Selection| format!("{}/{}", selection.provider, selection.model);
+        let state = Arc::new(Mutex::new(
+            SessionState::linked().with_store(state_dir.as_ref(), &cwd, &model_spec(&selection)),
+        ));
         let files: Files = Files::default();
         let (cancel_flag, _) = run::cancel_channel();
         let mut current_turn: Option<AbortHandle> = None;
-        let mut selection = self.selection;
-        let workspace = self.workspace;
         let permissions = self.permissions;
         let snapshots = workspace.snapshots().clone();
         let instructions_text = self.instructions.text;
@@ -352,6 +478,33 @@ impl CraftProvider {
                     let rows = state.lock().await.usage.rows();
                     let _ = evt_tx.send(AgentEvent::UsageSnapshot(rows));
                 }
+                Command::Compact => {
+                    if current_turn.is_some() {
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Warning,
+                            text:
+                                "A turn is still running; wait for it to finish before compacting."
+                                    .into(),
+                        });
+                        continue;
+                    }
+                    turn::compact_now(&config, &selection, &state, &evt_tx).await;
+                }
+                Command::LoadSession { id } => {
+                    if current_turn.is_some() {
+                        // Loading mid-run would race the running turn's
+                        // history copy and its compaction/dedup/guardrails
+                        // handles, desyncing the provider from the session.
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Warning,
+                            text: "A turn is still running; wait for it to finish before loading a session."
+                                .into(),
+                        });
+                        continue;
+                    }
+                    load_session(&state, &files, &id, state_dir.as_ref(), &cwd, &model_spec(&selection), &evt_tx)
+                        .await;
+                }
                 Command::Interrupt => {
                     interrupt(&mut current_turn);
                     let _ = evt_tx.send(AgentEvent::AssistantEnd);
@@ -363,13 +516,21 @@ impl CraftProvider {
                     // compaction state keeps working dedup/guardrails
                     // handles; a bare default would strand the caches the
                     // dispatcher still points at.
-                    *state.lock().await = SessionState::linked();
+                    *state.lock().await = SessionState::linked().with_store(
+                        state_dir.as_ref(),
+                        &cwd,
+                        &model_spec(&selection),
+                    );
                     let _ = evt_tx.send(AgentEvent::AssistantEnd);
                     let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                 }
                 Command::Reset => {
                     interrupt(&mut current_turn);
-                    *state.lock().await = SessionState::linked();
+                    *state.lock().await = SessionState::linked().with_store(
+                        state_dir.as_ref(),
+                        &cwd,
+                        &model_spec(&selection),
+                    );
                     files.lock().expect("files lock").clear();
                     let _ = evt_tx.send(AgentEvent::AssistantEnd);
                     let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
@@ -431,5 +592,124 @@ impl Provider for CraftProvider {
         tokio::spawn(self.spawn_command_loop(cmd_rx, evt_tx));
 
         (cmd_tx, evt_rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::Message;
+
+    /// W10: a persisted session is listed by `/sessions`, and loading it
+    /// repopulates the history plus the conversation view.
+    #[tokio::test]
+    async fn loading_a_persisted_session_repopulates_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+        // Persist a session the way a committed turn does.
+        let session_ref = crate::id::SessionRef::generate();
+        let mut store = crate::headless::SessionStore::open_in(
+            state_dir.clone(),
+            session_ref.clone(),
+            "/cwd",
+            "mock/model",
+        )
+        .unwrap();
+        let history = vec![
+            Message::user("hello there"),
+            Message::assistant("hi — how can I help?"),
+        ];
+        store.record_turn(&history, "mock/model".into());
+
+        // The record exists in the state dir and lists for this cwd.
+        let summaries = crate::headless::StoredSession::list(Some("/cwd"), &state_dir).unwrap();
+        assert!(summaries.iter().any(|s| s.id == session_ref));
+
+        // Loading it repopulates the history and emits the rebuilt transcript.
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let files = Files::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        load_session(
+            &state,
+            &files,
+            session_ref.as_str(),
+            Some(&state_dir),
+            "/cwd",
+            "mock/model",
+            &tx,
+        )
+        .await;
+
+        assert_eq!(state.lock().await.history, history);
+        // The store rebinds to the loaded id so future turns resume it.
+        assert!(state.lock().await.store.is_some());
+        let mut loaded = None;
+        let mut resumed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentEvent::SessionLoaded { messages } => loaded = Some(messages),
+                AgentEvent::Notice { tone, text } => {
+                    assert_eq!(tone, Tone::Success);
+                    resumed = text.starts_with("resumed session");
+                }
+                _ => {}
+            }
+        }
+        let loaded = loaded.expect("SessionLoaded event");
+        assert!(matches!(&loaded[0], LoadedMessage::User(t) if t == "hello there"));
+        assert!(matches!(&loaded[1], LoadedMessage::Assistant(t) if t == "hi — how can I help?"));
+        assert!(resumed);
+    }
+
+    /// Tool calls, results, and system blocks don't render as user/agent
+    /// text in the rebuilt transcript; a system block reads as agent text.
+    #[test]
+    fn transcript_skips_tool_blocks() {
+        let messages = vec![
+            Message::user("do it"),
+            Message::User {
+                content: vec![crate::history::UserContent::ToolResult(
+                    crate::history::ToolResult {
+                        call: "t1".into(),
+                        name: "read".into(),
+                        content: vec![crate::history::ToolResultContent::text("file body")],
+                        is_error: false,
+                    },
+                )],
+            },
+            Message::system("compacted summary"),
+        ];
+        let rendered = transcript(&messages);
+        assert_eq!(rendered.len(), 2);
+        assert!(matches!(&rendered[0], LoadedMessage::User(t) if t == "do it"));
+        assert!(matches!(&rendered[1], LoadedMessage::Assistant(t) if t == "compacted summary"));
+    }
+
+    /// An unparseable id keeps the current session and warns.
+    #[tokio::test]
+    async fn load_with_unknown_id_keeps_the_session_and_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        state.lock().await.history = vec![Message::user("keep me")];
+        let files = Files::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        load_session(
+            &state,
+            &files,
+            "bogus",
+            Some(&state_dir),
+            "/cwd",
+            "mock/model",
+            &tx,
+        )
+        .await;
+        assert_eq!(state.lock().await.history.len(), 1);
+        let event = rx.try_recv().expect("a warning notice");
+        assert!(
+            matches!(event, AgentEvent::Notice { tone: Tone::Warning, ref text }
+                if text.contains("unknown session id")),
+            "{event:?}"
+        );
     }
 }

@@ -131,6 +131,33 @@ impl CompactionEngine {
         history: &mut Vec<Message>,
         context_length: Option<u32>,
     ) -> bool {
+        self.compact_impl(state, model, history, context_length, false)
+            .await
+    }
+
+    /// Manual compaction (`/compact`): every armed stage runs regardless of
+    /// fill, following the same rule the overflow-forced path uses. Stages
+    /// whose mechanics decline to run (too-short history) still leave the
+    /// history untouched, so an already-compact history returns `false`.
+    pub async fn force_compact<M: CompletionModel + Clone>(
+        &self,
+        state: &mut CompactionState,
+        model: &M,
+        history: &mut Vec<Message>,
+        context_length: Option<u32>,
+    ) -> bool {
+        self.compact_impl(state, model, history, context_length, true)
+            .await
+    }
+
+    async fn compact_impl<M: CompletionModel + Clone>(
+        &self,
+        state: &mut CompactionState,
+        model: &M,
+        history: &mut Vec<Message>,
+        context_length: Option<u32>,
+        force: bool,
+    ) -> bool {
         let Some(context_length) = context_length.filter(|length| *length > 0) else {
             return false;
         };
@@ -145,7 +172,7 @@ impl CompactionEngine {
                 continue;
             }
             let before = state.estimator.scale(estimate_tokens(history));
-            let overflow = before >= usable;
+            let overflow = force || before >= usable;
             if !overflow && before < threshold {
                 continue;
             }
@@ -244,6 +271,63 @@ mod tests {
             messages.extend(tool_round(i, &"y".repeat(200)));
         }
         messages
+    }
+
+    #[tokio::test]
+    async fn force_compact_runs_regardless_of_fill() {
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let before = history.len();
+        // A window far above the fill: `maybe_compact` would not run.
+        let context_length = 1_000_000;
+        let ran = engine
+            .force_compact(
+                &mut state,
+                &MockCompletionModel::text("x"),
+                &mut history,
+                Some(context_length),
+            )
+            .await;
+        assert!(ran);
+        assert!(
+            history.len() < before,
+            "forced compaction shrinks a long history even below the fill threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_compact_on_short_history_is_a_no_op() {
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
+        let mut state = CompactionState::default();
+        let mut history = vec![user("hi"), user("there")];
+        // The VCC stage declines a too-short history even when forced, so
+        // callers get `false` and can report "already compact".
+        let ran = engine
+            .force_compact(
+                &mut state,
+                &MockCompletionModel::text("x"),
+                &mut history,
+                Some(1_000_000),
+            )
+            .await;
+        assert!(!ran);
+    }
+
+    #[tokio::test]
+    async fn force_compact_without_a_window_is_a_no_op() {
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let ran = engine
+            .force_compact(
+                &mut state,
+                &MockCompletionModel::text("x"),
+                &mut history,
+                None,
+            )
+            .await;
+        assert!(!ran);
     }
 
     #[tokio::test]

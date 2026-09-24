@@ -6,10 +6,10 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::tui::composer::Composer;
-use crate::tui::modals::{Modal, StatsView};
+use crate::tui::modals::{Modal, SessionEntry, StatsView};
 use crate::tui::provider::{
-    AgentEvent, Command, ModelChoice, PlanItem, Status, ToolCallData, ToolKind, ToolLine,
-    TouchedFile, UsageRow,
+    AgentEvent, Command, LoadedMessage, ModelChoice, PlanItem, Status, Tone, ToolCallData,
+    ToolKind, ToolLine, TouchedFile, UsageRow,
 };
 use crate::tui::repaint;
 use crate::tui::selection::{
@@ -43,26 +43,107 @@ fn seed_models() -> Vec<ModelChoice> {
 
 pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
-pub const SLASH_COMMANDS: [(&str, &str); 9] = [
-    ("/clear", "Clear conversation context"),
-    ("/compact", "Compact context to save tokens"),
-    ("/undo", "Revert the last edit"),
-    ("/model", "Switch model"),
-    ("/sessions", "List sessions"),
-    ("/usage", "Show this session's tokens and cost"),
-    ("/stats", "Show cost across all sessions"),
-    ("/auto-review", "Toggle LLM auto-review of permissions"),
-    ("/help", "Show keybindings"),
-];
+/// One command as shown in slash completion and the command palette. Both
+/// surfaces derive from [`COMMANDS`] so a command can never be advertised
+/// in one and absent (or a no-op) in the other.
+pub struct CommandSpec {
+    /// Dispatch id resolved by [`App::run_command`].
+    pub id: &'static str,
+    /// Slash form; `None` = palette-only.
+    pub slash: Option<&'static str>,
+    /// Palette label.
+    pub label: &'static str,
+    /// Palette right-aligned hint.
+    pub hint: &'static str,
+    /// Slash-completion description.
+    pub desc: &'static str,
+}
 
-/// Palette entries: (id, label, hint).
-pub const PALETTE_COMMANDS: [(&str, &str, &str); 6] = [
-    ("new", "New session", ""),
-    ("sessions", "Switch session", ""),
-    ("toggle-sidebar", "Toggle context panel", "ctrl+b"),
-    ("model", "Change model", "ctrl+l"),
-    ("clear", "Clear context", "/clear"),
-    ("copy", "Copy last message", ""),
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: "new",
+        slash: None,
+        label: "New session",
+        hint: "",
+        desc: "",
+    },
+    CommandSpec {
+        id: "sessions",
+        slash: Some("/sessions"),
+        label: "Switch session",
+        hint: "/sessions",
+        desc: "List sessions",
+    },
+    CommandSpec {
+        id: "toggle-sidebar",
+        slash: None,
+        label: "Toggle context panel",
+        hint: "ctrl+b",
+        desc: "",
+    },
+    CommandSpec {
+        id: "model",
+        slash: Some("/model"),
+        label: "Change model",
+        hint: "ctrl+l",
+        desc: "Switch model",
+    },
+    CommandSpec {
+        id: "clear",
+        slash: Some("/clear"),
+        label: "Clear context",
+        hint: "/clear",
+        desc: "Clear conversation context",
+    },
+    CommandSpec {
+        id: "copy",
+        slash: None,
+        label: "Copy last message",
+        hint: "",
+        desc: "",
+    },
+    CommandSpec {
+        id: "undo",
+        slash: Some("/undo"),
+        label: "Undo last edit",
+        hint: "/undo",
+        desc: "Revert the last edit",
+    },
+    CommandSpec {
+        id: "compact",
+        slash: Some("/compact"),
+        label: "Compact context",
+        hint: "/compact",
+        desc: "Compact context to save tokens",
+    },
+    CommandSpec {
+        id: "usage",
+        slash: Some("/usage"),
+        label: "Show usage",
+        hint: "/usage",
+        desc: "Show this session's tokens and cost",
+    },
+    CommandSpec {
+        id: "stats",
+        slash: Some("/stats"),
+        label: "Show stats",
+        hint: "/stats",
+        desc: "Show cost across all sessions",
+    },
+    CommandSpec {
+        id: "auto-review",
+        slash: Some("/auto-review"),
+        label: "Toggle auto-review",
+        hint: "/auto-review",
+        desc: "Toggle LLM auto-review of permissions",
+    },
+    CommandSpec {
+        id: "help",
+        slash: Some("/help"),
+        label: "Help",
+        hint: "/help",
+        desc: "Show keybindings",
+    },
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,6 +158,12 @@ pub enum Message {
     Assistant(String),
     /// Model reasoning (thinking) text, rendered dimmer than replies.
     Thinking(String),
+    /// A tone-tagged system notice (retry / auth / compaction / doom /
+    /// guardrail status), rendered as one muted line without card chrome.
+    Notice {
+        tone: Tone,
+        text: String,
+    },
     Tool {
         id: String,
         kind: ToolKind,
@@ -155,6 +242,12 @@ impl Conversation {
             AgentEvent::AssistantEnd => {
                 self.assistant_open = false;
                 self.thinking_open = false;
+            }
+            AgentEvent::Notice { tone, text } => {
+                // Notices break paragraphs just like tool boundaries do.
+                self.assistant_open = false;
+                self.thinking_open = false;
+                self.messages.push(Message::Notice { tone, text });
             }
             AgentEvent::ToolCall(ToolCallData {
                 id,
@@ -483,6 +576,16 @@ impl App {
                     self.modal = Modal::Usage(self.usage.clone());
                 }
             }
+            AgentEvent::SessionLoaded { messages } => {
+                self.reset_conversation();
+                for msg in messages {
+                    let msg = match msg {
+                        LoadedMessage::User(text) => Message::User(text),
+                        LoadedMessage::Assistant(text) => Message::Assistant(text),
+                    };
+                    self.conversation.messages.push(msg);
+                }
+            }
             // Message-bearing events merge into the conversation.
             ev => self.conversation.apply(ev),
         }
@@ -529,9 +632,9 @@ impl App {
         if !q.starts_with('/') {
             return Vec::new();
         }
-        SLASH_COMMANDS
+        COMMANDS
             .iter()
-            .copied()
+            .filter_map(|spec| spec.slash.map(|slash| (slash, spec.desc)))
             .filter(|(cmd, _)| q == "/" || cmd.starts_with(q))
             .collect()
     }
@@ -545,9 +648,9 @@ impl App {
             Modal::Palette { query, .. } => query.to_lowercase(),
             _ => String::new(),
         };
-        PALETTE_COMMANDS
+        COMMANDS
             .iter()
-            .copied()
+            .map(|spec| (spec.id, spec.label, spec.hint))
             .filter(|(_, label, _)| label.to_lowercase().contains(&q))
             .collect()
     }
@@ -690,45 +793,154 @@ fn load_stats() -> StatsView {
     }
 }
 
+/// Entries for the `/sessions` picker: newest first, filtered to this cwd
+/// like the headless session lookup.
+fn load_session_entries() -> Vec<SessionEntry> {
+    let Ok(dir) = crate::storage::StateDir::resolve() else {
+        return Vec::new();
+    };
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.display().to_string());
+    crate::headless::StoredSession::list(cwd.as_deref(), &dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|summary| SessionEntry {
+            id: summary.id.as_str().to_owned(),
+            title: summary.title,
+            updated: rel_age(summary.updated_at),
+        })
+        .collect()
+}
+
+/// Relative age ("2h ago") of an epoch timestamp.
+fn rel_age(epoch: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let secs = now.saturating_sub(epoch);
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+/// (binding, action) rows of the `/help` sheet: the real key chords plus
+/// the same command table the completion popup and palette derive from.
+pub fn help_rows() -> Vec<(String, String)> {
+    let mut rows = vec![
+        ("ctrl+p".into(), "command palette".into()),
+        ("ctrl+l".into(), "model menu".into()),
+        ("ctrl+b".into(), "toggle context panel".into()),
+        ("ctrl+f".into(), "cycle effort".into()),
+        (
+            "tab / shift+tab".into(),
+            "focus next/previous tool card".into(),
+        ),
+        ("ctrl+y".into(), "approve pending edit".into()),
+        ("ctrl+shift+y".into(), "approve pending edit, always".into()),
+        ("ctrl+n".into(), "reject pending edit".into()),
+        ("up / down".into(), "recall input history".into()),
+        ("esc".into(), "close menu / interrupt the turn".into()),
+        ("ctrl+c / ctrl+q".into(), "quit".into()),
+        ("pgup / pgdn / g / G".into(), "scroll the transcript".into()),
+        (String::new(), String::new()),
+    ];
+    for (slash, desc) in COMMANDS
+        .iter()
+        .filter_map(|spec| spec.slash.map(|slash| (slash, spec.desc)))
+    {
+        rows.push((slash.to_string(), desc.to_string()));
+    }
+    rows
+}
+
 impl App {
-    fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
-        match cmd {
-            "/clear" => {
-                self.reset_conversation();
-                let _ = tx.send(Command::Clear);
+    /// Open the persisted-session picker (empty when no sessions exist).
+    fn open_sessions(&mut self) {
+        self.modal = Modal::Sessions {
+            entries: load_session_entries(),
+            selected: 0,
+        };
+    }
+
+    /// Push a provider-style notice locally (used for confirmations of
+    /// app-side actions like clipboard copies).
+    fn push_notice(&mut self, tone: Tone, text: impl Into<String>) {
+        self.conversation.apply(AgentEvent::Notice {
+            tone,
+            text: text.into(),
+        });
+    }
+
+    fn copy_last_assistant(&mut self) {
+        let text = self
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::Assistant(text) if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            });
+        match text {
+            Some(text) => {
+                copy_to_clipboard(&text);
+                self.push_notice(Tone::Success, "copied the last reply to the clipboard");
             }
-            "/undo" => {
-                let _ = tx.send(Command::Undo);
-            }
-            "/model" => self.open_model_menu(),
-            "/usage" => {
-                self.modal = Modal::Usage(self.usage.clone());
-                let _ = tx.send(Command::GetUsage);
-            }
-            "/stats" => self.modal = Modal::Stats(load_stats()),
-            "/auto-review" => {
-                let _ = tx.send(Command::ToggleAutoReview);
-            }
-            // Compact/help/sessions are no-ops for now.
-            _ => {}
+            None => self.push_notice(Tone::Neutral, "nothing to copy yet"),
         }
     }
 
-    pub(crate) fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
+    /// The one dispatch arm every advertised command resolves to; slash
+    /// names map here through [`COMMANDS`].
+    fn run_command(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
         match id {
             "new" => {
                 self.reset_conversation();
                 let _ = tx.send(Command::Reset);
             }
+            "sessions" => self.open_sessions(),
             "toggle-sidebar" => self.session.sidebar_open = !self.session.sidebar_open,
             "model" => self.open_model_menu(),
             "clear" => {
                 self.reset_conversation();
                 let _ = tx.send(Command::Clear);
             }
-            // Copy/sessions are no-ops under the mock provider.
+            "copy" => self.copy_last_assistant(),
+            "undo" => {
+                let _ = tx.send(Command::Undo);
+            }
+            "compact" => {
+                let _ = tx.send(Command::Compact);
+            }
+            "usage" => {
+                self.modal = Modal::Usage(self.usage.clone());
+                let _ = tx.send(Command::GetUsage);
+            }
+            "stats" => self.modal = Modal::Stats(load_stats()),
+            "auto-review" => {
+                let _ = tx.send(Command::ToggleAutoReview);
+            }
+            "help" => self.modal = Modal::Help,
             _ => {}
         }
+    }
+
+    fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
+        if let Some(spec) = COMMANDS.iter().find(|spec| spec.slash == Some(cmd)) {
+            self.run_command(spec.id, tx);
+        }
+    }
+
+    pub(crate) fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
+        self.run_command(id, tx);
     }
 
     fn approve(&mut self, idx: usize, tx: &mpsc::UnboundedSender<Command>, always: bool) {
@@ -1238,6 +1450,87 @@ mod tests {
     use crate::tui::ui::scrollback::Layout;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// W8: every command advertised in the slash popup or the palette
+    /// resolves to a real dispatch arm (command sent, modal opened, or an
+    /// immediate visible effect).
+    #[test]
+    fn every_advertised_command_dispatches_to_a_real_arm() {
+        for spec in COMMANDS {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut app = App::new();
+            app.conversation
+                .messages
+                .push(Message::Assistant("hello".into()));
+            let sidebar = app.session.sidebar_open;
+            app.run_command(spec.id, &tx);
+            let sent = rx.try_recv().is_ok();
+            let modal = !matches!(app.modal, Modal::None);
+            let flipped = app.session.sidebar_open != sidebar;
+            let noticed = matches!(
+                app.conversation.messages.last(),
+                Some(Message::Notice { .. })
+            );
+            assert!(
+                sent || modal || flipped || noticed,
+                "command {:?} resolves to a no-op",
+                spec.id
+            );
+        }
+    }
+
+    /// W8 + slash completion: both surfaces read the same table, so the
+    /// slash completion's entries all exist and carry a description.
+    #[test]
+    fn slash_entries_all_resolve_to_dispatch_ids() {
+        let ids: std::collections::HashSet<&str> = COMMANDS.iter().map(|s| s.id).collect();
+        for spec in COMMANDS {
+            assert!(ids.contains(spec.id));
+            if spec.slash.is_some() {
+                assert!(!spec.desc.is_empty(), "{} lacks a description", spec.id);
+            }
+        }
+    }
+
+    /// W9: the help sheet lists every slash command the completion popup
+    /// advertises (sourced from the same table, so it cannot lie).
+    #[test]
+    fn help_rows_cover_every_slash_command() {
+        let rows = help_rows();
+        for slash in COMMANDS.iter().filter_map(|s| s.slash) {
+            assert!(
+                rows.iter().any(|(key, _)| key == slash),
+                "{slash} missing from the help sheet"
+            );
+        }
+    }
+
+    /// W8: palette `copy` copies the last assistant reply and confirms with
+    /// a success notice; with no reply it explains instead.
+    #[test]
+    fn copy_reports_through_a_notice() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.run_command("copy", &tx);
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(Message::Notice {
+                tone: Tone::Neutral,
+                ..
+            })
+        ));
+        app.conversation
+            .messages
+            .push(Message::Assistant("the reply".into()));
+        app.run_command("copy", &tx);
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(Message::Notice {
+                tone: Tone::Success,
+                ..
+            })
+        ));
+    }
 
     /// Paint the app once so the renderer builds the segment document and
     /// resolves the viewport, as the real loop does before key handling.

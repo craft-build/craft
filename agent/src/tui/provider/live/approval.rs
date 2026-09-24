@@ -169,6 +169,20 @@ async fn auto_review_decide(
     scopes: &[String],
     id: String,
 ) -> Decision {
+    // In-progress marker with the decision card's id (cards merge by id):
+    // the verdict card below replaces it in place when the review lands.
+    let _ = tx.send(AgentEvent::ToolCall(ToolCallData {
+        id: id.clone(),
+        kind: ToolKind::Bash {
+            cmd: "auto-review".to_string(),
+        },
+        lines: vec![ToolLine {
+            kind: LineKind::Muted,
+            text: "auto-review: reviewing…".into(),
+            ..Default::default()
+        }],
+        awaiting_approval: false,
+    }));
     let review = reviewer(tool.to_string(), scopes.to_vec());
     let outcome = match review.await {
         Ok(decision) => {
@@ -522,6 +536,56 @@ mod tests {
             Some(reviewer),
         );
         (gate, state, permissions)
+    }
+
+    /// The in-progress card precedes the verdict card and shares its id so
+    /// the conversation view merges them (W6).
+    #[tokio::test]
+    async fn auto_review_posts_an_in_progress_card_before_the_verdict() {
+        // The reviewer parks until released.
+        let gate_open = Arc::new(tokio::sync::Notify::new());
+        let proceed = gate_open.clone();
+        let reviewer: Reviewer = Arc::new(move |_tool, _scopes| {
+            let proceed = proceed.clone();
+            Box::pin(async move {
+                proceed.notified().await;
+                Ok(crate::auto_review::Decision {
+                    verdict: crate::auto_review::Verdict::Allow,
+                    risk: crate::auto_review::Risk::Low,
+                    rationale: "in-project edit".into(),
+                })
+            })
+        });
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (_flag, cancel) = crate::run::cancel_channel();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        permissions.toggle_auto_review();
+        let gate = ApprovalGate::new(state, tx, cancel, permissions, Some(reviewer));
+        let pending = tokio::spawn(async move { gate.decide(tool_call("t1", "write")).await });
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for the in-progress card")
+            .expect("channel closed");
+        let AgentEvent::ToolCall(card) = first else {
+            panic!("expected the in-progress ToolCall card, got {first:?}");
+        };
+        assert_eq!(card.id, "t1");
+        assert_eq!(card.lines[0].text, "auto-review: reviewing…");
+
+        gate_open.notify_one();
+        assert!(matches!(pending.await.unwrap(), Decision::Run));
+
+        let second = rx.recv().await.expect("verdict card");
+        let AgentEvent::ToolCall(card) = second else {
+            panic!("expected the verdict ToolCall card, got {second:?}");
+        };
+        assert_eq!(card.id, "t1", "the verdict replaces the in-progress card");
+        assert!(card.lines[0].text.starts_with("auto-review allow"));
     }
 
     #[tokio::test]
