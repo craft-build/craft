@@ -66,11 +66,31 @@ pub struct ReadClassification {
 /// content for its next edit. Reads from the most recent assistant message are
 /// never Superseded, to avoid re-read feedback loops.
 pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
-    let mut operations: Vec<FileOperation> = Vec::new();
+    let move_rewrites = collect_move_rewrites(history);
+    let operations = collect_file_operations(history, &move_rewrites);
+    let by_file = group_by_file(&operations);
+    let (working_set_files, last_assistant_msg) = compute_working_set(&operations);
 
-    // Files whose imports a `move` rewrote, keyed by the call it answered:
-    // args alone cannot name them, only the executed result can.
-    let move_rewrites: HashMap<&str, Vec<String>> = history
+    let mut classifications = Vec::new();
+    for op in &operations {
+        if !matches!(op.op_kind, OpKind::Read) {
+            continue;
+        }
+        classifications.push(classify_read(
+            op,
+            &by_file,
+            &working_set_files,
+            last_assistant_msg,
+        ));
+    }
+
+    classifications
+}
+
+/// Files whose imports a `move` rewrote, keyed by the call it answered:
+/// args alone cannot name them, only the executed result can.
+fn collect_move_rewrites(history: &[Message]) -> HashMap<&str, Vec<String>> {
+    history
         .iter()
         .filter_map(|msg| match msg {
             Message::User { content } => Some(content),
@@ -90,7 +110,15 @@ pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
             }
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+/// Walk assistant tool calls and record one `FileOperation` per file touched.
+fn collect_file_operations(
+    history: &[Message],
+    move_rewrites: &HashMap<&str, Vec<String>>,
+) -> Vec<FileOperation> {
+    let mut operations: Vec<FileOperation> = Vec::new();
 
     for (msg_index, msg) in history.iter().enumerate() {
         let Message::Assistant { content } = msg else {
@@ -180,17 +208,22 @@ pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
             });
         }
     }
+    operations
+}
 
-    let by_file: HashMap<&str, Vec<&FileOperation>> = {
-        let mut map: HashMap<&str, Vec<&FileOperation>> = HashMap::new();
-        for op in &operations {
-            map.entry(op.file_path.as_str()).or_default().push(op);
-        }
-        map
-    };
+/// Group operations by file path (preserving order).
+fn group_by_file(operations: &[FileOperation]) -> HashMap<&str, Vec<&FileOperation>> {
+    let mut map: HashMap<&str, Vec<&FileOperation>> = HashMap::new();
+    for op in operations {
+        map.entry(op.file_path.as_str()).or_default().push(op);
+    }
+    map
+}
 
-    // Working set: files edited in the last WORKING_SET_LOOKBACK assistant
-    // messages that contain file operations.
+/// Working set: files edited in the last WORKING_SET_LOOKBACK assistant
+/// messages that contain file operations, plus the index of the most recent
+/// assistant message with file operations.
+fn compute_working_set(operations: &[FileOperation]) -> (HashSet<&str>, Option<usize>) {
     let mut assistant_msg_indices: Vec<usize> = operations
         .iter()
         .map(|op| op.msg_index)
@@ -213,47 +246,46 @@ pub fn classify_reads(history: &[Message]) -> Vec<ReadClassification> {
         .collect();
 
     let last_assistant_msg = operations.iter().map(|op| op.msg_index).max();
+    (working_set_files, last_assistant_msg)
+}
 
-    let mut classifications = Vec::new();
-    for op in &operations {
-        if !matches!(op.op_kind, OpKind::Read) {
-            continue;
-        }
-        let file_ops = by_file
-            .get(op.file_path.as_str())
-            .expect("every operation is keyed in by_file");
+/// Classify a single read operation as Stale, Superseded, or Fresh.
+fn classify_read(
+    op: &FileOperation,
+    by_file: &HashMap<&str, Vec<&FileOperation>>,
+    working_set_files: &HashSet<&str>,
+    last_assistant_msg: Option<usize>,
+) -> ReadClassification {
+    let file_ops = by_file
+        .get(op.file_path.as_str())
+        .expect("every operation is keyed in by_file");
 
-        let has_later_edit = file_ops.iter().any(|other| {
-            other.msg_index > op.msg_index && matches!(other.op_kind, OpKind::Edit | OpKind::Write)
-        });
+    let has_later_edit = file_ops.iter().any(|other| {
+        other.msg_index > op.msg_index && matches!(other.op_kind, OpKind::Edit | OpKind::Write)
+    });
 
-        // Working set protection: the model still needs the read content for
-        // subsequent edits of actively-edited files.
-        if has_later_edit && !working_set_files.contains(op.file_path.as_str()) {
-            classifications.push(classification(op, ReadState::Stale));
-            continue;
-        }
-
-        let has_later_superseding_read = file_ops.iter().any(|other| {
-            if other.msg_index <= op.msg_index || !matches!(other.op_kind, OpKind::Read) {
-                return false;
-            }
-            range_contains(other.line_range.as_ref(), op.line_range.as_ref())
-        });
-
-        // Don't supersede reads from the most recent turn — premature marking
-        // causes re-read feedback loops.
-        let is_most_recent = last_assistant_msg.is_some_and(|last| op.msg_index == last);
-
-        if has_later_superseding_read && !is_most_recent {
-            classifications.push(classification(op, ReadState::Superseded));
-            continue;
-        }
-
-        classifications.push(classification(op, ReadState::Fresh));
+    // Working set protection: the model still needs the read content for
+    // subsequent edits of actively-edited files.
+    if has_later_edit && !working_set_files.contains(op.file_path.as_str()) {
+        return classification(op, ReadState::Stale);
     }
 
-    classifications
+    let has_later_superseding_read = file_ops.iter().any(|other| {
+        if other.msg_index <= op.msg_index || !matches!(other.op_kind, OpKind::Read) {
+            return false;
+        }
+        range_contains(other.line_range.as_ref(), op.line_range.as_ref())
+    });
+
+    // Don't supersede reads from the most recent turn — premature marking
+    // causes re-read feedback loops.
+    let is_most_recent = last_assistant_msg.is_some_and(|last| op.msg_index == last);
+
+    if has_later_superseding_read && !is_most_recent {
+        return classification(op, ReadState::Superseded);
+    }
+
+    classification(op, ReadState::Fresh)
 }
 
 fn classification(op: &FileOperation, state: ReadState) -> ReadClassification {

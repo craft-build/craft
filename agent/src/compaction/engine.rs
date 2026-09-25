@@ -166,17 +166,41 @@ impl CompactionEngine {
         // `is_overflow`: `usage >= window - buffer`).
         let usable = u64::from(context_length.saturating_sub(self.buffer.resolve(context_length)));
         let mut ran = false;
+        // Overflow forcing cascades: a VCC pass that leaves the history over
+        // its limit forces the next (heavier) stage even below its threshold.
+        let mut forced = force;
         for stage in &self.stages {
             let threshold = (context_length as f64 * stage.context) as u64;
             if threshold == 0 {
                 continue;
             }
             let before = state.estimator.scale(estimate_tokens(history));
-            let overflow = force || before >= usable;
+            let overflow = forced || before >= usable;
             if !overflow && before < threshold {
                 continue;
             }
             if state.disarmed.contains(&stage.kind) {
+                continue;
+            }
+            // Unanswered input is held out of the summary and re-appended
+            // verbatim; `carry_len == 0` between turns.
+            let carry_len = history
+                .len()
+                .saturating_sub(state.carry_from.unwrap_or(history.len()));
+            let before_len = history.len();
+            let under_limit = match stage.kind {
+                CompactionKind::Vcc => vcc_compact(history, threshold, estimate_tokens, carry_len),
+                CompactionKind::Llm => llm_compact(model, history, threshold, carry_len, None)
+                    .await
+                    .unwrap_or(false),
+            };
+            // A stage that declined to run (too-short history, empty head)
+            // leaves the history untouched; that is not an ineffective run,
+            // so the stage stays armed — and the dedup cache and guardrails,
+            // which describe the pre-compaction history, stay intact too.
+            if history.len() == before_len
+                && state.estimator.scale(estimate_tokens(history)) == before
+            {
                 continue;
             }
             if let Some(cache) = &state.dedup
@@ -189,29 +213,10 @@ impl CompactionEngine {
             {
                 guard.reset();
             }
-            // Unanswered input is held out of the summary and re-appended
-            // verbatim; `carry_len == 0` between turns.
-            let carry_len = history
-                .len()
-                .saturating_sub(state.carry_from.unwrap_or(history.len()));
-            let before_len = history.len();
-            let _under_limit = match stage.kind {
-                CompactionKind::Vcc => vcc_compact(history, threshold, estimate_tokens),
-                CompactionKind::Llm => llm_compact(model, history, threshold, carry_len, None)
-                    .await
-                    .unwrap_or(false),
-            };
-            // A stage that declined to run (too-short history, empty head)
-            // leaves the history untouched; that is not an ineffective run,
-            // so the stage stays armed.
-            if history.len() == before_len
-                && state.estimator.scale(estimate_tokens(history)) == before
-            {
-                continue;
-            }
             ran = true;
-            // The carried input survived verbatim at the tail; re-anchor the
-            // protection to where it now starts.
+            // The carried input survived verbatim at the tail (both stages
+            // hold it out of the summary); re-anchor the protection to where
+            // it now starts.
             if carry_len > 0 {
                 state.carry_from = Some(history.len().saturating_sub(carry_len));
             }
@@ -226,6 +231,11 @@ impl CompactionEngine {
                 state.disarmed.clear();
             } else {
                 state.disarmed.insert(stage.kind);
+            }
+            // A VCC pass that left the history over its limit is not a
+            // sufficient pass: force the heavier stages to run too.
+            if stage.kind == CompactionKind::Vcc && !under_limit {
+                forced = true;
             }
         }
         ran
@@ -701,6 +711,152 @@ mod tests {
                 )
                 .await,
             "a disarmed stage must not run even on overflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn vcc_carry_protection_keeps_unanswered_input_verbatim() {
+        // The queued prompt is unanswered; the VCC stage must hold it out of
+        // the summary and re-append it verbatim.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let prompt = user("unanswered queued prompt");
+        history.push(prompt.clone());
+        state.protect_from(history.len() - 1);
+        let tokens = estimate_tokens(&history);
+        let context_length = ((tokens as f64 / 0.9) as u32).max(1);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length)
+                )
+                .await
+        );
+        // The prompt survived verbatim at the tail and was never summarized.
+        assert_eq!(*history.last().unwrap(), prompt);
+        assert!(matches!(&history[0], Message::Assistant { content, .. }
+            if matches!(&content[0], AssistantContent::Text(t)
+                if t.text.contains("This summary captures")
+                    && !t.text.contains("unanswered queued prompt"))));
+        // The protection re-anchored to where the carried input now starts.
+        assert_eq!(state.carry_from(), Some(history.len() - 1));
+    }
+
+    #[tokio::test]
+    async fn vcc_carry_reanchor_points_at_carried_messages() {
+        // After a VCC compaction, the re-anchored index must fall exactly on
+        // the start of the carried (unanswered) messages.
+        let engine = CompactionEngine::new(vec![stage(CompactionKind::Vcc, 0.6)]);
+        let mut state = CompactionState::default();
+        let mut history = long_history();
+        let (a, b) = (user("first unanswered"), user("second unanswered"));
+        history.push(a.clone());
+        history.push(b);
+        state.protect_from(history.len() - 2);
+        let tokens = estimate_tokens(&history);
+        let context_length = ((tokens as f64 / 0.9) as u32).max(1);
+        assert!(
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length)
+                )
+                .await
+        );
+        let carry_from = state.carry_from().expect("protection re-anchored");
+        assert_eq!(carry_from, history.len() - 2);
+        assert_eq!(history[carry_from], a);
+    }
+
+    #[tokio::test]
+    async fn vcc_over_limit_forces_llm_stage() {
+        // VCC runs at its threshold but cannot get under it; the LLM stage's
+        // own threshold is not crossed, so only the cascaded forcing runs it.
+        let engine = CompactionEngine::new(vec![
+            stage(CompactionKind::Vcc, 0.6),
+            stage(CompactionKind::Llm, 0.8),
+        ])
+        .with_buffer(crate::config::CompactionBuffer::Tokens(0));
+        let mut state = CompactionState::default();
+        let mut history = vec![
+            user(&"a".repeat(100)),
+            assistant_text(&"b".repeat(100)),
+            user(&"c".repeat(100)),
+            assistant_text(&"d".repeat(100)),
+            user(&"e".repeat(100)),
+            assistant_text(&"f".repeat(100)),
+            user(&"g".repeat(100)),
+            assistant_text(&"h".repeat(100)),
+        ];
+        let tokens = estimate_tokens(&history);
+        // Fill ratio 0.7: over VCC's 0.6 threshold, under LLM's 0.8 and the
+        // usable window, so the LLM stage only runs via the cascade.
+        let context_length = ((tokens as f64 / 0.7) as u32).max(1);
+        let model = MockCompletionModel::new([MockTurn::text("summarized")]);
+        assert!(
+            engine
+                .maybe_compact(&mut state, &model, &mut history, Some(context_length))
+                .await
+        );
+        assert!(
+            !model.requests().is_empty(),
+            "the LLM stage must run after an over-limit VCC pass"
+        );
+        assert!(matches!(&history[0], Message::Assistant { content, .. }
+            if matches!(&content[0], AssistantContent::Text(t)
+                if t.text.contains(LLM_SUMMARY_PREFIX))));
+        assert!(
+            estimate_tokens(&history) < u64::from(context_length),
+            "context must end under the usable window"
+        );
+    }
+
+    #[tokio::test]
+    async fn declined_compaction_keeps_dedup_cache() {
+        use crate::run::{ToolDedupCache, shared_cache};
+
+        let cache = shared_cache();
+        let input = serde_json::json!({"path": "/x.rs"});
+        let key = ToolDedupCache::key("read", &input);
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key,
+                &crate::history::ToolResult::text("c1", "read", "x"),
+                None,
+                "read",
+                &input,
+            );
+        }
+        // A short history that crosses a tiny threshold but both compactors
+        // decline: the dedup cache must survive repeated runs.
+        let engine = CompactionEngine::new(vec![
+            stage(CompactionKind::Vcc, 0.1),
+            stage(CompactionKind::Llm, 0.1),
+        ]);
+        let mut state = CompactionState::default().with_dedup(cache.clone());
+        let mut history = vec![user(&"x".repeat(4000))];
+        let tokens = estimate_tokens(&history);
+        let context_length = ((tokens as f64 / 0.9) as u32).max(1);
+        for _ in 0..2 {
+            engine
+                .maybe_compact(
+                    &mut state,
+                    &MockCompletionModel::text("x"),
+                    &mut history,
+                    Some(context_length),
+                )
+                .await;
+        }
+        assert!(
+            cache.lock().unwrap().get(key, "read", &input).is_some(),
+            "a declined compaction must not clear the dedup cache"
         );
     }
 }

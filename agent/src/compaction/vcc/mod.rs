@@ -90,30 +90,37 @@ fn summary_text(msg: &Message) -> Option<&str> {
 /// If the first message is itself a VCC summary, it is treated as the previous
 /// summary and compacting starts at the live history after it. The head of the
 /// history is replaced with a single assistant summary message and the tail is
-/// kept verbatim. Returns whether the compacted history is under `token_limit`
-/// (per `estimate_tokens`); `false` signals the caller should fall back to a
+/// kept verbatim. The last `carry_len` messages are held out of the summary
+/// and re-appended verbatim, so input no turn has answered yet survives
+/// compaction verbatim (same carry protection as the LLM stage). Returns
+/// whether the compacted history is under `token_limit` (per
+/// `estimate_tokens`); `false` signals the caller should fall back to a
 /// heavier compactor.
 pub fn vcc_compact(
     messages: &mut Vec<Message>,
     token_limit: u64,
     estimate_tokens: fn(&[Message]) -> u64,
+    carry_len: usize,
 ) -> bool {
     let (prev, live_start) = match messages.first() {
         Some(m) if is_vcc_summary(m) => (summary_text(m), 1),
         _ => (None, 0),
     };
     let live: Vec<Message> = messages[live_start..].to_vec();
+    let carry_len = carry_len.min(live.len());
     if live.len() <= 2 {
         return false;
     }
+    // Summarization stops where the protected (unanswered) input begins.
+    let summarize_end = live.len().saturating_sub(carry_len);
     let VccSummary {
         summary,
         tail_start,
-    } = compact(&live, prev);
+    } = compact(&live[..summarize_end], prev);
     if summary.is_empty() {
         return false;
     }
-    let tail_start = tail_start.min(live.len());
+    let tail_start = tail_start.min(summarize_end);
     let tail_msgs = live.len() - tail_start;
     let mut new_history: Vec<Message> = Vec::with_capacity(1 + tail_msgs);
     new_history.push(Message::assistant(summary));
@@ -264,7 +271,7 @@ mod tests {
     fn vcc_compact_under_limit_keeps_tail() {
         let mut messages = long_history();
         let original_tail_user = "final user message";
-        let under = vcc_compact(&mut messages, u64::MAX, char_estimate);
+        let under = vcc_compact(&mut messages, u64::MAX, char_estimate, 0);
         assert!(under);
         assert!(is_vcc_summary(&messages[0]));
         assert!(messages.len() > 1, "tail must be preserved");
@@ -281,7 +288,7 @@ mod tests {
     fn vcc_compact_over_limit_returns_false_but_still_compacts() {
         let mut messages = long_history();
         let tiny_limit = 1;
-        let under = vcc_compact(&mut messages, tiny_limit, char_estimate);
+        let under = vcc_compact(&mut messages, tiny_limit, char_estimate, 0);
         assert!(!under, "tiny token limit should remain over the limit");
         assert!(is_vcc_summary(&messages[0]));
     }
@@ -289,10 +296,10 @@ mod tests {
     #[test]
     fn vcc_compact_merges_existing_summary_message() {
         let mut first = two_task_history();
-        assert!(vcc_compact(&mut first, u64::MAX, char_estimate));
+        assert!(vcc_compact(&mut first, u64::MAX, char_estimate, 0));
         assert!(first.len() > 3, "first compaction must leave a real tail");
         let before = summary_text(&first[0]).unwrap_or_default().to_string();
-        assert!(vcc_compact(&mut first, u64::MAX, char_estimate));
+        assert!(vcc_compact(&mut first, u64::MAX, char_estimate, 0));
         assert!(!first.is_empty());
         assert!(is_vcc_summary(&first[0]));
         // Merging must keep the previous summary's handoff content around.
@@ -304,7 +311,7 @@ mod tests {
     #[test]
     fn vcc_compact_returns_false_for_short_history() {
         let mut messages = vec![user("hi"), user("there")];
-        assert!(!vcc_compact(&mut messages, u64::MAX, char_estimate));
+        assert!(!vcc_compact(&mut messages, u64::MAX, char_estimate, 0));
         assert_eq!(messages.len(), 2);
     }
 }

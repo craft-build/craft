@@ -446,6 +446,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_run_leaves_trailing_grace_prompt_intact() {
+        // A trailing grace prompt must not replay as user text, but a run
+        // that fails commits nothing: the caller's history stays
+        // byte-identical, and a retry strips it again identically.
+        let (model, _turns) = stream_turns(vec![vec![MockStreamEvent::Error(
+            rig_core::test_utils::MockError::provider("boom"),
+        )]]);
+        let dir = tempfile::tempdir().unwrap();
+        let tools = crate::tools::Workspace::new(dir.path()).unwrap().register();
+        let (_, cancel) = cancel_channel();
+        let mut history = vec![Message::user(doom::GRACE_CALL_PROMPT)];
+        let before = history.clone();
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Failed(_)));
+        assert_eq!(history, before, "failed run must not drop the grace prompt");
+
+        // The retry strips it again: the request view omits it, and a
+        // successful run never commits it back.
+        let (model, _turns) = stream_turns(vec![vec![
+            MockStreamEvent::text("hi"),
+            MockStreamEvent::final_response_with_total_tokens(1),
+        ]]);
+        let outcome = run(
+            &model,
+            &RunParams::default(),
+            &tools,
+            &mut history,
+            "go",
+            &cancel,
+            &|_| {},
+        )
+        .await;
+        assert!(matches!(outcome, RunOutcome::Done { .. }));
+        let requests = model.requests();
+        let replayed = crate::edge::rig_to_own(&requests[0].chat_history);
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|m| m.text() == doom::GRACE_CALL_PROMPT)
+                .count(),
+            0,
+            "request must not carry the grace prompt"
+        );
+        assert!(
+            !history.iter().any(|m| m.text() == doom::GRACE_CALL_PROMPT),
+            "committed history drops the grace prompt"
+        );
+    }
+
+    #[tokio::test]
     async fn doom_loop_scores_reach_grace_then_summarize() {
         // One batch of identical failing reads: two errors (+1 each) and one
         // blocked doom-loop call (+15) put the score at 17 — past the grace

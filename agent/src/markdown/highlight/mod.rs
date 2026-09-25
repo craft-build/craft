@@ -501,21 +501,29 @@ impl CodeHighlighter {
     }
 }
 
+/// Test-only lock over the process-global theme and block cache, so tests
+/// that touch them (here or in sibling modules) cannot interleave under the
+/// shared-process test harness.
+#[cfg(test)]
+static TEST_GLOBALS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_test_globals() -> std::sync::MutexGuard<'static, ()> {
+    TEST_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Test-only: takes the global lock and installs the built-in theme, so
 /// tests in other modules compare highlight output under a known theme.
 #[cfg(test)]
 pub(crate) fn pin_default_theme_for_tests() -> std::sync::MutexGuard<'static, ()> {
-    let guard = {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    };
+    let guard = lock_test_globals();
     set_theme(default_theme());
     guard
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     use super::*;
     use test_case::test_case;
@@ -529,8 +537,7 @@ mod tests {
     /// theme or read the cache take this first and cannot be tripped up by a
     /// sibling running under `cargo test`'s shared-process harness.
     fn exclusive_globals() -> MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        super::lock_test_globals()
     }
 
     /// Like [`exclusive_globals`], but also installs the built-in theme, so

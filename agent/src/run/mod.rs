@@ -540,6 +540,33 @@ async fn run_inner<M: CompletionModel + Clone>(
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> (RunOutcome, RunStats) {
+    // A trailing grace prompt from a previous run must not replay as if
+    // the user asked for it, but a failed run commits nothing: capture the
+    // stripped tail so history stays byte-identical when the run fails.
+    let grace_tail = history.last().cloned();
+    let before = history.len();
+    strip_trailing_grace_prompt(history);
+    let grace_tail = (history.len() < before).then_some(grace_tail).flatten();
+    let stripped = grace_tail.is_some().then(|| history.clone());
+    let (outcome, stats) = run_loop(model, params, tools, history, prompt, cancel, emit).await;
+    if let Some(message) = grace_tail
+        && matches!(outcome, RunOutcome::Failed(_))
+        && stripped.as_ref().is_some_and(|s| s == history)
+    {
+        history.push(message);
+    }
+    (outcome, stats)
+}
+
+async fn run_loop<M: CompletionModel + Clone>(
+    model: &M,
+    params: &RunParams,
+    tools: &ToolDispatch,
+    history: &mut Vec<Message>,
+    prompt: &str,
+    cancel: &CancelToken,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> (RunOutcome, RunStats) {
     let definitions = tools.definitions();
     let mut turn = vec![Message::user(prompt)];
     let mut turns = 0;
@@ -560,9 +587,7 @@ async fn run_inner<M: CompletionModel + Clone>(
     // Measured input tokens from the last completed stream; feeds the
     // output-token clamp a number better than the chars/4 estimate.
     let mut measured_prompt_tokens: u64 = 0;
-    // Doom-loop tracker for this run; a trailing grace prompt from a
-    // previous run must not replay as if the user asked for it.
-    strip_trailing_grace_prompt(history);
+    // Doom-loop tracker for this run.
     let mut doom = doom::DoomTracker::new();
     let mut recent = doom::RecentCalls::default();
     loop {

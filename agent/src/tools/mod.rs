@@ -171,6 +171,7 @@ impl Workspace {
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
         let dispatch = crate::run::ToolDispatch::new(tools)
+            .with_write_root((*self.root).clone())
             .with_compression_store(self.compression_store.clone())
             .with_snapshots(self.snapshots.clone());
         let _ = batch.0.set(dispatch.clone());
@@ -373,8 +374,14 @@ macro_rules! impl_tool {
             }
 
             fn parameters(&self) -> serde_json::Value {
-                serde_json::to_value(schemars::schema_for!($args))
-                    .expect("JSON Schema is serializable")
+                serde_json::to_value(schemars::schema_for!($args)).unwrap_or_else(|error| {
+                    tracing::error!(
+                        tool = $name,
+                        %error,
+                        "tool schema serialization failed; serving a bare object schema"
+                    );
+                    serde_json::json!({"type": "object"})
+                })
             }
 
             async fn call(&self, args: Self::Args) -> super::Result<Self::Output> {

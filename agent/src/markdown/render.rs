@@ -1110,6 +1110,7 @@ mod tests {
     /// renderer, so this is the only convergence that has to hold.
     #[test]
     fn streamed_prefixes_end_where_the_cached_path_starts() {
+        let _theme = crate::markdown::highlight::pin_default_theme_for_tests();
         const WIDTHS: &[u16] = &[20, 40, TEST_WIDTH];
         let wrapping_block = format!("```rust\nlet x = [{}];\n```", "\"aa\", ".repeat(40));
         let corpus = AGREEMENT_CORPUS

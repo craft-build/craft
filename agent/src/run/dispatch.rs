@@ -57,6 +57,7 @@ pub struct ToolDispatch {
     before: Option<Arc<dyn BeforeExecute>>,
     after: Option<Arc<dyn AfterExecute>>,
     dedup: Option<SharedDedupCache>,
+    write_root: Option<std::path::PathBuf>,
     compression_store: Option<SharedCompressionStore>,
     snapshots: Option<SnapshotManager>,
     guardrails: Option<SharedGuardrails>,
@@ -83,6 +84,7 @@ impl ToolDispatch {
             before: None,
             after: None,
             dedup: None,
+            write_root: std::env::current_dir().ok(),
             compression_store: None,
             snapshots: None,
             guardrails: None,
@@ -108,6 +110,14 @@ impl ToolDispatch {
     /// cache, writes invalidate the paths they touch.
     pub fn with_dedup(mut self, cache: SharedDedupCache) -> Self {
         self.dedup = Some(cache);
+        self
+    }
+
+    /// Anchor write-path conflict normalization at the workspace root, so
+    /// relative and absolute spellings of the same file conflict-detected
+    /// identically even when the process cwd differs from the workspace.
+    pub fn with_write_root(mut self, root: std::path::PathBuf) -> Self {
+        self.write_root = Some(root);
         self
     }
 
@@ -459,7 +469,18 @@ pub(crate) async fn dispatch_tool_calls(
             // A never-parallel tool or a repeat write path must not share a
             // wave with earlier calls, so the pending wave is flushed
             // *before* this call is spawned into a fresh one.
-            let write_paths = dedup::extract_write_paths(&name, &call.function.arguments);
+            let write_paths: Vec<String> =
+                dedup::extract_write_paths(&name, &call.function.arguments)
+                    .iter()
+                    .map(|p| {
+                        let root = tools
+                            .write_root
+                            .as_deref()
+                            .map(|r| r.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        dedup::normalize_write_path_with_root(Some(&root), p)
+                    })
+                    .collect();
             let conflicts = is_never_parallel(&name)
                 || write_paths
                     .iter()
