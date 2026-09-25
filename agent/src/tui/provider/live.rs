@@ -169,7 +169,7 @@ async fn load_session(
             crate::headless::SessionStore::open_in(dir.clone(), loaded.id.clone(), cwd, model_spec)
                 .ok();
     }
-    files.lock().expect("files lock").clear();
+    files.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let _ = tx.send(AgentEvent::FilesSet(Vec::new()));
     let _ = tx.send(AgentEvent::AssistantEnd);
     let _ = tx.send(AgentEvent::SessionLoaded { messages: rendered });
@@ -547,7 +547,7 @@ impl CraftProvider {
                         &cwd,
                         &model_spec(&selection),
                     );
-                    files.lock().expect("files lock").clear();
+                    files.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     let _ = evt_tx.send(AgentEvent::AssistantEnd);
                     let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
                     let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));

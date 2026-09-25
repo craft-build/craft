@@ -47,7 +47,10 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
             theme::BG_RAISED
         };
         let mut spans = spans.clone();
-        let w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let w: usize = spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
         if w < area.width as usize {
             spans.push(Span::styled(
                 " ".repeat(area.width as usize - w),

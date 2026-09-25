@@ -14,13 +14,15 @@ use crate::tui::app::{App, DiffState, Message};
 use crate::tui::hyperlink;
 use crate::tui::provider::{LineKind, Tone, ToolKind};
 use crate::tui::ui::scrollback::{Layout, ScrollPos, Segment};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MARGIN: u16 = 2;
 const BODY_INDENT: usize = 4;
 
-/// Display width in cells (all glyphs we use are single-width).
+/// Display width in cells (CJK/emoji count as double-width). Used for
+/// measurement only; slicing elsewhere stays char-index based.
 fn cell_len(s: &str) -> usize {
-    s.chars().count()
+    s.width()
 }
 
 fn spans_width(spans: &[Span]) -> usize {
@@ -44,13 +46,27 @@ pub(crate) fn wrap_rows(text: &str, width: usize) -> Vec<(usize, usize)> {
     let mut rows = Vec::new();
     let mut offset = 0;
     for para in text.split('\n') {
-        let chars: Vec<char> = para.chars().collect();
+        // (char, display width) pairs: breaks are chosen in cells but
+        // reported as char indices for slicing.
+        let chars: Vec<(char, usize)> = para.chars().map(|c| (c, c.width().unwrap_or(0))).collect();
+        let mut cum = Vec::with_capacity(chars.len() + 1);
+        cum.push(0usize);
+        for &(_, w) in &chars {
+            cum.push(cum.last().unwrap() + w);
+        }
         let plen = chars.len();
+        let total = cum[plen];
         let mut start = 0;
-        while plen - start > width {
-            let hard_end = start + width;
+        while total - cum[start] > width {
+            // Hard limit: the most chars that fit in `width` cells.
+            let hard_end = (start + 1..=plen)
+                .find(|&e| cum[e] - cum[start] > width)
+                .map(|e| e - 1)
+                .unwrap_or(plen);
             // Prefer breaking after the last space inside the row.
-            let space = (start + 1..=hard_end).rev().find(|&i| chars[i - 1] == ' ');
+            let space = (start + 1..=hard_end)
+                .rev()
+                .find(|&i| chars[i - 1].0 == ' ');
             let (row_end, next) = match space {
                 Some(i) => (i - 1, i),
                 None => (hard_end, hard_end),
@@ -85,9 +101,21 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 cur.push_str(word);
             }
         }
+        // Hard-split in cells: take the longest char prefix whose display
+        // width fits `width`, so double-width glyphs never overflow a row.
         while cell_len(&cur) > width {
-            let head: String = cur.chars().take(width).collect();
-            cur = cur.chars().skip(width).collect();
+            let mut head = String::new();
+            let mut head_w = 0;
+            for c in cur.chars() {
+                let cw = c.width().unwrap_or(0);
+                if head_w + cw > width {
+                    break;
+                }
+                head_w += cw;
+                head.push(c);
+            }
+            let tail_start = cur.chars().count().saturating_sub(head.chars().count());
+            cur = cur.chars().skip(tail_start).collect();
             out.push(head);
         }
         out.push(cur);
@@ -924,7 +952,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::wrap_rows;
-    use super::{Line, tool_block};
+    use super::{Line, cell_len, pad_row, tool_block};
     use crate::tui::provider::ToolLine;
     use ratatui::style::Modifier;
 
@@ -1411,6 +1439,27 @@ mod tests {
             "off-screen link's visible text dropped: {screen:?}"
         );
         assert!(!screen.contains("\u{1b}]8;;"));
+    }
+
+    #[test]
+    fn double_width_glyphs_pad_to_cell_width() {
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+        use unicode_width::UnicodeWidthStr;
+        // CJK chars are 2 cells each, the emoji 2 as well: 6+2 = 8 cells
+        // from 4 chars. Padding must count cells, not chars, so an ASCII
+        // row and a CJK+emoji row padded to the same width line up —
+        // including the diff `+/-` sign column, which sits after the
+        // fixed-width gutter and before `spans` content.
+        assert_eq!(cell_len("日本語🎉"), 8);
+        assert_eq!(cell_len("abcdef"), 6);
+        let bg = Style::default();
+        let ascii = pad_row(vec![Span::raw("abcdef")], 10, bg);
+        let wide = pad_row(vec![Span::raw("日本語🎉")], 10, bg);
+        for line in [ascii, wide] {
+            let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+            assert_eq!(text.width(), 10, "row must fill exactly 10 cells");
+        }
     }
 
     fn render(text: &str, width: usize) -> Vec<String> {

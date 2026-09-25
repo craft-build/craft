@@ -238,6 +238,9 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
 /// Abbreviate a cwd for the status row: keep the last two components, `…`
 /// prefix when something was cut (reference `cwd_branch_label` shape).
 fn abbreviated_cwd(cwd: &str) -> String {
+    if cwd.is_empty() {
+        return "—".into();
+    }
     let parts: Vec<&str> = cwd.split('/').filter(|p| !p.is_empty()).collect();
     match parts.len() {
         0 => "/".into(),

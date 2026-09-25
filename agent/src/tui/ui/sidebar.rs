@@ -65,7 +65,14 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     put(
         f,
         Line::from(vec![Span::styled(
-            truncate(&app.session.cwd, w),
+            truncate(
+                if app.session.cwd.is_empty() {
+                    "—"
+                } else {
+                    &app.session.cwd
+                },
+                w,
+            ),
             Style::default().fg(theme::TEXT_TERTIARY),
         )]),
         y,
@@ -74,7 +81,14 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     put(
         f,
         Line::from(vec![Span::styled(
-            truncate(&app.session.branch, w),
+            truncate(
+                if app.session.branch.is_empty() {
+                    "—"
+                } else {
+                    &app.session.branch
+                },
+                w,
+            ),
             Style::default().fg(theme::TEXT_TERTIARY),
         )]),
         y,
