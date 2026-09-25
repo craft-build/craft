@@ -12,11 +12,13 @@ pub mod mock;
 
 use tokio::sync::mpsc;
 
+use crate::run::AgentMode;
+
 /// Commands sent UI -> provider.
 #[derive(Clone, Debug)]
 pub enum Command {
-    /// User submitted a message in the composer.
-    SendMessage(String),
+    /// User submitted a message in the composer, in the given mode.
+    SendMessage(String, AgentMode),
     /// User approved a pending diff (by tool-call id). `always` persists an
     /// allow rule to the project's `permissions.toml` instead of the session.
     Approve { id: String, always: bool },

@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::history;
 use crate::permissions::PermissionManager;
 use crate::providers::Provider as ClientProvider;
-use crate::run::{self, CancelToken, RunOutcome};
+use crate::run::{self, AgentMode, CancelToken, RunOutcome};
 use crate::tools::Workspace;
 
 use super::super::cards::{self, Files};
@@ -38,6 +38,7 @@ pub(super) struct TurnCtx {
     pub(super) cancel: CancelToken,
     pub(super) tx: mpsc::UnboundedSender<AgentEvent>,
     pub(super) permissions: Arc<PermissionManager>,
+    pub(super) mode: AgentMode,
 }
 
 /// Maps run-loop events to TUI events for one model call. Owns the
@@ -440,6 +441,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
         cancel,
         tx,
         permissions,
+        mode,
     } = ctx;
     macro_rules! fail {
         ($message:expr) => {{
@@ -459,6 +461,9 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
     let mut history = state.lock().await.history.clone();
     let dedup = state.lock().await.dedup.clone();
     let guardrails = state.lock().await.guardrails.clone();
+    // The plan file is the one write target allowed outside the workspace;
+    // cleared again on every Build-mode turn.
+    workspace.set_plan_path(mode.plan_path().map(|p| p.to_path_buf()));
 
     compact_history(
         &state,
@@ -477,7 +482,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
     };
 
     let tools = workspace
-        .register()
+        .register_with_mode(mode.clone())
         .with_dedup(dedup)
         .with_guardrails(guardrails)
         .with_before(Arc::new(ApprovalGate::new(
@@ -495,6 +500,7 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
                 .set("{date}", crate::prompt::today_utc()),
             &format!("{}{}", config.agent.preamble, instructions_text),
             &crate::prompt::ResolvedSlots::default(),
+            mode.plan_path(),
         )),
         temperature: config.agent.temperature,
         max_tokens: config.agent.max_tokens,

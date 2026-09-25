@@ -271,7 +271,7 @@ impl Provider for MockProvider {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    Command::SendMessage(_) => {
+                    Command::SendMessage(_, _mode) => {
                         if let Some(h) = current.take() {
                             h.abort();
                         }
@@ -380,6 +380,7 @@ impl Provider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run::AgentMode;
 
     async fn recv(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> AgentEvent {
         tokio::time::timeout(Duration::from_secs(15), rx.recv())
@@ -400,8 +401,11 @@ mod tests {
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, AgentEvent::FilesSet(_)));
 
-        tx.send(Command::SendMessage("fix the flaky refresh".into()))
-            .unwrap();
+        tx.send(Command::SendMessage(
+            "fix the flaky refresh".into(),
+            AgentMode::Build,
+        ))
+        .unwrap();
         let mut saw_read = false;
         let mut saw_grep = false;
         let mut saw_edit = false;
@@ -448,7 +452,8 @@ mod tests {
         for _ in 0..4 {
             rx.recv().await.unwrap();
         }
-        tx.send(Command::SendMessage("go".into())).unwrap();
+        tx.send(Command::SendMessage("go".into(), AgentMode::Build))
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         tx.send(Command::Interrupt).unwrap();
         let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())

@@ -146,6 +146,14 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let (model, provider) = app.model();
     let left = vec![
         Span::styled(
+            app.mode.label(),
+            Style::default()
+                .fg(app.mode.color())
+                .bg(theme::BG_SURFACE)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+        sep(),
+        Span::styled(
             model,
             Style::default().fg(theme::BLUE_400).bg(theme::BG_SURFACE),
         ),

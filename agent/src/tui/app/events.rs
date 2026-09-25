@@ -202,8 +202,10 @@ impl App {
                 }
                 true
             }
+            // Tab cycles Build/Plan (F.2); focus cycling stays on
+            // BackTab so block navigation remains reachable.
             KeyCode::Tab => {
-                self.cycle_focus(1);
+                self.toggle_mode();
                 true
             }
             KeyCode::BackTab => {
@@ -508,6 +510,19 @@ mod tests {
         };
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
         assert!(matches!(app.modal, Modal::ModelMenu(_)));
+    }
+
+    /// Tab cycles Build -> Plan -> Build (F.2); BackTab keeps focus cycling.
+    #[test]
+    fn tab_cycles_modes_and_backtab_keeps_focus_cycling() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        assert_eq!(app.mode, crate::tui::app::Mode::Build);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
+        assert_eq!(app.mode, crate::tui::app::Mode::Plan);
+        assert!(app.plan_path.is_some(), "plan path allocated on entry");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
+        assert_eq!(app.mode, crate::tui::app::Mode::Build);
     }
 
     /// Esc dismisses the command palette without running a command.

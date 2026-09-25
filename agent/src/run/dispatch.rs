@@ -19,6 +19,7 @@ use crate::history;
 
 use super::dedup::{self, SharedDedupCache, ToolDedupCache};
 use super::guardrails::{GuardrailDecision, SharedGuardrails};
+use super::mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 use crate::compression::store::SharedCompressionStore;
 use crate::snapshot::SnapshotManager;
 
@@ -61,6 +62,10 @@ pub struct ToolDispatch {
     compression_store: Option<SharedCompressionStore>,
     snapshots: Option<SnapshotManager>,
     guardrails: Option<SharedGuardrails>,
+    /// Frozen per dispatch table (one per turn): write-gating cannot change
+    /// while tools execute. Batch children share it because the child table
+    /// is built with the mode already baked in.
+    mode: AgentMode,
 }
 
 /// What executing one call produced.
@@ -88,6 +93,7 @@ impl ToolDispatch {
             compression_store: None,
             snapshots: None,
             guardrails: None,
+            mode: AgentMode::Build,
         }
     }
 
@@ -151,6 +157,13 @@ impl ToolDispatch {
         self
     }
 
+    /// Set the agent mode (C.17): in Plan mode every write except the
+    /// allocated plan file is blocked before execution.
+    pub fn with_mode(mut self, mode: AgentMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
     /// Provider-facing definitions for the request.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools
@@ -186,6 +199,17 @@ impl ToolDispatch {
                 }
                 Decision::Stop(reason) => return Ok(DispatchOutcome::Stopped(reason)),
             }
+        }
+        // Plan mode (C.17): a write may only touch the allocated plan file.
+        // Batch children reach this same gate because they flow through the
+        // shared dispatch table.
+        if let Some(reason) = self.plan_block_reason(&call) {
+            return Ok(DispatchOutcome::Skipped(history::ToolResult {
+                call: call.id,
+                name: call.function.name,
+                content: vec![history::ToolResultContent::text(reason)],
+                is_error: true,
+            }));
         }
         let name = call.function.name.clone();
         let read_only = ToolDedupCache::is_read_only(&name);
@@ -294,6 +318,44 @@ impl ToolDispatch {
         );
         Ok(DispatchOutcome::Ran(result))
     }
+
+    /// Returns the plan-mode block reason for a call, or `None` when the
+    /// call may run. In Plan mode only the allocated plan file may be
+    /// written; write calls that name no path fail closed.
+    fn plan_block_reason(&self, call: &history::ToolCall) -> Option<String> {
+        let plan = self.mode.plan_path()?;
+        if !is_gated_write(&call.function.name) {
+            return None;
+        }
+        let root = self
+            .write_root
+            .as_deref()
+            .map(|p| p.to_string_lossy().into_owned());
+        let plan_key =
+            dedup::normalize_write_path_with_root(root.as_deref(), &plan.display().to_string());
+        let paths = gated_write_paths(&call.function.name, &call.function.arguments);
+        let blocked = paths.is_empty()
+            || paths
+                .iter()
+                .any(|p| dedup::normalize_write_path_with_root(root.as_deref(), p) != plan_key);
+        blocked.then(|| PLAN_WRITE_RESTRICTED.to_owned())
+    }
+}
+
+/// Tools whose calls mutate files and must honor the plan-mode gate. Mirrors
+/// dedup's write classification plus the mutators dedup does not track
+/// (`fuzzy_replace`). `batch` is absent on purpose: its children execute
+/// through this same dispatch table and pass the gate individually.
+fn is_gated_write(name: &str) -> bool {
+    ToolDedupCache::is_write(name) || name == "fuzzy_replace"
+}
+
+/// Every path a gated write call touches.
+fn gated_write_paths(name: &str, input: &serde_json::Value) -> Vec<String> {
+    if name == "fuzzy_replace" {
+        return dedup::extract_file_path(input).into_iter().collect();
+    }
+    dedup::extract_write_paths(name, input)
 }
 
 /// Feed one finished result back into the guardrail counters and surface
@@ -623,4 +685,119 @@ async fn commit_wave(
         });
     }
     None
+}
+
+#[cfg(test)]
+mod plan_mode_tests {
+    use super::*;
+    use crate::history::ToolCall;
+    use crate::tools::Workspace;
+    use serde_json::json;
+
+    fn dispatch(root: &std::path::Path, mode: AgentMode) -> ToolDispatch {
+        let workspace = Workspace::new(root).expect("workspace");
+        workspace.set_plan_path(mode.plan_path().map(|p| p.to_path_buf()));
+        workspace.register_with_mode(mode)
+    }
+
+    fn write_call(path: &str) -> ToolCall {
+        ToolCall::new("t1", "write", json!({ "path": path, "content": "hi\n" }))
+    }
+
+    fn result_text(result: &history::ToolResult) -> String {
+        use history::ToolResultContent;
+        result
+            .content
+            .iter()
+            .map(|c| match c {
+                ToolResultContent::Text(t) => t.text.clone(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    async fn run(dispatch: &ToolDispatch, call: ToolCall) -> history::ToolResult {
+        match dispatch.execute(call).await.expect("dispatch") {
+            DispatchOutcome::Ran(result) | DispatchOutcome::Skipped(result) => result,
+            DispatchOutcome::Stopped(reason) => panic!("stopped: {reason}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blocks_writes_outside_the_plan_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("state/plans/alpha.md");
+        let dispatch = dispatch(dir.path(), AgentMode::Plan(plan.clone()));
+        let result = run(&dispatch, write_call("src/main.rs")).await;
+        assert!(result.is_error, "non-plan write must be blocked");
+        assert!(
+            result_text(&result).contains(PLAN_WRITE_RESTRICTED),
+            "wrong message: {}",
+            result_text(&result)
+        );
+        assert!(
+            !dir.path().join("src/main.rs").exists(),
+            "blocked write must not touch disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_allows_writing_the_plan_file_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("state/plans/alpha.md");
+        std::fs::create_dir_all(plan.parent().unwrap()).unwrap();
+        let dispatch = dispatch(dir.path(), AgentMode::Plan(plan.clone()));
+        let result = run(&dispatch, write_call(&plan.display().to_string())).await;
+        assert!(
+            !result.is_error,
+            "plan write must run: {}",
+            result_text(&result)
+        );
+        assert!(plan.exists());
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blocks_batch_children_that_write_outside_the_plan() {
+        // The plan file is never inside the workspace in practice, but the
+        // point here is the child gate: a batch wrapping a non-plan write
+        // still fails because children flow through `execute`.
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("state/plans/alpha.md");
+        let dispatch = dispatch(dir.path(), AgentMode::Plan(plan));
+        let call = ToolCall::new(
+            "t1",
+            "batch",
+            json!({ "tool_calls": [ { "tool": "write", "parameters": {
+                "path": "src/main.rs", "content": "hi\n"
+            } } ] }),
+        );
+        // Batch reports partial child failures inside a successful result,
+        // so the block message is the evidence, not `is_error`.
+        let result = run(&dispatch, call).await;
+        assert!(
+            result_text(&result).contains(PLAN_WRITE_RESTRICTED),
+            "batch child write must be blocked: {}",
+            result_text(&result)
+        );
+        assert!(!dir.path().join("src/main.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn build_mode_is_unaffected() {
+        let dir = tempfile::tempdir().unwrap();
+        let dispatch = dispatch(dir.path(), AgentMode::Build);
+        let result = run(&dispatch, write_call("src/main.rs")).await;
+        assert!(!result.is_error, "build mode write must run");
+        assert!(dir.path().join("src/main.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn plan_mode_leaves_reads_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+        let dispatch = dispatch(dir.path(), AgentMode::Plan(dir.path().join("p.md")));
+        let call = ToolCall::new("t1", "read", json!({ "path": "f.txt" }));
+        let result = run(&dispatch, call).await;
+        assert!(!result.is_error);
+    }
 }

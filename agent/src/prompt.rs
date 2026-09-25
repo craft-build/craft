@@ -19,6 +19,7 @@ pub const GENERAL_PROMPT: &str = include_str!("prompts/general.md");
 pub const COMPACTION_SYSTEM: &str = include_str!("prompts/compaction.md");
 pub const COMPACTION_USER: &str = include_str!("prompts/compaction_user.md");
 pub const COMPACTION_TARGETED_USER: &str = include_str!("prompts/compaction_targeted_user.md");
+pub const PLAN_PROMPT: &str = include_str!("prompts/plan.md");
 
 pub const DEFAULT_IDENTITY: &str = r#"You are Craft, an interactive CLI coding agent. Use the tools available to assist the user with software engineering tasks. Complete tasks successfully while minimizing token usage and tool calls to avoid context bloat.
 
@@ -371,13 +372,24 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// Assemble the root agent's system prompt: the env section (cwd, platform,
 /// date) is prepended to `instructions` (the user preamble followed by any
 /// discovered AGENTS.md instruction text, C.15) and substituted into the
-/// system template's `{{instructions}}` slot.
-pub fn build_system_prompt(vars: &Vars, instructions: &str, slots: &ResolvedSlots) -> String {
+/// system template's `{{instructions}}` slot. In plan mode (C.17) the
+/// plan-mode section is appended with `{plan_path}` filled.
+pub fn build_system_prompt(
+    vars: &Vars,
+    instructions: &str,
+    slots: &ResolvedSlots,
+    plan_path: Option<&std::path::Path>,
+) -> String {
     let env = vars.apply(
         "\n\nEnvironment:\n- Working directory: {cwd}\n- Platform: {platform}\n- Date: {date}",
     );
     let instructions = format!("{env}{instructions}");
-    assemble_raw(SYSTEM_PROMPT, slots, &instructions)
+    let mut out = assemble_raw(SYSTEM_PROMPT, slots, &instructions);
+    if let Some(plan) = plan_path {
+        let plan_vars = Vars::new().set("{plan_path}", plan.display().to_string());
+        out.push_str(&plan_vars.apply(PLAN_PROMPT));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -620,7 +632,7 @@ mod tests {
             .set("{cwd}", "/tmp/proj")
             .set("{platform}", "macos")
             .set("{date}", "2026-09-13");
-        let out = build_system_prompt(&vars, "EXTRA_INSTR", &ResolvedSlots::default());
+        let out = build_system_prompt(&vars, "EXTRA_INSTR", &ResolvedSlots::default(), None);
         let env = at(
             &out,
             "\n\nEnvironment:\n- Working directory: /tmp/proj\n- Platform: macos\n- Date: 2026-09-13",
@@ -631,6 +643,25 @@ mod tests {
         );
         assert!(out.starts_with("You are Craft"));
         assert!(!out.contains("{{"));
+    }
+
+    #[test]
+    fn build_system_prompt_appends_plan_section_when_plan_path_is_set() {
+        let vars = Vars::new()
+            .set("{cwd}", "/tmp/proj")
+            .set("{platform}", "macos")
+            .set("{date}", "2026-09-13");
+        let plan = std::path::Path::new("/state/plans/quick-map.md");
+        let out = build_system_prompt(&vars, "EXTRA_INSTR", &ResolvedSlots::default(), Some(plan));
+        assert!(out.contains("# Plan Mode"), "plan section missing");
+        assert!(
+            out.contains("Write your plan to: /state/plans/quick-map.md"),
+            "plan path not filled"
+        );
+        assert!(!out.contains("{plan_path}"));
+        // Build mode: no plan section at all.
+        let plain = build_system_prompt(&vars, "EXTRA_INSTR", &ResolvedSlots::default(), None);
+        assert!(!plain.contains("# Plan Mode"));
     }
 
     #[test]

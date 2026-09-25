@@ -3,6 +3,7 @@
 
 mod commands;
 mod events;
+mod mode;
 mod models;
 mod scroll;
 mod sidebar;
@@ -26,6 +27,8 @@ use crate::tui::provider::{
 use crate::tui::repaint;
 use crate::tui::ui::scrollback::ScrollPos;
 
+pub(crate) use self::mode::Mode;
+
 /// How long a status-row flash toast stays up (reference default,
 /// `DEFAULT_FLASH_DURATION_MS`).
 pub(crate) const FLASH_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -33,6 +36,11 @@ pub(crate) const FLASH_TTL: std::time::Duration = std::time::Duration::from_mill
 pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
 pub struct App {
+    // --- mode (F.2 Tab cycling, Build/Plan) ---
+    pub mode: Mode,
+    /// Session's allocated plan file; set on first entry into Plan mode.
+    pub plan_path: Option<std::path::PathBuf>,
+
     // --- provider-driven state ---
     pub plan: Vec<PlanItem>,
     pub files: Vec<TouchedFile>,
@@ -81,6 +89,8 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         App {
+            mode: Mode::Build,
+            plan_path: None,
             plan: Vec::new(),
             files: Vec::new(),
             status: Status::Done,
@@ -310,7 +320,7 @@ impl App {
         }
         self.conversation.assistant_open = false;
         self.conversation.messages.push(Message::User(text.clone()));
-        let _ = tx.send(Command::SendMessage(text.clone()));
+        let _ = tx.send(Command::SendMessage(text.clone(), self.agent_mode()));
         self.input_history.push(text);
         self.history_index = None;
         self.history_draft.clear();
@@ -479,6 +489,19 @@ mod tests {
     use super::testutil::screen_text;
     use super::*;
     use crate::tui::repaint::Cadence;
+
+    /// The composer info line carries the active mode label (F.2).
+    #[test]
+    fn composer_info_line_shows_mode_label() {
+        let mut app = App::new();
+        app.session.sidebar_open = false;
+        let build = screen_text(&mut app, 120, 24);
+        assert!(build.contains("[BUILD]"), "build label missing:\n{build}");
+        assert!(!build.contains("[PLAN]"));
+        app.toggle_mode();
+        let plan = screen_text(&mut app, 120, 24);
+        assert!(plan.contains("[PLAN]"), "plan label missing:\n{plan}");
+    }
 
     /// Only the statuses that render the spinner glyph owe cadence frames;
     /// settled statuses sleep until a real event wakes the loop.

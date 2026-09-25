@@ -83,6 +83,10 @@ pub struct Workspace {
     compression_store: crate::compression::store::SharedCompressionStore,
     snapshots: crate::snapshot::SnapshotManager,
     bash_jobs: bash::BashJobs,
+    /// Plan-mode plan file (C.17): the one write target allowed outside the
+    /// workspace root. Shared (like every Workspace cell) so the per-turn
+    /// set is visible through clones.
+    plan_path: std::sync::Arc<std::sync::RwLock<Option<PathBuf>>>,
 }
 
 impl Workspace {
@@ -102,6 +106,7 @@ impl Workspace {
             compression_store: crate::compression::store::shared_store(),
             snapshots: crate::snapshot::SnapshotManager::new(root.clone()),
             bash_jobs: Default::default(),
+            plan_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -117,6 +122,21 @@ impl Workspace {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Set (or clear) the plan-mode plan file for the current turn (C.17).
+    /// The plan file lives in the state dir, outside the workspace root;
+    /// `walk` exempts exactly this path from containment.
+    pub fn set_plan_path(&self, path: Option<PathBuf>) {
+        *self.plan_path.write().unwrap_or_else(|e| e.into_inner()) = path;
+    }
+
+    fn plan_target(&self, requested: &str) -> bool {
+        let guard = self.plan_path.read().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().is_some_and(|plan| {
+            crate::run::dedup::normalize_write_path(requested)
+                == crate::run::dedup::normalize_write_path(&plan.display().to_string())
+        })
     }
 
     /// The session-shared reversible-compression store: request-build
@@ -141,6 +161,13 @@ impl Workspace {
     /// receives the finished table through its shared slot so its children
     /// flow through the same interception pipeline.
     pub fn register(&self) -> crate::run::ToolDispatch {
+        self.register_with_mode(crate::run::AgentMode::Build)
+    }
+
+    /// [`Self::register`] with the turn's mode baked into the table — and
+    /// into the batch child table — so write-gating is a frozen snapshot for
+    /// the whole turn.
+    pub fn register_with_mode(&self, mode: crate::run::AgentMode) -> crate::run::ToolDispatch {
         let batch = Batch(std::sync::Arc::new(std::sync::OnceLock::new()));
         let mut tools: Vec<PortableDynamicTool> = vec![
             dynamic(Read(self.clone())),
@@ -173,7 +200,8 @@ impl Workspace {
         let dispatch = crate::run::ToolDispatch::new(tools)
             .with_write_root((*self.root).clone())
             .with_compression_store(self.compression_store.clone())
-            .with_snapshots(self.snapshots.clone());
+            .with_snapshots(self.snapshots.clone())
+            .with_mode(mode);
         let _ = batch.0.set(dispatch.clone());
         dispatch
     }
@@ -207,6 +235,21 @@ impl Workspace {
     ) -> Result<(PathBuf, Option<Component<'a>>)> {
         if requested.is_empty() {
             return Err(invalid("path must not be empty"));
+        }
+        // Plan mode (C.17): the plan file is the one target exempt from
+        // workspace containment (the reference exempts it from the boundary
+        // block the same way).
+        if self.plan_target(requested) {
+            let plan = Path::new(requested);
+            if create_dirs {
+                let name = plan
+                    .file_name()
+                    .ok_or_else(|| invalid("path must name a file, not a directory"))?;
+                let parent = plan.parent().unwrap_or(Path::new("")).to_path_buf();
+                fs::create_dir_all(&parent).map_err(io_error)?;
+                return Ok((parent, Some(Component::Normal(name))));
+            }
+            return Ok((plan.to_path_buf(), None));
         }
         let requested = Path::new(requested);
         let relative = if requested.is_absolute() {

@@ -16,6 +16,7 @@ pub mod dispatch;
 pub(crate) mod doom;
 pub mod events;
 pub mod guardrails;
+pub mod mode;
 mod nudge;
 mod overflow;
 mod read_lifecycle;
@@ -32,6 +33,7 @@ pub use dispatch::{
 };
 pub use events::{Envelope, EventSender, EventStreamGuard, SessionEvents, event_stream};
 pub use guardrails::{SharedGuardrails, shared_guardrails};
+pub use mode::{AgentMode, PLAN_WRITE_RESTRICTED};
 #[cfg(test)]
 use overflow::{CANCEL_MARKER, END_MARKER};
 use overflow::{

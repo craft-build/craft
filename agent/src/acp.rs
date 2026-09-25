@@ -531,6 +531,7 @@ async fn run_turn(
                 .set("{date}", crate::prompt::today_utc()),
             &format!("{}{}", state.config.agent.preamble, instructions_text),
             &crate::prompt::ResolvedSlots::default(),
+            None,
         )),
         temperature: state.config.agent.temperature,
         max_tokens: state.config.agent.max_tokens,

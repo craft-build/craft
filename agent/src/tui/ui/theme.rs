@@ -26,6 +26,11 @@ pub const ACCENT: Color = Color::Rgb(0x4f, 0x8d, 0xff); // blue-500
 pub const BLUE_400: Color = Color::Rgb(0x6f, 0xa8, 0xff);
 pub const CYAN: Color = Color::Rgb(0x22, 0xd3, 0xee);
 
+// Mode indicator (F.2 Tab cycling): Build rides the primary accent, Plan
+// uses the planning cyan so the active mode is readable at a glance.
+pub const MODE_BUILD: Color = ACCENT;
+pub const MODE_PLAN: Color = CYAN;
+
 // Status
 pub const SUCCESS: Color = Color::Rgb(0x3d, 0xdc, 0x84);
 pub const WARNING: Color = Color::Rgb(0xf0, 0xa9, 0x3e);

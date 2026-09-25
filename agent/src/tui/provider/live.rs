@@ -435,7 +435,7 @@ impl CraftProvider {
                 current_turn = None;
             }
             match cmd {
-                Command::SendMessage(text) => {
+                Command::SendMessage(text, mode) => {
                     if text.trim().is_empty() {
                         continue;
                     }
@@ -454,6 +454,7 @@ impl CraftProvider {
                             cancel: cancel_token.clone(),
                             tx: evt_tx.clone(),
                             permissions: permissions.clone(),
+                            mode,
                         },
                         text,
                     ));
