@@ -432,7 +432,12 @@ mod tests {
     #[test]
     fn normalize_write_path_with_root_collapses_relative_and_absolute_aliases() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap().to_string_lossy().into_owned();
+        let root = tmp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let abs = normalize_write_path_with_root(Some(&root), "src/a.rs");
         assert_eq!(
             abs,

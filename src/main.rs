@@ -45,4 +45,5 @@ fn main() {
         .unwrap();
         cx.activate(true);
     });
+    app::flush_state_saves();
 }

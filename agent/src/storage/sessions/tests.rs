@@ -27,11 +27,7 @@ const HAIKU_COST: f64 = 0.08;
 #[test_case(None, Some(SONNET_COST), Some(SONNET_COST) ; "first_price_starts_the_total")]
 #[test_case(Some(SONNET_COST), Some(HAIKU_COST), Some(SONNET_COST + HAIKU_COST) ; "priced_turns_accumulate")]
 #[test_case(Some(SONNET_COST), None, Some(SONNET_COST) ; "unpriced_turn_keeps_the_total")]
-fn add_cost_only_grows_a_total(
-    mut total: Option<f64>,
-    addend: Option<f64>,
-    expected: Option<f64>,
-) {
+fn add_cost_only_grows_a_total(mut total: Option<f64>, addend: Option<f64>, expected: Option<f64>) {
     super::add_cost(&mut total, addend);
     assert_eq!(total, expected);
 }
@@ -194,8 +190,7 @@ fn prune_orphans_drops_unreachable_tool_state() {
 fn roundtrip_save_load() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
-    let mut session: TestSession =
-        Session::new("anthropic/claude-sonnet-4", "/home/test/project");
+    let mut session: TestSession = Session::new("anthropic/claude-sonnet-4", "/home/test/project");
     session.push_message(user_message("hello"));
     session.set_subagent_messages(
         "tool-1".into(),
@@ -1123,12 +1118,10 @@ fn snapshot_adoption_does_not_erase_a_local_rewrite() {
     };
     let meta = session.meta.clone();
     Session::checkpoint(&mut session, Some(&run), meta.clone(), Value::Null);
-    Arc::make_mut(&mut session)
-        .set_subagent_messages("sub-1".into(), vec![user_message("old")]);
+    Arc::make_mut(&mut session).set_subagent_messages("sub-1".into(), vec![user_message("old")]);
     let mut log = SessionLog::rewrite(dir, &session).unwrap();
 
-    Arc::make_mut(&mut session)
-        .set_subagent_messages("sub-1".into(), vec![user_message("new")]);
+    Arc::make_mut(&mut session).set_subagent_messages("sub-1".into(), vec![user_message("new")]);
     let advanced = HistorySnapshot {
         epoch: run.epoch,
         messages: Arc::new(vec![user_message("hi"), assistant_message("reply")]),
