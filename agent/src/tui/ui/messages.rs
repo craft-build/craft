@@ -564,19 +564,6 @@ fn tool_block(
             LineKind::Del if is_edit => {
                 diff_row(ln, false, gutter_w, &mut hl, width, card_bg, surf)
             }
-            LineKind::Context if is_edit => {
-                let mut spans = vec![
-                    Span::styled(indent.clone(), surf),
-                    gutter_span(ln.nr, gutter_w, card_bg),
-                    Span::styled("  ".to_string(), surf),
-                    Span::styled(
-                        ln.text.clone(),
-                        Style::default().fg(theme::TEXT_SECONDARY).bg(card_bg),
-                    ),
-                ];
-                let _ = &mut spans;
-                pad_row(spans, width, surf)
-            }
             LineKind::Add | LineKind::Del => {
                 let (sign, fg, bg) = if ln.kind == LineKind::Add {
                     ("+ ", theme::DIFF_ADD_TEXT, theme::DIFF_ADD_BG)
@@ -1159,6 +1146,41 @@ mod tests {
         assert!(del_line.spans.iter().any(|s| {
             s.content.contains("one") && s.style.add_modifier.contains(Modifier::BOLD)
         }));
+    }
+
+    /// Unchanged (context) rows inside an edit diff are syntax highlighted like
+    /// the added/removed rows, not left as plain secondary text.
+    #[test]
+    fn edit_card_highlights_context_lines() {
+        use super::theme;
+
+        let kind = crate::tui::provider::ToolKind::Edit {
+            path: "src/a.rs".into(),
+            summary: String::new(),
+        };
+        let body = vec![
+            ToolLine::new(crate::tui::provider::LineKind::Context, "let x = 1;"),
+            ToolLine {
+                kind: crate::tui::provider::LineKind::Add,
+                text: "let y = 2;".into(),
+                ..Default::default()
+            },
+        ];
+        let lines = tool_block(&kind, "t1", &body, None, false, false, false, false, 80).0;
+        let ctx = lines
+            .iter()
+            .find(|l| line_text(l).contains("let x = 1;"))
+            .expect("context row rendered");
+        // The `let` keyword carries a syntax color, not the plain secondary fg.
+        assert!(
+            ctx.spans.iter().any(|s| {
+                s.content.contains("let")
+                    && s.style.fg.is_some()
+                    && s.style.fg != Some(theme::TEXT_SECONDARY)
+            }),
+            "context row is not syntax highlighted: {:?}",
+            ctx.spans
+        );
     }
 
     #[test]
