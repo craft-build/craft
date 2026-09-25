@@ -133,6 +133,7 @@ impl App {
             return;
         };
         match key.code {
+            KeyCode::Esc => {} // dismiss (modal already replaced with None)
             KeyCode::Up => {
                 self.modal = Modal::Palette {
                     query,

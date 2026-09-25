@@ -1919,6 +1919,19 @@ mod tests {
         assert!(matches!(app.modal, Modal::ModelMenu(_)));
     }
 
+    /// Esc dismisses the command palette without running a command.
+    #[test]
+    fn esc_closes_the_command_palette() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.modal = Modal::Palette {
+            query: "mo".into(),
+            selected: 0,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.modal, Modal::None));
+    }
+
     fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
         MouseEvent {
             kind,

@@ -312,6 +312,30 @@ mod tests {
         assert!(text.contains("src/auth/refresh.ts"));
     }
 
+    /// The palette scrolls its window so the highlighted item stays visible
+    /// past the eighth row (regression: the selection used to scroll off the
+    /// rendered window and vanish).
+    #[test]
+    fn palette_scrolls_to_keep_selection_visible() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut app = seeded_app();
+        app.modal = crate::tui::modals::Modal::Palette {
+            query: String::new(),
+            selected: 0,
+        };
+        let last = app.palette_items().len() - 1;
+        let (_, label, _) = app.palette_items()[last];
+        app.modal = crate::tui::modals::Modal::Palette {
+            query: String::new(),
+            selected: last,
+        };
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(
+            buffer_text(&terminal).contains(label),
+            "the selected row ({label}) must be rendered"
+        );
+    }
+
     #[test]
     fn usage_and_stats_overlays_render_rows_and_costs() {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();

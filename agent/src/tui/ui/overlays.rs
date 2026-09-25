@@ -87,9 +87,16 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
         Block::default().style(Style::default().bg(theme::BG_RAISED)),
         area,
     );
+    // Scroll the window so the highlighted row stays visible past the edge.
+    let window = n as usize;
+    let start = app
+        .slash_selected
+        .saturating_sub(window.saturating_sub(1))
+        .min(items.len().saturating_sub(window));
     let rows: Vec<Vec<Span<'static>>> = items
         .iter()
-        .take(6)
+        .skip(start)
+        .take(window)
         .map(|(cmd, desc)| {
             vec![
                 Span::styled(format!(" {cmd}"), Style::default().fg(theme::CYAN)),
@@ -100,7 +107,7 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
             ]
         })
         .collect();
-    render_rows(f, &rows, app.slash_selected.min(items.len() - 1), area);
+    render_rows(f, &rows, app.slash_selected.saturating_sub(start), area);
 }
 
 /// Model picker, opened with ctrl+l / /model / palette.
@@ -243,9 +250,16 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
         },
     );
 
+    // Scroll the 8-row window so the highlighted row stays visible once the
+    // selection moves past the bottom edge.
+    let window = n as usize;
+    let start = selected
+        .saturating_sub(window.saturating_sub(1))
+        .min(items.len().saturating_sub(window));
     let rows: Vec<Vec<Span<'static>>> = items
         .iter()
-        .take(8)
+        .skip(start)
+        .take(window)
         .map(|(_, label, hint)| {
             let w = content.width as usize;
             let label = format!(" {label}");
@@ -261,7 +275,7 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     render_rows(
         f,
         &rows,
-        selected.min(items.len().saturating_sub(1)),
+        selected.saturating_sub(start),
         Rect {
             x: content.x,
             y: div_y + 1,
