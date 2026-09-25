@@ -3,31 +3,29 @@
 //! [`DynamicModel`] erases the concrete model type behind rig-core's
 //! `CompletionModel` so the rest of the crate never names a provider type.
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+mod catalog;
+mod dynamic;
+mod openai_compat;
+mod reauth;
+mod registry;
+
+pub use catalog::{CatalogEntry, CatalogModel};
+pub use dynamic::DynamicModel;
+pub use reauth::reauth_hook;
+pub use registry::{Provider, ProviderKind};
+
 use std::time::Duration;
 
-use rig_core::completion::{
-    CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-};
-use rig_core::streaming::StreamingCompletionResponse;
-use rig_core::{
-    client::{CompletionClient, ModelListingClient},
-    model::{Model, ModelList},
-    providers::*,
-};
-use serde::Deserialize;
+use rig_core::providers::*;
 use snafu::{OptionExt, ResultExt};
 
 use crate::config::ProviderConfig;
 use crate::error::{
-    AzureApiVersionMissingSnafu, AzureEndpointMissingSnafu, CreateProviderSnafu,
-    CredentialEmptySnafu, CredentialMissingSnafu, InvalidSnafu, NoCompletionSnafu, Result,
-    SelectModelSnafu,
+    AzureApiVersionMissingSnafu, AzureEndpointMissingSnafu, CredentialEmptySnafu,
+    CredentialMissingSnafu, Result,
 };
 
-fn credential(name: &str) -> Result<String> {
+pub(crate) fn credential(name: &str) -> Result<String> {
     let value = std::env::var(name).context(CredentialMissingSnafu {
         name: name.to_string(),
     })?;
@@ -38,32 +36,6 @@ fn credential(name: &str) -> Result<String> {
         .fail();
     }
     Ok(value)
-}
-
-// The table below is the single source of truth for config kinds, concrete
-// clients, construction, discovery, and completion support. Rig expresses provider
-// capabilities at compile time, so unsupported listers must not be called.
-macro_rules! list_models {
-    ($client:expr, yes) => {
-        $client
-            .list_models()
-            .await
-            .map_err(crate::error::client_error)?
-    };
-    ($client:expr, no) => {{
-        let _ = $client;
-        ModelList::new(vec![])
-    }};
-}
-
-macro_rules! completion_model {
-    ($client:expr, $model:expr, yes) => {
-        DynamicModel::wrap(Some($model), $client.completion_model($model))
-    };
-    ($client:expr, $model:expr, no) => {{
-        let _ = ($client, $model);
-        NoCompletionSnafu.fail()?
-    }};
 }
 
 /// Shared timeout policy for every provider HTTP client, ported from the
@@ -103,470 +75,11 @@ pub(crate) fn timeout_client(timeouts: Timeouts) -> Result<reqwest::Client> {
 
 /// The base-URL env var rig's `from_env` reads for a provider whose key env
 /// is `api_env` (e.g. `ANTHROPIC_API_KEY` → `ANTHROPIC_BASE_URL`).
-fn base_url_env(api_env: &str) -> String {
+pub(crate) fn base_url_env(api_env: &str) -> String {
     api_env.replace("_API_KEY", "_BASE_URL")
 }
 
-macro_rules! build_client {
-    ($config:expr, $client:ty, $env:literal, $timeouts:expr, $credential:expr) => {{
-        let config = $config;
-        let key = $credential(config.api_key_env.as_deref().unwrap_or($env))?;
-        let mut builder = <$client>::builder()
-            .api_key(key)
-            .http_client(timeout_client($timeouts)?);
-        let base_url = config.base_url.as_deref().map(str::to_owned).or_else(|| {
-            std::env::var(base_url_env($env))
-                .ok()
-                .filter(|s| !s.is_empty())
-        });
-        if let Some(base_url) = base_url {
-            builder = builder.base_url(base_url);
-        }
-        builder.build().map_err(crate::error::client_error)?
-    }};
-    ($config:expr, $client:ty, $factory:ident, $timeouts:expr, $credential:expr) => {
-        $factory($config, $timeouts, $credential)?
-    };
-}
-
-// Expands to the default credential env var for a providers! table row:
-// literal env names surface, factory-auth kinds (azure, chatgpt, …) have
-// none at the kind level.
-macro_rules! default_env {
-    ($env:literal) => {
-        Some($env)
-    };
-    ($factory:ident) => {
-        None
-    };
-}
-
-macro_rules! providers {
-    ($($variant:ident, $name:literal, $client:ty, $auth:tt, $listing:ident, $completion:ident;)+) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-        pub enum ProviderKind {
-            $(#[serde(rename = $name)] $variant,)+
-        }
-
-        /// Native clients, not a lowest-common-denominator protocol wrapper.
-        pub enum Provider {
-            $($variant($client),)+
-        }
-
-        impl ProviderKind {
-            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
-
-            pub fn as_str(self) -> &'static str {
-                match self { $(Self::$variant => $name,)+ }
-            }
-
-            /// Default credential env var for the kind, when the table row
-            /// names one (`api_key_env` in the config still wins).
-            pub fn api_key_env_default(self) -> Option<&'static str> {
-                match self { $(Self::$variant => default_env!($auth),)+ }
-            }
-        }
-
-        impl Provider {
-            pub fn from_config(config: &ProviderConfig) -> Result<Self> {
-                Self::from_config_with_timeouts(config, Timeouts::default())
-            }
-
-            /// Build with an explicit timeout policy (the shared HTTP client
-            /// every configured provider runs on).
-            pub fn from_config_with_timeouts(
-                config: &ProviderConfig,
-                timeouts: Timeouts,
-            ) -> Result<Self> {
-                Self::from_config_with(config, timeouts, &credential)
-            }
-
-            // Inject credential lookup for tests without mutating process-wide
-            // environment variables in a multithreaded async test runner.
-            fn from_config_with(
-                config: &ProviderConfig,
-                timeouts: Timeouts,
-                credential: &dyn Fn(&str) -> Result<String>,
-            ) -> Result<Self> {
-                config.validate()?;
-                (|| -> Result<Self> {
-                    Ok(match config.kind {
-                        $(ProviderKind::$variant => Self::$variant(
-                            build_client!(config, $client, $auth, timeouts, credential)
-                        ),)+
-                    })
-                })().with_context(|_| CreateProviderSnafu {
-                    kind: config.kind.as_str(),
-                })
-            }
-
-            pub fn kind(&self) -> ProviderKind {
-                match self { $(Self::$variant(_) => ProviderKind::$variant,)+ }
-            }
-
-            /// Select an exact provider model/deployment ID without discovery.
-            /// The concrete model is erased once behind [`DynamicModel`],
-            /// retaining its native protocol.
-            pub fn completion_model(&self, model: &str) -> Result<DynamicModel> {
-                if model.trim().is_empty() {
-                    return InvalidSnafu {
-                        reason: "model ID must not be empty",
-                    }
-                    .fail();
-                }
-                (|| -> Result<DynamicModel> {
-                    Ok(match self {
-                        $(Self::$variant(client) => completion_model!(client, model, $completion),)+
-                    })
-                })().with_context(|_| SelectModelSnafu {
-                    model: model.to_string(),
-                    kind: self.kind().as_str(),
-                })
-            }
-
-            /// Providers without listing support return the configured models.
-            /// Discovery errors propagate instead of masquerading as an empty
-            /// catalog. Set `discover_models = false` for manual-only catalogs.
-            pub async fn models(&self, config: &ProviderConfig) -> Result<Vec<CatalogModel>> {
-                self.models_with(config, &credential).await
-            }
-
-            // Injectable credential lookup keeps environment access out of
-            // multithreaded async tests.
-            async fn models_with(
-                &self,
-                config: &ProviderConfig,
-                credential: &(dyn Fn(&str) -> Result<String> + Send + Sync),
-            ) -> Result<Vec<CatalogModel>> {
-                config.validate()?;
-                if config.kind != self.kind() {
-                    return InvalidSnafu {
-                        reason: "model config kind does not match the provider",
-                    }
-                    .fail();
-                }
-                let discovered = if config.discover_models {
-                    if matches!(self, Self::OpenaiCompatible(_)) && config.base_url.is_some() {
-                        list_openai_compatible_models(config, credential).await?
-                    } else {
-                        match self {
-                            $(Self::$variant(client) => list_models!(client, $listing),)+
-                        }
-                    }
-                } else {
-                    ModelList::new(vec![])
-                };
-                Ok(merge_catalog(config, discovered))
-            }
-        }
-    };
-}
-
-// Variant, config kind, client, auth, model listing, text completion.
-providers! {
-    Anthropic, "anthropic", anthropic::Client, "ANTHROPIC_API_KEY", yes, yes;
-    Azure, "azure", azure::Client, build_azure, no, yes;
-    Chatgpt, "chatgpt", chatgpt::Client, build_chatgpt, no, yes;
-    Cohere, "cohere", cohere::Client, "COHERE_API_KEY", no, yes;
-    Copilot, "copilot", copilot::Client, build_copilot, yes, yes;
-    Deepseek, "deepseek", deepseek::Client, "DEEPSEEK_API_KEY", yes, yes;
-    Doubleword, "doubleword", doubleword::Client, "DOUBLEWORD_API_KEY", no, yes;
-    Gemini, "gemini", gemini::Client, "GEMINI_API_KEY", yes, yes;
-    Groq, "groq", groq::Client, "GROQ_API_KEY", yes, yes;
-    Huggingface, "huggingface", huggingface::Client, "HUGGINGFACE_API_KEY", no, yes;
-    Hyperbolic, "hyperbolic", hyperbolic::Client, "HYPERBOLIC_API_KEY", no, yes;
-    Llamafile, "llamafile", llamafile::Client, build_llamafile, no, yes;
-    Minimax, "minimax", minimax::Client, "MINIMAX_API_KEY", yes, yes;
-    Mira, "mira", mira::Client, "MIRA_API_KEY", yes, yes;
-    Mistral, "mistral", mistral::Client, "MISTRAL_API_KEY", yes, yes;
-    Moonshot, "moonshot", moonshot::Client, "MOONSHOT_API_KEY", yes, yes;
-    Ollama, "ollama", ollama::Client, build_ollama, yes, yes;
-    Openai, "openai", openai::Client, "OPENAI_API_KEY", yes, yes;
-    OpenaiCompatible, "openai-compatible", openai::CompletionsClient, "OPENAI_API_KEY", yes, yes;
-    Openrouter, "openrouter", openrouter::Client, "OPENROUTER_API_KEY", yes, yes;
-    Perplexity, "perplexity", perplexity::Client, "PERPLEXITY_API_KEY", no, yes;
-    Together, "together", together::Client, "TOGETHER_API_KEY", no, yes;
-    Venice, "venice", venice::Client, "VENICE_API_KEY", yes, yes;
-    Voyageai, "voyageai", voyageai::Client, "VOYAGE_API_KEY", no, no;
-    Xai, "xai", xai::Client, "XAI_API_KEY", no, yes;
-    Xiaomimimo, "xiaomimimo", xiaomimimo::Client, "XIAOMI_MIMO_API_KEY", yes, yes;
-    Zai, "zai", zai::Client, "ZAI_API_KEY", no, yes;
-}
-
-/// How often the E.10 reauth hook polls the credential, and how long it
-/// waits overall before giving up (the run's cancellation still ends it
-/// immediately).
-const REAUTH_POLL: Duration = Duration::from_secs(2);
-const REAUTH_MAX_WAIT: Duration = Duration::from_secs(600);
-
-/// Production E.10 hook (see [`crate::run::RunParams::reauth`]): waits for
-/// the provider credential to be refreshed, then rebuilds the provider and
-/// returns the model for the run to retry with. A process's environment
-/// only changes in-process, so this serves flows that update credentials
-/// while craft runs (plugins, config reloads, the future H.5 auth flow).
-pub fn reauth_hook(config: &ProviderConfig, model: &str) -> crate::run::ReauthHook {
-    // Clone before the closure so no borrowed data is captured.
-    let config = config.clone();
-    let model = model.to_owned();
-    Arc::new(move |_attempt| {
-        let config = config.clone();
-        let model = model.clone();
-        Box::pin(async move {
-            let Some(env_name) = config
-                .api_key_env
-                .clone()
-                .or_else(|| config.kind.api_key_env_default().map(str::to_owned))
-            else {
-                return Err(format!(
-                    "provider {} has no refreshable credential; restart after re-authenticating",
-                    config.kind.as_str()
-                ));
-            };
-            let original = std::env::var(&env_name).unwrap_or_default();
-            let deadline = std::time::Instant::now() + REAUTH_MAX_WAIT;
-            loop {
-                let current = std::env::var(&env_name).unwrap_or_default();
-                if !current.trim().is_empty() && current != original {
-                    let provider = Provider::from_config(&config).map_err(|e| e.to_string())?;
-                    return provider
-                        .completion_model(&model)
-                        .map(Some)
-                        .map_err(|e| e.to_string());
-                }
-                if std::time::Instant::now() >= deadline {
-                    return Err(format!(
-                        "credentials in {env_name} were not refreshed within {}s; \
-                         set a new value and retry",
-                        REAUTH_MAX_WAIT.as_secs()
-                    ));
-                }
-                tokio::time::sleep(REAUTH_POLL).await;
-            }
-        })
-    })
-}
-
-/// One selectable model in a provider catalog, in crate-owned form (the rig
-/// listing DTO stays inside this module).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CatalogModel {
-    pub id: String,
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub context_length: Option<u32>,
-    pub max_output_tokens: Option<u32>,
-}
-
-pub trait CatalogEntry {
-    fn id(&self) -> &str;
-    fn context_length_mut(&mut self) -> &mut Option<u32>;
-    fn max_output_tokens_mut(&mut self) -> &mut Option<u32>;
-}
-
-impl CatalogEntry for CatalogModel {
-    fn id(&self) -> &str {
-        &self.id
-    }
-    fn context_length_mut(&mut self) -> &mut Option<u32> {
-        &mut self.context_length
-    }
-    fn max_output_tokens_mut(&mut self) -> &mut Option<u32> {
-        &mut self.max_output_tokens
-    }
-}
-
-impl CatalogModel {
-    /// Display label: the catalog name, falling back to the model id.
-    pub fn label(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.id)
-    }
-
-    fn from_rig(model: Model) -> Self {
-        Self {
-            id: model.id,
-            name: model.name,
-            description: model.description,
-            context_length: model.context_length,
-            max_output_tokens: model.max_output_tokens,
-        }
-    }
-}
-
-/// Configured fields win; omitted fields preserve discovery metadata. New IDs
-/// are added, and the final catalog is sorted by ID.
-fn merge_catalog(config: &ProviderConfig, discovered: ModelList) -> Vec<CatalogModel> {
-    let mut models: std::collections::BTreeMap<String, CatalogModel> = discovered
-        .into_iter()
-        .map(|model| {
-            let id = model.id.clone();
-            (id, CatalogModel::from_rig(model))
-        })
-        .collect();
-    for (id, settings) in &config.models {
-        let model = models.entry(id.clone()).or_insert_with(|| CatalogModel {
-            id: id.clone(),
-            name: None,
-            description: None,
-            context_length: None,
-            max_output_tokens: None,
-        });
-        if let Some(name) = &settings.name {
-            model.name = Some(name.clone());
-        }
-        if let Some(description) = &settings.description {
-            model.description = Some(description.clone());
-        }
-        if let Some(context_length) = settings.context_length {
-            model.context_length = Some(context_length);
-        }
-        if let Some(max_output_tokens) = settings.max_output_tokens {
-            model.max_output_tokens = Some(max_output_tokens);
-        }
-    }
-    models.into_values().collect()
-}
-
-/// A type-erased completion model: clones cheaply, implements rig-core's
-/// `CompletionModel` by forwarding to the provider's concrete model behind an
-/// `Arc`. This is the only model type the rest of the crate sees.
-#[derive(Clone)]
-pub struct DynamicModel {
-    label: Option<String>,
-    inner: Arc<dyn ErasedModel>,
-}
-
-type ModelFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CompletionError>> + Send + 'a>>;
-
-trait ErasedModel: Send + Sync + 'static {
-    fn completion(&self, request: CompletionRequest) -> ModelFuture<'_, CompletionResponse>;
-    fn stream(&self, request: CompletionRequest) -> ModelFuture<'_, StreamingCompletionResponse>;
-}
-
-impl<M: CompletionModel + Send + Sync + 'static> ErasedModel for M {
-    fn completion(&self, request: CompletionRequest) -> ModelFuture<'_, CompletionResponse> {
-        Box::pin(async move { CompletionModel::completion(self, request).await })
-    }
-
-    fn stream(&self, request: CompletionRequest) -> ModelFuture<'_, StreamingCompletionResponse> {
-        Box::pin(async move { CompletionModel::stream(self, request).await })
-    }
-}
-
-impl DynamicModel {
-    pub(crate) fn wrap<M: CompletionModel + Send + Sync + 'static>(
-        label: Option<&str>,
-        model: M,
-    ) -> Self {
-        Self {
-            label: label.map(str::to_owned),
-            inner: Arc::new(model),
-        }
-    }
-
-    /// The model/deployment ID this handle was built for, when known.
-    pub fn label(&self) -> Option<&str> {
-        self.label.as_deref()
-    }
-}
-
-impl CompletionModel for DynamicModel {
-    async fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse, CompletionError> {
-        self.inner.completion(request).await
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<StreamingCompletionResponse, CompletionError> {
-        self.inner.stream(request).await
-    }
-}
-
-/// Shared discovery HTTP client with a bounded timeout, so one hung
-/// model-listing endpoint cannot block startup indefinitely.
-static DISCOVERY_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
-});
-
-/// `GET {base_url}/models` for OpenAI-compatible servers, keeping the optional
-/// metadata (`context_length`, `description`, output limits) that Rig's shared
-/// listing DTO drops. Third-party servers (synthetic, vLLM, LM Studio, ...)
-/// frequently publish these; without `context_length` the ACP layer cannot
-/// report context usage or trigger compaction. Used only when `base_url` is
-/// configured; otherwise Rig's lister covers the default OpenAI endpoint.
-async fn list_openai_compatible_models(
-    config: &ProviderConfig,
-    credential: &(dyn Fn(&str) -> Result<String> + Send + Sync),
-) -> Result<ModelList> {
-    let key = credential(config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY"))?;
-    let Some(base_url) = config.base_url.as_deref() else {
-        return InvalidSnafu {
-            reason: "openai-compatible discovery requires a configured base_url",
-        }
-        .fail();
-    };
-    let base = base_url.trim_end_matches('/');
-    let url = format!("{base}/models");
-    let response = DISCOVERY_CLIENT
-        .get(&url)
-        .bearer_auth(key)
-        .send()
-        .await
-        .map_err(crate::error::client_error)?;
-    let status = response.status();
-    let body = response.text().await.map_err(crate::error::client_error)?;
-    if !status.is_success() {
-        return InvalidSnafu {
-            reason: format!("GET {url} returned {status}: {body}"),
-        }
-        .fail();
-    }
-    let envelope: serde_json::Value =
-        serde_json::from_str(&body).map_err(|_| crate::error::Error::Invalid {
-            reason: format!("GET {url} returned a malformed models listing"),
-        })?;
-    let models = envelope
-        .get("data")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| crate::error::Error::Invalid {
-            reason: format!("GET {url} returned no models data"),
-        })?
-        .iter()
-        .filter_map(|entry| {
-            let id = entry.get("id")?.as_str()?;
-            let mut model = Model::from_id(id);
-            model.name = string_field(entry, "name");
-            model.description = string_field(entry, "description");
-            model.created_at =
-                number_field(entry, "created").or_else(|| number_field(entry, "created_at"));
-            model.owned_by = string_field(entry, "owned_by");
-            model.context_length = number_field(entry, "context_length")
-                .or_else(|| number_field(entry, "context_window"))
-                .map(|value| value.min(u32::MAX as u64) as u32);
-            model.max_output_tokens = number_field(entry, "max_output_tokens")
-                .or_else(|| number_field(entry, "max_output_length"))
-                .map(|value| value.min(u32::MAX as u64) as u32);
-            Some(model)
-        })
-        .collect();
-    Ok(ModelList::new(models))
-}
-
-fn string_field(entry: &serde_json::Value, field: &str) -> Option<String> {
-    entry.get(field)?.as_str().map(str::to_owned)
-}
-
-fn number_field(entry: &serde_json::Value, field: &str) -> Option<u64> {
-    entry.get(field)?.as_u64()
-}
-
-fn build_llamafile(
+pub(crate) fn build_llamafile(
     config: &ProviderConfig,
     timeouts: Timeouts,
     _: &dyn Fn(&str) -> Result<String>,
@@ -582,7 +95,7 @@ fn build_llamafile(
     builder.build().map_err(crate::error::client_error)
 }
 
-fn build_ollama(
+pub(crate) fn build_ollama(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
@@ -602,7 +115,7 @@ fn build_ollama(
     builder.build().map_err(crate::error::client_error)
 }
 
-fn build_azure(
+pub(crate) fn build_azure(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
@@ -633,7 +146,7 @@ fn build_azure(
         .map_err(crate::error::client_error)
 }
 
-fn build_chatgpt(
+pub(crate) fn build_chatgpt(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
@@ -660,7 +173,7 @@ fn build_chatgpt(
     builder.build().map_err(crate::error::client_error)
 }
 
-fn build_copilot(
+pub(crate) fn build_copilot(
     config: &ProviderConfig,
     timeouts: Timeouts,
     credential: &dyn Fn(&str) -> Result<String>,
@@ -698,6 +211,7 @@ fn first_env(names: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use rig_core::model::{Model, ModelList};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -871,7 +385,7 @@ mod tests {
         .unwrap();
         let mut existing = Model::new("existing", "Discovered name");
         existing.context_length = Some(8192);
-        let merged = merge_catalog(
+        let merged = catalog::merge_catalog(
             &config.providers["x"],
             ModelList::new(vec![existing, Model::from_id("untouched")]),
         );
@@ -924,7 +438,7 @@ mod tests {
                 .unwrap();
         let result =
             Provider::from_config_with(&config.providers["test"], Timeouts::default(), &|name| {
-                InvalidSnafu {
+                crate::error::InvalidSnafu {
                     reason: format!("missing {name}"),
                 }
                 .fail()
