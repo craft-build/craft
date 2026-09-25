@@ -51,6 +51,9 @@ pub struct CommandSpec {
     pub id: &'static str,
     /// Slash form; `None` = palette-only.
     pub slash: Option<&'static str>,
+    /// Alternate slash spelling for the same `id` (e.g. `/exit` for
+    /// `/quit`); advertised next to `slash` in completion and help.
+    pub alias: Option<&'static str>,
     /// Palette label.
     pub label: &'static str,
     /// Palette right-aligned hint.
@@ -63,6 +66,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "new",
         slash: None,
+        alias: None,
         label: "New session",
         hint: "",
         desc: "",
@@ -70,6 +74,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "sessions",
         slash: Some("/sessions"),
+        alias: None,
         label: "Switch session",
         hint: "/sessions",
         desc: "List sessions",
@@ -77,6 +82,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "toggle-sidebar",
         slash: None,
+        alias: None,
         label: "Toggle context panel",
         hint: "ctrl+b",
         desc: "",
@@ -84,6 +90,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "model",
         slash: Some("/model"),
+        alias: None,
         label: "Change model",
         hint: "ctrl+l",
         desc: "Switch model",
@@ -91,6 +98,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "clear",
         slash: Some("/clear"),
+        alias: None,
         label: "Clear context",
         hint: "/clear",
         desc: "Clear conversation context",
@@ -98,6 +106,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "copy",
         slash: None,
+        alias: None,
         label: "Copy last message",
         hint: "",
         desc: "",
@@ -105,6 +114,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "undo",
         slash: Some("/undo"),
+        alias: None,
         label: "Undo last edit",
         hint: "/undo",
         desc: "Revert the last edit",
@@ -112,6 +122,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "compact",
         slash: Some("/compact"),
+        alias: None,
         label: "Compact context",
         hint: "/compact",
         desc: "Compact context to save tokens",
@@ -119,6 +130,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "usage",
         slash: Some("/usage"),
+        alias: None,
         label: "Show usage",
         hint: "/usage",
         desc: "Show this session's tokens and cost",
@@ -126,6 +138,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "stats",
         slash: Some("/stats"),
+        alias: None,
         label: "Show stats",
         hint: "/stats",
         desc: "Show cost across all sessions",
@@ -133,6 +146,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "auto-review",
         slash: Some("/auto-review"),
+        alias: None,
         label: "Toggle auto-review",
         hint: "/auto-review",
         desc: "Toggle LLM auto-review of permissions",
@@ -140,9 +154,18 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "help",
         slash: Some("/help"),
+        alias: None,
         label: "Help",
         hint: "/help",
         desc: "Show keybindings",
+    },
+    CommandSpec {
+        id: "quit",
+        slash: Some("/quit"),
+        alias: Some("/exit"),
+        label: "Quit",
+        hint: "/quit",
+        desc: "Quit craft",
     },
 ];
 
@@ -153,7 +176,8 @@ fn opens_slash_menu(text: &str) -> bool {
     text.starts_with('/')
         && COMMANDS
             .iter()
-            .filter_map(|spec| spec.slash)
+            .flat_map(|spec| [spec.slash, spec.alias])
+            .flatten()
             .any(|cmd| text == "/" || cmd.starts_with(text))
 }
 
@@ -668,7 +692,12 @@ impl App {
         }
         COMMANDS
             .iter()
-            .filter_map(|spec| spec.slash.map(|slash| (slash, spec.desc)))
+            .flat_map(|spec| {
+                [spec.slash, spec.alias]
+                    .into_iter()
+                    .flatten()
+                    .map(|slash| (slash, spec.desc))
+            })
             .filter(|(cmd, _)| q == "/" || cmd.starts_with(q))
             .collect()
     }
@@ -898,10 +927,12 @@ pub fn help_rows() -> Vec<(String, String)> {
         ("pgup / pgdn / g / G".into(), "scroll the transcript".into()),
         (String::new(), String::new()),
     ];
-    for (slash, desc) in COMMANDS
-        .iter()
-        .filter_map(|spec| spec.slash.map(|slash| (slash, spec.desc)))
-    {
+    for (slash, desc) in COMMANDS.iter().flat_map(|spec| {
+        [spec.slash, spec.alias]
+            .into_iter()
+            .flatten()
+            .map(|slash| (slash, spec.desc))
+    }) {
         rows.push((slash.to_string(), desc.to_string()));
     }
     rows
@@ -975,12 +1006,16 @@ impl App {
                 let _ = tx.send(Command::ToggleAutoReview);
             }
             "help" => self.modal = Modal::Help,
+            "quit" => self.should_quit = true,
             _ => {}
         }
     }
 
     fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
-        if let Some(spec) = COMMANDS.iter().find(|spec| spec.slash == Some(cmd)) {
+        if let Some(spec) = COMMANDS
+            .iter()
+            .find(|spec| spec.slash == Some(cmd) || spec.alias == Some(cmd))
+        {
             self.run_command(spec.id, tx);
         }
     }
@@ -1518,7 +1553,7 @@ mod tests {
                 Some(Message::Notice { .. })
             );
             assert!(
-                sent || modal || flipped || noticed,
+                sent || modal || flipped || noticed || app.should_quit,
                 "command {:?} resolves to a no-op",
                 spec.id
             );
@@ -1543,12 +1578,40 @@ mod tests {
     #[test]
     fn help_rows_cover_every_slash_command() {
         let rows = help_rows();
-        for slash in COMMANDS.iter().filter_map(|s| s.slash) {
+        for slash in COMMANDS.iter().flat_map(|s| [s.slash, s.alias]).flatten() {
             assert!(
                 rows.iter().any(|(key, _)| key == slash),
                 "{slash} missing from the help sheet"
             );
         }
+    }
+
+    /// `/quit` and its `/exit` alias both flag the app to leave.
+    #[test]
+    fn quit_and_exit_alias_leave() {
+        for cmd in ["/quit", "/exit"] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut app = App::new();
+            assert!(!app.should_quit);
+            app.run_slash(cmd, &tx);
+            assert!(app.should_quit, "{cmd} did not quit");
+        }
+    }
+
+    /// The alias is a first-class slash entry: it opens the menu and dispatches.
+    #[test]
+    fn exit_alias_completes_and_dispatches() {
+        let mut app = App::new();
+        app.composer.text = "/exit".into();
+        assert!(app.slash_open(), "/exit should open the slash menu");
+        assert!(
+            app.slash_matches().iter().any(|(cmd, _)| *cmd == "/exit"),
+            "/exit missing from completion"
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.submit(&tx);
+        assert!(app.should_quit, "/exit did not quit");
+        assert!(rx.try_recv().is_err(), "quit sends no provider command");
     }
 
     /// W8: palette `copy` copies the last assistant reply and confirms with

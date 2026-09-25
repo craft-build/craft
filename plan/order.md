@@ -90,7 +90,7 @@ Optimal port order from `comparison.md`: dependencies first, highest leverage-pe
 66. F.2 Ctrl-C tri-state (S)
 67. F.2 Suspend Ctrl-Z (S)
 68. F.6 OSC-8 hyperlinks (S)
-69. F.7 Status bar deltas, notifications, thinking indicators, splash (all S)
+69. F.7 Status bar deltas, notifications, thinking indicators (all S)
 
 Fixes:
 - [x] Ctrl+E does not jump to bottom in the scrollback engine
