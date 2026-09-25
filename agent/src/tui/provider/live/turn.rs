@@ -261,10 +261,10 @@ async fn compact_history(
     }
 }
 
-/// `/compact`: force every armed compaction stage over the session history
-/// and report through notices; also refreshes the token label. An empty or
-/// already-compact history reports a neutral no-op (silence would read as
-/// a lost command).
+/// `/compact`: force every armed compaction stage over the session history,
+/// announcing the run and reporting through notices; also refreshes the token
+/// label. An empty or already-compact history reports a neutral no-op (silence
+/// would read as a lost command).
 pub(super) async fn compact_now(
     config: &Config,
     selection: &Selection,
@@ -289,6 +289,15 @@ pub(super) async fn compact_now(
     let before = compaction
         .estimator
         .scale(crate::compaction::estimate_tokens(&session.history));
+    // `force_compact` can await an LLM summary before it returns; announce the
+    // run so the pause is not mistaken for a lost command.
+    let _ = tx.send(AgentEvent::Notice {
+        tone: Tone::Info,
+        text: format!(
+            "compacting context ({})…",
+            usage_label_size(before, u64::from(selection.context_length.unwrap_or(0)))
+        ),
+    });
     let ran = CompactionEngine::new(config.compaction.clone())
         .with_buffer(config.compaction_buffer)
         .force_compact(

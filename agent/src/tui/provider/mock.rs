@@ -352,6 +352,12 @@ impl Provider for MockProvider {
                         let _ = evt_tx.send(AgentEvent::UsageSnapshot(Vec::new()));
                     }
                     Command::Compact => {
+                        // Mirror the real provider: announce the run, then the
+                        // (scripted) neutral no-op.
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Info,
+                            text: "compacting context…".into(),
+                        });
                         let _ = evt_tx.send(AgentEvent::Notice {
                             tone: Tone::Neutral,
                             text: "context already compact".into(),
@@ -453,5 +459,23 @@ mod tests {
             ev,
             AgentEvent::StatusChanged(Status::Done) | AgentEvent::AssistantText(_)
         ));
+    }
+
+    /// `/compact` announces the run before the (scripted) no-op result, so the
+    /// status surface shows an indicator while it works.
+    #[tokio::test]
+    async fn compact_announces_the_run_before_the_result() {
+        let (tx, mut rx) = MockProvider.start();
+        // Drain initial state.
+        for _ in 0..4 {
+            rx.recv().await.unwrap();
+        }
+        tx.send(Command::Compact).unwrap();
+        let first = recv(&mut rx).await;
+        assert!(
+            matches!(first, AgentEvent::Notice { tone: Tone::Info, ref text }
+                if text.starts_with("compacting context")),
+            "{first:?}"
+        );
     }
 }
