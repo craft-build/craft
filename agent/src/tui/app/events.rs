@@ -18,7 +18,39 @@ impl App {
             self.handle_modal_key(key, tx);
             return;
         }
+        // The permission prompt (F.5) owns plain keys while open: the tool
+        // call is parked on it. Ctrl-modified chords it does not consume
+        // (ctrl-c denies inside it) still fall through to the base surface.
+        if self.permission_prompt.is_open() && self.handle_permission_key(key, tx) {
+            return;
+        }
         self.handle_base_key(key, tx);
+    }
+
+    /// Route a key through the permission prompt. Returns true when the
+    /// key was consumed (answer produced, state transition, or a plain key
+    /// swallowed while the prompt owns the keyboard).
+    fn handle_permission_key(
+        &mut self,
+        key: KeyEvent,
+        tx: &mpsc::UnboundedSender<Command>,
+    ) -> bool {
+        let Some(id) = self.permission_prompt.id().map(str::to_owned) else {
+            return false;
+        };
+        match self.permission_prompt.handle_key(key) {
+            Some(answer) => {
+                let _ = tx.send(Command::AnswerPermission { id, answer });
+                true
+            }
+            None => {
+                // Unhandled ctrl chords keep working (palette, quit path,
+                // ...); plain keys never reach the composer while the
+                // prompt is open.
+                !key.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            }
+        }
     }
 
     /// Keys for the normal (modal-free) surface: global chords, then
@@ -342,9 +374,13 @@ impl App {
     }
 
     /// Paste lands in the composer as one unit; modal inputs own the
-    /// keyboard so pastes are dropped while one is open.
+    /// keyboard so pastes are dropped while one is open. An open permission
+    /// prompt's guidance buffer takes precedence.
     pub fn insert_paste(&mut self, text: &str) {
         if !matches!(self.modal, Modal::None) {
+            return;
+        }
+        if self.permission_prompt.handle_paste(text) {
             return;
         }
         self.composer.insert_paste(text);
@@ -496,6 +532,74 @@ mod tests {
         };
         app.insert_paste("nope");
         assert!(app.composer.text.is_empty());
+    }
+
+    fn open_permission(app: &mut App) {
+        app.handle_event(AgentEvent::PermissionRequest {
+            id: "t9".into(),
+            tool: "bash".into(),
+            scopes: vec!["execute".into()],
+            files: Vec::new(),
+            commands: vec!["rm -rf /tmp/x".into()],
+        });
+    }
+
+    #[test]
+    fn permission_request_opens_the_overlay_and_resolution_closes_it() {
+        let mut app = App::new();
+        open_permission(&mut app);
+        assert!(app.permission_prompt.is_open());
+        // A stale resolution must not close a newer request.
+        app.handle_event(AgentEvent::PermissionResolved { id: "other".into() });
+        assert!(app.permission_prompt.is_open());
+        app.handle_event(AgentEvent::PermissionResolved { id: "t9".into() });
+        assert!(!app.permission_prompt.is_open());
+    }
+
+    #[test]
+    fn answering_the_prompt_routes_the_answered_command() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        open_permission(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::AnswerPermission { id, answer: crate::permissions::PermissionAnswer::AllowOnce })
+                if id == "t9"
+        ));
+    }
+
+    #[test]
+    fn prompt_owns_plain_keys_while_open() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        open_permission(&mut app);
+        // A plain char never reaches the composer.
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &tx);
+        assert!(app.composer.text.is_empty());
+        // Enter would submit the composer; here it does nothing.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(app.composer.text.is_empty());
+        // Ctrl-chords fall through (e.g. the palette still opens).
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &tx,
+        );
+        assert!(matches!(app.modal, Modal::Palette { .. }));
+    }
+
+    #[test]
+    fn paste_lands_in_the_guidance_buffer_while_editing() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        open_permission(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &tx);
+        app.insert_paste("use cat");
+        assert!(app.composer.text.is_empty());
+        // Enter denies with the typed guidance.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        // The overlay stays open until PermissionResolved arrives.
+        assert!(app.permission_prompt.is_open());
     }
 
     /// Modals are exclusive by construction: running the palette's "model"

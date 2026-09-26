@@ -29,6 +29,12 @@ pub enum Command {
     /// User rejected a pending diff (by tool-call id). `always` persists a
     /// deny rule to the project's `permissions.toml` instead of the session.
     Reject { id: String, always: bool },
+    /// Answered the permission-prompt overlay (by tool-call id) with the
+    /// full scope-negotiated decision (F.5).
+    AnswerPermission {
+        id: String,
+        answer: crate::permissions::PermissionAnswer,
+    },
     /// Esc: interrupt the running turn.
     Interrupt,
     /// Start over (new session): abort any turn and reset to the initial state.
@@ -253,6 +259,21 @@ pub enum AgentEvent {
     /// the user/assistant text transcript for display rebuild.
     SessionLoaded {
         messages: Vec<LoadedMessage>,
+    },
+    /// A gated tool call is parked on the user's decision: opens the
+    /// permission-prompt overlay (F.5). `files`/`commands` are display
+    /// context for the form; `scopes` are the permission-engine scopes.
+    PermissionRequest {
+        id: String,
+        tool: String,
+        scopes: Vec<String>,
+        files: Vec<String>,
+        commands: Vec<String>,
+    },
+    /// The pending permission request resolved (answered, cancelled, or
+    /// timed out); closes the overlay if the id matches.
+    PermissionResolved {
+        id: String,
     },
 }
 

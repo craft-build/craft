@@ -328,6 +328,21 @@ impl Provider for MockProvider {
                         ));
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
+                    Command::AnswerPermission { id, answer } => {
+                        // Mirrors the gate: the request resolves and the
+                        // tool proceeds (allow answers) or is skipped.
+                        let _ = evt_tx.send(AgentEvent::PermissionResolved { id });
+                        let allowed = answer.is_allow();
+                        let _ = evt_tx.send(AgentEvent::AssistantText(format!(
+                            "Permission answer: {}",
+                            answer.encode()
+                        )));
+                        let _ = evt_tx.send(AgentEvent::StatusChanged(if allowed {
+                            Status::Running
+                        } else {
+                            Status::Done
+                        }));
+                    }
                     Command::Interrupt => {
                         if let Some(h) = current.take() {
                             h.abort();

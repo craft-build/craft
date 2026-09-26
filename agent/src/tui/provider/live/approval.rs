@@ -244,6 +244,29 @@ impl ApprovalGate {
     }
 }
 
+/// Display context for the permission-prompt overlay: the files a
+/// file-write tool touches, or the raw bash command(s). The scopes already
+/// carry resolved paths; files simply re-present them for the form.
+fn display_context(
+    name: &str,
+    args: &serde_json::Value,
+    scopes: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut commands = Vec::new();
+    if name == "bash" {
+        if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
+            match crate::permissions::bash::permission_scopes(command) {
+                Some(split) => commands.extend(split.scopes),
+                None => commands.push(command.to_string()),
+            }
+        }
+    } else if FILE_WRITE_TOOLS.contains(&name) {
+        files.extend(scopes.iter().cloned());
+    }
+    (files, commands)
+}
+
 async fn gate_decide(
     state: Arc<Mutex<SessionState>>,
     tx: mpsc::UnboundedSender<AgentEvent>,
@@ -279,9 +302,17 @@ async fn gate_decide(
         awaiting_approval: true,
     }));
     let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
+    let (files, commands) = display_context(name, &call.function.arguments, &scopes);
+    let _ = tx.send(AgentEvent::PermissionRequest {
+        id: id.clone(),
+        tool: name.to_string(),
+        scopes: scopes.clone(),
+        files,
+        commands,
+    });
 
     let (decision_tx, mut decision_rx) = oneshot::channel();
-    state.lock().await.pending_approval = Some((id, decision_tx));
+    state.lock().await.pending_approval = Some((id.clone(), decision_tx));
     let mut cancel_rx = cancel.subscribe();
     // Cancellation is epoch-based: `changed()` fires only on a
     // `set(true)` generation bump or a dropped flag — a re-arm
@@ -291,10 +322,12 @@ async fn gate_decide(
         changed = cancel_rx.changed() => {
             let _ = changed;
             state.lock().await.pending_approval = None;
+            let _ = tx.send(AgentEvent::PermissionResolved { id });
             return Decision::Stop("cancelled by client".into());
         }
         decision = tokio::time::timeout(ASK_TIMEOUT, &mut decision_rx) => {
             state.lock().await.pending_approval = None;
+            let _ = tx.send(AgentEvent::PermissionResolved { id });
             decision
                 .unwrap_or(Ok(PermissionAnswer::Deny))
                 .unwrap_or(PermissionAnswer::Deny)
@@ -303,6 +336,11 @@ async fn gate_decide(
     let _ = tx.send(AgentEvent::StatusChanged(Status::Running));
     if record_answer(&permissions, &tool, &scopes, &answer) {
         Decision::Run
+    } else if let Some(guidance) = answer.guidance() {
+        Decision::Skip(
+            PermissionError::with_guidance(&tool.to_string(), &scopes, guidance.to_string())
+                .to_string(),
+        )
     } else {
         Decision::Skip(denied_message(&tool, &scopes))
     }
@@ -450,6 +488,130 @@ mod tests {
         sibling.function.arguments = serde_json::json!({ "path": "src/other.rs" });
         assert!(matches!(gate.decide(sibling).await, Decision::Run));
         assert!(state.lock().await.pending_approval.is_none());
+    }
+
+    #[tokio::test]
+    async fn deny_with_guidance_reaches_the_model() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (flag, cancel) = crate::run::cancel_channel();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        let gate = ApprovalGate::new(state.clone(), tx, cancel, permissions, None);
+        let _ = flag;
+
+        let call = tool_call("t1", "write");
+        let pending = tokio::spawn(async move { gate.decide(call).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.lock().await.pending_approval.is_none() {
+            assert!(std::time::Instant::now() < deadline, "write never parked");
+            tokio::task::yield_now().await;
+        }
+        decide(
+            &state,
+            "t1".into(),
+            PermissionAnswer::DenyWithGuidance("use read instead".into()),
+        )
+        .await;
+        match pending.await.unwrap() {
+            Decision::Skip(msg) => assert!(
+                msg.contains("use read instead"),
+                "guidance missing from: {msg}"
+            ),
+            other => panic!("expected Skip, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_once_grants_nothing_persistent() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        let make_gate = |permissions: Arc<PermissionManager>| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (flag, cancel) = crate::run::cancel_channel();
+            (
+                ApprovalGate::new(state.clone(), tx, cancel, permissions, None),
+                flag,
+            )
+        };
+
+        for i in 0..2 {
+            let id = format!("t{i}");
+            let (gate, _flag) = make_gate(permissions.clone());
+            let mut call = tool_call(&id, "write");
+            call.function.arguments = serde_json::json!({ "path": "src/lib.rs" });
+            let pending = tokio::spawn(async move { gate.decide(call).await });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while state.lock().await.pending_approval.is_none() {
+                assert!(std::time::Instant::now() < deadline, "write never parked");
+                tokio::task::yield_now().await;
+            }
+            decide(&state, id, PermissionAnswer::AllowOnce).await;
+            assert!(matches!(pending.await.unwrap(), Decision::Run));
+            // The next identical call must ask again: nothing persisted.
+            if i == 0 {
+                assert!(
+                    state.lock().await.pending_approval.is_none(),
+                    "allow-once leaked a pending approval"
+                );
+            }
+        }
+        // The second iteration parked again (the loop's wait would have
+        // timed out otherwise), proving allow-once granted no rule.
+    }
+
+    #[tokio::test]
+    async fn permission_request_event_carries_display_context() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (flag, cancel) = crate::run::cancel_channel();
+        let permissions = Arc::new(PermissionManager::new(
+            PermissionsConfig::default(),
+            std::env::temp_dir(),
+        ));
+        let gate = ApprovalGate::new(state.clone(), tx.clone(), cancel, permissions, None);
+        let _ = flag;
+
+        let mut call = tool_call("t1", "bash");
+        call.function.arguments = serde_json::json!({ "command": "echo hi" });
+        let pending = tokio::spawn(async move { gate.decide(call).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.lock().await.pending_approval.is_none() {
+            assert!(std::time::Instant::now() < deadline, "bash never parked");
+            tokio::task::yield_now().await;
+        }
+        let mut request = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let AgentEvent::PermissionRequest {
+                id,
+                tool,
+                scopes,
+                files,
+                commands,
+            } = ev
+            {
+                request = Some((id, tool, scopes, files, commands));
+            }
+        }
+        let (id, tool, _scopes, files, commands) = request.expect("no PermissionRequest event");
+        assert_eq!(id, "t1");
+        assert_eq!(tool, "bash");
+        assert!(files.is_empty());
+        assert_eq!(commands, vec!["echo hi".to_string()]);
+        decide(&state, "t1".into(), PermissionAnswer::Deny).await;
+        let _ = pending.await;
+        let mut resolved = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, AgentEvent::PermissionResolved { id } if id == "t1") {
+                resolved = true;
+            }
+        }
+        assert!(resolved, "no PermissionResolved event");
     }
 
     #[tokio::test]

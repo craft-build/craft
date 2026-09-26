@@ -9,7 +9,7 @@ mod sidebar;
 pub mod theme;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders};
 
@@ -48,6 +48,31 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let msg_area = rows[0];
     let bottom = rows[1];
 
+    // The permission prompt (F.5) rides directly above the composer region:
+    // its rows are carved out of the message area, so the shared top border
+    // and the composer block below it keep their positions.
+    let prompt_h = if app.permission_prompt.is_open() {
+        app.permission_prompt
+            .height(chat.width)
+            .min(bottom.y.saturating_sub(msg_area.y))
+    } else {
+        0
+    };
+    let prompt_area = Rect {
+        x: bottom.x,
+        y: bottom.y - prompt_h,
+        width: bottom.width,
+        height: prompt_h,
+    };
+    let msg_area = if prompt_h > 0 {
+        Rect {
+            height: msg_area.height.saturating_sub(prompt_h),
+            ..msg_area
+        }
+    } else {
+        msg_area
+    };
+
     // Shared top border across composer + status + footer.
     f.render_widget(
         Block::default()
@@ -68,6 +93,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let status_area = sub[2];
 
     messages::render(f, app, msg_area);
+    if prompt_h > 0 {
+        app.permission_prompt.view(f, prompt_area);
+    }
     composer::render_input(f, app, composer_area);
     composer::render_status(f, app, status_area);
 
@@ -244,6 +272,62 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn permission_prompt_sits_above_the_composer_without_overlap() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = seeded_app();
+        app.handle_event(AgentEvent::PermissionRequest {
+            id: "t9".into(),
+            tool: "bash".into(),
+            scopes: vec!["execute".into()],
+            files: Vec::new(),
+            commands: vec!["rm -rf /tmp/x".into()],
+        });
+        app.handle_event(AgentEvent::StatusChanged(Status::WaitingApproval));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row =
+            |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
+
+        // The prompt form's title and tool row must be visible...
+        let rows: Vec<String> = (0..buf.area.height).map(row).collect();
+        let title = rows
+            .iter()
+            .position(|r| r.contains("Permission Required"))
+            .expect("prompt title rendered");
+        assert!(
+            rows[title + 2].contains("tool"),
+            "tool row: {:?}",
+            rows[title + 2]
+        );
+        assert!(
+            rows[title + 4].contains("rm -rf /tmp/x"),
+            "cmd row: {:?}",
+            rows[title + 4]
+        );
+
+        // ...strictly above the composer block, whose rows are unchanged:
+        // the top border is the first row below the prompt, and the
+        // composer's accent bar never appears inside the prompt rows.
+        let prompt_h = app.permission_prompt.height(100);
+        let border_y = (title + 1 + prompt_h as usize).min(buf.area.height as usize - 1);
+        assert!(
+            rows[border_y].starts_with('─'),
+            "border below prompt: {:?}",
+            rows[border_y]
+        );
+        for r in rows[title..border_y].iter() {
+            assert!(!r.contains('▎'), "composer bled into prompt: {r:?}");
+        }
+        // The composer area snapshot matches where its accent bar renders.
+        let composer_y = app.view.composer_area.y;
+        assert!(
+            rows[composer_y as usize].contains('▎'),
+            "composer at {}",
+            composer_y
+        );
     }
 
     #[test]

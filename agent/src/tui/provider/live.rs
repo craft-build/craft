@@ -494,6 +494,9 @@ impl CraftProvider {
                     };
                     decide(&state, id, answer).await
                 }
+                Command::AnswerPermission { id, answer } => {
+                    decide(&state, id, answer).await;
+                }
                 Command::ToggleAutoReview => {
                     let on = permissions.toggle_auto_review();
                     let _ = evt_tx.send(AgentEvent::AssistantText(format!(

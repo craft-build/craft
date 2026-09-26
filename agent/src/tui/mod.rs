@@ -8,6 +8,7 @@ mod composer;
 mod hyperlink;
 mod modals;
 mod notify;
+mod permission_prompt;
 pub mod provider;
 mod repaint;
 mod selection;

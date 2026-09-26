@@ -80,6 +80,10 @@ pub struct App {
     /// on the composer (shown when the composer starts with '/').
     pub modal: Modal,
     pub slash_selected: usize, // row in the slash popup
+    /// Permission-prompt overlay (F.5): open while a gated tool call is
+    /// parked on the user's decision. Not a modal — it rides above the
+    /// composer and owns plain keys while open.
+    pub permission_prompt: crate::tui::permission_prompt::PermissionPrompt,
     /// Latest per-model usage snapshot from the provider (the `/usage`
     /// overlay's data; refreshed after every completed run).
     pub usage: Vec<UsageRow>,
@@ -108,6 +112,7 @@ impl App {
             history_draft: String::new(),
             modal: Modal::None,
             slash_selected: 0,
+            permission_prompt: crate::tui::permission_prompt::PermissionPrompt::new(),
             usage: Vec::new(),
             should_quit: false,
         }
@@ -223,6 +228,20 @@ impl App {
                         LoadedMessage::Assistant(text) => Message::Assistant(text),
                     };
                     self.conversation.messages.push(msg);
+                }
+            }
+            AgentEvent::PermissionRequest {
+                id,
+                tool,
+                scopes,
+                files,
+                commands,
+            } => self
+                .permission_prompt
+                .open(id, tool, scopes, files, commands),
+            AgentEvent::PermissionResolved { id } => {
+                if self.permission_prompt.id() == Some(id.as_str()) {
+                    self.permission_prompt.close();
                 }
             }
             // Message-bearing events merge into the conversation.
