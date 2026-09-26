@@ -95,6 +95,10 @@ pub struct App {
     /// Fuzzy transcript search (F.3): owns the keyboard while open, above
     /// the base surface like a modal but outside the exclusive `modal` slot.
     pub search: crate::tui::search_modal::SearchModal,
+    /// File picker (F.3, Ctrl-S): fuzzy path matcher over an async walkdir
+    /// of the session cwd; owns the keyboard while open, above the base
+    /// surface like the search modal.
+    pub file_picker: crate::tui::file_picker::FilePicker,
 
     pub should_quit: bool,
 }
@@ -125,6 +129,7 @@ impl App {
             usage_quota: crate::tui::provider::UsageFetchState::Idle,
             usage_scroll: 0,
             search: crate::tui::search_modal::SearchModal::new(),
+            file_picker: crate::tui::file_picker::FilePicker::new(),
             should_quit: false,
         }
     }
@@ -192,6 +197,14 @@ impl App {
             // A live flash expires on the clock: keep waking up so the
             // status row drops it without waiting for the next event.
             repaint::Cadence::when(self.flash.is_some(), repaint::Cadence::SPINNER),
+            // The file picker's walk runs on its own thread: keep coming
+            // back so the streaming paths land on screen (and animate the
+            // scanning spinner once the list is visible).
+            repaint::Cadence::when(self.file_picker.walking(), repaint::Cadence::PENDING),
+            repaint::Cadence::when(
+                self.file_picker.walking() && self.file_picker.visible(),
+                repaint::Cadence::SPINNER,
+            ),
         ])
     }
 
@@ -362,6 +375,17 @@ impl App {
             self.scroll_to_segment(seg, row);
         }
         self.view.highlight_segment = at.map(|(seg, _)| seg);
+    }
+
+    /// Poll the file picker's walker (paths streaming in, walk endings,
+    /// self-close flashes); true when the screen changed. Called by the
+    /// event loop every turn, since nothing else announces the walker.
+    pub(crate) fn tick_file_picker(&mut self) -> bool {
+        let (mut dirty, flash) = self.file_picker.tick();
+        if let Some(msg) = flash {
+            self.flash(msg);
+        }
+        dirty.take()
     }
 
     pub fn slash_open(&self) -> bool {

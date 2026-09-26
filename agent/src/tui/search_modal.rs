@@ -250,7 +250,8 @@ impl SearchModal {
             indices.clear();
             let haystack = Utf32Str::new(text, &mut buf);
             if let Some(score) = atom.indices(haystack, &mut self.matcher, &mut indices) {
-                let (display_line, display_row, display_indices) = pick_display_line(text, &indices);
+                let (display_line, display_row, display_indices) =
+                    pick_display_line(text, &indices);
                 self.matches.push(SearchMatch {
                     segment_index: idx,
                     display_row,

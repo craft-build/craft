@@ -24,6 +24,20 @@ impl App {
             self.handle_search_key(key);
             return;
         }
+        // The file picker (F.3, Ctrl-S) owns the keyboard while open,
+        // above the base surface like the search modal.
+        if self.file_picker.is_open() {
+            use crate::tui::file_picker::FilePickerAction;
+            match self.file_picker.handle_key(key) {
+                FilePickerAction::Consumed => {}
+                FilePickerAction::Select(path) => {
+                    self.file_picker.close();
+                    self.insert_path_into_composer(&path);
+                }
+                FilePickerAction::Close => self.file_picker.close(),
+            }
+            return;
+        }
         // The permission prompt (F.5) owns plain keys while open: the tool
         // call is parked on it. Ctrl-modified chords it does not consume
         // (ctrl-c denies inside it) still fall through to the base surface.
@@ -136,6 +150,15 @@ impl App {
             }
             KeyCode::Char('f') => {
                 self.search.open(self.view.scroll, self.view.follow);
+                true
+            }
+            KeyCode::Char('s') => {
+                let cwd = if self.session.cwd.is_empty() {
+                    ".".to_string()
+                } else {
+                    self.session.cwd.clone()
+                };
+                self.file_picker.open(&cwd);
                 true
             }
             KeyCode::Char('u') => {
@@ -421,11 +444,24 @@ impl App {
             self.refresh_search_matches();
             return;
         }
+        if self.file_picker.is_open() {
+            self.file_picker.handle_paste(text);
+            return;
+        }
         if self.permission_prompt.handle_paste(text) {
             return;
         }
         self.composer.insert_paste(text);
         self.slash_selected = 0;
+    }
+
+    /// Insert a picked path into the composer (reference: paste with
+    /// spaces — a space separates it from existing text).
+    fn insert_path_into_composer(&mut self, path: &str) {
+        if !self.composer.text.is_empty() && !self.composer.text.ends_with(' ') {
+            self.composer.insert_char(' ');
+        }
+        self.composer.insert_paste(path);
     }
 
     // ------------------------------------------------------------------
@@ -564,7 +600,6 @@ mod tests {
     use ratatui::layout::Rect;
     use tokio::sync::mpsc;
 
-
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -631,7 +666,10 @@ mod tests {
         let target = app.search.current_segment_index();
         app.handle_key(key(KeyCode::Enter), &tx);
         assert!(!app.search.is_open());
-        assert_eq!(app.view.highlight_segment, None, "select clears the highlight");
+        assert_eq!(
+            app.view.highlight_segment, None,
+            "select clears the highlight"
+        );
         assert_eq!(
             app.view.scroll,
             crate::tui::ui::scrollback::ScrollPos {
@@ -647,9 +685,11 @@ mod tests {
         draw_app(&mut app2, 80, 24);
         app2.handle_key(ctrl('f'), &tx);
         app2.handle_key(key(KeyCode::Tab), &tx);
-        assert!(app2.composer.text.is_empty(), "keys never reach the composer");
+        assert!(
+            app2.composer.text.is_empty(),
+            "keys never reach the composer"
+        );
     }
-
 
     /// The search overlay paints: query row with the caret, and the
     /// matching result rows on the raised surface.
@@ -661,8 +701,14 @@ mod tests {
         app.handle_key(ctrl('f'), &tx);
         type_query(&mut app, &tx, "message number 3");
         let text = super::super::testutil::screen_text(&mut app, 100, 30);
-        assert!(text.contains("/ message number 3"), "query row missing:\n{text}");
-        assert!(text.contains("message number 3"), "result row missing:\n{text}");
+        assert!(
+            text.contains("/ message number 3"),
+            "query row missing:\n{text}"
+        );
+        assert!(
+            text.contains("message number 3"),
+            "result row missing:\n{text}"
+        );
     }
 
     #[test]
@@ -742,6 +788,117 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
         // The overlay stays open until PermissionResolved arrives.
         assert!(app.permission_prompt.is_open());
+    }
+
+    /// Ctrl-S opens the file picker over the session cwd; while open it owns
+    /// the keyboard, and Enter on a match inserts the path into the
+    /// composer (reference: paste with spaces).
+    #[test]
+    fn ctrl_s_opens_picker_and_enter_inserts_the_path() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "").unwrap();
+        let mut app = App::new();
+        app.handle_event(AgentEvent::SessionInfo {
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            branch: "main".into(),
+        });
+
+        // A walking picker claims cadence frames.
+        assert!(!app.file_picker.is_open());
+        app.handle_key(ctrl('s'), &tx);
+        assert!(app.file_picker.is_open());
+        assert_eq!(app.cadence(), crate::tui::repaint::Cadence::PENDING);
+
+        // Drain the walker via the app's loop hook.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.file_picker.walking() {
+            app.tick_file_picker();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "picker never finished walking"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Nothing more to arrive: settled picker owes no frame.
+        assert!(!app.tick_file_picker());
+
+        // Typing filters; keys never reach the composer while open.
+        type_query(&mut app, &tx, "main");
+        assert!(app.composer.text.is_empty(), "picker owns the keyboard");
+
+        app.handle_key(key(KeyCode::Enter), &tx);
+        assert!(!app.file_picker.is_open());
+        assert_eq!(app.composer.text, "main.rs");
+    }
+
+    /// Esc closes the picker without touching the composer; an existing
+    /// draft gets a separating space before the picked path.
+    #[test]
+    fn esc_closes_and_selection_separates_from_existing_text() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_key(ctrl('s'), &tx);
+        assert!(app.file_picker.is_open());
+        app.handle_key(key(KeyCode::Esc), &tx);
+        assert!(!app.file_picker.is_open());
+        assert!(app.composer.text.is_empty());
+
+        app.composer.set_text("read".into());
+        app.file_picker.handle_key(key(KeyCode::Char('a')));
+        // Simulate a Select via the same helper the key path uses.
+        app.handle_key(ctrl('s'), &tx);
+        if let Some(s) = app.file_picker.session_mut() {
+            s.matches = vec![crate::tui::file_picker::Match {
+                path: "src/a.rs".into(),
+                indices: Vec::new(),
+            }];
+            s.total_matches = 1;
+            s.selected = 0;
+            s.visible = true;
+        }
+        app.handle_key(key(KeyCode::Enter), &tx);
+        assert_eq!(app.composer.text, "read src/a.rs");
+    }
+
+    /// A paste while the picker is open lands in its query, not the
+    /// composer.
+    #[test]
+    fn paste_feeds_the_picker_query() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_key(ctrl('s'), &tx);
+        app.insert_paste("src");
+        assert!(app.composer.text.is_empty());
+        if let Some(s) = app.file_picker.session_mut() {
+            assert_eq!(s.query, "src");
+        }
+    }
+
+    /// The picker overlay paints: query row with the caret and matched
+    /// path rows on the raised surface.
+    #[test]
+    fn file_picker_overlay_renders_paths_and_query_row() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "").unwrap();
+        let mut app = App::new();
+        app.handle_event(AgentEvent::SessionInfo {
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            branch: "main".into(),
+        });
+        app.handle_key(ctrl('s'), &tx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.file_picker.walking() {
+            app.tick_file_picker();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.tick_file_picker();
+        type_query(&mut app, &tx, "main");
+        let text = super::super::testutil::screen_text(&mut app, 100, 30);
+        assert!(text.contains("/ main"), "query row missing:\n{text}");
+        assert!(text.contains("main.rs"), "path row missing:\n{text}");
     }
 
     /// Modals are exclusive by construction: running the palette's "model"

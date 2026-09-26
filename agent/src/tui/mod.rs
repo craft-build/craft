@@ -5,6 +5,7 @@
 
 mod app;
 mod composer;
+mod file_picker;
 mod hyperlink;
 mod modals;
 mod notify;
@@ -340,6 +341,10 @@ async fn run_loop(
     let mut bells = notify::RunNotificationState::default();
 
     loop {
+        // The file picker's walker is the one change nothing else announces.
+        if app.tick_file_picker() {
+            dirty = Dirty::YES;
+        }
         let cadence = app.cadence();
         let sleep = tokio::time::sleep(cadence.frame().unwrap_or(IDLE_POLL));
         tokio::select! {
