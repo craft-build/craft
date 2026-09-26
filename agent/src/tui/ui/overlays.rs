@@ -130,9 +130,9 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     let n = visible as u16;
     let area = Rect {
         x: chat.x + 2,
-        y: bottom.y.saturating_sub(n + 2),
-        width: 44.min(chat.width.saturating_sub(4)),
-        height: n + 2,
+        y: bottom.y.saturating_sub(n + 3),
+        width: 56.min(chat.width.saturating_sub(4)),
+        height: n + 3,
     };
     f.render_widget(Clear, area);
     let block = boxed(area);
@@ -149,6 +149,21 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
             } else {
                 "  "
             };
+            // Held tiers from the global registry; overrides are tier-keyed
+            // so a model may hold several ("strong/weak").
+            let spec = format!("{}/{}", choice.provider, choice.model);
+            let tiers = crate::model_registry::override_tiers(&spec);
+            let tier_label = tiers
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join("/");
+            let label_style = if tiers.is_empty() {
+                Style::default().fg(theme::TEXT_PRIMARY)
+            } else {
+                // Highlight rows the user has explicitly assigned.
+                Style::default().fg(theme::ACCENT)
+            };
             vec![
                 Span::styled(
                     marker.to_string(),
@@ -158,13 +173,14 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
                         theme::BG_RAISED
                     }),
                 ),
-                Span::styled(
-                    choice.label.clone(),
-                    Style::default().fg(theme::TEXT_PRIMARY),
-                ),
+                Span::styled(choice.label.clone(), label_style),
                 Span::styled(
                     format!("  {}", choice.provider_label),
                     Style::default().fg(theme::TEXT_TERTIARY),
+                ),
+                Span::styled(
+                    format!("  {tier_label}"),
+                    Style::default().fg(theme::ACCENT),
                 ),
             ]
         })
@@ -175,8 +191,25 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
         selected - start,
         Rect {
             y: inner.y + 1,
+            height: inner.height.saturating_sub(2),
             ..inner
         },
+    );
+    // Keybind footer: Enter selects; !@#$ (or 1-4) toggle tier assignment.
+    let footer = Rect {
+        y: inner.y + 1 + visible as u16,
+        height: 1,
+        ..inner
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Enter select", Style::default().fg(theme::CYAN)),
+            Span::styled("  ! strong", Style::default().fg(theme::ACCENT)),
+            Span::styled("  @ medium", Style::default().fg(theme::ACCENT)),
+            Span::styled("  # weak", Style::default().fg(theme::ACCENT)),
+            Span::styled("  $ compaction", Style::default().fg(theme::ACCENT)),
+        ])),
+        footer,
     );
 }
 

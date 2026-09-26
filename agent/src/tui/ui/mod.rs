@@ -496,6 +496,33 @@ mod tests {
         assert!(!text.contains("m01"), "out-of-window rows are clipped");
     }
 
+    /// Rows show tiers held in the global registry, and the keybind footer
+    /// advertises the tier-assignment keys (task 73).
+    #[test]
+    fn model_menu_shows_tier_labels_and_footer() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut app = seeded_app();
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+        // Seed: Opus holds strong+weak; Sonnet holds medium.
+        crate::model_registry::set_and_persist(
+            "Anthropic/Claude Opus 4.1".into(),
+            crate::model_registry::ModelTier::Strong,
+            &state,
+        );
+        crate::model_registry::set_and_persist(
+            "Anthropic/Claude Opus 4.1".into(),
+            crate::model_registry::ModelTier::Weak,
+            &state,
+        );
+        app.modal = crate::tui::modals::Modal::ModelMenu(2);
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("strong/weak"), "multi-tier label: {text:?}");
+        assert!(text.contains("! strong"), "footer hints: {text:?}");
+        assert!(text.contains("$ compaction"), "footer hints: {text:?}");
+    }
+
     #[test]
     fn selection_highlights_cells() {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
