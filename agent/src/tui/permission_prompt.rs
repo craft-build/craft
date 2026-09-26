@@ -12,7 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::permissions::{DEFAULT_DENY_GUIDANCE, PermissionAnswer, ToolKey, generalized_scopes};
+use crate::permissions::{DEFAULT_DENY_GUIDANCE, PermissionAnswer};
 use crate::tui::ui::theme;
 
 const HINT_ALLOW_ROW: &[(&str, &str)] = &[
@@ -192,9 +192,6 @@ pub enum PermissionPrompt {
         scopes: Vec<String>,
         files: Vec<String>,
         commands: Vec<String>,
-        /// What an "always" answer would actually grant (generalized
-        /// scopes); empty when it is identical to the concrete scopes.
-        allow_scopes: Vec<String>,
         state: PromptState,
         buffer: PromptBuffer,
     },
@@ -224,20 +221,12 @@ impl PermissionPrompt {
         files: Vec<String>,
         commands: Vec<String>,
     ) {
-        let tool_key = ToolKey::native(&tool);
-        let allow_scopes = generalized_scopes(&tool_key, &scopes);
-        let allow_scopes = if allow_scopes == scopes {
-            vec![]
-        } else {
-            allow_scopes
-        };
         *self = Self::Open {
             id,
             tool,
             scopes,
             files,
             commands,
-            allow_scopes,
             state: PromptState::Normal,
             buffer: PromptBuffer::default(),
         };
@@ -348,7 +337,6 @@ impl PermissionPrompt {
             scopes,
             files,
             commands,
-            allow_scopes,
             state,
             buffer,
             ..
@@ -359,51 +347,39 @@ impl PermissionPrompt {
         let label_style = Style::default().fg(theme::current().text_tertiary);
         let value_style = Style::default().fg(theme::current().text_primary);
 
+        // The tool name, scopes, files, commands and generalized scopes are
+        // all views of the same request; render the call itself once instead
+        // of repeating it under five labels. Prefer the most concrete detail:
+        // the command lines for bash, the file paths for fs tools, the raw
+        // scopes otherwise.
+        let detail: Vec<String> = if !commands.is_empty() {
+            commands.clone()
+        } else if !files.is_empty() {
+            files.clone()
+        } else {
+            scopes.clone()
+        };
+
         let mut lines = vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                " Permission Required".to_string(),
+                Style::default()
+                    .fg(theme::current().text_primary)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::raw(""),
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled("tool  ".to_string(), label_style),
                 Span::styled(tool.clone(), value_style),
             ]),
         ];
-        for (i, s) in scopes.iter().enumerate() {
-            let label = if i == 0 { "scope " } else { "    + " };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(label.to_string(), label_style),
-                Span::styled(s.clone(), value_style),
-            ]));
-        }
-        for (i, f) in files.iter().enumerate() {
-            let label = if i == 0 { "file  " } else { "    + " };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(label.to_string(), label_style),
-                Span::styled(f.clone(), value_style),
-            ]));
-        }
-        for (i, c) in commands.iter().enumerate() {
-            let label = if i == 0 { "cmd   " } else { "    + " };
-            let display = if c.chars().count() > 80 {
-                let truncated: String = c.chars().take(79).collect();
-                format!("{truncated}…")
-            } else {
-                c.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(label.to_string(), label_style),
-                Span::styled(display, value_style),
-            ]));
-        }
-        if !allow_scopes.is_empty() {
-            for (i, g) in allow_scopes.iter().enumerate() {
-                let label = if i == 0 { "allow " } else { "    + " };
+        for d in detail {
+            let chars: Vec<char> = d.chars().collect();
+            for chunk in chars.chunks(78) {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(label.to_string(), label_style),
-                    Span::styled(g.clone(), value_style),
+                    Span::styled(chunk.iter().collect::<String>(), label_style),
                 ]));
             }
         }
@@ -442,7 +418,8 @@ impl PermissionPrompt {
             lines.push(Line::from(spans));
         }
 
-        lines.push(Line::raw(""));
+        // One padding row above the content (the leading blank) and one
+        // below the hints; no extra blank between content and hints.
         match *state {
             PromptState::ConfirmAllowAlwaysLocal => {
                 lines.push(hint_line(CONFIRM_ALLOW_PROJECT_HINTS));
@@ -464,7 +441,8 @@ impl PermissionPrompt {
                 lines.extend(aligned_hint_rows(&[HINT_ALLOW_ROW, HINT_DENY_ROW]));
             }
         }
-        lines.push(Line::raw(""));
+        // Bottom padding: `height()` reserves one trailing margin row, which
+        // renders empty. A blank here on top of that gave two rows.
         lines
     }
 
@@ -481,34 +459,11 @@ impl PermissionPrompt {
             area,
         );
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " Permission Required",
-                Style::default()
-                    .fg(t.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .style(Style::default().bg(t.bg_raised)),
-            Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: 1.min(area.height),
-            },
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(t.bg_raised)),
+            area,
         );
-        let body = Rect {
-            x: area.x,
-            y: area.y + 1,
-            width: area.width,
-            height: area.height.saturating_sub(1),
-        };
-        if !body.is_empty() {
-            f.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .style(Style::default().bg(t.bg_raised)),
-                body,
-            );
-        }
     }
 
     pub fn height(&self, width: u16) -> u16 {
@@ -523,9 +478,7 @@ impl PermissionPrompt {
                 w.div_ceil(inner_width).max(1)
             })
             .sum();
-        rows as u16
-            + 1 // title row
-            + 1 // rounding margin
+        rows as u16 + 1 // rounding margin
     }
 }
 
@@ -702,20 +655,6 @@ mod tests {
         } else {
             panic!("expected Open");
         }
-    }
-
-    #[test]
-    fn generalizes_allow_scopes_for_file_tools() {
-        let mut prompt = PermissionPrompt::new();
-        prompt.open(
-            "id".into(),
-            "edit".into(),
-            vec!["/repo/src/main.rs".into()],
-            vec!["/repo/src/main.rs".into()],
-            Vec::new(),
-        );
-        // The generalized scope (parent glob) differs, so it is offered.
-        assert!(prompt.height(80) > 0);
     }
 
     #[test]

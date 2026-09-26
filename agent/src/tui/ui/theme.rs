@@ -638,18 +638,37 @@ impl Theme {
                 .unwrap_or(default)
         };
 
+        // Borders: ui override, then palette, then a bg<->fg lerp step.
+        let derived_border = |ui_key: &str, palette_keys: &[&str], t: f32| -> Color {
+            derived(ui_key, palette_keys, lerp_color(bg, fg, t))
+        };
+
         let accent = derived("accent", &["blue", "cyan", "primary"], fallback::ACCENT);
+
+        let bg_surface = layer("surface", &["background_2"], 0.035);
+        let bg_raised = layer("layer01", &["current_line"], 0.09);
+        // The overlay must read as a step above the raised surface (it is
+        // the selected-row background in every picker); if a theme maps both
+        // to the same color, push the overlay one lerp step further.
+        let bg_overlay = {
+            let c = layer("layer02", &["selection"], 0.18);
+            if c == bg_raised {
+                lerp_color(bg, fg, 0.28)
+            } else {
+                c
+            }
+        };
 
         Ok(Self {
             bg_app: bg,
-            bg_surface: layer("layer01", &["current_line"], 0.06),
-            bg_raised: layer("layer02", &["selection"], 0.12),
-            bg_overlay: layer("layer02", &["selection"], 0.18),
+            bg_surface,
+            bg_raised,
+            bg_overlay,
             // On light themes blend toward the foreground instead of black,
             // so the sunken surface darkens rather than vanishes.
             bg_sunken: color("background_2").map_or_else(|| sunken(bg, fg), |c| sunken(c, fg)),
-            border_subtle: lerp_color(bg, fg, 0.15),
-            border_strong: lerp_color(bg, fg, 0.35),
+            border_subtle: derived_border("border_subtle", &[], 0.12),
+            border_strong: derived_border("border_strong", &["border"], 0.28),
             text_primary: derived("text_primary", &["foreground"], fg),
             text_secondary: derived(
                 "text_secondary",
@@ -659,7 +678,7 @@ impl Theme {
             text_tertiary: derived("text_helper", &["comment"], lerp_color(fg, bg, 0.50)),
             text_disabled: derived("text_disabled", &["comment"], lerp_color(fg, bg, 0.65)),
             accent,
-            blue_400: lerp_color(accent, fg, 0.35),
+            blue_400: color("blue_bright").unwrap_or_else(|| lerp_color(accent, fg, 0.35)),
             cyan: derived("cyan", &["cyan"], fallback::CYAN),
             mode_build: accent,
             mode_plan: color("mode_plan")
@@ -736,6 +755,43 @@ mod tests {
         assert_eq!(theme.cyan, Color::Rgb(0x88, 0xc0, 0xd0));
         // Themes must actually differ from the fallback palette.
         assert_ne!(theme.bg_app, fallback::BG_APP);
+    }
+
+    #[test]
+    fn default_craft_theme_reproduces_the_original_palette() {
+        let t = load_by_name("craft").unwrap();
+        assert_eq!(t.bg_app, fallback::BG_APP);
+        assert_eq!(t.bg_surface, fallback::BG_SURFACE);
+        assert_eq!(t.bg_raised, fallback::BG_RAISED);
+        assert_eq!(t.bg_overlay, fallback::BG_OVERLAY);
+        assert_eq!(t.border_subtle, fallback::BORDER_SUBTLE);
+        assert_eq!(t.border_strong, fallback::BORDER_STRONG);
+        assert_eq!(t.text_primary, fallback::TEXT_PRIMARY);
+        assert_eq!(t.text_secondary, fallback::TEXT_SECONDARY);
+        assert_eq!(t.text_tertiary, fallback::TEXT_TERTIARY);
+        assert_eq!(t.text_disabled, fallback::TEXT_DISABLED);
+        assert_eq!(t.accent, fallback::ACCENT);
+        assert_eq!(t.blue_400, fallback::BLUE_400);
+        assert_eq!(t.cyan, fallback::CYAN);
+        assert_eq!(t.mode_build, fallback::ACCENT);
+        assert_eq!(t.mode_plan, fallback::CYAN);
+        assert_eq!(t.success, fallback::SUCCESS);
+        assert_eq!(t.warning, fallback::WARNING);
+        assert_eq!(t.danger, fallback::DANGER);
+    }
+
+    /// The pickers show selection as overlay-vs-raised background; they must
+    /// never collide on any bundled theme or the selected row vanishes.
+    #[test]
+    fn every_theme_keeps_overlay_distinct_from_raised() {
+        for entry in BUNDLED_THEMES {
+            let t = Theme::from_toml(entry.toml).unwrap();
+            assert_ne!(
+                t.bg_overlay, t.bg_raised,
+                "{}: selected-row bg equals unselected bg",
+                entry.name
+            );
+        }
     }
 
     #[test]

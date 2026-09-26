@@ -110,15 +110,21 @@ green          = "#3ddc84"
 amber          = "#f0a93e"
 red            = "#f0455f"
 mode_build     = "#6fa8ff"
-mode_plan      = "#a875f5"
+# This repo's plan-mode indicator rides the planning cyan (not the
+# reference's violet), pinned here so the default look is unchanged.
+mode_plan      = "#22d3ee"
 # flow-mode accent (magenta, matches --magenta-500 in the brand design system)
 mode_bash      = "#e13fea"
 
 [ui]
+surface            = { bg = "#0a0e1a" }
+border_subtle      = { fg = "#1b2338" }
+border_strong      = { fg = "#3a4664" }
+text_disabled      = { fg = "#40485f" }
 layer01           = { bg = "#0f1424" }
 layer02           = { bg = "#161d30" }
 text_primary      = { fg = "foreground" }
-text_secondary    = { fg = "fog_200" }
+text_secondary    = { fg = "#a6acc0" }
 text_helper       = { fg = "comment" }
 user              = { fg = "blue" }
 assistant         = { fg = "foreground" }

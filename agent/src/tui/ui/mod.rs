@@ -292,28 +292,32 @@ mod tests {
         let row =
             |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
 
-        // The prompt form's title and tool row must be visible...
+        // The prompt form's title and the tool call must be visible...
         let rows: Vec<String> = (0..buf.area.height).map(row).collect();
         let title = rows
             .iter()
             .position(|r| r.contains("Permission Required"))
             .expect("prompt title rendered");
         assert!(
-            rows[title + 2].contains("tool"),
+            rows[title + 2].trim().starts_with("bash"),
             "tool row: {:?}",
             rows[title + 2]
         );
         assert!(
-            rows[title + 4].contains("rm -rf /tmp/x"),
+            rows[title + 3].contains("rm -rf /tmp/x"),
             "cmd row: {:?}",
-            rows[title + 4]
+            rows[title + 3]
         );
 
         // ...strictly above the composer block, whose rows are unchanged:
         // the top border is the first row below the prompt, and the
         // composer's accent bar never appears inside the prompt rows.
-        let prompt_h = app.permission_prompt.height(100);
-        let border_y = (title + 1 + prompt_h as usize).min(buf.area.height as usize - 1);
+        // Match the layout's width (100-px terminal minus the 30-px sidebar).
+        let prompt_h = app.permission_prompt.height(70);
+        // The title now sits one row inside the prompt area (top padding).
+        let border_y = (title + prompt_h as usize)
+            .saturating_sub(1)
+            .min(buf.area.height as usize - 1);
         assert!(
             rows[border_y].starts_with('─'),
             "border below prompt: {:?}",
