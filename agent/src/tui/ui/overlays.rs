@@ -1,7 +1,7 @@
 //! Overlays: slash menu, model menu, command palette, confirm dialog.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
@@ -68,6 +68,87 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
             },
         );
     }
+}
+
+/// Search modal (F.3, Ctrl-F): fuzzy matches over the transcript's
+/// segments, list on top, query row below it.
+pub fn render_search(f: &mut Frame, app: &mut App, area: Rect) {
+    use crate::tui::search_modal::{self, SearchModal};
+
+    if !app.search.is_open() {
+        return;
+    }
+    let search: &mut SearchModal = &mut app.search;
+    let t = theme::current();
+
+    let content_rows = if search.matches.is_empty() && !search.query().is_empty() {
+        1
+    } else {
+        search.matches.len().min(16)
+    } as u16;
+    let width = (area.width / 2).max(20).min(area.width);
+    let height = (content_rows + search_modal::search_row_height() + 2)
+        .min(area.height * 3 / 5)
+        .max(3);
+    dim(f, area);
+    let rect = centered(width, height, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block.title(search_modal::MODAL_TITLE), rect);
+
+    let [list_area, query_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    search.viewport_height = list_area.height as usize;
+    search.ensure_visible();
+
+    if search.matches.is_empty() {
+        if !search.query().is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    search_modal::no_matches_label(),
+                    Style::default().fg(t.text_tertiary),
+                ))),
+                list_area,
+            );
+        }
+    } else {
+        let max_label_width = list_area.width.saturating_sub(2) as usize; // label indent
+        let end = (search.scroll_offset + search.viewport_height).min(search.matches.len());
+        let rows: Vec<Vec<Span<'static>>> = (search.scroll_offset..end)
+            .map(|i| {
+                search_modal::highlighted_row(
+                    &search.matches[i],
+                    max_label_width,
+                    i == search.selected,
+                )
+            })
+            .collect();
+        render_rows(f, &rows, search.selected - search.scroll_offset, list_area);
+    }
+
+    // Query row with a block cursor over the char at the caret.
+    let query = search.query().to_string();
+    let cursor_char = search.cursor();
+    let before: String = query.chars().take(cursor_char).collect();
+    let at: String = query
+        .chars()
+        .nth(cursor_char)
+        .map(String::from)
+        .unwrap_or(" ".into());
+    let after: String = query.chars().skip(cursor_char + 1).collect();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                search_modal::search_prefix(),
+                Style::default().fg(t.text_tertiary),
+            ),
+            Span::raw(before),
+            Span::styled(at, Style::default().bg(t.accent).fg(t.bg_app)),
+            Span::raw(after),
+        ])),
+        query_area,
+    );
 }
 
 /// Slash-command popup above the composer. `chat` is the whole chat column and

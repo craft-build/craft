@@ -917,6 +917,26 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
 
+    // The search modal's current match highlight (F.3): the segment's
+    // visible cells are reversed, mirroring the reference's
+    // `Cursor::render(..., highlight)`.
+    if let Some(seg) = app.view.highlight_segment
+        && let Some(s) = app.view.segments.get(seg)
+    {
+        let start = layout.doc_row(ScrollPos { seg, row: 0 });
+        let end = start + u32::from(s.height(inner.width));
+        for doc in start.max(top_row)..end.min(top_row + u32::from(inner.height)) {
+            let vis = (doc - top_row) as u16;
+            for col in 0..inner.width {
+                let cell = f
+                    .buffer_mut()
+                    .cell_mut((inner.x + col, inner.y + vis))
+                    .expect("bounded by inner");
+                std::mem::swap(&mut cell.fg, &mut cell.bg);
+            }
+        }
+    }
+
     // Rewrite the linked header cells in place: spans stayed plain text
     // during layout, so wrap math is unaffected. Skipped under tmux, whose
     // passthrough mangles OSC-8. The single-row guard mirrors the

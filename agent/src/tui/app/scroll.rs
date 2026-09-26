@@ -33,7 +33,7 @@ impl App {
 
     /// Applies a scroll position: clamped into the document, and re-pins
     /// follow once the viewport sits at the document bottom.
-    fn set_scroll_pos(&mut self, pos: ScrollPos) {
+    pub(crate) fn set_scroll_pos(&mut self, pos: ScrollPos) {
         let layout = Layout::new(&self.view.segments, self.view.view_width);
         let mut clamped = layout.clamp(pos);
         // Before the first frame (no viewport height) keep the follow flag
@@ -49,6 +49,17 @@ impl App {
         // Card rects move with the scroll; stale hover/click state is dropped.
         self.view.hover_tool = None;
         self.view.pending_click = None;
+    }
+
+    /// Jump so the given row of a segment (the matched line of a search
+    /// hit) is the viewport's top row. An explicit jump away from the
+    /// bottom must not be re-pinned by the next frame.
+    pub(crate) fn scroll_to_segment(&mut self, segment_index: usize, row: usize) {
+        self.set_scroll_pos(ScrollPos {
+            seg: segment_index,
+            row: row.min(u16::MAX as usize) as u16,
+        });
+        self.view.follow = false;
     }
 
     /// After focus changes, make sure the focused block is in view.

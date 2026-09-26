@@ -18,6 +18,12 @@ impl App {
             self.handle_modal_key(key, tx);
             return;
         }
+        // The search modal (F.3) owns the keyboard while open, like the
+        // reference's overlay stack.
+        if self.search.is_open() {
+            self.handle_search_key(key);
+            return;
+        }
         // The permission prompt (F.5) owns plain keys while open: the tool
         // call is parked on it. Ctrl-modified chords it does not consume
         // (ctrl-c denies inside it) still fall through to the base surface.
@@ -27,7 +33,31 @@ impl App {
         self.handle_base_key(key, tx);
     }
 
-    /// Route a key through the permission prompt. Returns true when the
+    /// Route a key through the open search modal: typing refreshes the
+    /// matches (derived fresh, since output can land behind the modal),
+    /// navigation scrolls the transcript to the current match, Enter jumps
+    /// and closes, Esc restores the scroll position saved on open.
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        use crate::tui::search_modal::SearchAction;
+        match self.search.handle_key(key) {
+            SearchAction::Consumed => self.refresh_search_matches(),
+            SearchAction::Navigate => self.sync_search_highlight(),
+            SearchAction::Select(seg, row) => {
+                self.scroll_to_segment(seg, row);
+                self.view.highlight_segment = None;
+                self.search.close();
+            }
+            SearchAction::Close(saved) => {
+                self.view.highlight_segment = None;
+                if let Some((pos, follow)) = saved {
+                    self.set_scroll_pos(pos);
+                    self.view.follow = follow;
+                }
+                self.search.close();
+            }
+        }
+    }
+
     /// key was consumed (answer produced, state transition, or a plain key
     /// swallowed while the prompt owns the keyboard).
     fn handle_permission_key(
@@ -105,7 +135,7 @@ impl App {
                 true
             }
             KeyCode::Char('f') => {
-                self.session.effort_idx = (self.session.effort_idx + 1) % EFFORTS.len();
+                self.search.open(self.view.scroll, self.view.follow);
                 true
             }
             KeyCode::Char('u') => {
@@ -207,6 +237,12 @@ impl App {
                 }
                 KeyCode::Right | KeyCode::Char('f') => {
                     self.composer.move_word_right();
+                    true
+                }
+                // Effort cycling lives here (Alt-E) so Ctrl-F can be the
+                // transcript search, matching the reference chord.
+                KeyCode::Char('e') => {
+                    self.session.effort_idx = (self.session.effort_idx + 1) % EFFORTS.len();
                     true
                 }
                 _ => false,
@@ -380,6 +416,11 @@ impl App {
         if !matches!(self.modal, Modal::None) {
             return;
         }
+        if self.search.is_open() {
+            self.search.insert_paste(text);
+            self.refresh_search_matches();
+            return;
+        }
         if self.permission_prompt.handle_paste(text) {
             return;
         }
@@ -522,6 +563,107 @@ mod tests {
     use crate::tui::provider::{AgentEvent, LineKind, Status, ToolCallData, ToolKind, ToolLine};
     use ratatui::layout::Rect;
     use tokio::sync::mpsc;
+
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn type_query(app: &mut App, tx: &mpsc::UnboundedSender<Command>, q: &str) {
+        for c in q.chars() {
+            app.handle_key(key(KeyCode::Char(c)), tx);
+        }
+    }
+
+    /// Ctrl-F opens the search modal with the current scroll saved; typing
+    /// filters the transcript segments and jumps to the best match.
+    #[test]
+    fn ctrl_f_opens_search_and_typing_jumps_to_matches() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = scrolled_app();
+        draw_app(&mut app, 80, 24);
+        let saved = (app.view.scroll, app.view.follow);
+
+        app.handle_key(ctrl('f'), &tx);
+        assert!(app.search.is_open());
+        type_query(&mut app, &tx, "message number 5");
+        assert!(!app.search_matches() > 0, "query must match");
+
+        // The transcript is scrolled to the selected match's segment and
+        // that segment is highlighted while the modal stays open.
+        let (seg, row) = app.search.current_segment_index().unwrap();
+        assert_eq!(
+            (app.view.scroll.seg, app.view.scroll.row as usize),
+            (seg, row)
+        );
+        assert!(!app.view.follow, "a search jump must not re-pin follow");
+        assert!(seg > 0, "match is off the very top of the document");
+
+        // Esc restores the scroll position saved on open.
+        app.handle_key(key(KeyCode::Esc), &tx);
+        assert!(!app.search.is_open());
+        assert_eq!(app.view.highlight_segment, None);
+        assert_eq!((app.view.scroll, app.view.follow), saved);
+    }
+
+    /// Enter jumps to the selected match and closes; Up/Down cycle the
+    /// selection over the matches, wrapping around.
+    #[test]
+    fn enter_jumps_and_navigation_cycles_matches() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = scrolled_app();
+        draw_app(&mut app, 80, 24);
+        app.handle_key(ctrl('f'), &tx);
+        type_query(&mut app, &tx, "message number");
+
+        let n = app.search_matches();
+        assert!(n >= 2, "several segments carry the phrase");
+        app.handle_key(key(KeyCode::Down), &tx);
+        assert_eq!(
+            app.view.highlight_segment,
+            app.search.current_segment_index().map(|(seg, _)| seg)
+        );
+
+        let target = app.search.current_segment_index();
+        app.handle_key(key(KeyCode::Enter), &tx);
+        assert!(!app.search.is_open());
+        assert_eq!(app.view.highlight_segment, None, "select clears the highlight");
+        assert_eq!(
+            app.view.scroll,
+            crate::tui::ui::scrollback::ScrollPos {
+                seg: target.unwrap().0,
+                row: target.unwrap().1.min(u16::MAX as usize) as u16
+            },
+            "jump lands on the matched row of the matched segment"
+        );
+
+        // While open, the search modal swallows keys that would otherwise
+        // reach the composer.
+        let mut app2 = scrolled_app();
+        draw_app(&mut app2, 80, 24);
+        app2.handle_key(ctrl('f'), &tx);
+        app2.handle_key(key(KeyCode::Tab), &tx);
+        assert!(app2.composer.text.is_empty(), "keys never reach the composer");
+    }
+
+
+    /// The search overlay paints: query row with the caret, and the
+    /// matching result rows on the raised surface.
+    #[test]
+    fn search_overlay_renders_results_and_query_row() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = scrolled_app();
+        draw_app(&mut app, 100, 30);
+        app.handle_key(ctrl('f'), &tx);
+        type_query(&mut app, &tx, "message number 3");
+        let text = super::super::testutil::screen_text(&mut app, 100, 30);
+        assert!(text.contains("/ message number 3"), "query row missing:\n{text}");
+        assert!(text.contains("message number 3"), "result row missing:\n{text}");
+    }
 
     #[test]
     fn paste_ignored_when_modal_open() {
@@ -1009,9 +1151,10 @@ mod tests {
         );
     }
 
-    /// Effort lives on Ctrl-F; Ctrl-E moves to the end of the line.
+    /// Effort lives on Alt-E (Ctrl-F is the transcript search); Ctrl-E
+    /// moves to the end of the line.
     #[test]
-    fn ctrl_f_cycles_effort_and_ctrl_e_moves_to_line_end() {
+    fn alt_e_cycles_effort_and_ctrl_e_moves_to_line_end() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.composer.set_text("hello".into());
@@ -1021,8 +1164,11 @@ mod tests {
             KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
             &tx,
         );
+        assert_eq!(app.session.effort_idx, before, "ctrl-f opens search");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT), &tx);
         assert_eq!(app.session.effort_idx, (before + 1) % EFFORTS.len());
-        assert_eq!(app.composer.text, "hello", "ctrl-f does not type");
+        assert_eq!(app.composer.text, "hello", "alt-e does not type");
         app.handle_key(
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
             &tx,

@@ -162,7 +162,8 @@ pub fn help_rows() -> Vec<(String, String)> {
         ("ctrl+p".into(), "command palette".into()),
         ("ctrl+l".into(), "model menu".into()),
         ("ctrl+b".into(), "toggle context panel".into()),
-        ("ctrl+f".into(), "cycle effort".into()),
+        ("ctrl+f".into(), "search the transcript".into()),
+        ("alt+e".into(), "cycle effort".into()),
         (
             "tab / shift+tab".into(),
             "focus next/previous tool card".into(),

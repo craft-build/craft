@@ -104,6 +104,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // Overlays, back to front.
+    overlays::render_search(f, app, area);
     overlays::render_slash(f, app, chat, bottom);
     overlays::render_model_menu(f, app, chat, bottom);
     overlays::render_palette(f, app, area);

@@ -21,6 +21,7 @@ jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
 jiff = "0.2"
 ignore.workspace = true
 libc = "0.2"
+nucleo-matcher.workspace = true
 ratatui.workspace = true
 regex.workspace = true
 reqwest.workspace = true

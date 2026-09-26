@@ -11,6 +11,7 @@ mod notify;
 mod permission_prompt;
 pub mod provider;
 mod repaint;
+pub(crate) mod search_modal;
 mod selection;
 mod shell;
 mod ui;

@@ -528,9 +528,7 @@ impl CraftProvider {
                             None
                         }
                     };
-                    let fetch_gen = usage_gen
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                        + 1;
+                    let fetch_gen = usage_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     let tx = evt_tx.clone();
                     let latest = Arc::clone(&usage_gen);
                     let _ = evt_tx.send(AgentEvent::UsageQuota(UsageFetchState::Loading));

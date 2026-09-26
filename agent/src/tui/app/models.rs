@@ -239,6 +239,9 @@ pub struct ViewModel {
     /// Click target the current press started on; a press without drag
     /// activates it.
     pub pending_click: Option<PendingClick>,
+    /// Segment index highlighted by the open search modal (F.3); rendered
+    /// as reversed cells like the reference's `Cursor::render(highlight)`.
+    pub highlight_segment: Option<usize>,
 }
 
 /// What a card press activates: toggling the whole card's collapse or just
@@ -266,6 +269,7 @@ impl ViewModel {
             notice_regions: Vec::new(),
             hover_tool: None,
             pending_click: None,
+            highlight_segment: None,
         }
     }
 }

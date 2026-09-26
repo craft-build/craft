@@ -92,6 +92,9 @@ pub struct App {
     pub usage_quota: crate::tui::provider::UsageFetchState,
     /// Scroll offset of the `/usage` overlay's line list, reset on open.
     pub usage_scroll: usize,
+    /// Fuzzy transcript search (F.3): owns the keyboard while open, above
+    /// the base surface like a modal but outside the exclusive `modal` slot.
+    pub search: crate::tui::search_modal::SearchModal,
 
     pub should_quit: bool,
 }
@@ -121,6 +124,7 @@ impl App {
             usage: Vec::new(),
             usage_quota: crate::tui::provider::UsageFetchState::Idle,
             usage_scroll: 0,
+            search: crate::tui::search_modal::SearchModal::new(),
             should_quit: false,
         }
     }
@@ -310,6 +314,56 @@ impl App {
             .collect()
     }
 
+    /// Plain text of every rendered segment, one entry per segment index
+    /// (the search corpus). Derived on demand like the reference's
+    /// `segment_search_texts`: output can land behind the modal.
+    pub(crate) fn search_texts(&self) -> Vec<String> {
+        (0..self.view.segments.len())
+            .map(|i| {
+                self.view
+                    .segments
+                    .get(i)
+                    .map(|seg| {
+                        seg.lines()
+                            .iter()
+                            .map(|l| {
+                                l.spans
+                                    .iter()
+                                    .map(|s| s.content.as_ref())
+                                    .collect::<String>()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Number of live search matches (test accessor).
+    #[cfg(test)]
+    pub(crate) fn search_matches(&self) -> usize {
+        self.search.match_count()
+    }
+
+    /// Re-run the fuzzy match over the current corpus, then keep the
+    /// transcript parked on the selected match.
+    pub(crate) fn refresh_search_matches(&mut self) {
+        let corpus = self.search_texts();
+        self.search.update_matches(|| corpus);
+        self.sync_search_highlight();
+    }
+
+    /// Scroll the transcript to the currently selected match and highlight
+    /// its segment while the search modal stays open.
+    pub(crate) fn sync_search_highlight(&mut self) {
+        let at = self.search.current_segment_index();
+        if let Some((seg, row)) = at {
+            self.scroll_to_segment(seg, row);
+        }
+        self.view.highlight_segment = at.map(|(seg, _)| seg);
+    }
+
     pub fn slash_open(&self) -> bool {
         matches!(self.modal, Modal::None) && !self.slash_matches().is_empty()
     }
@@ -443,6 +497,7 @@ impl App {
         self.conversation.focused = None;
         self.view.hover_tool = None;
         self.view.pending_click = None;
+        self.view.highlight_segment = None;
         self.view.tool_regions.clear();
         self.view.notice_regions.clear();
         self.modal = Modal::None;
