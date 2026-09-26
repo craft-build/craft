@@ -57,6 +57,13 @@ pub enum Command {
     Compact,
     /// Replace the session with a persisted one, by session id (`/sessions`).
     LoadSession { id: String },
+    /// Resume this directory's most recent session (F.3 resume-latest-by-
+    /// cwd; startup `--continue` and `/resume`).
+    ResumeLatest,
+    /// The composer draft changed (F.3 draft preservation). The provider
+    /// checkpoints it into the session file at most once per soft-save
+    /// delay; empty text clears the stored draft.
+    SetDraft(String),
 }
 
 /// Agent lifecycle status, mirrors the prototype's STATUS_MAP.
@@ -274,10 +281,12 @@ pub enum AgentEvent {
         tone: Tone,
         text: String,
     },
-    /// The session was replaced by a persisted one (`/sessions`); carries
-    /// the user/assistant text transcript for display rebuild.
+    /// The session was replaced by a persisted one (`/sessions`, resume);
+    /// carries the user/assistant text transcript for display rebuild plus
+    /// the composer draft preserved across checkpoints.
     SessionLoaded {
         messages: Vec<LoadedMessage>,
+        draft: String,
     },
     /// A gated tool call is parked on the user's decision: opens the
     /// permission-prompt overlay (F.5). `files`/`commands` are display

@@ -156,6 +156,7 @@ async fn load_session(
         }
     };
     let title = loaded.title.clone();
+    let draft = loaded.meta.input_draft.clone().unwrap_or_default();
     let messages = loaded.messages().to_vec();
     let rendered = transcript(&messages);
     {
@@ -174,12 +175,65 @@ async fn load_session(
     files.lock().unwrap_or_else(|e| e.into_inner()).clear();
     let _ = tx.send(AgentEvent::FilesSet(Vec::new()));
     let _ = tx.send(AgentEvent::AssistantEnd);
-    let _ = tx.send(AgentEvent::SessionLoaded { messages: rendered });
+    let _ = tx.send(AgentEvent::SessionLoaded {
+        messages: rendered,
+        draft,
+    });
     let _ = tx.send(AgentEvent::StatusChanged(Status::Done));
     let _ = tx.send(AgentEvent::Notice {
         tone: Tone::Success,
         text: format!("resumed session \"{title}\""),
     });
+}
+
+/// F.3 resume-latest-by-cwd: load the newest session recorded for this
+/// directory (cwd index first, disk scan fallback), reusing the `/sessions`
+/// load path. Nothing found keeps the fresh session.
+async fn resume_latest(
+    state: &Arc<Mutex<SessionState>>,
+    files: &Files,
+    dir: Option<&crate::storage::StateDir>,
+    cwd: &str,
+    model_spec: &str,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    let Some(dir) = dir else {
+        let _ = tx.send(AgentEvent::Notice {
+            tone: Tone::Neutral,
+            text: "session storage is unavailable".into(),
+        });
+        return;
+    };
+    let read_dir = dir.clone();
+    let read_cwd = cwd.to_owned();
+    let found = tokio::task::spawn_blocking(move || {
+        crate::headless::StoredSession::latest(&read_cwd, &read_dir)
+    })
+    .await;
+    match found {
+        Ok(Ok(Some(session))) => {
+            let id = session.id.id().to_string();
+            load_session(state, files, &id, Some(dir), cwd, model_spec, tx).await;
+        }
+        Ok(Ok(None)) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Neutral,
+                text: "no previous session in this directory".into(),
+            });
+        }
+        Ok(Err(e)) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!("could not find the latest session: {e}"),
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(AgentEvent::Notice {
+                tone: Tone::Warning,
+                text: format!("could not find the latest session: {e}"),
+            });
+        }
+    }
 }
 
 /// User/assistant text of a persisted session, for the conversation view's
@@ -226,6 +280,8 @@ pub struct CraftProvider {
     selection: Selection,
     cwd_label: String,
     branch: String,
+    /// F.3 resume-latest-by-cwd at startup (`craft --continue`).
+    resume_latest: bool,
 }
 
 impl CraftProvider {
@@ -357,7 +413,15 @@ impl CraftProvider {
             selection,
             cwd_label: cards::display_path(cwd),
             branch: cards::git_branch(cwd).await,
+            resume_latest: false,
         })
+    }
+
+    /// Resume this directory's most recent session when the command loop
+    /// starts (F.3 resume-latest-by-cwd, `craft --continue`).
+    pub fn with_resume_latest(mut self, yes: bool) -> Self {
+        self.resume_latest = yes;
+        self
     }
 
     /// The session's command loop: receives [`Command`]s, drives turns and
@@ -427,6 +491,18 @@ impl CraftProvider {
         let _ = evt_tx.send(AgentEvent::CatalogSet { models, current });
         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
         let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
+
+        if self.resume_latest {
+            resume_latest(
+                &state,
+                &files,
+                state_dir.as_ref(),
+                &cwd,
+                &model_spec(&selection),
+                &evt_tx,
+            )
+            .await;
+        }
 
         // Signal cancellation and abort any in-flight turn. Callers then
         // differ only in how much session state they rebuild.
@@ -584,6 +660,41 @@ impl CraftProvider {
                     )
                     .await;
                 }
+                Command::ResumeLatest => {
+                    if current_turn.is_some() {
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Warning,
+                            text: "A turn is still running; wait for it to finish before resuming."
+                                .into(),
+                        });
+                        continue;
+                    }
+                    resume_latest(
+                        &state,
+                        &files,
+                        state_dir.as_ref(),
+                        &cwd,
+                        &model_spec(&selection),
+                        &evt_tx,
+                    )
+                    .await;
+                }
+                Command::SetDraft(draft) => {
+                    let mut guard = state.lock().await;
+                    let Some(store) = &mut guard.store else {
+                        continue;
+                    };
+                    store.checkpoint_draft(&draft);
+                    if let Some(wait) = store.soft_save_wait() {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            tokio::time::sleep(wait).await;
+                            if let Some(store) = &mut state.lock().await.store {
+                                store.checkpoint_now();
+                            }
+                        });
+                    }
+                }
                 Command::Interrupt => {
                     interrupt(&mut current_turn);
                     let _ = evt_tx.send(AgentEvent::AssistantEnd);
@@ -662,6 +773,12 @@ impl CraftProvider {
                     }
                 }
             }
+        }
+        // The UI dropped its command half: the session is over. Flush a
+        // soft checkpointed draft that never hit its write window, so a
+        // keystroke from a second ago still reaches disk.
+        if let Some(store) = &mut state.lock().await.store {
+            store.checkpoint_now();
         }
     }
 }
@@ -748,6 +865,8 @@ mod tests {
             Message::user("hello there"),
             Message::assistant("hi — how can I help?"),
         ];
+        store.checkpoint_draft("unsent draft");
+        store.checkpoint_now();
         store.record_turn(&history, "mock/model".into());
 
         // The record exists in the state dir and lists for this cwd.
@@ -773,10 +892,14 @@ mod tests {
         // The store rebinds to the loaded id so future turns resume it.
         assert!(state.lock().await.store.is_some());
         let mut loaded = None;
+        let mut loaded_draft = String::new();
         let mut resumed = false;
         while let Ok(event) = rx.try_recv() {
             match event {
-                AgentEvent::SessionLoaded { messages } => loaded = Some(messages),
+                AgentEvent::SessionLoaded { messages, draft } => {
+                    loaded = Some(messages);
+                    loaded_draft = draft;
+                }
                 AgentEvent::Notice { tone, text } => {
                     assert_eq!(tone, Tone::Success);
                     resumed = text.starts_with("resumed session");
@@ -787,7 +910,74 @@ mod tests {
         let loaded = loaded.expect("SessionLoaded event");
         assert!(matches!(&loaded[0], LoadedMessage::User(t) if t == "hello there"));
         assert!(matches!(&loaded[1], LoadedMessage::Assistant(t) if t == "hi — how can I help?"));
+        assert_eq!(
+            loaded_draft, "unsent draft",
+            "the preserved draft rides the load"
+        );
         assert!(resumed);
+    }
+
+    /// F.3 resume-latest-by-cwd: the newest session for this directory is
+    /// loaded; nothing persisted keeps the fresh session untouched.
+    #[tokio::test]
+    async fn resume_latest_picks_the_newest_session_for_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+        let persist = |text: &str| {
+            let session_ref = crate::id::SessionRef::generate();
+            let mut store = crate::headless::SessionStore::open_in(
+                state_dir.clone(),
+                session_ref,
+                "/cwd",
+                "mock/model",
+            )
+            .unwrap();
+            store.record_turn(&[Message::user(text)], "mock/model".into());
+        };
+        persist("older session");
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // distinct updated_at seconds
+        persist("newer session");
+
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let files = Files::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        resume_latest(&state, &files, Some(&state_dir), "/cwd", "mock/model", &tx).await;
+
+        assert_eq!(state.lock().await.history.len(), 1);
+        assert_eq!(state.lock().await.history[0].text(), "newer session");
+        let mut saw_load = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AgentEvent::SessionLoaded { .. }) {
+                saw_load = true;
+            }
+        }
+        assert!(saw_load, "the resumed session announces a SessionLoaded");
+
+        // No prior session in this cwd: a notice, not a crash, and the
+        // current session history stays put.
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        state.lock().await.history = vec![Message::user("keep me")];
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        resume_latest(
+            &state,
+            &files,
+            Some(&state_dir),
+            "/other-cwd",
+            "mock/model",
+            &tx,
+        )
+        .await;
+        assert_eq!(state.lock().await.history.len(), 1);
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(AgentEvent::Notice {
+                    tone: Tone::Neutral,
+                    ..
+                })
+            ),
+            "no-session resume is a neutral notice"
+        );
     }
 
     /// Tool calls, results, and system blocks don't render as user/agent

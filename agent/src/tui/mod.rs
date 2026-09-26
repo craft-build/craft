@@ -345,6 +345,8 @@ async fn run_loop(
         if app.tick_file_picker() {
             dirty = Dirty::YES;
         }
+        // F.3 draft preservation: per-frame checkpoint of the composer text.
+        app.sync_draft(cmd_tx);
         let cadence = app.cadence();
         let sleep = tokio::time::sleep(cadence.frame().unwrap_or(IDLE_POLL));
         tokio::select! {

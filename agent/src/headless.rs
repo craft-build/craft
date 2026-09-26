@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -33,6 +34,10 @@ use crate::tools::Workspace;
 /// domain types.
 pub type StoredSession = sessions::Session<Message, StoredTokenUsage, history::ToolResult>;
 
+/// The shortest gap between two writes that carry only soft session state
+/// (the composer draft). Ported from the reference `SOFT_SAVE_DELAY`.
+const SOFT_SAVE_DELAY: Duration = Duration::from_millis(1000);
+
 /// Owns a session's persisted state for the lifetime of one headless run.
 /// Save failures are warnings, never fatal: a headless run must finish even
 /// when the disk is unhappy.
@@ -42,6 +47,13 @@ pub struct SessionStore {
     /// the path. `None` when the state dir cannot host it.
     ledger: Option<CostLedger>,
     session: StoredSession,
+    /// When the last disk write happened, so draft-only changes land at
+    /// most once per [`SOFT_SAVE_DELAY`] (each costs a meta record plus an
+    /// fsync).
+    last_save: Instant,
+    /// A soft change is waiting for its write window; flushed by
+    /// [`SessionStore::checkpoint_now`].
+    pending_soft_save: bool,
 }
 
 impl SessionStore {
@@ -71,6 +83,8 @@ impl SessionStore {
                 dir,
                 ledger,
                 session,
+                last_save: Instant::now(),
+                pending_soft_save: false,
             }),
             Err(SessionError::Storage {
                 source: StorageError::NotFound { .. },
@@ -81,6 +95,8 @@ impl SessionStore {
                     dir,
                     ledger,
                     session,
+                    last_save: Instant::now(),
+                    pending_soft_save: false,
                 };
                 store.save();
                 Ok(store)
@@ -90,9 +106,43 @@ impl SessionStore {
     }
 
     fn save(&mut self) {
+        self.last_save = Instant::now();
+        self.pending_soft_save = false;
         if let Err(e) = self.session.save(&self.dir) {
             eprintln!("failed to persist session: {e}");
         }
+    }
+
+    /// A draft-only change: written at most once per [`SOFT_SAVE_DELAY`],
+    /// bounding what a crash takes with it without charging a keystroke an
+    /// fsync. Anything a turn produced still writes immediately
+    /// ([`Self::record_turn`]). An empty draft clears the field.
+    pub fn checkpoint_draft(&mut self, draft: &str) {
+        let draft = (!draft.is_empty()).then(|| draft.to_owned());
+        if self.session.meta.input_draft.as_deref() == draft.as_deref() {
+            return;
+        }
+        self.session.set_input_draft(draft);
+        if self.last_save.elapsed() >= SOFT_SAVE_DELAY {
+            self.save();
+        } else {
+            self.pending_soft_save = true;
+        }
+    }
+
+    /// Flush a pending soft write: shutdown, or a session swap, where no
+    /// later frame will carry the change to disk.
+    pub fn checkpoint_now(&mut self) {
+        if self.pending_soft_save {
+            self.save();
+        }
+    }
+
+    /// How long until a pending soft write may land, so a caller can arm a
+    /// timer instead of waiting for the next keystroke to carry it.
+    pub fn soft_save_wait(&self) -> Option<Duration> {
+        self.pending_soft_save
+            .then(|| SOFT_SAVE_DELAY.saturating_sub(self.last_save.elapsed()))
     }
 
     /// Persist the post-turn history and the model that served it, deriving
@@ -478,6 +528,55 @@ mod tests {
         let loaded = load(&tmp);
         assert_eq!(loaded.messages().len(), 1);
         assert_eq!(loaded.title, generate_title(&messages));
+    }
+
+    /// F.3 draft preservation: a draft-only change waits for its soft-write
+    /// window on disk, `checkpoint_now` flushes it, and an emptied draft
+    /// clears the stored copy.
+    #[test]
+    fn checkpoint_draft_soft_delays_then_flushes_and_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = store_in(&tmp);
+        // The store just wrote its fresh header, so the first draft lands
+        // inside the soft window: recorded, not yet on disk.
+        store.checkpoint_draft("half-finished thought");
+        assert!(
+            load(&tmp).meta.input_draft.is_none(),
+            "a draft inside the soft window must not hit disk yet"
+        );
+        let wait = store
+            .soft_save_wait()
+            .expect("a deferred draft owes a write window");
+        assert!(wait <= SOFT_SAVE_DELAY);
+
+        // Shutdown flush: the pending draft reaches disk.
+        store.checkpoint_now();
+        assert_eq!(
+            load(&tmp).meta.input_draft.as_deref(),
+            Some("half-finished thought")
+        );
+
+        // A changed draft within the window again defers; the next turn's
+        // record_turn write carries it regardless of the delay.
+        store.checkpoint_draft("edited");
+        store.record_turn(&[Message::user("sent")], MODEL_SPEC.into());
+        let loaded = load(&tmp);
+        assert_eq!(loaded.meta.input_draft.as_deref(), Some("edited"));
+        assert_eq!(loaded.messages().len(), 1);
+
+        // Submitting empties the draft: the stored copy is cleared.
+        store.checkpoint_draft("");
+        store.checkpoint_now();
+        assert!(load(&tmp).meta.input_draft.is_none());
+
+        // An unchanged draft is a no-op (no revision bump, no write).
+        let before = store.session.revision();
+        store.checkpoint_draft("");
+        assert_eq!(store.session.revision(), before);
+        assert!(
+            store.soft_save_wait().is_none(),
+            "nothing pending, nothing owed"
+        );
     }
 
     #[test]

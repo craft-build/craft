@@ -16,6 +16,11 @@ use snafu::ResultExt;
                   backed by the configured providers in ~/.config/craft/agent.toml."
 )]
 struct Cli {
+    /// Resume this directory's most recent session instead of starting fresh
+    /// (F.3 resume-latest-by-cwd).
+    #[arg(short = 'c', long = "continue")]
+    continue_session: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -52,7 +57,9 @@ async fn main() -> Result<(), Error> {
             let cwd = std::env::current_dir().context(TuiSnafu {
                 context: "resolving the current directory",
             })?;
-            let provider = CraftProvider::new(config, cwd).await?;
+            let provider = CraftProvider::new(config, cwd)
+                .await?
+                .with_resume_latest(cli.continue_session);
             tui::run(provider).await.context(TuiSnafu {
                 context: "running the terminal UI",
             })

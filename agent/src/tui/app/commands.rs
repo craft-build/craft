@@ -38,6 +38,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "",
     },
     CommandSpec {
+        id: "resume",
+        slash: Some("/resume"),
+        alias: Some("/continue"),
+        label: "Resume latest session",
+        hint: "/resume",
+        desc: "Resume this directory's latest session",
+    },
+    CommandSpec {
         id: "sessions",
         slash: Some("/sessions"),
         alias: None,
@@ -246,6 +254,9 @@ impl App {
                 let _ = tx.send(Command::Reset);
             }
             "sessions" => self.open_sessions(),
+            "resume" => {
+                let _ = tx.send(Command::ResumeLatest);
+            }
             "theme" => self.open_theme_picker(),
             "toggle-sidebar" => self.session.sidebar_open = !self.session.sidebar_open,
             "model" => self.open_model_menu(),

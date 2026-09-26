@@ -183,6 +183,10 @@ pub struct SessionMeta {
     pub session_rules: Vec<PermissionRule>,
     #[serde(default)]
     pub context_size: u32,
+    /// Composer text preserved across checkpoints (F.3 draft preservation).
+    /// `None` when the composer is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_draft: Option<String>,
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells
@@ -531,6 +535,16 @@ where
     pub fn usage_by_model_mut(&mut self) -> &mut HashMap<String, StoredTokenUsage> {
         self.touch();
         &mut self.usage_by_model
+    }
+
+    /// Draft-only change: it can wait for company behind it on disk, so a
+    /// keystroke costs no fsync of its own (see `SessionStore::checkpoint_draft`).
+    pub fn set_input_draft(&mut self, draft: Option<String>) {
+        if self.meta.input_draft == draft {
+            return;
+        }
+        self.meta.input_draft = draft;
+        self.touch_soft();
     }
 
     pub fn set_title(&mut self, title: String) {

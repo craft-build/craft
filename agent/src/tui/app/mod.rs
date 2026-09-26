@@ -73,6 +73,9 @@ pub struct App {
     /// The in-progress text saved when history recall starts, restored on
     /// ↓ past the newest entry.
     pub history_draft: String,
+    /// Composer text last handed to the provider for draft checkpointing;
+    /// `sync_draft` sends only the changes.
+    pub sent_draft: String,
 
     // --- overlays ---
     /// The one modal currently open (palette / model menu / confirm),
@@ -122,6 +125,7 @@ impl App {
             input_history: crate::storage::input_history::InputHistory::default(),
             history_index: None,
             history_draft: String::new(),
+            sent_draft: String::new(),
             modal: Modal::None,
             slash_selected: 0,
             permission_prompt: crate::tui::permission_prompt::PermissionPrompt::new(),
@@ -245,7 +249,7 @@ impl App {
                 }
             }
             AgentEvent::UsageQuota(state) => self.usage_quota = state,
-            AgentEvent::SessionLoaded { messages } => {
+            AgentEvent::SessionLoaded { messages, draft } => {
                 self.reset_conversation();
                 for msg in messages {
                     let msg = match msg {
@@ -253,6 +257,12 @@ impl App {
                         LoadedMessage::Assistant(text) => Message::Assistant(text),
                     };
                     self.conversation.messages.push(msg);
+                }
+                // F.3 draft preservation: a draft saved across checkpoints
+                // comes back into the composer, cursor at the end.
+                if !draft.is_empty() {
+                    self.composer.set_text(draft);
+                    self.sent_draft = self.composer.text.clone();
                 }
             }
             AgentEvent::PermissionRequest {
@@ -386,6 +396,18 @@ impl App {
             self.flash(msg);
         }
         dirty.take()
+    }
+
+    /// Hand the current composer draft to the provider when it changed
+    /// (F.3 draft preservation). Called once per loop turn, like the
+    /// reference's per-frame checkpoint; unchanged drafts cost nothing.
+    /// Submitting also lands here: the emptied draft clears the stored
+    /// copy a frame before the turn mirrors the prompt back.
+    pub(crate) fn sync_draft(&mut self, tx: &mpsc::UnboundedSender<Command>) {
+        if self.composer.text != self.sent_draft {
+            self.sent_draft = self.composer.text.clone();
+            let _ = tx.send(Command::SetDraft(self.composer.text.clone()));
+        }
     }
 
     pub fn slash_open(&self) -> bool {
@@ -665,6 +687,32 @@ mod tests {
             "cwd segment missing:\n{text}"
         );
         assert!(text.contains("running 0s"), "elapsed missing:\n{text}");
+    }
+
+    /// A loaded session's preserved draft lands back in the composer (F.3),
+    /// and `sync_draft` hands the provider only the changes.
+    #[test]
+    fn loaded_draft_restores_and_sync_draft_sends_only_changes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_event(AgentEvent::SessionLoaded {
+            messages: vec![crate::tui::provider::LoadedMessage::User("earlier".into())],
+            draft: "unsent words".into(),
+        });
+        assert_eq!(app.composer.text, "unsent words");
+
+        // The restored draft is the new baseline: no SetDraft echo for it.
+        app.sync_draft(&tx);
+        assert!(rx.try_recv().is_err(), "unchanged draft sends nothing");
+
+        app.composer.set_text("typed more".to_string());
+        app.sync_draft(&tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::SetDraft(t)) if t == "typed more"),
+            "a changed draft reaches the provider"
+        );
+        app.sync_draft(&tx);
+        assert!(rx.try_recv().is_err(), "each change is sent exactly once");
     }
 
     /// A flash toast takes over the status row's right side until it

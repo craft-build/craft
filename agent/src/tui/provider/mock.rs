@@ -399,6 +399,15 @@ impl Provider for MockProvider {
                             text: "the mock provider keeps a single scripted session".into(),
                         });
                     }
+                    Command::ResumeLatest => {
+                        let _ = evt_tx.send(AgentEvent::Notice {
+                            tone: Tone::Neutral,
+                            text: "the mock provider keeps a single scripted session".into(),
+                        });
+                    }
+                    Command::SetDraft(_) => {
+                        // No persistence behind the scripted demo.
+                    }
                 }
             }
         });
