@@ -24,7 +24,7 @@ fn truncate(s: &str, width: usize) -> String {
 fn divider(width: usize) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width),
-        Style::default().fg(theme::BORDER_SUBTLE),
+        Style::default().fg(theme::current().border_subtle),
     ))
 }
 
@@ -32,13 +32,15 @@ fn heading(label: &str) -> Line<'static> {
     Line::from(Span::styled(
         label.to_uppercase(),
         Style::default()
-            .fg(theme::TEXT_PRIMARY)
+            .fg(theme::current().text_primary)
             .add_modifier(Modifier::BOLD),
     ))
 }
 
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().style(Style::default().bg(theme::BG_SURFACE));
+    let t = theme::current();
+
+    let block = Block::default().style(Style::default().bg(t.bg_surface));
     let inner = area;
     f.render_widget(block, area);
 
@@ -73,7 +75,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                 },
                 w,
             ),
-            Style::default().fg(theme::TEXT_TERTIARY),
+            Style::default().fg(t.text_tertiary),
         )]),
         y,
     );
@@ -89,7 +91,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                 },
                 w,
             ),
-            Style::default().fg(theme::TEXT_TERTIARY),
+            Style::default().fg(t.text_tertiary),
         )]),
         y,
     );
@@ -108,11 +110,11 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             break;
         }
         let (mark, mark_color, text_color) = if p.done {
-            ("[x]", theme::TEXT_TERTIARY, theme::TEXT_TERTIARY)
+            ("[x]", t.text_tertiary, t.text_tertiary)
         } else if p.active {
-            ("[>]", theme::ACCENT, theme::TEXT_PRIMARY)
+            ("[>]", t.accent, t.text_primary)
         } else {
-            ("[ ]", theme::BORDER_STRONG, theme::TEXT_SECONDARY)
+            ("[ ]", t.border_strong, t.text_secondary)
         };
         let label_style = Style::default().fg(text_color).add_modifier(if p.done {
             Modifier::CROSSED_OUT
@@ -151,10 +153,10 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled(
                     truncate(&file.path, path_w),
-                    Style::default().fg(theme::TEXT_SECONDARY),
+                    Style::default().fg(t.text_secondary),
                 ),
                 Span::raw(" ".repeat(gap)),
-                Span::styled(badge, Style::default().fg(theme::tone_color(file.tone))),
+                Span::styled(badge, Style::default().fg(t.tone_color(file.tone))),
             ]),
             y,
         );

@@ -15,14 +15,14 @@ fn dim(f: &mut Frame, area: Rect) {
     // Clear first: a bg-only Block would leave the underlying characters visible.
     f.render_widget(Clear, area);
     f.render_widget(
-        Block::default().style(Style::default().bg(theme::BG_SUNKEN)),
+        Block::default().style(Style::default().bg(theme::current().bg_sunken)),
         area,
     );
 }
 
 /// Borderless raised-surface block shared by all overlays.
 fn boxed(_area: Rect) -> Block<'static> {
-    Block::default().style(Style::default().bg(theme::BG_RAISED))
+    Block::default().style(Style::default().bg(theme::current().bg_raised))
 }
 
 fn centered(width: u16, height: u16, area: Rect) -> Rect {
@@ -42,9 +42,9 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
             break;
         }
         let bg = if i == selected {
-            theme::BG_OVERLAY
+            theme::current().bg_overlay
         } else {
-            theme::BG_RAISED
+            theme::current().bg_raised
         };
         let mut spans = spans.clone();
         let w: usize = spans
@@ -73,6 +73,8 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
 /// Slash-command popup above the composer. `chat` is the whole chat column and
 /// `bottom` the 7-row composer/status/footer region it sits above.
 pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
+    let t = theme::current();
+
     let items = app.slash_matches();
     if items.is_empty() {
         return;
@@ -87,7 +89,7 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     };
     f.render_widget(Clear, area);
     f.render_widget(
-        Block::default().style(Style::default().bg(theme::BG_RAISED)),
+        Block::default().style(Style::default().bg(t.bg_raised)),
         area,
     );
     // Scroll the window so the highlighted row stays visible past the edge.
@@ -102,11 +104,8 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
         .take(window)
         .map(|(cmd, desc)| {
             vec![
-                Span::styled(format!(" {cmd}"), Style::default().fg(theme::CYAN)),
-                Span::styled(
-                    format!("  {desc}"),
-                    Style::default().fg(theme::TEXT_TERTIARY),
-                ),
+                Span::styled(format!(" {cmd}"), Style::default().fg(t.cyan)),
+                Span::styled(format!("  {desc}"), Style::default().fg(t.text_tertiary)),
             ]
         })
         .collect();
@@ -115,6 +114,8 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
 
 /// Model picker, opened with ctrl+l / /model / palette.
 pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
+    let t = theme::current();
+
     let Modal::ModelMenu(selected) = app.modal else {
         return;
     };
@@ -159,29 +160,26 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
                 .collect::<Vec<_>>()
                 .join("/");
             let label_style = if tiers.is_empty() {
-                Style::default().fg(theme::TEXT_PRIMARY)
+                Style::default().fg(t.text_primary)
             } else {
                 // Highlight rows the user has explicitly assigned.
-                Style::default().fg(theme::ACCENT)
+                Style::default().fg(t.accent)
             };
             vec![
                 Span::styled(
                     marker.to_string(),
                     Style::default().fg(if i == app.session.model_idx {
-                        theme::ACCENT
+                        t.accent
                     } else {
-                        theme::BG_RAISED
+                        t.bg_raised
                     }),
                 ),
                 Span::styled(choice.label.clone(), label_style),
                 Span::styled(
                     format!("  {}", choice.provider_label),
-                    Style::default().fg(theme::TEXT_TERTIARY),
+                    Style::default().fg(t.text_tertiary),
                 ),
-                Span::styled(
-                    format!("  {tier_label}"),
-                    Style::default().fg(theme::ACCENT),
-                ),
+                Span::styled(format!("  {tier_label}"), Style::default().fg(t.accent)),
             ]
         })
         .collect();
@@ -203,11 +201,11 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Enter select", Style::default().fg(theme::CYAN)),
-            Span::styled("  ! strong", Style::default().fg(theme::ACCENT)),
-            Span::styled("  @ medium", Style::default().fg(theme::ACCENT)),
-            Span::styled("  # weak", Style::default().fg(theme::ACCENT)),
-            Span::styled("  $ compaction", Style::default().fg(theme::ACCENT)),
+            Span::styled(" Enter select", Style::default().fg(t.cyan)),
+            Span::styled("  ! strong", Style::default().fg(t.accent)),
+            Span::styled("  @ medium", Style::default().fg(t.accent)),
+            Span::styled("  # weak", Style::default().fg(t.accent)),
+            Span::styled("  $ compaction", Style::default().fg(t.accent)),
         ])),
         footer,
     );
@@ -215,6 +213,8 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
 
 /// ctrl+p command palette, centered near the top.
 pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
     let Modal::Palette { query, selected } = &app.modal else {
         return;
     };
@@ -245,7 +245,7 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme::CYAN)),
+            Span::styled("> ", Style::default().fg(t.cyan)),
             Span::styled(
                 if query.is_empty() {
                     "Type a command…".to_string()
@@ -253,9 +253,9 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
                     query.clone()
                 },
                 Style::default().fg(if query.is_empty() {
-                    theme::TEXT_TERTIARY
+                    t.text_tertiary
                 } else {
-                    theme::TEXT_PRIMARY
+                    t.text_primary
                 }),
             ),
         ])),
@@ -276,7 +276,7 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(content.width as usize),
-            Style::default().fg(theme::BORDER_SUBTLE),
+            Style::default().fg(t.border_subtle),
         ))),
         Rect {
             x: content.x,
@@ -302,9 +302,9 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
             let hint = format!("{hint} ");
             let gap = w.saturating_sub(label.chars().count() + hint.chars().count());
             vec![
-                Span::styled(label, Style::default().fg(theme::TEXT_PRIMARY)),
+                Span::styled(label, Style::default().fg(t.text_primary)),
                 Span::raw(" ".repeat(gap)),
-                Span::styled(hint, Style::default().fg(theme::TEXT_TERTIARY)),
+                Span::styled(hint, Style::default().fg(t.text_tertiary)),
             ]
         })
         .collect();
@@ -351,7 +351,7 @@ fn render_usage_sheet(
         line(Line::from(Span::styled(
             title.to_string(),
             Style::default()
-                .fg(theme::TEXT_PRIMARY)
+                .fg(theme::current().text_primary)
                 .add_modifier(Modifier::BOLD),
         ))),
         Rect {
@@ -406,11 +406,11 @@ fn usage_row_line(row: &crate::tui::provider::UsageRow, w: usize) -> Line<'stati
             + 4,
     );
     Line::from(vec![
-        Span::styled(label, Style::default().fg(theme::TEXT_PRIMARY)),
+        Span::styled(label, Style::default().fg(theme::current().text_primary)),
         Span::raw(" ".repeat(gap)),
         Span::styled(
             format!("{tokens}  {cost}"),
-            Style::default().fg(theme::TEXT_SECONDARY),
+            Style::default().fg(theme::current().text_secondary),
         ),
     ])
 }
@@ -418,7 +418,7 @@ fn usage_row_line(row: &crate::tui::provider::UsageRow, w: usize) -> Line<'stati
 fn section_label(text: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!(" {text}"),
-        Style::default().fg(theme::TEXT_TERTIARY),
+        Style::default().fg(theme::current().text_tertiary),
     ))
 }
 
@@ -436,6 +436,8 @@ fn format_reset(reset_at: u64) -> String {
 /// The provider-quota section of `/usage`, one line per limit plus the
 /// per-model today rows (F.5). Pure so layout can be unit-tested.
 pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<Line<'static>> {
+    let t = theme::current();
+
     use crate::providers::{ModelUsageRow, ProviderUsage, UsageLimit};
     use crate::tui::provider::UsageFetchState;
 
@@ -453,30 +455,32 @@ pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<
             .as_deref()
             .map(|d| format!("  {d}"))
             .unwrap_or_default();
+        let t = theme::current();
         Line::from(vec![
             Span::styled(
                 format!("   {}", limit.label),
-                Style::default().fg(theme::TEXT_PRIMARY),
+                Style::default().fg(t.text_primary),
             ),
             Span::styled(
                 format!("{pct}{detail}{reset}"),
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(t.text_secondary),
             ),
         ])
     }
 
     fn model_line(row: &ModelUsageRow) -> Line<'static> {
+        let t = theme::current();
         Line::from(vec![
             Span::styled(
                 format!("   {}", row.model),
-                Style::default().fg(theme::TEXT_PRIMARY),
+                Style::default().fg(t.text_primary),
             ),
             Span::styled(
                 format!(
                     "  {} today",
                     crate::storage::stats::format_usd(row.spend_microdollars as f64 / 1_000_000.0)
                 ),
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(t.text_secondary),
             ),
         ])
     }
@@ -505,7 +509,7 @@ pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<
         )],
         UsageFetchState::Error(error) => vec![Line::from(Span::styled(
             format!(" Provider quota: {error}"),
-            Style::default().fg(theme::TEXT_SECONDARY),
+            Style::default().fg(t.text_secondary),
         ))],
         UsageFetchState::Ready(usage) => ready_lines(usage),
     }
@@ -513,20 +517,22 @@ pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<
 
 /// One `session  cost  tokens` row of the `/stats` top-sessions section.
 fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
+    let t = theme::current();
+
     use crate::storage::stats::format_usd;
     use crate::usage::format_tokens;
     Line::from(vec![
         Span::styled(
             format!("   {}", entry.0.chars().take(8).collect::<String>()),
-            Style::default().fg(theme::TEXT_PRIMARY),
+            Style::default().fg(t.text_primary),
         ),
         Span::styled(
             format!("  {}", format_usd(entry.1)),
-            Style::default().fg(theme::TEXT_SECONDARY),
+            Style::default().fg(t.text_secondary),
         ),
         Span::styled(
             format!("  {}", format_tokens(entry.2)),
-            Style::default().fg(theme::TEXT_SECONDARY),
+            Style::default().fg(t.text_secondary),
         ),
     ])
 }
@@ -534,6 +540,8 @@ fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
 /// `/usage`: this session's per-model tokens and cost, plus the live
 /// provider quota section (F.5).
 pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
     let Modal::Usage(rows) = &app.modal else {
         return;
     };
@@ -542,7 +550,7 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
             " no usage recorded yet",
-            Style::default().fg(theme::TEXT_TERTIARY),
+            Style::default().fg(t.text_tertiary),
         )));
     } else {
         lines.push(section_label("Per model:"));
@@ -568,15 +576,15 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
         vec![
             Span::styled(
                 format!(" total {}", crate::usage::format_tokens(total_tokens)),
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(t.text_secondary),
             ),
             Span::styled(
                 format!("  {}", footer_cost),
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(t.text_secondary),
             ),
             Span::styled(
                 "  ctrl+r reload · esc to close",
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(t.text_tertiary),
             ),
         ],
         app.usage_scroll,
@@ -586,6 +594,8 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
 /// `/stats`: cross-session cost totals from the cost ledger, with the
 /// by-model table and top-sessions sections (F.5).
 pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
     let Modal::Stats(view) = &app.modal else {
         return;
     };
@@ -596,11 +606,11 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
             "Cost stats",
             &[Line::from(Span::styled(
                 " no runs recorded",
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(t.text_tertiary),
             ))],
             vec![Span::styled(
                 " esc to close",
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(t.text_tertiary),
             )],
             0,
         );
@@ -612,7 +622,7 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
     if view.models_overflow > 0 {
         lines.push(Line::from(Span::styled(
             format!(" +{} more models", view.models_overflow),
-            Style::default().fg(theme::TEXT_TERTIARY),
+            Style::default().fg(t.text_tertiary),
         )));
     }
     if !view.by_session.is_empty() {
@@ -628,15 +638,15 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
         vec![
             Span::styled(
                 format!(" total {}", crate::usage::format_tokens(view.total_tokens)),
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(t.text_secondary),
             ),
             Span::styled(
                 format!("  {}", crate::storage::stats::format_usd(view.total_cost)),
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(t.text_secondary),
             ),
             Span::styled(
                 format!("  {} sessions  esc to close", view.sessions),
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(t.text_tertiary),
             ),
         ],
         app.usage_scroll,
@@ -646,6 +656,8 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
 /// `/help`: static keybinding + slash-command sheet, sourced from the same
 /// data as the completion popup (`app::help_rows`).
 pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
     if !matches!(app.modal, Modal::Help) {
         return;
     }
@@ -662,7 +674,7 @@ pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(Span::styled(
             "Help — any key closes",
             Style::default()
-                .fg(theme::TEXT_PRIMARY)
+                .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
         ))),
         Rect {
@@ -680,8 +692,8 @@ pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
                 return vec![Span::raw("")];
             }
             vec![
-                Span::styled(format!(" {key:<key_w$}"), Style::default().fg(theme::CYAN)),
-                Span::styled(action.clone(), Style::default().fg(theme::TEXT_TERTIARY)),
+                Span::styled(format!(" {key:<key_w$}"), Style::default().fg(t.cyan)),
+                Span::styled(action.clone(), Style::default().fg(t.text_tertiary)),
             ]
         })
         .collect();
@@ -700,6 +712,8 @@ pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
 
 /// `/sessions`: persisted-session picker; Enter loads, Esc closes.
 pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
     let Modal::Sessions { entries, selected } = &app.modal else {
         return;
     };
@@ -715,7 +729,7 @@ pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(Span::styled(
             "Sessions — enter to resume, esc to close",
             Style::default()
-                .fg(theme::TEXT_PRIMARY)
+                .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
         ))),
         Rect {
@@ -729,7 +743,7 @@ pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     let spans: Vec<Vec<Span<'static>>> = if entries.is_empty() {
         vec![vec![Span::styled(
             " no sessions yet".to_string(),
-            Style::default().fg(theme::TEXT_TERTIARY),
+            Style::default().fg(t.text_tertiary),
         )]]
     } else {
         entries
@@ -745,9 +759,9 @@ pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
                 let title = format!(" {title}");
                 let gap = content_w.saturating_sub(title.chars().count() + updated.chars().count());
                 vec![
-                    Span::styled(title, Style::default().fg(theme::TEXT_PRIMARY)),
+                    Span::styled(title, Style::default().fg(t.text_primary)),
                     Span::raw(" ".repeat(gap)),
-                    Span::styled(updated, Style::default().fg(theme::TEXT_TERTIARY)),
+                    Span::styled(updated, Style::default().fg(t.text_tertiary)),
                 ]
             })
             .collect()
@@ -769,8 +783,81 @@ pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// `/theme`: bundled-theme picker. Arrows preview live, Enter applies +
+/// persists, Esc restores the pre-open theme.
+pub fn render_theme_picker(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
+    let Modal::ThemePicker {
+        entries,
+        selected,
+        original,
+    } = &app.modal
+    else {
+        return;
+    };
+    dim(f, area);
+    if entries.is_empty() {
+        return;
+    }
+    const MAX_VISIBLE: usize = 15;
+    let visible = entries.len().clamp(1, MAX_VISIBLE);
+    let start = (*selected).min(entries.len().saturating_sub(visible));
+    let n = visible as u16;
+    let width = 48.min(area.width.saturating_sub(4));
+    let rect = centered(width, n + 4, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Themes — ↑↓ preview, enter apply, esc cancel",
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    let rows: Vec<Vec<Span<'static>>> = entries[start..start + visible]
+        .iter()
+        .map(|name| {
+            let marker = if name == original { "● " } else { "  " };
+            vec![
+                Span::styled(
+                    marker.to_string(),
+                    Style::default().fg(if name == original {
+                        t.accent
+                    } else {
+                        t.bg_raised
+                    }),
+                ),
+                Span::styled(name.clone(), Style::default().fg(t.text_primary)),
+            ]
+        })
+        .collect();
+    render_rows(
+        f,
+        &rows,
+        *selected - start,
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(2),
+            height: n,
+        },
+    );
+}
+
 /// "Reject this diff?" confirmation dialog.
 pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
     let Modal::ConfirmReject(id) = &app.modal else {
         return;
     };
@@ -802,7 +889,7 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(Span::styled(
             "Reject this diff?",
             Style::default()
-                .fg(theme::TEXT_PRIMARY)
+                .fg(t.text_primary)
                 .add_modifier(Modifier::BOLD),
         ))),
         Rect {
@@ -819,7 +906,7 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 chunk,
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(t.text_secondary),
             ))),
             Rect {
                 x: inner.x + 1,
@@ -831,11 +918,11 @@ pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
     }
     // actions, right-aligned on the last row
     let actions = Line::from(vec![
-        Span::styled("[ esc cancel ]", Style::default().fg(theme::TEXT_SECONDARY)),
+        Span::styled("[ esc cancel ]", Style::default().fg(t.text_secondary)),
         Span::raw("  "),
-        Span::styled("[ Y always ]", Style::default().fg(theme::DANGER)),
+        Span::styled("[ Y always ]", Style::default().fg(t.danger)),
         Span::raw("  "),
-        Span::styled("[ y reject ]", Style::default().fg(theme::DANGER)),
+        Span::styled("[ y reject ]", Style::default().fg(t.danger)),
     ]);
     let aw = actions.width() as u16 + 1;
     f.render_widget(

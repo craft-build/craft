@@ -20,6 +20,8 @@ pub const TEXT_RIGHT_PAD: usize = 2;
 /// (sized by the caller from [`wrap_rows`]) grows as text wraps, so all typed
 /// text stays on screen.
 pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
+    let t = theme::current();
+
     // 1-cell app-bg padding on each side of the surface box.
     let inset = Rect {
         x: area.x + 1,
@@ -28,7 +30,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         height: area.height,
     };
     f.render_widget(
-        Block::default().style(Style::default().bg(theme::BG_SURFACE)),
+        Block::default().style(Style::default().bg(t.bg_surface)),
         inset,
     );
 
@@ -47,7 +49,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "▎",
-                Style::default().fg(theme::ACCENT).bg(theme::BG_SURFACE),
+                Style::default().fg(t.accent).bg(t.bg_surface),
             ))),
             Rect {
                 x: bar_x,
@@ -79,9 +81,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         .saturating_sub(view_rows.saturating_sub(1))
         .min(rows.len().saturating_sub(view_rows));
 
-    let text_style = Style::default()
-        .fg(theme::TEXT_PRIMARY)
-        .bg(theme::BG_SURFACE);
+    let text_style = Style::default().fg(t.text_primary).bg(t.bg_surface);
     for (i, &(s, e)) in rows.iter().enumerate().skip(offset).take(view_rows) {
         let y = inset.y + 1 + (i - offset) as u16;
         let line: String = chars[s..e].iter().collect();
@@ -90,7 +90,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         if w < text_w {
             spans.push(Span::styled(
                 " ".repeat(text_w - w),
-                Style::default().bg(theme::BG_SURFACE),
+                Style::default().bg(t.bg_surface),
             ));
         }
         f.render_widget(
@@ -109,9 +109,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "Message Craft…",
-                Style::default()
-                    .fg(theme::TEXT_TERTIARY)
-                    .bg(theme::BG_SURFACE),
+                Style::default().fg(t.text_tertiary).bg(t.bg_surface),
             ))),
             Rect {
                 x: text_x,
@@ -138,10 +136,8 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         width: inset.width.saturating_sub(TEXT_LEFT_PAD as u16 + 1),
         height: 1,
     };
-    let surf = Style::default().bg(theme::BG_SURFACE);
-    let tertiary = Style::default()
-        .fg(theme::TEXT_TERTIARY)
-        .bg(theme::BG_SURFACE);
+    let surf = Style::default().bg(t.bg_surface);
+    let tertiary = Style::default().fg(t.text_tertiary).bg(t.bg_surface);
     let sep = || Span::styled(" · ", tertiary);
     let (model, provider) = app.model();
     let left = vec![
@@ -149,20 +145,17 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
             app.mode.label(),
             Style::default()
                 .fg(app.mode.color())
-                .bg(theme::BG_SURFACE)
+                .bg(t.bg_surface)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
         sep(),
-        Span::styled(
-            model,
-            Style::default().fg(theme::BLUE_400).bg(theme::BG_SURFACE),
-        ),
+        Span::styled(model, Style::default().fg(t.blue_400).bg(t.bg_surface)),
         sep(),
         Span::styled(provider, tertiary),
         sep(),
         Span::styled(
             app.effort(),
-            Style::default().fg(theme::WARNING).bg(theme::BG_SURFACE),
+            Style::default().fg(t.warning).bg(t.bg_surface),
         ),
     ];
     let right = format!("{}  ", app.session.token_label);
@@ -178,7 +171,9 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
 
 /// Spinner / status word with the running timer and interrupt hint.
 fn status_indicator(app: &App) -> Vec<Span<'static>> {
-    let tertiary = Style::default().fg(theme::TEXT_TERTIARY);
+    let t = theme::current();
+
+    let tertiary = Style::default().fg(t.text_tertiary);
     const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     // Prompt-progress: how long the current turn has been running, so a
     // silent model reads as slow rather than stuck.
@@ -195,12 +190,12 @@ fn status_indicator(app: &App) -> Vec<Span<'static>> {
                 _ => "awaiting approval",
             };
             vec![
-                Span::styled(format!("{frame} "), Style::default().fg(theme::ACCENT)),
+                Span::styled(format!("{frame} "), Style::default().fg(t.accent)),
                 Span::styled(format!("{word} {elapsed}s  esc interrupt"), tertiary),
             ]
         }
         Status::Failed => vec![
-            Span::styled("✖ ", Style::default().fg(theme::DANGER)),
+            Span::styled("✖ ", Style::default().fg(t.danger)),
             Span::styled("failed  esc interrupt", tertiary),
         ],
         Status::Done => vec![Span::styled("········  esc interrupt", tertiary)],
@@ -212,7 +207,7 @@ fn status_indicator(app: &App) -> Vec<Span<'static>> {
 /// `ctrl+p commands` right-aligned. The model/provider/thinking level and
 /// context usage moved up into the composer's info line.
 pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
-    let tertiary = Style::default().fg(theme::TEXT_TERTIARY);
+    let tertiary = Style::default().fg(theme::current().text_tertiary);
     let sep = || Span::styled(" · ", tertiary);
     // Two leading spaces line the indicator up under the composer's accent
     // bar, which sits two cells in from the row's left edge.
@@ -235,7 +230,7 @@ pub fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = left;
     spans.push(Span::raw(" ".repeat(gap)));
     let right_style = if app.flash_text().is_some() {
-        Style::default().fg(theme::ACCENT)
+        Style::default().fg(theme::current().accent)
     } else {
         tertiary
     };

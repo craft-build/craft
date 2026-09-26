@@ -57,10 +57,13 @@ fn hint_line(hints: &[(&str, &str)]) -> Line<'static> {
                 let sep = if i == 0 { "  " } else { "    " };
                 [
                     Span::raw(sep),
-                    Span::styled((*key).to_string(), Style::default().fg(theme::CYAN)),
+                    Span::styled(
+                        (*key).to_string(),
+                        Style::default().fg(theme::current().cyan),
+                    ),
                     Span::styled(
                         format!(" {desc}"),
-                        Style::default().fg(theme::TEXT_TERTIARY),
+                        Style::default().fg(theme::current().text_tertiary),
                     ),
                 ]
             })
@@ -86,7 +89,7 @@ fn aligned_hint_rows(rows: &[&[(&str, &str)]]) -> Vec<Line<'static>> {
                 spans.push(Span::raw("  ".to_string()));
                 spans.push(Span::styled(
                     (*key).to_string(),
-                    Style::default().fg(theme::CYAN),
+                    Style::default().fg(theme::current().cyan),
                 ));
                 let cell_len = key.len() + 1 + desc.len();
                 let pad = if i + 1 < row.len() {
@@ -96,7 +99,7 @@ fn aligned_hint_rows(rows: &[&[(&str, &str)]]) -> Vec<Line<'static>> {
                 };
                 spans.push(Span::styled(
                     format!(" {desc}{:width$}", "", width = pad),
-                    Style::default().fg(theme::TEXT_TERTIARY),
+                    Style::default().fg(theme::current().text_tertiary),
                 ));
             }
             Line::from(spans)
@@ -353,8 +356,8 @@ impl PermissionPrompt {
         else {
             return vec![];
         };
-        let label_style = Style::default().fg(theme::TEXT_TERTIARY);
-        let value_style = Style::default().fg(theme::TEXT_PRIMARY);
+        let label_style = Style::default().fg(theme::current().text_tertiary);
+        let value_style = Style::default().fg(theme::current().text_primary);
 
         let mut lines = vec![
             Line::raw(""),
@@ -466,23 +469,25 @@ impl PermissionPrompt {
     }
 
     pub fn view(&self, f: &mut Frame, area: Rect) {
+        let t = theme::current();
+
         if !self.is_open() {
             return;
         }
         let lines = self.build_lines();
         f.render_widget(ratatui::widgets::Clear, area);
         f.render_widget(
-            ratatui::widgets::Block::default().style(Style::default().bg(theme::BG_RAISED)),
+            ratatui::widgets::Block::default().style(Style::default().bg(t.bg_raised)),
             area,
         );
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " Permission Required",
                 Style::default()
-                    .fg(theme::TEXT_PRIMARY)
+                    .fg(t.text_primary)
                     .add_modifier(Modifier::BOLD),
             )))
-            .style(Style::default().bg(theme::BG_RAISED)),
+            .style(Style::default().bg(t.bg_raised)),
             Rect {
                 x: area.x,
                 y: area.y,
@@ -500,7 +505,7 @@ impl PermissionPrompt {
             f.render_widget(
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: false })
-                    .style(Style::default().bg(theme::BG_RAISED)),
+                    .style(Style::default().bg(t.bg_raised)),
                 body,
             );
         }

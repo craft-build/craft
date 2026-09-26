@@ -34,6 +34,7 @@ use tokio::sync::mpsc;
 use app::App;
 use provider::{AgentEvent, Command, Provider, Status};
 use repaint::{Dirty, IDLE_POLL};
+use ui::theme;
 
 /// Run the terminal UI against `provider` until the user quits.
 pub async fn run<P: Provider>(provider: P) -> io::Result<()> {
@@ -111,8 +112,13 @@ async fn drive<P: Provider>(
     });
 
     let mut app = App::new();
-    // Recall the persistent input history from the state dir (best effort).
+    // Recall the persistent input history and theme from the state dir (best effort).
     if let Ok(dir) = crate::storage::StateDir::resolve() {
+        if let Some(name) = crate::storage::theme::read_theme_name(&dir)
+            && theme::load_by_name(&name).is_ok()
+        {
+            let _ = theme::set_named(&name);
+        }
         app.input_history = crate::storage::input_history::InputHistory::load(
             &dir,
             crate::storage::input_history::MAX_ENTRIES,

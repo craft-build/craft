@@ -124,7 +124,7 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 fn surface_style() -> Style {
-    Style::default().bg(theme::BG_SURFACE)
+    Style::default().bg(theme::current().bg_surface)
 }
 
 fn surface_style_with(bg: ratatui::style::Color) -> Style {
@@ -148,10 +148,12 @@ fn user_block(text: &str, width: usize) -> Vec<Line<'static>> {
     for chunk in wrap_text(text, width.saturating_sub(3)) {
         lines.push(user_line(
             vec![
-                Span::styled("▎", Style::default().fg(theme::ACCENT)),
+                Span::styled("▎", Style::default().fg(theme::current().accent)),
                 Span::styled(
                     format!(" {chunk}"),
-                    Style::default().fg(theme::TEXT_PRIMARY).patch(surf),
+                    Style::default()
+                        .fg(theme::current().text_primary)
+                        .patch(surf),
                 ),
             ],
             width,
@@ -162,16 +164,18 @@ fn user_block(text: &str, width: usize) -> Vec<Line<'static>> {
 
 /// Map the markdown engine's semantic tokens onto the TUI theme.
 fn md_style(token: &StyleToken, emph: &Emphasis) -> Style {
+    let t = theme::current();
+
     let mut style = match token {
-        StyleToken::Text => Style::default().fg(theme::TEXT_PRIMARY),
-        StyleToken::InlineCode => Style::default().fg(theme::CYAN),
+        StyleToken::Text => Style::default().fg(t.text_primary),
+        StyleToken::InlineCode => Style::default().fg(t.cyan),
         StyleToken::Highlight {
             fg,
             bold,
             italic,
             underline,
         } => {
-            let mut s = Style::default().fg(seg_color(*fg).unwrap_or(theme::TEXT_PRIMARY));
+            let mut s = Style::default().fg(seg_color(*fg).unwrap_or(t.text_primary));
             if *bold {
                 s = s.bold();
             }
@@ -183,10 +187,10 @@ fn md_style(token: &StyleToken, emph: &Emphasis) -> Style {
             }
             s
         }
-        StyleToken::Heading => Style::default().fg(theme::ACCENT).bold(),
-        StyleToken::CodeBar | StyleToken::ListMarker => Style::default().fg(theme::TEXT_TERTIARY),
+        StyleToken::Heading => Style::default().fg(t.accent).bold(),
+        StyleToken::CodeBar | StyleToken::ListMarker => Style::default().fg(t.text_tertiary),
         StyleToken::TableBorder | StyleToken::HorizontalRule => {
-            Style::default().fg(theme::TEXT_TERTIARY)
+            Style::default().fg(t.text_tertiary)
         }
     };
     if emph.bold {
@@ -230,7 +234,7 @@ fn thinking_block(text: &str, width: usize) -> Vec<Line<'static>> {
         .map(|chunk| {
             Line::from(Span::styled(
                 chunk,
-                Style::default().fg(theme::TEXT_SECONDARY),
+                Style::default().fg(theme::current().text_secondary),
             ))
         })
         .collect()
@@ -247,10 +251,10 @@ fn notice_block(tone: Tone, text: &str, width: usize) -> Vec<Line<'static>> {
             Line::from(vec![
                 Span::styled(
                     if i == 0 { "◆ " } else { "  " },
-                    Style::default().fg(theme::tone_color(tone)),
+                    Style::default().fg(theme::current().tone_color(tone)),
                 ),
                 Span::styled("  ", Style::default()),
-                Span::styled(chunk, Style::default().fg(theme::TEXT_TERTIARY)),
+                Span::styled(chunk, Style::default().fg(theme::current().text_tertiary)),
             ])
         })
         .collect()
@@ -275,10 +279,12 @@ fn tool_summary(kind: &ToolKind) -> String {
 }
 
 fn diff_badge(diff: Option<DiffState>) -> Option<(&'static str, ratatui::style::Color)> {
+    let t = theme::current();
+
     match diff {
-        Some(DiffState::Pending) => Some(("[needs approval]", theme::WARNING)),
-        Some(DiffState::Approved) => Some(("[approved]", theme::SUCCESS)),
-        Some(DiffState::Rejected) => Some(("[rejected]", theme::DANGER)),
+        Some(DiffState::Pending) => Some(("[needs approval]", t.warning)),
+        Some(DiffState::Approved) => Some(("[approved]", t.success)),
+        Some(DiffState::Rejected) => Some(("[rejected]", t.danger)),
         None => None,
     }
 }
@@ -369,16 +375,14 @@ fn tool_block(
     Option<usize>,
     Option<hyperlink::Hyperlink>,
 ) {
+    let t = theme::current();
+
     // Hovered collapsible cards lift to a slightly lighter background.
-    let card_bg = if hovered {
-        theme::BG_OVERLAY
-    } else {
-        theme::BG_SURFACE
-    };
+    let card_bg = if hovered { t.bg_overlay } else { t.bg_surface };
     let surf = surface_style_with(card_bg);
     let marker = if focused { "▌" } else { " " };
     let marker_style = if focused {
-        Style::default().fg(theme::ACCENT).bg(card_bg)
+        Style::default().fg(t.accent).bg(card_bg)
     } else {
         surf
     };
@@ -389,26 +393,26 @@ fn tool_block(
         ToolKind::Read { .. } | ToolKind::Grep { .. } => {
             header.push(Span::styled(
                 if collapsed { "▸ " } else { "▾ " }.to_string(),
-                Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+                Style::default().fg(t.text_tertiary).bg(card_bg),
             ));
         }
         ToolKind::Bash { .. } => {
             header.push(Span::styled(
                 "$ ",
-                Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+                Style::default().fg(t.text_tertiary).bg(card_bg),
             ));
         }
         ToolKind::Edit { .. } => {
             header.push(Span::styled(
                 if collapsed { "▸ " } else { "▾ " }.to_string(),
-                Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+                Style::default().fg(t.text_tertiary).bg(card_bg),
             ));
         }
     }
     let prefix_w = spans_width(&header);
     header.push(Span::styled(
         tool_label(kind),
-        Style::default().fg(theme::TEXT_SECONDARY).bg(card_bg),
+        Style::default().fg(t.text_secondary).bg(card_bg),
     ));
     // OSC-8 link target: the path text inside the header label. Columns
     // count from the row start (marker + caret + label prefix). The row
@@ -438,7 +442,7 @@ fn tool_block(
     let badge = diff_badge(diff);
     let right = match (badge, kind) {
         (Some((text, color)), _) => Some((text.to_string(), color)),
-        (None, k) if k.collapsible() => Some((tool_summary(k), theme::TEXT_TERTIARY)),
+        (None, k) if k.collapsible() => Some((tool_summary(k), t.text_tertiary)),
         _ => None,
     };
     if let Some((text, color)) = right {
@@ -463,6 +467,7 @@ fn tool_block(
     }
 
     fn gutter_span(nr: usize, w: usize, bg: ratatui::style::Color) -> Span<'static> {
+        let t = theme::current();
         let text = if nr == 0 {
             " ".repeat(w)
         } else {
@@ -470,7 +475,7 @@ fn tool_block(
         };
         Span::styled(
             format!("{text} "),
-            Style::default().fg(theme::TEXT_TERTIARY).bg(bg),
+            Style::default().fg(t.text_tertiary).bg(bg),
         )
     }
 
@@ -487,10 +492,11 @@ fn tool_block(
         card_bg: ratatui::style::Color,
         surf: Style,
     ) -> Line<'static> {
+        let t = theme::current();
         let (sign, fg, bg) = if is_add {
-            ("+ ", theme::DIFF_ADD_TEXT, theme::DIFF_ADD_BG)
+            ("+ ", t.diff_add_text, t.diff_add_bg)
         } else {
-            ("- ", theme::DIFF_DEL_TEXT, theme::DIFF_DEL_BG)
+            ("- ", t.diff_del_text, t.diff_del_bg)
         };
         let base = Style::default().fg(fg).bg(bg);
         let emph_style = base.bold();
@@ -542,7 +548,7 @@ fn tool_block(
                     Span::styled(indent.clone(), surf),
                     Span::styled(
                         text.clone(),
-                        Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+                        Style::default().fg(t.text_tertiary).bg(card_bg),
                     ),
                 ],
                 width,
@@ -582,7 +588,7 @@ fn tool_block(
                     Span::styled(indent.clone(), surf),
                     Span::styled(
                         " ...".to_string(),
-                        Style::default().fg(theme::TEXT_TERTIARY).bg(card_bg),
+                        Style::default().fg(t.text_tertiary).bg(card_bg),
                     ),
                 ],
                 width,
@@ -594,9 +600,9 @@ fn tool_block(
             }
             LineKind::Add | LineKind::Del => {
                 let (sign, fg, bg) = if ln.kind == LineKind::Add {
-                    ("+ ", theme::DIFF_ADD_TEXT, theme::DIFF_ADD_BG)
+                    ("+ ", t.diff_add_text, t.diff_add_bg)
                 } else {
-                    ("- ", theme::DIFF_DEL_TEXT, theme::DIFF_DEL_BG)
+                    ("- ", t.diff_del_text, t.diff_del_bg)
                 };
                 let text = format!("{sign}{}", ln.text);
                 let mut spans = vec![
@@ -612,7 +618,7 @@ fn tool_block(
             LineKind::Context => {
                 // Source-bearing Context rows (Read cards, edit context)
                 // get syntax colors patched over the card surface.
-                let base = Style::default().fg(theme::TEXT_SECONDARY).bg(card_bg);
+                let base = Style::default().fg(t.text_secondary).bg(card_bg);
                 let segs = hl
                     .as_mut()
                     .map(|h| h.highlight_line(&ln.text))
@@ -633,10 +639,10 @@ fn tool_block(
             }
             kind => {
                 let (prefix, fg) = match kind {
-                    LineKind::Cmd => ("$ ", theme::TEXT_PRIMARY),
-                    LineKind::Muted => ("", theme::TEXT_TERTIARY),
-                    LineKind::Success => ("", theme::SUCCESS),
-                    _ => ("", theme::TEXT_SECONDARY),
+                    LineKind::Cmd => ("$ ", t.text_primary),
+                    LineKind::Muted => ("", t.text_tertiary),
+                    LineKind::Success => ("", t.success),
+                    _ => ("", t.text_secondary),
                 };
                 pad_row(
                     vec![
@@ -660,16 +666,8 @@ fn tool_block(
 
     // --- approve / reject actions for pending diffs ---
     if diff == Some(DiffState::Pending) {
-        let hint_fg = if focused {
-            theme::SUCCESS
-        } else {
-            theme::TEXT_TERTIARY
-        };
-        let rej_fg = if focused {
-            theme::DANGER
-        } else {
-            theme::TEXT_TERTIARY
-        };
+        let hint_fg = if focused { t.success } else { t.text_tertiary };
+        let rej_fg = if focused { t.danger } else { t.text_tertiary };
         lines.push(pad_row(
             vec![
                 Span::styled(indent.clone(), surf),
@@ -689,6 +687,8 @@ fn tool_block(
 }
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = theme::current();
+
     let inner = Rect {
         x: area.x + MARGIN,
         y: area.y + 1,
@@ -709,7 +709,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // left border reads as one continuous line.
     let bar_blank = |width: usize| {
         user_line(
-            vec![Span::styled("▎", Style::default().fg(theme::ACCENT))],
+            vec![Span::styled("▎", Style::default().fg(t.accent))],
             width,
         )
     };
@@ -717,18 +717,18 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     if app.conversation.messages.is_empty() {
         let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(
             "No messages yet.",
-            Style::default().fg(theme::TEXT_TERTIARY),
+            Style::default().fg(t.text_tertiary),
         ))];
         lines.push(Line::default());
         #[cfg(test)]
         lines.push(Line::from(Span::styled(
             "Send a message — the mock provider will replay the scripted \"session refresh\" scenario.",
-            Style::default().fg(theme::TEXT_DISABLED),
+            Style::default().fg(t.text_disabled),
         )));
         #[cfg(not(test))]
         lines.push(Line::from(Span::styled(
             "Send a message to get started.",
-            Style::default().fg(theme::TEXT_DISABLED),
+            Style::default().fg(t.text_disabled),
         )));
         app.view.segments.push(Segment::with_lines(lines));
     }
@@ -959,6 +959,8 @@ mod tests {
     /// W1: a notice is one muted line with a tone-colored prefix glyph.
     #[test]
     fn notice_renders_tone_glyph_and_muted_text() {
+        let t = theme::current();
+
         use super::{notice_block, theme};
         use crate::tui::app::{App, Message};
         use crate::tui::provider::{AgentEvent, Tone};
@@ -969,8 +971,8 @@ mod tests {
         let lines = notice_block(Tone::Warning, "retrying (attempt 1)", 80);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].content, "◆ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme::WARNING));
-        assert_eq!(lines[0].spans[2].style.fg, Some(theme::TEXT_TERTIARY));
+        assert_eq!(lines[0].spans[0].style.fg, Some(t.warning));
+        assert_eq!(lines[0].spans[2].style.fg, Some(t.text_tertiary));
 
         // App level: AgentEvent::Notice lands as a Message::Notice and
         // renders into the transcript.
@@ -1000,7 +1002,7 @@ mod tests {
             .expect("notice text rendered");
         assert!(rows[y].contains('◆'), "tone glyph rendered: {:?}", rows[y]);
         let gx = rows[y].find('◆').unwrap() as u16;
-        assert_eq!(buf[(gx, y as u16)].fg, theme::DANGER);
+        assert_eq!(buf[(gx, y as u16)].fg, t.danger);
     }
 
     /// Auto-review renders as its own line *under* the tool card; the card
@@ -1051,6 +1053,8 @@ mod tests {
 
     #[test]
     fn assistant_markdown_read_highlight_and_painted_card_header() {
+        let t = theme::current();
+
         use super::theme;
         use crate::tui::app::{App, Message};
         use ratatui::Terminal;
@@ -1088,7 +1092,7 @@ mod tests {
         let hy = rows.iter().position(|r| r.contains("Title")).unwrap();
         let hx = rows[hy].find("Title").unwrap() as u16;
         let c = &buf[(hx, hy as u16)];
-        assert_eq!(c.fg, theme::ACCENT, "heading fg");
+        assert_eq!(c.fg, t.accent, "heading fg");
         assert!(c.modifier.contains(Modifier::BOLD), "heading bold");
 
         // Read card body is syntax highlighted: some source cell carries a
@@ -1098,8 +1102,8 @@ mod tests {
             let c = &buf[(x, cy as u16)];
             matches!(c.symbol(), "f" | "m" | "(" | ")")
                 && c.fg != Color::Reset
-                && c.fg != theme::TEXT_SECONDARY
-                && c.fg != theme::TEXT_TERTIARY
+                && c.fg != t.text_secondary
+                && c.fg != t.text_tertiary
         });
         assert!(
             hl_found,
@@ -1204,7 +1208,7 @@ mod tests {
             ctx.spans.iter().any(|s| {
                 s.content.contains("let")
                     && s.style.fg.is_some()
-                    && s.style.fg != Some(theme::TEXT_SECONDARY)
+                    && s.style.fg != Some(theme::current().text_secondary)
             }),
             "context row is not syntax highlighted: {:?}",
             ctx.spans

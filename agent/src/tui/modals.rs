@@ -10,6 +10,7 @@ use crate::model_registry::{self, ModelTier};
 use crate::storage::StateDir;
 use crate::tui::app::App;
 use crate::tui::provider::Command;
+use crate::tui::ui::theme;
 
 /// The one modal that may be open at a time. Variants are mutually exclusive
 /// by construction: opening one replaces whatever was open.
@@ -35,6 +36,13 @@ pub enum Modal {
     Sessions {
         entries: Vec<SessionEntry>,
         selected: usize,
+    },
+    /// `/theme`: bundled-theme picker with live preview. `original` is the
+    /// theme active on open; cancel restores it (F.5, reference theme_picker).
+    ThemePicker {
+        entries: Vec<String>,
+        selected: usize,
+        original: String,
     },
 }
 
@@ -102,6 +110,57 @@ impl App {
         // 5. Sessions picker.
         if matches!(self.modal, Modal::Sessions { .. }) {
             self.handle_sessions_key(key, tx);
+            return;
+        }
+
+        // 6. Theme picker.
+        if matches!(self.modal, Modal::ThemePicker { .. }) {
+            self.handle_theme_picker_key(key);
+        }
+    }
+
+    /// Theme picker keys: arrows preview live, Enter applies + persists,
+    /// Esc/Ctrl-C restores the theme active on open. All keys are consumed.
+    fn handle_theme_picker_key(&mut self, key: KeyEvent) {
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        let Modal::ThemePicker {
+            entries,
+            selected,
+            original,
+        } = std::mem::replace(&mut self.modal, Modal::None)
+        else {
+            return;
+        };
+        let preview = |sel: usize, app: &mut Self, entries: &[String]| {
+            if let Some(name) = entries.get(sel) {
+                let _ = theme::set_named(name);
+            }
+            app.modal = Modal::ThemePicker {
+                entries: entries.to_vec(),
+                selected: sel,
+                original: original.clone(),
+            };
+        };
+        let max = entries.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => preview(selected.saturating_sub(1), self, &entries),
+            KeyCode::Down | KeyCode::Char('j') => preview((selected + 1).min(max), self, &entries),
+            KeyCode::Enter => {
+                if let Some(name) = entries.get(selected) {
+                    let _ = theme::set_named(name);
+                    apply_theme_choice(name, theme_state_dir().as_ref());
+                }
+            }
+            // Cancel: restore the theme active on open.
+            KeyCode::Esc => {
+                let _ = theme::set_named(&original);
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') if ctrl => {
+                let _ = theme::set_named(&original);
+            }
+            _ => preview(selected, self, &entries),
         }
     }
 
@@ -287,6 +346,24 @@ fn tier_state_dir() -> Option<StateDir> {
     None
 }
 
+/// Persist the chosen theme name. `dir=None` skips persistence: tests must
+/// not touch the user's real state dir (same pattern as `apply_tier_toggle`).
+pub(crate) fn apply_theme_choice(name: &str, dir: Option<&StateDir>) {
+    if let Some(dir) = dir {
+        let _ = crate::storage::theme::persist_theme_name(dir, name);
+    }
+}
+
+#[cfg(not(test))]
+fn theme_state_dir() -> Option<StateDir> {
+    StateDir::resolve().ok()
+}
+
+#[cfg(test)]
+fn theme_state_dir() -> Option<StateDir> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +509,85 @@ mod tests {
         assert!(rx.try_recv().is_err());
         app.handle_modal_key(ctrl('c'), &tx);
         assert!(matches!(app.modal, Modal::None));
+    }
+
+    #[test]
+    fn theme_picker_opens_on_current_theme() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        theme::set_named("nord").unwrap();
+        let mut app = App::new();
+        app.run_command("theme", &tx);
+        let Modal::ThemePicker {
+            entries,
+            selected,
+            original,
+        } = &app.modal
+        else {
+            panic!("theme command did not open the picker");
+        };
+        assert_eq!(entries, &theme::all_theme_names());
+        assert_eq!(original, "nord");
+        assert_eq!(entries[*selected], "nord");
+        theme::set_named(theme::DEFAULT_THEME).unwrap();
+    }
+
+    #[test]
+    fn theme_picker_arrows_preview_live() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        theme::set_named(theme::DEFAULT_THEME).unwrap();
+        let names = theme::all_theme_names();
+        let idx = names
+            .iter()
+            .position(|n| n == theme::DEFAULT_THEME)
+            .unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.run_command("theme", &tx);
+        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert!(
+            matches!(&app.modal, Modal::ThemePicker { selected, .. } if *selected == idx + 1),
+            "Down moved the cursor one row"
+        );
+        // Moving the cursor swaps the global theme for the highlighted entry.
+        assert_eq!(theme::current_theme_name(), names[idx + 1]);
+    }
+
+    #[test]
+    fn theme_picker_enter_persists_and_esc_restores() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, state) = temp_state_dir();
+
+        // Enter: persist the selection (persistence via the injected dir).
+        let name = theme::all_theme_names()[2].clone();
+        apply_theme_choice(&name, Some(&state));
+        assert_eq!(
+            crate::storage::theme::read_theme_name(&state).as_deref(),
+            Some(name.as_str())
+        );
+
+        // Esc: restore the theme active on open and close.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        theme::set_named(theme::DEFAULT_THEME).unwrap();
+        let mut app = App::new();
+        app.run_command("theme", &tx);
+        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_ne!(theme::current_theme_name(), theme::DEFAULT_THEME);
+        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.modal, Modal::None));
+        assert_eq!(theme::current_theme_name(), theme::DEFAULT_THEME);
+    }
+
+    #[test]
+    fn theme_picker_ctrl_c_restores() {
+        let _guard = theme::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        theme::set_named(theme::DEFAULT_THEME).unwrap();
+        let mut app = App::new();
+        app.run_command("theme", &tx);
+        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        app.handle_modal_key(ctrl('c'), &tx);
+        assert!(matches!(app.modal, Modal::None));
+        assert_eq!(theme::current_theme_name(), theme::DEFAULT_THEME);
     }
 }

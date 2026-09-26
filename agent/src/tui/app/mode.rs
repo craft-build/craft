@@ -28,8 +28,8 @@ impl Mode {
 
     pub(crate) fn color(&self) -> Color {
         match self {
-            Self::Build => theme::MODE_BUILD,
-            Self::Plan => theme::MODE_PLAN,
+            Self::Build => theme::current().mode_build,
+            Self::Plan => theme::current().mode_plan,
         }
     }
 }

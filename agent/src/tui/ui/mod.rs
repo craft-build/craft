@@ -22,7 +22,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.clear_expired_flash();
     let area = f.area();
     f.render_widget(
-        Block::default().style(Style::default().bg(theme::BG_APP)),
+        Block::default().style(Style::default().bg(theme::current().bg_app)),
         area,
     );
 
@@ -77,7 +77,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(
         Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(theme::BORDER_SUBTLE)),
+            .border_style(Style::default().fg(theme::current().border_subtle)),
         bottom,
     );
     // Nested layout (instead of manual offsets) so tiny terminals that shrink
@@ -112,6 +112,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     overlays::render_stats(f, app, area);
     overlays::render_help(f, app, area);
     overlays::render_sessions(f, app, area);
+    overlays::render_theme_picker(f, app, area);
 
     // Snapshot the frame as plain text (selection copy extracts from this),
     // then draw the current text selection as reversed cells.
@@ -394,6 +395,19 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Reject this diff?"));
         assert!(text.contains("src/auth/refresh.ts"));
+
+        // Theme picker: title, windowed list, and the current-theme marker.
+        let entries = theme::all_theme_names();
+        let selected = entries.len().saturating_sub(1); // last row: forces windowing
+        app.modal = crate::tui::modals::Modal::ThemePicker {
+            entries,
+            selected,
+            original: theme::DEFAULT_THEME.to_owned(),
+        };
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Themes"));
+        assert!(text.contains("zenburn")); // last entry stays visible via the window
     }
 
     /// The palette scrolls its window so the highlighted item stays visible

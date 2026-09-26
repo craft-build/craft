@@ -7,6 +7,7 @@ use super::{App, Message};
 use crate::tui::modals::Modal;
 use crate::tui::provider::{AgentEvent, Command, Tone};
 use crate::tui::selection::copy_to_clipboard;
+use crate::tui::ui::theme;
 
 /// One command as shown in slash completion and the command palette. Both
 /// surfaces derive from [`COMMANDS`] so a command can never be advertised
@@ -115,6 +116,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         label: "Toggle auto-review",
         hint: "/auto-review",
         desc: "Toggle LLM auto-review of permissions",
+    },
+    CommandSpec {
+        id: "theme",
+        slash: Some("/theme"),
+        alias: None,
+        label: "Switch color theme",
+        hint: "/theme",
+        desc: "Switch color theme",
     },
     CommandSpec {
         id: "help",
@@ -236,6 +245,7 @@ impl App {
                 let _ = tx.send(Command::Reset);
             }
             "sessions" => self.open_sessions(),
+            "theme" => self.open_theme_picker(),
             "toggle-sidebar" => self.session.sidebar_open = !self.session.sidebar_open,
             "model" => self.open_model_menu(),
             "clear" => {
@@ -268,6 +278,21 @@ impl App {
             "quit" => self.should_quit = true,
             _ => {}
         }
+    }
+
+    /// `/theme`: open the picker with the cursor on the active theme.
+    pub(crate) fn open_theme_picker(&mut self) {
+        let entries = theme::all_theme_names();
+        let original = theme::current_theme_name();
+        let selected = entries
+            .iter()
+            .position(|name| *name == original)
+            .unwrap_or(0);
+        self.modal = Modal::ThemePicker {
+            entries,
+            selected,
+            original,
+        };
     }
 
     pub(crate) fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
