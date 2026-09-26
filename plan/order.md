@@ -132,7 +132,7 @@ Fixes:
 93. A.5 sessions (model-side)
 94. B.11 MCP client
 95. A.5 task (subagents) — single-tier first, then tiers/isolation/output_schema
-96. F.3 Subagent task chats
+96. F.3 Subagent task chats + per-session shell state (ShellState id bookkeeping for bang-mode) + bang-prefix composer highlighting (syntax-highlight the `!`/`!!` prefix while typing; engine from task 61)
 97. C.12 Advisor (post-turn review)
 98. D.5 auto-retrieve (semantic, needs embeddings)
 99. C.17 Flow mode + J.6 Flow workstreams (XL — last)

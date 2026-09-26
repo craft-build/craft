@@ -380,6 +380,10 @@ impl CraftProvider {
         let files: Files = Files::default();
         let (cancel_flag, _) = run::cancel_channel();
         let mut current_turn: Option<AbortHandle> = None;
+        // Bang-mode shell bookkeeping: id sequence and visible-run results
+        // waiting for the next turn (see `Command::SendMessage`).
+        let mut shell_seq: u64 = 0;
+        let pending_shell: Arc<std::sync::Mutex<Vec<crate::history::Message>>> = Arc::default();
         let permissions = self.permissions;
         let snapshots = workspace.snapshots().clone();
         let instructions_text = self.instructions.text;
@@ -442,6 +446,10 @@ impl CraftProvider {
                     if let Some(h) = current_turn.take() {
                         h.abort();
                     }
+                    // Bang-mode results queue until the next turn: pushing
+                    // them into the history directly would race the running
+                    // turn's whole-history commit.
+                    drain_shell_results(&pending_shell, &state).await;
                     let cancel_token = cancel_flag.token();
                     let handle = tokio::spawn(run_turn(
                         TurnCtx {
@@ -459,6 +467,16 @@ impl CraftProvider {
                         text,
                     ));
                     current_turn = Some(handle.abort_handle());
+                }
+                Command::Shell { command, visible } => {
+                    shell_seq += 1;
+                    let id = format!("shell-{shell_seq}");
+                    let tx = evt_tx.clone();
+                    let cancel = cancel_flag.token();
+                    let results = Arc::clone(&pending_shell);
+                    tokio::spawn(crate::tui::shell::run_shell(
+                        id, command, visible, tx, cancel, results,
+                    ));
                 }
                 Command::Approve { id, always } => {
                     let answer = if always {
@@ -529,6 +547,10 @@ impl CraftProvider {
                 }
                 Command::Clear => {
                     interrupt(&mut current_turn);
+                    pending_shell
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
                     // Reset through `linked` so the fresh session's
                     // compaction state keeps working dedup/guardrails
                     // handles; a bare default would strand the caches the
@@ -543,6 +565,10 @@ impl CraftProvider {
                 }
                 Command::Reset => {
                     interrupt(&mut current_turn);
+                    pending_shell
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
                     *state.lock().await = SessionState::linked().with_store(
                         state_dir.as_ref(),
                         &cwd,
@@ -596,6 +622,24 @@ impl CraftProvider {
     }
 }
 
+/// Move queued bang-mode visible-run results into the session history.
+/// Called at the next `SendMessage`: pushing them when they finish would
+/// race the running turn's whole-history commit (turn.rs replaces
+/// `session.history` only on success).
+async fn drain_shell_results(
+    pending: &Arc<std::sync::Mutex<Vec<crate::history::Message>>>,
+    state: &Arc<Mutex<SessionState>>,
+) {
+    let queued = pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain(..)
+        .collect::<Vec<_>>();
+    if !queued.is_empty() {
+        state.lock().await.history.extend(queued);
+    }
+}
+
 impl Provider for CraftProvider {
     fn start(
         self,
@@ -616,6 +660,30 @@ impl Provider for CraftProvider {
 mod tests {
     use super::*;
     use crate::history::Message;
+
+    /// Bang-mode visible-run results queue and are drained into the session
+    /// history exactly once, at the next `SendMessage`.
+    #[tokio::test]
+    async fn shell_results_drain_into_history_once() {
+        let state = Arc::new(Mutex::new(SessionState::linked()));
+        let pending: Arc<std::sync::Mutex<Vec<crate::history::Message>>> = Arc::default();
+        pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
+
+        drain_shell_results(&pending, &state).await;
+        assert_eq!(state.lock().await.history.len(), 1);
+        assert_eq!(
+            state.lock().await.history[0].text(),
+            "I ran: $ ls\n\nOutput:\nsrc"
+        );
+        assert!(pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+
+        // A second drain with nothing queued is a no-op.
+        drain_shell_results(&pending, &state).await;
+        assert_eq!(state.lock().await.history.len(), 1);
+    }
 
     /// W10: a persisted session is listed by `/sessions`, and loading it
     /// repopulates the history plus the conversation view.

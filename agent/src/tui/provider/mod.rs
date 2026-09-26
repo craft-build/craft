@@ -19,6 +19,10 @@ use crate::run::AgentMode;
 pub enum Command {
     /// User submitted a message in the composer, in the given mode.
     SendMessage(String, AgentMode),
+    /// Bang-mode (`!` / `!!`): run a shell command directly, outside the
+    /// model loop. `visible` runs enter history as an `I ran: …` user
+    /// message; hidden runs never reach the model.
+    Shell { command: String, visible: bool },
     /// User approved a pending diff (by tool-call id). `always` persists an
     /// allow rule to the project's `permissions.toml` instead of the session.
     Approve { id: String, always: bool },

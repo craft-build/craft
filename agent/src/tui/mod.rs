@@ -11,6 +11,7 @@ mod notify;
 pub mod provider;
 mod repaint;
 mod selection;
+mod shell;
 mod ui;
 
 use std::cell::RefCell;

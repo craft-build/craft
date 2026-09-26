@@ -25,6 +25,7 @@ use crate::tui::provider::{
     AgentEvent, Command, LoadedMessage, PlanItem, Status, TouchedFile, UsageRow,
 };
 use crate::tui::repaint;
+use crate::tui::shell;
 use crate::tui::ui::scrollback::ScrollPos;
 
 pub(crate) use self::mode::Mode;
@@ -316,6 +317,29 @@ impl App {
             self.history_index = None;
             self.history_draft.clear();
             self.run_slash(cmd, tx);
+            return;
+        }
+        // Bang-mode: run the line as a shell command, bypassing the model.
+        if let Some(prefix) = shell::parse_shell_prefix(&text) {
+            let cmd = prefix.command.trim();
+            if cmd == "cd" || cmd.starts_with("cd ") {
+                // The subshell cannot change the session's cwd; only /cd can.
+                self.flash("Only /cd can change the working directory");
+            }
+            let sigil = if prefix.visible { "!" } else { "!!" };
+            self.conversation.assistant_open = false;
+            self.conversation
+                .messages
+                .push(Message::User(format!("{sigil} {}", prefix.command)));
+            let _ = tx.send(Command::Shell {
+                command: prefix.command,
+                visible: prefix.visible,
+            });
+            self.input_history.push(text);
+            self.history_index = None;
+            self.history_draft.clear();
+            self.composer.clear();
+            self.view.follow = true;
             return;
         }
         self.conversation.assistant_open = false;

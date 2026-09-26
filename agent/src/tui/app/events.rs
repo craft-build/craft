@@ -842,6 +842,69 @@ mod tests {
         assert!(app.should_quit, "idle press quits");
     }
 
+    /// Bang-mode submit: `! cmd` sends a visible `Command::Shell` and shows
+    /// the echoed command instead of a model turn.
+    #[test]
+    fn submit_bang_sends_visible_shell_command() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("! echo hi".into());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::Shell { command, visible }) if command == "echo hi" && visible
+        ));
+        assert!(rx.try_recv().is_err(), "no SendMessage follows");
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(Message::User(text)) if text == "! echo hi"
+        ));
+        assert_eq!(app.input_history.get(0), Some("! echo hi"));
+        assert!(app.composer.text.is_empty());
+    }
+
+    /// `!! cmd` runs hidden from the model: `visible: false`, no history
+    /// result will be queued, and the echo uses the double sigil.
+    #[test]
+    fn submit_double_bang_sends_hidden_shell_command() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("!! make".into());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::Shell { command, visible }) if command == "make" && !visible
+        ));
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(Message::User(text)) if text == "!! make"
+        ));
+    }
+
+    /// A lone sigil or interior bang stays normal input.
+    #[test]
+    fn submit_lone_bang_is_a_normal_message() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("!".into());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(matches!(rx.try_recv(), Ok(Command::SendMessage(text, _)) if text == "!"));
+    }
+
+    /// `cd` through bang-mode flashes the hint but still runs (reference
+    /// behavior); the echo uses the single sigil.
+    #[test]
+    fn submit_bang_cd_flashes() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.set_text("! cd /tmp".into());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert_eq!(
+            app.flash_text(),
+            Some("Only /cd can change the working directory")
+        );
+    }
+
     /// Effort lives on Ctrl-F; Ctrl-E moves to the end of the line.
     #[test]
     fn ctrl_f_cycles_effort_and_ctrl_e_moves_to_line_end() {

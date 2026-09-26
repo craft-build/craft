@@ -284,6 +284,17 @@ impl Provider for MockProvider {
                         };
                         current = Some(handle.abort_handle());
                     }
+                    Command::Shell { command, .. } => {
+                        // The scripted mock cannot run shells; echo the
+                        // command back as a finished bash card.
+                        let _ = evt_tx.send(AgentEvent::ToolCall(ToolCallData {
+                            id: format!("shell-{turns}"),
+                            kind: ToolKind::Bash { cmd: command },
+                            lines: Vec::new(),
+                            awaiting_approval: false,
+                        }));
+                        let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+                    }
                     Command::Approve { .. } => {
                         // The scripted diff completes the linked plan step.
                         if let Some(p) = plan.get_mut(2) {
