@@ -32,7 +32,9 @@ use turn::{TurnCtx, run_turn};
 use usage_recorder::UsageLedger;
 
 use super::cards::{self, Files};
-use super::{AgentEvent, Command, LoadedMessage, ModelChoice, Provider, Status, Tone};
+use super::{
+    AgentEvent, Command, LoadedMessage, ModelChoice, Provider, Status, Tone, UsageFetchState,
+};
 
 /// Render an error and its sources as one client-facing message.
 pub(super) fn report(error: crate::error::Error) -> String {
@@ -383,6 +385,9 @@ impl CraftProvider {
         // Bang-mode shell bookkeeping: id sequence and visible-run results
         // waiting for the next turn (see `Command::SendMessage`).
         let mut shell_seq: u64 = 0;
+        // Quota-fetch generation: shared with the spawned fetches so a slow
+        // stale answer never overwrites a newer one (rapid Ctrl+R).
+        let usage_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pending_shell: Arc<std::sync::Mutex<Vec<crate::history::Message>>> = Arc::default();
         let permissions = self.permissions;
         let snapshots = workspace.snapshots().clone();
@@ -507,6 +512,44 @@ impl CraftProvider {
                 Command::GetUsage => {
                     let rows = state.lock().await.usage.rows();
                     let _ = evt_tx.send(AgentEvent::UsageSnapshot(rows));
+                }
+                Command::FetchUsage => {
+                    // Reference refresh_usage (event_loop.rs:2033): mark
+                    // loading, then resolve off-loop so the UI keeps ticking.
+                    // Each fetch carries a generation; answers from an older
+                    // generation than the latest request are dropped so a
+                    // slow stale fetch can't overwrite a newer answer.
+                    let config = match config.providers.get(&selection.provider) {
+                        Some(config) => Some(config.clone()),
+                        None => {
+                            let _ = evt_tx.send(AgentEvent::UsageQuota(UsageFetchState::Error(
+                                format!("provider {:?} not found in config", selection.provider),
+                            )));
+                            None
+                        }
+                    };
+                    let fetch_gen = usage_gen
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    let tx = evt_tx.clone();
+                    let latest = Arc::clone(&usage_gen);
+                    let _ = evt_tx.send(AgentEvent::UsageQuota(UsageFetchState::Loading));
+                    let Some(config) = config else {
+                        // Error already emitted above; no fetch to run.
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let state = match crate::providers::usage_fetch::fetch_usage(&config).await
+                        {
+                            Ok(Some(usage)) => UsageFetchState::Ready(usage),
+                            Ok(None) => UsageFetchState::Unsupported,
+                            Err(error) => UsageFetchState::Error(report(error)),
+                        };
+                        if latest.load(std::sync::atomic::Ordering::SeqCst) != fetch_gen {
+                            return; // superseded by a newer fetch
+                        }
+                        let _ = tx.send(AgentEvent::UsageQuota(state));
+                    });
                 }
                 Command::Compact => {
                     if current_turn.is_some() {

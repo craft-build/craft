@@ -55,7 +55,9 @@ impl UsageLedger {
                 }
             })
             .collect();
-        rows.sort_by(|a, b| a.model.cmp(&b.model));
+        // Total-desc order, like the reference usage modal's per-model
+        // section.
+        rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.model.cmp(&b.model)));
         rows
     }
 }
@@ -187,6 +189,11 @@ mod tests {
         assert!(records.iter().all(|r| r.session_id == "s1"));
 
         assert!(matches!(rx.try_recv(), Ok(AgentEvent::UsageSnapshot(rows)) if rows.len() == 2));
+
+        // `/usage` sorts its per-model section by total tokens, desc.
+        let rows = session.usage.rows();
+        assert_eq!(rows[0].model, "anthropic/claude-sonnet-5");
+        assert_eq!(rows[1].model, "mock/free-model");
     }
 
     #[tokio::test]

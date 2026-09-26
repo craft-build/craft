@@ -9,7 +9,7 @@ use tokio::time::sleep;
 
 use super::{
     AgentEvent, Command, LineKind, PlanItem, Provider, Status, Tone, ToolCallData, ToolKind,
-    ToolLine, TouchedFile,
+    ToolLine, TouchedFile, UsageFetchState,
 };
 
 pub struct MockProvider;
@@ -376,6 +376,10 @@ impl Provider for MockProvider {
                     Command::GetUsage => {
                         // The scripted demo tracks no real usage.
                         let _ = evt_tx.send(AgentEvent::UsageSnapshot(Vec::new()));
+                    }
+                    Command::FetchUsage => {
+                        // No backing provider in the demo.
+                        let _ = evt_tx.send(AgentEvent::UsageQuota(UsageFetchState::Unsupported));
                     }
                     Command::Compact => {
                         // Mirror the real provider: announce the run, then the

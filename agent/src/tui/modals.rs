@@ -51,6 +51,10 @@ pub struct SessionEntry {
 #[derive(Clone, Debug, Default)]
 pub struct StatsView {
     pub rows: Vec<crate::tui::provider::UsageRow>,
+    /// Cost per session id, spend desc (capped at build time).
+    pub by_session: Vec<(String, f64, u64)>,
+    /// Models beyond the rendered cap.
+    pub models_overflow: usize,
     pub total_cost: f64,
     pub total_tokens: u64,
     pub sessions: usize,
@@ -81,8 +85,16 @@ impl App {
             return;
         }
 
-        // 4. Read-only usage/stats/help sheets: any key dismisses.
-        if matches!(self.modal, Modal::Usage(_) | Modal::Stats(_) | Modal::Help) {
+        // 4. Read-only usage/stats/help sheets.
+        if matches!(self.modal, Modal::Usage(_)) {
+            self.handle_usage_key(key, tx, true);
+            return;
+        }
+        if matches!(self.modal, Modal::Stats(_)) {
+            self.handle_usage_key(key, tx, false);
+            return;
+        }
+        if matches!(self.modal, Modal::Help) {
             self.modal = Modal::None;
             return;
         }
@@ -120,6 +132,33 @@ impl App {
                 }
             }
             // Esc or any other key closes the picker (already None).
+            _ => {}
+        }
+    }
+
+    /// `/usage` and `/stats` sheet keys: close on Esc/Ctrl-C, scroll the
+    /// line list, and reload the provider quota on Ctrl+R when the sheet
+    /// supports it (usage only). All keys are consumed (F.5, reference
+    /// usage/stats modals).
+    fn handle_usage_key(
+        &mut self,
+        key: KeyEvent,
+        tx: &mpsc::UnboundedSender<Command>,
+        allow_refresh: bool,
+    ) {
+        let ctrl = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.modal = Modal::None,
+            KeyCode::Char('c') | KeyCode::Char('C') if ctrl => self.modal = Modal::None,
+            KeyCode::Char('r') | KeyCode::Char('R') if ctrl && allow_refresh => {
+                let _ = tx.send(Command::FetchUsage);
+            }
+            KeyCode::Up => self.usage_scroll = self.usage_scroll.saturating_sub(1),
+            KeyCode::Down => self.usage_scroll = self.usage_scroll.saturating_add(1),
+            KeyCode::PageUp => self.usage_scroll = self.usage_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.usage_scroll = self.usage_scroll.saturating_add(10),
             _ => {}
         }
     }
@@ -328,6 +367,70 @@ mod tests {
         assert!(rx.try_recv().is_err(), "no SelectModel command is sent");
         // Non-tier keys (Esc) still close.
         app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn usage_overlay_ctrl_r_refetches_and_stays_open() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.modal = Modal::Usage(Vec::new());
+        app.handle_modal_key(ctrl('r'), &tx);
+        assert!(
+            matches!(app.modal, Modal::Usage(_)),
+            "ctrl+r keeps the overlay open"
+        );
+        assert!(matches!(rx.try_recv(), Ok(Command::FetchUsage)));
+    }
+
+    #[test]
+    fn usage_overlay_esc_and_ctrl_c_close() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.modal = Modal::Usage(Vec::new());
+        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.modal, Modal::None));
+        app.modal = Modal::Usage(Vec::new());
+        app.handle_modal_key(ctrl('c'), &tx);
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    #[test]
+    fn usage_overlay_scrolls_and_consumes_other_keys() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.modal = Modal::Usage(Vec::new());
+        for _ in 0..3 {
+            app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        }
+        assert_eq!(app.usage_scroll, 3);
+        app.handle_modal_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &tx);
+        assert_eq!(app.usage_scroll, 0);
+        // Plain 'q' is consumed: modal stays open, no quit.
+        app.handle_modal_key(key('q'), &tx);
+        assert!(matches!(app.modal, Modal::Usage(_)));
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn stats_overlay_scrolls_instead_of_closing_and_has_no_reload() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.modal = Modal::Stats(StatsView::default());
+        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.usage_scroll, 1);
+        assert!(
+            matches!(app.modal, Modal::Stats(_)),
+            "arrows scroll, they do not close"
+        );
+        // Ctrl+R is usage-only: no quota fetch from the stats sheet.
+        app.handle_modal_key(ctrl('r'), &tx);
+        assert!(rx.try_recv().is_err());
+        app.handle_modal_key(ctrl('c'), &tx);
         assert!(matches!(app.modal, Modal::None));
     }
 }

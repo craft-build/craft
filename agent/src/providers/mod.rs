@@ -8,11 +8,13 @@ mod dynamic;
 mod openai_compat;
 mod reauth;
 mod registry;
+pub mod usage_fetch;
 
 pub use catalog::{CatalogEntry, CatalogModel};
 pub use dynamic::DynamicModel;
 pub use reauth::reauth_hook;
 pub use registry::{Provider, ProviderKind};
+pub use usage_fetch::{ModelUsageRow, ProviderUsage, UsageLimit};
 
 use std::time::Duration;
 

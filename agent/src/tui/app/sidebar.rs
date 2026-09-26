@@ -17,36 +17,51 @@ pub(crate) fn load_stats() -> StatsView {
         return empty;
     };
     match ledger.summary() {
-        Ok(summary) if summary.records > 0 => {
-            let sessions = summary.session_count();
-            let total_cost = summary.total_cost;
-            let total_tokens = summary.total_tokens;
-            StatsView {
-                rows: summary
-                    .by_model
-                    .into_iter()
-                    .map(|(model, cost, tokens)| {
-                        // A $0 total on a spec the pricing table does not know
-                        // means unpriced, not free — show "—" like `/usage`.
-                        let cost = if cost == 0.0 && crate::usage::resolve_spec(&model).is_none() {
-                            None
-                        } else {
-                            Some(cost)
-                        };
-                        UsageRow {
-                            model,
-                            tokens,
-                            cost,
-                        }
-                    })
-                    .collect(),
-                total_cost,
-                total_tokens,
-                sessions,
-                empty: false,
-            }
-        }
+        Ok(summary) if summary.records > 0 => stats_view(summary),
         _ => empty,
+    }
+}
+
+/// Build the `/stats` view from a cost-ledger summary, capping the by-model
+/// table at 12 rows (the rest folds into an overflow line) and the top
+/// sessions at 8, like the reference stats modal.
+fn stats_view(summary: crate::storage::stats::CostSummary) -> StatsView {
+    const MAX_MODEL_ROWS: usize = 12;
+    const MAX_SESSION_ROWS: usize = 8;
+    let sessions = summary.session_count();
+    let models_overflow = summary.by_model.len().saturating_sub(MAX_MODEL_ROWS);
+    let by_session = summary
+        .by_session
+        .into_iter()
+        .take(MAX_SESSION_ROWS)
+        .collect::<Vec<_>>();
+
+    StatsView {
+        rows: summary
+            .by_model
+            .into_iter()
+            .take(MAX_MODEL_ROWS)
+            .map(|(model, cost, tokens)| {
+                // A $0 total on a spec the pricing table does not know
+                // means unpriced, not free — show "—" like `/usage`.
+                let cost = if cost == 0.0 && crate::usage::resolve_spec(&model).is_none() {
+                    None
+                } else {
+                    Some(cost)
+                };
+                UsageRow {
+                    model,
+                    tokens,
+                    cost,
+                }
+            })
+            .collect(),
+        by_session,
+        models_overflow,
+        total_cost: summary.total_cost,
+        total_tokens: summary.total_tokens,
+        sessions,
+        empty: false,
     }
 }
 
@@ -85,5 +100,29 @@ fn rel_age(epoch: u64) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::stats::CostSummary;
+
+    #[test]
+    fn stats_view_caps_models_and_sessions() {
+        let summary = CostSummary {
+            total_cost: 3.0,
+            total_tokens: 10_000,
+            by_model: (0..15).map(|i| (format!("p/m{i}"), 0.1, 100)).collect(),
+            by_session: (0..10).map(|i| (format!("s{i}"), 0.2, 200)).collect(),
+            records: 25,
+        };
+        let view = stats_view(summary);
+        assert_eq!(view.rows.len(), 12);
+        assert_eq!(view.models_overflow, 3);
+        assert_eq!(view.by_session.len(), 8);
+        assert_eq!(view.sessions, 10, "session count stays uncapped");
+        assert!(!view.empty);
+        assert_eq!(view.rows[0].model, "p/m0");
     }
 }

@@ -87,6 +87,11 @@ pub struct App {
     /// Latest per-model usage snapshot from the provider (the `/usage`
     /// overlay's data; refreshed after every completed run).
     pub usage: Vec<UsageRow>,
+    /// Latest provider quota answer for `/usage` (F.5); kept across modal
+    /// close/reopen so the last successful fetch survives.
+    pub usage_quota: crate::tui::provider::UsageFetchState,
+    /// Scroll offset of the `/usage` overlay's line list, reset on open.
+    pub usage_scroll: usize,
 
     pub should_quit: bool,
 }
@@ -114,6 +119,8 @@ impl App {
             slash_selected: 0,
             permission_prompt: crate::tui::permission_prompt::PermissionPrompt::new(),
             usage: Vec::new(),
+            usage_quota: crate::tui::provider::UsageFetchState::Idle,
+            usage_scroll: 0,
             should_quit: false,
         }
     }
@@ -220,6 +227,7 @@ impl App {
                     self.modal = Modal::Usage(self.usage.clone());
                 }
             }
+            AgentEvent::UsageQuota(state) => self.usage_quota = state,
             AgentEvent::SessionLoaded { messages } => {
                 self.reset_conversation();
                 for msg in messages {

@@ -321,118 +321,237 @@ pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Shared table renderer for the /usage and /stats read-only overlays.
-fn render_usage_table(
+/// Shared scrollable sheet renderer for the `/usage` and `/stats` overlays
+/// (F.5): boxed title, a body of pre-built lines clipped by `scroll`, and a
+/// footer. Body lines are built by pure helpers so layout stays testable.
+fn render_usage_sheet(
     f: &mut Frame,
     area: Rect,
     title: &str,
-    rows: &[crate::tui::provider::UsageRow],
+    lines: &[Line<'static>],
     footer: Vec<Span<'static>>,
+    scroll: usize,
 ) {
-    use crate::storage::stats::format_usd;
-    use crate::usage::format_tokens;
-
     dim(f, area);
-    let n = rows.len().min(12) as u16;
-    let height = (n + 4).min(area.height); // title + header + rows + footer
-    let width = 56.min(area.width.saturating_sub(4));
+    let height = (lines.len() as u16 + 4).min(area.height);
+    let width = 64.min(area.width.saturating_sub(4));
     let rect = centered(width, height, area);
     f.render_widget(Clear, rect);
     let block = boxed(rect);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let w = inner.width.saturating_sub(2) as usize;
-    // Rows must fit inside the box: title + header + footer already claim
-    // three lines of `inner`, so clip before painting to avoid spilling
-    // over the dimmed chat on short terminals.
-    let max_rows = 12.min(inner.height.saturating_sub(3) as usize);
-    let line = |spans: Vec<Span<'static>>| Paragraph::new(Line::from(spans));
-    let mut y = inner.y + 1;
+    let w = inner.width.saturating_sub(2);
+    // Title and footer claim two lines of `inner`; the body must fit in the
+    // rest or it would spill over the dimmed chat on short terminals.
+    let visible = (inner.height.saturating_sub(3)) as usize;
+    let scroll = scroll.min(lines.len().saturating_sub(visible.min(lines.len())));
+    let line = |l: Line<'static>| Paragraph::new(l);
     f.render_widget(
-        line(vec![Span::styled(
+        line(Line::from(Span::styled(
             title.to_string(),
             Style::default()
                 .fg(theme::TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
-        )]),
+        ))),
         Rect {
             x: inner.x + 1,
-            y,
-            width: w as u16,
+            y: inner.y + 1,
+            width: w,
             height: 1,
         },
     );
-    y += 1;
-    f.render_widget(
-        line(vec![
-            Span::styled(" model", Style::default().fg(theme::TEXT_TERTIARY)),
-            Span::styled("  tokens  cost ", Style::default().fg(theme::TEXT_TERTIARY)),
-        ]),
-        Rect {
-            x: inner.x + 1,
-            y,
-            width: w as u16,
-            height: 1,
-        },
-    );
-    y += 1;
-    for row in rows.iter().take(max_rows) {
-        let label = format!(" {}", row.model);
-        let tokens = format_tokens(row.tokens);
-        let cost = match row.cost {
-            Some(cost) => format_usd(cost),
-            None => "—".to_string(),
-        };
-        let gap = w.saturating_sub(
-            label.chars().count() + tokens.chars().count() + cost.chars().count() + 4,
-        );
+    for (row, body) in lines.iter().skip(scroll).take(visible).enumerate() {
         f.render_widget(
-            line(vec![
-                Span::styled(label, Style::default().fg(theme::TEXT_PRIMARY)),
-                Span::raw(" ".repeat(gap)),
-                Span::styled(
-                    format!("{tokens}  {cost}"),
-                    Style::default().fg(theme::TEXT_SECONDARY),
-                ),
-            ]),
+            line(body.clone()),
             Rect {
                 x: inner.x + 1,
-                y,
-                width: w as u16,
+                y: inner.y + 2 + row as u16,
+                width: w,
                 height: 1,
             },
         );
-        y += 1;
     }
     f.render_widget(
-        line(footer),
+        line(Line::from(footer)),
         Rect {
             x: inner.x + 1,
             y: inner.y + inner.height.saturating_sub(1),
-            width: w as u16,
+            width: w,
             height: 1,
         },
     );
 }
 
-/// `/usage`: this session's per-model tokens and cost.
+/// One `model  tokens  cost` body line (styled like the old table rows).
+fn usage_row_line(row: &crate::tui::provider::UsageRow, w: usize) -> Line<'static> {
+    use crate::storage::stats::format_usd;
+    use crate::usage::format_tokens;
+    let label = format!(" {}", row.model);
+    let tokens = format_tokens(row.tokens);
+    let cost = match row.cost {
+        Some(cost) => format_usd(cost),
+        None => "—".to_string(),
+    };
+    let gap = w.saturating_sub(
+        unicode_width::UnicodeWidthStr::width(label.as_str())
+            + tokens
+                .chars()
+                .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum::<usize>()
+            + cost
+                .chars()
+                .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum::<usize>()
+            + 4,
+    );
+    Line::from(vec![
+        Span::styled(label, Style::default().fg(theme::TEXT_PRIMARY)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(
+            format!("{tokens}  {cost}"),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+    ])
+}
+
+fn section_label(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {text}"),
+        Style::default().fg(theme::TEXT_TERTIARY),
+    ))
+}
+
+fn format_reset(reset_at: u64) -> String {
+    match jiff::Timestamp::from_millisecond(reset_at as i64) {
+        // Local wall-clock time, matching the reference's local-time fallback.
+        Ok(ts) => ts
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%m-%d %H:%M")
+            .to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// The provider-quota section of `/usage`, one line per limit plus the
+/// per-model today rows (F.5). Pure so layout can be unit-tested.
+pub(crate) fn quota_lines(state: &crate::tui::provider::UsageFetchState) -> Vec<Line<'static>> {
+    use crate::providers::{ModelUsageRow, ProviderUsage, UsageLimit};
+    use crate::tui::provider::UsageFetchState;
+
+    fn limit_line(limit: &UsageLimit) -> Line<'static> {
+        let pct = match limit.percentage {
+            Some(p) => format!(" {p}%"),
+            None => String::new(),
+        };
+        let reset = limit
+            .reset_at
+            .map(|at| format!("  resets {}", format_reset(at)))
+            .unwrap_or_default();
+        let detail = limit
+            .detail
+            .as_deref()
+            .map(|d| format!("  {d}"))
+            .unwrap_or_default();
+        Line::from(vec![
+            Span::styled(
+                format!("   {}", limit.label),
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ),
+            Span::styled(
+                format!("{pct}{detail}{reset}"),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ])
+    }
+
+    fn model_line(row: &ModelUsageRow) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!("   {}", row.model),
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ),
+            Span::styled(
+                format!(
+                    "  {} today",
+                    crate::storage::stats::format_usd(row.spend_microdollars as f64 / 1_000_000.0)
+                ),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ),
+        ])
+    }
+
+    fn ready_lines(usage: &ProviderUsage) -> Vec<Line<'static>> {
+        let plan = usage
+            .plan
+            .as_deref()
+            .map(|p| format!(" ({p})"))
+            .unwrap_or_default();
+        let mut lines = vec![section_label(&format!("Provider quota{plan}:"))];
+        lines.extend(usage.limits.iter().map(limit_line));
+        if !usage.by_model_today.is_empty() {
+            lines.push(section_label(" By model (provider, today):"));
+            lines.extend(usage.by_model_today.iter().map(model_line));
+        }
+        lines
+    }
+
+    let _ = ();
+    match state {
+        UsageFetchState::Idle => Vec::new(),
+        UsageFetchState::Loading => vec![section_label("Provider quota: fetching…")],
+        UsageFetchState::Unsupported => vec![section_label(
+            "Provider quota: not available for this provider",
+        )],
+        UsageFetchState::Error(error) => vec![Line::from(Span::styled(
+            format!(" Provider quota: {error}"),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ))],
+        UsageFetchState::Ready(usage) => ready_lines(usage),
+    }
+}
+
+/// One `session  cost  tokens` row of the `/stats` top-sessions section.
+fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
+    use crate::storage::stats::format_usd;
+    use crate::usage::format_tokens;
+    Line::from(vec![
+        Span::styled(
+            format!("   {}", entry.0.chars().take(8).collect::<String>()),
+            Style::default().fg(theme::TEXT_PRIMARY),
+        ),
+        Span::styled(
+            format!("  {}", format_usd(entry.1)),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+        Span::styled(
+            format!("  {}", format_tokens(entry.2)),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+    ])
+}
+
+/// `/usage`: this session's per-model tokens and cost, plus the live
+/// provider quota section (F.5).
 pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
     let Modal::Usage(rows) = &app.modal else {
         return;
     };
+    let w = 56usize; // body column width, as the old table used
+    let mut lines = Vec::new();
     if rows.is_empty() {
-        render_usage_table(
-            f,
-            area,
-            "Session usage",
-            &[],
-            vec![Span::styled(
-                " no usage recorded yet — esc to close ",
-                Style::default().fg(theme::TEXT_TERTIARY),
-            )],
-        );
-        return;
+        lines.push(Line::from(Span::styled(
+            " no usage recorded yet",
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )));
+    } else {
+        lines.push(section_label("Per model:"));
+        lines.extend(rows.iter().map(|row| usage_row_line(row, w)));
+    }
+    let quota = quota_lines(&app.usage_quota);
+    if !quota.is_empty() {
+        lines.push(Line::raw(""));
+        lines.extend(quota);
     }
     let total_tokens: u64 = rows.iter().map(|r| r.tokens).sum();
     // Costs sum like the session ledger: `None` until a priced model shows up.
@@ -441,11 +560,11 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
         Some(cost) => crate::storage::stats::format_usd(cost),
         None => "—".to_string(),
     };
-    render_usage_table(
+    render_usage_sheet(
         f,
         area,
         "Session usage",
-        rows,
+        &lines,
         vec![
             Span::styled(
                 format!(" total {}", crate::usage::format_tokens(total_tokens)),
@@ -455,34 +574,57 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
                 format!("  {}", footer_cost),
                 Style::default().fg(theme::TEXT_SECONDARY),
             ),
-            Span::styled("  esc to close", Style::default().fg(theme::TEXT_TERTIARY)),
+            Span::styled(
+                "  ctrl+r reload · esc to close",
+                Style::default().fg(theme::TEXT_TERTIARY),
+            ),
         ],
+        app.usage_scroll,
     );
 }
 
-/// `/stats`: cross-session cost totals from the cost ledger.
+/// `/stats`: cross-session cost totals from the cost ledger, with the
+/// by-model table and top-sessions sections (F.5).
 pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
     let Modal::Stats(view) = &app.modal else {
         return;
     };
     if view.empty {
-        render_usage_table(
+        render_usage_sheet(
             f,
             area,
             "Cost stats",
-            &[],
+            &[Line::from(Span::styled(
+                " no runs recorded",
+                Style::default().fg(theme::TEXT_TERTIARY),
+            ))],
             vec![Span::styled(
-                " no runs recorded — esc to close ",
+                " esc to close",
                 Style::default().fg(theme::TEXT_TERTIARY),
             )],
+            0,
         );
         return;
     }
-    render_usage_table(
+    let w = 56usize;
+    let mut lines = vec![section_label("By model:")];
+    lines.extend(view.rows.iter().map(|row| usage_row_line(row, w)));
+    if view.models_overflow > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" +{} more models", view.models_overflow),
+            Style::default().fg(theme::TEXT_TERTIARY),
+        )));
+    }
+    if !view.by_session.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(section_label("Top sessions:"));
+        lines.extend(view.by_session.iter().map(session_line));
+    }
+    render_usage_sheet(
         f,
         area,
         "Cost stats",
-        &view.rows,
+        &lines,
         vec![
             Span::styled(
                 format!(" total {}", crate::usage::format_tokens(view.total_tokens)),
@@ -497,6 +639,7 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(theme::TEXT_TERTIARY),
             ),
         ],
+        app.usage_scroll,
     );
 }
 

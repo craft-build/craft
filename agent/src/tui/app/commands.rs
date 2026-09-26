@@ -250,10 +250,17 @@ impl App {
                 let _ = tx.send(Command::Compact);
             }
             "usage" => {
+                self.usage_scroll = 0;
                 self.modal = Modal::Usage(self.usage.clone());
+                // Rows come from the session ledger; quota is refetched on
+                // every open, like the reference.
                 let _ = tx.send(Command::GetUsage);
+                let _ = tx.send(Command::FetchUsage);
             }
-            "stats" => self.modal = Modal::Stats(super::sidebar::load_stats()),
+            "stats" => {
+                self.usage_scroll = 0;
+                self.modal = Modal::Stats(super::sidebar::load_stats());
+            }
             "auto-review" => {
                 let _ = tx.send(Command::ToggleAutoReview);
             }
@@ -313,6 +320,7 @@ mod tests {
     use super::super::testutil::usage_rows;
     use super::*;
     use crate::tui::app::{App, Message, Modal};
+    use crate::tui::provider::UsageFetchState;
 
     /// W8: every command advertised in the slash popup or the palette
     /// resolves to a real dispatch arm (command sent, modal opened, or an
@@ -450,6 +458,10 @@ mod tests {
             matches!(rx.try_recv(), Ok(Command::GetUsage)),
             "/usage refreshes the snapshot from the provider"
         );
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::FetchUsage)),
+            "/usage refetches the provider quota on every open"
+        );
         // Any key dismisses the read-only overlay.
         app.handle_key(
             crossterm::event::KeyEvent::new(
@@ -484,5 +496,36 @@ mod tests {
         app.run_slash("/usage", &mpsc::unbounded_channel().0);
         app.handle_event(AgentEvent::UsageSnapshot(usage_rows()));
         assert!(matches!(&app.modal, Modal::Usage(rows) if rows.len() == 2));
+    }
+
+    /// The provider quota answer survives close/reopen (F.5: the last
+    /// successful fetch is kept, like the reference's usage_slot).
+    #[test]
+    fn quota_state_persists_across_close_and_reopen() {
+        let mut app = App::new();
+        app.run_slash("/usage", &mpsc::unbounded_channel().0);
+        app.handle_event(AgentEvent::UsageQuota(UsageFetchState::Ready(
+            crate::providers::ProviderUsage {
+                plan: Some("lite".into()),
+                limits: Vec::new(),
+                by_model_today: Vec::new(),
+            },
+        )));
+        app.handle_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &mpsc::unbounded_channel().0,
+        );
+        assert!(matches!(app.modal, Modal::None));
+        assert!(
+            matches!(&app.usage_quota, UsageFetchState::Ready(u) if u.plan.as_deref() == Some("lite"))
+        );
+        // Reopening resets the scroll but keeps the quota answer.
+        app.usage_scroll = 5;
+        app.run_slash("/usage", &mpsc::unbounded_channel().0);
+        assert_eq!(app.usage_scroll, 0);
+        assert!(matches!(&app.usage_quota, UsageFetchState::Ready(_)));
     }
 }

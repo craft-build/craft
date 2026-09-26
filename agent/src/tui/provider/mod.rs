@@ -49,6 +49,9 @@ pub enum Command {
     ToggleAutoReview,
     /// Refresh the per-model usage snapshot shown by `/usage`.
     GetUsage,
+    /// Fetch the provider-side usage quota shown by `/usage` (F.5); the
+    /// answer streams back as [`AgentEvent::UsageQuota`].
+    FetchUsage,
     /// Force-run every armed compaction stage on the current history
     /// (`/compact`), regardless of fill thresholds.
     Compact,
@@ -205,6 +208,19 @@ pub struct UsageRow {
     pub cost: Option<f64>,
 }
 
+/// Lifecycle of the provider quota fetch backing `/usage` (F.5), mirroring
+/// the reference `UsageFetchState` (Loading / Ready / Unsupported / Error).
+/// `Idle` is the pre-first-fetch state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UsageFetchState {
+    Idle,
+    Loading,
+    Ready(crate::providers::ProviderUsage),
+    /// The provider exposes no programmatic usage endpoint.
+    Unsupported,
+    Error(String),
+}
+
 /// Events streamed provider -> UI.
 #[allow(dead_code)] // `PlanSet` has no real source yet; exercised by the test mock
 #[derive(Clone, Debug)]
@@ -239,6 +255,9 @@ pub enum AgentEvent {
     /// Per-model usage of the current session (`/usage`); pushed after each
     /// completed run and in answer to [`Command::GetUsage`].
     UsageSnapshot(Vec<UsageRow>),
+    /// Provider-side quota answer for `/usage` (F.5). The last answer is
+    /// kept on the App across modal close/reopen.
+    UsageQuota(UsageFetchState),
     /// A tone-tagged system line (retry/auth/compaction/doom/guardrail
     /// status) rendered as scrollback text rather than a card. Notices are
     /// provider-facing only; they never enter the model-visible history.

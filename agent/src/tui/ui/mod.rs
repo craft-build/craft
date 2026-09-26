@@ -450,6 +450,8 @@ mod tests {
                 tokens: 100_000,
                 cost: Some(1.5),
             }],
+            by_session: vec![("0123456789abcdef".into(), 1.5, 100_000)],
+            models_overflow: 0,
             total_cost: 1.5,
             total_tokens: 100_000,
             sessions: 3,
@@ -467,6 +469,94 @@ mod tests {
         });
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("no runs recorded"));
+    }
+
+    #[test]
+    fn usage_overlay_renders_the_provider_quota_section() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        let mut app = seeded_app();
+        app.usage = vec![crate::tui::provider::UsageRow {
+            model: "anthropic/claude-sonnet-5".into(),
+            tokens: 12_345,
+            cost: Some(0.0123),
+        }];
+        app.modal = crate::tui::modals::Modal::Usage(app.usage.clone());
+
+        app.usage_quota =
+            crate::tui::provider::UsageFetchState::Ready(crate::providers::ProviderUsage {
+                plan: Some("lite".into()),
+                limits: vec![crate::providers::UsageLimit {
+                    label: "5-hour window".into(),
+                    percentage: Some(14),
+                    reset_at: Some(1_800_000_000_000),
+                    detail: None,
+                }],
+                by_model_today: vec![crate::providers::ModelUsageRow {
+                    model: "claude-sonnet-5".into(),
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                    spend_microdollars: 2_330_000,
+                }],
+            });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Provider quota (lite):"));
+        assert!(text.contains("5-hour window"));
+        assert!(text.contains("14%"));
+        assert!(text.contains("resets "));
+        assert!(text.contains("By model (provider, today):"));
+        assert!(text.contains("$2.33 today"));
+
+        app.usage_quota = crate::tui::provider::UsageFetchState::Loading;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("fetching"));
+
+        app.usage_quota = crate::tui::provider::UsageFetchState::Unsupported;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("not available"));
+
+        app.usage_quota = crate::tui::provider::UsageFetchState::Error("rate limited".into());
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(buffer_text(&terminal).contains("rate limited"));
+    }
+
+    #[test]
+    fn stats_overlay_caps_models_and_lists_top_sessions() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut app = seeded_app();
+        // The view is capped at build time (sidebar::stats_view): 12 rows
+        // in the view, 2 more beyond it.
+        let rows: Vec<_> = (0..12)
+            .map(|i| crate::tui::provider::UsageRow {
+                model: format!("provider/model-{i:02}"),
+                tokens: 1_000,
+                cost: Some(0.1),
+            })
+            .collect();
+        app.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
+            rows,
+            by_session: vec![
+                ("0123456789abcdef".into(), 1.5, 100_000),
+                ("fedcba9876543210".into(), 0.5, 50_000),
+            ],
+            models_overflow: 2,
+            total_cost: 2.0,
+            total_tokens: 150_000,
+            sessions: 2,
+            empty: false,
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("By model:"));
+        assert!(!text.contains("model-12"), "only the 12 capped rows render");
+        assert!(text.contains("+2 more models"));
+        assert!(text.contains("Top sessions:"));
+        assert!(
+            text.contains("01234567"),
+            "sessions render 8-char short ids"
+        );
+        assert!(text.contains("fedcba98"));
     }
 
     /// A catalog larger than the space above the composer windows around the
