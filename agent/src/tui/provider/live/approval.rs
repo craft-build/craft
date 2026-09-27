@@ -300,6 +300,7 @@ async fn gate_decide(
         kind: cards::tool_head(&call.function.name, &call.function.arguments),
         lines: Vec::new(),
         awaiting_approval: true,
+        image: None,
     }));
     let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
     let (files, commands) = display_context(name, &call.function.arguments, &scopes);

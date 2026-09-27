@@ -739,6 +739,16 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     // (segment index, link) for card headers carrying an OSC-8 target;
     // injected into the buffer after layout, once the row is known.
     let mut card_links: Vec<(usize, hyperlink::Hyperlink)> = Vec::new();
+    // (segment, caption rows, render state) for inline images; drawn into
+    // the buffer after the Paragraph, mirroring the hyperlink injection.
+    let mut image_renders: Vec<(
+        usize,
+        u16,
+        std::sync::Arc<crate::tui::ui::image::ImageRenderState>,
+    )> = Vec::new();
+    // (segment, tool id, base64 payload) collected during the message walk;
+    // resolved into render states right after it.
+    let mut pending_images: Vec<(usize, String, String)> = Vec::new();
     for (idx, msg) in app.conversation.messages.iter().enumerate() {
         msg_seg_start.push(app.view.segments.len());
         let is_user = matches!(msg, Message::User(_));
@@ -770,6 +780,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 lines: body,
                 diff,
                 review,
+                image,
             } => {
                 let collapsed = app.conversation.collapsed.iter().any(|c| c == id);
                 let body_expanded = app.conversation.expanded_bodies.iter().any(|c| c == id);
@@ -801,6 +812,14 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                     ));
                 }
                 app.view.segments.push(Segment::with_lines(lines));
+                // F.6 inline images: `view_image` results render below the
+                // card body, in the same segment so scroll/height math
+                // covers them.
+                // The message loop holds `&app.conversation`; decoding is
+                // deferred to after it (the picker cache needs `&mut app`).
+                if let Some(data) = image {
+                    pending_images.push((app.view.segments.len(), id.clone(), data.clone()));
+                }
                 // Auto-review rides just below the card, outside its chrome,
                 // so the card itself stays focused on the tool's output.
                 if let Some(review) = review {
@@ -820,6 +839,21 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         app.view
             .segments
             .push(Segment::with_lines(vec![Line::default()]));
+    }
+
+    for (seg, id, data) in pending_images {
+        let caption_rows = app
+            .view
+            .segments
+            .get(seg)
+            .map(|s| s.lines().len().min(u16::MAX as usize) as u16)
+            .unwrap_or(0);
+        if let Some(state) = app.image_state(&id, &data, inner.width) {
+            image_renders.push((seg, caption_rows, state.clone()));
+            if let Some(s) = app.view.segments.get_mut(seg) {
+                s.set_image(Some(state));
+            }
+        }
     }
 
     // Resolve the viewport through the scrollback engine: follow pins to
@@ -849,13 +883,22 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             .segments
             .get(pos.seg)
             .expect("bounds checked above");
-        let h = seg.height(inner.width);
-        let take = (h.saturating_sub(pos.row)).min(inner.height - lines.len() as u16);
+        let caption = seg.lines().len().min(u16::MAX as usize) as u16;
+        let img_rows = seg.image.as_ref().map_or(0, |img| img.rows);
+        let capacity = inner.height - lines.len() as u16;
+        // Caption rows are real lines; image rows have none, so they are
+        // blank-padded to keep following segments below the image.
+        let take_lines = caption.saturating_sub(pos.row).min(capacity);
         lines.extend(
-            seg.lines()[pos.row as usize..(pos.row + take) as usize]
+            seg.lines()[pos.row as usize..(pos.row + take_lines) as usize]
                 .iter()
                 .cloned(),
         );
+        let img_start = caption.max(pos.row);
+        let img_end = (caption + img_rows).min(pos.row + capacity);
+        for _ in img_start..img_end {
+            lines.push(Line::default());
+        }
         pos.seg += 1;
         pos.row = 0;
     }
@@ -917,6 +960,34 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
 
+    // Draw inline images over their reserved rows. Like the hyperlink
+    // injection this happens after the Paragraph so the layout math is
+    // untouched; skipped rows (scrolled out above or below) simply don't
+    // draw.
+    for (seg, caption_rows, state) in image_renders {
+        let doc = layout.doc_row(ScrollPos {
+            seg,
+            row: caption_rows,
+        });
+        if doc < top_row {
+            continue;
+        }
+        let vis = (doc - top_row) as u16;
+        if vis >= inner.height {
+            continue;
+        }
+        let height = state.rows.min(inner.height - vis);
+        state.render(
+            Rect {
+                x: inner.x,
+                y: inner.y + vis,
+                width: inner.width,
+                height,
+            },
+            f,
+        );
+    }
+
     // The search modal's current match highlight (F.3): the segment's
     // visible cells are reversed, mirroring the reference's
     // `Cursor::render(..., highlight)`.
@@ -975,6 +1046,57 @@ mod tests {
     use super::{Line, cell_len, pad_row, tool_block};
     use crate::tui::provider::ToolLine;
     use ratatui::style::Modifier;
+
+    /// F.6: a `view_image` result renders an inline image under the card
+    /// body — the segment grows by the image's cell rows and halfblock
+    /// glyphs land in the buffer below the header.
+    #[test]
+    fn view_image_card_renders_inline_image() {
+        use crate::tui::app::App;
+        use crate::tui::provider::{AgentEvent, ToolCallData, ToolKind};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let img = image::RgbaImage::from_pixel(16, 8, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "t1".into(),
+            kind: ToolKind::Bash {
+                cmd: "view_image shot.png".into(),
+            },
+            lines: Vec::new(),
+            awaiting_approval: false,
+            image: Some(b64),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
+
+        let seg_idx = (0..app.view.segments.len())
+            .find(|&i| app.view.segments.get(i).is_some_and(|s| s.image.is_some()))
+            .expect("image segment built");
+        let (caption, height) = {
+            let seg = app.view.segments.get(seg_idx).unwrap();
+            (seg.lines().len() as u16, seg.height(56))
+        };
+        assert!(height > caption, "image rows add to the segment height");
+
+        // Halfblock fallback draws upper/lower-cell glyphs into the buffer
+        // below the card header.
+        let buf = terminal.backend().buffer();
+        let symbols: Vec<&str> = buf.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            symbols.iter().any(|s| *s == "\u{2580}" || *s == "\u{2584}"),
+            "halfblock glyphs rendered"
+        );
+    }
 
     /// W1: a notice is one muted line with a tone-colored prefix glyph.
     #[test]
@@ -1042,6 +1164,7 @@ mod tests {
             },
             lines: Vec::new(),
             awaiting_approval: false,
+            image: None,
         }));
         app.handle_event(AgentEvent::AutoReview {
             id: "t1".into(),
@@ -1098,6 +1221,7 @@ mod tests {
             ],
             diff: None,
             review: None,
+            image: None,
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal
@@ -1385,6 +1509,7 @@ mod tests {
             )],
             diff: None,
             review: None,
+            image: None,
         });
         // Fill the document past the viewport so a scroll below the card
         // survives the layout clamp instead of snapping back to the top.
@@ -1447,6 +1572,7 @@ mod tests {
             lines: vec![ToolLine::new(crate::tui::provider::LineKind::Context, "x")],
             diff: None,
             review: None,
+            image: None,
         });
         narrow_app.view.follow = false;
         let mut narrow = Terminal::new(TestBackend::new(24, 12)).unwrap();

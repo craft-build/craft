@@ -233,6 +233,7 @@ mod tests {
                     .iter()
                     .map(|b| match b {
                         UserContent::Text(t) => t.text.chars().count() as u64,
+                        UserContent::Image(_) => 0,
                         UserContent::ToolResult(r) => {
                             r.content.iter().map(|c| c.to_text().len() as u64).sum()
                         }

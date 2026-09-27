@@ -89,6 +89,9 @@ pub fn estimate_tokens(messages: &[Message]) -> u64 {
 fn user_content_chars(block: &UserContent) -> usize {
     match block {
         UserContent::Text(text) => text_len(&text.text),
+        // Attached images weigh like tool-result images: a flat per-image
+        // token cost, in chars so the `/4` division stays consistent.
+        UserContent::Image(_) => TOKENS_PER_IMAGE as usize * CHARS_PER_TOKEN,
         UserContent::ToolResult(result) => result
             .content
             .iter()

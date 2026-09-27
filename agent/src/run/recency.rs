@@ -98,6 +98,7 @@ mod tests {
     fn block_text(block: &UserContent) -> String {
         match block {
             UserContent::Text(text) => text.text.clone(),
+            UserContent::Image(image) => image.caption.clone(),
             UserContent::ToolResult(result) => result
                 .content
                 .first()

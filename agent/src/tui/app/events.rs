@@ -169,6 +169,12 @@ impl App {
             self.search.open(self.view.scroll, self.view.follow);
             return true;
         }
+        if m(ActionId::PasteImage) {
+            // Clipboard image attach (F.6); a no-op flash when the
+            // clipboard holds no image.
+            self.start_clipboard_image_paste();
+            return true;
+        }
         if m(ActionId::FilePicker) {
             let cwd = if self.session.cwd.is_empty() {
                 ".".to_string()
@@ -475,6 +481,14 @@ impl App {
             return;
         }
         if self.permission_prompt.handle_paste(text) {
+            return;
+        }
+        // A paste that is nothing but an image path attaches the image
+        // instead of inserting the text (F.6).
+        if let Some((path, media)) = crate::tui::ui::image::try_parse_image_path(text)
+            && path.is_file()
+        {
+            self.start_file_image_paste(path, media);
             return;
         }
         self.composer.insert_paste(text);
@@ -1038,6 +1052,7 @@ mod tests {
             kind: ToolKind::Bash { cmd: "make".into() },
             lines,
             awaiting_approval: false,
+            image: None,
         }));
         draw_app(&mut app, 80, 24);
         let press = |app: &mut App, row, col| {
@@ -1317,7 +1332,7 @@ mod tests {
         let mut app = App::new();
         app.composer.set_text("!".into());
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
-        assert!(matches!(rx.try_recv(), Ok(Command::SendMessage(text, _)) if text == "!"));
+        assert!(matches!(rx.try_recv(), Ok(Command::SendMessage(text, _, _)) if text == "!"));
     }
 
     /// `cd` through bang-mode flashes the hint but still runs (reference
@@ -1397,5 +1412,38 @@ mod tests {
             "ctrl-p no longer triggers the palette"
         );
         assert!(app.keybinds.is_overridden(ActionId::Palette));
+    }
+    /// F.6: pasting an image path attaches the image instead of inserting
+    /// the path text; text pastes are unaffected.
+    #[test]
+    fn paste_of_image_path_attaches_image() {
+        let mut app = App::new();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("shot.png");
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]));
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(Vec::new()),
+                image::ImageFormat::Png,
+            )
+            .ok();
+        std::fs::write(&path, b"png").unwrap();
+        app.insert_paste(path.to_str().unwrap());
+        assert!(app.composer.text.is_empty(), "path not inserted as text");
+        assert_eq!(app.image_loads.len(), 1);
+        // The background load lands through the poll.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.attached_images.is_empty() && std::time::Instant::now() < deadline {
+            app.poll_image_loads();
+        }
+        assert_eq!(app.attached_images.len(), 1);
+        assert_eq!(
+            app.attached_images[0].media_type,
+            crate::history::ImageMedia::Png
+        );
+
+        // Plain text pastes are unaffected.
+        app.insert_paste("just words");
+        assert_eq!(app.composer.text, "just words");
     }
 }

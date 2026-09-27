@@ -18,7 +18,8 @@ use crate::run::AgentMode;
 #[derive(Clone, Debug)]
 pub enum Command {
     /// User submitted a message in the composer, in the given mode.
-    SendMessage(String, AgentMode),
+    /// Submit the composer text, with any image attachments (F.6).
+    SendMessage(String, AgentMode, Vec<crate::history::ImageBlock>),
     /// Bang-mode (`!` / `!!`): run a shell command directly, outside the
     /// model loop. `visible` runs enter history as an `I ran: …` user
     /// message; hidden runs never reach the model.
@@ -177,6 +178,9 @@ pub struct ToolCallData {
     /// The card awaits an approve/reject decision. Only backends that stage
     /// edits set this; the live agent applies filesystem tools inline.
     pub awaiting_approval: bool,
+    /// Base64 image payload rendered inline under the card body (F.6), from
+    /// a `view_image` tool result. `None` for every other tool.
+    pub image: Option<String>,
 }
 
 /// One selectable model on a configured provider, as shown in the model menu.

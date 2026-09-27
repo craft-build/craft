@@ -69,6 +69,7 @@ fn card(id: &str, command: &str, lines: Vec<ToolLine>) -> AgentEvent {
         },
         lines,
         awaiting_approval: false,
+        image: None,
     })
 }
 

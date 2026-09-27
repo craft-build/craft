@@ -33,6 +33,9 @@ struct CachedHeight {
 /// slicing is line slicing.
 pub struct Segment {
     lines: Vec<Line<'static>>,
+    /// Inline image rendered below the lines (F.6): occupies `rows` extra
+    /// display rows, tracked by the same height cache.
+    pub image: Option<std::sync::Arc<crate::tui::ui::image::ImageRenderState>>,
     cached_height: Cell<Option<CachedHeight>>,
 }
 
@@ -40,8 +43,17 @@ impl Segment {
     pub fn with_lines(lines: Vec<Line<'static>>) -> Self {
         Self {
             lines,
+            image: None,
             cached_height: Cell::new(None),
         }
+    }
+
+    pub fn set_image(
+        &mut self,
+        image: Option<std::sync::Arc<crate::tui::ui::image::ImageRenderState>>,
+    ) {
+        self.image = image;
+        self.cached_height.set(None);
     }
 
     pub fn lines(&self) -> &[Line<'static>] {
@@ -65,6 +77,10 @@ impl Segment {
             return c.height;
         }
         let h = self.lines.len().min(u16::MAX as usize) as u16;
+        let h = self
+            .image
+            .as_ref()
+            .map_or(h, |img| h.saturating_add(img.rows));
         self.cached_height.set(Some(CachedHeight {
             at_width: width,
             height: h,
@@ -107,7 +123,6 @@ impl SegmentCache {
         self.segments.get(idx)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn get_mut(&mut self, idx: usize) -> Option<&mut Segment> {
         self.segments.get_mut(idx)
     }

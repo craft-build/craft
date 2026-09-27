@@ -91,6 +91,7 @@ impl TurnRenderer {
                     kind: cards::tool_head(&name, &arguments),
                     lines: Vec::new(),
                     awaiting_approval: false,
+                    image: None,
                 }));
             }
             run::Event::ToolDone {
@@ -430,7 +431,7 @@ const MAX_EMPTY_CONTINUATIONS: usize = 2;
 const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and no tool \
      calls. Continue the task with your reply or the next tool call.";
 
-pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
+pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::history::ImageBlock>) {
     let TurnCtx {
         config,
         workspace,
@@ -529,12 +530,13 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String) {
         // folded into the session and the cost ledger once the run returns.
         let done_by_model = Arc::new(std::sync::Mutex::new(None));
         let sink = Arc::clone(&done_by_model);
-        let outcome = run::run(
+        let outcome = run::run_with_images(
             &model,
             &params,
             &tools,
             &mut history,
             &prompt,
+            &images,
             &cancel,
             &|event| {
                 if let run::Event::Done { by_model, .. } = event {

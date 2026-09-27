@@ -147,6 +147,14 @@ pub(super) struct ToolDone {
     pub touched: Option<(String, FileStatus)>,
 }
 
+/// First image block of a tool result, for inline rendering (F.6).
+pub(super) fn result_image(result: &history::ToolResult) -> Option<String> {
+    result.content.iter().find_map(|block| match block {
+        history::ToolResultContent::Image(image) => Some(image.data.clone()),
+        _ => None,
+    })
+}
+
 /// Card emitted when a tool result arrives: same id as the start card, with
 /// the body and summary filled from the result text.
 pub(super) fn tool_done(
@@ -235,6 +243,7 @@ pub(super) fn tool_done(
             kind,
             lines,
             awaiting_approval: false,
+            image: result_image(result),
         },
         touched,
     }
@@ -663,5 +672,31 @@ mod tests {
             vec![LineKind::Add, LineKind::Del, LineKind::Context]
         );
         assert!(lines.iter().all(|l| l.nr == 0));
+    }
+    /// F.6: a view_image result's image block rides on the card for inline
+    /// rendering; the caption stays as the card text.
+    #[test]
+    fn tool_done_extracts_view_image_block() {
+        let result = history::ToolResult {
+            call: "t1".into(),
+            name: "view_image".into(),
+            content: vec![
+                history::ToolResultContent::text("shot.png 64x64 (2.1 KB)"),
+                history::ToolResultContent::Image(history::ImageBlock {
+                    media_type: history::ImageMedia::Png,
+                    data: "aGVsbG8=".into(),
+                    caption: "shot.png 64x64 (2.1 KB)".into(),
+                }),
+            ],
+            is_error: false,
+        };
+        let done = tool_done(
+            "t1".into(),
+            "view_image",
+            &serde_json::json!({"path": "shot.png"}),
+            &result,
+        );
+        assert_eq!(done.card.image.as_deref(), Some("aGVsbG8="));
+        assert!(done.card.lines.iter().any(|l| l.text.contains("shot.png")));
     }
 }

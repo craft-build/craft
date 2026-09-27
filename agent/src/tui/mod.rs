@@ -103,6 +103,11 @@ async fn drive<P: Provider>(
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     provider: P,
 ) -> io::Result<()> {
+    // Probe the terminal's graphics protocol (kitty/sixel vs halfblocks)
+    // before the input reader thread starts: the probe reads its replies
+    // straight from stdin (F.6).
+    ui::image::probe();
+
     let (cmd_tx, evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
@@ -362,6 +367,10 @@ async fn run_loop(
     loop {
         // The file picker's walker is the one change nothing else announces.
         if app.tick_file_picker() {
+            dirty = Dirty::YES;
+        }
+        // Clipboard/file image loads land the same way (F.6).
+        if app.poll_image_loads() {
             dirty = Dirty::YES;
         }
         // F.3 draft preservation: per-frame checkpoint of the composer text.

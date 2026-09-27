@@ -307,7 +307,7 @@ mod tests {
         assert!(!app.plan_form.is_visible());
         assert!(app.composer.text.is_empty());
         let sent = match rx.try_recv() {
-            Ok(Command::SendMessage(text, AgentMode::Build)) => text,
+            Ok(Command::SendMessage(text, AgentMode::Build, _)) => text,
             other => panic!("expected SendMessage(Build), got {other:?}"),
         };
         assert!(sent.starts_with("Implement the plan at `"), "{sent}");

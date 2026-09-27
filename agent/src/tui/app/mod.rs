@@ -120,6 +120,21 @@ pub struct App {
     /// surface like the search modal.
     pub file_picker: crate::tui::file_picker::FilePicker,
 
+    // --- inline images (F.6) ---
+    /// Terminal-graphics picker (kitty/sixel/halfblocks), resolved once.
+    pub image_picker: crate::tui::ui::image::ImagePicker,
+    /// Decoded image render states by tool id, with the width they were
+    /// built for; rebuilt on resize, reused across frames otherwise.
+    pub image_states: std::collections::HashMap<
+        String,
+        (u16, std::sync::Arc<crate::tui::ui::image::ImageRenderState>),
+    >,
+    /// Image attachments staged in the composer (path picks and clipboard
+    /// pastes); sent with the next message and cleared on submit.
+    pub attached_images: Vec<crate::history::ImageBlock>,
+    /// Finished clipboard/file loads awaiting pickup by the render loop.
+    pub image_loads: Vec<std::sync::mpsc::Receiver<Result<crate::history::ImageBlock, String>>>,
+
     pub should_quit: bool,
 }
 
@@ -157,6 +172,10 @@ impl App {
             keybinds: crate::tui::keybindings::KeybindingResolver::new(),
             search: crate::tui::search_modal::SearchModal::new(),
             file_picker: crate::tui::file_picker::FilePicker::new(),
+            image_picker: crate::tui::ui::image::ImagePicker::new(),
+            image_states: std::collections::HashMap::new(),
+            attached_images: Vec::new(),
+            image_loads: Vec::new(),
             should_quit: false,
         }
     }
@@ -189,6 +208,104 @@ impl App {
             .as_ref()
             .filter(|(_, at)| at.elapsed() < FLASH_TTL)
             .map(|(s, _)| s.as_str())
+    }
+
+    /// Decode `data` into a cached render state for tool `id`, reusing the
+    /// cached one while the width is unchanged (F.6).
+    pub(crate) fn image_state(
+        &mut self,
+        id: &str,
+        data: &str,
+        width: u16,
+    ) -> Option<std::sync::Arc<crate::tui::ui::image::ImageRenderState>> {
+        if let Some((at_width, state)) = self.image_states.get(id)
+            && *at_width == width
+        {
+            return Some(state.clone());
+        }
+        let state = self.image_picker.render_state(data, width)?;
+        let state = std::sync::Arc::new(state);
+        self.image_states
+            .insert(id.to_string(), (width, state.clone()));
+        Some(state)
+    }
+
+    /// Pick up finished image loads (path picks and clipboard pastes);
+    /// true when the caller owes a repaint.
+    pub(crate) fn poll_image_loads(&mut self) -> bool {
+        let mut dirty = false;
+        let mut i = 0;
+        while i < self.image_loads.len() {
+            match self.image_loads[i].try_recv() {
+                Ok(Ok(block)) => {
+                    self.image_loads.swap_remove(i);
+                    self.attached_images.push(block);
+                    self.flash("Image attached");
+                    dirty = true;
+                }
+                Ok(Err(e)) => {
+                    self.image_loads.swap_remove(i);
+                    self.flash(format!("Image paste failed: {e}"));
+                    dirty = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => i += 1,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.image_loads.swap_remove(i);
+                }
+            }
+        }
+        dirty
+    }
+
+    /// Whether the selected model takes image input (unknown models are
+    /// allowed: the catalog is best-effort).
+    fn model_supports_vision(&self) -> bool {
+        self.session
+            .models
+            .get(self.session.model_idx)
+            .and_then(|m| crate::models_dev::metadata_for(&m.provider, &m.model))
+            .is_none_or(|meta| meta.supports_vision)
+    }
+
+    /// Attach an image file by path (paste of an image path, F.6).
+    pub fn start_file_image_paste(
+        &mut self,
+        path: std::path::PathBuf,
+        media: crate::history::ImageMedia,
+    ) {
+        if !self.model_supports_vision() {
+            self.flash("Model does not support image input");
+            return;
+        }
+        let msg = format!("Reading {}...", path.display());
+        self.spawn_image_load(msg, move || {
+            crate::tui::ui::image::load_file_image(&path, media)
+        });
+    }
+
+    /// Attach the clipboard image (Ctrl+V, F.6).
+    pub fn start_clipboard_image_paste(&mut self) {
+        if !self.model_supports_vision() {
+            self.flash("Model does not support image input");
+            return;
+        }
+        self.spawn_image_load(
+            "Reading clipboard...".into(),
+            crate::tui::ui::image::load_clipboard_image,
+        );
+    }
+
+    fn spawn_image_load(
+        &mut self,
+        flash: String,
+        f: impl FnOnce() -> Result<crate::history::ImageBlock, String> + Send + 'static,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        self.image_loads.push(rx);
+        self.flash(flash);
     }
 
     /// Drop an expired flash; true when the caller owes a repaint.
@@ -494,7 +611,12 @@ impl App {
         }
         self.conversation.assistant_open = false;
         self.conversation.messages.push(Message::User(text.clone()));
-        let _ = tx.send(Command::SendMessage(text.clone(), self.agent_mode()));
+        let images = std::mem::take(&mut self.attached_images);
+        let _ = tx.send(Command::SendMessage(
+            text.clone(),
+            self.agent_mode(),
+            images,
+        ));
         self.input_history.push(text);
         self.history_index = None;
         self.history_draft.clear();
@@ -628,6 +750,7 @@ pub(crate) mod testutil {
                 summary: "10 lines".into(),
             },
             lines: vec![],
+            image: None,
         }));
         // Card spans rows 2..6, columns 2..40 (as the renderer would report).
         app.view.tool_regions = vec![(

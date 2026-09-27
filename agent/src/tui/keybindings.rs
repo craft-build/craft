@@ -87,6 +87,10 @@ pub mod key {
         modifiers: KeyModifiers::ALT,
         label: "Alt+E",
     };
+    /// Clipboard image paste (F.6). Terminals without bracketed-paste
+    /// image support deliver screenshots via the OSC 52-style clipboard,
+    /// so the chord reads the clipboard directly.
+    pub const PASTE_IMAGE: Bind = ctrl('v', "Ctrl+V");
 }
 
 /// Every remappable action in the TUI.
@@ -112,6 +116,7 @@ pub enum ActionId {
     LineEnd,
     EditInput,
     CycleEffort,
+    PasteImage,
 }
 
 const ALL_ACTION_IDS: &[ActionId] = &[
@@ -135,6 +140,7 @@ const ALL_ACTION_IDS: &[ActionId] = &[
     ActionId::LineEnd,
     ActionId::EditInput,
     ActionId::CycleEffort,
+    ActionId::PasteImage,
 ];
 
 pub fn all_action_ids() -> impl Iterator<Item = ActionId> {
@@ -164,6 +170,7 @@ impl ActionId {
             Self::LineEnd => "line_end",
             Self::EditInput => "edit_input",
             Self::CycleEffort => "cycle_effort",
+            Self::PasteImage => "paste_image",
         }
     }
 
@@ -193,6 +200,7 @@ impl ActionId {
             Self::LineEnd => &[key::LINE_END],
             Self::EditInput => &[key::EDIT_INPUT],
             Self::CycleEffort => &[key::EFFORT_CYCLE],
+            Self::PasteImage => &[key::PASTE_IMAGE],
         }
     }
 }
@@ -516,6 +524,13 @@ pub const KEYBINDS: &[Keybind] = &[
         action_id: Some(ActionId::EditInput),
         label: KeyLabel::Single(key::EDIT_INPUT.label),
         description: "Edit input in external editor",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        action_id: Some(ActionId::PasteImage),
+        label: KeyLabel::Single(key::PASTE_IMAGE.label),
+        description: "Attach clipboard image",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

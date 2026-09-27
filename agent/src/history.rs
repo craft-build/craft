@@ -69,6 +69,9 @@ impl Message {
 pub enum UserContent {
     Text(Text),
     ToolResult(ToolResult),
+    /// Image the user attached (path pick or clipboard paste); sent as
+    /// vision input, with `caption` as the text stand-in for telemetry.
+    Image(ImageBlock),
 }
 
 impl UserContent {

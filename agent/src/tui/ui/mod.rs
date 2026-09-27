@@ -2,6 +2,7 @@
 //! plus the optional right sidebar, with overlays on top.
 
 mod composer;
+pub mod image;
 mod messages;
 mod overlays;
 pub mod scrollback;
@@ -243,6 +244,7 @@ mod tests {
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             id: "t1".into(),
             awaiting_approval: false,
+            image: None,
             kind: ToolKind::Read {
                 path: "src/auth/refresh.ts".into(),
                 summary: "38 lines".into(),
@@ -256,6 +258,7 @@ mod tests {
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             id: "t2".into(),
             awaiting_approval: true,
+            image: None,
             kind: ToolKind::Edit {
                 path: "src/auth/refresh.ts".into(),
                 summary: String::new(),
@@ -277,6 +280,7 @@ mod tests {
         app.handle_event(AgentEvent::ToolCall(ToolCallData {
             id: "t3".into(),
             awaiting_approval: false,
+            image: None,
             kind: ToolKind::Bash {
                 cmd: "pnpm test auth/refresh.spec.ts".into(),
             },

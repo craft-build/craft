@@ -34,7 +34,7 @@ pub(super) fn remove_orphaned_tool_results(messages: &mut Vec<Message>) {
         if let Message::User { content } = message {
             content.retain(|block| match block {
                 UserContent::ToolResult(result) => calls.contains(&result.call),
-                UserContent::Text(_) => true,
+                UserContent::Text(_) | UserContent::Image(_) => true,
             });
         }
     }
@@ -197,6 +197,7 @@ mod tests {
                 .map(|block| match block {
                     UserContent::ToolResult(r) => r.content[0].to_text(),
                     UserContent::Text(t) => t.text.clone(),
+                    UserContent::Image(_) => String::new(),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -224,6 +225,7 @@ mod tests {
                 .map(|block| match block {
                     UserContent::ToolResult(r) => r.content[0].to_text(),
                     UserContent::Text(t) => t.text.clone(),
+                    UserContent::Image(_) => String::new(),
                 })
                 .collect(),
             _ => Vec::new(),

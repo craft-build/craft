@@ -62,6 +62,7 @@ fn read_call(id: &str) -> ToolCallData {
             path: FILE.into(),
             summary: "38 lines".into(),
         },
+        image: None,
         lines: [
             "export async function refreshToken(old: string) {",
             "  const res = await api.post('/auth/refresh', { token: old })",
@@ -87,6 +88,7 @@ fn grep_call(id: &str) -> ToolCallData {
             pattern: "refreshToken(".into(),
             summary: "6 matches in 4 files".into(),
         },
+        image: None,
         lines: [
             "src/auth/refresh.ts:12",
             "src/auth/session.ts:44",
@@ -114,6 +116,7 @@ fn edit_call(id: &str) -> ToolCallData {
             path: FILE.into(),
             summary: String::new(),
         },
+        image: None,
         lines: [
             (Context, "export async function refreshToken(old: string) {"),
             (
@@ -152,6 +155,7 @@ fn bash_call(id: &str) -> ToolCallData {
         kind: ToolKind::Bash {
             cmd: "pnpm test auth/refresh.spec.ts".into(),
         },
+        image: None,
         lines: vec![
             ToolLine {
                 kind: LineKind::Muted,
@@ -271,7 +275,7 @@ impl Provider for MockProvider {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    Command::SendMessage(_, _mode) => {
+                    Command::SendMessage(_, _mode, _) => {
                         if let Some(h) = current.take() {
                             h.abort();
                         }
@@ -292,6 +296,7 @@ impl Provider for MockProvider {
                             kind: ToolKind::Bash { cmd: command },
                             lines: Vec::new(),
                             awaiting_approval: false,
+                            image: None,
                         }));
                         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
                     }
@@ -443,6 +448,7 @@ mod tests {
         tx.send(Command::SendMessage(
             "fix the flaky refresh".into(),
             AgentMode::Build,
+            Vec::new(),
         ))
         .unwrap();
         let mut saw_read = false;
@@ -491,8 +497,12 @@ mod tests {
         for _ in 0..4 {
             rx.recv().await.unwrap();
         }
-        tx.send(Command::SendMessage("go".into(), AgentMode::Build))
-            .unwrap();
+        tx.send(Command::SendMessage(
+            "go".into(),
+            AgentMode::Build,
+            Vec::new(),
+        ))
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         tx.send(Command::Interrupt).unwrap();
         let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())

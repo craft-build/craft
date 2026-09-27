@@ -520,7 +520,7 @@ impl CraftProvider {
                 current_turn = None;
             }
             match cmd {
-                Command::SendMessage(text, mode) => {
+                Command::SendMessage(text, mode, images) => {
                     if text.trim().is_empty() {
                         continue;
                     }
@@ -546,6 +546,7 @@ impl CraftProvider {
                             mode,
                         },
                         text,
+                        images,
                     ));
                     current_turn = Some(handle.abort_handle());
                 }

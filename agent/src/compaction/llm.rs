@@ -104,6 +104,7 @@ fn message_text(message: &Message) -> Option<String> {
                 .iter()
                 .map(|block| match block {
                     UserContent::Text(text) => text.text.clone(),
+                    UserContent::Image(image) => image.caption.clone(),
                     UserContent::ToolResult(result) => {
                         let output = result
                             .content

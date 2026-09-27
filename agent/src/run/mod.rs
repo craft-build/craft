@@ -53,7 +53,7 @@ use tokio::sync::watch;
 use crate::compression::{self, CompressionConfig};
 use crate::config::{CompactionBuffer, CompactionConfig};
 use crate::edge;
-use crate::history::{self, Message};
+use crate::history::{self, ImageBlock, Message};
 
 /// Events emitted as the run progresses; consumed by the TUI and ACP
 /// surfaces. Ported from the reference's `AgentEvent` taxonomy
@@ -496,7 +496,26 @@ pub async fn run<M: CompletionModel + Clone>(
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> RunOutcome {
-    let (outcome, mut stats) = run_inner(model, params, tools, history, prompt, cancel, emit).await;
+    run_with_images(model, params, tools, history, prompt, &[], cancel, emit).await
+}
+
+/// [`run`] with image attachments staged on the prompt message (F.6:
+/// composer path picks and clipboard pastes).
+// Clippy: the loop seam is deliberately flat (model, params, tools,
+// history, prompt, attachments, cancel, emit) rather than a builder.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_images<M: CompletionModel + Clone>(
+    model: &M,
+    params: &RunParams,
+    tools: &ToolDispatch,
+    history: &mut Vec<Message>,
+    prompt: &str,
+    images: &[crate::history::ImageBlock],
+    cancel: &CancelToken,
+    emit: &(dyn Fn(Event) + Send + Sync),
+) -> RunOutcome {
+    let (outcome, mut stats) =
+        run_inner(model, params, tools, history, prompt, images, cancel, emit).await;
     if let RunOutcome::Failed(message) = &outcome {
         emit(Event::Error(message.clone()));
     }
@@ -533,12 +552,14 @@ pub async fn run<M: CompletionModel + Clone>(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_inner<M: CompletionModel + Clone>(
     model: &M,
     params: &RunParams,
     tools: &ToolDispatch,
     history: &mut Vec<Message>,
     prompt: &str,
+    images: &[crate::history::ImageBlock],
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> (RunOutcome, RunStats) {
@@ -550,7 +571,8 @@ async fn run_inner<M: CompletionModel + Clone>(
     strip_trailing_grace_prompt(history);
     let grace_tail = (history.len() < before).then_some(grace_tail).flatten();
     let stripped = grace_tail.is_some().then(|| history.clone());
-    let (outcome, stats) = run_loop(model, params, tools, history, prompt, cancel, emit).await;
+    let (outcome, stats) =
+        run_loop(model, params, tools, history, prompt, images, cancel, emit).await;
     if let Some(message) = grace_tail
         && matches!(outcome, RunOutcome::Failed(_))
         && stripped.as_ref().is_some_and(|s| s == history)
@@ -560,17 +582,36 @@ async fn run_inner<M: CompletionModel + Clone>(
     (outcome, stats)
 }
 
+/// The turn's first user message: the prompt text, with any composer image
+/// attachments as trailing vision blocks (F.6).
+fn prompt_message(prompt: &str, images: &[ImageBlock]) -> Message {
+    if images.is_empty() {
+        return Message::user(prompt);
+    }
+    let mut content = vec![crate::history::UserContent::text(prompt)];
+    content.extend(
+        images
+            .iter()
+            .map(|image| crate::history::UserContent::Image(image.clone())),
+    );
+    Message::User { content }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_loop<M: CompletionModel + Clone>(
     model: &M,
     params: &RunParams,
     tools: &ToolDispatch,
     history: &mut Vec<Message>,
     prompt: &str,
+    images: &[crate::history::ImageBlock],
     cancel: &CancelToken,
     emit: &(dyn Fn(Event) + Send + Sync),
 ) -> (RunOutcome, RunStats) {
     let definitions = tools.definitions();
-    let mut turn = vec![Message::user(prompt)];
+    // The prompt message carries any composer image attachments; later
+    // grace/nudge prompts are plain text.
+    let mut turn = vec![prompt_message(prompt, images)];
     let mut turns = 0;
     let mut stats = RunStats::default();
     // Nudge budget for this run; real progress (tool results) resets it.
@@ -711,3 +752,36 @@ fn compress_request_view(full: &mut [Message], config: &CompressionConfig) {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod run_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::prompt_message;
+    use crate::history::{ImageBlock, ImageMedia, Message, UserContent};
+
+    #[test]
+    fn prompt_message_is_plain_text_without_attachments() {
+        let msg = prompt_message("hello", &[]);
+        assert_eq!(msg.text(), "hello");
+    }
+
+    #[test]
+    fn prompt_message_carries_image_attachments() {
+        let images = vec![ImageBlock {
+            media_type: ImageMedia::Png,
+            data: "aGk=".into(),
+            caption: "[image]".into(),
+        }];
+        let msg = prompt_message("look", &images);
+        let UserContent::Image(block) = &msg_user_content(&msg)[1] else {
+            panic!("image attachment");
+        };
+        assert_eq!(block.data, "aGk=");
+    }
+
+    fn msg_user_content(msg: &Message) -> &Vec<UserContent> {
+        match msg {
+            Message::User { content } => content,
+            _ => panic!("user message"),
+        }
+    }
+}

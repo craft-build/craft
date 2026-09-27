@@ -52,6 +52,8 @@ pub enum Message {
         /// Auto-review status for this call, rendered as a line under the
         /// card rather than inside it (updated in place by [`AgentEvent::AutoReview`]).
         review: Option<AutoReviewLine>,
+        /// Base64 image rendered inline under the card body (`view_image`).
+        image: Option<String>,
     },
 }
 
@@ -156,6 +158,7 @@ impl Conversation {
                 kind,
                 lines,
                 awaiting_approval,
+                image,
             }) => {
                 // Tool boundaries close any open streamed paragraph.
                 self.assistant_open = false;
@@ -171,12 +174,14 @@ impl Conversation {
                         kind: existing_kind,
                         lines: body,
                         diff,
+                        image: slot,
                         ..
                     }) => {
                         // Completion events carry the authoritative kind
                         // (summaries arrive with the result).
                         *existing_kind = kind;
                         *body = lines;
+                        *slot = image;
                         if awaiting_approval && matches!(diff, None | Some(DiffState::Pending)) {
                             *diff = Some(DiffState::Pending);
                         }
@@ -194,6 +199,7 @@ impl Conversation {
                             lines,
                             diff,
                             review: None,
+                            image,
                         });
                         if collapsible {
                             self.collapsed.push(id);
@@ -358,6 +364,7 @@ mod tests {
             },
             lines: vec![],
             awaiting_approval: false,
+            image: None,
         }));
         conv.apply(AgentEvent::ToolCall(ToolCallData {
             id: "t1".into(),
@@ -371,6 +378,7 @@ mod tests {
                 ..Default::default()
             }],
             awaiting_approval: false,
+            image: None,
         }));
         assert_eq!(conv.messages.len(), 1);
         match &conv.messages[0] {
@@ -394,6 +402,7 @@ mod tests {
             },
             lines: vec![],
             awaiting_approval: false,
+            image: None,
         }));
         conv.apply(AgentEvent::AutoReview {
             id: "t1".into(),
@@ -412,6 +421,7 @@ mod tests {
                 ..Default::default()
             }],
             awaiting_approval: false,
+            image: None,
         }));
         match &conv.messages[0] {
             Message::Tool {

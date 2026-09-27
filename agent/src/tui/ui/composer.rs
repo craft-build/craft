@@ -140,7 +140,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let tertiary = Style::default().fg(t.text_tertiary).bg(t.bg_surface);
     let sep = || Span::styled(" · ", tertiary);
     let (model, provider) = app.model();
-    let left = vec![
+    let mut left = vec![
         Span::styled(
             app.mode.label(),
             Style::default()
@@ -153,11 +153,28 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         sep(),
         Span::styled(provider, tertiary),
         sep(),
-        Span::styled(
-            app.effort(),
-            Style::default().fg(t.warning).bg(t.bg_surface),
-        ),
     ];
+    // Attached images (F.6): a count chip, so staged attachments are
+    // visible before the message is sent.
+    if !app.attached_images.is_empty() {
+        left.push(Span::styled(
+            format!(
+                "[{} image{}] ",
+                app.attached_images.len(),
+                if app.attached_images.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ),
+            Style::default().fg(t.accent).bg(t.bg_surface),
+        ));
+        left.push(sep());
+    }
+    left.push(Span::styled(
+        app.effort(),
+        Style::default().fg(t.warning).bg(t.bg_surface),
+    ));
     let right = format!("{}  ", app.session.token_label);
     let width = info.width as usize;
     let right_w = right.chars().count();

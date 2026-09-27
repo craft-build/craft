@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use rig_core::completion::message::{
-    AssistantContent, ImageMediaType, Message as RigMessage, Reasoning as RigReasoning,
-    Text as RigText, ToolCall as RigToolCall, ToolCallId, ToolFunction,
+    AssistantContent, DocumentSourceKind, Image as RigImage, ImageMediaType, Message as RigMessage,
+    Reasoning as RigReasoning, Text as RigText, ToolCall as RigToolCall, ToolCallId, ToolFunction,
     ToolResult as RigToolResult, ToolResultContent as RigToolResultContent, UserContent,
 };
 use rig_core::completion::{CompletionRequest, ToolDefinition};
@@ -62,6 +62,12 @@ pub fn own_message_to_rig(message: &history::Message) -> RigMessage {
 fn own_user_block_to_rig(block: &history::UserContent) -> UserContent {
     match block {
         history::UserContent::Text(text) => UserContent::Text(rig_text(&text.text)),
+        history::UserContent::Image(image) => UserContent::Image(RigImage {
+            data: DocumentSourceKind::Base64(image.data.clone()),
+            media_type: Some(media_own_to_rig(image.media_type)),
+            detail: None,
+            additional_params: None,
+        }),
         history::UserContent::ToolResult(result) => UserContent::ToolResult(RigToolResult {
             call: ToolCallId::new_or_mint(&result.call),
             provider: None,
@@ -232,6 +238,21 @@ fn rig_message_to_own(message: &RigMessage) -> history::Message {
                     UserContent::Text(text) => Some(history::UserContent::Text(history::Text {
                         text: text.text.clone(),
                     })),
+                    UserContent::Image(image) => {
+                        let data = match &image.data {
+                            DocumentSourceKind::Base64(data) => data.clone(),
+                            _ => String::new(),
+                        };
+                        Some(history::UserContent::Image(history::ImageBlock {
+                            media_type: image
+                                .media_type
+                                .as_ref()
+                                .map(|m| media_rig_to_own(m.clone()))
+                                .unwrap_or(history::ImageMedia::Png),
+                            data,
+                            caption: "[image]".into(),
+                        }))
+                    }
                     UserContent::ToolResult(result) => {
                         Some(history::UserContent::ToolResult(history::ToolResult {
                             call: result.call.to_string(),
@@ -483,5 +504,38 @@ mod tests {
         };
         assert_eq!(call.id, "internal-1");
         assert_eq!(call.function.name, "bash");
+    }
+    #[test]
+    fn user_image_block_round_trips() {
+        let own = history::Message::User {
+            content: vec![
+                history::UserContent::text("what is this?"),
+                history::UserContent::Image(history::ImageBlock {
+                    media_type: history::ImageMedia::Webp,
+                    data: "d2Vi-cA==".into(),
+                    caption: "[image]".into(),
+                }),
+            ],
+        };
+        let rig = own_message_to_rig(&own);
+        let RigMessage::User { content } = &rig else {
+            panic!("user message");
+        };
+        assert_eq!(content.len(), 2);
+        assert!(matches!(content[0], UserContent::Text(_)));
+        let UserContent::Image(image) = &content[1] else {
+            panic!("image block");
+        };
+        assert_eq!(image.media_type, Some(ImageMediaType::WEBP));
+
+        // And back: the replayed block keeps its payload.
+        let back = rig_message_to_own(&rig);
+        let history::Message::User { content } = back else {
+            panic!("user message");
+        };
+        assert!(matches!(
+            &content[1],
+            history::UserContent::Image(b) if b.data == "d2Vi-cA=="
+        ));
     }
 }
