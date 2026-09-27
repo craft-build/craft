@@ -42,8 +42,51 @@ pub fn to_request(
 }
 
 /// Convert our history into rig's replay format.
+///
+/// Images inside tool results are moved into a user message that follows the
+/// tool-result message: OpenAI Chat Completions rejects image content in
+/// tool results ("does not support images in tool results"), while both
+/// families accept an image in user content.
 pub fn own_to_rig(messages: &[history::Message]) -> Vec<RigMessage> {
-    messages.iter().map(own_message_to_rig).collect()
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        out.push(own_message_to_rig(message));
+        if let history::Message::User { content } = message {
+            let images: Vec<UserContent> = content
+                .iter()
+                .filter_map(|block| match block {
+                    history::UserContent::ToolResult(result) => {
+                        let images: Vec<UserContent> = result
+                            .content
+                            .iter()
+                            .filter_map(|item| match item {
+                                history::ToolResultContent::Image(image) => {
+                                    Some(UserContent::Image(RigImage {
+                                        data: DocumentSourceKind::Base64(image.data.clone()),
+                                        media_type: Some(media_own_to_rig(image.media_type)),
+                                        detail: None,
+                                        additional_params: None,
+                                    }))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        (!images.is_empty()).then_some(images)
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            if !images.is_empty() {
+                let mut content = vec![UserContent::Text(rig_text(
+                    "Images returned by the tool calls above:",
+                ))];
+                content.extend(images);
+                out.push(RigMessage::User { content });
+            }
+        }
+    }
+    out
 }
 
 pub fn own_message_to_rig(message: &history::Message) -> RigMessage {
@@ -82,11 +125,12 @@ fn own_user_block_to_rig(block: &history::UserContent) -> UserContent {
                     history::ToolResultContent::Json { value } => RigToolResultContent::Json {
                         value: value.clone(),
                     },
-                    history::ToolResultContent::Image(image) => RigToolResultContent::image_base64(
-                        image.data.clone(),
-                        Some(media_own_to_rig(image.media_type)),
-                        None,
-                    ),
+                    history::ToolResultContent::Image(image) => {
+                        RigToolResultContent::Text(rig_text(&format!(
+                            "[image {} returned; attached in the next message]",
+                            image.caption
+                        )))
+                    }
                 })
                 .collect(),
         }),
@@ -404,14 +448,35 @@ mod tests {
             })],
         }];
         let rig = own_to_rig(&own);
+        // OpenAI-compatible requests cannot carry images in tool results;
+        // the provider-bound replay replaces the block with a text note and
+        // attaches the image in a following user message.
+        let RigMessage::User { content } = &rig[0] else {
+            panic!("expected tool-result user message");
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!("expected tool result");
+        };
+        assert!(matches!(
+            result.content.first(),
+            Some(RigToolResultContent::Text(_))
+        ));
+        let RigMessage::User { content } = &rig[1] else {
+            panic!("expected follow-up image user message, got {:?}", rig[1]);
+        };
+        assert!(matches!(content.first(), Some(UserContent::Text(_))));
+        assert!(matches!(
+            content.get(1),
+            Some(UserContent::Image(image))
+                if image.media_type == Some(ImageMediaType::WEBP)
+                    && matches!(&image.data, DocumentSourceKind::Base64(data) if data == "aGVsbG8=")
+        ));
+        // And the image survives the back conversion as user vision input.
         let back = rig_to_own(&rig);
-        match &back[0] {
+        match &back[1] {
             history::Message::User { content } => {
-                let history::UserContent::ToolResult(result) = &content[0] else {
-                    panic!("expected tool result");
-                };
-                let history::ToolResultContent::Image(image) = &result.content[0] else {
-                    panic!("expected image block, got {:?}", result.content[0]);
+                let history::UserContent::Image(image) = &content[1] else {
+                    panic!("expected image block, got {:?}", content[0]);
                 };
                 assert_eq!(image.media_type, history::ImageMedia::Webp);
                 assert_eq!(image.data, "aGVsbG8=");
@@ -420,18 +485,6 @@ mod tests {
             }
             _ => panic!("expected user message"),
         }
-        // The provider-bound replay keeps the image block as real vision input.
-        let RigMessage::User { content } = &rig[0] else {
-            panic!("expected user message");
-        };
-        let UserContent::ToolResult(result) = &content[0] else {
-            panic!("expected tool result");
-        };
-        assert!(matches!(
-            result.content.first(),
-            Some(RigToolResultContent::Image(image))
-                if image.media_type == Some(ImageMediaType::WEBP)
-        ));
     }
 
     #[test]
