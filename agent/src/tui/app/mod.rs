@@ -41,6 +41,18 @@ pub struct App {
     pub mode: Mode,
     /// Session's allocated plan file; set on first entry into Plan mode.
     pub plan_path: Option<std::path::PathBuf>,
+    /// The plan form (F.3, Ctrl-T): "Plan complete" menu over the composer
+    /// while a finished plan draft is parked.
+    pub plan_form: crate::tui::plan_form::PlanForm,
+    /// Whether the allocated plan file holds a finished draft; drives the
+    /// plan form's shown/drafting lifecycle.
+    pub plan_ready: bool,
+    /// Plan-file content at the start of the current Plan-mode turn; the
+    /// form only surfaces when a turn actually rewrote the plan.
+    pub plan_turn_snapshot: Option<String>,
+    /// Plan file the run loop should hand to $VISUAL/$EDITOR (Ctrl-O);
+    /// taken by the loop, which owns the terminal around the child.
+    pub editor_request: Option<std::path::PathBuf>,
 
     // --- provider-driven state ---
     pub plan: Vec<PlanItem>,
@@ -111,6 +123,10 @@ impl App {
         App {
             mode: Mode::Build,
             plan_path: None,
+            plan_form: crate::tui::plan_form::PlanForm::new(),
+            plan_ready: false,
+            plan_turn_snapshot: None,
+            editor_request: None,
             plan: Vec::new(),
             files: Vec::new(),
             status: Status::Done,
@@ -216,17 +232,17 @@ impl App {
         let was_following = self.view.follow;
         match ev {
             AgentEvent::StatusChanged(s) => {
+                let was_busy = matches!(self.status, Status::Thinking | Status::Running);
                 // A fresh busy status starts the elapsed-seconds clock; a
                 // settled status stops it.
-                if matches!(s, Status::Thinking | Status::Running)
-                    && !matches!(self.status, Status::Thinking | Status::Running)
-                {
+                if matches!(s, Status::Thinking | Status::Running) && !was_busy {
                     self.turn_started = Some(std::time::Instant::now());
                 } else if !matches!(s, Status::Thinking | Status::Running) {
                     self.turn_started = None;
                 }
                 self.status = s;
                 self.interrupt_requested = false;
+                self.update_plan_lifecycle(was_busy);
             }
             AgentEvent::PlanSet(plan) => self.plan = plan,
             AgentEvent::FilesSet(files) => self.files = files,

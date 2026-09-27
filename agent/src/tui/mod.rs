@@ -10,6 +10,7 @@ mod hyperlink;
 mod modals;
 mod notify;
 mod permission_prompt;
+mod plan_form;
 pub mod provider;
 mod repaint;
 pub(crate) mod search_modal;
@@ -147,6 +148,12 @@ async fn drive<P: Provider>(
             app.composer.set_text(edited);
             // A full clear: the alternate screen came back with whatever the
             // editor left in the diff buffers.
+            terminal.borrow_mut().clear().map_err(io::Error::other)
+        },
+        |path: &std::path::Path| {
+            // Plan editor handoff (Ctrl-O): park the UI, run the editor on
+            // the plan file, then rebuild the alternate screen.
+            open_in_editor(path).map_err(io::Error::other)?;
             terminal.borrow_mut().clear().map_err(io::Error::other)
         },
         || {
@@ -328,6 +335,7 @@ async fn run_loop(
     mut evt_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut paint: impl FnMut(&mut App) -> io::Result<()>,
     mut edit_composer: impl FnMut(&mut App) -> io::Result<()>,
+    mut open_plan_file: impl FnMut(&std::path::Path) -> io::Result<()>,
     mut suspend_ui: impl FnMut() -> io::Result<()>,
     mut ring: impl FnMut(),
     focus: notify::Focus,
@@ -377,6 +385,17 @@ async fn run_loop(
                             focus.on_resume();
                         } else {
                             app.handle_key(key, cmd_tx);
+                        }
+                        // Ctrl-O plan-editor handoff: the child process
+                        // needs the terminal, so it runs here, not in
+                        // handle_key (like the Alt-O composer handoff).
+                        if let Some(path) = app.take_editor_request() {
+                            if let Err(e) = open_plan_file(&path) {
+                                eprintln!("warning: could not open editor: {e}");
+                            }
+                            // The editor ate the focus reports we would
+                            // have seen around it.
+                            focus.on_resume();
                         }
                     }
                     Some(Event::Paste(text)) => {
@@ -534,6 +553,7 @@ mod tests {
                 counting_paint(paints),
                 // The test editor stub: refuse to edit anything.
                 |_| Err(io::Error::other("no editor in tests")),
+                |_| Err(io::Error::other("no editor in tests")),
                 move || {
                     suspends.fetch_add(1, Ordering::SeqCst);
                     Ok(())
@@ -626,6 +646,7 @@ mod tests {
                         .map(|_| ())
                         .map_err(|e| match e {})
                 },
+                |_| Err(io::Error::other("no editor in tests")),
                 |_| Err(io::Error::other("no editor in tests")),
                 || Ok(()),
                 || (),
@@ -782,6 +803,7 @@ mod tests {
                         .map(|_| ())
                         .map_err(|e| match e {})
                 },
+                |_| Err(io::Error::other("no editor in tests")),
                 |_| Err(io::Error::other("no editor in tests")),
                 || Ok(()),
                 move || {

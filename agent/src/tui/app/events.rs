@@ -38,6 +38,17 @@ impl App {
             }
             return;
         }
+        // The plan form (F.3, Ctrl-T) owns the keyboard while shown in
+        // Plan mode; Tab passes through so mode cycling keeps working
+        // (reference: the form is non-modal).
+        if self.plan_form_active() {
+            use crate::tui::plan_form::PlanFormAction;
+            let action = self.plan_form.handle_key(key);
+            if action != PlanFormAction::Passthrough {
+                self.handle_plan_form_action(action, tx);
+                return;
+            }
+        }
         // The permission prompt (F.5) owns plain keys while open: the tool
         // call is parked on it. Ctrl-modified chords it does not consume
         // (ctrl-c denies inside it) still fall through to the base surface.
@@ -116,7 +127,7 @@ impl App {
     }
 
     /// Global ctrl chords: quit/interrupt, palette, sidebar, model, effort,
-    /// half-page scroll, focus toggle, and diff approval/rejection.
+    /// half-page scroll, plan panel/editor, and diff approval/rejection.
     fn handle_chord_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
         if !key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
@@ -161,16 +172,22 @@ impl App {
                 self.file_picker.open(&cwd);
                 true
             }
+            KeyCode::Char('t') => {
+                self.toggle_plan_panel();
+                true
+            }
+            KeyCode::Char('o') => {
+                // Plan editor handoff (F.3, task 79): Ctrl-O opens the
+                // session's plan file in $VISUAL/$EDITOR.
+                self.open_plan_editor();
+                true
+            }
             KeyCode::Char('u') => {
                 self.scroll_by(-(self.view.view_height as i32 / 2).max(1));
                 true
             }
             KeyCode::Char('d') => {
                 self.scroll_by((self.view.view_height as i32 / 2).max(1));
-                true
-            }
-            KeyCode::Char('o') => {
-                self.toggle_focused();
                 true
             }
             KeyCode::Char('Y') => {

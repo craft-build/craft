@@ -50,11 +50,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // The permission prompt (F.5) rides directly above the composer region:
     // its rows are carved out of the message area, so the shared top border
-    // and the composer block below it keep their positions.
+    // and the composer block below it keep their positions. The plan form
+    // (F.3, Ctrl-T) stacks above it the same way.
     let prompt_h = if app.permission_prompt.is_open() {
         app.permission_prompt
             .height(chat.width)
             .min(bottom.y.saturating_sub(msg_area.y))
+    } else {
+        0
+    };
+    let form_h = if app.plan_form.is_visible() {
+        app.plan_form
+            .height()
+            .min(bottom.y.saturating_sub(msg_area.y + prompt_h))
     } else {
         0
     };
@@ -64,9 +72,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         width: bottom.width,
         height: prompt_h,
     };
-    let msg_area = if prompt_h > 0 {
+    let form_area = Rect {
+        x: bottom.x,
+        y: bottom.y - prompt_h - form_h,
+        width: bottom.width,
+        height: form_h,
+    };
+    let msg_area = if prompt_h + form_h > 0 {
         Rect {
-            height: msg_area.height.saturating_sub(prompt_h),
+            height: msg_area.height.saturating_sub(prompt_h + form_h),
             ..msg_area
         }
     } else {
@@ -91,13 +105,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .split(bottom);
     let composer_area = sub[1];
     let status_area = sub[2];
+    let footer_area = sub[3];
 
     messages::render(f, app, msg_area);
+    if form_h > 0 {
+        app.plan_form.view(f, form_area);
+    }
     if prompt_h > 0 {
         app.permission_prompt.view(f, prompt_area);
     }
     composer::render_input(f, app, composer_area);
     composer::render_status(f, app, status_area);
+    // One-row " Plan Ctrl+T " reminder in the blank footer row while a
+    // ready plan's form is dismissed (reference `PlanForm::hint_line`).
+    if let Some(hint) = app.plan_form.hint_line() {
+        f.render_widget(ratatui::widgets::Paragraph::new(hint), footer_area);
+    }
 
     if let Some(side) = side {
         sidebar::render(f, app, side);
@@ -732,5 +755,28 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         // Should not panic and should not render the sidebar plan heading.
         assert!(!buffer_text(&terminal).contains("PLAN"));
+    }
+
+    /// The plan form (Ctrl-T) rides above the composer: its menu items are
+    /// visible in Plan mode, and the dismissed state leaves the one-row
+    /// " Plan Ctrl+T " hint in the footer.
+    #[test]
+    fn plan_form_renders_above_composer_and_hints_when_dismissed() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut app = App::new();
+        app.mode = crate::tui::app::Mode::Plan;
+        app.plan_path = Some(std::path::PathBuf::from("/tmp/plans/x.md"));
+        app.plan_form.on_plan_ready();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Plan complete"), "form title missing");
+        assert!(text.contains("Implement plan"), "menu missing");
+        assert!(text.contains("Refine plan"));
+
+        app.plan_form.hide();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("Plan complete"));
+        assert!(text.contains("Plan Ctrl+T"), "dismissed hint missing");
     }
 }
