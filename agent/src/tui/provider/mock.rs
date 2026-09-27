@@ -348,6 +348,11 @@ impl Provider for MockProvider {
                             Status::Done
                         }));
                     }
+                    Command::AnswerQuestion { id, .. } => {
+                        // Mirrors the question asker: the request resolves
+                        // and the tool unblocks.
+                        let _ = evt_tx.send(AgentEvent::QuestionResolved { id });
+                    }
                     Command::Interrupt => {
                         if let Some(h) = current.take() {
                             h.abort();

@@ -124,7 +124,7 @@ impl PromptBuffer {
         self.cursor += 1;
     }
 
-    fn insert_text(&mut self, text: &str) {
+    pub(crate) fn insert_text(&mut self, text: &str) {
         let n = text.chars().count();
         if n == 0 {
             return;
@@ -150,11 +150,16 @@ impl PromptBuffer {
             .unwrap_or(self.text.len())
     }
 
-    fn value(&self) -> &str {
+    pub(crate) fn value(&self) -> &str {
         &self.text
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    /// Cursor position in chars (for rendering the caret).
+    pub(crate) fn cursor_char(&self) -> usize {
+        self.cursor
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => self.insert(c),
             KeyCode::Backspace => self.backspace(),

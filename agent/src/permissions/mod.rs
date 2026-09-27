@@ -79,6 +79,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "list_tools",
     "bash_status",
     "bash_watch",
+    "question",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

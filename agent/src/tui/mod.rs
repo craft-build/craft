@@ -13,6 +13,7 @@ mod notify;
 mod permission_prompt;
 mod plan_form;
 pub mod provider;
+mod question_form;
 mod repaint;
 pub(crate) mod search_modal;
 mod selection;

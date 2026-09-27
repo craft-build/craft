@@ -60,10 +60,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         0
     };
+    // The question form (A.5) stacks above the permission prompt the same
+    // way; at most one is open at a time in practice.
+    let question_h = if app.question_form.is_open() {
+        app.question_form
+            .height(chat.width)
+            .min(bottom.y.saturating_sub(msg_area.y + prompt_h))
+    } else {
+        0
+    };
     let form_h = if app.plan_form.is_visible() {
         app.plan_form
             .height()
-            .min(bottom.y.saturating_sub(msg_area.y + prompt_h))
+            .min(bottom.y.saturating_sub(msg_area.y + prompt_h + question_h))
     } else {
         0
     };
@@ -73,15 +82,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         width: bottom.width,
         height: prompt_h,
     };
+    let question_area = Rect {
+        x: bottom.x,
+        y: bottom.y - prompt_h - question_h,
+        width: bottom.width,
+        height: question_h,
+    };
     let form_area = Rect {
         x: bottom.x,
-        y: bottom.y - prompt_h - form_h,
+        y: bottom.y - prompt_h - question_h - form_h,
         width: bottom.width,
         height: form_h,
     };
-    let msg_area = if prompt_h + form_h > 0 {
+    let msg_area = if prompt_h + question_h + form_h > 0 {
         Rect {
-            height: msg_area.height.saturating_sub(prompt_h + form_h),
+            height: msg_area
+                .height
+                .saturating_sub(prompt_h + question_h + form_h),
             ..msg_area
         }
     } else {
@@ -111,6 +128,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     messages::render(f, app, msg_area);
     if form_h > 0 {
         app.plan_form.view(f, form_area);
+    }
+    if question_h > 0 {
+        app.question_form.view(f, question_area);
     }
     if prompt_h > 0 {
         app.permission_prompt.view(f, prompt_area);

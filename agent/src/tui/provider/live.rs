@@ -9,6 +9,7 @@
 //! explicit user decision.
 
 mod approval;
+mod question;
 mod turn;
 mod usage_recorder;
 
@@ -28,6 +29,7 @@ use crate::run;
 use crate::tools::Workspace;
 
 use approval::decide;
+use question::answer_question;
 use turn::{TurnCtx, run_turn};
 use usage_recorder::UsageLedger;
 
@@ -57,6 +59,11 @@ struct SessionState {
     pending_approval: Option<(
         String,
         tokio::sync::oneshot::Sender<crate::permissions::PermissionAnswer>,
+    )>,
+    /// Parked `question` tool call, by question-request id (A.5).
+    pending_question: Option<(
+        String,
+        tokio::sync::oneshot::Sender<crate::tools::QuestionAnswer>,
     )>,
     /// Per-model usage totals and the cost ledger they feed.
     usage: UsageLedger,
@@ -578,6 +585,9 @@ impl CraftProvider {
                 }
                 Command::AnswerPermission { id, answer } => {
                     decide(&state, id, answer).await;
+                }
+                Command::AnswerQuestion { id, answer } => {
+                    answer_question(&state, id, answer).await;
                 }
                 Command::ToggleAutoReview => {
                     let on = permissions.toggle_auto_review();

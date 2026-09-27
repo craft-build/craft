@@ -99,6 +99,10 @@ pub struct App {
     /// parked on the user's decision. Not a modal — it rides above the
     /// composer and owns plain keys while open.
     pub permission_prompt: crate::tui::permission_prompt::PermissionPrompt,
+    /// Question form (A.5): open while the `question` tool is parked on
+    /// the user's answers. Like the permission prompt, not a modal — it
+    /// rides above the composer and owns plain keys while open.
+    pub question_form: crate::tui::question_form::QuestionForm,
     /// Latest per-model usage snapshot from the provider (the `/usage`
     /// overlay's data; refreshed after every completed run).
     pub usage: Vec<UsageRow>,
@@ -165,6 +169,7 @@ impl App {
             modal: Modal::None,
             slash_selected: 0,
             permission_prompt: crate::tui::permission_prompt::PermissionPrompt::new(),
+            question_form: crate::tui::question_form::QuestionForm::new(),
             usage: Vec::new(),
             usage_quota: crate::tui::provider::UsageFetchState::Idle,
             usage_scroll: 0,
@@ -417,6 +422,12 @@ impl App {
             AgentEvent::PermissionResolved { id } => {
                 if self.permission_prompt.id() == Some(id.as_str()) {
                     self.permission_prompt.close();
+                }
+            }
+            AgentEvent::QuestionRequest { id, questions } => self.question_form.open(id, questions),
+            AgentEvent::QuestionResolved { id } => {
+                if self.question_form.id() == Some(id.as_str()) {
+                    self.question_form.close();
                 }
             }
             // Message-bearing events merge into the conversation.

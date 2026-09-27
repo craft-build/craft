@@ -469,7 +469,7 @@ pub(crate) const GUARDRAIL_BLOCK_MESSAGE: &str = "blocked by guardrails: this to
 const GUARDRAIL_WARN_PREFIX: &str = "[guardrail] ";
 
 /// Tools that must never share a wave with another call: `batch` nests its
-/// own parallel dispatch and `question` (not yet ported) blocks on the user.
+/// own parallel dispatch and `question` blocks on the user.
 pub(crate) fn is_never_parallel(name: &str) -> bool {
     matches!(name, "batch" | "question")
 }

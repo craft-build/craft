@@ -36,6 +36,12 @@ pub enum Command {
         id: String,
         answer: crate::permissions::PermissionAnswer,
     },
+    /// Answered the question form (by question-request id) with the
+    /// picked labels per question, or dismissed it (A.5).
+    AnswerQuestion {
+        id: String,
+        answer: crate::tools::QuestionAnswer,
+    },
     /// Esc: interrupt the running turn.
     Interrupt,
     /// Start over (new session): abort any turn and reset to the initial state.
@@ -305,6 +311,17 @@ pub enum AgentEvent {
     /// The pending permission request resolved (answered, cancelled, or
     /// timed out); closes the overlay if the id matches.
     PermissionResolved {
+        id: String,
+    },
+    /// The `question` tool is parked on the user: opens the question form
+    /// (A.5) with one tab per question.
+    QuestionRequest {
+        id: String,
+        questions: Vec<crate::tools::QuestionSpec>,
+    },
+    /// The pending question resolved (answered, dismissed, cancelled, or
+    /// timed out); closes the form if the id matches.
+    QuestionResolved {
         id: String,
     },
 }

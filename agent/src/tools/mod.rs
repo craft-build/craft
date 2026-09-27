@@ -19,6 +19,7 @@ mod list;
 mod list_tools;
 pub(crate) mod move_file;
 mod multiedit;
+mod question;
 mod read;
 mod retrieve;
 pub(crate) mod ssrf;
@@ -49,6 +50,10 @@ pub use list::{List, ListArgs, ListOutput};
 pub use list_tools::{ListTools, ListToolsArgs, ListToolsOutput};
 pub use move_file::{MoveFile, MoveFileArgs, MoveFileOutput};
 pub use multiedit::{EditEntry, MultiEdit, MultiEditArgs, MultiEditOutput};
+pub use question::{
+    ASK_TIMEOUT, AskQuestions, DismissAsk, Question, QuestionAnswer, QuestionArgs, QuestionOption,
+    QuestionOutput, QuestionSpec, decode_answer, encode_answer, is_question_answer,
+};
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
@@ -83,6 +88,9 @@ pub struct Workspace {
     compression_store: crate::compression::store::SharedCompressionStore,
     snapshots: crate::snapshot::SnapshotManager,
     bash_jobs: bash::BashJobs,
+    /// Host seam for the `question` tool (A.5): the TUI installs the
+    /// interactive asker per turn; the default dismisses headlessly.
+    questions: Arc<dyn question::AskQuestions>,
     /// Plan-mode plan file (C.17): the one write target allowed outside the
     /// workspace root. Shared (like every Workspace cell) so the per-turn
     /// set is visible through clones.
@@ -106,6 +114,7 @@ impl Workspace {
             compression_store: crate::compression::store::shared_store(),
             snapshots: crate::snapshot::SnapshotManager::new(root.clone()),
             bash_jobs: Default::default(),
+            questions: Arc::new(question::DismissAsk),
             plan_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
         })
     }
@@ -137,6 +146,14 @@ impl Workspace {
             crate::run::dedup::normalize_write_path(requested)
                 == crate::run::dedup::normalize_write_path(&plan.display().to_string())
         })
+    }
+
+    /// Install the question seam (A.5). Taken on a workspace clone per
+    /// turn (like the approval gate) so the asker can carry the turn's
+    /// cancel token and event channel.
+    pub fn with_questions(mut self, asker: Arc<dyn question::AskQuestions>) -> Self {
+        self.questions = asker;
+        self
     }
 
     /// The session-shared reversible-compression store: request-build
@@ -192,6 +209,7 @@ impl Workspace {
             dynamic(Webfetch),
             dynamic(Websearch),
             dynamic(ViewImage(self.clone())),
+            dynamic(Question(self.questions.clone())),
             dynamic(batch.clone()),
         ];
         // Introspection snapshot of every other registered tool.

@@ -482,6 +482,16 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         context_length: selection.context_length,
     };
 
+    // The question seam (A.5) is per-turn like the approval gate: it parks
+    // on this turn's cancel token and event channel.
+    let workspace =
+        workspace
+            .clone()
+            .with_questions(Arc::new(super::question::QuestionAsker::new(
+                state.clone(),
+                tx.clone(),
+                cancel.clone(),
+            )));
     let tools = workspace
         .register_with_mode(mode.clone())
         .with_dedup(dedup)

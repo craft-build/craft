@@ -56,6 +56,11 @@ impl App {
         if self.permission_prompt.is_open() && self.handle_permission_key(key, tx) {
             return;
         }
+        // The question form (A.5) owns plain keys the same way while the
+        // `question` tool is parked on it.
+        if self.question_form.is_open() && self.handle_question_key(key, tx) {
+            return;
+        }
         self.handle_base_key(key, tx);
     }
 
@@ -106,6 +111,24 @@ impl App {
                 !key.modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
             }
+        }
+    }
+
+    /// Route a key through the open question form (A.5): an answer (picked
+    /// labels or dismissal) goes to the provider by question-request id;
+    /// unhandled ctrl chords keep working, plain keys stay in the form.
+    fn handle_question_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
+        let Some(id) = self.question_form.id().map(str::to_owned) else {
+            return false;
+        };
+        match self.question_form.handle_key(key) {
+            Some(answer) => {
+                let _ = tx.send(Command::AnswerQuestion { id, answer });
+                true
+            }
+            None => !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
         }
     }
 
@@ -483,6 +506,9 @@ impl App {
         if self.permission_prompt.handle_paste(text) {
             return;
         }
+        if self.question_form.handle_paste(text) {
+            return;
+        }
         // A paste that is nothing but an image path attaches the image
         // instead of inserting the text (F.6).
         if let Some((path, media)) = crate::tui::ui::image::try_parse_image_path(text)
@@ -782,6 +808,69 @@ mod tests {
         assert!(app.permission_prompt.is_open());
         app.handle_event(AgentEvent::PermissionResolved { id: "t9".into() });
         assert!(!app.permission_prompt.is_open());
+    }
+
+    fn open_question(app: &mut App) {
+        app.handle_event(AgentEvent::QuestionRequest {
+            id: "q9".into(),
+            questions: vec![crate::tools::QuestionSpec {
+                question: "Which?".into(),
+                header: None,
+                options: vec![crate::tools::QuestionOption {
+                    label: "A".into(),
+                    description: None,
+                }],
+                multi_select: false,
+            }],
+        });
+    }
+
+    #[test]
+    fn question_request_opens_the_form_and_resolution_closes_it() {
+        let mut app = App::new();
+        open_question(&mut app);
+        assert!(app.question_form.is_open());
+        // A stale resolution must not close a newer request.
+        app.handle_event(AgentEvent::QuestionResolved { id: "other".into() });
+        assert!(app.question_form.is_open());
+        app.handle_event(AgentEvent::QuestionResolved { id: "q9".into() });
+        assert!(!app.question_form.is_open());
+    }
+
+    #[test]
+    fn answering_the_question_routes_the_answered_command() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        open_question(&mut app);
+        // Single-select: Enter picks A and submits immediately.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::AnswerQuestion { id, answer })
+                if id == "q9" && !answer.dismissed && answer.answers == vec![vec!["A".to_string()]]
+        ));
+        // Dismissing routes a dismissed answer too.
+        open_question(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Command::AnswerQuestion { id, answer }) if id == "q9" && answer.dismissed
+        ));
+    }
+
+    #[test]
+    fn question_form_owns_plain_keys_while_open() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        open_question(&mut app);
+        // A plain char never reaches the composer.
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &tx);
+        assert!(app.composer.text.is_empty());
+        // Enter picks the option instead of submitting the composer.
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx2);
+        assert!(app.composer.text.is_empty());
+        assert!(matches!(rx2.try_recv(), Ok(Command::AnswerQuestion { .. })));
     }
 
     #[test]
