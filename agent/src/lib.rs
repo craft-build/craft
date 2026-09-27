@@ -1,7 +1,7 @@
 pub mod acp;
-pub mod cli;
 pub mod auto_review;
 pub mod child_guard;
+pub mod cli;
 pub mod compaction;
 pub mod compression;
 pub mod config;
@@ -19,6 +19,7 @@ pub mod model_registry;
 pub mod models_dev;
 pub mod paths;
 pub mod permissions;
+pub mod print;
 pub mod prompt;
 pub mod providers;
 pub mod run;

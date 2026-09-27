@@ -232,13 +232,7 @@ impl Cli {
         if self.print {
             if matches!(self.input_format, InputFormat::StreamJson) {
                 return InvalidSnafu {
-                    reason: "--input-format stream-json is not supported yet (task 84)",
-                }
-                .fail();
-            }
-            if matches!(self.output_format, OutputFormat::StreamJson) {
-                return InvalidSnafu {
-                    reason: "--output-format stream-json is not supported yet (task 84)",
+                    reason: "--input-format stream-json (SDK mode) is not supported yet",
                 }
                 .fail();
             }
@@ -407,11 +401,16 @@ mod tests {
     }
 
     #[test]
-    fn stream_json_print_formats_rejected_until_task_84() {
+    fn stream_json_output_is_accepted_in_print_mode() {
         let cli = parse(&["-p", "--output-format", "stream-json", "hi"]).unwrap();
-        assert!(cli.validate().unwrap_err().to_string().contains("task 84"));
+        assert!(cli.validate().is_ok());
         let cli = parse(&["-p", "--input-format", "stream-json", "hi"]).unwrap();
-        assert!(cli.validate().unwrap_err().to_string().contains("task 84"));
+        assert!(
+            cli.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("stream-json")
+        );
     }
 
     #[test]
@@ -482,12 +481,26 @@ mod tests {
     }
 }
 
-/// `craft --print` (G.1 minimal, text only): run one prompt to completion
-/// against the configured providers and print the assistant's reply. The
-/// full headless surface (stream-json I/O, images, verbose transcript) is
-/// task 84 (G.3).
+/// `craft --print` (G.3): run one prompt to completion against the
+/// configured providers and emit text, JSONL (`--output-format
+/// stream-json`), or a verbose transcript (`--verbose`). SDK-mode
+/// stream-json input remains unported.
 pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<()> {
-    for flag in ["--image", "--verbose", "--fork-session", "--include-partial-messages"] {
+    for flag in ["--fork-session", "--include-partial-messages"] {
+        let set = match flag {
+            "--fork-session" => cli.fork_session,
+            _ => cli.include_partial_messages,
+        };
+        if set {
+            eprintln!("warning: {flag} is accepted but not implemented yet");
+        }
+    }
+    for flag in [
+        "--image",
+        "--verbose",
+        "--fork-session",
+        "--include-partial-messages",
+    ] {
         let set = match flag {
             "--image" => !cli.images.is_empty(),
             "--verbose" => cli.verbose,
@@ -503,13 +516,12 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         Some(prompt) => prompt.clone(),
         None if !std::io::stdin().is_terminal() => {
             let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
-                .map_err(|e| {
-                    crate::error::InvalidSnafu {
-                        reason: format!("reading the prompt from stdin: {e}"),
-                    }
-                    .build()
-                })?;
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map_err(|e| {
+                crate::error::InvalidSnafu {
+                    reason: format!("reading the prompt from stdin: {e}"),
+                }
+                .build()
+            })?;
             buf.trim().to_string()
         }
         None => {
@@ -520,39 +532,46 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         }
     };
 
+    // Fails fast: silently dropping an image the caller explicitly attached
+    // would be worse than erroring.
+    let images = crate::print::load_images(&cli.images)?;
+
     // Model resolution: `-m provider/model-id`, else the first configured
     // completion provider's first catalog entry.
-    let (provider_name, provider_config) = match &cli.model {
-        Some(spec) => {
-            let (provider, _model) = spec.split_once('/').ok_or_else(|| {
-                InvalidSnafu {
-                    reason: format!("--model expects provider/model-id, got {spec:?}"),
-                }
-                .build()
-            })?;
-            let config = config.providers.get(provider).ok_or_else(|| {
-                InvalidSnafu {
+    let (provider_name, provider_config) =
+        match &cli.model {
+            Some(spec) => {
+                let (provider, _model) = spec.split_once('/').ok_or_else(|| {
+                    InvalidSnafu {
+                        reason: format!("--model expects provider/model-id, got {spec:?}"),
+                    }
+                    .build()
+                })?;
+                let config =
+                    config.providers.get(provider).ok_or_else(|| {
+                        InvalidSnafu {
                     reason: format!(
                         "unknown provider {provider:?} in --model {spec:?} (configured: {})",
                         config.providers.keys().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 }
                 .build()
-            })?;
-            (provider.to_string(), config.clone())
-        }
-        None => config
-            .providers
-            .iter()
-            .find(|(_, c)| c.kind != crate::providers::ProviderKind::Voyageai)
-            .map(|(name, c)| (name.to_string(), c.clone()))
-            .ok_or_else(|| {
-                InvalidSnafu {
-                    reason: "no providers are configured in ~/.config/craft/agent.toml".to_string(),
-                }
-                .build()
-            })?,
-    };
+                    })?;
+                (provider.to_string(), config.clone())
+            }
+            None => config
+                .providers
+                .iter()
+                .find(|(_, c)| c.kind != crate::providers::ProviderKind::Voyageai)
+                .map(|(name, c)| (name.to_string(), c.clone()))
+                .ok_or_else(|| {
+                    InvalidSnafu {
+                        reason: "no providers are configured in ~/.config/craft/agent.toml"
+                            .to_string(),
+                    }
+                    .build()
+                })?,
+        };
     let model_id = match &cli.model {
         Some(spec) => spec.split_once('/').expect("validated above").1.to_string(),
         None => {
@@ -585,8 +604,7 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         .build()
     })?;
     let cwd_str = cwd.display().to_string();
-    let instructions =
-        crate::instructions::load_instructions(&cwd_str);
+    let instructions = crate::instructions::load_instructions(&cwd_str);
     let workspace = crate::tools::Workspace::new(&cwd)
         .map_err(crate::error::client_error)?
         .with_loaded_instructions(instructions.loaded.clone());
@@ -630,35 +648,28 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         retry: crate::run::RetryCtx::default(),
     };
 
-    let mut handle = crate::headless::spawn(crate::headless::HeadlessParams {
+    let model_label = params
+        .model_spec
+        .as_ref()
+        .map(|spec| spec.to_string())
+        .unwrap_or_else(|| model_id.clone());
+    let handle = crate::headless::spawn(crate::headless::HeadlessParams {
         model,
         model_spec: params.model_spec.clone(),
         run: params,
         workspace,
         before: None,
         prompt,
+        images,
         initial_wd: cwd,
         state_dir,
         session_id: cli.resume_session()?,
     });
 
-    let mut reply = String::new();
-    let mut failed: Option<String> = None;
-    while let Some(envelope) = handle.events.next().await {
-        match &envelope.event {
-            crate::run::Event::TextDelta(chunk) => reply.push_str(chunk),
-            crate::run::Event::Error(message) => failed = Some(message.clone()),
-            crate::run::Event::Done { .. } => break,
-            _ => {}
-        }
-    }
-    let _ = handle.task.await;
-    if !reply.trim().is_empty() {
-        println!("{reply}");
-    }
-    match failed {
-        // Unlike the reference (whose print mode exits 0 on agent errors),
-        // a failed run is a failure exit.
+    // G.3 print mode: raw text or stream-json JSONL output. Unlike the
+    // reference (whose print mode exits 0 on agent errors), a failed run is
+    // a failure exit.
+    match crate::print::emit(handle, &cli.output_format, cli.verbose, &model_label).await? {
         Some(message) => Err(crate::error::InvalidSnafu { reason: message }.build()),
         None => Ok(()),
     }

@@ -201,6 +201,8 @@ pub struct HeadlessParams {
     /// Optional interception point for every tool call (approval gate).
     pub before: Option<Arc<dyn BeforeExecute>>,
     pub prompt: String,
+    /// Vision attachments staged on the prompt message (`-p --image`).
+    pub images: Vec<crate::history::ImageBlock>,
     pub initial_wd: PathBuf,
     /// Where the session is persisted; `None` disables persistence.
     pub state_dir: Option<StateDir>,
@@ -267,12 +269,13 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
         // seam so the store can persist it after the run ends.
         let done_by_model = Arc::new(std::sync::Mutex::new(None));
         let sink = Arc::clone(&done_by_model);
-        crate::run::run(
+        crate::run::run_with_images(
             &params.model,
             &run_params,
             &tools,
             &mut history,
             &params.prompt,
+            &params.images,
             &cancel,
             &|event| {
                 if let Event::Done { by_model, .. } = &event {
@@ -641,6 +644,7 @@ mod tests {
             workspace: workspace(),
             before: None,
             prompt: prompt.into(),
+            images: Vec::new(),
             initial_wd: std::env::temp_dir(),
             state_dir: state,
             session_id: None,
