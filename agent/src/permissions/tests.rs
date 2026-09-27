@@ -38,7 +38,10 @@ fn yolo_allows_everything_including_explicit_denies() {
     let tmp = tempfile::tempdir().unwrap();
     let mgr = mgr_with(tmp.path(), vec![deny_rule("write", None)]);
     let tool = ToolKey::native("write");
-    assert_eq!(mgr.check(&tool, &["/tmp/x".into()]), PermissionCheck::Denied);
+    assert_eq!(
+        mgr.check(&tool, &["/tmp/x".into()]),
+        PermissionCheck::Denied
+    );
     mgr.set_yolo(true);
     assert!(mgr.is_yolo());
     assert_eq!(
@@ -46,7 +49,10 @@ fn yolo_allows_everything_including_explicit_denies() {
         PermissionCheck::Allowed
     );
     mgr.set_yolo(false);
-    assert_eq!(mgr.check(&tool, &["/tmp/x".into()]), PermissionCheck::Denied);
+    assert_eq!(
+        mgr.check(&tool, &["/tmp/x".into()]),
+        PermissionCheck::Denied
+    );
 }
 
 #[test]

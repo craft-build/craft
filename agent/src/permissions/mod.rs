@@ -596,6 +596,73 @@ impl PermissionManager {
     }
 }
 
+/// The scope a tool call is about: the touched path for file tools,
+/// per-command scopes for bash (task B.2), `*` otherwise (scope-less rules
+/// still match it; everything else falls to the default). Shared by the
+/// TUI's approval gate and the ACP permission gate so the two frontends
+/// prompt for exactly the same things. The flag is the bash parser's
+/// `force_prompt`: the scopes could not be derived confidently, so allow
+/// rules must not silence the prompt.
+pub fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<String>, bool) {
+    if name == "bash"
+        && let Some(command) = args.get("command").and_then(|v| v.as_str())
+        && let Some(scopes) = bash::permission_scopes(command)
+    {
+        return (scopes.scopes, scopes.force_prompt);
+    }
+    if name == "apply_patch"
+        && let Some(patch) = args.get("patch_text").and_then(|v| v.as_str())
+    {
+        return (
+            crate::tools::patch_paths(patch)
+                .iter()
+                .map(|p| resolve_scope_path(root, p))
+                .collect(),
+            false,
+        );
+    }
+    if name == "move"
+        && let (Some(source), Some(destination)) = (
+            args.get("source").and_then(|v| v.as_str()),
+            args.get("destination").and_then(|v| v.as_str()),
+        )
+    {
+        return (
+            [source, destination]
+                .iter()
+                .map(|p| resolve_scope_path(root, p))
+                .collect(),
+            false,
+        );
+    }
+    if FILE_WRITE_TOOLS.contains(&name) {
+        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+            return (vec![resolve_scope_path(root, path)], false);
+        }
+        if let Some(files) = args.get("files").and_then(|v| v.as_array()) {
+            return (
+                files
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|p| resolve_scope_path(root, p))
+                    .collect(),
+                false,
+            );
+        }
+    }
+    (vec!["*".to_string()], false)
+}
+
+/// Resolve a tool-supplied path against the project root for scope matching.
+pub fn resolve_scope_path(root: &Path, path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        root.join(p).display().to_string()
+    }
+}
+
 #[derive(Debug)]
 pub enum PermissionWriteError {
     Parse(String),

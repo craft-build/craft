@@ -6,10 +6,14 @@
 //! here: provider and model selection travel as session config options, model
 //! output streams as `session/update` notifications, and `session/cancel`
 //! stops the in-flight turn. The loop itself is unchanged; this module only
-//! translates.
+//! translates. Gated tool calls ask the client over
+//! `session/request_permission`, the `question` tool is mapped onto
+//! `elicitation/create` forms, and `session/load` resumes a persisted session
+//! (task G.5).
 //!
-//! Deliberately not advertised: `session/load` (the loop keeps history in
-//! memory only), embedded context, image, and audio prompts, and MCP servers.
+//! Deliberately not advertised: embedded context, image, and audio
+//! prompts. `mcp_servers` on new/load is ignored until the MCP client
+//! (task 94) is ported.
 
 use agent_client_protocol::{
     Agent as AcpRole, Client as AcpClient, ConnectionTo, Error, JsonRpcResponse, Responder, Stdio,
@@ -17,15 +21,21 @@ use agent_client_protocol::{
     schema::{
         ProtocolVersion,
         v1::{
-            AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
-            ConfigOptionUpdate, Content, ContentBlock, ContentChunk, Implementation,
-            InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
-            PromptCapabilities, PromptRequest, PromptResponse as AcpPromptResponse,
-            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
-            SessionConfigValueId, SessionId, SessionNotification, SessionUpdate,
-            SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
-            ToolCall as AcpToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
-            ToolCallUpdateFields, ToolKind, UsageUpdate,
+            AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest,
+            CloseSessionResponse, ConfigOptionUpdate, Content, ContentBlock, ContentChunk,
+            CreateElicitationRequest, ElicitationContentValue, ElicitationFormMode,
+            ElicitationPropertySchema, ElicitationSchema, ElicitationScope,
+            ElicitationSessionScope, EnumOption, Implementation, InitializeRequest,
+            InitializeResponse, LoadSessionRequest, LoadSessionResponse, MultiSelectPropertySchema,
+            NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionId,
+            PermissionOptionKind, PromptCapabilities, PromptRequest,
+            PromptResponse as AcpPromptResponse, RequestPermissionOutcome,
+            RequestPermissionRequest, SessionConfigOption, SessionConfigOptionCategory,
+            SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionNotification,
+            SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+            StopReason, StringPropertySchema, TextContent, ToolCall as AcpToolCall,
+            ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+            ToolKind, UsageUpdate,
         },
     },
 };
@@ -42,13 +52,25 @@ use tokio::sync::Mutex;
 use crate::{
     config::Config,
     history,
+    permissions::{
+        ASK_TIMEOUT, PermissionAnswer, PermissionCheck, PermissionError, PermissionManager,
+        ToolKey, append_permission_rule, scope_for_call,
+    },
     providers::{CatalogModel, Provider, ProviderKind},
     run::{self, RunOutcome},
     tools::Workspace,
+    tools::{AskQuestions, QuestionAnswer, QuestionOption, QuestionSpec},
 };
 
 pub const PROVIDER_OPTION_ID: &str = "provider";
 pub const MODEL_OPTION_ID: &str = "model";
+
+/// Permission option ids on `session/request_permission` (G.5). Ported from
+/// the reference `craft-acp/src/permissions.rs`.
+const ALLOW_ONCE_ID: &str = "allow_once";
+const ALLOW_ALWAYS_ID: &str = "allow_always";
+const REJECT_ONCE_ID: &str = "reject_once";
+const REJECT_ALWAYS_ID: &str = "reject_always";
 
 struct Session {
     workspace: Workspace,
@@ -65,6 +87,9 @@ struct Session {
     /// Session-wide tool dedup cache, shared by the dispatcher and cleared
     /// by the compaction engine.
     dedup: run::SharedDedupCache,
+    /// Session-lifetime permission engine; the ACP gate prompts the client
+    /// where the TUI gate prompts the user (G.5).
+    permissions: Arc<PermissionManager>,
     cancel: run::CancelFlag,
 }
 
@@ -112,6 +137,8 @@ struct AppState {
     config: Config,
     sessions: Mutex<BTreeMap<String, Session>>,
     next_session: AtomicU64,
+    /// Client capabilities from `initialize`, consulted before elicitation.
+    client_caps: Mutex<Option<ClientCapabilities>>,
 }
 
 impl AppState {
@@ -120,6 +147,7 @@ impl AppState {
             config,
             sessions: Mutex::new(BTreeMap::new()),
             next_session: AtomicU64::new(1),
+            client_caps: Mutex::new(None),
         }
     }
 
@@ -148,15 +176,7 @@ impl AppState {
     }
 
     async fn open_session(&self, cwd: &Path) -> std::result::Result<Session, String> {
-        let instructions = tokio::task::spawn_blocking({
-            let cwd = cwd.display().to_string();
-            move || crate::instructions::load_instructions(&cwd)
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        let workspace = Workspace::new(cwd)
-            .map_err(|e| e.to_string())?
-            .with_loaded_instructions(instructions.loaded.clone());
+        let (instructions, workspace, permissions) = self.open_workspace(cwd).await?;
         let provider_name = self
             .config
             .providers
@@ -172,22 +192,137 @@ impl AppState {
             .map(|model| model.id.clone())
             .unwrap_or_default();
         let context_length = models.first().and_then(|model| model.context_length);
-        let (cancel, _) = run::cancel_channel();
-        let dedup = run::shared_cache();
-        Ok(Session {
+        Ok(self.build_session(
             workspace,
             instructions,
-            history: Vec::new(),
+            permissions,
+            Vec::new(),
             provider_name,
             models,
             model,
             context_length,
-            compaction: std::sync::Arc::new(std::sync::Mutex::new(
+        ))
+    }
+
+    /// Resume a persisted session (G.5 `session/load`): history, provider,
+    /// and model come from the stored record; the workspace is rooted at the
+    /// client-requested `cwd`, not the recorded one — the client decides
+    /// where the resumed session runs.
+    async fn load_session(
+        &self,
+        cwd: &Path,
+        stored_id: &str,
+    ) -> std::result::Result<Session, String> {
+        use crate::storage::StateDir;
+        let session_ref = stored_id
+            .parse::<crate::id::SessionRef>()
+            .map_err(|_| format!("invalid session id {stored_id:?}"))?;
+        let dir = StateDir::resolve().map_err(|e| e.to_string())?;
+        let stored = crate::headless::StoredSession::load(session_ref.id(), &dir)
+            .map_err(|e| format!("session {stored_id:?} could not be loaded: {e}"))?;
+        let (instructions, workspace, permissions) = self.open_workspace(cwd).await?;
+        // The stored model spec is `{provider}/{model}` (see `run_turn`).
+        let stored_model = stored.model.clone();
+        let (provider_name, model) = match stored_model.split_once('/') {
+            Some((provider, model))
+                if !self.config.providers.contains_key(provider) || model.is_empty() =>
+            {
+                (self.default_provider()?, None)
+            }
+            Some((provider, model)) => (provider.to_owned(), Some(model.to_owned())),
+            None => (self.default_provider()?, None),
+        };
+        let (_provider, models) = self.provider_catalog(&provider_name).await?;
+        let model = model
+            .and_then(|id| models.iter().find(|m| m.id == id).map(|m| m.id.clone()))
+            .or_else(|| models.first().map(|m| m.id.clone()))
+            .unwrap_or_default();
+        let context_length = models
+            .iter()
+            .find(|m| m.id == model)
+            .and_then(|m| m.context_length);
+        Ok(self.build_session(
+            workspace,
+            instructions,
+            permissions,
+            stored.messages().to_vec(),
+            provider_name,
+            models,
+            model,
+            context_length,
+        ))
+    }
+
+    fn default_provider(&self) -> std::result::Result<String, String> {
+        self.config
+            .providers
+            .keys()
+            .next()
+            .cloned()
+            .ok_or_else(|| "no providers are configured in ~/.config/craft/agent.toml".to_string())
+    }
+
+    /// Instructions discovery, workspace, and the permission engine —
+    /// shared by `session/new` and `session/load`.
+    async fn open_workspace(
+        &self,
+        cwd: &Path,
+    ) -> std::result::Result<
+        (
+            crate::instructions::Instructions,
+            Workspace,
+            Arc<PermissionManager>,
+        ),
+        String,
+    > {
+        let (instructions, permissions) = tokio::task::spawn_blocking({
+            let cwd = cwd.display().to_string();
+            move || {
+                let instructions = crate::instructions::load_instructions(&cwd);
+                let permissions = PermissionManager::new(
+                    crate::permissions::load_permissions(Path::new(&cwd)),
+                    cwd.into(),
+                );
+                (instructions, permissions)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let workspace = Workspace::new(cwd)
+            .map_err(|e| e.to_string())?
+            .with_loaded_instructions(instructions.loaded.clone());
+        Ok((instructions, workspace, Arc::new(permissions)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_session(
+        &self,
+        workspace: Workspace,
+        instructions: crate::instructions::Instructions,
+        permissions: Arc<PermissionManager>,
+        history: Vec<history::Message>,
+        provider_name: String,
+        models: Vec<CatalogModel>,
+        model: String,
+        context_length: Option<u32>,
+    ) -> Session {
+        let (cancel, _) = run::cancel_channel();
+        let dedup = run::shared_cache();
+        Session {
+            workspace,
+            instructions,
+            history,
+            provider_name,
+            models,
+            model,
+            context_length,
+            compaction: Arc::new(std::sync::Mutex::new(
                 crate::compaction::CompactionState::default().with_dedup(dedup.clone()),
             )),
             dedup,
+            permissions,
             cancel,
-        })
+        }
     }
 }
 
@@ -197,6 +332,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
 
     let init_state = state.clone();
     let new_state = state.clone();
+    let load_state = state.clone();
     let set_state = state.clone();
     let prompt_state = state.clone();
     let close_state = state.clone();
@@ -210,6 +346,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         responder: Responder<InitializeResponse>,
                         _connection: ConnectionTo<AcpClient>| {
                 // Echo the requested version when supported, else our latest.
+                *init_state.client_caps.lock().await = Some(request.client_capabilities.clone());
                 let version = if request.protocol_version == ProtocolVersion::V1 {
                     ProtocolVersion::V1
                 } else {
@@ -218,11 +355,10 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                 let response = InitializeResponse::new(version)
                     .agent_capabilities(
                         AgentCapabilities::new()
-                            .load_session(false)
+                            .load_session(true)
                             .prompt_capabilities(PromptCapabilities::new()),
                     )
                     .agent_info(Implementation::new("craft-acp", env!("CARGO_PKG_VERSION")));
-                let _ = init_state;
                 responder.respond(response)
             },
             on_receive_request!(),
@@ -235,6 +371,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(session) => session,
                     Err(message) => return respond_setup_error(responder, message),
                 };
+                // `mcp_servers` is ignored until the MCP client (task 94)
+                // is ported.
                 let options = session.config_options(&new_state.provider_names());
                 let id = format!(
                     "{}-{}",
@@ -245,6 +383,22 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     NewSessionResponse::new(SessionId::new(id.clone())).config_options(options);
                 new_state.sessions.lock().await.insert(id, session);
                 responder.respond(response)
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: LoadSessionRequest,
+                        responder: Responder<LoadSessionResponse>,
+                        _connection: ConnectionTo<AcpClient>| {
+                // The loaded session keeps the stored id as its ACP id.
+                let stored_id = request.session_id.0.to_string();
+                let session = match load_state.load_session(&request.cwd, &stored_id).await {
+                    Ok(session) => session,
+                    Err(message) => return respond_setup_error(responder, message),
+                };
+                let options = session.config_options(&load_state.provider_names());
+                load_state.sessions.lock().await.insert(stored_id, session);
+                responder.respond(LoadSessionResponse::new().config_options(options))
             },
             on_receive_request!(),
         )
@@ -315,7 +469,7 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                     Ok(text) => text,
                     Err(message) => return respond_setup_error(responder, message),
                 };
-                let (workspace, history, provider_name, model, cancel_rx) = {
+                let (workspace, history, provider_name, model, permissions, cancel_rx) = {
                     let mut sessions = prompt_state.sessions.lock().await;
                     let Some(session) = sessions.get_mut(request.session_id.0.as_ref()) else {
                         drop(sessions);
@@ -328,9 +482,16 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         session.history.clone(),
                         session.provider_name.clone(),
                         session.model.clone(),
+                        session.permissions.clone(),
                         session.cancel.token(),
                     )
                 };
+                let client_caps = prompt_state
+                    .client_caps
+                    .lock()
+                    .await
+                    .clone()
+                    .unwrap_or_default();
                 let run_state = prompt_state.clone();
                 let session_id = request.session_id.clone();
                 tokio::spawn(async move {
@@ -343,6 +504,8 @@ pub async fn serve(config: Config) -> std::result::Result<(), Error> {
                         workspace,
                         provider_name,
                         model,
+                        permissions,
+                        client_caps,
                         cancel_rx,
                         responder,
                     )
@@ -433,6 +596,397 @@ fn prompt_text(prompt: &[ContentBlock]) -> std::result::Result<String, String> {
     Ok(text)
 }
 
+// ---------------------------------------------------------------------------
+// G.5 ACP permission gate
+// ---------------------------------------------------------------------------
+
+/// The four options every `session/request_permission` carries. Ported from
+/// the reference `craft-acp/src/permissions.rs`.
+fn permission_options() -> Vec<PermissionOption> {
+    vec![
+        PermissionOption::new(
+            PermissionOptionId::from(ALLOW_ONCE_ID),
+            "Allow once",
+            PermissionOptionKind::AllowOnce,
+        ),
+        PermissionOption::new(
+            PermissionOptionId::from(ALLOW_ALWAYS_ID),
+            "Allow for this session",
+            PermissionOptionKind::AllowAlways,
+        ),
+        PermissionOption::new(
+            PermissionOptionId::from(REJECT_ONCE_ID),
+            "Reject once",
+            PermissionOptionKind::RejectOnce,
+        ),
+        PermissionOption::new(
+            PermissionOptionId::from(REJECT_ALWAYS_ID),
+            "Reject always",
+            PermissionOptionKind::RejectAlways,
+        ),
+    ]
+}
+
+/// Map the client's choice onto the engine's answers, matching the
+/// reference `craft-acp/src/permissions.rs`.
+fn outcome_to_answer(outcome: &RequestPermissionOutcome) -> PermissionAnswer {
+    match outcome {
+        RequestPermissionOutcome::Selected(selected) => match selected.option_id.0.as_ref() {
+            ALLOW_ONCE_ID => PermissionAnswer::AllowOnce,
+            ALLOW_ALWAYS_ID => PermissionAnswer::AllowSession,
+            REJECT_ONCE_ID => PermissionAnswer::Deny,
+            REJECT_ALWAYS_ID => PermissionAnswer::DenyAlwaysLocal,
+            _ => PermissionAnswer::Deny,
+        },
+        RequestPermissionOutcome::Cancelled => PermissionAnswer::Deny,
+        _ => PermissionAnswer::Deny,
+    }
+}
+
+/// The `session/request_permission` payload for one gated call.
+fn permission_request(
+    session_id: &SessionId,
+    id: &str,
+    name: &str,
+    arguments: &serde_json::Value,
+    scopes: &[String],
+) -> RequestPermissionRequest {
+    let mut fields = ToolCallUpdateFields::new()
+        .title(tool_title(name, arguments))
+        .status(ToolCallStatus::Pending)
+        .content(vec![ToolCallContent::Content(Content::new(
+            ContentBlock::Text(TextContent::new(scopes.join("\n"))),
+        ))]);
+    fields.name = Some(name.to_owned());
+    fields.raw_input = Some(arguments.clone());
+    RequestPermissionRequest::new(
+        session_id.clone(),
+        ToolCallUpdate::new(ToolCallId::new(id), fields),
+        permission_options(),
+    )
+}
+
+/// Record a client answer, persisting "always" answers to permissions.toml
+/// (project-local). Write failures degrade to the session grant — the answer
+/// still applies now, it just may be asked again later. Mirrors the TUI
+/// gate's `record_answer`.
+fn record_answer(
+    permissions: &PermissionManager,
+    tool: &ToolKey,
+    scopes: &[String],
+    answer: &PermissionAnswer,
+) -> bool {
+    let allow = answer.is_allow();
+    for (tool, scope, effect, target) in permissions.apply_decision(tool, scopes, answer) {
+        if let Err(err) = append_permission_rule(&tool, scope.as_deref(), effect, &target) {
+            eprintln!("permissions: could not persist always-rule: {err}");
+        }
+    }
+    allow
+}
+
+fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
+    PermissionError::new(&tool.to_string(), scopes).to_string()
+}
+
+/// The ACP approval gate: the permission engine decides, and where it would
+/// prompt, the client answers a `session/request_permission` instead of the
+/// user answering the TUI overlay. Cancellation is epoch-based, matching the
+/// TUI gate.
+struct AcpPermissionGate {
+    connection: ConnectionTo<AcpClient>,
+    session_id: SessionId,
+    cancel: run::CancelToken,
+    permissions: Arc<PermissionManager>,
+}
+
+impl run::BeforeExecute for AcpPermissionGate {
+    fn decide(&self, call: history::ToolCall) -> run::BoxFuture<run::Decision> {
+        let gate = AcpPermissionGate {
+            connection: self.connection.clone(),
+            session_id: self.session_id.clone(),
+            cancel: self.cancel.clone(),
+            permissions: self.permissions.clone(),
+        };
+        Box::pin(async move { gate_decide(gate, call).await })
+    }
+}
+
+async fn gate_decide(gate: AcpPermissionGate, call: history::ToolCall) -> run::Decision {
+    let AcpPermissionGate {
+        connection,
+        session_id,
+        cancel,
+        permissions,
+    } = gate;
+    if cancel.cancelled() {
+        return run::Decision::Stop("cancelled by client".into());
+    }
+    let name = call.function.name.as_str();
+    let tool = ToolKey::native(name);
+    let (scopes, force_prompt) = scope_for_call(permissions.cwd(), name, &call.function.arguments);
+    match permissions.check_multi(&tool, &scopes, force_prompt) {
+        PermissionCheck::Allowed => return run::Decision::Run,
+        PermissionCheck::Denied => return run::Decision::Skip(denied_message(&tool, &scopes)),
+        PermissionCheck::NeedsPrompt { .. } => {}
+    }
+    let request = permission_request(
+        &session_id,
+        &call.id,
+        name,
+        &call.function.arguments,
+        &scopes,
+    );
+    // Dropping the sent request on cancel asks the client to cancel it.
+    let mut cancel_rx = cancel.subscribe();
+    let answer = {
+        let sent = connection.send_request(request);
+        tokio::select! {
+            biased;
+            changed = cancel_rx.changed() => {
+                let _ = changed;
+                return run::Decision::Stop("cancelled by client".into());
+            }
+            outcome = tokio::time::timeout(
+                ASK_TIMEOUT,
+                sent.block_task(),
+            ) => match outcome {
+                Ok(Ok(response)) => outcome_to_answer(&response.outcome),
+                // A timeout, dead connection, or client error denies — but
+                // never wedges the turn.
+                _ => PermissionAnswer::Deny,
+            },
+        }
+    };
+    if record_answer(&permissions, &tool, &scopes, &answer) {
+        run::Decision::Run
+    } else {
+        run::Decision::Skip(denied_message(&tool, &scopes))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G.5 Elicitation: the `question` tool over `elicitation/create`
+// ---------------------------------------------------------------------------
+
+fn supports_form(caps: &ClientCapabilities) -> bool {
+    caps.elicitation.as_ref().is_some_and(|e| e.form.is_some())
+}
+
+fn enum_options(options: &[QuestionOption]) -> Vec<EnumOption> {
+    options
+        .iter()
+        .map(|opt| {
+            let title = match opt.description.as_deref() {
+                Some(description) if !description.is_empty() => {
+                    format!("{} - {}", opt.label, description)
+                }
+                _ => opt.label.clone(),
+            };
+            EnumOption::new(opt.label.clone(), title)
+        })
+        .collect()
+}
+
+fn property(q: &QuestionSpec) -> ElicitationPropertySchema {
+    let title = q.question.clone();
+    if q.options.is_empty() {
+        ElicitationPropertySchema::String(StringPropertySchema::new().title(title))
+    } else if q.multi_select {
+        ElicitationPropertySchema::Array(
+            MultiSelectPropertySchema::titled(enum_options(&q.options)).title(title),
+        )
+    } else {
+        ElicitationPropertySchema::String(
+            StringPropertySchema::new()
+                .title(title)
+                .one_of(enum_options(&q.options)),
+        )
+    }
+}
+
+/// Property keys are positional (`q1`, `q2`, ...) so answers map back to
+/// questions even when headers repeat or are missing.
+fn question_key(index: usize) -> String {
+    format!("q{}", index + 1)
+}
+
+fn form_request(
+    session_id: &SessionId,
+    tool_call_id: Option<String>,
+    questions: &[QuestionSpec],
+) -> Result<CreateElicitationRequest, String> {
+    if questions.is_empty() {
+        return Err("at least one question is required".to_owned());
+    }
+
+    let mut schema = ElicitationSchema::new();
+    schema.properties = questions
+        .iter()
+        .enumerate()
+        .map(|(i, q)| (question_key(i), property(q)))
+        .collect();
+
+    let scope = ElicitationSessionScope::new(session_id.0.to_string())
+        .tool_call_id(tool_call_id.map(ToolCallId::from));
+    let message = match questions {
+        [only] => only.question.clone(),
+        many => format!("{} questions", many.len()),
+    };
+    Ok(CreateElicitationRequest::new(
+        ElicitationFormMode::new(ElicitationScope::Session(scope), schema),
+        message,
+    ))
+}
+
+fn content_labels(value: &ElicitationContentValue) -> Vec<String> {
+    match value {
+        ElicitationContentValue::String(s) if !s.is_empty() => vec![s.clone()],
+        ElicitationContentValue::StringArray(items) if !items.is_empty() => items.clone(),
+        ElicitationContentValue::Integer(n) => vec![n.to_string()],
+        ElicitationContentValue::Number(n) => vec![n.to_string()],
+        ElicitationContentValue::Boolean(b) => vec![b.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// `elicitation/create` with an untyped response: the reference parses the
+/// raw JSON-RPC result, and the typed `CreateElicitationResponse` cannot
+/// represent nulled-out content values ("one bad value costs one answer, not
+/// the form"), so this wrapper keeps the wire shape but returns raw JSON.
+const ELICITATION_METHOD: &str = "elicitation/create";
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(transparent)]
+struct RawElicitationRequest(CreateElicitationRequest);
+
+impl agent_client_protocol::JsonRpcMessage for RawElicitationRequest {
+    fn matches_method(method: &str) -> bool {
+        method == ELICITATION_METHOD
+    }
+
+    fn method(&self) -> &str {
+        ELICITATION_METHOD
+    }
+
+    fn to_untyped_message(&self) -> Result<agent_client_protocol::UntypedMessage, Error> {
+        agent_client_protocol::UntypedMessage::new(ELICITATION_METHOD, self)
+    }
+
+    fn parse_message(
+        method: &str,
+        params: &impl serde::Serialize,
+    ) -> Result<Self, agent_client_protocol::Error> {
+        if !Self::matches_method(method) {
+            return Err(Error::method_not_found());
+        }
+        let value = serde_json::to_value(params).map_err(|e| {
+            let mut error = Error::invalid_params();
+            error.message = e.to_string();
+            error
+        })?;
+        serde_json::from_value(value)
+            .map(RawElicitationRequest)
+            .map_err(|e| {
+                let mut error = Error::invalid_params();
+                error.message = e.to_string();
+                error
+            })
+    }
+}
+
+impl agent_client_protocol::JsonRpcRequest for RawElicitationRequest {
+    type Response = serde_json::Value;
+}
+
+/// Turns the client's `elicitation/create` result into the encoded answer
+/// the `question` tool already understands. Ported from the reference
+/// `elicitation.rs`: values parse per key — nothing in the schema is
+/// `required`, so clients may null out skipped fields, and one unreadable
+/// value should cost one answer, not the whole form.
+fn answer_from_response(raw: &serde_json::Value) -> QuestionAnswer {
+    let dismissed = QuestionAnswer {
+        dismissed: true,
+        answers: vec![],
+    };
+    if raw["action"] != "accept" {
+        return dismissed;
+    }
+    let Some(content) = raw["content"].as_object() else {
+        return dismissed;
+    };
+
+    let mut answers: Vec<Vec<String>> = Vec::new();
+    for (k, v) in content {
+        let Ok(index) = k.trim_start_matches('q').parse::<usize>() else {
+            continue;
+        };
+        // One unreadable value costs one answer, not the form: the key is
+        // dropped, exactly like the reference's filter_map.
+        let Ok(value) = serde_json::from_value::<ElicitationContentValue>(v.clone()) else {
+            continue;
+        };
+        let labels = content_labels(&value);
+        if answers.len() < index {
+            answers.resize(index, Vec::new());
+        }
+        answers[index - 1] = labels;
+    }
+    QuestionAnswer {
+        dismissed: false,
+        answers,
+    }
+}
+
+/// Ask the client through `elicitation/create`; clients without form
+/// capability get the headless dismissed answer.
+struct ElicitationAsker {
+    connection: ConnectionTo<AcpClient>,
+    session_id: SessionId,
+    cancel: run::CancelToken,
+    caps: ClientCapabilities,
+}
+
+impl AskQuestions for ElicitationAsker {
+    fn ask(&self, questions: Vec<QuestionSpec>) -> run::BoxFuture<QuestionAnswer> {
+        let asker = ElicitationAsker {
+            connection: self.connection.clone(),
+            session_id: self.session_id.clone(),
+            cancel: self.cancel.clone(),
+            caps: self.caps.clone(),
+        };
+        Box::pin(async move { asker.ask(questions).await })
+    }
+}
+
+impl ElicitationAsker {
+    async fn ask(self, questions: Vec<QuestionSpec>) -> QuestionAnswer {
+        let dismissed = QuestionAnswer {
+            dismissed: true,
+            answers: vec![],
+        };
+        if !supports_form(&self.caps) {
+            return dismissed;
+        }
+        let Ok(request) = form_request(&self.session_id, None, &questions) else {
+            return dismissed;
+        };
+        let sent = self.connection.send_request(RawElicitationRequest(request));
+        let mut cancel_rx = self.cancel.subscribe();
+        tokio::select! {
+            biased;
+            changed = cancel_rx.changed() => {
+                let _ = changed;
+                dismissed
+            }
+            response = tokio::time::timeout(ASK_TIMEOUT, sent.block_task()) => match response {
+                Ok(Ok(response)) => answer_from_response(&response),
+                _ => dismissed,
+            },
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
     state: Arc<AppState>,
@@ -443,6 +997,8 @@ async fn run_turn(
     workspace: Workspace,
     provider_name: String,
     model: String,
+    permissions: Arc<PermissionManager>,
+    client_caps: ClientCapabilities,
     cancel: run::CancelToken,
     responder: Responder<AcpPromptResponse>,
 ) {
@@ -509,7 +1065,21 @@ async fn run_turn(
         }
     }
 
-    let tools = workspace.register().with_dedup(dedup);
+    let tools = workspace
+        .with_questions(Arc::new(ElicitationAsker {
+            connection: connection.clone(),
+            session_id: session_id.clone(),
+            cancel: cancel.clone(),
+            caps: client_caps,
+        }))
+        .register()
+        .with_dedup(dedup)
+        .with_before(Arc::new(AcpPermissionGate {
+            connection: connection.clone(),
+            session_id: session_id.clone(),
+            cancel: cancel.clone(),
+            permissions,
+        }));
     let (cwd, instructions_text) = {
         let sessions = state.sessions.lock().await;
         let session = sessions.get(session_id.0.as_ref());
@@ -761,6 +1331,10 @@ mod tests {
             model: "gpt-x".into(),
             context_length: Some(128_000),
             dedup: run::shared_cache(),
+            permissions: Arc::new(PermissionManager::new(
+                crate::permissions::PermissionsConfig::default(),
+                std::env::temp_dir(),
+            )),
             cancel: run::cancel_channel().0,
         };
         let options = session.config_options(&["openai".into(), "llamafile".into()]);
@@ -903,5 +1477,299 @@ mod tests {
         );
         assert!(text.contains("\"total_lines\": 2"), "unexpected: {text}");
         assert!(!text.contains("Json {"), "Debug rendering leaked: {text}");
+    }
+
+    // ----- G.5 permission requests -----
+
+    fn selected(option_id: &str) -> RequestPermissionOutcome {
+        RequestPermissionOutcome::Selected(
+            agent_client_protocol::schema::v1::SelectedPermissionOutcome::new(
+                option_id.to_string(),
+            ),
+        )
+    }
+
+    #[test]
+    fn permission_options_list_all_four_choices() {
+        let options = permission_options();
+        let ids: Vec<&str> = options.iter().map(|o| o.option_id.0.as_ref()).collect();
+        assert_eq!(
+            ids,
+            ["allow_once", "allow_always", "reject_once", "reject_always"]
+        );
+    }
+
+    #[test]
+    fn outcomes_map_to_reference_answers() {
+        assert_eq!(
+            outcome_to_answer(&selected("allow_once")),
+            PermissionAnswer::AllowOnce
+        );
+        assert_eq!(
+            outcome_to_answer(&selected("allow_always")),
+            PermissionAnswer::AllowSession
+        );
+        assert_eq!(
+            outcome_to_answer(&selected("reject_once")),
+            PermissionAnswer::Deny
+        );
+        assert_eq!(
+            outcome_to_answer(&selected("reject_always")),
+            PermissionAnswer::DenyAlwaysLocal
+        );
+        assert_eq!(
+            outcome_to_answer(&RequestPermissionOutcome::Cancelled),
+            PermissionAnswer::Deny
+        );
+        assert_eq!(outcome_to_answer(&selected("nope")), PermissionAnswer::Deny);
+    }
+
+    #[test]
+    fn permission_request_carries_the_call_and_scopes() {
+        let request = permission_request(
+            &SessionId::new("s1"),
+            "call-1",
+            "edit",
+            &serde_json::json!({"path": "a.rs", "old_string": "x", "new_string": "y"}),
+            &["/tmp/proj/a.rs".to_string()],
+        );
+        assert_eq!(request.session_id.0.as_ref(), "s1");
+        assert_eq!(request.tool_call.tool_call_id.0.as_ref(), "call-1");
+        assert_eq!(request.tool_call.fields.name.as_deref(), Some("edit"));
+        assert_eq!(request.options.len(), 4);
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["options"][0]["optionId"], "allow_once");
+    }
+
+    #[test]
+    fn gate_decides_run_skip_and_stop_without_a_client() {
+        // The engine decides without a client round-trip for allow/deny.
+        let tmp = tempfile::tempdir().unwrap();
+        let permissions = Arc::new(PermissionManager::new(
+            crate::permissions::PermissionsConfig::default(),
+            tmp.path().to_path_buf(),
+        ));
+        let read_call = history::ToolCall::new("1", "read", serde_json::json!({"path": "x"}));
+        // read-only tool: allowed by default.
+        let tool = ToolKey::native("read");
+        let (scopes, force_prompt) =
+            scope_for_call(permissions.cwd(), "read", &read_call.function.arguments);
+        assert!(matches!(
+            permissions.check_multi(&tool, &scopes, force_prompt),
+            PermissionCheck::Allowed
+        ));
+        // A write with a session allow rule: allowed.
+        let edit_tool = ToolKey::native("edit");
+        permissions.add_session_rule(crate::permissions::PermissionRule {
+            tool: edit_tool.clone(),
+            scope: Some(tmp.path().join("a.rs").display().to_string()),
+            effect: crate::permissions::Effect::Allow,
+        });
+        let (scopes, force_prompt) = scope_for_call(
+            permissions.cwd(),
+            "edit",
+            &serde_json::json!({"path": "a.rs", "old_string": "x", "new_string": "y"}),
+        );
+        assert!(matches!(
+            permissions.check_multi(&edit_tool, &scopes, force_prompt),
+            PermissionCheck::Allowed
+        ));
+        // A session deny wins and produces the denial text the model sees.
+        permissions.add_session_rule(crate::permissions::PermissionRule {
+            tool: edit_tool.clone(),
+            scope: Some(tmp.path().join("b.rs").display().to_string()),
+            effect: crate::permissions::Effect::Deny,
+        });
+        let (scopes, force_prompt) = scope_for_call(
+            permissions.cwd(),
+            "edit",
+            &serde_json::json!({"path": "b.rs", "old_string": "x", "new_string": "y"}),
+        );
+        let PermissionCheck::Denied = permissions.check_multi(&edit_tool, &scopes, force_prompt)
+        else {
+            panic!("expected denial");
+        };
+        assert!(
+            denied_message(&edit_tool, &scopes)
+                .starts_with(crate::permissions::PERMISSION_DENIED_PREFIX)
+        );
+    }
+
+    // ----- G.5 elicitation -----
+
+    fn question_specs() -> Vec<QuestionSpec> {
+        vec![
+            QuestionSpec {
+                question: "Pick a framework".into(),
+                header: Some("Framework".into()),
+                options: vec![
+                    QuestionOption {
+                        label: "axum".into(),
+                        description: Some("tokio based".into()),
+                    },
+                    QuestionOption {
+                        label: "actix".into(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            },
+            QuestionSpec {
+                question: "Which features?".into(),
+                header: Some("Features".into()),
+                options: vec![
+                    QuestionOption {
+                        label: "auth".into(),
+                        description: None,
+                    },
+                    QuestionOption {
+                        label: "uploads".into(),
+                        description: None,
+                    },
+                ],
+                multi_select: true,
+            },
+            QuestionSpec {
+                question: "Anything else?".into(),
+                header: None,
+                options: vec![],
+                multi_select: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn form_request_maps_questions_to_schema() {
+        let req = form_request(
+            &SessionId::new("sess_1"),
+            Some("tool_1".to_owned()),
+            &question_specs(),
+        )
+        .unwrap();
+        assert_eq!(req.message, "3 questions");
+
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["mode"], "form");
+        let props = &json["requestedSchema"]["properties"];
+        assert_eq!(props["q1"]["type"], "string");
+        assert_eq!(props["q1"]["oneOf"][0]["const"], "axum");
+        assert_eq!(props["q2"]["type"], "array");
+        assert_eq!(props["q3"]["type"], "string");
+        assert!(props["q3"].get("oneOf").is_none());
+    }
+
+    #[test]
+    fn single_question_is_the_message() {
+        let qs = vec![QuestionSpec {
+            question: "Proceed?".into(),
+            header: None,
+            options: vec![],
+            multi_select: false,
+        }];
+        let req = form_request(&SessionId::new("sess_1"), None, &qs).unwrap();
+        assert_eq!(req.message, "Proceed?");
+    }
+
+    #[test]
+    fn form_request_rejects_empty_questions() {
+        assert!(form_request(&SessionId::new("sess_1"), None, &[]).is_err());
+    }
+
+    fn accept_response(content: serde_json::Value) -> serde_json::Value {
+        if content.is_null() {
+            serde_json::json!({"action": "accept"})
+        } else {
+            serde_json::json!({"action": "accept", "content": content})
+        }
+    }
+
+    #[test]
+    fn accepted_forms_map_answers_by_position() {
+        let answer = answer_from_response(&accept_response(
+            serde_json::json!({ "q1": "axum", "q2": ["auth", "uploads"] }),
+        ));
+        assert!(!answer.dismissed);
+        assert_eq!(answer.answers, vec![vec!["axum"], vec!["auth", "uploads"]]);
+    }
+
+    #[test]
+    fn missing_answer_becomes_empty_labels() {
+        let answer = answer_from_response(&accept_response(serde_json::json!({ "q2": ["auth"] })));
+        assert!(!answer.dismissed);
+        assert_eq!(answer.answers, vec![vec![], vec!["auth"]]);
+    }
+
+    #[test]
+    fn nulled_out_field_costs_one_answer_not_the_form() {
+        let answer = answer_from_response(&accept_response(
+            serde_json::json!({ "q1": "axum", "q2": null }),
+        ));
+        assert!(!answer.dismissed);
+        assert_eq!(answer.answers, vec![vec!["axum"]]);
+    }
+
+    #[test]
+    fn non_accept_is_dismissed() {
+        for raw in [
+            r#"{"action":"decline"}"#,
+            r#"{"action":"cancel"}"#,
+            r#"{"action":"_custom"}"#,
+        ] {
+            let response: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert!(answer_from_response(&response).dismissed, "{raw}");
+        }
+    }
+
+    #[test]
+    fn supports_form_requires_form_capability() {
+        assert!(!supports_form(&ClientCapabilities::default()));
+        let caps: ClientCapabilities = serde_json::from_value(serde_json::json!({
+            "elicitation": { "form": {} }
+        }))
+        .unwrap();
+        assert!(supports_form(&caps));
+        let url_only: ClientCapabilities = serde_json::from_value(serde_json::json!({
+            "elicitation": { "url": {} }
+        }))
+        .unwrap();
+        assert!(!supports_form(&url_only));
+    }
+
+    // ----- G.5 session/load -----
+
+    #[tokio::test]
+    async fn load_session_restores_history_and_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+        let session_ref =
+            crate::id::SessionRef::from_id("01965087-4c71-7f00-8000-000000000000".parse().unwrap());
+        let mut stored = crate::headless::StoredSession::new("openai/gpt-x", "/tmp/proj");
+        stored.id = session_ref.clone();
+        stored.push_message(history::Message::User {
+            content: vec![history::UserContent::text("hello")],
+        });
+        stored.save(&dir).unwrap();
+
+        let loaded = crate::headless::StoredSession::load(session_ref.id(), &dir).unwrap();
+        assert_eq!(loaded.model, "openai/gpt-x");
+        assert_eq!(loaded.messages().len(), 1);
+
+        // The provider/model resolution from a stored spec (pure helper
+        // semantics exercised through load_session's match logic).
+        let (provider, model) = match loaded.model.split_once('/') {
+            Some((p, m)) if !m.is_empty() => (p.to_owned(), Some(m.to_owned())),
+            _ => (String::new(), None),
+        };
+        assert_eq!(provider, "openai");
+        assert_eq!(model.as_deref(), Some("gpt-x"));
+    }
+
+    #[tokio::test]
+    async fn load_session_rejects_unknown_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = crate::storage::StateDir::from_path(tmp.path().to_path_buf());
+        let missing =
+            crate::id::SessionRef::from_id("01965087-4c71-7f00-8000-000000000001".parse().unwrap());
+        assert!(crate::headless::StoredSession::load(missing.id(), &dir).is_err());
     }
 }

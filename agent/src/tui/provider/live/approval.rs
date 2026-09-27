@@ -1,7 +1,6 @@
 //! The approval gate: tool calls gated behind the permission engine and,
 //! when it asks, the UI's approve/reject seam.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -9,7 +8,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use crate::history;
 use crate::permissions::{
     ASK_TIMEOUT, FILE_WRITE_TOOLS, PermissionAnswer, PermissionCheck, PermissionError,
-    PermissionManager, ToolKey, append_permission_rule,
+    PermissionManager, ToolKey, append_permission_rule, scope_for_call,
 };
 use crate::run::{CancelToken, Decision};
 
@@ -68,70 +67,6 @@ pub(super) fn model_reviewer(model: crate::providers::DynamicModel) -> Reviewer 
         let model = model.clone();
         Box::pin(async move { crate::auto_review::review(&model, &tool, &scopes).await })
     })
-}
-
-/// The scope a call is about: the touched path for file tools, per-command
-/// scopes for bash (task B.2), `*` otherwise (scope-less rules still match
-/// it; everything else falls to the default). The flag is the bash parser's
-/// `force_prompt`: the scopes could not be derived confidently, so allow
-/// rules must not silence the prompt.
-fn scope_for_call(root: &Path, name: &str, args: &serde_json::Value) -> (Vec<String>, bool) {
-    if name == "bash"
-        && let Some(command) = args.get("command").and_then(|v| v.as_str())
-        && let Some(scopes) = crate::permissions::bash::permission_scopes(command)
-    {
-        return (scopes.scopes, scopes.force_prompt);
-    }
-    if name == "apply_patch"
-        && let Some(patch) = args.get("patch_text").and_then(|v| v.as_str())
-    {
-        return (
-            crate::tools::patch_paths(patch)
-                .iter()
-                .map(|p| resolve_scope_path(root, p))
-                .collect(),
-            false,
-        );
-    }
-    if name == "move"
-        && let (Some(source), Some(destination)) = (
-            args.get("source").and_then(|v| v.as_str()),
-            args.get("destination").and_then(|v| v.as_str()),
-        )
-    {
-        return (
-            [source, destination]
-                .iter()
-                .map(|p| resolve_scope_path(root, p))
-                .collect(),
-            false,
-        );
-    }
-    if FILE_WRITE_TOOLS.contains(&name) {
-        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-            return (vec![resolve_scope_path(root, path)], false);
-        }
-        if let Some(files) = args.get("files").and_then(|v| v.as_array()) {
-            return (
-                files
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|p| resolve_scope_path(root, p))
-                    .collect(),
-                false,
-            );
-        }
-    }
-    (vec!["*".to_string()], false)
-}
-
-fn resolve_scope_path(root: &Path, path: &str) -> String {
-    let p = Path::new(path);
-    if p.is_absolute() {
-        path.to_string()
-    } else {
-        root.join(p).display().to_string()
-    }
 }
 
 fn denied_message(tool: &ToolKey, scopes: &[String]) -> String {
