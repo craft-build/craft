@@ -28,6 +28,10 @@ pub struct Config {
     pub compaction_buffer: CompactionBuffer,
     /// Tool-output pre-compression applied to the model's request view.
     pub compression: crate::compression::CompressionConfig,
+    /// User keybinding overlay: snake_case action id → chord list (F.1).
+    /// An empty list disables the action; unknown ids are warned and dropped.
+    #[serde(default)]
+    pub keybindings: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Which compaction strategy runs when a stage's threshold is crossed.

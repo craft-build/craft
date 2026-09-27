@@ -301,6 +301,34 @@ mod tests {
     }
 
     #[test]
+    fn help_sheet_renders_grouped_contexts_and_effective_chords() {
+        use crate::tui::keybindings::KeybindingResolver;
+        use crate::tui::modals::Modal;
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let mut app = seeded_app();
+        // A user override: search moves to Alt+M and must render that way.
+        let entries = vec![("search".to_string(), vec!["Alt+M".to_string()])];
+        let mut warnings = Vec::new();
+        app.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
+        app.modal = Modal::Help;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let all = rows.join("\n");
+        assert!(all.contains("Keybindings"), "title rendered");
+        assert!(all.contains("General"), "section header rendered");
+        assert!(all.contains("Editing"), "section header rendered");
+        assert!(all.contains("Alt+M"), "overridden chord rendered");
+        assert!(
+            !all.contains("Ctrl+F /"),
+            "default search chord replaced, not duplicated"
+        );
+        assert!(all.contains("esc to close"), "footer rendered");
+    }
+
+    #[test]
     fn permission_prompt_sits_above_the_composer_without_overlap() {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let mut app = seeded_app();

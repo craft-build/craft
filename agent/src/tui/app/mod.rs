@@ -11,7 +11,7 @@ mod sidebar;
 // Re-exported so `crate::tui::app::*` keeps working for every item that
 // lived in the old flat `app.rs`.
 #[allow(unused_imports)]
-pub use self::commands::{COMMANDS, CommandSpec, help_rows};
+pub use self::commands::{COMMANDS, CommandSpec};
 #[allow(unused_imports)]
 pub use self::models::{
     AutoReviewLine, Conversation, DiffState, Message, PendingClick, Session, ViewModel,
@@ -107,6 +107,11 @@ pub struct App {
     pub usage_quota: crate::tui::provider::UsageFetchState,
     /// Scroll offset of the `/usage` overlay's line list, reset on open.
     pub usage_scroll: usize,
+    /// Scroll offset of the keybindings help modal (F.1), reset on open.
+    pub help_scroll: usize,
+    /// Data-driven keybinding resolution (F.1): compile-time defaults plus
+    /// the user's config overlay. All chord dispatch goes through this.
+    pub keybinds: crate::tui::keybindings::KeybindingResolver,
     /// Fuzzy transcript search (F.3): owns the keyboard while open, above
     /// the base surface like a modal but outside the exclusive `modal` slot.
     pub search: crate::tui::search_modal::SearchModal,
@@ -148,6 +153,8 @@ impl App {
             usage: Vec::new(),
             usage_quota: crate::tui::provider::UsageFetchState::Idle,
             usage_scroll: 0,
+            help_scroll: 0,
+            keybinds: crate::tui::keybindings::KeybindingResolver::new(),
             search: crate::tui::search_modal::SearchModal::new(),
             file_picker: crate::tui::file_picker::FilePicker::new(),
             should_quit: false,

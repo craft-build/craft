@@ -7,6 +7,7 @@ mod app;
 mod composer;
 mod file_picker;
 mod hyperlink;
+mod keybindings;
 mod modals;
 mod notify;
 mod permission_prompt;
@@ -115,6 +116,16 @@ async fn drive<P: Provider>(
     });
 
     let mut app = App::new();
+    // Data-driven keybindings (F.1): apply the user's config overlay on top
+    // of the compile-time defaults; surface the first problem as a flash.
+    if let Ok(config) = crate::config::Config::load().await {
+        let entries: Vec<(String, Vec<String>)> = config.keybindings.into_iter().collect();
+        let mut warnings = Vec::new();
+        app.keybinds = keybindings::KeybindingResolver::from_overlay(&entries, &mut warnings);
+        if let Some(w) = warnings.first() {
+            app.flash(w.clone());
+        }
+    }
     // Recall the persistent input history and theme from the state dir (best effort).
     if let Ok(dir) = crate::storage::StateDir::resolve() {
         if let Some(name) = crate::storage::theme::read_theme_name(&dir)
@@ -374,7 +385,11 @@ async fn run_loop(
                     if is_suspend_key(&key) {
                         suspend_ui()?;
                         focus.on_resume();
-                    } else if is_open_editor_key(&key)
+                    } else if (is_open_editor_key(&key)
+                            || app.keybinds.matches(
+                                keybindings::ActionId::EditInput,
+                                key,
+                            ))
                             && matches!(app.modal, modals::Modal::None)
                         {
                             if let Err(e) = edit_composer(app) {

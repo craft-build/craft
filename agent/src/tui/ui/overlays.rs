@@ -891,60 +891,26 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// `/help`: static keybinding + slash-command sheet, sourced from the same
-/// data as the completion popup (`app::help_rows`).
+/// `/help`: keybinding sheet, generated from the data-driven `KEYBINDS`
+/// table grouped by context (F.1); user overrides show their effective
+/// chords, disabled actions are omitted.
 pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
     let t = theme::current();
 
     if !matches!(app.modal, Modal::Help) {
         return;
     }
-    dim(f, area);
-    let rows = crate::tui::app::help_rows();
-    let width = 56.min(area.width.saturating_sub(4));
-    let height = (rows.len() as u16 + 4).min(area.height);
-    let rect = centered(width, height, area);
-    f.render_widget(Clear, rect);
-    let block = boxed(rect);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "Help — any key closes",
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        Rect {
-            x: inner.x + 1,
-            y: inner.y + 1,
-            width: inner.width.saturating_sub(2),
-            height: 1,
-        },
-    );
-    let key_w = 22usize;
-    let spans: Vec<Vec<Span<'static>>> = rows
-        .iter()
-        .map(|(key, action)| {
-            if key.is_empty() {
-                return vec![Span::raw("")];
-            }
-            vec![
-                Span::styled(format!(" {key:<key_w$}"), Style::default().fg(t.cyan)),
-                Span::styled(action.clone(), Style::default().fg(t.text_tertiary)),
-            ]
-        })
-        .collect();
-    render_rows(
+    let (lines, _) = crate::tui::keybindings::help_lines(&app.keybinds);
+    render_usage_sheet(
         f,
-        &spans,
-        usize::MAX,
-        Rect {
-            x: inner.x + 1,
-            y: inner.y + 2,
-            width: inner.width.saturating_sub(2),
-            height: inner.height.saturating_sub(2),
-        },
+        area,
+        "Keybindings",
+        &lines,
+        vec![Span::styled(
+            "↑↓ scroll · esc to close",
+            Style::default().fg(t.text_tertiary),
+        )],
+        app.help_scroll,
     );
 }
 

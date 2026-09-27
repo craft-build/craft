@@ -163,39 +163,6 @@ pub(crate) fn opens_slash_menu(text: &str) -> bool {
             .any(|cmd| text == "/" || cmd.starts_with(text))
 }
 
-/// (binding, action) rows of the `/help` sheet: the real key chords plus
-/// the same command table the completion popup and palette derive from.
-pub fn help_rows() -> Vec<(String, String)> {
-    let mut rows = vec![
-        ("ctrl+p".into(), "command palette".into()),
-        ("ctrl+l".into(), "model menu".into()),
-        ("ctrl+b".into(), "toggle context panel".into()),
-        ("ctrl+f".into(), "search the transcript".into()),
-        ("alt+e".into(), "cycle effort".into()),
-        (
-            "tab / shift+tab".into(),
-            "focus next/previous tool card".into(),
-        ),
-        ("ctrl+y".into(), "approve pending edit".into()),
-        ("ctrl+shift+y".into(), "approve pending edit, always".into()),
-        ("ctrl+n".into(), "reject pending edit".into()),
-        ("up / down".into(), "recall input history".into()),
-        ("esc".into(), "close menu / interrupt the turn".into()),
-        ("ctrl+c / ctrl+q".into(), "quit".into()),
-        ("pgup / pgdn / g / G".into(), "scroll the transcript".into()),
-        (String::new(), String::new()),
-    ];
-    for (slash, desc) in COMMANDS.iter().flat_map(|spec| {
-        [spec.slash, spec.alias]
-            .into_iter()
-            .flatten()
-            .map(|slash| (slash, spec.desc))
-    }) {
-        rows.push((slash.to_string(), desc.to_string()));
-    }
-    rows
-}
-
 impl App {
     /// Open the model picker with the current selection highlighted,
     /// replacing any modal already open.
@@ -397,19 +364,6 @@ mod tests {
             if spec.slash.is_some() {
                 assert!(!spec.desc.is_empty(), "{} lacks a description", spec.id);
             }
-        }
-    }
-
-    /// W9: the help sheet lists every slash command the completion popup
-    /// advertises (sourced from the same table, so it cannot lie).
-    #[test]
-    fn help_rows_cover_every_slash_command() {
-        let rows = help_rows();
-        for slash in COMMANDS.iter().flat_map(|s| [s.slash, s.alias]).flatten() {
-            assert!(
-                rows.iter().any(|(key, _)| key == slash),
-                "{slash} missing from the help sheet"
-            );
         }
     }
 

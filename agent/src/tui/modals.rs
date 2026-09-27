@@ -29,8 +29,8 @@ pub enum Modal {
     Usage(Vec<crate::tui::provider::UsageRow>),
     /// `/stats`: cross-session totals from the cost ledger.
     Stats(StatsView),
-    /// `/help`: static keybinding/command sheet (throwaway; Phase 8 #80
-    /// replaces it with data-driven keybindings).
+    /// `/help` or Ctrl+H: data-driven keybinding sheet (F.1); rows come
+    /// from the `KEYBINDS` table via the user's overlay resolver.
     Help,
     /// `/sessions`: persisted-session picker; Enter loads the selection.
     Sessions {
@@ -103,7 +103,7 @@ impl App {
             return;
         }
         if matches!(self.modal, Modal::Help) {
-            self.modal = Modal::None;
+            self.handle_help_key(key);
             return;
         }
 
@@ -116,6 +116,33 @@ impl App {
         // 6. Theme picker.
         if matches!(self.modal, Modal::ThemePicker { .. }) {
             self.handle_theme_picker_key(key);
+        }
+    }
+
+    /// Keybindings help modal (F.1): Esc / the help and quit chords close,
+    /// arrows and page keys scroll; other keys close (kept from the old
+    /// "any key closes" sheet so muscle memory still works).
+    fn handle_help_key(&mut self, key: KeyEvent) {
+        use crate::tui::keybindings::ActionId;
+        if key.code == KeyCode::Esc
+            || self.keybinds.matches(ActionId::Help, key)
+            || self.keybinds.matches(ActionId::Quit, key)
+        {
+            self.modal = Modal::None;
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.help_scroll = self.help_scroll.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.help_scroll = self.help_scroll.saturating_add(1)
+            }
+            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
+            KeyCode::Home => self.help_scroll = 0,
+            KeyCode::End => self.help_scroll = usize::MAX,
+            _ => self.modal = Modal::None,
         }
     }
 

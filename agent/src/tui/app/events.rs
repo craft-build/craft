@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use super::{App, Message, Modal, PendingClick};
 use crate::tui::app::EFFORTS;
+use crate::tui::keybindings::ActionId;
 use crate::tui::provider::Command;
 use crate::tui::selection::{clamp_to, copy_to_clipboard, extract_selection_text, rect_contains};
 
@@ -126,100 +127,106 @@ impl App {
         self.handle_submit_or_edit_key(key, tx);
     }
 
-    /// Global ctrl chords: quit/interrupt, palette, sidebar, model, effort,
-    /// half-page scroll, plan panel/editor, and diff approval/rejection.
+    /// Global chords, dispatched through the data-driven keybinding table
+    /// (F.1): quit/interrupt, palette, sidebar, model, effort, half-page
+    /// scroll, plan panel/editor, help, and diff approval/rejection.
     fn handle_chord_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
-        if !key.modifiers.contains(KeyModifiers::CONTROL) {
-            return false;
+        let key = crate::tui::keybindings::normalize_key(key);
+        let keybinds = &self.keybinds;
+        let m = |id: ActionId| keybinds.matches(id, key);
+        if m(ActionId::Quit) {
+            if !self.composer.text.is_empty() {
+                self.composer.clear();
+            } else if self.busy() {
+                let _ = tx.send(Command::Interrupt);
+                self.interrupt_requested = true;
+            } else {
+                self.should_quit = true;
+            }
+            return true;
         }
-        match key.code {
-            KeyCode::Char('c') | KeyCode::Char('q') => {
-                if !self.composer.text.is_empty() {
-                    self.composer.clear();
-                } else if self.busy() {
-                    let _ = tx.send(Command::Interrupt);
-                    self.interrupt_requested = true;
-                } else {
-                    self.should_quit = true;
-                }
-                true
-            }
-            KeyCode::Char('p') => {
-                self.modal = Modal::Palette {
-                    query: String::new(),
-                    selected: 0,
-                };
-                true
-            }
-            KeyCode::Char('b') => {
-                self.session.sidebar_open = !self.session.sidebar_open;
-                true
-            }
-            KeyCode::Char('l') => {
-                self.open_model_menu();
-                true
-            }
-            KeyCode::Char('f') => {
-                self.search.open(self.view.scroll, self.view.follow);
-                true
-            }
-            KeyCode::Char('s') => {
-                let cwd = if self.session.cwd.is_empty() {
-                    ".".to_string()
-                } else {
-                    self.session.cwd.clone()
-                };
-                self.file_picker.open(&cwd);
-                true
-            }
-            KeyCode::Char('t') => {
-                self.toggle_plan_panel();
-                true
-            }
-            KeyCode::Char('o') => {
-                // Plan editor handoff (F.3, task 79): Ctrl-O opens the
-                // session's plan file in $VISUAL/$EDITOR.
-                self.open_plan_editor();
-                true
-            }
-            KeyCode::Char('u') => {
-                self.scroll_by(-(self.view.view_height as i32 / 2).max(1));
-                true
-            }
-            KeyCode::Char('d') => {
-                self.scroll_by((self.view.view_height as i32 / 2).max(1));
-                true
-            }
-            KeyCode::Char('Y') => {
-                if let Some(i) = self
-                    .focused_pending_diff()
-                    .or_else(|| self.last_pending_diff())
-                {
-                    self.approve(i, tx, true);
-                }
-                true
-            }
-            KeyCode::Char('y') => {
-                if let Some(i) = self
-                    .focused_pending_diff()
-                    .or_else(|| self.last_pending_diff())
-                {
-                    self.approve(i, tx, false);
-                }
-                true
-            }
-            KeyCode::Char('n') => {
-                if let Some(i) = self
-                    .focused_pending_diff()
-                    .or_else(|| self.last_pending_diff())
-                    && let Message::Tool { id, .. } = &self.conversation.messages[i]
-                {
-                    self.modal = Modal::ConfirmReject(id.clone());
-                }
-                true
-            }
-            _ => false,
+        if m(ActionId::Help) {
+            self.help_scroll = 0;
+            self.modal = Modal::Help;
+            return true;
         }
+        if m(ActionId::Palette) {
+            self.modal = Modal::Palette {
+                query: String::new(),
+                selected: 0,
+            };
+            return true;
+        }
+        if m(ActionId::Sidebar) {
+            self.session.sidebar_open = !self.session.sidebar_open;
+            return true;
+        }
+        if m(ActionId::ModelMenu) {
+            self.open_model_menu();
+            return true;
+        }
+        if m(ActionId::Search) {
+            self.search.open(self.view.scroll, self.view.follow);
+            return true;
+        }
+        if m(ActionId::FilePicker) {
+            let cwd = if self.session.cwd.is_empty() {
+                ".".to_string()
+            } else {
+                self.session.cwd.clone()
+            };
+            self.file_picker.open(&cwd);
+            return true;
+        }
+        if m(ActionId::PlanToggle) {
+            self.toggle_plan_panel();
+            return true;
+        }
+        if m(ActionId::OpenEditor) {
+            // Plan editor handoff (F.3, task 79): Ctrl-O opens the
+            // session's plan file in $VISUAL/$EDITOR.
+            self.open_plan_editor();
+            return true;
+        }
+        if m(ActionId::ScrollHalfUp) {
+            self.scroll_by(-(self.view.view_height as i32 / 2).max(1));
+            return true;
+        }
+        if m(ActionId::ScrollHalfDown) {
+            self.scroll_by((self.view.view_height as i32 / 2).max(1));
+            return true;
+        }
+        // "Always" first: its chord is more specific (Ctrl+Shift+Y) than the
+        // plain approve, and both could match after a user rebind.
+        if m(ActionId::ApproveDiffAlways) {
+            if let Some(i) = self
+                .focused_pending_diff()
+                .or_else(|| self.last_pending_diff())
+            {
+                self.approve(i, tx, true);
+            }
+            return true;
+        }
+        if m(ActionId::ApproveDiff) {
+            if let Some(i) = self
+                .focused_pending_diff()
+                .or_else(|| self.last_pending_diff())
+            {
+                self.approve(i, tx, false);
+            }
+            return true;
+        }
+        if m(ActionId::RejectDiff) {
+            if let Some(i) = self
+                .focused_pending_diff()
+                .or_else(|| self.last_pending_diff())
+                && let Message::Tool { id, .. } = &self.conversation.messages[i]
+            {
+                self.modal = Modal::ConfirmReject(id.clone());
+            }
+            return true;
+        }
+        false
     }
 
     /// Composer editing chords (reference `TextBuffer::handle_key`):
@@ -227,28 +234,32 @@ impl App {
     /// to Ctrl-F so Ctrl-E can be line-end; with an empty composer it jumps
     /// the scrollback to bottom.
     fn handle_editing_chord_key(&mut self, key: KeyEvent) -> bool {
+        let key = crate::tui::keybindings::normalize_key(key);
+        let keybinds = &self.keybinds;
         if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if keybinds.matches(ActionId::LineStart, key) {
+                self.composer.move_home();
+                return true;
+            }
+            if keybinds.matches(ActionId::LineEnd, key) {
+                if self.composer.text.is_empty() {
+                    self.scroll_to_bottom();
+                } else {
+                    self.composer.move_end();
+                }
+                return true;
+            }
+            if keybinds.matches(ActionId::DeleteWord, key)
+                || (key.code == KeyCode::Backspace && key.modifiers == KeyModifiers::CONTROL)
+            {
+                self.composer.delete_word_back();
+                return true;
+            }
+            if keybinds.matches(ActionId::KillLine, key) {
+                self.composer.kill_to_end_of_line();
+                return true;
+            }
             return match key.code {
-                KeyCode::Char('a') => {
-                    self.composer.move_home();
-                    true
-                }
-                KeyCode::Char('e') => {
-                    if self.composer.text.is_empty() {
-                        self.scroll_to_bottom();
-                    } else {
-                        self.composer.move_end();
-                    }
-                    true
-                }
-                KeyCode::Char('w') | KeyCode::Backspace => {
-                    self.composer.delete_word_back();
-                    true
-                }
-                KeyCode::Char('k') => {
-                    self.composer.kill_to_end_of_line();
-                    true
-                }
                 KeyCode::Delete => {
                     self.composer.delete_word_forward();
                     true
@@ -270,6 +281,10 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT)
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
+            if keybinds.matches(ActionId::CycleEffort, key) {
+                self.session.effort_idx = (self.session.effort_idx + 1) % EFFORTS.len();
+                return true;
+            }
             return match key.code {
                 KeyCode::Left | KeyCode::Char('b') => {
                     self.composer.move_word_left();
@@ -277,12 +292,6 @@ impl App {
                 }
                 KeyCode::Right | KeyCode::Char('f') => {
                     self.composer.move_word_right();
-                    true
-                }
-                // Effort cycling lives here (Alt-E) so Ctrl-F can be the
-                // transcript search, matching the reference chord.
-                KeyCode::Char('e') => {
-                    self.session.effort_idx = (self.session.effort_idx + 1) % EFFORTS.len();
                     true
                 }
                 _ => false,
@@ -1348,5 +1357,45 @@ mod tests {
             &tx,
         );
         assert_eq!(app.composer.cursor, 5);
+    }
+
+    /// Ctrl-H opens the data-driven keybinding sheet; arrows scroll it,
+    /// Esc closes (F.1).
+    #[test]
+    fn ctrl_h_opens_scrolls_and_closes_the_help_sheet() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.handle_key(ctrl('h'), &tx);
+        assert!(matches!(app.modal, Modal::Help), "ctrl-h opens the sheet");
+        app.handle_modal_key(key(KeyCode::Down), &tx);
+        assert_eq!(app.help_scroll, 1, "down scrolls the sheet");
+        app.handle_modal_key(key(KeyCode::PageUp), &tx);
+        assert_eq!(app.help_scroll, 0);
+        app.handle_modal_key(key(KeyCode::Esc), &tx);
+        assert!(matches!(app.modal, Modal::None), "esc closes the sheet");
+    }
+
+    /// A config overlay rebinds a chord: the new chord dispatches the
+    /// action and the old one no longer does (F.1).
+    #[test]
+    fn keybinding_overlay_replaces_the_palette_chord() {
+        use crate::tui::keybindings::{ActionId, KeybindingResolver};
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let entries = vec![("palette".to_string(), vec!["Alt+M".to_string()])];
+        let mut warnings = Vec::new();
+        app.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
+        assert!(warnings.is_empty());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
+        assert!(matches!(app.modal, Modal::Palette { .. }), "alt-m opens it");
+
+        app.modal = Modal::None;
+        app.handle_key(ctrl('p'), &tx);
+        assert!(
+            matches!(app.modal, Modal::None),
+            "ctrl-p no longer triggers the palette"
+        );
+        assert!(app.keybinds.is_overridden(ActionId::Palette));
     }
 }
