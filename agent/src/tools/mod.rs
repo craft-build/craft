@@ -56,6 +56,7 @@ pub use question::{
 };
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
+pub(crate) use todo_write::flatten_todos;
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
 pub use view_image::{ViewImage, ViewImageArgs, ViewImageOutput};
 pub use webfetch::{Webfetch, WebfetchArgs, WebfetchOutput};

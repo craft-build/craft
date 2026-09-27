@@ -100,7 +100,7 @@ fn marker(status: &str) -> &'static str {
 /// Flatten the todo list parent-first, depth-indented. Tasks whose parent is
 /// missing or empty sit at depth 0; unvisited leftovers (cycles, shared
 /// parents) are appended at the end.
-fn flatten_todos(todos: &[Todo]) -> Vec<(&Todo, usize)> {
+pub(crate) fn flatten_todos(todos: &[Todo]) -> Vec<(&Todo, usize)> {
     let ids: Vec<&str> = todos.iter().map(|todo| todo.id.as_str()).collect();
     let mut visited = vec![false; todos.len()];
     let mut out = Vec::new();

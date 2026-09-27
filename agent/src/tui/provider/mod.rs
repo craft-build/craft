@@ -239,7 +239,7 @@ pub enum UsageFetchState {
 }
 
 /// Events streamed provider -> UI.
-#[allow(dead_code)] // `PlanSet` has no real source yet; exercised by the test mock
+#[allow(dead_code)] // some variants have no live source yet; exercised by tests and the mock
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
     StatusChanged(Status),

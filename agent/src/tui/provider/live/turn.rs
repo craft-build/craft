@@ -17,7 +17,7 @@ use super::super::cards::{self, Files};
 use super::SessionState;
 use super::approval::{ApprovalGate, model_reviewer};
 use super::usage_recorder::record_run_usage;
-use crate::tui::provider::{AgentEvent, Status, Tone, ToolCallData};
+use crate::tui::provider::{AgentEvent, PlanItem, Status, Tone, ToolCallData};
 
 use super::{Selection, report};
 
@@ -108,6 +108,9 @@ impl TurnRenderer {
                         .send(AgentEvent::FilesSet(cards::touched_files(&self.files)));
                 }
                 let _ = self.tx.send(AgentEvent::ToolCall(done.card));
+                if name == "todo_write" {
+                    let _ = self.tx.send(AgentEvent::PlanSet(todo_plan(&arguments)));
+                }
             }
             run::Event::TurnComplete { usage, .. } => {
                 let _ = self.tx.send(AgentEvent::TokenUsage(cards::usage_label(
@@ -192,6 +195,25 @@ impl TurnRenderer {
 /// Human token count for notices (44.8K-style, matching `cards::usage_label`).
 fn fmt_tokens(tokens: u64) -> String {
     cards::usage_label(tokens, tokens, None)
+}
+
+/// Sidebar plan items for a `todo_write` call. Its arguments carry the full
+/// replacement list, so the panel mirrors the todo store; children are
+/// indented under their parent.
+fn todo_plan(arguments: &serde_json::Value) -> Vec<PlanItem> {
+    let todos = arguments
+        .get("todos")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<Vec<crate::tools::Todo>>(v).ok())
+        .unwrap_or_default();
+    crate::tools::flatten_todos(&todos)
+        .into_iter()
+        .map(|(todo, depth)| PlanItem {
+            label: format!("{}{} {}", "  ".repeat(depth), todo.id, todo.content),
+            done: matches!(todo.status.as_str(), "completed" | "cancelled"),
+            active: todo.status == "in_progress",
+        })
+        .collect()
 }
 
 /// `size/window (pct)` for the auto-compacting notice.
@@ -608,6 +630,32 @@ mod tests {
             AgentEvent::Notice { tone, text } => (tone, text),
             other => panic!("expected a notice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn todo_write_done_emits_plan_set() {
+        let (renderer, mut rx) = renderer();
+        renderer.map(run::Event::ToolDone {
+            id: "t1".into(),
+            name: "todo_write".into(),
+            arguments: serde_json::json!({"todos": [
+                {"id": "T1", "parent": null, "content": "Map the seam", "status": "completed"},
+                {"id": "T1.1", "parent": "T1", "content": "Fix the renderer", "status": "in_progress"},
+                {"id": "T2", "parent": null, "content": "Add tests", "status": "pending"},
+            ]}),
+            result: history::ToolResult::text("t1", "todo_write", "ok"),
+        });
+        // Tool card first, then the plan snapshot.
+        assert!(matches!(rx.try_recv(), Ok(AgentEvent::ToolCall(_))));
+        let AgentEvent::PlanSet(plan) = rx.try_recv().expect("plan was sent") else {
+            panic!("expected PlanSet");
+        };
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan[0].label, "T1 Map the seam");
+        assert!(plan[0].done && !plan[0].active);
+        assert_eq!(plan[1].label, "  T1.1 Fix the renderer");
+        assert!(!plan[1].done && plan[1].active);
+        assert!(!plan[2].done && !plan[2].active);
     }
 
     #[test]
