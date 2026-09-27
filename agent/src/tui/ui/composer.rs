@@ -120,7 +120,7 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
         );
     }
 
-    if !matches!(app.modal, crate::tui::modals::Modal::Palette { .. }) {
+    if !matches!(app.overlays.modal, crate::tui::modals::Modal::Palette { .. }) {
         f.set_cursor_position((
             text_x + cursor_col.min(text_w.saturating_sub(1)) as u16,
             inset.y + 1 + (cursor_row - offset) as u16,
@@ -156,12 +156,12 @@ pub fn render_input(f: &mut Frame, app: &App, area: Rect) {
     ];
     // Attached images (F.6): a count chip, so staged attachments are
     // visible before the message is sent.
-    if !app.attached_images.is_empty() {
+    if !app.images.attached.is_empty() {
         left.push(Span::styled(
             format!(
                 "[{} image{}] ",
-                app.attached_images.len(),
-                if app.attached_images.len() == 1 {
+                app.images.attached.len(),
+                if app.images.attached.len() == 1 {
                     ""
                 } else {
                     "s"

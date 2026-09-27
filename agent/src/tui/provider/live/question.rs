@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::run::CancelToken;
-use crate::tools::{AskQuestions, QuestionAnswer, QuestionSpec, ASK_TIMEOUT};
+use crate::tools::{ASK_TIMEOUT, AskQuestions, QuestionAnswer, QuestionSpec};
 
 use super::SessionState;
 use crate::tui::provider::AgentEvent;
@@ -44,12 +44,14 @@ impl AskQuestions for QuestionAsker {
         };
         Box::pin(async move {
             let id = crate::id::CraftId::generate().to_string();
+            // Register before emitting: an answer racing in on event
+            // receipt must find the oneshot already parked.
+            let (answer_tx, mut answer_rx) = oneshot::channel();
+            state.lock().await.pending_question = Some((id.clone(), answer_tx));
             let _ = tx.send(AgentEvent::QuestionRequest {
                 id: id.clone(),
                 questions: questions.clone(),
             });
-            let (answer_tx, mut answer_rx) = oneshot::channel();
-            state.lock().await.pending_question = Some((id.clone(), answer_tx));
             let mut cancel_rx = cancel.subscribe();
             let answer = tokio::select! {
                 biased;
@@ -136,6 +138,40 @@ mod tests {
             rx.recv().await,
             Some(AgentEvent::QuestionResolved { .. })
         ));
+    }
+
+    /// The oneshot is registered before the event is emitted, so an
+    /// answer delivered the instant the request arrives still lands.
+    #[tokio::test]
+    async fn immediate_answer_on_event_receipt_lands() {
+        let state = Arc::new(Mutex::new(SessionState::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (_flag, cancel) = crate::run::cancel_channel();
+        let asker = QuestionAsker::new(state.clone(), tx, cancel);
+
+        let pending = tokio::spawn(async move { asker.ask(vec![spec()]).await });
+        let request = loop {
+            match rx.recv().await.expect("channel open") {
+                event @ AgentEvent::QuestionRequest { .. } => break event,
+                _ => continue,
+            }
+        };
+        let AgentEvent::QuestionRequest { id, .. } = request else {
+            unreachable!();
+        };
+        // No yield loop: answer right away, as the UI would on receipt.
+        answer_question(
+            &state,
+            id,
+            QuestionAnswer {
+                dismissed: false,
+                answers: vec![vec!["Y".into()]],
+            },
+        )
+        .await;
+        let answer = pending.await.unwrap();
+        assert!(!answer.dismissed);
+        assert_eq!(answer.answers, vec![vec!["Y".to_string()]]);
     }
 
     #[tokio::test]

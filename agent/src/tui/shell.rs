@@ -175,7 +175,13 @@ async fn run_command(
             Ok(None) => break,
             Err(e) => {
                 guard.kill_and_reap().await;
-                return Err(e);
+                // Keep the streamed output: the card and the `I ran:` record
+                // still show what the command produced before the cut.
+                return Err(if output.is_empty() {
+                    e
+                } else {
+                    format!("{e}\n{output}")
+                });
             }
         }
 
@@ -203,7 +209,11 @@ async fn run_command(
         }
         Err(e) => {
             guard.kill_and_reap().await;
-            Err(e)
+            Err(if output.is_empty() {
+                e
+            } else {
+                format!("{e}\n{output}")
+            })
         }
     }
 }

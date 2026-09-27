@@ -9,59 +9,121 @@ use crate::tui::keybindings::ActionId;
 use crate::tui::provider::Command;
 use crate::tui::selection::{clamp_to, copy_to_clipboard, extract_selection_text, rect_contains};
 
+/// Who owns the keyboard right now, in dispatch priority order.
+/// `keyboard_owner` resolves the top of the stack; a prompt that
+/// declines a chord lets the key keep walking down (`owner_below`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardOwner {
+    Modal,
+    PermissionPrompt,
+    QuestionForm,
+    Search,
+    FilePicker,
+    PlanForm,
+    Base,
+}
+
 impl App {
+    /// Resolve which surface owns the keyboard, mirroring the overlay
+    /// stack priority: the modal first, then the answerable prompts
+    /// (permission F.5 / question A.5, whose keys must stay answerable
+    /// even if search/picker was already open), then the informational
+    /// overlays.
+    fn keyboard_owner(&self) -> KeyboardOwner {
+        if !matches!(self.overlays.modal, Modal::None) {
+            KeyboardOwner::Modal
+        } else if self.overlays.permission_prompt.is_open() {
+            KeyboardOwner::PermissionPrompt
+        } else if self.overlays.question_form.is_open() {
+            KeyboardOwner::QuestionForm
+        } else {
+            self.owner_below()
+        }
+    }
+
+    /// The next owner under the prompts: search (F.3), then the file
+    /// picker (F.3, Ctrl-S), then the plan form (F.3, Ctrl-T), then the
+    /// base surface.
+    fn owner_below(&self) -> KeyboardOwner {
+        if self.overlays.search.is_open() {
+            KeyboardOwner::Search
+        } else if self.overlays.file_picker.is_open() {
+            KeyboardOwner::FilePicker
+        } else if self.plan_form_active() {
+            KeyboardOwner::PlanForm
+        } else {
+            KeyboardOwner::Base
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
         // Any keypress dismisses a live flash toast.
         self.flash = None;
-        // A modal owns the keyboard while open; its keys never fall through
-        // to base chords (so ctrl+q does not quit under an open palette).
-        if !matches!(self.modal, Modal::None) {
-            self.handle_modal_key(key, tx);
-            return;
-        }
-        // The search modal (F.3) owns the keyboard while open, like the
-        // reference's overlay stack.
-        if self.search.is_open() {
-            self.handle_search_key(key);
-            return;
-        }
-        // The file picker (F.3, Ctrl-S) owns the keyboard while open,
-        // above the base surface like the search modal.
-        if self.file_picker.is_open() {
-            use crate::tui::file_picker::FilePickerAction;
-            match self.file_picker.handle_key(key) {
-                FilePickerAction::Consumed => {}
-                FilePickerAction::Select(path) => {
-                    self.file_picker.close();
-                    self.insert_path_into_composer(&path);
+        // A modal owns the keyboard while open; its keys never fall
+        // through to base chords (so ctrl+q does not quit under an open
+        // palette). Permission/question may decline a chord; declined
+        // keys keep walking down the stack, and the plan form passes
+        // Tab through so mode cycling keeps working (the form is
+        // non-modal).
+        let mut owner = self.keyboard_owner();
+        loop {
+            match owner {
+                KeyboardOwner::Modal => {
+                    self.handle_modal_key(key, tx);
+                    return;
                 }
-                FilePickerAction::Close => self.file_picker.close(),
+                KeyboardOwner::PermissionPrompt => {
+                    if self.handle_permission_key(key, tx) {
+                        return;
+                    }
+                    owner = if self.overlays.question_form.is_open() {
+                        KeyboardOwner::QuestionForm
+                    } else {
+                        self.owner_below()
+                    };
+                }
+                KeyboardOwner::QuestionForm => {
+                    if self.handle_question_key(key, tx) {
+                        return;
+                    }
+                    owner = self.owner_below();
+                }
+                KeyboardOwner::Search => {
+                    self.handle_search_key(key);
+                    return;
+                }
+                KeyboardOwner::FilePicker => {
+                    use crate::tui::file_picker::FilePickerAction;
+                    match self.overlays.file_picker.handle_key(key) {
+                        FilePickerAction::Consumed => {}
+                        FilePickerAction::Select(path) => {
+                            self.overlays.file_picker.close();
+                            self.insert_path_into_composer(&path);
+                        }
+                        FilePickerAction::Close => self.overlays.file_picker.close(),
+                    }
+                    return;
+                }
+                KeyboardOwner::PlanForm => {
+                    use crate::tui::plan_form::PlanFormAction;
+                    let action = self
+                        .plan_mode
+                        .plan_form
+                        .handle_key(key, &self.overlays.keybinds);
+                    if action != PlanFormAction::Passthrough {
+                        self.handle_plan_form_action(action, tx);
+                        return;
+                    }
+                    owner = KeyboardOwner::Base;
+                }
+                KeyboardOwner::Base => {
+                    // Chords the permission/question handlers did not
+                    // consume still fall through to the base surface.
+                    self.handle_base_key(key, tx);
+                    return;
+                }
             }
-            return;
         }
-        // The plan form (F.3, Ctrl-T) owns the keyboard while shown in
-        // Plan mode; Tab passes through so mode cycling keeps working
-        // (reference: the form is non-modal).
-        if self.plan_form_active() {
-            use crate::tui::plan_form::PlanFormAction;
-            let action = self.plan_form.handle_key(key);
-            if action != PlanFormAction::Passthrough {
-                self.handle_plan_form_action(action, tx);
-                return;
-            }
-        }
-        // The permission prompt (F.5) owns plain keys while open: the tool
-        // call is parked on it. Ctrl-modified chords it does not consume
-        // (ctrl-c denies inside it) still fall through to the base surface.
-        if self.permission_prompt.is_open() && self.handle_permission_key(key, tx) {
-            return;
-        }
-        // The question form (A.5) owns plain keys the same way while the
-        // `question` tool is parked on it.
-        if self.question_form.is_open() && self.handle_question_key(key, tx) {
-            return;
-        }
-        self.handle_base_key(key, tx);
     }
 
     /// Route a key through the open search modal: typing refreshes the
@@ -70,13 +132,13 @@ impl App {
     /// and closes, Esc restores the scroll position saved on open.
     fn handle_search_key(&mut self, key: KeyEvent) {
         use crate::tui::search_modal::SearchAction;
-        match self.search.handle_key(key) {
+        match self.overlays.search.handle_key(key) {
             SearchAction::Consumed => self.refresh_search_matches(),
             SearchAction::Navigate => self.sync_search_highlight(),
             SearchAction::Select(seg, row) => {
                 self.scroll_to_segment(seg, row);
                 self.view.highlight_segment = None;
-                self.search.close();
+                self.overlays.search.close();
             }
             SearchAction::Close(saved) => {
                 self.view.highlight_segment = None;
@@ -84,7 +146,7 @@ impl App {
                     self.set_scroll_pos(pos);
                     self.view.follow = follow;
                 }
-                self.search.close();
+                self.overlays.search.close();
             }
         }
     }
@@ -96,10 +158,10 @@ impl App {
         key: KeyEvent,
         tx: &mpsc::UnboundedSender<Command>,
     ) -> bool {
-        let Some(id) = self.permission_prompt.id().map(str::to_owned) else {
+        let Some(id) = self.overlays.permission_prompt.id().map(str::to_owned) else {
             return false;
         };
-        match self.permission_prompt.handle_key(key) {
+        match self.overlays.permission_prompt.handle_key(key) {
             Some(answer) => {
                 let _ = tx.send(Command::AnswerPermission { id, answer });
                 true
@@ -118,10 +180,10 @@ impl App {
     /// labels or dismissal) goes to the provider by question-request id;
     /// unhandled ctrl chords keep working, plain keys stay in the form.
     fn handle_question_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
-        let Some(id) = self.question_form.id().map(str::to_owned) else {
+        let Some(id) = self.overlays.question_form.id().map(str::to_owned) else {
             return false;
         };
-        match self.question_form.handle_key(key) {
+        match self.overlays.question_form.handle_key(key) {
             Some(answer) => {
                 let _ = tx.send(Command::AnswerQuestion { id, answer });
                 true
@@ -155,7 +217,7 @@ impl App {
     /// scroll, plan panel/editor, help, and diff approval/rejection.
     fn handle_chord_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) -> bool {
         let key = crate::tui::keybindings::normalize_key(key);
-        let keybinds = &self.keybinds;
+        let keybinds = &self.overlays.keybinds;
         let m = |id: ActionId| keybinds.matches(id, key);
         if m(ActionId::Quit) {
             if !self.composer.text.is_empty() {
@@ -169,12 +231,12 @@ impl App {
             return true;
         }
         if m(ActionId::Help) {
-            self.help_scroll = 0;
-            self.modal = Modal::Help;
+            self.overlays.help_scroll = 0;
+            self.overlays.modal = Modal::Help;
             return true;
         }
         if m(ActionId::Palette) {
-            self.modal = Modal::Palette {
+            self.overlays.modal = Modal::Palette {
                 query: String::new(),
                 selected: 0,
             };
@@ -189,7 +251,9 @@ impl App {
             return true;
         }
         if m(ActionId::Search) {
-            self.search.open(self.view.scroll, self.view.follow);
+            self.overlays
+                .search
+                .open(self.view.scroll, self.view.follow);
             return true;
         }
         if m(ActionId::PasteImage) {
@@ -204,7 +268,7 @@ impl App {
             } else {
                 self.session.cwd.clone()
             };
-            self.file_picker.open(&cwd);
+            self.overlays.file_picker.open(&cwd);
             return true;
         }
         if m(ActionId::PlanToggle) {
@@ -251,7 +315,7 @@ impl App {
                 .or_else(|| self.last_pending_diff())
                 && let Message::Tool { id, .. } = &self.conversation.messages[i]
             {
-                self.modal = Modal::ConfirmReject(id.clone());
+                self.overlays.modal = Modal::ConfirmReject(id.clone());
             }
             return true;
         }
@@ -264,7 +328,7 @@ impl App {
     /// the scrollback to bottom.
     fn handle_editing_chord_key(&mut self, key: KeyEvent) -> bool {
         let key = crate::tui::keybindings::normalize_key(key);
-        let keybinds = &self.keybinds;
+        let keybinds = &self.overlays.keybinds;
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if keybinds.matches(ActionId::LineStart, key) {
                 self.composer.move_home();
@@ -395,7 +459,7 @@ impl App {
         match key.code {
             KeyCode::Up => {
                 if self.slash_open() {
-                    self.slash_selected = self.slash_selected.saturating_sub(1);
+                    self.overlays.slash_selected = self.overlays.slash_selected.saturating_sub(1);
                 } else if !self.composer.cursor_on_first_line() {
                     self.composer.move_up();
                 } else {
@@ -406,7 +470,7 @@ impl App {
             KeyCode::Down => {
                 if self.slash_open() {
                     let max = self.slash_matches().len().saturating_sub(1);
-                    self.slash_selected = (self.slash_selected + 1).min(max);
+                    self.overlays.slash_selected = (self.overlays.slash_selected + 1).min(max);
                 } else if !self.composer.cursor_on_last_line() {
                     self.composer.move_down();
                 } else {
@@ -444,11 +508,11 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.composer.insert_char(c);
-                self.slash_selected = 0;
+                self.overlays.slash_selected = 0;
             }
             KeyCode::Backspace => {
                 self.composer.backspace();
-                self.slash_selected = 0;
+                self.overlays.slash_selected = 0;
             }
             KeyCode::Left => self.composer.move_left(),
             KeyCode::Right => self.composer.move_right(),
@@ -491,34 +555,53 @@ impl App {
     /// keyboard so pastes are dropped while one is open. An open permission
     /// prompt's guidance buffer takes precedence.
     pub fn insert_paste(&mut self, text: &str) {
-        if !matches!(self.modal, Modal::None) {
-            return;
+        // Same owner stack as `handle_key`: a prompt that declines the
+        // paste (not in its editing buffer) lets it keep walking down.
+        let mut owner = self.keyboard_owner();
+        loop {
+            match owner {
+                KeyboardOwner::Modal => return,
+                KeyboardOwner::PermissionPrompt => {
+                    if self.overlays.permission_prompt.handle_paste(text) {
+                        return;
+                    }
+                    owner = if self.overlays.question_form.is_open() {
+                        KeyboardOwner::QuestionForm
+                    } else {
+                        self.owner_below()
+                    };
+                }
+                KeyboardOwner::QuestionForm => {
+                    if self.overlays.question_form.handle_paste(text) {
+                        return;
+                    }
+                    owner = self.owner_below();
+                }
+                KeyboardOwner::Search => {
+                    self.overlays.search.insert_paste(text);
+                    self.refresh_search_matches();
+                    return;
+                }
+                KeyboardOwner::FilePicker => {
+                    self.overlays.file_picker.handle_paste(text);
+                    return;
+                }
+                // The plan form takes no pastes; they reach the composer.
+                KeyboardOwner::PlanForm | KeyboardOwner::Base => {
+                    // A paste that is nothing but an image path attaches
+                    // the image instead of inserting the text (F.6).
+                    if let Some((path, media)) = crate::tui::ui::image::try_parse_image_path(text)
+                        && path.is_file()
+                    {
+                        self.start_file_image_paste(path, media);
+                        return;
+                    }
+                    self.composer.insert_paste(text);
+                    self.overlays.slash_selected = 0;
+                    return;
+                }
+            }
         }
-        if self.search.is_open() {
-            self.search.insert_paste(text);
-            self.refresh_search_matches();
-            return;
-        }
-        if self.file_picker.is_open() {
-            self.file_picker.handle_paste(text);
-            return;
-        }
-        if self.permission_prompt.handle_paste(text) {
-            return;
-        }
-        if self.question_form.handle_paste(text) {
-            return;
-        }
-        // A paste that is nothing but an image path attaches the image
-        // instead of inserting the text (F.6).
-        if let Some((path, media)) = crate::tui::ui::image::try_parse_image_path(text)
-            && path.is_file()
-        {
-            self.start_file_image_paste(path, media);
-            return;
-        }
-        self.composer.insert_paste(text);
-        self.slash_selected = 0;
     }
 
     /// Insert a picked path into the composer (reference: paste with
@@ -690,13 +773,13 @@ mod tests {
         let saved = (app.view.scroll, app.view.follow);
 
         app.handle_key(ctrl('f'), &tx);
-        assert!(app.search.is_open());
+        assert!(app.overlays.search.is_open());
         type_query(&mut app, &tx, "message number 5");
         assert!(!app.search_matches() > 0, "query must match");
 
         // The transcript is scrolled to the selected match's segment and
         // that segment is highlighted while the modal stays open.
-        let (seg, row) = app.search.current_segment_index().unwrap();
+        let (seg, row) = app.overlays.search.current_segment_index().unwrap();
         assert_eq!(
             (app.view.scroll.seg, app.view.scroll.row as usize),
             (seg, row)
@@ -706,7 +789,7 @@ mod tests {
 
         // Esc restores the scroll position saved on open.
         app.handle_key(key(KeyCode::Esc), &tx);
-        assert!(!app.search.is_open());
+        assert!(!app.overlays.search.is_open());
         assert_eq!(app.view.highlight_segment, None);
         assert_eq!((app.view.scroll, app.view.follow), saved);
     }
@@ -726,12 +809,15 @@ mod tests {
         app.handle_key(key(KeyCode::Down), &tx);
         assert_eq!(
             app.view.highlight_segment,
-            app.search.current_segment_index().map(|(seg, _)| seg)
+            app.overlays
+                .search
+                .current_segment_index()
+                .map(|(seg, _)| seg)
         );
 
-        let target = app.search.current_segment_index();
+        let target = app.overlays.search.current_segment_index();
         app.handle_key(key(KeyCode::Enter), &tx);
-        assert!(!app.search.is_open());
+        assert!(!app.overlays.search.is_open());
         assert_eq!(
             app.view.highlight_segment, None,
             "select clears the highlight"
@@ -780,7 +866,7 @@ mod tests {
     #[test]
     fn paste_ignored_when_modal_open() {
         let mut app = App::new();
-        app.modal = Modal::Palette {
+        app.overlays.modal = Modal::Palette {
             query: "x".into(),
             selected: 0,
         };
@@ -802,12 +888,12 @@ mod tests {
     fn permission_request_opens_the_overlay_and_resolution_closes_it() {
         let mut app = App::new();
         open_permission(&mut app);
-        assert!(app.permission_prompt.is_open());
+        assert!(app.overlays.permission_prompt.is_open());
         // A stale resolution must not close a newer request.
         app.handle_event(AgentEvent::PermissionResolved { id: "other".into() });
-        assert!(app.permission_prompt.is_open());
+        assert!(app.overlays.permission_prompt.is_open());
         app.handle_event(AgentEvent::PermissionResolved { id: "t9".into() });
-        assert!(!app.permission_prompt.is_open());
+        assert!(!app.overlays.permission_prompt.is_open());
     }
 
     fn open_question(app: &mut App) {
@@ -829,12 +915,12 @@ mod tests {
     fn question_request_opens_the_form_and_resolution_closes_it() {
         let mut app = App::new();
         open_question(&mut app);
-        assert!(app.question_form.is_open());
+        assert!(app.overlays.question_form.is_open());
         // A stale resolution must not close a newer request.
         app.handle_event(AgentEvent::QuestionResolved { id: "other".into() });
-        assert!(app.question_form.is_open());
+        assert!(app.overlays.question_form.is_open());
         app.handle_event(AgentEvent::QuestionResolved { id: "q9".into() });
-        assert!(!app.question_form.is_open());
+        assert!(!app.overlays.question_form.is_open());
     }
 
     #[test]
@@ -902,7 +988,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
             &tx,
         );
-        assert!(matches!(app.modal, Modal::Palette { .. }));
+        assert!(matches!(app.overlays.modal, Modal::Palette { .. }));
     }
 
     #[test]
@@ -916,7 +1002,7 @@ mod tests {
         // Enter denies with the typed guidance.
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
         // The overlay stays open until PermissionResolved arrives.
-        assert!(app.permission_prompt.is_open());
+        assert!(app.overlays.permission_prompt.is_open());
     }
 
     /// Ctrl-S opens the file picker over the session cwd; while open it owns
@@ -934,14 +1020,14 @@ mod tests {
         });
 
         // A walking picker claims cadence frames.
-        assert!(!app.file_picker.is_open());
+        assert!(!app.overlays.file_picker.is_open());
         app.handle_key(ctrl('s'), &tx);
-        assert!(app.file_picker.is_open());
+        assert!(app.overlays.file_picker.is_open());
         assert_eq!(app.cadence(), crate::tui::repaint::Cadence::PENDING);
 
         // Drain the walker via the app's loop hook.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while app.file_picker.walking() {
+        while app.overlays.file_picker.walking() {
             app.tick_file_picker();
             assert!(
                 std::time::Instant::now() < deadline,
@@ -957,7 +1043,7 @@ mod tests {
         assert!(app.composer.text.is_empty(), "picker owns the keyboard");
 
         app.handle_key(key(KeyCode::Enter), &tx);
-        assert!(!app.file_picker.is_open());
+        assert!(!app.overlays.file_picker.is_open());
         assert_eq!(app.composer.text, "main.rs");
     }
 
@@ -968,16 +1054,16 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.handle_key(ctrl('s'), &tx);
-        assert!(app.file_picker.is_open());
+        assert!(app.overlays.file_picker.is_open());
         app.handle_key(key(KeyCode::Esc), &tx);
-        assert!(!app.file_picker.is_open());
+        assert!(!app.overlays.file_picker.is_open());
         assert!(app.composer.text.is_empty());
 
         app.composer.set_text("read".into());
-        app.file_picker.handle_key(key(KeyCode::Char('a')));
+        app.overlays.file_picker.handle_key(key(KeyCode::Char('a')));
         // Simulate a Select via the same helper the key path uses.
         app.handle_key(ctrl('s'), &tx);
-        if let Some(s) = app.file_picker.session_mut() {
+        if let Some(s) = app.overlays.file_picker.session_mut() {
             s.matches = vec![crate::tui::file_picker::Match {
                 path: "src/a.rs".into(),
                 indices: Vec::new(),
@@ -999,7 +1085,7 @@ mod tests {
         app.handle_key(ctrl('s'), &tx);
         app.insert_paste("src");
         assert!(app.composer.text.is_empty());
-        if let Some(s) = app.file_picker.session_mut() {
+        if let Some(s) = app.overlays.file_picker.session_mut() {
             assert_eq!(s.query, "src");
         }
     }
@@ -1018,7 +1104,7 @@ mod tests {
         });
         app.handle_key(ctrl('s'), &tx);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while app.file_picker.walking() {
+        while app.overlays.file_picker.walking() {
             app.tick_file_picker();
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1036,12 +1122,12 @@ mod tests {
     fn model_menu_replaces_open_palette() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        app.modal = Modal::Palette {
+        app.overlays.modal = Modal::Palette {
             query: "mo".into(),
             selected: 0,
         };
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
-        assert!(matches!(app.modal, Modal::ModelMenu(_)));
+        assert!(matches!(app.overlays.modal, Modal::ModelMenu(_)));
     }
 
     /// Tab cycles Build -> Plan -> Build (F.2); BackTab keeps focus cycling.
@@ -1052,7 +1138,10 @@ mod tests {
         assert_eq!(app.mode, crate::tui::app::Mode::Build);
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
         assert_eq!(app.mode, crate::tui::app::Mode::Plan);
-        assert!(app.plan_path.is_some(), "plan path allocated on entry");
+        assert!(
+            app.plan_mode.plan_path.is_some(),
+            "plan path allocated on entry"
+        );
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
         assert_eq!(app.mode, crate::tui::app::Mode::Build);
     }
@@ -1062,12 +1151,12 @@ mod tests {
     fn esc_closes_the_command_palette() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        app.modal = Modal::Palette {
+        app.overlays.modal = Modal::Palette {
             query: "mo".into(),
             selected: 0,
         };
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     fn mouse(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
@@ -1231,7 +1320,7 @@ mod tests {
         assert_eq!(app.composer.text, "second");
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_eq!(app.composer.text, "draft", "draft restored past newest");
-        assert!(app.history_index.is_none());
+        assert!(app.history_recall.history_index.is_none());
     }
 
     /// Slash commands are recorded in history but ↑/↓ skip over them, so
@@ -1260,7 +1349,7 @@ mod tests {
         assert_eq!(app.composer.text, "new text", "skipped over /help");
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_eq!(app.composer.text, "draft", "draft restored past newest");
-        assert!(app.history_index.is_none());
+        assert!(app.history_recall.history_index.is_none());
     }
 
     /// A slash command as the newest entry is never recalled; ↑ stays put and
@@ -1274,7 +1363,7 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
         assert_eq!(app.composer.text, "draft", "nothing but slash commands");
-        assert!(app.history_index.is_none());
+        assert!(app.history_recall.history_index.is_none());
         assert!(!app.slash_open());
     }
 
@@ -1295,7 +1384,7 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_eq!(app.composer.text, "", "draft (empty) restored past newest");
-        assert!(app.history_index.is_none());
+        assert!(app.history_recall.history_index.is_none());
     }
 
     /// Ctrl-E: line-end while the composer holds text; with an empty
@@ -1470,13 +1559,19 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.handle_key(ctrl('h'), &tx);
-        assert!(matches!(app.modal, Modal::Help), "ctrl-h opens the sheet");
+        assert!(
+            matches!(app.overlays.modal, Modal::Help),
+            "ctrl-h opens the sheet"
+        );
         app.handle_modal_key(key(KeyCode::Down), &tx);
-        assert_eq!(app.help_scroll, 1, "down scrolls the sheet");
+        assert_eq!(app.overlays.help_scroll, 1, "down scrolls the sheet");
         app.handle_modal_key(key(KeyCode::PageUp), &tx);
-        assert_eq!(app.help_scroll, 0);
+        assert_eq!(app.overlays.help_scroll, 0);
         app.handle_modal_key(key(KeyCode::Esc), &tx);
-        assert!(matches!(app.modal, Modal::None), "esc closes the sheet");
+        assert!(
+            matches!(app.overlays.modal, Modal::None),
+            "esc closes the sheet"
+        );
     }
 
     /// A config overlay rebinds a chord: the new chord dispatches the
@@ -1488,19 +1583,22 @@ mod tests {
         let mut app = App::new();
         let entries = vec![("palette".to_string(), vec!["Alt+M".to_string()])];
         let mut warnings = Vec::new();
-        app.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
+        app.overlays.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
         assert!(warnings.is_empty());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT), &tx);
-        assert!(matches!(app.modal, Modal::Palette { .. }), "alt-m opens it");
+        assert!(
+            matches!(app.overlays.modal, Modal::Palette { .. }),
+            "alt-m opens it"
+        );
 
-        app.modal = Modal::None;
+        app.overlays.modal = Modal::None;
         app.handle_key(ctrl('p'), &tx);
         assert!(
-            matches!(app.modal, Modal::None),
+            matches!(app.overlays.modal, Modal::None),
             "ctrl-p no longer triggers the palette"
         );
-        assert!(app.keybinds.is_overridden(ActionId::Palette));
+        assert!(app.overlays.keybinds.is_overridden(ActionId::Palette));
     }
     /// F.6: pasting an image path attaches the image instead of inserting
     /// the path text; text pastes are unaffected.
@@ -1519,15 +1617,15 @@ mod tests {
         std::fs::write(&path, b"png").unwrap();
         app.insert_paste(path.to_str().unwrap());
         assert!(app.composer.text.is_empty(), "path not inserted as text");
-        assert_eq!(app.image_loads.len(), 1);
+        assert_eq!(app.images.loads.len(), 1);
         // The background load lands through the poll.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while app.attached_images.is_empty() && std::time::Instant::now() < deadline {
+        while app.images.attached.is_empty() && std::time::Instant::now() < deadline {
             app.poll_image_loads();
         }
-        assert_eq!(app.attached_images.len(), 1);
+        assert_eq!(app.images.attached.len(), 1);
         assert_eq!(
-            app.attached_images[0].media_type,
+            app.images.attached[0].media_type,
             crate::history::ImageMedia::Png
         );
 

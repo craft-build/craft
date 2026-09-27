@@ -304,6 +304,10 @@ async fn gate_decide(
     }));
     let _ = tx.send(AgentEvent::StatusChanged(Status::WaitingApproval));
     let (files, commands) = display_context(name, &call.function.arguments, &scopes);
+    // Register before emitting: an answer racing in on event receipt
+    // must find the oneshot already parked.
+    let (decision_tx, mut decision_rx) = oneshot::channel();
+    state.lock().await.pending_approval = Some((id.clone(), decision_tx));
     let _ = tx.send(AgentEvent::PermissionRequest {
         id: id.clone(),
         tool: name.to_string(),
@@ -312,8 +316,6 @@ async fn gate_decide(
         commands,
     });
 
-    let (decision_tx, mut decision_rx) = oneshot::channel();
-    state.lock().await.pending_approval = Some((id.clone(), decision_tx));
     let mut cancel_rx = cancel.subscribe();
     // Cancellation is epoch-based: `changed()` fires only on a
     // `set(true)` generation bump or a dropped flag — a re-arm

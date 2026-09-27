@@ -168,7 +168,7 @@ impl App {
     /// replacing any modal already open.
     pub(crate) fn open_model_menu(&mut self) {
         if !self.session.models.is_empty() {
-            self.modal = Modal::ModelMenu(
+            self.overlays.modal = Modal::ModelMenu(
                 self.session
                     .model_idx
                     .min(self.session.models.len().saturating_sub(1)),
@@ -178,7 +178,7 @@ impl App {
 
     /// Open the persisted-session picker (empty when no sessions exist).
     fn open_sessions(&mut self) {
-        self.modal = Modal::Sessions {
+        self.overlays.modal = Modal::Sessions {
             entries: super::sidebar::load_session_entries(),
             selected: 0,
         };
@@ -239,21 +239,21 @@ impl App {
                 let _ = tx.send(Command::Compact);
             }
             "usage" => {
-                self.usage_scroll = 0;
-                self.modal = Modal::Usage(self.usage.clone());
+                self.overlays.usage_scroll = 0;
+                self.overlays.modal = Modal::Usage(self.overlays.usage.clone());
                 // Rows come from the session ledger; quota is refetched on
                 // every open, like the reference.
                 let _ = tx.send(Command::GetUsage);
                 let _ = tx.send(Command::FetchUsage);
             }
             "stats" => {
-                self.usage_scroll = 0;
-                self.modal = Modal::Stats(super::sidebar::load_stats());
+                self.overlays.usage_scroll = 0;
+                self.overlays.modal = Modal::Stats(super::sidebar::load_stats());
             }
             "auto-review" => {
                 let _ = tx.send(Command::ToggleAutoReview);
             }
-            "help" => self.modal = Modal::Help,
+            "help" => self.overlays.modal = Modal::Help,
             "quit" => self.should_quit = true,
             _ => {}
         }
@@ -267,7 +267,7 @@ impl App {
             .iter()
             .position(|name| *name == original)
             .unwrap_or(0);
-        self.modal = Modal::ThemePicker {
+        self.overlays.modal = Modal::ThemePicker {
             entries,
             selected,
             original,
@@ -304,7 +304,7 @@ impl App {
     }
 
     pub(crate) fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>, always: bool) {
-        if let Modal::ConfirmReject(id) = std::mem::replace(&mut self.modal, Modal::None) {
+        if let Modal::ConfirmReject(id) = std::mem::replace(&mut self.overlays.modal, Modal::None) {
             if let Some(Message::Tool { diff, .. }) = self
                 .conversation
                 .messages
@@ -340,7 +340,7 @@ mod tests {
             let sidebar = app.session.sidebar_open;
             app.run_command(spec.id, &tx);
             let sent = rx.try_recv().is_ok();
-            let modal = !matches!(app.modal, Modal::None);
+            let modal = !matches!(app.overlays.modal, Modal::None);
             let flipped = app.session.sidebar_open != sidebar;
             let noticed = matches!(
                 app.conversation.messages.last(),
@@ -444,7 +444,7 @@ mod tests {
         let mut app = App::new();
         app.handle_event(AgentEvent::UsageSnapshot(usage_rows()));
         app.run_slash("/usage", &tx);
-        assert!(matches!(&app.modal, Modal::Usage(rows) if rows.len() == 2));
+        assert!(matches!(&app.overlays.modal, Modal::Usage(rows) if rows.len() == 2));
         assert!(
             matches!(rx.try_recv(), Ok(Command::GetUsage)),
             "/usage refreshes the snapshot from the provider"
@@ -461,7 +461,7 @@ mod tests {
             ),
             &tx,
         );
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     #[test]
@@ -469,7 +469,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         app.run_slash("/stats", &tx);
-        assert!(matches!(app.modal, Modal::Stats(_)));
+        assert!(matches!(app.overlays.modal, Modal::Stats(_)));
         app.handle_key(
             crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Esc,
@@ -477,7 +477,7 @@ mod tests {
             ),
             &tx,
         );
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     /// A fresh snapshot while `/usage` is open replaces the overlay's rows.
@@ -486,7 +486,7 @@ mod tests {
         let mut app = App::new();
         app.run_slash("/usage", &mpsc::unbounded_channel().0);
         app.handle_event(AgentEvent::UsageSnapshot(usage_rows()));
-        assert!(matches!(&app.modal, Modal::Usage(rows) if rows.len() == 2));
+        assert!(matches!(&app.overlays.modal, Modal::Usage(rows) if rows.len() == 2));
     }
 
     /// The provider quota answer survives close/reopen (F.5: the last
@@ -509,14 +509,14 @@ mod tests {
             ),
             &mpsc::unbounded_channel().0,
         );
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
         assert!(
-            matches!(&app.usage_quota, UsageFetchState::Ready(u) if u.plan.as_deref() == Some("lite"))
+            matches!(&app.overlays.usage_quota, UsageFetchState::Ready(u) if u.plan.as_deref() == Some("lite"))
         );
         // Reopening resets the scroll but keeps the quota answer.
-        app.usage_scroll = 5;
+        app.overlays.usage_scroll = 5;
         app.run_slash("/usage", &mpsc::unbounded_channel().0);
-        assert_eq!(app.usage_scroll, 0);
-        assert!(matches!(&app.usage_quota, UsageFetchState::Ready(_)));
+        assert_eq!(app.overlays.usage_scroll, 0);
+        assert!(matches!(&app.overlays.usage_quota, UsageFetchState::Ready(_)));
     }
 }

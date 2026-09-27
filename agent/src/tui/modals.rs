@@ -72,49 +72,49 @@ pub struct StatsView {
 impl App {
     pub(crate) fn handle_modal_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
         // 1. Confirm dialog swallows everything.
-        if matches!(self.modal, Modal::ConfirmReject(_)) {
+        if matches!(self.overlays.modal, Modal::ConfirmReject(_)) {
             match key.code {
                 KeyCode::Char('Y') => self.reject_confirmed(tx, true),
                 KeyCode::Char('y') | KeyCode::Enter => self.reject_confirmed(tx, false),
-                _ => self.modal = Modal::None,
+                _ => self.overlays.modal = Modal::None,
             }
             return;
         }
 
         // 2. Command palette.
-        if matches!(self.modal, Modal::Palette { .. }) {
+        if matches!(self.overlays.modal, Modal::Palette { .. }) {
             self.handle_palette_key(key, tx);
             return;
         }
 
         // 3. Model menu.
-        if matches!(self.modal, Modal::ModelMenu(_)) {
+        if matches!(self.overlays.modal, Modal::ModelMenu(_)) {
             self.handle_model_menu_key(key, tx);
             return;
         }
 
         // 4. Read-only usage/stats/help sheets.
-        if matches!(self.modal, Modal::Usage(_)) {
+        if matches!(self.overlays.modal, Modal::Usage(_)) {
             self.handle_usage_key(key, tx, true);
             return;
         }
-        if matches!(self.modal, Modal::Stats(_)) {
+        if matches!(self.overlays.modal, Modal::Stats(_)) {
             self.handle_usage_key(key, tx, false);
             return;
         }
-        if matches!(self.modal, Modal::Help) {
+        if matches!(self.overlays.modal, Modal::Help) {
             self.handle_help_key(key);
             return;
         }
 
         // 5. Sessions picker.
-        if matches!(self.modal, Modal::Sessions { .. }) {
+        if matches!(self.overlays.modal, Modal::Sessions { .. }) {
             self.handle_sessions_key(key, tx);
             return;
         }
 
         // 6. Theme picker.
-        if matches!(self.modal, Modal::ThemePicker { .. }) {
+        if matches!(self.overlays.modal, Modal::ThemePicker { .. }) {
             self.handle_theme_picker_key(key);
         }
     }
@@ -125,25 +125,28 @@ impl App {
     fn handle_help_key(&mut self, key: KeyEvent) {
         use crate::tui::keybindings::ActionId;
         if key.code == KeyCode::Esc
-            || self.keybinds.matches(ActionId::Help, key)
-            || self.keybinds.matches(ActionId::Quit, key)
+            || self.overlays.keybinds.matches(ActionId::Help, key)
+            || self.overlays.keybinds.matches(ActionId::Quit, key)
         {
-            self.modal = Modal::None;
+            self.overlays.modal = Modal::None;
             return;
         }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.help_scroll = self.help_scroll.saturating_sub(1)
+                self.overlays.help_scroll = self.overlays.help_scroll.saturating_sub(1)
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.help_scroll = self.help_scroll.saturating_add(1)
+                self.overlays.help_scroll = self.overlays.help_scroll.saturating_add(1)
             }
-            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
-            KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(10),
-            KeyCode::Home => self.help_scroll = 0,
-            KeyCode::End => self.help_scroll = usize::MAX,
-            _ => self.modal = Modal::None,
+            KeyCode::PageUp => self.overlays.help_scroll = self.overlays.help_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.overlays.help_scroll = self.overlays.help_scroll.saturating_add(10),
+            KeyCode::Home => self.overlays.help_scroll = 0,
+            KeyCode::End => self.overlays.help_scroll = self.overlays.help_scroll_max,
+            _ => self.overlays.modal = Modal::None,
         }
+        // Clamp against the last-rendered bound so a saturated value can
+        // never pin the sheet at the bottom.
+        self.overlays.help_scroll = self.overlays.help_scroll.min(self.overlays.help_scroll_max);
     }
 
     /// Theme picker keys: arrows preview live, Enter applies + persists,
@@ -156,7 +159,7 @@ impl App {
             entries,
             selected,
             original,
-        } = std::mem::replace(&mut self.modal, Modal::None)
+        } = std::mem::replace(&mut self.overlays.modal, Modal::None)
         else {
             return;
         };
@@ -164,7 +167,7 @@ impl App {
             if let Some(name) = entries.get(sel) {
                 let _ = theme::set_named(name);
             }
-            app.modal = Modal::ThemePicker {
+            app.overlays.modal = Modal::ThemePicker {
                 entries: entries.to_vec(),
                 selected: sel,
                 original: original.clone(),
@@ -192,20 +195,20 @@ impl App {
     }
 
     fn handle_sessions_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
-        let Modal::Sessions { entries, selected } = std::mem::replace(&mut self.modal, Modal::None)
+        let Modal::Sessions { entries, selected } = std::mem::replace(&mut self.overlays.modal, Modal::None)
         else {
             return;
         };
         match key.code {
             KeyCode::Up => {
-                self.modal = Modal::Sessions {
+                self.overlays.modal = Modal::Sessions {
                     entries,
                     selected: selected.saturating_sub(1),
                 }
             }
             KeyCode::Down => {
                 let max = entries.len().saturating_sub(1);
-                self.modal = Modal::Sessions {
+                self.overlays.modal = Modal::Sessions {
                     entries,
                     selected: (selected + 1).min(max),
                 }
@@ -236,17 +239,18 @@ impl App {
             .modifiers
             .contains(crossterm::event::KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => self.modal = Modal::None,
-            KeyCode::Char('c') | KeyCode::Char('C') if ctrl => self.modal = Modal::None,
+            KeyCode::Esc => self.overlays.modal = Modal::None,
+            KeyCode::Char('c') | KeyCode::Char('C') if ctrl => self.overlays.modal = Modal::None,
             KeyCode::Char('r') | KeyCode::Char('R') if ctrl && allow_refresh => {
                 let _ = tx.send(Command::FetchUsage);
             }
-            KeyCode::Up => self.usage_scroll = self.usage_scroll.saturating_sub(1),
-            KeyCode::Down => self.usage_scroll = self.usage_scroll.saturating_add(1),
-            KeyCode::PageUp => self.usage_scroll = self.usage_scroll.saturating_sub(10),
-            KeyCode::PageDown => self.usage_scroll = self.usage_scroll.saturating_add(10),
+            KeyCode::Up => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_sub(1),
+            KeyCode::Down => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_add(1),
+            KeyCode::PageUp => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_sub(10),
+            KeyCode::PageDown => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_add(10),
             _ => {}
         }
+        self.overlays.usage_scroll = self.overlays.usage_scroll.min(self.overlays.usage_scroll_max);
     }
 
     fn handle_palette_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
@@ -255,21 +259,21 @@ impl App {
         let Modal::Palette {
             mut query,
             selected,
-        } = std::mem::replace(&mut self.modal, Modal::None)
+        } = std::mem::replace(&mut self.overlays.modal, Modal::None)
         else {
             return;
         };
         match key.code {
             KeyCode::Esc => {} // dismiss (modal already replaced with None)
             KeyCode::Up => {
-                self.modal = Modal::Palette {
+                self.overlays.modal = Modal::Palette {
                     query,
                     selected: selected.saturating_sub(1),
                 }
             }
             KeyCode::Down => {
                 let max = items.len().saturating_sub(1);
-                self.modal = Modal::Palette {
+                self.overlays.modal = Modal::Palette {
                     query,
                     selected: (selected + 1).min(max),
                 }
@@ -282,21 +286,21 @@ impl App {
             }
             KeyCode::Backspace => {
                 query.pop();
-                self.modal = Modal::Palette { query, selected: 0 }
+                self.overlays.modal = Modal::Palette { query, selected: 0 }
             }
             KeyCode::Char(c) => {
                 query.push(c);
-                self.modal = Modal::Palette { query, selected: 0 }
+                self.overlays.modal = Modal::Palette { query, selected: 0 }
             }
             _ => {
                 // Unhandled keys leave the palette open.
-                self.modal = Modal::Palette { query, selected };
+                self.overlays.modal = Modal::Palette { query, selected };
             }
         }
     }
 
     fn handle_model_menu_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
-        let Modal::ModelMenu(sel) = std::mem::replace(&mut self.modal, Modal::None) else {
+        let Modal::ModelMenu(sel) = std::mem::replace(&mut self.overlays.modal, Modal::None) else {
             return;
         };
         // Tier assignment: a toggle on the highlighted model, persisted
@@ -306,13 +310,13 @@ impl App {
                 let spec = format!("{}/{}", choice.provider, choice.model);
                 apply_tier_toggle(&spec, tier, tier_state_dir().as_ref());
             }
-            self.modal = Modal::ModelMenu(sel);
+            self.overlays.modal = Modal::ModelMenu(sel);
             return;
         }
         match key.code {
-            KeyCode::Up => self.modal = Modal::ModelMenu(sel.saturating_sub(1)),
+            KeyCode::Up => self.overlays.modal = Modal::ModelMenu(sel.saturating_sub(1)),
             KeyCode::Down => {
-                self.modal =
+                self.overlays.modal =
                     Modal::ModelMenu((sel + 1).min(self.session.models.len().saturating_sub(1)))
             }
             KeyCode::Enter => {
@@ -464,14 +468,14 @@ mod tests {
     fn tier_keys_keep_the_picker_open_and_leave_the_session_model_alone() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        app.modal = Modal::ModelMenu(1);
+        app.overlays.modal = Modal::ModelMenu(1);
         app.handle_modal_key(key('!'), &tx);
-        assert!(matches!(app.modal, Modal::ModelMenu(1)));
+        assert!(matches!(app.overlays.modal, Modal::ModelMenu(1)));
         assert_eq!(app.session.model_idx, 0, "tier keys never select a model");
         assert!(rx.try_recv().is_err(), "no SelectModel command is sent");
         // Non-tier keys (Esc) still close.
         app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     fn ctrl(c: char) -> KeyEvent {
@@ -482,10 +486,10 @@ mod tests {
     fn usage_overlay_ctrl_r_refetches_and_stays_open() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        app.modal = Modal::Usage(Vec::new());
+        app.overlays.modal = Modal::Usage(Vec::new());
         app.handle_modal_key(ctrl('r'), &tx);
         assert!(
-            matches!(app.modal, Modal::Usage(_)),
+            matches!(app.overlays.modal, Modal::Usage(_)),
             "ctrl+r keeps the overlay open"
         );
         assert!(matches!(rx.try_recv(), Ok(Command::FetchUsage)));
@@ -495,28 +499,28 @@ mod tests {
     fn usage_overlay_esc_and_ctrl_c_close() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        app.modal = Modal::Usage(Vec::new());
+        app.overlays.modal = Modal::Usage(Vec::new());
         app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
-        assert!(matches!(app.modal, Modal::None));
-        app.modal = Modal::Usage(Vec::new());
+        assert!(matches!(app.overlays.modal, Modal::None));
+        app.overlays.modal = Modal::Usage(Vec::new());
         app.handle_modal_key(ctrl('c'), &tx);
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     #[test]
     fn usage_overlay_scrolls_and_consumes_other_keys() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        app.modal = Modal::Usage(Vec::new());
+        app.overlays.modal = Modal::Usage(Vec::new());
         for _ in 0..3 {
             app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         }
-        assert_eq!(app.usage_scroll, 3);
+        assert_eq!(app.overlays.usage_scroll, 3);
         app.handle_modal_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &tx);
-        assert_eq!(app.usage_scroll, 0);
+        assert_eq!(app.overlays.usage_scroll, 0);
         // Plain 'q' is consumed: modal stays open, no quit.
         app.handle_modal_key(key('q'), &tx);
-        assert!(matches!(app.modal, Modal::Usage(_)));
+        assert!(matches!(app.overlays.modal, Modal::Usage(_)));
         assert!(!app.should_quit);
     }
 
@@ -524,18 +528,18 @@ mod tests {
     fn stats_overlay_scrolls_instead_of_closing_and_has_no_reload() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        app.modal = Modal::Stats(StatsView::default());
+        app.overlays.modal = Modal::Stats(StatsView::default());
         app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.usage_scroll, 1);
+        assert_eq!(app.overlays.usage_scroll, 1);
         assert!(
-            matches!(app.modal, Modal::Stats(_)),
+            matches!(app.overlays.modal, Modal::Stats(_)),
             "arrows scroll, they do not close"
         );
         // Ctrl+R is usage-only: no quota fetch from the stats sheet.
         app.handle_modal_key(ctrl('r'), &tx);
         assert!(rx.try_recv().is_err());
         app.handle_modal_key(ctrl('c'), &tx);
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     #[test]
@@ -549,7 +553,7 @@ mod tests {
             entries,
             selected,
             original,
-        } = &app.modal
+        } = &app.overlays.modal
         else {
             panic!("theme command did not open the picker");
         };
@@ -573,7 +577,7 @@ mod tests {
         app.run_command("theme", &tx);
         app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert!(
-            matches!(&app.modal, Modal::ThemePicker { selected, .. } if *selected == idx + 1),
+            matches!(&app.overlays.modal, Modal::ThemePicker { selected, .. } if *selected == idx + 1),
             "Down moved the cursor one row"
         );
         // Moving the cursor swaps the global theme for the highlighted entry.
@@ -601,7 +605,7 @@ mod tests {
         app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_ne!(theme::current_theme_name(), theme::DEFAULT_THEME);
         app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
         assert_eq!(theme::current_theme_name(), theme::DEFAULT_THEME);
     }
 
@@ -614,7 +618,7 @@ mod tests {
         app.run_command("theme", &tx);
         app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         app.handle_modal_key(ctrl('c'), &tx);
-        assert!(matches!(app.modal, Modal::None));
+        assert!(matches!(app.overlays.modal, Modal::None));
         assert_eq!(theme::current_theme_name(), theme::DEFAULT_THEME);
     }
 }

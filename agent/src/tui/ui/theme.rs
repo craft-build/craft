@@ -148,7 +148,7 @@ pub fn all_theme_names() -> Vec<String> {
 pub fn current_theme_name() -> String {
     CURRENT_NAME
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_else(|| DEFAULT_THEME.to_owned())
 }

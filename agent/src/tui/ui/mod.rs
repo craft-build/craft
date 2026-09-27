@@ -53,8 +53,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // its rows are carved out of the message area, so the shared top border
     // and the composer block below it keep their positions. The plan form
     // (F.3, Ctrl-T) stacks above it the same way.
-    let prompt_h = if app.permission_prompt.is_open() {
-        app.permission_prompt
+    let prompt_h = if app.overlays.permission_prompt.is_open() {
+        app.overlays.permission_prompt
             .height(chat.width)
             .min(bottom.y.saturating_sub(msg_area.y))
     } else {
@@ -62,15 +62,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
     // The question form (A.5) stacks above the permission prompt the same
     // way; at most one is open at a time in practice.
-    let question_h = if app.question_form.is_open() {
-        app.question_form
+    let question_h = if app.overlays.question_form.is_open() {
+        app.overlays.question_form
             .height(chat.width)
             .min(bottom.y.saturating_sub(msg_area.y + prompt_h))
     } else {
         0
     };
-    let form_h = if app.plan_form.is_visible() {
-        app.plan_form
+    let form_h = if app.plan_mode.plan_form.is_visible() {
+        app.plan_mode.plan_form
             .height()
             .min(bottom.y.saturating_sub(msg_area.y + prompt_h + question_h))
     } else {
@@ -127,19 +127,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     messages::render(f, app, msg_area);
     if form_h > 0 {
-        app.plan_form.view(f, form_area);
+        app.plan_mode.plan_form.view(f, form_area);
     }
     if question_h > 0 {
-        app.question_form.view(f, question_area);
+        app.overlays.question_form.view(f, question_area);
     }
     if prompt_h > 0 {
-        app.permission_prompt.view(f, prompt_area);
+        app.overlays.permission_prompt.view(f, prompt_area);
     }
     composer::render_input(f, app, composer_area);
     composer::render_status(f, app, status_area);
     // One-row " Plan Ctrl+T " reminder in the blank footer row while a
     // ready plan's form is dismissed (reference `PlanForm::hint_line`).
-    if let Some(hint) = app.plan_form.hint_line() {
+    if let Some(hint) = app.plan_mode.plan_form.hint_line() {
         f.render_widget(ratatui::widgets::Paragraph::new(hint), footer_area);
     }
 
@@ -333,8 +333,8 @@ mod tests {
         // A user override: search moves to Alt+M and must render that way.
         let entries = vec![("search".to_string(), vec!["Alt+M".to_string()])];
         let mut warnings = Vec::new();
-        app.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
-        app.modal = Modal::Help;
+        app.overlays.keybinds = KeybindingResolver::from_overlay(&entries, &mut warnings);
+        app.overlays.modal = Modal::Help;
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
         let rows: Vec<String> = (0..buf.area.height)
@@ -390,7 +390,7 @@ mod tests {
         // the top border is the first row below the prompt, and the
         // composer's accent bar never appears inside the prompt rows.
         // Match the layout's width (100-px terminal minus the 30-px sidebar).
-        let prompt_h = app.permission_prompt.height(70);
+        let prompt_h = app.overlays.permission_prompt.height(70);
         // The title now sits one row inside the prompt area (top padding).
         let border_y = (title + prompt_h as usize)
             .saturating_sub(1)
@@ -453,25 +453,25 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
         let mut app = seeded_app();
 
-        app.modal = crate::tui::modals::Modal::Palette {
+        app.overlays.modal = crate::tui::modals::Modal::Palette {
             query: "mo".into(),
             selected: 0,
         };
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("Change model"));
 
-        app.modal = crate::tui::modals::Modal::ModelMenu(2);
+        app.overlays.modal = crate::tui::modals::Modal::ModelMenu(2);
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Claude Opus 4.1"));
 
-        app.modal = crate::tui::modals::Modal::None;
+        app.overlays.modal = crate::tui::modals::Modal::None;
         app.composer.text = "/cl".into();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("/clear"));
 
         app.composer.clear();
-        app.modal = crate::tui::modals::Modal::ConfirmReject("t2".into());
+        app.overlays.modal = crate::tui::modals::Modal::ConfirmReject("t2".into());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Reject this diff?"));
@@ -480,7 +480,7 @@ mod tests {
         // Theme picker: title, windowed list, and the current-theme marker.
         let entries = theme::all_theme_names();
         let selected = entries.len().saturating_sub(1); // last row: forces windowing
-        app.modal = crate::tui::modals::Modal::ThemePicker {
+        app.overlays.modal = crate::tui::modals::Modal::ThemePicker {
             entries,
             selected,
             original: theme::DEFAULT_THEME.to_owned(),
@@ -498,13 +498,13 @@ mod tests {
     fn palette_scrolls_to_keep_selection_visible() {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
         let mut app = seeded_app();
-        app.modal = crate::tui::modals::Modal::Palette {
+        app.overlays.modal = crate::tui::modals::Modal::Palette {
             query: String::new(),
             selected: 0,
         };
         let last = app.palette_items().len() - 1;
         let (_, label, _) = app.palette_items()[last];
-        app.modal = crate::tui::modals::Modal::Palette {
+        app.overlays.modal = crate::tui::modals::Modal::Palette {
             query: String::new(),
             selected: last,
         };
@@ -531,7 +531,7 @@ mod tests {
                 cost: None,
             },
         ]));
-        app.modal = crate::tui::modals::Modal::Usage(app.usage.clone());
+        app.overlays.modal = crate::tui::modals::Modal::Usage(app.overlays.usage.clone());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Session usage"));
@@ -539,7 +539,7 @@ mod tests {
         assert!(text.contains("$0.01"), "priced model shows its cost");
         assert!(text.contains("\u{2014}"), "unpriced model shows an em dash");
 
-        app.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
+        app.overlays.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
             rows: vec![crate::tui::provider::UsageRow {
                 model: "claude-sonnet-5".into(),
                 tokens: 100_000,
@@ -558,7 +558,7 @@ mod tests {
         assert!(text.contains("$1.50"));
         assert!(text.contains("3 sessions"));
 
-        app.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
+        app.overlays.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
             empty: true,
             ..Default::default()
         });
@@ -570,14 +570,14 @@ mod tests {
     fn usage_overlay_renders_the_provider_quota_section() {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
         let mut app = seeded_app();
-        app.usage = vec![crate::tui::provider::UsageRow {
+        app.overlays.usage = vec![crate::tui::provider::UsageRow {
             model: "anthropic/claude-sonnet-5".into(),
             tokens: 12_345,
             cost: Some(0.0123),
         }];
-        app.modal = crate::tui::modals::Modal::Usage(app.usage.clone());
+        app.overlays.modal = crate::tui::modals::Modal::Usage(app.overlays.usage.clone());
 
-        app.usage_quota =
+        app.overlays.usage_quota =
             crate::tui::provider::UsageFetchState::Ready(crate::providers::ProviderUsage {
                 plan: Some("lite".into()),
                 limits: vec![crate::providers::UsageLimit {
@@ -603,15 +603,15 @@ mod tests {
         assert!(text.contains("By model (provider, today):"));
         assert!(text.contains("$2.33 today"));
 
-        app.usage_quota = crate::tui::provider::UsageFetchState::Loading;
+        app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Loading;
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("fetching"));
 
-        app.usage_quota = crate::tui::provider::UsageFetchState::Unsupported;
+        app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Unsupported;
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("not available"));
 
-        app.usage_quota = crate::tui::provider::UsageFetchState::Error("rate limited".into());
+        app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Error("rate limited".into());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("rate limited"));
     }
@@ -629,7 +629,7 @@ mod tests {
                 cost: Some(0.1),
             })
             .collect();
-        app.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
+        app.overlays.modal = crate::tui::modals::Modal::Stats(crate::tui::modals::StatsView {
             rows,
             by_session: vec![
                 ("0123456789abcdef".into(), 1.5, 100_000),
@@ -672,7 +672,7 @@ mod tests {
             models,
             current: 25,
         });
-        app.modal = crate::tui::modals::Modal::ModelMenu(25);
+        app.overlays.modal = crate::tui::modals::Modal::ModelMenu(25);
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("m25"), "window keeps the selection visible");
@@ -700,7 +700,7 @@ mod tests {
             crate::model_registry::ModelTier::Weak,
             &state,
         );
-        app.modal = crate::tui::modals::Modal::ModelMenu(2);
+        app.overlays.modal = crate::tui::modals::Modal::ModelMenu(2);
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("strong/weak"), "multi-tier label: {text:?}");
@@ -817,15 +817,15 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let mut app = App::new();
         app.mode = crate::tui::app::Mode::Plan;
-        app.plan_path = Some(std::path::PathBuf::from("/tmp/plans/x.md"));
-        app.plan_form.on_plan_ready();
+        app.plan_mode.plan_path = Some(std::path::PathBuf::from("/tmp/plans/x.md"));
+        app.plan_mode.plan_form.on_plan_ready();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Plan complete"), "form title missing");
         assert!(text.contains("Implement plan"), "menu missing");
         assert!(text.contains("Refine plan"));
 
-        app.plan_form.hide();
+        app.plan_mode.plan_form.hide();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(!text.contains("Plan complete"));

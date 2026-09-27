@@ -1,11 +1,11 @@
 //! Todo/plan panel (F.3, task 79): Ctrl-T toggles the plan form — the
 //! "Plan complete" menu shown when the agent finishes drafting its plan in
 //! Plan mode — and Ctrl-O hands the plan file to `$VISUAL`/`$EDITOR`.
-//! Ported from the reference `craft-ui/src/components/plan_form.rs`; the
-//! data-driven keybinding resolver (task 80) is not ported yet, so the
-//! dismiss and open-editor chords are matched directly.
+//! Ported from the reference `craft-ui/src/components/plan_form.rs`.
+//! Dismiss and open-editor chords resolve through the data-driven
+//! keybinding resolver, so user rebinds apply inside the form.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -78,14 +78,6 @@ pub(crate) struct PlanForm {
     visibility: Visibility,
     selected: usize,
     parallel: bool,
-}
-
-fn is_ctrl(key: &KeyEvent, c: char) -> bool {
-    key.code == KeyCode::Char(c)
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key
-            .modifiers
-            .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT)
 }
 
 fn selected_prefix(is_selected: bool) -> (&'static str, Style) {
@@ -180,11 +172,16 @@ impl PlanForm {
         if self.is_visible() { FORM_HEIGHT } else { 0 }
     }
 
-    pub(crate) fn handle_key(&mut self, key_event: KeyEvent) -> PlanFormAction {
-        if key_event.code == KeyCode::Esc || is_ctrl(&key_event, 't') {
+    pub(crate) fn handle_key(
+        &mut self,
+        key_event: KeyEvent,
+        keybinds: &crate::tui::keybindings::KeybindingResolver,
+    ) -> PlanFormAction {
+        use crate::tui::keybindings::ActionId;
+        if key_event.code == KeyCode::Esc || keybinds.matches(ActionId::PlanToggle, key_event) {
             return PlanFormAction::Hide;
         }
-        if is_ctrl(&key_event, 'o') {
+        if keybinds.matches(ActionId::OpenEditor, key_event) {
             return PlanFormAction::OpenEditor;
         }
         match key_event.code {
@@ -263,6 +260,7 @@ impl PlanForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -278,6 +276,10 @@ mod tests {
             modifiers: KeyModifiers::CONTROL,
             ..key(KeyCode::Char(c))
         }
+    }
+
+    fn kb() -> crate::tui::keybindings::KeybindingResolver {
+        crate::tui::keybindings::KeybindingResolver::new()
     }
 
     const LAST: usize = MENU.len() - 1;
@@ -359,20 +361,26 @@ mod tests {
         let mut form = PlanForm::new();
         form.on_plan_ready();
         form.selected = 0;
-        assert_eq!(form.handle_key(key(KeyCode::Up)), PlanFormAction::Consumed);
+        assert_eq!(
+            form.handle_key(key(KeyCode::Up), &kb()),
+            PlanFormAction::Consumed
+        );
         assert_eq!(form.selected, 0, "up at zero stays");
         assert_eq!(
-            form.handle_key(key(KeyCode::Down)),
+            form.handle_key(key(KeyCode::Down), &kb()),
             PlanFormAction::Consumed
         );
         assert_eq!(form.selected, 1);
         form.selected = LAST;
         assert_eq!(
-            form.handle_key(key(KeyCode::Down)),
+            form.handle_key(key(KeyCode::Down), &kb()),
             PlanFormAction::Consumed
         );
         assert_eq!(form.selected, LAST, "down at max stays");
-        assert_eq!(form.handle_key(key(KeyCode::Up)), PlanFormAction::Consumed);
+        assert_eq!(
+            form.handle_key(key(KeyCode::Up), &kb()),
+            PlanFormAction::Consumed
+        );
         assert_eq!(form.selected, LAST - 1);
     }
 
@@ -386,7 +394,7 @@ mod tests {
             let mut form = PlanForm::new();
             form.on_plan_ready();
             form.selected = selected;
-            assert_eq!(form.handle_key(key(KeyCode::Enter)), expected);
+            assert_eq!(form.handle_key(key(KeyCode::Enter), &kb()), expected);
         }
     }
 
@@ -397,12 +405,12 @@ mod tests {
         form.on_plan_ready();
         assert_eq!(form.parallel(), initial);
         assert_eq!(
-            form.handle_key(key(KeyCode::Char(' '))),
+            form.handle_key(key(KeyCode::Char(' ')), &kb()),
             PlanFormAction::Consumed
         );
         assert_eq!(form.parallel(), !initial);
         assert_eq!(
-            form.handle_key(key(KeyCode::Char(' '))),
+            form.handle_key(key(KeyCode::Char(' ')), &kb()),
             PlanFormAction::Consumed
         );
         assert_eq!(form.parallel(), initial);
@@ -413,7 +421,7 @@ mod tests {
         for k in [key(KeyCode::Esc), ctrl('t')] {
             let mut form = PlanForm::new();
             form.on_plan_ready();
-            assert_eq!(form.handle_key(k), PlanFormAction::Hide);
+            assert_eq!(form.handle_key(k, &kb()), PlanFormAction::Hide);
         }
     }
 
@@ -421,7 +429,10 @@ mod tests {
     fn ctrl_o_opens_editor() {
         let mut form = PlanForm::new();
         form.on_plan_ready();
-        assert_eq!(form.handle_key(ctrl('o')), PlanFormAction::OpenEditor);
+        assert_eq!(
+            form.handle_key(ctrl('o'), &kb()),
+            PlanFormAction::OpenEditor
+        );
     }
 
     #[test]
@@ -429,7 +440,7 @@ mod tests {
         let mut form = PlanForm::new();
         form.on_plan_ready();
         assert_eq!(
-            form.handle_key(key(KeyCode::Char('x'))),
+            form.handle_key(key(KeyCode::Char('x')), &kb()),
             PlanFormAction::Consumed
         );
     }
@@ -439,7 +450,7 @@ mod tests {
         let mut form = PlanForm::new();
         form.on_plan_ready();
         assert_eq!(
-            form.handle_key(key(KeyCode::Tab)),
+            form.handle_key(key(KeyCode::Tab), &kb()),
             PlanFormAction::Passthrough
         );
     }

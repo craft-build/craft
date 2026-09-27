@@ -75,10 +75,10 @@ fn render_rows(f: &mut Frame, rows: &[Vec<Span<'static>>], selected: usize, area
 pub fn render_search(f: &mut Frame, app: &mut App, area: Rect) {
     use crate::tui::search_modal::{self, SearchModal};
 
-    if !app.search.is_open() {
+    if !app.overlays.search.is_open() {
         return;
     }
-    let search: &mut SearchModal = &mut app.search;
+    let search: &mut SearchModal = &mut app.overlays.search;
     let t = theme::current();
 
     let content_rows = if search.matches.is_empty() && !search.query().is_empty() {
@@ -156,10 +156,10 @@ pub fn render_search(f: &mut Frame, app: &mut App, area: Rect) {
 pub fn render_file_picker(f: &mut Frame, app: &mut App, area: Rect) {
     use crate::tui::file_picker::{self, FilePicker};
 
-    if !app.file_picker.is_open() {
+    if !app.overlays.file_picker.is_open() {
         return;
     }
-    let picker: &mut FilePicker = &mut app.file_picker;
+    let picker: &mut FilePicker = &mut app.overlays.file_picker;
     let t = theme::current();
 
     let Some(s) = picker.session_mut() else {
@@ -333,7 +333,7 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     // Scroll the window so the highlighted row stays visible past the edge.
     let window = n as usize;
     let start = app
-        .slash_selected
+        .overlays.slash_selected
         .saturating_sub(window.saturating_sub(1))
         .min(items.len().saturating_sub(window));
     let rows: Vec<Vec<Span<'static>>> = items
@@ -347,14 +347,14 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
             ]
         })
         .collect();
-    render_rows(f, &rows, app.slash_selected.saturating_sub(start), area);
+    render_rows(f, &rows, app.overlays.slash_selected.saturating_sub(start), area);
 }
 
 /// Model picker, opened with ctrl+l / /model / palette.
 pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     let t = theme::current();
 
-    let Modal::ModelMenu(selected) = app.modal else {
+    let Modal::ModelMenu(selected) = app.overlays.modal else {
         return;
     };
     if app.session.models.is_empty() {
@@ -453,7 +453,7 @@ pub fn render_model_menu(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
 pub fn render_palette(f: &mut Frame, app: &App, area: Rect) {
     let t = theme::current();
 
-    let Modal::Palette { query, selected } = &app.modal else {
+    let Modal::Palette { query, selected } = &app.overlays.modal else {
         return;
     };
     let (query, selected) = (query.clone(), *selected);
@@ -569,7 +569,7 @@ fn render_usage_sheet(
     lines: &[Line<'static>],
     footer: Vec<Span<'static>>,
     scroll: usize,
-) {
+) -> usize {
     dim(f, area);
     let height = (lines.len() as u16 + 4).min(area.height);
     let width = 64.min(area.width.saturating_sub(4));
@@ -584,6 +584,7 @@ fn render_usage_sheet(
     // rest or it would spill over the dimmed chat on short terminals.
     let visible = (inner.height.saturating_sub(3)) as usize;
     let scroll = scroll.min(lines.len().saturating_sub(visible.min(lines.len())));
+    let max_scroll = lines.len().saturating_sub(visible.min(lines.len()));
     let line = |l: Line<'static>| Paragraph::new(l);
     f.render_widget(
         line(Line::from(Span::styled(
@@ -619,6 +620,7 @@ fn render_usage_sheet(
             height: 1,
         },
     );
+    max_scroll
 }
 
 /// One `model  tokens  cost` body line (styled like the old table rows).
@@ -777,10 +779,10 @@ fn session_line(entry: &(String, f64, u64)) -> Line<'static> {
 
 /// `/usage`: this session's per-model tokens and cost, plus the live
 /// provider quota section (F.5).
-pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
+pub fn render_usage(f: &mut Frame, app: &mut App, area: Rect) {
     let t = theme::current();
 
-    let Modal::Usage(rows) = &app.modal else {
+    let Modal::Usage(rows) = &app.overlays.modal else {
         return;
     };
     let w = 56usize; // body column width, as the old table used
@@ -794,7 +796,7 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
         lines.push(section_label("Per model:"));
         lines.extend(rows.iter().map(|row| usage_row_line(row, w)));
     }
-    let quota = quota_lines(&app.usage_quota);
+    let quota = quota_lines(&app.overlays.usage_quota);
     if !quota.is_empty() {
         lines.push(Line::raw(""));
         lines.extend(quota);
@@ -806,7 +808,8 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
         Some(cost) => crate::storage::stats::format_usd(cost),
         None => "—".to_string(),
     };
-    render_usage_sheet(
+    let scroll = app.overlays.usage_scroll;
+    app.overlays.usage_scroll_max = render_usage_sheet(
         f,
         area,
         "Session usage",
@@ -825,16 +828,16 @@ pub fn render_usage(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(t.text_tertiary),
             ),
         ],
-        app.usage_scroll,
+        scroll,
     );
 }
 
 /// `/stats`: cross-session cost totals from the cost ledger, with the
 /// by-model table and top-sessions sections (F.5).
-pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
+pub fn render_stats(f: &mut Frame, app: &mut App, area: Rect) {
     let t = theme::current();
 
-    let Modal::Stats(view) = &app.modal else {
+    let Modal::Stats(view) = &app.overlays.modal else {
         return;
     };
     if view.empty {
@@ -868,7 +871,8 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
         lines.push(section_label("Top sessions:"));
         lines.extend(view.by_session.iter().map(session_line));
     }
-    render_usage_sheet(
+    let scroll = app.overlays.usage_scroll;
+    app.overlays.usage_scroll_max = render_usage_sheet(
         f,
         area,
         "Cost stats",
@@ -887,21 +891,22 @@ pub fn render_stats(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(t.text_tertiary),
             ),
         ],
-        app.usage_scroll,
+        scroll,
     );
 }
 
 /// `/help`: keybinding sheet, generated from the data-driven `KEYBINDS`
 /// table grouped by context (F.1); user overrides show their effective
 /// chords, disabled actions are omitted.
-pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
+pub fn render_help(f: &mut Frame, app: &mut App, area: Rect) {
     let t = theme::current();
 
-    if !matches!(app.modal, Modal::Help) {
+    if !matches!(app.overlays.modal, Modal::Help) {
         return;
     }
-    let (lines, _) = crate::tui::keybindings::help_lines(&app.keybinds);
-    render_usage_sheet(
+    let (lines, _) = crate::tui::keybindings::help_lines(&app.overlays.keybinds);
+    let scroll = app.overlays.help_scroll;
+    app.overlays.help_scroll_max = render_usage_sheet(
         f,
         area,
         "Keybindings",
@@ -910,7 +915,7 @@ pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
             "↑↓ scroll · esc to close",
             Style::default().fg(t.text_tertiary),
         )],
-        app.help_scroll,
+        scroll,
     );
 }
 
@@ -918,7 +923,7 @@ pub fn render_help(f: &mut Frame, app: &App, area: Rect) {
 pub fn render_sessions(f: &mut Frame, app: &App, area: Rect) {
     let t = theme::current();
 
-    let Modal::Sessions { entries, selected } = &app.modal else {
+    let Modal::Sessions { entries, selected } = &app.overlays.modal else {
         return;
     };
     dim(f, area);
@@ -996,7 +1001,7 @@ pub fn render_theme_picker(f: &mut Frame, app: &App, area: Rect) {
         entries,
         selected,
         original,
-    } = &app.modal
+    } = &app.overlays.modal
     else {
         return;
     };
@@ -1062,7 +1067,7 @@ pub fn render_theme_picker(f: &mut Frame, app: &App, area: Rect) {
 pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
     let t = theme::current();
 
-    let Modal::ConfirmReject(id) = &app.modal else {
+    let Modal::ConfirmReject(id) = &app.overlays.modal else {
         return;
     };
     let file = app

@@ -1,9 +1,11 @@
 //! File picker (F.3, Ctrl-S): a fuzzy path matcher over an async walkdir of
 //! the session's cwd. Ported from the reference
 //! `craft-ui/src/components/file_picker.rs`, adapted to this repo: the
-//! reference's `nucleo` matcher harness is replaced by `nucleo-matcher` run
-//! synchronously over the walked corpus (as the search modal does), and the
-//! render lives with the other overlays (`ui::overlays`).
+//! reference's `nucleo` matcher harness is replaced by `nucleo-matcher`
+//! run off the event-loop thread (a generation-stamped job per query, so
+//! stale answers are dropped and the UI keeps rendering the previous
+//! matches until the fresh ones land), and the render lives with the
+//! other overlays (`ui::overlays`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,7 +71,6 @@ pub(crate) struct Session {
     pub(crate) files: Vec<String>,
     pub(crate) matches: Vec<Match>,
     pub(crate) total_matches: usize,
-    matcher: Matcher,
 
     pub(crate) query: String,
     /// Cursor position in chars from the start of `query`.
@@ -83,6 +84,19 @@ pub(crate) struct Session {
     pub(crate) walking: bool,
     rx: std::sync::mpsc::Receiver<WalkerMsg>,
     cancel: Arc<AtomicBool>,
+    /// Generation of the latest query/corpus change; a match job's answer
+    /// is applied only when its generation is still current.
+    match_gen: u64,
+    /// The in-flight match job's answer channel, if one is running.
+    match_rx: Option<std::sync::mpsc::Receiver<MatchJobResult>>,
+}
+
+/// A finished off-thread match job, stamped with the generation it ran
+/// for so stale answers are dropped instead of overwriting newer ones.
+struct MatchJobResult {
+    generation: u64,
+    matches: Vec<Match>,
+    total: usize,
 }
 
 impl Drop for Session {
@@ -127,7 +141,6 @@ impl FilePicker {
             files: Vec::new(),
             matches: Vec::new(),
             total_matches: 0,
-            matcher: Matcher::new(Config::DEFAULT.match_paths()),
             query: String::new(),
             cursor: 0,
             selected: 0,
@@ -138,6 +151,8 @@ impl FilePicker {
             walking: true,
             rx,
             cancel,
+            match_gen: 0,
+            match_rx: None,
         });
     }
 
@@ -241,6 +256,30 @@ impl FilePicker {
         let mut dirty = Dirty::NO;
         let mut files_arrived = false;
         let mut ended: Option<WalkEnd> = None;
+
+        // Apply a finished match job: only if its generation is current;
+        // a stale answer triggers a fresh job for the newer query.
+        if let Some(rx) = s.match_rx.take() {
+            match rx.try_recv() {
+                Ok(res) => {
+                    if res.generation == s.match_gen {
+                        s.matches = res.matches;
+                        s.total_matches = res.total;
+                        clamp_selection(s);
+                        dirty = Dirty::YES;
+                    } else {
+                        spawn_match_job(s);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    s.match_rx = Some(rx); // still running
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Job died without answering; forget it.
+                }
+            }
+        }
+
         loop {
             match s.rx.try_recv() {
                 Ok(WalkerMsg::Path(path)) => {
@@ -349,46 +388,87 @@ fn walk_root(root: &std::path::Path, cancel: &AtomicBool, tx: &std::sync::mpsc::
     let _ = tx.send(WalkerMsg::End(end));
 }
 
+/// Request a match rebuild for the current query and corpus. Bumps the
+/// generation; the rebuild itself runs off-thread (`spawn_match_job`),
+/// except the cheap empty-query materialization which is synchronous.
 fn refresh_matches(s: &mut Session) {
-    s.matches.clear();
+    s.match_gen += 1;
+    if s.match_rx.is_some() {
+        // A job is already running; its (now stale) answer arriving will
+        // trigger a fresh job for the newer generation.
+        return;
+    }
+    spawn_match_job(s);
+}
+
+/// Start a match job for the current generation, or apply the cheap
+/// empty-query list synchronously.
+fn spawn_match_job(s: &mut Session) {
     s.selected = 0;
     s.scroll_offset = 0;
-
     if s.query.trim().is_empty() {
-        s.total_matches = s.files.len();
-        s.matches = s.files[..s.total_matches.min(MAX_MATERIALIZED)]
+        let (matches, total) = run_match(&s.files, &s.query);
+        s.matches = matches;
+        s.total_matches = total;
+        return;
+    }
+    let generation = s.match_gen;
+    let files = s.files.clone();
+    let query = s.query.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<MatchJobResult>();
+    let spawned = thread::Builder::new()
+        .name("file-matcher".into())
+        .spawn(move || {
+            let (matches, total) = run_match(&files, &query);
+            let _ = tx.send(MatchJobResult {
+                generation,
+                matches,
+                total,
+            });
+        });
+    if spawned.is_ok() {
+        s.match_rx = Some(rx);
+    }
+}
+
+/// Pure scoring over the corpus; runs on the worker thread.
+fn run_match(files: &[String], query: &str) -> (Vec<Match>, usize) {
+    if query.trim().is_empty() {
+        let total = files.len();
+        let matches = files[..total.min(MAX_MATERIALIZED)]
             .iter()
             .map(|path| Match {
                 path: path.clone(),
                 indices: Vec::new(),
             })
             .collect();
-        return;
+        return (matches, total);
     }
-
     let atom = Atom::new(
-        &s.query,
+        query,
         CaseMatching::Smart,
         Normalization::Smart,
         AtomKind::Fuzzy,
         false,
     );
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let mut buf = Vec::new();
     let mut scored: Vec<(u16, String, Vec<u32>)> = Vec::new();
-    for path in &s.files {
+    for path in files {
         let haystack = Utf32Str::new(path, &mut buf);
         let mut indices = Vec::new();
-        if let Some(score) = atom.indices(haystack, &mut s.matcher, &mut indices) {
+        if let Some(score) = atom.indices(haystack, &mut matcher, &mut indices) {
             scored.push((score, path.clone(), indices));
         }
     }
     scored.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
-    s.total_matches = scored.len();
-    s.matches = scored
+    let total = scored.len();
+    let matches = scored
         .into_iter()
         .take(MAX_MATERIALIZED)
         .map(|(_, path, indices)| Match { path, indices })
         .collect();
+    (matches, total)
 }
 
 fn move_selection(s: &mut Session, delta: isize) {
@@ -519,7 +599,6 @@ mod tests {
             files: Vec::new(),
             matches: Vec::new(),
             total_matches: 0,
-            matcher: Matcher::new(Config::DEFAULT.match_paths()),
             query: String::new(),
             cursor: 0,
             selected: 0,
@@ -530,6 +609,8 @@ mod tests {
             walking: true,
             rx,
             cancel: Arc::new(AtomicBool::new(false)),
+            match_gen: 0,
+            match_rx: None,
         });
         (picker, tx)
     }
@@ -538,6 +619,19 @@ mod tests {
         let s = picker.session.as_mut().unwrap();
         s.files.push(path.to_string());
         refresh_matches(s);
+    }
+
+    /// Drive `tick` until the pending match job (if any) answered and was
+    /// applied — the async matcher never lands synchronously.
+    fn converge_matches(picker: &mut FilePicker) {
+        let deadline = Instant::now() + CONVERGE_TIMEOUT;
+        while picker.session.as_ref().is_some_and(|s| s.match_rx.is_some()) {
+            let _ = picker.tick();
+            assert!(Instant::now() < deadline, "match job never answered");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // One more tick applies anything that landed between polls.
+        let _ = picker.tick();
     }
 
     fn tick_until(picker: &mut FilePicker, ready: impl Fn(&Session) -> bool) -> Option<Dirty> {
@@ -559,6 +653,34 @@ mod tests {
     /// test is descheduled for.
     fn hold_off_debounce(picker: &mut FilePicker) {
         picker.session.as_mut().unwrap().started_at = Instant::now() + DEBOUNCE_HELD_OFF;
+    }
+
+    /// Matching runs off-thread with generations: a stale job's answer is
+    /// dropped and recomputed for the newer query, and typing never blocks
+    /// on the corpus.
+    #[test]
+    fn stale_match_results_are_dropped_by_generation() {
+        let (mut picker, _tx) = hand_fed_picker();
+        {
+            let s = picker.session.as_mut().unwrap();
+            for i in 0..2000 {
+                s.files.push(format!("src/mod_{i:04}.rs"));
+            }
+        }
+        // First query spawns a job.
+        picker.handle_key(key(KeyCode::Char('m')));
+        assert!(picker.session.as_ref().unwrap().match_rx.is_some());
+        // A second keystroke bumps the generation; the in-flight job is
+        // left to finish and its answer must be dropped as stale.
+        picker.handle_key(key(KeyCode::Char('z')));
+        converge_matches(&mut picker);
+        let s = picker.session.as_ref().unwrap();
+        assert_eq!(s.query, "mz");
+        assert!(
+            s.matches.iter().all(|m| m.path.contains("mod")),
+            "every applied match came from the current query's job"
+        );
+        assert!(picker.session.as_ref().unwrap().match_rx.is_none());
     }
 
     #[test]
@@ -643,6 +765,7 @@ mod tests {
         for c in "readme".chars() {
             picker.handle_key(key(KeyCode::Char(c)));
         }
+        converge_matches(&mut picker);
         let s = picker.session.as_ref().unwrap();
         assert_eq!(s.matches.len(), 1);
         assert_eq!(s.matches[0].path, "docs/readme.md");

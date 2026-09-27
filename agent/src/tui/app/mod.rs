@@ -36,9 +36,9 @@ pub(crate) const FLASH_TTL: std::time::Duration = std::time::Duration::from_mill
 
 pub const EFFORTS: [&str; 3] = ["low", "medium", "high"];
 
-pub struct App {
-    // --- mode (F.2 Tab cycling, Build/Plan) ---
-    pub mode: Mode,
+/// Plan-mode state: the allocated plan file, the "Plan complete" form,
+/// and the Ctrl-O editor request.
+pub struct PlanMode {
     /// Session's allocated plan file; set on first entry into Plan mode.
     pub plan_path: Option<std::path::PathBuf>,
     /// The plan form (F.3, Ctrl-T): "Plan complete" menu over the composer
@@ -53,6 +53,86 @@ pub struct App {
     /// Plan file the run loop should hand to $VISUAL/$EDITOR (Ctrl-O);
     /// taken by the loop, which owns the terminal around the child.
     pub editor_request: Option<std::path::PathBuf>,
+}
+
+/// Input-history recall state (↑/↓ navigation over `input_history`).
+pub struct HistoryRecall {
+    /// Position in `input_history` while recalling; `None` = live editing.
+    pub history_index: Option<usize>,
+    /// The in-progress text saved when history recall starts, restored on
+    /// ↓ past the newest entry.
+    pub history_draft: String,
+}
+
+/// Every overlay surface: the exclusive modal plus the composer-riding
+/// prompts, sheets, and pickers.
+pub struct Overlays {
+    /// The one modal currently open (palette / model menu / confirm),
+    /// exclusive by construction. The slash popup is not a modal: it rides
+    /// on the composer (shown when the composer starts with '/').
+    pub modal: Modal,
+    pub slash_selected: usize, // row in the slash popup
+    /// Permission-prompt overlay (F.5): open while a gated tool call is
+    /// parked on the user's decision. Not a modal — it rides above the
+    /// composer and owns plain keys while open.
+    pub permission_prompt: crate::tui::permission_prompt::PermissionPrompt,
+    /// Question form (A.5): open while the `question` tool is parked on
+    /// the user's answers. Like the permission prompt, not a modal — it
+    /// rides above the composer and owns plain keys while open.
+    pub question_form: crate::tui::question_form::QuestionForm,
+    /// Latest per-model usage snapshot from the provider (the `/usage`
+    /// overlay's data; refreshed after every completed run).
+    pub usage: Vec<UsageRow>,
+    /// Latest provider quota answer for `/usage` (F.5); kept across modal
+    /// close/reopen so the last successful fetch survives.
+    pub usage_quota: crate::tui::provider::UsageFetchState,
+    /// Scroll offset of the `/usage` overlay's line list, reset on open.
+    pub usage_scroll: usize,
+    /// Max scroll of the `/usage`/`/stats` sheet, written back by its
+    /// renderer so handlers clamp against the real bound (not
+    /// `usize::MAX`, which pins the sheet at the bottom).
+    pub usage_scroll_max: usize,
+    /// Scroll offset of the keybindings help modal (F.1), reset on open.
+    pub help_scroll: usize,
+    /// Max scroll of the help sheet, written back by its renderer.
+    pub help_scroll_max: usize,
+    /// Data-driven keybinding resolution (F.1): compile-time defaults plus
+    /// the user's config overlay. All chord dispatch goes through this.
+    pub keybinds: crate::tui::keybindings::KeybindingResolver,
+    /// Fuzzy transcript search (F.3): owns the keyboard while open, above
+    /// the base surface like a modal but outside the exclusive `modal` slot.
+    pub search: crate::tui::search_modal::SearchModal,
+    /// File picker (F.3, Ctrl-S): fuzzy path matcher over an async walkdir
+    /// of the session cwd; owns the keyboard while open, above the base
+    /// surface like the search modal.
+    pub file_picker: crate::tui::file_picker::FilePicker,
+}
+
+/// Inline-image state (F.6): picker, decoded render-state cache, staged
+/// attachments, and pending loads.
+pub struct Images {
+    /// Terminal-graphics picker (kitty/sixel/halfblocks), resolved once.
+    pub picker: crate::tui::ui::image::ImagePicker,
+    /// Decoded image render states by tool id, with the width they were
+    /// built for; rebuilt on resize, reused across frames otherwise.
+    pub states: std::collections::HashMap<
+        String,
+        (u16, std::sync::Arc<crate::tui::ui::image::ImageRenderState>),
+    >,
+    /// LRU order of `states` keys; the cache is capped so decoded
+    /// render states can't grow unbounded across a long session.
+    pub states_order: std::collections::VecDeque<String>,
+    /// Image attachments staged in the composer (path picks and clipboard
+    /// pastes); sent with the next message and cleared on submit.
+    pub attached: Vec<crate::history::ImageBlock>,
+    /// Finished clipboard/file loads awaiting pickup by the render loop.
+    pub loads: Vec<std::sync::mpsc::Receiver<Result<crate::history::ImageBlock, String>>>,
+}
+
+pub struct App {
+    // --- mode (F.2 Tab cycling, Build/Plan) ---
+    pub mode: Mode,
+    pub plan_mode: PlanMode,
 
     // --- provider-driven state ---
     pub plan: Vec<PlanItem>,
@@ -76,81 +156,34 @@ pub struct App {
     pub view: ViewModel,
     pub session: Session,
 
-    // --- composer ---
     pub composer: Composer,
     /// Rolling user-input history (↑/↓ recall; persisted per state dir).
     pub input_history: crate::storage::input_history::InputHistory,
-    /// Position in `input_history` while recalling; `None` = live editing.
-    pub history_index: Option<usize>,
-    /// The in-progress text saved when history recall starts, restored on
-    /// ↓ past the newest entry.
-    pub history_draft: String,
+    pub history_recall: HistoryRecall,
     /// Composer text last handed to the provider for draft checkpointing;
     /// `sync_draft` sends only the changes.
     pub sent_draft: String,
 
-    // --- overlays ---
-    /// The one modal currently open (palette / model menu / confirm),
-    /// exclusive by construction. The slash popup is not a modal: it rides
-    /// on the composer (shown when the composer starts with '/').
-    pub modal: Modal,
-    pub slash_selected: usize, // row in the slash popup
-    /// Permission-prompt overlay (F.5): open while a gated tool call is
-    /// parked on the user's decision. Not a modal — it rides above the
-    /// composer and owns plain keys while open.
-    pub permission_prompt: crate::tui::permission_prompt::PermissionPrompt,
-    /// Question form (A.5): open while the `question` tool is parked on
-    /// the user's answers. Like the permission prompt, not a modal — it
-    /// rides above the composer and owns plain keys while open.
-    pub question_form: crate::tui::question_form::QuestionForm,
-    /// Latest per-model usage snapshot from the provider (the `/usage`
-    /// overlay's data; refreshed after every completed run).
-    pub usage: Vec<UsageRow>,
-    /// Latest provider quota answer for `/usage` (F.5); kept across modal
-    /// close/reopen so the last successful fetch survives.
-    pub usage_quota: crate::tui::provider::UsageFetchState,
-    /// Scroll offset of the `/usage` overlay's line list, reset on open.
-    pub usage_scroll: usize,
-    /// Scroll offset of the keybindings help modal (F.1), reset on open.
-    pub help_scroll: usize,
-    /// Data-driven keybinding resolution (F.1): compile-time defaults plus
-    /// the user's config overlay. All chord dispatch goes through this.
-    pub keybinds: crate::tui::keybindings::KeybindingResolver,
-    /// Fuzzy transcript search (F.3): owns the keyboard while open, above
-    /// the base surface like a modal but outside the exclusive `modal` slot.
-    pub search: crate::tui::search_modal::SearchModal,
-    /// File picker (F.3, Ctrl-S): fuzzy path matcher over an async walkdir
-    /// of the session cwd; owns the keyboard while open, above the base
-    /// surface like the search modal.
-    pub file_picker: crate::tui::file_picker::FilePicker,
-
-    // --- inline images (F.6) ---
-    /// Terminal-graphics picker (kitty/sixel/halfblocks), resolved once.
-    pub image_picker: crate::tui::ui::image::ImagePicker,
-    /// Decoded image render states by tool id, with the width they were
-    /// built for; rebuilt on resize, reused across frames otherwise.
-    pub image_states: std::collections::HashMap<
-        String,
-        (u16, std::sync::Arc<crate::tui::ui::image::ImageRenderState>),
-    >,
-    /// Image attachments staged in the composer (path picks and clipboard
-    /// pastes); sent with the next message and cleared on submit.
-    pub attached_images: Vec<crate::history::ImageBlock>,
-    /// Finished clipboard/file loads awaiting pickup by the render loop.
-    pub image_loads: Vec<std::sync::mpsc::Receiver<Result<crate::history::ImageBlock, String>>>,
+    pub overlays: Overlays,
+    pub images: Images,
 
     pub should_quit: bool,
 }
+
+/// Upper bound on cached decoded image render states (LRU-evicted).
+const IMAGE_STATE_CAP: usize = 32;
 
 impl App {
     pub fn new() -> Self {
         App {
             mode: Mode::Build,
-            plan_path: None,
-            plan_form: crate::tui::plan_form::PlanForm::new(),
-            plan_ready: false,
-            plan_turn_snapshot: None,
-            editor_request: None,
+            plan_mode: PlanMode {
+                plan_path: None,
+                plan_form: crate::tui::plan_form::PlanForm::new(),
+                plan_ready: false,
+                plan_turn_snapshot: None,
+                editor_request: None,
+            },
             plan: Vec::new(),
             files: Vec::new(),
             status: Status::Done,
@@ -163,24 +196,33 @@ impl App {
             session: Session::new(),
             composer: Composer::new(),
             input_history: crate::storage::input_history::InputHistory::default(),
-            history_index: None,
-            history_draft: String::new(),
+            history_recall: HistoryRecall {
+                history_index: None,
+                history_draft: String::new(),
+            },
             sent_draft: String::new(),
-            modal: Modal::None,
-            slash_selected: 0,
-            permission_prompt: crate::tui::permission_prompt::PermissionPrompt::new(),
-            question_form: crate::tui::question_form::QuestionForm::new(),
-            usage: Vec::new(),
-            usage_quota: crate::tui::provider::UsageFetchState::Idle,
-            usage_scroll: 0,
-            help_scroll: 0,
-            keybinds: crate::tui::keybindings::KeybindingResolver::new(),
-            search: crate::tui::search_modal::SearchModal::new(),
-            file_picker: crate::tui::file_picker::FilePicker::new(),
-            image_picker: crate::tui::ui::image::ImagePicker::new(),
-            image_states: std::collections::HashMap::new(),
-            attached_images: Vec::new(),
-            image_loads: Vec::new(),
+            overlays: Overlays {
+                modal: Modal::None,
+                slash_selected: 0,
+                permission_prompt: crate::tui::permission_prompt::PermissionPrompt::new(),
+                question_form: crate::tui::question_form::QuestionForm::new(),
+                usage: Vec::new(),
+                usage_quota: crate::tui::provider::UsageFetchState::Idle,
+                usage_scroll: 0,
+                usage_scroll_max: usize::MAX,
+                help_scroll: 0,
+                help_scroll_max: usize::MAX,
+                keybinds: crate::tui::keybindings::KeybindingResolver::new(),
+                search: crate::tui::search_modal::SearchModal::new(),
+                file_picker: crate::tui::file_picker::FilePicker::new(),
+            },
+            images: Images {
+                picker: crate::tui::ui::image::ImagePicker::new(),
+                states: std::collections::HashMap::new(),
+                states_order: std::collections::VecDeque::new(),
+                attached: Vec::new(),
+                loads: Vec::new(),
+            },
             should_quit: false,
         }
     }
@@ -216,23 +258,43 @@ impl App {
     }
 
     /// Decode `data` into a cached render state for tool `id`, reusing the
-    /// cached one while the width is unchanged (F.6).
+    /// cached one while the width is unchanged (F.6). The cache is a
+    /// capped LRU (see [`Self::touch_image_state`]).
     pub(crate) fn image_state(
         &mut self,
         id: &str,
         data: &str,
         width: u16,
     ) -> Option<std::sync::Arc<crate::tui::ui::image::ImageRenderState>> {
-        if let Some((at_width, state)) = self.image_states.get(id)
+        if let Some((at_width, state)) = self.images.states.get(id)
             && *at_width == width
         {
-            return Some(state.clone());
+            let state = state.clone();
+            self.touch_image_state(id);
+            return Some(state);
         }
-        let state = self.image_picker.render_state(data, width)?;
+        let state = self.images.picker.render_state(data, width)?;
         let state = std::sync::Arc::new(state);
-        self.image_states
+        self.images.states
             .insert(id.to_string(), (width, state.clone()));
+        self.images.states_order.push_back(id.to_string());
+        // Evict least-recently-used entries beyond the cap.
+        while self.images.states.len() > IMAGE_STATE_CAP {
+            let Some(oldest) = self.images.states_order.pop_front() else {
+                break;
+            };
+            self.images.states.remove(&oldest);
+        }
         Some(state)
+    }
+
+    /// Mark `id` most-recently-used in the image-state LRU.
+    fn touch_image_state(&mut self, id: &str) {
+        if let Some(pos) = self.images.states_order.iter().position(|k| k == id) {
+            if let Some(k) = self.images.states_order.remove(pos) {
+                self.images.states_order.push_back(k);
+            }
+        }
     }
 
     /// Pick up finished image loads (path picks and clipboard pastes);
@@ -240,22 +302,22 @@ impl App {
     pub(crate) fn poll_image_loads(&mut self) -> bool {
         let mut dirty = false;
         let mut i = 0;
-        while i < self.image_loads.len() {
-            match self.image_loads[i].try_recv() {
+        while i < self.images.loads.len() {
+            match self.images.loads[i].try_recv() {
                 Ok(Ok(block)) => {
-                    self.image_loads.swap_remove(i);
-                    self.attached_images.push(block);
+                    self.images.loads.swap_remove(i);
+                    self.images.attached.push(block);
                     self.flash("Image attached");
                     dirty = true;
                 }
                 Ok(Err(e)) => {
-                    self.image_loads.swap_remove(i);
+                    self.images.loads.swap_remove(i);
                     self.flash(format!("Image paste failed: {e}"));
                     dirty = true;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => i += 1,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.image_loads.swap_remove(i);
+                    self.images.loads.swap_remove(i);
                 }
             }
         }
@@ -309,7 +371,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send(f());
         });
-        self.image_loads.push(rx);
+        self.images.loads.push(rx);
         self.flash(flash);
     }
 
@@ -349,9 +411,9 @@ impl App {
             // The file picker's walk runs on its own thread: keep coming
             // back so the streaming paths land on screen (and animate the
             // scanning spinner once the list is visible).
-            repaint::Cadence::when(self.file_picker.walking(), repaint::Cadence::PENDING),
+            repaint::Cadence::when(self.overlays.file_picker.walking(), repaint::Cadence::PENDING),
             repaint::Cadence::when(
-                self.file_picker.walking() && self.file_picker.visible(),
+                self.overlays.file_picker.walking() && self.overlays.file_picker.visible(),
                 repaint::Cadence::SPINNER,
             ),
         ])
@@ -387,13 +449,13 @@ impl App {
                 self.session.branch = branch;
             }
             AgentEvent::UsageSnapshot(rows) => {
-                self.usage = rows;
+                self.overlays.usage = rows;
                 // Keep an open /usage overlay fresh when a run completes.
-                if matches!(self.modal, Modal::Usage(_)) {
-                    self.modal = Modal::Usage(self.usage.clone());
+                if matches!(self.overlays.modal, Modal::Usage(_)) {
+                    self.overlays.modal = Modal::Usage(self.overlays.usage.clone());
                 }
             }
-            AgentEvent::UsageQuota(state) => self.usage_quota = state,
+            AgentEvent::UsageQuota(state) => self.overlays.usage_quota = state,
             AgentEvent::SessionLoaded { messages, draft } => {
                 self.reset_conversation();
                 for msg in messages {
@@ -417,17 +479,17 @@ impl App {
                 files,
                 commands,
             } => self
-                .permission_prompt
+                .overlays.permission_prompt
                 .open(id, tool, scopes, files, commands),
             AgentEvent::PermissionResolved { id } => {
-                if self.permission_prompt.id() == Some(id.as_str()) {
-                    self.permission_prompt.close();
+                if self.overlays.permission_prompt.id() == Some(id.as_str()) {
+                    self.overlays.permission_prompt.close();
                 }
             }
-            AgentEvent::QuestionRequest { id, questions } => self.question_form.open(id, questions),
+            AgentEvent::QuestionRequest { id, questions } => self.overlays.question_form.open(id, questions),
             AgentEvent::QuestionResolved { id } => {
-                if self.question_form.id() == Some(id.as_str()) {
-                    self.question_form.close();
+                if self.overlays.question_form.id() == Some(id.as_str()) {
+                    self.overlays.question_form.close();
                 }
             }
             // Message-bearing events merge into the conversation.
@@ -517,21 +579,21 @@ impl App {
     /// Number of live search matches (test accessor).
     #[cfg(test)]
     pub(crate) fn search_matches(&self) -> usize {
-        self.search.match_count()
+        self.overlays.search.match_count()
     }
 
     /// Re-run the fuzzy match over the current corpus, then keep the
     /// transcript parked on the selected match.
     pub(crate) fn refresh_search_matches(&mut self) {
         let corpus = self.search_texts();
-        self.search.update_matches(|| corpus);
+        self.overlays.search.update_matches(|| corpus);
         self.sync_search_highlight();
     }
 
     /// Scroll the transcript to the currently selected match and highlight
     /// its segment while the search modal stays open.
     pub(crate) fn sync_search_highlight(&mut self) {
-        let at = self.search.current_segment_index();
+        let at = self.overlays.search.current_segment_index();
         if let Some((seg, row)) = at {
             self.scroll_to_segment(seg, row);
         }
@@ -542,7 +604,7 @@ impl App {
     /// self-close flashes); true when the screen changed. Called by the
     /// event loop every turn, since nothing else announces the walker.
     pub(crate) fn tick_file_picker(&mut self) -> bool {
-        let (mut dirty, flash) = self.file_picker.tick();
+        let (mut dirty, flash) = self.overlays.file_picker.tick();
         if let Some(msg) = flash {
             self.flash(msg);
         }
@@ -562,11 +624,11 @@ impl App {
     }
 
     pub fn slash_open(&self) -> bool {
-        matches!(self.modal, Modal::None) && !self.slash_matches().is_empty()
+        matches!(self.overlays.modal, Modal::None) && !self.slash_matches().is_empty()
     }
 
     pub fn palette_items(&self) -> Vec<(&'static str, &'static str, &'static str)> {
-        let q = match &self.modal {
+        let q = match &self.overlays.modal {
             Modal::Palette { query, .. } => query.to_lowercase(),
             _ => String::new(),
         };
@@ -589,11 +651,11 @@ impl App {
         // Enter on an open slash menu executes the highlighted command.
         let slash = self.slash_matches();
         if text.starts_with('/') && !slash.is_empty() {
-            let (cmd, _) = slash[self.slash_selected.min(slash.len() - 1)];
+            let (cmd, _) = slash[self.overlays.slash_selected.min(slash.len() - 1)];
             self.composer.clear();
             self.input_history.push(text);
-            self.history_index = None;
-            self.history_draft.clear();
+            self.history_recall.history_index = None;
+            self.history_recall.history_draft.clear();
             self.run_slash(cmd, tx);
             return;
         }
@@ -614,23 +676,23 @@ impl App {
                 visible: prefix.visible,
             });
             self.input_history.push(text);
-            self.history_index = None;
-            self.history_draft.clear();
+            self.history_recall.history_index = None;
+            self.history_recall.history_draft.clear();
             self.composer.clear();
             self.view.follow = true;
             return;
         }
         self.conversation.assistant_open = false;
         self.conversation.messages.push(Message::User(text.clone()));
-        let images = std::mem::take(&mut self.attached_images);
+        let images = std::mem::take(&mut self.images.attached);
         let _ = tx.send(Command::SendMessage(
             text.clone(),
             self.agent_mode(),
             images,
         ));
         self.input_history.push(text);
-        self.history_index = None;
-        self.history_draft.clear();
+        self.history_recall.history_index = None;
+        self.history_recall.history_draft.clear();
         self.composer.clear();
         self.view.follow = true;
     }
@@ -648,7 +710,7 @@ impl App {
     /// Recall the previous (older) normal-text history entry, saving the
     /// in-progress text as the draft restored by [`Self::history_down`].
     pub fn history_up(&mut self) {
-        let from = match self.history_index {
+        let from = match self.history_recall.history_index {
             None => self.input_history.len(),
             Some(0) => return,
             Some(i) => i,
@@ -656,10 +718,10 @@ impl App {
         let Some(new_index) = (0..from).rev().find(|&i| self.recallable(i)) else {
             return; // no older normal-text entry to recall
         };
-        if self.history_index.is_none() {
-            self.history_draft = self.composer.text.clone();
+        if self.history_recall.history_index.is_none() {
+            self.history_recall.history_draft = self.composer.text.clone();
         }
-        self.history_index = Some(new_index);
+        self.history_recall.history_index = Some(new_index);
         let entry = self
             .input_history
             .get(new_index)
@@ -671,12 +733,12 @@ impl App {
     /// Recall the next (newer) normal-text history entry; ↓ past the newest
     /// restores the draft saved on entry.
     pub fn history_down(&mut self) {
-        let Some(i) = self.history_index else {
+        let Some(i) = self.history_recall.history_index else {
             return;
         };
         match (i + 1..self.input_history.len()).find(|&j| self.recallable(j)) {
             Some(new_index) => {
-                self.history_index = Some(new_index);
+                self.history_recall.history_index = Some(new_index);
                 let entry = self
                     .input_history
                     .get(new_index)
@@ -685,8 +747,8 @@ impl App {
                 self.composer.set_text(entry);
             }
             None => {
-                self.history_index = None;
-                let draft = std::mem::take(&mut self.history_draft);
+                self.history_recall.history_index = None;
+                let draft = std::mem::take(&mut self.history_recall.history_draft);
                 self.composer.set_text(draft);
             }
         }
@@ -702,10 +764,12 @@ impl App {
         self.view.highlight_segment = None;
         self.view.tool_regions.clear();
         self.view.notice_regions.clear();
-        self.modal = Modal::None;
+        self.overlays.modal = Modal::None;
         self.view.scroll = ScrollPos::default();
         self.view.segments.clear();
         self.view.follow = true;
+        self.images.states.clear();
+        self.images.states_order.clear();
     }
 }
 
@@ -901,5 +965,31 @@ mod tests {
             !text.contains("Copied"),
             "keypress must clear the flash:\n{text}"
         );
+    }
+
+    /// The image-state cache is capped (LRU) and emptied on reset.
+    #[test]
+    fn image_states_are_lru_capped_and_reset() {
+        let mut app = App::new();
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        for i in 0..40 {
+            let id = format!("img-{i}");
+            // A 1x1 PNG decodes at any width; ids differ per call.
+            app.image_state(&id, png, 10);
+        }
+        assert!(
+            app.images.states.len() <= IMAGE_STATE_CAP,
+            "cache grew past the cap: {}",
+            app.images.states.len()
+        );
+        assert!(
+            !app.images.states.contains_key("img-0"),
+            "the oldest entry is evicted"
+        );
+        assert!(app.images.states.contains_key("img-39"));
+
+        app.reset_conversation();
+        assert!(app.images.states.is_empty());
+        assert!(app.images.states_order.is_empty());
     }
 }

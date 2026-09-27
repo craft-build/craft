@@ -13,11 +13,11 @@ mod question;
 mod turn;
 mod usage_recorder;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::AbortHandle;
 
 use crate::compaction::CompactionState;
@@ -262,6 +262,67 @@ fn transcript(messages: &[crate::history::Message]) -> Vec<LoadedMessage> {
         .collect()
 }
 
+/// Immutable-by-loop shared state for the command loop's handlers: the
+/// session, its connections, and the pieces every arm reaches for. Loop
+/// locals that mutate per command (`current_turn`, `shell_seq`,
+/// `selection`) stay in the loop and are passed as `&mut`.
+struct LoopCtx {
+    state: Arc<Mutex<SessionState>>,
+    files: Files,
+    cancel_flag: run::CancelFlag,
+    pending_shell: Arc<std::sync::Mutex<Vec<crate::history::Message>>>,
+    permissions: Arc<PermissionManager>,
+    config: Arc<Config>,
+    workspace: Workspace,
+    instructions_text: String,
+    catalogs: BTreeMap<String, Vec<CatalogModel>>,
+    snapshots: crate::snapshot::SnapshotManager,
+    state_dir: Option<crate::storage::StateDir>,
+    cwd: String,
+    evt_tx: mpsc::UnboundedSender<AgentEvent>,
+    /// Signals the loop when a running turn settles, so messages queued
+    /// behind it drain even with no further user command.
+    wake: Arc<Notify>,
+}
+
+impl LoopCtx {
+    /// The current "provider/model" spec, for pricing and the session
+    /// header.
+    fn model_spec(selection: &Selection) -> String {
+        format!("{}/{}", selection.provider, selection.model)
+    }
+
+    /// Flat model menu rows across all usable providers, with the
+    /// current selection's index.
+    fn catalog_choices(&self, selection: &Selection) -> (Vec<ModelChoice>, usize) {
+        catalog_choices(&self.catalogs, selection)
+    }
+}
+
+/// Flat model menu rows across all usable providers, with the current
+/// selection's index.
+fn catalog_choices(
+    catalogs: &BTreeMap<String, Vec<CatalogModel>>,
+    selection: &Selection,
+) -> (Vec<ModelChoice>, usize) {
+    let mut choices = Vec::new();
+    let mut current = 0;
+    for (provider, models) in catalogs {
+        for model in models {
+            if provider == &selection.provider && model.id == selection.model {
+                current = choices.len();
+            }
+            choices.push(ModelChoice {
+                provider: provider.clone(),
+                model: model.id.clone(),
+                label: model.label().to_owned(),
+                provider_label: provider.clone(),
+            });
+        }
+    }
+    (choices, current)
+}
+
 #[derive(Clone)]
 struct Selection {
     provider: String,
@@ -439,16 +500,12 @@ impl CraftProvider {
         evt_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) {
         let mut selection = self.selection;
-        let workspace = self.workspace;
-        let cwd = workspace.root().display().to_string();
+        let cwd = self.workspace.root().display().to_string();
         let state_dir = crate::storage::StateDir::resolve().ok();
-        // "provider/model" for pricing and the session header.
-        let model_spec =
-            |selection: &Selection| format!("{}/{}", selection.provider, selection.model);
         let state = Arc::new(Mutex::new(SessionState::linked().with_store(
             state_dir.as_ref(),
             &cwd,
-            &model_spec(&selection),
+            &LoopCtx::model_spec(&selection),
         )));
         let files: Files = Files::default();
         let (cancel_flag, _) = run::cancel_channel();
@@ -460,32 +517,33 @@ impl CraftProvider {
         // stale answer never overwrites a newer one (rapid Ctrl+R).
         let usage_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pending_shell: Arc<std::sync::Mutex<Vec<crate::history::Message>>> = Arc::default();
+        // Signals the loop when a running turn finishes (see LoopCtx).
+        let wake = Arc::new(Notify::new());
         let permissions = self.permissions;
+        let workspace = self.workspace;
         let snapshots = workspace.snapshots().clone();
         let instructions_text = self.instructions.text;
         let config = self.config;
         let catalogs = self.catalogs;
-
-        // Flat model menu rows across all usable providers, with the
-        // current selection's index.
-        let catalog_choices = |selection: &Selection| -> (Vec<ModelChoice>, usize) {
-            let mut choices = Vec::new();
-            let mut current = 0;
-            for (provider, models) in &catalogs {
-                for model in models {
-                    if provider == &selection.provider && model.id == selection.model {
-                        current = choices.len();
-                    }
-                    choices.push(ModelChoice {
-                        provider: provider.clone(),
-                        model: model.id.clone(),
-                        label: model.label().to_owned(),
-                        provider_label: provider.clone(),
-                    });
-                }
-            }
-            (choices, current)
+        let ctx = LoopCtx {
+            state,
+            files,
+            cancel_flag,
+            pending_shell,
+            permissions,
+            config,
+            workspace,
+            instructions_text,
+            catalogs,
+            snapshots,
+            state_dir: state_dir.clone(),
+            cwd,
+            evt_tx: evt_tx.clone(),
+            wake: wake.clone(),
         };
+        // Messages submitted while a turn is still running queue here and
+        // are sent, in order, when that turn settles (never aborting it).
+        let mut pending_messages: VecDeque<PendingMessage> = VecDeque::new();
 
         let _ = evt_tx.send(AgentEvent::SessionInfo {
             cwd: self.cwd_label,
@@ -494,78 +552,57 @@ impl CraftProvider {
         for note in self.notes {
             let _ = evt_tx.send(AgentEvent::AssistantText(note));
         }
-        let (models, current) = catalog_choices(&selection);
+        let (models, current) = ctx.catalog_choices(&selection);
         let _ = evt_tx.send(AgentEvent::CatalogSet { models, current });
         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
         let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
 
         if self.resume_latest {
             resume_latest(
-                &state,
-                &files,
-                state_dir.as_ref(),
-                &cwd,
-                &model_spec(&selection),
-                &evt_tx,
+                &ctx.state,
+                &ctx.files,
+                ctx.state_dir.as_ref(),
+                &ctx.cwd,
+                &LoopCtx::model_spec(&selection),
+                &ctx.evt_tx,
             )
             .await;
         }
 
-        // Signal cancellation and abort any in-flight turn. Callers then
-        // differ only in how much session state they rebuild.
-        let interrupt = |current_turn: &mut Option<AbortHandle>| {
-            cancel_flag.set(true);
-            if let Some(h) = current_turn.take() {
-                h.abort();
-            }
-        };
-        while let Some(cmd) = cmd_rx.recv().await {
+        loop {
+            let cmd = tokio::select! {
+                cmd = cmd_rx.recv() => match cmd {
+                    Some(cmd) => cmd,
+                    None => break,
+                },
+                _ = wake.notified() => {
+                    // A turn settled: drop a finished handle and send the
+                    // next queued message, if any.
+                    maybe_send_next(&ctx, &selection, &mut current_turn, &mut pending_messages)
+                        .await;
+                    continue;
+                }
+            };
             // A turn that finished on its own leaves its handle behind;
             // drop it so the turn-running guards (undo/compact/load)
-            // don't refuse forever after the first completed turn.
-            if current_turn.as_ref().is_some_and(AbortHandle::is_finished) {
-                current_turn = None;
-            }
+            // don't refuse forever after the first completed turn, then
+            // send the next queued message if any.
+            maybe_send_next(&ctx, &selection, &mut current_turn, &mut pending_messages).await;
             match cmd {
                 Command::SendMessage(text, mode, images) => {
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    if let Some(h) = current_turn.take() {
-                        h.abort();
-                    }
-                    // Bang-mode results queue until the next turn: pushing
-                    // them into the history directly would race the running
-                    // turn's whole-history commit.
-                    drain_shell_results(&pending_shell, &state).await;
-                    let cancel_token = cancel_flag.token();
-                    let handle = tokio::spawn(run_turn(
-                        TurnCtx {
-                            config: config.clone(),
-                            workspace: workspace.clone(),
-                            instructions_text: instructions_text.clone(),
-                            selection: selection.clone(),
-                            state: state.clone(),
-                            files: files.clone(),
-                            cancel: cancel_token.clone(),
-                            tx: evt_tx.clone(),
-                            permissions: permissions.clone(),
-                            mode,
-                        },
+                    handle_send_message(
+                        &ctx,
+                        &selection,
+                        &mut current_turn,
+                        &mut pending_messages,
                         text,
+                        mode,
                         images,
-                    ));
-                    current_turn = Some(handle.abort_handle());
+                    )
+                    .await
                 }
                 Command::Shell { command, visible } => {
-                    shell_seq += 1;
-                    let id = format!("shell-{shell_seq}");
-                    let tx = evt_tx.clone();
-                    let cancel = cancel_flag.token();
-                    let results = Arc::clone(&pending_shell);
-                    tokio::spawn(crate::tui::shell::run_shell(
-                        id, command, visible, tx, cancel, results,
-                    ));
+                    handle_shell(&ctx, &mut shell_seq, command, visible)
                 }
                 Command::Approve { id, always } => {
                     let answer = if always {
@@ -573,7 +610,7 @@ impl CraftProvider {
                     } else {
                         PermissionAnswer::AllowSession
                     };
-                    decide(&state, id, answer).await
+                    decide(&ctx.state, id, answer).await
                 }
                 Command::Reject { id, always } => {
                     let answer = if always {
@@ -581,215 +618,392 @@ impl CraftProvider {
                     } else {
                         PermissionAnswer::Deny
                     };
-                    decide(&state, id, answer).await
+                    decide(&ctx.state, id, answer).await
                 }
                 Command::AnswerPermission { id, answer } => {
-                    decide(&state, id, answer).await;
+                    decide(&ctx.state, id, answer).await;
                 }
                 Command::AnswerQuestion { id, answer } => {
-                    answer_question(&state, id, answer).await;
+                    answer_question(&ctx.state, id, answer).await;
                 }
                 Command::ToggleAutoReview => {
-                    let on = permissions.toggle_auto_review();
-                    let _ = evt_tx.send(AgentEvent::AssistantText(format!(
+                    let on = ctx.permissions.toggle_auto_review();
+                    let _ = ctx.evt_tx.send(AgentEvent::AssistantText(format!(
                         "auto-review {}.",
                         if on { "on" } else { "off" }
                     )));
                 }
                 Command::GetUsage => {
-                    let rows = state.lock().await.usage.rows();
-                    let _ = evt_tx.send(AgentEvent::UsageSnapshot(rows));
+                    let rows = ctx.state.lock().await.usage.rows();
+                    let _ = ctx.evt_tx.send(AgentEvent::UsageSnapshot(rows));
                 }
-                Command::FetchUsage => {
-                    // Reference refresh_usage (event_loop.rs:2033): mark
-                    // loading, then resolve off-loop so the UI keeps ticking.
-                    // Each fetch carries a generation; answers from an older
-                    // generation than the latest request are dropped so a
-                    // slow stale fetch can't overwrite a newer answer.
-                    let config = match config.providers.get(&selection.provider) {
-                        Some(config) => Some(config.clone()),
-                        None => {
-                            let _ = evt_tx.send(AgentEvent::UsageQuota(UsageFetchState::Error(
-                                format!("provider {:?} not found in config", selection.provider),
-                            )));
-                            None
-                        }
-                    };
-                    let fetch_gen = usage_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    let tx = evt_tx.clone();
-                    let latest = Arc::clone(&usage_gen);
-                    let _ = evt_tx.send(AgentEvent::UsageQuota(UsageFetchState::Loading));
-                    let Some(config) = config else {
-                        // Error already emitted above; no fetch to run.
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        let state = match crate::providers::usage_fetch::fetch_usage(&config).await
-                        {
-                            Ok(Some(usage)) => UsageFetchState::Ready(usage),
-                            Ok(None) => UsageFetchState::Unsupported,
-                            Err(error) => UsageFetchState::Error(report(error)),
-                        };
-                        if latest.load(std::sync::atomic::Ordering::SeqCst) != fetch_gen {
-                            return; // superseded by a newer fetch
-                        }
-                        let _ = tx.send(AgentEvent::UsageQuota(state));
-                    });
-                }
-                Command::Compact => {
-                    if current_turn.is_some() {
-                        let _ = evt_tx.send(AgentEvent::Notice {
-                            tone: Tone::Warning,
-                            text:
-                                "A turn is still running; wait for it to finish before compacting."
-                                    .into(),
-                        });
-                        continue;
-                    }
-                    turn::compact_now(&config, &selection, &state, &evt_tx).await;
-                }
+                Command::FetchUsage => handle_fetch_usage(&ctx, &selection, &usage_gen).await,
+                Command::Compact => handle_compact(&ctx, &selection, &current_turn).await,
                 Command::LoadSession { id } => {
-                    if current_turn.is_some() {
-                        // Loading mid-run would race the running turn's
-                        // history copy and its compaction/dedup/guardrails
-                        // handles, desyncing the provider from the session.
-                        let _ = evt_tx.send(AgentEvent::Notice {
-                            tone: Tone::Warning,
-                            text: "A turn is still running; wait for it to finish before loading a session."
-                                .into(),
-                        });
-                        continue;
-                    }
-                    load_session(
-                        &state,
-                        &files,
-                        &id,
-                        state_dir.as_ref(),
-                        &cwd,
-                        &model_spec(&selection),
-                        &evt_tx,
-                    )
-                    .await;
+                    handle_load_session(&ctx, &selection, &current_turn, id).await
                 }
                 Command::ResumeLatest => {
-                    if current_turn.is_some() {
-                        let _ = evt_tx.send(AgentEvent::Notice {
-                            tone: Tone::Warning,
-                            text: "A turn is still running; wait for it to finish before resuming."
-                                .into(),
-                        });
-                        continue;
-                    }
-                    resume_latest(
-                        &state,
-                        &files,
-                        state_dir.as_ref(),
-                        &cwd,
-                        &model_spec(&selection),
-                        &evt_tx,
-                    )
-                    .await;
+                    handle_resume_latest(&ctx, &selection, &current_turn).await
                 }
-                Command::SetDraft(draft) => {
-                    let mut guard = state.lock().await;
-                    let Some(store) = &mut guard.store else {
-                        continue;
-                    };
-                    store.checkpoint_draft(&draft);
-                    if let Some(wait) = store.soft_save_wait() {
-                        let state = Arc::clone(&state);
-                        tokio::spawn(async move {
-                            tokio::time::sleep(wait).await;
-                            if let Some(store) = &mut state.lock().await.store {
-                                store.checkpoint_now();
-                            }
-                        });
-                    }
-                }
+                Command::SetDraft(draft) => handle_set_draft(&ctx, draft).await,
                 Command::Interrupt => {
-                    interrupt(&mut current_turn);
-                    let _ = evt_tx.send(AgentEvent::AssistantEnd);
-                    let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+                    handle_interrupt(&ctx, &mut current_turn);
+                    pending_messages.clear();
                 }
                 Command::Clear => {
-                    interrupt(&mut current_turn);
-                    pending_shell
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear();
-                    // Reset through `linked` so the fresh session's
-                    // compaction state keeps working dedup/guardrails
-                    // handles; a bare default would strand the caches the
-                    // dispatcher still points at.
-                    *state.lock().await = SessionState::linked().with_store(
-                        state_dir.as_ref(),
-                        &cwd,
-                        &model_spec(&selection),
-                    );
-                    let _ = evt_tx.send(AgentEvent::AssistantEnd);
-                    let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+                    handle_clear(&ctx, &selection, &mut current_turn).await;
+                    pending_messages.clear();
                 }
                 Command::Reset => {
-                    interrupt(&mut current_turn);
-                    pending_shell
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear();
-                    *state.lock().await = SessionState::linked().with_store(
-                        state_dir.as_ref(),
-                        &cwd,
-                        &model_spec(&selection),
-                    );
-                    files.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                    let _ = evt_tx.send(AgentEvent::AssistantEnd);
-                    let _ = evt_tx.send(AgentEvent::FilesSet(Vec::new()));
-                    let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
-                    let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
+                    handle_reset(&ctx, &selection, &mut current_turn).await;
+                    pending_messages.clear();
                 }
-                Command::Undo => {
-                    if current_turn.is_some() {
-                        // Restoring mid-run would race the turn's writes
-                        // and drain its live capture session.
-                        let _ = evt_tx.send(AgentEvent::AssistantText(
-                            "A turn is still running; wait for it to finish before undoing.".into(),
-                        ));
-                        continue;
-                    }
-                    let message = snapshots
-                        .rollback()
-                        .await
-                        .unwrap_or_else(|| "Nothing to undo.".into());
-                    let _ = evt_tx.send(AgentEvent::AssistantText(message));
-                }
+                Command::Undo => handle_undo(&ctx, &current_turn).await,
                 Command::SelectModel { provider, model } => {
-                    let found = catalogs
-                        .get(&provider)
-                        .and_then(|models| models.iter().find(|m| m.id == model))
-                        .map(|m| m.context_length);
-                    match found {
-                        Some(context_length) => {
-                            selection = Selection {
-                                provider,
-                                model,
-                                context_length,
-                            };
-                            let (models, current) = catalog_choices(&selection);
-                            let _ = evt_tx.send(AgentEvent::CatalogSet { models, current });
-                        }
-                        None => {
-                            let _ = evt_tx.send(AgentEvent::AssistantText(format!(
-                                "Unknown model {model:?} on provider {provider:?}."
-                            )));
-                        }
-                    }
+                    handle_select_model(&ctx, &mut selection, provider, model)
                 }
             }
         }
-        // The UI dropped its command half: the session is over. Flush a
-        // soft checkpointed draft that never hit its write window, so a
-        // keystroke from a second ago still reaches disk.
-        if let Some(store) = &mut state.lock().await.store {
-            store.checkpoint_now();
+        // The UI dropped its command half: the session is over. Persist
+        // queued bang-mode results (they never got a next turn to ride)
+        // and flush a soft checkpointed draft that never hit its write
+        // window, so a keystroke from a second ago still reaches disk.
+        persist_on_exit(&ctx, &selection).await;
+    }
+}
+
+/// A message submitted while a turn is running, waiting for that turn to
+/// settle before it is sent.
+type PendingMessage = (
+    String,
+    crate::run::AgentMode,
+    Vec<crate::history::ImageBlock>,
+);
+
+/// `Command::SendMessage`: send now, or queue behind a still-running turn
+/// (submitting never aborts the in-flight turn). Queued messages are sent
+/// in order when the turn settles (`maybe_send_next`).
+async fn handle_send_message(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &mut Option<AbortHandle>,
+    pending: &mut VecDeque<PendingMessage>,
+    text: String,
+    mode: crate::run::AgentMode,
+    images: Vec<crate::history::ImageBlock>,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if current_turn.as_ref().is_some_and(|h| !h.is_finished()) {
+        pending.push_back((text, mode, images));
+        return;
+    }
+    *current_turn = None;
+    // Bang-mode results queue until the next turn: pushing them into the
+    // history directly would race the running turn's whole-history commit.
+    drain_shell_results(&ctx.pending_shell, &ctx.state).await;
+    *current_turn = Some(start_turn(ctx, selection, text, mode, images));
+}
+
+/// Drop a settled turn's handle and, if messages queued behind it, send
+/// the next one. No-op while a turn is still running or none is.
+async fn maybe_send_next(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &mut Option<AbortHandle>,
+    pending: &mut VecDeque<PendingMessage>,
+) {
+    if !current_turn.as_ref().is_some_and(AbortHandle::is_finished) {
+        return;
+    }
+    *current_turn = None;
+    if let Some((text, mode, images)) = pending.pop_front() {
+        drain_shell_results(&ctx.pending_shell, &ctx.state).await;
+        *current_turn = Some(start_turn(ctx, selection, text, mode, images));
+    }
+}
+
+/// Spawn a turn and arm the wake signal for when it settles.
+fn start_turn(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    text: String,
+    mode: crate::run::AgentMode,
+    images: Vec<crate::history::ImageBlock>,
+) -> AbortHandle {
+    let handle = tokio::spawn(run_turn(
+        TurnCtx {
+            config: ctx.config.clone(),
+            workspace: ctx.workspace.clone(),
+            instructions_text: ctx.instructions_text.clone(),
+            selection: selection.clone(),
+            state: ctx.state.clone(),
+            files: ctx.files.clone(),
+            cancel: ctx.cancel_flag.token(),
+            tx: ctx.evt_tx.clone(),
+            permissions: ctx.permissions.clone(),
+            mode,
+        },
+        text,
+        images,
+    ));
+    let abort = handle.abort_handle();
+    let wake = Arc::clone(&ctx.wake);
+    tokio::spawn(async move {
+        let _ = handle.await;
+        wake.notify_one();
+    });
+    abort
+}
+
+/// `Command::Shell`: spawn a bang-mode shell run under the cancel token;
+/// visible-run results queue in `pending_shell` for the next turn.
+fn handle_shell(ctx: &LoopCtx, shell_seq: &mut u64, command: String, visible: bool) {
+    *shell_seq += 1;
+    let id = format!("shell-{shell_seq}");
+    let tx = ctx.evt_tx.clone();
+    let cancel = ctx.cancel_flag.token();
+    let results = Arc::clone(&ctx.pending_shell);
+    tokio::spawn(crate::tui::shell::run_shell(
+        id, command, visible, tx, cancel, results,
+    ));
+}
+
+/// `Command::FetchUsage`: mark loading, then resolve off-loop so the UI
+/// keeps ticking. Each fetch carries a generation; answers from an older
+/// generation than the latest request are dropped so a slow stale fetch
+/// can't overwrite a newer answer.
+async fn handle_fetch_usage(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    usage_gen: &Arc<std::sync::atomic::AtomicU64>,
+) {
+    let config = match ctx.config.providers.get(&selection.provider) {
+        Some(config) => Some(config.clone()),
+        None => {
+            let _ = ctx
+                .evt_tx
+                .send(AgentEvent::UsageQuota(UsageFetchState::Error(format!(
+                    "provider {:?} not found in config",
+                    selection.provider
+                ))));
+            None
+        }
+    };
+    let fetch_gen = usage_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let tx = ctx.evt_tx.clone();
+    let latest = Arc::clone(usage_gen);
+    let _ = ctx
+        .evt_tx
+        .send(AgentEvent::UsageQuota(UsageFetchState::Loading));
+    let Some(config) = config else {
+        // Error already emitted above; no fetch to run.
+        return;
+    };
+    tokio::spawn(async move {
+        let state = match crate::providers::usage_fetch::fetch_usage(&config).await {
+            Ok(Some(usage)) => UsageFetchState::Ready(usage),
+            Ok(None) => UsageFetchState::Unsupported,
+            Err(error) => UsageFetchState::Error(report(error)),
+        };
+        if latest.load(std::sync::atomic::Ordering::SeqCst) != fetch_gen {
+            return; // superseded by a newer fetch
+        }
+        let _ = tx.send(AgentEvent::UsageQuota(state));
+    });
+}
+
+/// `Command::Compact`: refuse while a turn is running, then compact now.
+async fn handle_compact(ctx: &LoopCtx, selection: &Selection, current_turn: &Option<AbortHandle>) {
+    if current_turn.is_some() {
+        let _ = ctx.evt_tx.send(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: "A turn is still running; wait for it to finish before compacting.".into(),
+        });
+        return;
+    }
+    turn::compact_now(&ctx.config, selection, &ctx.state, &ctx.evt_tx).await;
+}
+
+/// `Command::LoadSession`: refuse while a turn is running, then swap in the
+/// persisted session.
+async fn handle_load_session(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &Option<AbortHandle>,
+    id: String,
+) {
+    if current_turn.is_some() {
+        // Loading mid-run would race the running turn's history copy and
+        // its compaction/dedup/guardrails handles, desyncing the provider
+        // from the session.
+        let _ = ctx.evt_tx.send(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: "A turn is still running; wait for it to finish before loading a session.".into(),
+        });
+        return;
+    }
+    load_session(
+        &ctx.state,
+        &ctx.files,
+        &id,
+        ctx.state_dir.as_ref(),
+        &ctx.cwd,
+        &LoopCtx::model_spec(selection),
+        &ctx.evt_tx,
+    )
+    .await;
+}
+
+/// `Command::ResumeLatest`: refuse while a turn is running, then load this
+/// directory's newest session.
+async fn handle_resume_latest(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &Option<AbortHandle>,
+) {
+    if current_turn.is_some() {
+        let _ = ctx.evt_tx.send(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: "A turn is still running; wait for it to finish before resuming.".into(),
+        });
+        return;
+    }
+    resume_latest(
+        &ctx.state,
+        &ctx.files,
+        ctx.state_dir.as_ref(),
+        &ctx.cwd,
+        &LoopCtx::model_spec(selection),
+        &ctx.evt_tx,
+    )
+    .await;
+}
+
+/// `Command::SetDraft`: soft-checkpoint the input draft, with a delayed
+/// write if the store wants one.
+async fn handle_set_draft(ctx: &LoopCtx, draft: String) {
+    let mut guard = ctx.state.lock().await;
+    let Some(store) = &mut guard.store else {
+        return;
+    };
+    store.checkpoint_draft(&draft);
+    if let Some(wait) = store.soft_save_wait() {
+        let state = Arc::clone(&ctx.state);
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            if let Some(store) = &mut state.lock().await.store {
+                store.checkpoint_now();
+            }
+        });
+    }
+}
+
+/// Signal cancellation and abort any in-flight turn. Callers then differ
+/// only in how much session state they rebuild.
+fn interrupt(ctx: &LoopCtx, current_turn: &mut Option<AbortHandle>) {
+    ctx.cancel_flag.set(true);
+    if let Some(h) = current_turn.take() {
+        h.abort();
+    }
+}
+
+/// `Command::Interrupt`: cancel and end the assistant bubble.
+fn handle_interrupt(ctx: &LoopCtx, current_turn: &mut Option<AbortHandle>) {
+    interrupt(ctx, current_turn);
+    let _ = ctx.evt_tx.send(AgentEvent::AssistantEnd);
+    let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+}
+
+/// `Command::Clear`: interrupt, drop queued shell results, and start a
+/// fresh session (keeping the same caches via `linked`).
+async fn handle_clear(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &mut Option<AbortHandle>,
+) {
+    interrupt(ctx, current_turn);
+    ctx.pending_shell
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    // Reset through `linked` so the fresh session's compaction state keeps
+    // working dedup/guardrails handles; a bare default would strand the
+    // caches the dispatcher still points at.
+    *ctx.state.lock().await = SessionState::linked().with_store(
+        ctx.state_dir.as_ref(),
+        &ctx.cwd,
+        &LoopCtx::model_spec(selection),
+    );
+    let _ = ctx.evt_tx.send(AgentEvent::AssistantEnd);
+    let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+}
+
+/// `Command::Reset`: like `Clear`, plus dropped files and reset chrome.
+async fn handle_reset(
+    ctx: &LoopCtx,
+    selection: &Selection,
+    current_turn: &mut Option<AbortHandle>,
+) {
+    interrupt(ctx, current_turn);
+    ctx.pending_shell
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    *ctx.state.lock().await = SessionState::linked().with_store(
+        ctx.state_dir.as_ref(),
+        &ctx.cwd,
+        &LoopCtx::model_spec(selection),
+    );
+    ctx.files.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let _ = ctx.evt_tx.send(AgentEvent::AssistantEnd);
+    let _ = ctx.evt_tx.send(AgentEvent::FilesSet(Vec::new()));
+    let _ = ctx.evt_tx.send(AgentEvent::StatusChanged(Status::Done));
+    let _ = ctx.evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
+}
+
+/// `Command::Undo`: refuse while a turn is running, then roll the
+/// workspace snapshots back one step.
+async fn handle_undo(ctx: &LoopCtx, current_turn: &Option<AbortHandle>) {
+    if current_turn.is_some() {
+        // Restoring mid-run would race the turn's writes and drain its
+        // live capture session.
+        let _ = ctx.evt_tx.send(AgentEvent::AssistantText(
+            "A turn is still running; wait for it to finish before undoing.".into(),
+        ));
+        return;
+    }
+    let message = ctx
+        .snapshots
+        .rollback()
+        .await
+        .unwrap_or_else(|| "Nothing to undo.".into());
+    let _ = ctx.evt_tx.send(AgentEvent::AssistantText(message));
+}
+
+/// `Command::SelectModel`: switch the selection when the provider/model
+/// pair exists in the catalogs, then re-announce the menu.
+fn handle_select_model(ctx: &LoopCtx, selection: &mut Selection, provider: String, model: String) {
+    let found = ctx
+        .catalogs
+        .get(&provider)
+        .and_then(|models| models.iter().find(|m| m.id == model))
+        .map(|m| m.context_length);
+    match found {
+        Some(context_length) => {
+            *selection = Selection {
+                provider,
+                model,
+                context_length,
+            };
+            let (models, current) = ctx.catalog_choices(selection);
+            let _ = ctx.evt_tx.send(AgentEvent::CatalogSet { models, current });
+        }
+        None => {
+            let _ = ctx.evt_tx.send(AgentEvent::AssistantText(format!(
+                "Unknown model {model:?} on provider {provider:?}."
+            )));
         }
     }
 }
@@ -797,18 +1011,37 @@ impl CraftProvider {
 /// Move queued bang-mode visible-run results into the session history.
 /// Called at the next `SendMessage`: pushing them when they finish would
 /// race the running turn's whole-history commit (turn.rs replaces
-/// `session.history` only on success).
+/// `session.history` only on success). Returns how many landed.
 async fn drain_shell_results(
     pending: &Arc<std::sync::Mutex<Vec<crate::history::Message>>>,
     state: &Arc<Mutex<SessionState>>,
-) {
+) -> usize {
     let queued = pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .drain(..)
         .collect::<Vec<_>>();
-    if !queued.is_empty() {
+    let drained = queued.len();
+    if drained > 0 {
         state.lock().await.history.extend(queued);
+    }
+    drained
+}
+
+/// Command-loop exit: fold queued bang-mode results into the history and
+/// persist them (no next turn exists to carry them), then flush any soft
+/// checkpointed draft.
+async fn persist_on_exit(ctx: &LoopCtx, selection: &Selection) {
+    let drained = drain_shell_results(&ctx.pending_shell, &ctx.state).await;
+    let mut guard = ctx.state.lock().await;
+    let history = guard.history.clone();
+    if drained > 0 {
+        if let Some(store) = &mut guard.store {
+            store.record_turn(&history, LoopCtx::model_spec(selection));
+        }
+    }
+    if let Some(store) = &mut guard.store {
+        store.checkpoint_now();
     }
 }
 
@@ -855,6 +1088,130 @@ mod tests {
         // A second drain with nothing queued is a no-op.
         drain_shell_results(&pending, &state).await;
         assert_eq!(state.lock().await.history.len(), 1);
+    }
+
+    /// Quitting with queued bang-mode results persists them into the
+    /// session file, instead of losing them until a next `SendMessage`.
+    #[tokio::test]
+    async fn bang_results_persist_on_loop_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = crate::storage::StateDir::from_path(dir.path().to_path_buf());
+        let state = Arc::new(Mutex::new(SessionState::linked().with_store(
+            Some(&state_dir),
+            "/cwd",
+            "mock/model",
+        )));
+        let ctx = test_ctx(state.clone());
+        ctx.pending_shell
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Message::user("I ran: $ ls\n\nOutput:\nsrc"));
+
+        persist_on_exit(
+            &ctx,
+            &Selection {
+                provider: "mock".into(),
+                model: "model".into(),
+                context_length: None,
+            },
+        )
+        .await;
+
+        assert_eq!(state.lock().await.history.len(), 1);
+        // The store mints its own session id; discover it via the cwd list.
+        let summaries = crate::headless::StoredSession::list(Some("/cwd"), &state_dir).unwrap();
+        let found = summaries.first().expect("the session lists for this cwd");
+        let reloaded =
+            crate::headless::StoredSession::load(found.id.id().clone(), &state_dir).unwrap();
+        assert!(
+            reloaded
+                .messages()
+                .iter()
+                .any(|m| m.text().starts_with("I ran: $ ls")),
+            "the bang-mode result reached the session file"
+        );
+    }
+
+    /// Submitting while a turn is alive queues the message instead of
+    /// aborting the turn; the queue preserves submission order.
+    #[tokio::test]
+    async fn submit_mid_turn_queues_without_aborting() {
+        let state = Arc::new(Mutex::new(SessionState::linked()));
+        let ctx = LoopCtx {
+            pending_shell: Arc::default(),
+            ..test_ctx(state)
+        };
+        let selection = Selection {
+            provider: String::new(),
+            model: String::new(),
+            context_length: None,
+        };
+        // A long-running "turn": alive well past the test body.
+        let mut current_turn = Some(
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            })
+            .abort_handle(),
+        );
+        let mut pending: VecDeque<PendingMessage> = VecDeque::new();
+        for text in ["first", "second"] {
+            handle_send_message(
+                &ctx,
+                &selection,
+                &mut current_turn,
+                &mut pending,
+                text.to_string(),
+                crate::run::AgentMode::Build,
+                Vec::new(),
+            )
+            .await;
+        }
+        assert_eq!(pending.len(), 2, "both messages queue behind the turn");
+        assert_eq!(pending[0].0, "first");
+        assert_eq!(pending[1].0, "second");
+        assert!(
+            !current_turn.as_ref().unwrap().is_finished(),
+            "the in-flight turn was not aborted"
+        );
+
+        // A settled turn with nothing queued is a no-op.
+        let aborted = current_turn.take().unwrap();
+        aborted.abort();
+        while !aborted.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        current_turn = Some(aborted);
+        maybe_send_next(&ctx, &selection, &mut current_turn, &mut pending).await;
+        assert_eq!(pending.len(), 1, "the first queued message was sent");
+        assert_eq!(pending[0].0, "second");
+        assert!(
+            current_turn.is_some(),
+            "the queued message spawned the next turn"
+        );
+    }
+
+    /// A minimal LoopCtx for the queue/persist tests: only `state`,
+    /// `pending_shell`, and `wake` are exercised.
+    fn test_ctx(state: Arc<Mutex<SessionState>>) -> LoopCtx {
+        LoopCtx {
+            state,
+            files: Files::default(),
+            cancel_flag: run::cancel_channel().0,
+            pending_shell: Arc::default(),
+            permissions: Arc::new(PermissionManager::new(
+                PermissionsConfig::default(),
+                std::path::PathBuf::new(),
+            )),
+            config: Arc::new(Config::default()),
+            workspace: Workspace::new(std::env::temp_dir()).unwrap(),
+            instructions_text: String::new(),
+            catalogs: BTreeMap::new(),
+            snapshots: crate::snapshot::SnapshotManager::new(std::env::temp_dir()),
+            state_dir: None,
+            cwd: "/cwd".into(),
+            evt_tx: mpsc::unbounded_channel().0,
+            wake: Arc::new(Notify::new()),
+        }
     }
 
     /// W10: a persisted session is listed by `/sessions`, and loading it

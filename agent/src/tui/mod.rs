@@ -127,7 +127,7 @@ async fn drive<P: Provider>(
     if let Ok(config) = crate::config::Config::load().await {
         let entries: Vec<(String, Vec<String>)> = config.keybindings.into_iter().collect();
         let mut warnings = Vec::new();
-        app.keybinds = keybindings::KeybindingResolver::from_overlay(&entries, &mut warnings);
+        app.overlays.keybinds = keybindings::KeybindingResolver::from_overlay(&entries, &mut warnings);
         if let Some(w) = warnings.first() {
             app.flash(w.clone());
         }
@@ -196,10 +196,6 @@ async fn drive<P: Provider>(
 // $EDITOR handoff (Alt-O)
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// $EDITOR handoff (Alt-O)
-// ---------------------------------------------------------------------------
-
 /// True for the Ctrl-Z chord that suspends the process (Unix only). Like
 /// the reference, this binding always wins: it is checked before any modal
 /// or composer handling, and it is not remappable.
@@ -207,11 +203,15 @@ fn is_suspend_key(key: &KeyEvent) -> bool {
     cfg!(unix) && key.code == KeyCode::Char('z') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// True for the Alt-O chord that hands the composer text to $VISUAL/$EDITOR.
-fn is_open_editor_key(key: &KeyEvent) -> bool {
-    key.code == KeyCode::Char('o')
-        && key.modifiers.contains(KeyModifiers::ALT)
-        && !key.modifiers.contains(KeyModifiers::CONTROL)
+/// Whether the base surface owns the keyboard: no modal, search, file
+/// picker, permission prompt, or question form is open. Overlays that
+/// own the keyboard must swallow keys, including EditInput.
+fn base_owns_keyboard(app: &App) -> bool {
+    matches!(app.overlays.modal, modals::Modal::None)
+        && !app.overlays.search.is_open()
+        && !app.overlays.file_picker.is_open()
+        && !app.overlays.permission_prompt.is_open()
+        && !app.overlays.question_form.is_open()
 }
 
 /// Write `content` to a temp file, open it in the user's editor, and return
@@ -395,13 +395,11 @@ async fn run_loop(
                     if is_suspend_key(&key) {
                         suspend_ui()?;
                         focus.on_resume();
-                    } else if (is_open_editor_key(&key)
-                            || app.keybinds.matches(
-                                keybindings::ActionId::EditInput,
-                                key,
-                            ))
-                            && matches!(app.modal, modals::Modal::None)
-                        {
+                    } else if app
+                        .overlays.keybinds
+                        .matches(keybindings::ActionId::EditInput, key)
+                        && base_owns_keyboard(app)
+                    {
                             if let Err(e) = edit_composer(app) {
                                 eprintln!("warning: could not open editor: {e}");
                             }
@@ -729,7 +727,7 @@ mod tests {
         let (input_tx, input_rx) = mpsc::unbounded_channel::<Event>();
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<Command>();
         let mut app = App::new();
-        app.modal = modals::Modal::Palette {
+        app.overlays.modal = modals::Modal::Palette {
             query: String::new(),
             selected: 0,
         };
@@ -786,23 +784,14 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_alt_o_opens_the_editor() {
-        assert!(is_open_editor_key(&KeyEvent::new(
-            KeyCode::Char('o'),
-            KeyModifiers::ALT
-        )));
-        assert!(!is_open_editor_key(&KeyEvent::new(
-            KeyCode::Char('o'),
-            KeyModifiers::NONE
-        )));
-        assert!(!is_open_editor_key(&KeyEvent::new(
-            KeyCode::Char('o'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT
-        )));
-        assert!(!is_open_editor_key(&KeyEvent::new(
-            KeyCode::Char('p'),
-            KeyModifiers::ALT
-        )));
+    fn base_owns_keyboard_tracks_overlays() {
+        let mut app = App::new();
+        assert!(base_owns_keyboard(&app));
+        app.overlays.modal = modals::Modal::Help;
+        assert!(!base_owns_keyboard(&app));
+        app.overlays.modal = modals::Modal::None;
+        app.overlays.file_picker.open("");
+        assert!(!base_owns_keyboard(&app));
     }
 
     /// Drive `run_loop` with a fixed initial focus and a scripted turn,
