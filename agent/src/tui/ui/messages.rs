@@ -887,10 +887,13 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         let img_rows = seg.image.as_ref().map_or(0, |img| img.rows);
         let capacity = inner.height - lines.len() as u16;
         // Caption rows are real lines; image rows have none, so they are
-        // blank-padded to keep following segments below the image.
+        // blank-padded to keep following segments below the image. A
+        // position can point inside the image region, so clamp the slice
+        // start to the caption lines (height() counts image rows too).
         let take_lines = caption.saturating_sub(pos.row).min(capacity);
+        let start = (pos.row as usize).min(seg.lines().len());
         lines.extend(
-            seg.lines()[pos.row as usize..(pos.row + take_lines) as usize]
+            seg.lines()[start..start + take_lines as usize]
                 .iter()
                 .cloned(),
         );
@@ -1096,6 +1099,55 @@ mod tests {
             symbols.iter().any(|s| *s == "\u{2580}" || *s == "\u{2584}"),
             "halfblock glyphs rendered"
         );
+    }
+
+    /// Scrolling into a segment's image region must not slice the caption
+    /// lines out of range: image rows are blank-padded, not real lines.
+    #[test]
+    fn scrolling_into_image_rows_does_not_panic() {
+        use crate::tui::app::App;
+        use crate::tui::provider::{AgentEvent, ToolCallData, ToolKind};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let img = image::RgbaImage::from_pixel(16, 8, image::Rgba([255, 255, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+
+        let mut app = App::new();
+        app.handle_event(AgentEvent::ToolCall(ToolCallData {
+            id: "t1".into(),
+            kind: ToolKind::Bash {
+                cmd: "view_image shot.png".into(),
+            },
+            lines: Vec::new(),
+            awaiting_approval: false,
+            image: Some(b64),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
+        let seg_idx = (0..app.view.segments.len())
+            .find(|&i| app.view.segments.get(i).is_some_and(|s| s.image.is_some()))
+            .expect("image segment built");
+        let seg = app.view.segments.get(seg_idx).unwrap();
+        let caption = seg.lines().len() as u16;
+        let height = seg.height(56);
+        assert!(height > caption, "precondition: image rows exist");
+
+        // Park the scroll one row past the caption, inside the image rows.
+        app.view.follow = false;
+        app.view.scroll = crate::tui::ui::scrollback::ScrollPos {
+            seg: seg_idx,
+            row: caption + 1,
+        };
+        terminal
+            .draw(|f| super::render(f, &mut app, f.area()))
+            .unwrap();
     }
 
     /// W1: a notice is one muted line with a tone-colored prefix glyph.
