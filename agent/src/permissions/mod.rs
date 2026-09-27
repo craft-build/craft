@@ -80,6 +80,10 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "bash_status",
     "bash_watch",
     "question",
+    "todo_write",
+    "view_image",
+    "websearch",
+    "webfetch",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
