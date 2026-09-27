@@ -29,8 +29,6 @@ fn seed_models() -> Vec<ModelChoice> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DiffState {
     Pending,
-    Approved,
-    Rejected,
 }
 
 pub enum Message {
@@ -182,8 +180,14 @@ impl Conversation {
                         *existing_kind = kind;
                         *body = lines;
                         *slot = image;
-                        if awaiting_approval && matches!(diff, None | Some(DiffState::Pending)) {
-                            *diff = Some(DiffState::Pending);
+                        if awaiting_approval {
+                            if matches!(diff, None | Some(DiffState::Pending)) {
+                                *diff = Some(DiffState::Pending);
+                            }
+                        } else if *diff == Some(DiffState::Pending) {
+                            // The permission modal recorded the decision;
+                            // drop the stale "needs approval" badge.
+                            *diff = None;
                         }
                     }
                     _ => {

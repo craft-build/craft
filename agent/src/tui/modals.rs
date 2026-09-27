@@ -23,8 +23,6 @@ pub enum Modal {
     },
     /// Model picker: selected row.
     ModelMenu(usize),
-    /// "Reject this diff?" confirmation: tool id awaiting the decision.
-    ConfirmReject(String),
     /// `/usage`: this session's per-model tokens and cost.
     Usage(Vec<crate::tui::provider::UsageRow>),
     /// `/stats`: cross-session totals from the cost ledger.
@@ -71,16 +69,6 @@ pub struct StatsView {
 
 impl App {
     pub(crate) fn handle_modal_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
-        // 1. Confirm dialog swallows everything.
-        if matches!(self.overlays.modal, Modal::ConfirmReject(_)) {
-            match key.code {
-                KeyCode::Char('Y') => self.reject_confirmed(tx, true),
-                KeyCode::Char('y') | KeyCode::Enter => self.reject_confirmed(tx, false),
-                _ => self.overlays.modal = Modal::None,
-            }
-            return;
-        }
-
         // 2. Command palette.
         if matches!(self.overlays.modal, Modal::Palette { .. }) {
             self.handle_palette_key(key, tx);

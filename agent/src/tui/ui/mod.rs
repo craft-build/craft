@@ -153,7 +153,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     overlays::render_slash(f, app, chat, bottom);
     overlays::render_model_menu(f, app, chat, bottom);
     overlays::render_palette(f, app, area);
-    overlays::render_confirm(f, app, area);
     overlays::render_usage(f, app, area);
     overlays::render_stats(f, app, area);
     overlays::render_help(f, app, area);
@@ -469,13 +468,6 @@ mod tests {
         app.composer.text = "/cl".into();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("/clear"));
-
-        app.composer.clear();
-        app.overlays.modal = crate::tui::modals::Modal::ConfirmReject("t2".into());
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Reject this diff?"));
-        assert!(text.contains("src/auth/refresh.ts"));
 
         // Theme picker: title, windowed list, and the current-theme marker.
         let entries = theme::all_theme_names();

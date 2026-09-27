@@ -56,19 +56,6 @@ pub mod key {
     pub const OPEN_EDITOR: Bind = ctrl('o', "Ctrl+O");
     pub const SCROLL_HALF_UP: Bind = ctrl('u', "Ctrl+U");
     pub const SCROLL_HALF_DOWN: Bind = ctrl('d', "Ctrl+D");
-    pub const APPROVE_DIFF: Bind = ctrl('y', "Ctrl+Y");
-    pub const APPROVE_DIFF_ALWAYS: Bind = Bind {
-        code: KeyCode::Char('y'),
-        modifiers: KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
-        label: "Ctrl+Shift+Y",
-    };
-    /// Terminals that report the shifted letter without the SHIFT bit.
-    pub const APPROVE_DIFF_ALWAYS_LEGACY: Bind = Bind {
-        code: KeyCode::Char('Y'),
-        modifiers: KeyModifiers::CONTROL,
-        label: "Ctrl+Shift+Y",
-    };
-    pub const REJECT_DIFF: Bind = ctrl('n', "Ctrl+N");
     pub const DELETE_WORD: Bind = ctrl('w', "Ctrl+W");
     pub const KILL_LINE: Bind = ctrl('k', "Ctrl+K");
     pub const LINE_START: Bind = ctrl('a', "Ctrl+A");
@@ -342,20 +329,6 @@ pub const KEYBINDS: &[Keybind] = &[
         label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
         description: "Scroll half page up / down",
         context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        action_id: Some(super::ActionId::ApproveDiff),
-        label: KeyLabel::Alt(key::APPROVE_DIFF.label, key::REJECT_DIFF.label),
-        description: "Approve / reject pending edit",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        action_id: Some(super::ActionId::ApproveDiffAlways),
-        label: KeyLabel::Single(key::APPROVE_DIFF_ALWAYS.label),
-        description: "Approve pending edit, always",
-        context: KeybindContext::General,
         platform: Platform::All,
     },
     Keybind {

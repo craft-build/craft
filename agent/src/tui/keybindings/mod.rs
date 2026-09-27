@@ -46,9 +46,6 @@ pub enum ActionId {
     OpenEditor,
     ScrollHalfUp,
     ScrollHalfDown,
-    ApproveDiff,
-    ApproveDiffAlways,
-    RejectDiff,
     DeleteWord,
     KillLine,
     LineStart,
@@ -70,9 +67,6 @@ const ALL_ACTION_IDS: &[ActionId] = &[
     ActionId::OpenEditor,
     ActionId::ScrollHalfUp,
     ActionId::ScrollHalfDown,
-    ActionId::ApproveDiff,
-    ActionId::ApproveDiffAlways,
-    ActionId::RejectDiff,
     ActionId::DeleteWord,
     ActionId::KillLine,
     ActionId::LineStart,
@@ -100,9 +94,6 @@ impl ActionId {
             Self::OpenEditor => "open_editor",
             Self::ScrollHalfUp => "scroll_half_up",
             Self::ScrollHalfDown => "scroll_half_down",
-            Self::ApproveDiff => "approve_diff",
-            Self::ApproveDiffAlways => "approve_diff_always",
-            Self::RejectDiff => "reject_diff",
             Self::DeleteWord => "delete_word",
             Self::KillLine => "kill_line",
             Self::LineStart => "line_start",
@@ -130,9 +121,6 @@ impl ActionId {
             Self::OpenEditor => &[key::OPEN_EDITOR],
             Self::ScrollHalfUp => &[key::SCROLL_HALF_UP],
             Self::ScrollHalfDown => &[key::SCROLL_HALF_DOWN],
-            Self::ApproveDiff => &[key::APPROVE_DIFF],
-            Self::ApproveDiffAlways => &[key::APPROVE_DIFF_ALWAYS, key::APPROVE_DIFF_ALWAYS_LEGACY],
-            Self::RejectDiff => &[key::REJECT_DIFF],
             Self::DeleteWord => &[key::DELETE_WORD],
             Self::KillLine => &[key::KILL_LINE],
             Self::LineStart => &[key::LINE_START],
@@ -253,19 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn approve_diff_always_matches_both_terminal_reports() {
-        let resolver = KeybindingResolver::new();
-        let shifted = KeyEvent::new(
-            KeyCode::Char('y'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-        let legacy = KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::CONTROL);
-        assert!(resolver.matches(ActionId::ApproveDiffAlways, normalize_key(shifted)));
-        assert!(resolver.matches(ActionId::ApproveDiffAlways, legacy));
-        assert!(!resolver.matches(ActionId::ApproveDiff, legacy));
-    }
-
-    #[test]
     fn every_action_id_has_default_binds() {
         for id in all_action_ids() {
             assert!(
@@ -291,13 +266,7 @@ mod tests {
         // checked; the paired ones are still dispatchable.
         for id in all_action_ids() {
             let anchored = KEYBINDS.iter().any(|kb| kb.action_id == Some(id));
-            let paired = matches!(
-                id,
-                ActionId::ScrollHalfDown
-                    | ActionId::Quit
-                    | ActionId::ApproveDiff
-                    | ActionId::RejectDiff
-            );
+            let paired = matches!(id, ActionId::ScrollHalfDown | ActionId::Quit);
             assert!(anchored || paired, "action {:?} missing from KEYBINDS", id,);
         }
     }

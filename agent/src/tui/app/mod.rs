@@ -275,7 +275,8 @@ impl App {
         }
         let state = self.images.picker.render_state(data, width)?;
         let state = std::sync::Arc::new(state);
-        self.images.states
+        self.images
+            .states
             .insert(id.to_string(), (width, state.clone()));
         self.images.states_order.push_back(id.to_string());
         // Evict least-recently-used entries beyond the cap.
@@ -411,7 +412,10 @@ impl App {
             // The file picker's walk runs on its own thread: keep coming
             // back so the streaming paths land on screen (and animate the
             // scanning spinner once the list is visible).
-            repaint::Cadence::when(self.overlays.file_picker.walking(), repaint::Cadence::PENDING),
+            repaint::Cadence::when(
+                self.overlays.file_picker.walking(),
+                repaint::Cadence::PENDING,
+            ),
             repaint::Cadence::when(
                 self.overlays.file_picker.walking() && self.overlays.file_picker.visible(),
                 repaint::Cadence::SPINNER,
@@ -479,14 +483,33 @@ impl App {
                 files,
                 commands,
             } => self
-                .overlays.permission_prompt
+                .overlays
+                .permission_prompt
                 .open(id, tool, scopes, files, commands),
             AgentEvent::PermissionResolved { id } => {
                 if self.overlays.permission_prompt.id() == Some(id.as_str()) {
                     self.overlays.permission_prompt.close();
                 }
+                // Deny and cancel paths never produce a completed card, so
+                // the decision itself must retire the "needs approval" badge.
+                if let Some(Message::Tool { diff, .. }) =
+                    self.conversation.messages.iter_mut().find(|m| {
+                        matches!(
+                            m,
+                            Message::Tool {
+                                id: mid,
+                                diff: Some(DiffState::Pending),
+                                ..
+                            } if *mid == id
+                        )
+                    })
+                {
+                    *diff = None;
+                }
             }
-            AgentEvent::QuestionRequest { id, questions } => self.overlays.question_form.open(id, questions),
+            AgentEvent::QuestionRequest { id, questions } => {
+                self.overlays.question_form.open(id, questions)
+            }
             AgentEvent::QuestionResolved { id } => {
                 if self.overlays.question_form.id() == Some(id.as_str()) {
                     self.overlays.question_form.close();
@@ -514,23 +537,6 @@ impl App {
             .filter(|(_, m)| m.is_collapsible_tool() || m.is_pending_diff())
             .map(|(i, _)| i)
             .collect()
-    }
-
-    pub(crate) fn focused_pending_diff(&self) -> Option<usize> {
-        self.conversation.focused.filter(|&i| {
-            self.conversation
-                .messages
-                .get(i)
-                .map(|m| m.is_pending_diff())
-                .unwrap_or(false)
-        })
-    }
-
-    pub(crate) fn last_pending_diff(&self) -> Option<usize> {
-        self.conversation
-            .messages
-            .iter()
-            .rposition(|m| m.is_pending_diff())
     }
 
     pub fn slash_matches(&self) -> Vec<(&'static str, &'static str)> {

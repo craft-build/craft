@@ -222,7 +222,7 @@ async fn run_first_turn(tx: mpsc::UnboundedSender<AgentEvent>) {
         &tx,
         500,
         AgentEvent::AssistantText(
-            "All 6 tests pass. Diff above is ready — approve it (^Y) and I'll open the PR.".into(),
+            "All 6 tests pass. Diff above is ready — approve it in the permission prompt and I'll open the PR.".into(),
         ),
     )
     .await;

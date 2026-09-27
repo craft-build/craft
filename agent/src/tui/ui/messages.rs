@@ -283,8 +283,6 @@ fn diff_badge(diff: Option<DiffState>) -> Option<(&'static str, ratatui::style::
 
     match diff {
         Some(DiffState::Pending) => Some(("[needs approval]", t.warning)),
-        Some(DiffState::Approved) => Some(("[approved]", t.success)),
-        Some(DiffState::Rejected) => Some(("[rejected]", t.danger)),
         None => None,
     }
 }
@@ -662,24 +660,6 @@ fn tool_block(
 
     if !notice_before {
         push_notice(&mut lines);
-    }
-
-    // --- approve / reject actions for pending diffs ---
-    if diff == Some(DiffState::Pending) {
-        let hint_fg = if focused { t.success } else { t.text_tertiary };
-        let rej_fg = if focused { t.danger } else { t.text_tertiary };
-        lines.push(pad_row(
-            vec![
-                Span::styled(indent.clone(), surf),
-                Span::styled("[ y approve ]", Style::default().fg(hint_fg).bg(card_bg)),
-                Span::styled("   ", surf),
-                Span::styled("[ Y always ]", Style::default().fg(hint_fg).bg(card_bg)),
-                Span::styled("   ", surf),
-                Span::styled("[ n reject ]", Style::default().fg(rej_fg).bg(card_bg)),
-            ],
-            width,
-            surf,
-        ));
     }
 
     blank(&mut lines); // bottom padding

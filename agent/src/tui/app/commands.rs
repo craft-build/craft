@@ -286,37 +286,6 @@ impl App {
     pub(crate) fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
         self.run_command(id, tx);
     }
-
-    pub(crate) fn approve(
-        &mut self,
-        idx: usize,
-        tx: &mpsc::UnboundedSender<Command>,
-        always: bool,
-    ) {
-        if let Some(Message::Tool { id, diff, .. }) = self.conversation.messages.get_mut(idx) {
-            *diff = Some(super::DiffState::Approved);
-            let _ = tx.send(Command::Approve {
-                id: id.clone(),
-                always,
-            });
-        }
-        self.conversation.focused = None;
-    }
-
-    pub(crate) fn reject_confirmed(&mut self, tx: &mpsc::UnboundedSender<Command>, always: bool) {
-        if let Modal::ConfirmReject(id) = std::mem::replace(&mut self.overlays.modal, Modal::None) {
-            if let Some(Message::Tool { diff, .. }) = self
-                .conversation
-                .messages
-                .iter_mut()
-                .find(|m| matches!(m, Message::Tool { id: mid, .. } if *mid == id))
-            {
-                *diff = Some(super::DiffState::Rejected);
-            }
-            let _ = tx.send(Command::Reject { id, always });
-        }
-        self.conversation.focused = None;
-    }
 }
 
 #[cfg(test)]
@@ -517,6 +486,9 @@ mod tests {
         app.overlays.usage_scroll = 5;
         app.run_slash("/usage", &mpsc::unbounded_channel().0);
         assert_eq!(app.overlays.usage_scroll, 0);
-        assert!(matches!(&app.overlays.usage_quota, UsageFetchState::Ready(_)));
+        assert!(matches!(
+            &app.overlays.usage_quota,
+            UsageFetchState::Ready(_)
+        ));
     }
 }

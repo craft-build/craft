@@ -6,7 +6,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use super::messages::wrap_text;
 use super::theme;
 use crate::tui::app::App;
 use crate::tui::modals::Modal;
@@ -333,7 +332,8 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
     // Scroll the window so the highlighted row stays visible past the edge.
     let window = n as usize;
     let start = app
-        .overlays.slash_selected
+        .overlays
+        .slash_selected
         .saturating_sub(window.saturating_sub(1))
         .min(items.len().saturating_sub(window));
     let rows: Vec<Vec<Span<'static>>> = items
@@ -347,7 +347,12 @@ pub fn render_slash(f: &mut Frame, app: &App, chat: Rect, bottom: Rect) {
             ]
         })
         .collect();
-    render_rows(f, &rows, app.overlays.slash_selected.saturating_sub(start), area);
+    render_rows(
+        f,
+        &rows,
+        app.overlays.slash_selected.saturating_sub(start),
+        area,
+    );
 }
 
 /// Model picker, opened with ctrl+l / /model / palette.
@@ -1059,88 +1064,6 @@ pub fn render_theme_picker(f: &mut Frame, app: &App, area: Rect) {
             y: inner.y + 2,
             width: inner.width.saturating_sub(2),
             height: n,
-        },
-    );
-}
-
-/// "Reject this diff?" confirmation dialog.
-pub fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
-    let t = theme::current();
-
-    let Modal::ConfirmReject(id) = &app.overlays.modal else {
-        return;
-    };
-    let file = app
-        .conversation
-        .messages
-        .iter()
-        .find_map(|m| match m {
-            crate::tui::app::Message::Tool {
-                id: mid,
-                kind: crate::tui::provider::ToolKind::Edit { path, .. },
-                ..
-            } if mid == id => Some(path.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    dim(f, area);
-    let mut rect = centered(48, 8, area);
-    // Two rows below center.
-    rect.y = (rect.y + 2).min(area.y + area.height.saturating_sub(rect.height));
-    f.render_widget(Clear, rect);
-    let block = boxed(rect);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-
-    let mut y = inner.y + 1;
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "Reject this diff?",
-            Style::default()
-                .fg(t.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        Rect {
-            x: inner.x + 1,
-            y,
-            width: inner.width.saturating_sub(2),
-            height: 1,
-        },
-    );
-    y += 2;
-    let body = format!("This discards Craft's proposed changes to {file}.");
-    let w = inner.width.saturating_sub(2) as usize;
-    for (i, chunk) in wrap_text(&body, w).into_iter().enumerate().take(2) {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                chunk,
-                Style::default().fg(t.text_secondary),
-            ))),
-            Rect {
-                x: inner.x + 1,
-                y: y + i as u16,
-                width: w as u16,
-                height: 1,
-            },
-        );
-    }
-    // actions, right-aligned on the last row
-    let actions = Line::from(vec![
-        Span::styled("[ esc cancel ]", Style::default().fg(t.text_secondary)),
-        Span::raw("  "),
-        Span::styled("[ Y always ]", Style::default().fg(t.danger)),
-        Span::raw("  "),
-        Span::styled("[ y reject ]", Style::default().fg(t.danger)),
-    ]);
-    let aw = actions.width() as u16 + 1;
-    f.render_widget(
-        Paragraph::new(actions),
-        Rect {
-            x: inner.x + inner.width.saturating_sub(aw),
-            y: inner.y + inner.height.saturating_sub(1),
-            width: aw,
-            height: 1,
         },
     );
 }

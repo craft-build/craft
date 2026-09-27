@@ -100,10 +100,14 @@ impl App {
         } else if was_busy
             && !busy
             && !self.plan_mode.plan_ready
-            && self.plan_mode.plan_turn_snapshot.take().is_some_and(|before| {
-                let after = self.plan_content();
-                !after.trim().is_empty() && after != before
-            })
+            && self
+                .plan_mode
+                .plan_turn_snapshot
+                .take()
+                .is_some_and(|before| {
+                    let after = self.plan_content();
+                    !after.trim().is_empty() && after != before
+                })
         {
             self.plan_mode.plan_ready = true;
             self.plan_mode.plan_form.on_plan_ready();
@@ -111,7 +115,8 @@ impl App {
     }
 
     fn plan_content(&self) -> String {
-        self.plan_mode.plan_path
+        self.plan_mode
+            .plan_path
             .as_deref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_default()
@@ -209,7 +214,11 @@ mod tests {
         let state = crate::storage::StateDir::from_path(dir.path().to_path_buf());
         let mut app = App::new();
         app.plan_mode.plan_path = Some(App::allocate_plan_path(Some(&state)));
-        let first = app.plan_mode.plan_path.clone().expect("plan path allocated");
+        let first = app
+            .plan_mode
+            .plan_path
+            .clone()
+            .expect("plan path allocated");
         assert_eq!(
             first.extension().and_then(|e| e.to_str()),
             Some("md"),
@@ -266,7 +275,10 @@ mod tests {
             Status::Running,
         ));
         assert!(!app.plan_mode.plan_ready);
-        assert!(!app.plan_mode.plan_form.is_visible(), "new turn drafts again");
+        assert!(
+            !app.plan_mode.plan_form.is_visible(),
+            "new turn drafts again"
+        );
     }
 
     /// An unrelated Plan-mode turn that leaves the plan untouched (or
@@ -347,7 +359,10 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         app.handle_key(ctrl('t'), &tx);
-        assert!(app.plan_mode.plan_form.is_visible(), "Ctrl-T shows the form");
+        assert!(
+            app.plan_mode.plan_form.is_visible(),
+            "Ctrl-T shows the form"
+        );
         app.handle_key(ctrl('t'), &tx);
         assert!(!app.plan_mode.plan_form.is_visible(), "Ctrl-T dismisses it");
         // Ctrl-O hands the plan path to the run loop.

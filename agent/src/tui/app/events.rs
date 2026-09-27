@@ -289,36 +289,6 @@ impl App {
             self.scroll_by((self.view.view_height as i32 / 2).max(1));
             return true;
         }
-        // "Always" first: its chord is more specific (Ctrl+Shift+Y) than the
-        // plain approve, and both could match after a user rebind.
-        if m(ActionId::ApproveDiffAlways) {
-            if let Some(i) = self
-                .focused_pending_diff()
-                .or_else(|| self.last_pending_diff())
-            {
-                self.approve(i, tx, true);
-            }
-            return true;
-        }
-        if m(ActionId::ApproveDiff) {
-            if let Some(i) = self
-                .focused_pending_diff()
-                .or_else(|| self.last_pending_diff())
-            {
-                self.approve(i, tx, false);
-            }
-            return true;
-        }
-        if m(ActionId::RejectDiff) {
-            if let Some(i) = self
-                .focused_pending_diff()
-                .or_else(|| self.last_pending_diff())
-                && let Message::Tool { id, .. } = &self.conversation.messages[i]
-            {
-                self.overlays.modal = Modal::ConfirmReject(id.clone());
-            }
-            return true;
-        }
         false
     }
 
