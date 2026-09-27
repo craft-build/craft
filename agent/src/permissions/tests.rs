@@ -34,6 +34,30 @@ fn needs_prompt(check: &PermissionCheck) -> bool {
 }
 
 #[test]
+fn yolo_allows_everything_including_explicit_denies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = mgr_with(tmp.path(), vec![deny_rule("write", None)]);
+    let tool = ToolKey::native("write");
+    assert_eq!(mgr.check(&tool, &["/tmp/x".into()]), PermissionCheck::Denied);
+    mgr.set_yolo(true);
+    assert!(mgr.is_yolo());
+    assert_eq!(
+        mgr.check(&tool, &["/tmp/x".into()]),
+        PermissionCheck::Allowed
+    );
+    mgr.set_yolo(false);
+    assert_eq!(mgr.check(&tool, &["/tmp/x".into()]), PermissionCheck::Denied);
+}
+
+#[test]
+fn set_auto_review_starts_the_session_with_review_on() {
+    let mgr = mgr_with(std::env::temp_dir().as_ref(), Vec::new());
+    assert!(!mgr.is_auto_review());
+    mgr.set_auto_review(true);
+    assert!(mgr.is_auto_review());
+}
+
+#[test]
 fn auto_review_toggles_and_forks() {
     let mgr = mgr_with(std::env::temp_dir().as_ref(), Vec::new());
     assert!(!mgr.is_auto_review());

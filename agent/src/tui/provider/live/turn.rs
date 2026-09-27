@@ -537,7 +537,11 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
         )),
         temperature: config.agent.temperature,
         max_tokens: config.agent.max_tokens,
-        max_turns: run::RunParams::UNBOUNDED,
+        max_turns: config
+            .agent
+            .max_turns
+            .map(|n| n as usize)
+            .unwrap_or(run::RunParams::UNBOUNDED),
         recency: None,
         compression: config.compression.clone(),
         max_continuation_turns: run::RunParams::DEFAULT_MAX_CONTINUATION_TURNS,

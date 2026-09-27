@@ -177,7 +177,7 @@ pub struct PermissionsConfig {
     pub rules: Vec<PermissionRule>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum PermissionCheck {
     Allowed,
     Denied,
@@ -300,6 +300,9 @@ pub struct PermissionManager {
     tool_defaults: HashMap<ToolKey, DefaultEffect>,
     cwd: PathBuf,
     auto_review: AtomicBool,
+    /// G.1 `--yolo` (`--dangerously-skip-permissions`): when set, every
+    /// check short-circuits to allowed before rules are consulted.
+    yolo: AtomicBool,
 }
 
 impl PermissionManager {
@@ -341,6 +344,7 @@ impl PermissionManager {
             tool_defaults,
             cwd,
             auto_review: AtomicBool::new(false),
+            yolo: AtomicBool::new(false),
         }
     }
 
@@ -361,7 +365,25 @@ impl PermissionManager {
             tool_defaults: self.tool_defaults.clone(),
             cwd: self.cwd.clone(),
             auto_review: AtomicBool::new(self.is_auto_review()),
+            yolo: AtomicBool::new(self.is_yolo()),
         }
+    }
+
+    /// G.1 `--yolo`: skip every permission prompt and allow every check.
+    /// Explicit deny rules in `permissions.toml` are also bypassed, matching
+    /// the reference's "allow everything" semantics.
+    pub fn set_yolo(&self, yes: bool) {
+        self.yolo.store(yes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_yolo(&self) -> bool {
+        self.yolo.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Start the session with auto-review on (`craft -A`, G.1).
+    pub fn set_auto_review(&self, yes: bool) {
+        self.auto_review
+            .store(yes, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn session_rules(&self) -> std::sync::MutexGuard<'_, Vec<PermissionRule>> {
@@ -375,6 +397,9 @@ impl PermissionManager {
     /// how it was written: denies first, then explicit allows, then the
     /// defaults. Moving one moves the rules.
     fn check_inner(&self, tool: &ToolKey, scopes: &[&str], force_prompt: bool) -> PermissionCheck {
+        if self.is_yolo() {
+            return PermissionCheck::Allowed;
+        }
         let session = self.session_rules();
 
         // Any matching deny wins, however broadly it was aimed. Only allows

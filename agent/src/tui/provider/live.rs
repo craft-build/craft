@@ -350,6 +350,9 @@ pub struct CraftProvider {
     branch: String,
     /// F.3 resume-latest-by-cwd at startup (`craft --continue`).
     resume_latest: bool,
+    /// Resume this specific session id at startup (`craft -s/--session`,
+    /// G.1); takes precedence over `resume_latest`.
+    resume_session: Option<String>,
 }
 
 impl CraftProvider {
@@ -482,6 +485,7 @@ impl CraftProvider {
             cwd_label: cards::display_path(cwd),
             branch: cards::git_branch(cwd).await,
             resume_latest: false,
+            resume_session: None,
         })
     }
 
@@ -489,6 +493,59 @@ impl CraftProvider {
     /// starts (F.3 resume-latest-by-cwd, `craft --continue`).
     pub fn with_resume_latest(mut self, yes: bool) -> Self {
         self.resume_latest = yes;
+        self
+    }
+
+    /// Resume a specific session id at startup (`craft -s/--session`, G.1).
+    /// Takes precedence over [`Self::with_resume_latest`].
+    pub fn with_session(mut self, id: Option<String>) -> Self {
+        self.resume_session = id;
+        self
+    }
+
+    /// Override the startup model selection with a `provider/model` spec
+    /// (`craft -m`, G.1). Unknown specs fail fast instead of silently
+    /// falling back to the tier default.
+    pub fn with_model_spec(mut self, spec: &str) -> crate::error::Result<Self> {
+        use snafu::ensure;
+        let (provider, model) = spec.split_once('/').ok_or_else(|| {
+            crate::error::InvalidSnafu {
+                reason: format!("--model expects provider/model-id, got {spec:?}"),
+            }
+            .build()
+        })?;
+        ensure!(
+            self.catalogs.contains_key(provider),
+            crate::error::InvalidSnafu {
+                reason: format!(
+                    "unknown provider {provider:?} in --model {spec:?} \
+                     (configured: {})",
+                    self.catalogs.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
+        );
+        let entry = self.catalogs[provider]
+            .iter()
+            .find(|m| m.id == model)
+            .ok_or_else(|| {
+                crate::error::InvalidSnafu {
+                    reason: format!("provider {provider:?} has no model {model:?}"),
+                }
+                .build()
+            })?;
+        self.selection = Selection {
+            provider: provider.to_string(),
+            model: entry.id.clone(),
+            context_length: entry.context_length,
+        };
+        Ok(self)
+    }
+
+    /// Apply G.1 permission flags before the session's first turn: `--yolo`
+    /// bypasses every check, `-A/--auto-review` starts auto-review on.
+    pub fn with_permission_flags(self, yolo: bool, auto_review: bool) -> Self {
+        self.permissions.set_yolo(yolo);
+        self.permissions.set_auto_review(auto_review);
         self
     }
 
@@ -557,7 +614,18 @@ impl CraftProvider {
         let _ = evt_tx.send(AgentEvent::StatusChanged(Status::Done));
         let _ = evt_tx.send(AgentEvent::TokenUsage("0.0K".into()));
 
-        if self.resume_latest {
+        if let Some(id) = &self.resume_session {
+            load_session(
+                &ctx.state,
+                &ctx.files,
+                id,
+                ctx.state_dir.as_ref(),
+                &ctx.cwd,
+                &LoopCtx::model_spec(&selection),
+                &ctx.evt_tx,
+            )
+            .await;
+        } else if self.resume_latest {
             resume_latest(
                 &ctx.state,
                 &ctx.files,

@@ -1,48 +1,25 @@
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{Shell, generate};
+use clap::{CommandFactory, Parser};
+use clap_complete::generate;
 use craft::{
     acp,
+    cli::{Cli, Commands, run_print},
     config::Config,
     error::{AcpConnectionSnafu, Error, TuiSnafu},
     tui::{self, provider::live::CraftProvider},
 };
 use snafu::ResultExt;
 
-#[derive(Parser)]
-#[command(
-    version,
-    about = "Craft coding agent: launches the interactive TUI by default",
-    long_about = "Craft coding agent. With no subcommand, launches the interactive terminal UI \
-                  backed by the configured providers in ~/.config/craft/agent.toml."
-)]
-struct Cli {
-    /// Resume this directory's most recent session instead of starting fresh
-    /// (F.3 resume-latest-by-cwd).
-    #[arg(short = 'c', long = "continue")]
-    continue_session: bool,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Serve the agent loop over the ACP protocol on stdin/stdout (for editors
-    /// and other ACP clients).
-    Acp,
-    /// Emit shell completion scripts for the given shell to stdout.
-    Completions { shell: Shell },
-}
-
 #[tokio::main]
 #[snafu::report]
 async fn main() -> Result<(), Error> {
     let cli = Cli::parse();
-    match cli.command {
+    cli.warn_ignored_flags();
+    cli.validate()?;
+    match &cli.command {
         Some(Commands::Completions { shell }) => {
             let mut cmd = Cli::command();
             let bin = cmd.get_name().to_owned();
-            generate(shell, &mut cmd, bin, &mut std::io::stdout());
+            generate(*shell, &mut cmd, bin, &mut std::io::stdout());
             Ok(())
         }
         Some(Commands::Acp) => {
@@ -53,13 +30,27 @@ async fn main() -> Result<(), Error> {
             acp::serve(config).await.context(AcpConnectionSnafu)
         }
         None => {
-            let config = Config::load().await?;
+            let mut config = Config::load().await?;
+            // G.1 run overrides land in the config the TUI builds its run
+            // parameters from.
+            config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
+            if let Some(max_turns) = cli.max_turns {
+                config.agent.max_turns = Some(max_turns);
+            }
+            if cli.print {
+                return run_print(&cli, config).await;
+            }
             let cwd = std::env::current_dir().context(TuiSnafu {
                 context: "resolving the current directory",
             })?;
-            let provider = CraftProvider::new(config, cwd)
-                .await?
-                .with_resume_latest(cli.continue_session);
+            let mut provider = CraftProvider::new(config, cwd).await?;
+            if let Some(spec) = &cli.model {
+                provider = provider.with_model_spec(spec)?;
+            }
+            let provider = provider
+                .with_resume_latest(cli.continue_session)
+                .with_session(cli.session.clone())
+                .with_permission_flags(cli.yolo, cli.auto_review);
             tui::run(provider).await.context(TuiSnafu {
                 context: "running the terminal UI",
             })

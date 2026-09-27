@@ -172,6 +172,10 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     /// Request-level output cap, not a model catalog metadata override.
     pub max_tokens: Option<u64>,
+    /// Bound on model calls per run. `None` keeps each surface's default
+    /// (unbounded in the TUI, [`crate::run::RunParams`] defaults headless);
+    /// set by `--max-turns` (G.1).
+    pub max_turns: Option<u32>,
 }
 
 impl AgentConfig {
@@ -179,6 +183,12 @@ impl AgentConfig {
         if self.max_tokens == Some(0) {
             return InvalidSnafu {
                 reason: "agent.max_tokens must be positive",
+            }
+            .fail();
+        }
+        if self.max_turns == Some(0) {
+            return InvalidSnafu {
+                reason: "agent.max_turns must be positive",
             }
             .fail();
         }
@@ -504,13 +514,15 @@ mod tests {
         assert_eq!(config.agent.max_tokens, None);
         let config = Config::parse("[agent]\nmax_tokens = 1024").unwrap();
         assert_eq!(config.agent.max_tokens, Some(1024));
+        let config = Config::parse("[agent]\nmax_turns = 4").unwrap();
+        assert_eq!(config.agent.max_turns, Some(4));
         assert_eq!(config.agent.preamble, AgentConfig::default().preamble);
     }
 
     #[test]
     fn rejects_invalid_agent_settings() {
         for field in [
-            "max_turns = 4",
+            "max_turns = 0",
             "max_tokens = 0",
             "temperature = -0.1",
             "temperature = nan",
