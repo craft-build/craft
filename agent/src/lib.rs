@@ -28,6 +28,7 @@ pub mod setup;
 pub mod snapshot;
 pub mod storage;
 pub mod subcmd;
+pub mod term;
 pub mod tools;
 pub mod tui;
 pub mod update;

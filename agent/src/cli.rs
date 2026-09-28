@@ -5,7 +5,7 @@
 
 use std::io::IsTerminal;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::error::{InvalidSnafu, Result};
 use crate::id::SessionRef;
@@ -236,6 +236,48 @@ pub enum Commands {
         #[arg(long, requires = "tools")]
         names: bool,
     },
+    /// Shell integration: init scripts, command logging, `@craft` queries.
+    Term {
+        #[command(subcommand)]
+        action: TermAction,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum TermAction {
+    /// Print a shell init script that logs every command and defines `@craft`
+    Init {
+        /// Target shell
+        shell: ShellKind,
+        /// Also install a command_not_found handler that asks craft on miss
+        #[arg(long)]
+        with_not_found: bool,
+    },
+    /// Append a shell command to the current directory's command history
+    Log {
+        /// The command that was run
+        command: String,
+    },
+    /// Run a headless agent query with recent shell history injected as context
+    Run {
+        /// The query for craft
+        query: Vec<String>,
+        /// Model spec (provider/model-id)
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+        /// Output format for the result
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output_format: OutputFormat,
+    },
+    /// Show the active session id and recent logged commands for this directory
+    Info,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ShellKind {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 impl Cli {
@@ -364,6 +406,58 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("craft").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn term_actions_parse_with_reference_names() {
+        let cli = parse(&["term", "init", "zsh", "--with-not-found"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Some(Commands::Term {
+                action: TermAction::Init {
+                    shell: ShellKind::Zsh,
+                    with_not_found: true
+                }
+            })
+        ));
+        let cli = parse(&["term", "log", "cargo build"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Some(Commands::Term {
+                action: TermAction::Log { command }
+            }) if command == "cargo build"
+        ));
+        let cli = parse(&["term", "run", "-m", "anthropic/m", "fix", "it"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Some(Commands::Term {
+                action: TermAction::Run {
+                    query,
+                    model: Some(spec),
+                    output_format: OutputFormat::Text
+                }
+            }) if query == &["fix", "it"] && spec == "anthropic/m"
+        ));
+        let cli = parse(&["term", "info"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Some(Commands::Term {
+                action: TermAction::Info
+            })
+        ));
+    }
+
+    #[test]
+    fn inject_context_wraps_context_block() {
+        let out = inject_context("do thing", &["hist1".into(), "hist2".into()]);
+        assert!(out.starts_with("<context>\n"));
+        assert!(out.contains("hist1\nhist2\n"));
+        assert!(out.ends_with("</context>\n\ndo thing"));
+    }
+
+    #[test]
+    fn inject_context_passthrough_when_empty() {
+        assert_eq!(inject_context("do thing", &[]), "do thing");
     }
 
     #[test]
@@ -678,14 +772,65 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         }
     };
 
+    config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
+    run_headless_query(
+        config,
+        HeadlessQuery {
+            prompt,
+            context: Vec::new(),
+            images: cli.images.clone(),
+            model: cli.model.clone(),
+            output_format: cli.output_format.clone(),
+            verbose: cli.verbose,
+            mode: cli.mode.clone(),
+            session_id: cli.resume_session()?,
+        },
+    )
+    .await
+}
+
+/// Extra environment context (e.g. shell history) injected before the prompt.
+fn inject_context(prompt: &str, context: &[String]) -> String {
+    if context.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::from("<context>\n");
+    for block in context {
+        out.push_str(block);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str("</context>\n\n");
+    out.push_str(prompt);
+    out
+}
+
+/// One headless agent query in print mode. Both `--print` and
+/// `craft term run` funnel through here; `config.agent.preamble` must
+/// already be the effective preamble.
+pub struct HeadlessQuery {
+    pub prompt: String,
+    /// Context blocks wrapped in `<context>` before the prompt.
+    pub context: Vec<String>,
+    pub images: Vec<std::path::PathBuf>,
+    pub model: Option<String>,
+    pub output_format: OutputFormat,
+    pub verbose: bool,
+    pub mode: CliMode,
+    pub session_id: Option<SessionRef>,
+}
+
+pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery) -> Result<()> {
+    let prompt = inject_context(&q.prompt, &q.context);
     // Fails fast: silently dropping an image the caller explicitly attached
     // would be worse than erroring.
-    let images = crate::print::load_images(&cli.images)?;
+    let images = crate::print::load_images(&q.images)?;
 
     // Model resolution: `-m provider/model-id`, else the first configured
     // completion provider's first catalog entry.
     let (provider_name, provider_config) =
-        match &cli.model {
+        match &q.model {
             Some(spec) => {
                 let (provider, _model) = spec.split_once('/').ok_or_else(|| {
                     InvalidSnafu {
@@ -717,7 +862,7 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
                     .build()
                 })?,
         };
-    let model_id = match &cli.model {
+    let model_id = match &q.model {
         Some(spec) => spec.split_once('/').expect("validated above").1.to_string(),
         None => {
             let provider = crate::providers::Provider::from_config(&provider_config)?;
@@ -755,7 +900,7 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         .with_loaded_instructions(instructions.loaded.clone());
     let state_dir = crate::storage::StateDir::resolve().ok();
 
-    let mode = match cli.mode {
+    let mode = match q.mode {
         CliMode::Plan => crate::run::AgentMode::Plan(
             state_dir
                 .as_ref()
@@ -765,7 +910,6 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         _ => crate::run::AgentMode::Build,
     };
 
-    config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
     let params = crate::run::RunParams {
         fast: false,
         preamble: Some(crate::prompt::build_system_prompt(
@@ -808,13 +952,13 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
         images,
         initial_wd: cwd,
         state_dir,
-        session_id: cli.resume_session()?,
+        session_id: q.session_id,
     });
 
     // G.3 print mode: raw text or stream-json JSONL output. Unlike the
     // reference (whose print mode exits 0 on agent errors), a failed run is
     // a failure exit.
-    match crate::print::emit(handle, &cli.output_format, cli.verbose, &model_label).await? {
+    match crate::print::emit(handle, &q.output_format, q.verbose, &model_label).await? {
         Some(message) => Err(crate::error::InvalidSnafu { reason: message }.build()),
         None => Ok(()),
     }

@@ -46,6 +46,7 @@ async fn main() -> Result<(), Error> {
             tools,
             names,
         }) => craft::subcmd::prompt(variant.clone(), *plan, *tools, *names).await,
+        Some(Commands::Term { action }) => craft::term::run(action.clone()).await,
         None => {
             let mut config = Config::load().await?;
             // G.1 run overrides land in the config the TUI builds its run
