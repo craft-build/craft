@@ -26,6 +26,7 @@ pub mod run;
 pub mod sandbox;
 pub mod snapshot;
 pub mod storage;
+pub mod subcmd;
 pub mod tools;
 pub mod tui;
 pub mod usage;

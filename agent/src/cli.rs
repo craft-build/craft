@@ -25,6 +25,14 @@ pub enum InputFormat {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum PromptVariant {
+    #[default]
+    System,
+    Research,
+    General,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum CliMode {
     #[default]
     Build,
@@ -187,6 +195,35 @@ pub enum Commands {
     Acp,
     /// Emit shell completion scripts for the given shell to stdout.
     Completions { shell: clap_complete::Shell },
+    /// List every model available from the configured providers.
+    Models,
+    /// Show cost and usage stats from the persistent ledger.
+    Stats {
+        /// Show per-session breakdown instead of the default per-model view.
+        #[arg(long)]
+        sessions: bool,
+    },
+    /// Diagnose provider configuration and self-heal to a working provider.
+    Doctor {
+        /// Export a JSON diagnostics report instead of running self-heal.
+        #[arg(long)]
+        export: bool,
+    },
+    /// Show the rendered system prompt or tool definitions.
+    Prompt {
+        /// Prompt variant: system (default), research, general.
+        #[arg(value_enum, default_value_t = PromptVariant::System)]
+        variant: PromptVariant,
+        /// Append the plan mode reminder to the system prompt.
+        #[arg(long)]
+        plan: bool,
+        /// Show tool definitions (JSON) instead of prompt text.
+        #[arg(long)]
+        tools: bool,
+        /// With --tools: show only tool names, one per line.
+        #[arg(long, requires = "tools")]
+        names: bool,
+    },
 }
 
 impl Cli {
@@ -478,6 +515,79 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::Completions { .. })));
         let cli = parse(&["acp"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Acp)));
+    }
+
+    #[test]
+    fn g2_subcommands_parse_with_the_reference_flags() {
+        assert!(matches!(
+            cli(parse(&["models"]).unwrap()).command,
+            Some(Commands::Models)
+        ));
+        let cli = parse(&["stats", "--sessions"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Stats { sessions: true })
+        ));
+        let cli = parse(&["stats"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Stats { sessions: false })
+        ));
+        let cli = parse(&["doctor", "--export"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Doctor { export: true })
+        ));
+    }
+
+    fn cli(cli: Cli) -> Cli {
+        cli
+    }
+
+    #[test]
+    fn prompt_subcommand_parses_variants_and_flags() {
+        let cli = parse(&["prompt"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                variant: PromptVariant::System,
+                plan: false,
+                tools: false,
+                names: false,
+            })
+        ));
+        let cli = parse(&["prompt", "research"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                variant: PromptVariant::Research,
+                ..
+            })
+        ));
+        let cli = parse(&["prompt", "general", "--plan"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                variant: PromptVariant::General,
+                plan: true,
+                ..
+            })
+        ));
+        let cli = parse(&["prompt", "--tools", "--names"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Prompt {
+                tools: true,
+                names: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn prompt_names_flag_requires_tools() {
+        assert!(parse(&["prompt", "--names"]).is_err());
+        assert!(parse(&["prompt", "--tools", "--names"]).is_ok());
     }
 }
 

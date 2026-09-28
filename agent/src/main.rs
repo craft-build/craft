@@ -29,6 +29,21 @@ async fn main() -> Result<(), Error> {
             let config = Config::load().await?;
             acp::serve(config).await.context(AcpConnectionSnafu)
         }
+        Some(Commands::Models) => {
+            let config = Config::load().await?;
+            craft::subcmd::models(config).await
+        }
+        Some(Commands::Stats { sessions }) => craft::subcmd::stats(*sessions),
+        Some(Commands::Doctor { export }) => {
+            let config = Config::load().await?;
+            craft::subcmd::doctor(config, *export).await
+        }
+        Some(Commands::Prompt {
+            variant,
+            plan,
+            tools,
+            names,
+        }) => craft::subcmd::prompt(variant.clone(), *plan, *tools, *names).await,
         None => {
             let mut config = Config::load().await?;
             // G.1 run overrides land in the config the TUI builds its run
