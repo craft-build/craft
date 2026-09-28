@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::history::{ToolResult, ToolResultContent};
 
-const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob", "view_image"];
+const READ_ONLY_TOOLS: &[&str] = &["read", "grep", "glob", "view_image", "sessions"];
 const WRITE_TOOLS: &[&str] = &[
     "write",
     "edit",

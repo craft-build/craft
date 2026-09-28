@@ -22,7 +22,8 @@ mod multiedit;
 mod question;
 mod read;
 mod retrieve;
-mod skill;
+mod sessions;
+pub(crate) mod skill;
 pub(crate) mod ssrf;
 mod todo_write;
 mod view_image;
@@ -57,6 +58,7 @@ pub use question::{
 };
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
+pub use sessions::{Sessions, SessionsArgs, SessionsOutput};
 pub use skill::{Skill, SkillArgs, SkillOutput};
 pub(crate) use todo_write::flatten_todos;
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
@@ -91,6 +93,8 @@ pub struct Workspace {
     compression_store: crate::compression::store::SharedCompressionStore,
     snapshots: crate::snapshot::SnapshotManager,
     bash_jobs: bash::BashJobs,
+    /// Resolved once so the `sessions` tool lists without re-walking XDG.
+    state_dir: Option<crate::storage::StateDir>,
     /// Host seam for the `question` tool (A.5): the TUI installs the
     /// interactive asker per turn; the default dismisses headlessly.
     questions: Arc<dyn question::AskQuestions>,
@@ -117,6 +121,7 @@ impl Workspace {
             compression_store: crate::compression::store::shared_store(),
             snapshots: crate::snapshot::SnapshotManager::new(root.clone()),
             bash_jobs: Default::default(),
+            state_dir: crate::storage::StateDir::resolve().ok(),
             questions: Arc::new(question::DismissAsk),
             plan_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
         })
@@ -210,6 +215,10 @@ impl Workspace {
             dynamic(TodoWrite(self.clone())),
             dynamic(Retrieve(self.compression_store.clone())),
             dynamic(Skill::new(self.root().to_path_buf())),
+            dynamic(Sessions::new(
+                self.root().display().to_string(),
+                self.state_dir.clone(),
+            )),
             dynamic(Webfetch),
             dynamic(Websearch),
             dynamic(ViewImage(self.clone())),
