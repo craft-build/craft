@@ -54,7 +54,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // and the composer block below it keep their positions. The plan form
     // (F.3, Ctrl-T) stacks above it the same way.
     let prompt_h = if app.overlays.permission_prompt.is_open() {
-        app.overlays.permission_prompt
+        app.overlays
+            .permission_prompt
             .height(chat.width)
             .min(bottom.y.saturating_sub(msg_area.y))
     } else {
@@ -63,14 +64,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // The question form (A.5) stacks above the permission prompt the same
     // way; at most one is open at a time in practice.
     let question_h = if app.overlays.question_form.is_open() {
-        app.overlays.question_form
+        app.overlays
+            .question_form
             .height(chat.width)
             .min(bottom.y.saturating_sub(msg_area.y + prompt_h))
     } else {
         0
     };
     let form_h = if app.plan_mode.plan_form.is_visible() {
-        app.plan_mode.plan_form
+        app.plan_mode
+            .plan_form
             .height()
             .min(bottom.y.saturating_sub(msg_area.y + prompt_h + question_h))
     } else {
@@ -603,7 +606,8 @@ mod tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("not available"));
 
-        app.overlays.usage_quota = crate::tui::provider::UsageFetchState::Error("rate limited".into());
+        app.overlays.usage_quota =
+            crate::tui::provider::UsageFetchState::Error("rate limited".into());
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert!(buffer_text(&terminal).contains("rate limited"));
     }

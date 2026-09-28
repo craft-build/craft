@@ -625,7 +625,11 @@ mod tests {
     /// applied — the async matcher never lands synchronously.
     fn converge_matches(picker: &mut FilePicker) {
         let deadline = Instant::now() + CONVERGE_TIMEOUT;
-        while picker.session.as_ref().is_some_and(|s| s.match_rx.is_some()) {
+        while picker
+            .session
+            .as_ref()
+            .is_some_and(|s| s.match_rx.is_some())
+        {
             let _ = picker.tick();
             assert!(Instant::now() < deadline, "match job never answered");
             std::thread::sleep(std::time::Duration::from_millis(1));

@@ -126,8 +126,12 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.overlays.help_scroll = self.overlays.help_scroll.saturating_add(1)
             }
-            KeyCode::PageUp => self.overlays.help_scroll = self.overlays.help_scroll.saturating_sub(10),
-            KeyCode::PageDown => self.overlays.help_scroll = self.overlays.help_scroll.saturating_add(10),
+            KeyCode::PageUp => {
+                self.overlays.help_scroll = self.overlays.help_scroll.saturating_sub(10)
+            }
+            KeyCode::PageDown => {
+                self.overlays.help_scroll = self.overlays.help_scroll.saturating_add(10)
+            }
             KeyCode::Home => self.overlays.help_scroll = 0,
             KeyCode::End => self.overlays.help_scroll = self.overlays.help_scroll_max,
             _ => self.overlays.modal = Modal::None,
@@ -183,7 +187,8 @@ impl App {
     }
 
     fn handle_sessions_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
-        let Modal::Sessions { entries, selected } = std::mem::replace(&mut self.overlays.modal, Modal::None)
+        let Modal::Sessions { entries, selected } =
+            std::mem::replace(&mut self.overlays.modal, Modal::None)
         else {
             return;
         };
@@ -232,13 +237,24 @@ impl App {
             KeyCode::Char('r') | KeyCode::Char('R') if ctrl && allow_refresh => {
                 let _ = tx.send(Command::FetchUsage);
             }
-            KeyCode::Up => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_sub(1),
-            KeyCode::Down => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_add(1),
-            KeyCode::PageUp => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_sub(10),
-            KeyCode::PageDown => self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_add(10),
+            KeyCode::Up => {
+                self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_sub(1)
+            }
+            KeyCode::Down => {
+                self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_add(1)
+            }
+            KeyCode::PageUp => {
+                self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_sub(10)
+            }
+            KeyCode::PageDown => {
+                self.overlays.usage_scroll = self.overlays.usage_scroll.saturating_add(10)
+            }
             _ => {}
         }
-        self.overlays.usage_scroll = self.overlays.usage_scroll.min(self.overlays.usage_scroll_max);
+        self.overlays.usage_scroll = self
+            .overlays
+            .usage_scroll
+            .min(self.overlays.usage_scroll_max);
     }
 
     fn handle_palette_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<Command>) {
