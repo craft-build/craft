@@ -122,12 +122,18 @@ async fn drive<P: Provider>(
     });
 
     let mut app = App::new();
+    // Custom slash commands (J.5): discovered from the working directory's
+    // project ancestors and the user's global config dirs.
+    if let Ok(cwd) = std::env::current_dir() {
+        app.custom_commands = crate::command::discover_commands(&cwd);
+    }
     // Data-driven keybindings (F.1): apply the user's config overlay on top
     // of the compile-time defaults; surface the first problem as a flash.
     if let Ok(config) = crate::config::Config::load().await {
         let entries: Vec<(String, Vec<String>)> = config.keybindings.into_iter().collect();
         let mut warnings = Vec::new();
-        app.overlays.keybinds = keybindings::KeybindingResolver::from_overlay(&entries, &mut warnings);
+        app.overlays.keybinds =
+            keybindings::KeybindingResolver::from_overlay(&entries, &mut warnings);
         if let Some(w) = warnings.first() {
             app.flash(w.clone());
         }

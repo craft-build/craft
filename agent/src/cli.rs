@@ -241,6 +241,32 @@ pub enum Commands {
         #[command(subcommand)]
         action: TermAction,
     },
+    /// Browse and run parameterized recipes (J.5).
+    Recipe {
+        #[command(subcommand)]
+        action: RecipeAction,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum RecipeAction {
+    /// List discovered recipes as `name<TAB>description`.
+    List,
+    /// Run a recipe: resolve parameters, render its template, and run the
+    /// result as a headless query.
+    Run {
+        /// Recipe name (file stem or the recipe's own `name` field).
+        name: String,
+        /// Recipe parameter override, `key=value` (repeatable).
+        #[arg(short = 'p', long = "param")]
+        param: Vec<String>,
+        /// Model spec (provider/model-id); the recipe's `model` field wins.
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+        /// Output format for the result.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output_format: OutputFormat,
+    },
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -445,6 +471,40 @@ mod tests {
                 action: TermAction::Info
             })
         ));
+    }
+
+    #[test]
+    fn recipe_actions_parse_with_reference_names() {
+        let cli = parse(&["recipe", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Recipe {
+                action: RecipeAction::List
+            })
+        ));
+        let cli = parse(&[
+            "recipe",
+            "run",
+            "audit",
+            "--param",
+            "focus=security",
+            "-p",
+            "depth=3",
+            "-m",
+            "anthropic/m",
+        ])
+        .unwrap();
+        let Commands::Recipe {
+            action: RecipeAction::Run {
+                name, param, model, ..
+            },
+        } = cli.command.unwrap()
+        else {
+            panic!("expected recipe run");
+        };
+        assert_eq!(name, "audit");
+        assert_eq!(param, vec!["focus=security", "depth=3"]);
+        assert_eq!(model.as_deref(), Some("anthropic/m"));
     }
 
     #[test]

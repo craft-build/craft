@@ -31,6 +31,80 @@ pub fn builtin(name: &str) -> Option<&'static str> {
         .map(|(_, content)| *content)
 }
 
+/// A discovered flat file (e.g. a recipe), named after its file stem.
+/// Closer scopes shadow farther ones by name.
+#[derive(Debug, Clone)]
+pub struct DiscoveredFile {
+    pub name: String,
+    pub path: PathBuf,
+    pub scope: Scope,
+}
+
+/// Flat-file discovery within `<prefix>/<kind>` directories (e.g.
+/// `recipes`), filtered by extension. Skills are directory-based and use
+/// [`Discovery::discover_skills`] instead.
+impl Discovery {
+    /// Discover files named after their stems under each project
+    /// ancestor's `<prefix>/<kind>` and the global config dirs, with
+    /// closer scopes shadowing farther ones by name.
+    pub fn discover_files(&self, kind: &str, extensions: &[&str]) -> Vec<DiscoveredFile> {
+        let mut ordered = Vec::new();
+        for (depth, ancestor) in self.cwd.ancestors().enumerate() {
+            for prefix in PROJECT_PREFIXES {
+                let dir = ancestor.join(prefix).join(kind);
+                collect_files(&dir, Scope::Project(depth), extensions, &mut ordered);
+            }
+        }
+        for dir in self.global_dirs_for(kind) {
+            collect_files(&dir, Scope::Global, extensions, &mut ordered);
+        }
+        dedupe_files_by_name(ordered)
+    }
+
+    fn global_dirs_for(&self, kind: &str) -> Vec<PathBuf> {
+        crate::paths::config_search_dirs_from(self.home.as_deref(), self.xdg_config.as_deref())
+            .into_iter()
+            .map(|dir| dir.join(kind))
+            .collect()
+    }
+}
+
+fn collect_files(dir: &Path, scope: Scope, extensions: &[&str], out: &mut Vec<DiscoveredFile>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !extensions.contains(&ext) {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !fs::symlink_metadata(&path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        out.push(DiscoveredFile {
+            name: name.to_owned(),
+            path,
+            scope,
+        });
+    }
+}
+
+fn dedupe_files_by_name(mut files: Vec<DiscoveredFile>) -> Vec<DiscoveredFile> {
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|f| seen.insert(f.name.clone()));
+    files
+}
+
 /// Where a discovered skill lives, ordered by proximity. Closer scopes
 /// shadow farther ones when two skills share the same name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,5 +489,60 @@ mod tests {
         );
         assert_eq!(frontmatter_field(content, "name"), Some("x"));
         assert_eq!(frontmatter_field("no frontmatter", "description"), None);
+    }
+
+    #[test]
+    fn discover_files_closest_scope_first() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("proj");
+        let nested = project.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        write(&project.join(".craft/recipes/audit.yaml"), "project: 1");
+        write(&tmp.path().join(".craft/recipes/audit.yaml"), "ancestor: 1");
+
+        let found =
+            Discovery::new(nested, None, None).discover_files("recipes", &["yaml", "yml", "json"]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "audit");
+        assert!(found[0].path.ends_with("proj/.craft/recipes/audit.yaml"));
+        assert_eq!(found[0].scope, Scope::Project(1));
+    }
+
+    #[test]
+    fn discover_files_project_shadows_global() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let global = tmp.path().join("home/.config/craft/recipes");
+        fs::create_dir_all(&global).unwrap();
+
+        write(
+            &project.join(".craft/recipes/release.yaml"),
+            "project version",
+        );
+        write(&global.join("release.yaml"), "global version");
+
+        let found = Discovery::new(project, Some(tmp.path().join("home")), None)
+            .discover_files("recipes", &["yaml", "yml", "json"]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "release");
+        assert_eq!(found[0].scope, Scope::Project(0));
+    }
+
+    #[test]
+    fn discover_files_supports_multiple_extensions() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join(".craft/recipes/a.yaml"), "yaml");
+        write(&tmp.path().join(".craft/recipes/b.yml"), "yml");
+        write(&tmp.path().join(".craft/recipes/c.json"), "json");
+        write(&tmp.path().join(".craft/recipes/d.txt"), "ignored");
+
+        let found = Discovery::new(tmp.path().to_path_buf(), None, None)
+            .discover_files("recipes", &["yaml", "yml", "json"]);
+        let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+        assert!(names.contains(&"c"));
+        assert!(!names.contains(&"d"));
     }
 }

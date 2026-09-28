@@ -47,6 +47,15 @@ async fn main() -> Result<(), Error> {
             names,
         }) => craft::subcmd::prompt(variant.clone(), *plan, *tools, *names).await,
         Some(Commands::Term { action }) => craft::term::run(action.clone()).await,
+        Some(Commands::Recipe { action }) => match action.clone() {
+            craft::cli::RecipeAction::List => craft::subcmd::recipe_list().await,
+            craft::cli::RecipeAction::Run {
+                name,
+                param,
+                model,
+                output_format,
+            } => craft::subcmd::recipe_run(&name, &param, model, output_format).await,
+        },
         None => {
             let mut config = Config::load().await?;
             // G.1 run overrides land in the config the TUI builds its run

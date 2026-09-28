@@ -283,6 +283,51 @@ impl App {
         }
     }
 
+    /// Resolve a `/name` slash string to a custom command (J.5). Returns
+    /// `None` when the name is claimed by a builtin command or unknown.
+    pub(crate) fn custom_command(&self, slash: &str) -> Option<crate::command::CustomCommand> {
+        let name = slash.strip_prefix('/')?;
+        if COMMANDS
+            .iter()
+            .flat_map(|spec| [spec.slash, spec.alias])
+            .flatten()
+            .any(|builtin| builtin == slash)
+        {
+            return None;
+        }
+        self.custom_commands
+            .iter()
+            .find(|custom| custom.name == name)
+            .cloned()
+    }
+
+    /// Run a custom command: substitute `$ARGUMENTS`, apply `{cwd}` /
+    /// `{platform}` / `{date}` variables, echo the invocation, and send
+    /// the rendered prompt as a normal user message.
+    pub(crate) fn submit_custom_command(
+        &mut self,
+        custom: &crate::command::CustomCommand,
+        args: &str,
+        tx: &mpsc::UnboundedSender<Command>,
+    ) {
+        let rendered = crate::template::env_vars()
+            .apply(&custom.render(args))
+            .into_owned();
+        let echo = if args.is_empty() {
+            format!("/{}", custom.name)
+        } else {
+            format!("/{} {}", custom.name, args)
+        };
+        self.conversation.assistant_open = false;
+        self.conversation.messages.push(Message::User(echo));
+        let _ = tx.send(Command::SendMessage(
+            rendered,
+            self.agent_mode(),
+            std::mem::take(&mut self.images.attached),
+        ));
+        self.view.follow = true;
+    }
+
     pub(crate) fn run_palette(&mut self, id: &str, tx: &mpsc::UnboundedSender<Command>) {
         self.run_command(id, tx);
     }
@@ -490,5 +535,73 @@ mod tests {
             &app.overlays.usage_quota,
             UsageFetchState::Ready(_)
         ));
+    }
+
+    /// J.5: a discovered custom command appears in slash completion next
+    /// to the builtins.
+    #[test]
+    fn custom_command_appears_in_slash_completion() {
+        let mut app = App::new();
+        app.custom_commands = vec![crate::command::CustomCommand {
+            name: "review".into(),
+            description: "Code review".into(),
+            content: "Review $ARGUMENTS".into(),
+            scope: crate::command::CommandScope::Project,
+            accepts_args: true,
+        }];
+        app.composer.text = "/rev".into();
+        assert!(app.slash_open());
+        assert!(
+            app.slash_matches()
+                .iter()
+                .any(|(cmd, desc)| cmd == "/review" && desc == "Code review"),
+            "custom command missing from completion"
+        );
+    }
+
+    /// J.5: submitting `/name args` sends the rendered prompt with
+    /// `$ARGUMENTS` substituted and echoes the invocation.
+    #[test]
+    fn custom_command_submit_substitutes_arguments() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.custom_commands = vec![crate::command::CustomCommand {
+            name: "review".into(),
+            description: String::new(),
+            content: "Review the code in $ARGUMENTS".into(),
+            scope: crate::command::CommandScope::Project,
+            accepts_args: true,
+        }];
+        app.composer.set_text("/review src/lib.rs".into());
+        app.submit(&tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::SendMessage(text, _, _)) if text.contains("src/lib.rs")),
+            "rendered prompt not sent"
+        );
+        assert!(app.composer.text.is_empty(), "composer not cleared");
+        assert_eq!(app.input_history.get(0), Some("/review src/lib.rs"));
+        assert!(matches!(
+            app.conversation.messages.last(),
+            Some(Message::User(echo)) if echo.contains("/review src/lib.rs")
+        ));
+    }
+
+    /// J.5: a custom command whose name collides with a builtin slash
+    /// command never shadows it.
+    #[test]
+    fn builtin_slash_wins_name_collision() {
+        let mut app = App::new();
+        app.custom_commands = vec![crate::command::CustomCommand {
+            name: "clear".into(),
+            description: "imposter".into(),
+            content: "should not run".into(),
+            scope: crate::command::CommandScope::Project,
+            accepts_args: false,
+        }];
+        app.composer.text = "/cle".into();
+        let matches = app.slash_matches();
+        assert!(matches.iter().any(|(cmd, _)| cmd == "/clear"));
+        assert!(!matches.iter().any(|(_, desc)| *desc == "imposter"));
+        assert!(app.custom_command("/clear").is_none());
     }
 }

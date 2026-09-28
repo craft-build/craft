@@ -431,6 +431,153 @@ pub async fn prompt(variant: PromptVariant, plan: bool, tools: bool, names: bool
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// Recipes (J.5)
+// ---------------------------------------------------------------------
+
+fn discover_recipes() -> Vec<crate::skills::DiscoveredFile> {
+    crate::skills::Discovery::from_env().discover_files("recipes", &["yaml", "yml", "json"])
+}
+
+/// `/craft recipe list`: print `name<TAB>description` per discovered recipe.
+pub async fn recipe_list() -> Result<()> {
+    let files = discover_recipes();
+    if files.is_empty() {
+        println!("no recipes found");
+        return Ok(());
+    }
+    for f in &files {
+        match crate::recipe::load(&f.path) {
+            Ok(r) => {
+                let name = r.name.as_deref().unwrap_or(&f.name);
+                match &r.description {
+                    Some(desc) => println!("{name}\t{desc}"),
+                    None => println!("{name}"),
+                }
+            }
+            Err(e) => eprintln!("{}: {e}", f.name),
+        }
+    }
+    Ok(())
+}
+
+/// `craft recipe run <name>`: resolve parameters (interactive stdin for
+/// missing required ones), render the template, and run the prompt
+/// headless.
+pub async fn recipe_run(
+    name: &str,
+    raw_params: &[String],
+    model: Option<String>,
+    output_format: crate::cli::OutputFormat,
+) -> Result<()> {
+    use std::io::{BufRead, Write};
+
+    let files = discover_recipes();
+
+    let path = files
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| f.path.clone())
+        .or_else(|| {
+            let mut matches = Vec::new();
+            for f in &files {
+                if let Ok(r) = crate::recipe::load(&f.path)
+                    && r.name.as_deref() == Some(name)
+                {
+                    matches.push(f.path.clone());
+                }
+            }
+            match matches.len() {
+                1 => matches.pop(),
+                0 => None,
+                _ => {
+                    eprintln!("recipe '{name}' is ambiguous (multiple recipes match)");
+                    None
+                }
+            }
+        })
+        .ok_or_else(|| {
+            InvalidSnafu {
+                reason: format!("recipe '{name}' not found"),
+            }
+            .build()
+        })?;
+
+    let mut overrides = std::collections::HashMap::new();
+    for raw in raw_params {
+        let (k, v) = raw.split_once('=').ok_or_else(|| {
+            InvalidSnafu {
+                reason: format!("invalid --param {raw:?}, expected key=value"),
+            }
+            .build()
+        })?;
+        overrides.insert(k.trim().to_string(), v.trim().to_string());
+    }
+
+    let recipe = crate::recipe::load(&path).map_err(|e| {
+        InvalidSnafu {
+            reason: format!("load recipe: {e}"),
+        }
+        .build()
+    })?;
+
+    for param in recipe.missing_required(&overrides) {
+        let label = param.description.as_deref().unwrap_or(&param.name);
+        print!("{label}: ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        let read = std::io::stdin().lock().read_line(&mut line).map_err(|e| {
+            InvalidSnafu {
+                reason: format!("reading parameter: {e}"),
+            }
+            .build()
+        })?;
+        let line = line.trim();
+        if read == 0 || line.is_empty() {
+            return InvalidSnafu {
+                reason: format!(
+                    "missing required recipe parameter '{}' (pass via --param {}=...)",
+                    param.name, param.name
+                ),
+            }
+            .fail();
+        }
+        overrides.insert(param.name.clone(), line.to_string());
+    }
+
+    let params = recipe.resolve_parameters(&overrides).map_err(|e| {
+        InvalidSnafu {
+            reason: format!("resolve recipe parameters: {e}"),
+        }
+        .build()
+    })?;
+    let prompt = crate::template::env_vars()
+        .apply(&recipe.render(&params, &path).map_err(|e| {
+            InvalidSnafu {
+                reason: format!("render recipe template: {e}"),
+            }
+            .build()
+        })?)
+        .into_owned();
+
+    let config = Config::load().await?;
+    crate::cli::run_headless_query(
+        config,
+        crate::cli::HeadlessQuery {
+            prompt,
+            context: Vec::new(),
+            images: Vec::new(),
+            // The recipe's model field wins over the CLI flag.
+            model: recipe.model.clone().or(model),
+            output_format,
+            verbose: false,
+            mode: crate::cli::CliMode::Build,
+            session_id: None,
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

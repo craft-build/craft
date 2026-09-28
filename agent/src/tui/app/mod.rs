@@ -167,6 +167,11 @@ pub struct App {
     pub overlays: Overlays,
     pub images: Images,
 
+    /// Custom slash commands discovered from `.craft/commands` /
+    /// `.claude/commands` (J.5). Populated by the TUI entry point; empty
+    /// in tests unless set directly.
+    pub custom_commands: Vec<crate::command::CustomCommand>,
+
     pub should_quit: bool,
 }
 
@@ -223,6 +228,7 @@ impl App {
                 attached: Vec::new(),
                 loads: Vec::new(),
             },
+            custom_commands: Vec::new(),
             should_quit: false,
         }
     }
@@ -539,21 +545,32 @@ impl App {
             .collect()
     }
 
-    pub fn slash_matches(&self) -> Vec<(&'static str, &'static str)> {
+    pub fn slash_matches(&self) -> Vec<(String, String)> {
         let q = self.composer.text.as_str();
-        if !commands::opens_slash_menu(q) {
+        if !q.starts_with('/') {
             return Vec::new();
         }
-        COMMANDS
+        let builtin: Vec<(String, String)> = COMMANDS
             .iter()
             .flat_map(|spec| {
                 [spec.slash, spec.alias]
                     .into_iter()
                     .flatten()
-                    .map(|slash| (slash, spec.desc))
+                    .map(|slash| (slash.to_string(), spec.desc.to_string()))
             })
             .filter(|(cmd, _)| q == "/" || cmd.starts_with(q))
-            .collect()
+            .collect();
+        let mut items = builtin;
+        // Custom commands (J.5): appended after builtins; a builtin slash
+        // name always wins a collision.
+        for custom in &self.custom_commands {
+            let slash = format!("/{}", custom.name);
+            let claimed = items.iter().any(|(cmd, _)| *cmd == slash);
+            if !claimed && (q == "/" || slash.starts_with(q)) {
+                items.push((slash, custom.description.clone()));
+            }
+        }
+        items
     }
 
     /// Plain text of every rendered segment, one entry per segment index
@@ -657,12 +674,40 @@ impl App {
         // Enter on an open slash menu executes the highlighted command.
         let slash = self.slash_matches();
         if text.starts_with('/') && !slash.is_empty() {
-            let (cmd, _) = slash[self.overlays.slash_selected.min(slash.len() - 1)];
+            let (cmd, _) = slash[self.overlays.slash_selected.min(slash.len() - 1)].clone();
+            // A custom command selected from the popup dispatches with any
+            // trailing text as $ARGUMENTS (J.5).
+            let args = text
+                .split_once(' ')
+                .map(|(_, rest)| rest.trim().to_string())
+                .unwrap_or_default();
+            if let Some(custom) = self.custom_command(&cmd) {
+                self.composer.clear();
+                self.input_history.push(text);
+                self.history_recall.history_index = None;
+                self.history_recall.history_draft.clear();
+                self.submit_custom_command(&custom, &args, tx);
+                return;
+            }
             self.composer.clear();
             self.input_history.push(text);
             self.history_recall.history_index = None;
             self.history_recall.history_draft.clear();
-            self.run_slash(cmd, tx);
+            self.run_slash(&cmd, tx);
+            return;
+        }
+        // Exact custom-command token with arguments (popup is closed once
+        // a space follows the command name).
+        if text.starts_with('/')
+            && let Some((token, args)) = text.split_once(' ')
+            && let Some(custom) = self.custom_command(token)
+        {
+            let args = args.trim().to_string();
+            self.composer.clear();
+            self.input_history.push(text);
+            self.history_recall.history_index = None;
+            self.history_recall.history_draft.clear();
+            self.submit_custom_command(&custom, &args, tx);
             return;
         }
         // Bang-mode: run the line as a shell command, bypassing the model.
