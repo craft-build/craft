@@ -74,12 +74,50 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use rig_core::tool::{PortableDynamicTool, PortableTool, ToolErrorKind, ToolExecutionError};
+use rig_core::tool::{
+    PortableDynamicTool, PortableTool, ToolErrorKind, ToolExecutionError, ToolOutput,
+};
 
 pub(crate) type Result<T> = std::result::Result<T, ToolExecutionError>;
 pub(crate) const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_LINE_BYTES: usize = 2048;
+
+/// Every tool name registered by [`Workspace::register`]. MCP server names are
+/// rejected when they collide with one of these (they would shadow a builtin).
+const BUILTIN_TOOL_NAMES: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "list",
+    "edit",
+    "edit_lines",
+    "insert_lines",
+    "multiedit",
+    "apply_patch",
+    "write",
+    "delete",
+    "move_file",
+    "bash",
+    "bash_status",
+    "bash_watch",
+    "bash_kill",
+    "inspect",
+    "todo_write",
+    "retrieve",
+    "skill",
+    "sessions",
+    "webfetch",
+    "websearch",
+    "view_image",
+    "question",
+    "batch",
+    "list_tools",
+];
+
+pub fn is_builtin_tool(name: &str) -> bool {
+    BUILTIN_TOOL_NAMES.contains(&name)
+}
 
 /// One fixed root shared by all tools in an agent. Calls are serialized on a
 /// blocking worker, so filesystem I/O does not block Tokio's executor and two
@@ -102,6 +140,10 @@ pub struct Workspace {
     /// workspace root. Shared (like every Workspace cell) so the per-turn
     /// set is visible through clones.
     plan_path: std::sync::Arc<std::sync::RwLock<Option<PathBuf>>>,
+    /// MCP client handle (B.11): when set, `register_with_mode` appends one
+    /// portable tool per published MCP tool under its `server__tool` wire name.
+    /// Shared like every other cell so the per-turn set is visible through clones.
+    mcp: std::sync::Arc<std::sync::RwLock<Option<crate::mcp::McpHandle>>>,
 }
 
 impl Workspace {
@@ -124,7 +166,20 @@ impl Workspace {
             state_dir: crate::storage::StateDir::resolve().ok(),
             questions: Arc::new(question::DismissAsk),
             plan_path: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            mcp: std::sync::Arc::new(std::sync::RwLock::new(None)),
         })
+    }
+
+    /// Install the session's MCP client (B.11). Call before the first turn
+    /// registers tools, after awaiting `McpHandle::ready` where the caller
+    /// must not ship a prompt without the MCP tools.
+    pub fn set_mcp(&self, handle: Option<crate::mcp::McpHandle>) {
+        let mut cell = self.mcp.write().expect("mcp cell poisoned");
+        *cell = handle;
+    }
+
+    pub fn mcp(&self) -> Option<crate::mcp::McpHandle> {
+        self.mcp.read().expect("mcp cell poisoned").clone()
     }
 
     /// Share the session's instruction-dedupe set so instruction files are
@@ -225,6 +280,11 @@ impl Workspace {
             dynamic(Question(self.questions.clone())),
             dynamic(batch.clone()),
         ];
+        // MCP tools (B.11): one portable tool per published MCP server tool,
+        // registered under the `server__tool` wire name.
+        if let Some(handle) = self.mcp() {
+            tools.extend(mcp_tools(&handle));
+        }
         // Introspection snapshot of every other registered tool.
         let definitions = tools.iter().map(PortableDynamicTool::definition).collect();
         tools.push(dynamic(ListTools(Arc::new(definitions))));
@@ -467,6 +527,35 @@ macro_rules! impl_tool {
     };
 }
 pub(crate) use impl_tool;
+
+/// One portable tool per published MCP tool (B.11). The model sees the
+/// `server__tool` wire name; the closure resolves it back to the qualified
+/// name the manager's tool index is keyed by.
+fn mcp_tools(handle: &crate::mcp::McpHandle) -> Vec<PortableDynamicTool> {
+    handle
+        .tool_descriptors()
+        .into_iter()
+        .map(|descriptor| {
+            let handle = handle.clone();
+            let qualified = descriptor.qualified_name.clone();
+            PortableDynamicTool::new(
+                descriptor.wire_name,
+                descriptor.description,
+                descriptor.parameters,
+                move |arguments| {
+                    let handle = handle.clone();
+                    let qualified = qualified.clone();
+                    Box::pin(async move {
+                        match handle.call_tool(&qualified, &arguments).await {
+                            Ok(text) => Ok(ToolOutput::text(text)),
+                            Err(e) => Err(failure(e.to_string())),
+                        }
+                    })
+                },
+            )
+        })
+        .collect()
+}
 
 /// Adapt a typed portable tool into the erased tool the dispatcher executes.
 fn dynamic<T>(tool: T) -> PortableDynamicTool

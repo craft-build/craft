@@ -109,6 +109,8 @@ async fn drive<P: Provider>(
     // straight from stdin (F.6).
     ui::image::probe();
 
+    // B.11: grab the MCP handle before `start` consumes the provider.
+    let mcp = provider.mcp();
     let (cmd_tx, evt_rx): (mpsc::UnboundedSender<Command>, _) = provider.start();
 
     // Crossterm events are blocking reads -> pump them on a dedicated thread.
@@ -122,6 +124,9 @@ async fn drive<P: Provider>(
     });
 
     let mut app = App::new();
+    // B.11: the session's MCP client (snapshot reads + Toggle/Reconnect
+    // commands from the `/mcp` screen). Providers without one leave it None.
+    app.mcp = mcp;
     // Custom slash commands (J.5): discovered from the working directory's
     // project ancestors and the user's global config dirs.
     if let Ok(cwd) = std::env::current_dir() {

@@ -6,6 +6,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 
+use crate::mcp::McpCommand;
+use crate::mcp::config::{McpServerInfo, McpServerStatus};
 use crate::model_registry::{self, ModelTier};
 use crate::storage::StateDir;
 use crate::tui::app::App;
@@ -41,6 +43,11 @@ pub enum Modal {
         entries: Vec<String>,
         selected: usize,
         original: String,
+    },
+    /// `/mcp`: server-status screen (B.11). Rows come from the live MCP
+    /// snapshot at render time; only the selection lives here.
+    Mcp {
+        selected: usize,
     },
 }
 
@@ -104,6 +111,12 @@ impl App {
         // 6. Theme picker.
         if matches!(self.overlays.modal, Modal::ThemePicker { .. }) {
             self.handle_theme_picker_key(key);
+            return;
+        }
+
+        // 7. MCP server screen.
+        if matches!(self.overlays.modal, Modal::Mcp { .. }) {
+            self.handle_mcp_key(key);
         }
     }
 
@@ -335,6 +348,93 @@ impl App {
             _ => {} // Esc or any other key closes the menu (already None)
         }
     }
+
+    /// `/mcp` screen keys (B.11): arrows move the selection, `t` toggles the
+    /// highlighted server, `r` reconnects it, Esc or `q` closes. Rows read
+    /// the live snapshot, so a command's effect shows up on the next paint.
+    fn handle_mcp_key(&mut self, key: KeyEvent) {
+        let Modal::Mcp { selected } = std::mem::replace(&mut self.overlays.modal, Modal::None)
+        else {
+            return;
+        };
+        let infos: Vec<McpServerInfo> = match &self.mcp {
+            Some(handle) => handle.reader().load().infos.clone(),
+            None => Vec::new(),
+        };
+        match key.code {
+            KeyCode::Up => {
+                self.overlays.modal = Modal::Mcp {
+                    selected: selected.saturating_sub(1),
+                }
+            }
+            KeyCode::Down => {
+                self.overlays.modal = Modal::Mcp {
+                    selected: (selected + 1).min(infos.len().saturating_sub(1)),
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => {}
+            KeyCode::Esc => {}
+            _ => {
+                if let Some(handle) = &self.mcp
+                    && matches!(
+                        infos.get(selected).map(|i| &i.status),
+                        Some(McpServerStatus::NeedsAuth { .. })
+                    )
+                    && matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L'))
+                    && let Some(info) = infos.get(selected)
+                {
+                    // OAuth login (B.11): run the browser flow off the UI
+                    // thread, then ask the manager to reconnect.
+                    let handle = handle.clone();
+                    let reader = handle.reader();
+                    let server = info.name.clone();
+                    tokio::spawn(async move {
+                        match crate::mcp::oauth::login_and_reconnect(&handle, &reader, &server)
+                            .await
+                        {
+                            Ok(info) => {
+                                tracing::info!(server, url = %info.auth_url, "MCP login complete")
+                            }
+                            Err(e) => tracing::warn!(server, error = %e, "MCP login failed"),
+                        }
+                    });
+                } else if let Some(handle) = &self.mcp
+                    && let Some(cmd) = mcp_command_for(&infos, selected, key.code)
+                {
+                    handle.send(cmd);
+                }
+                self.overlays.modal = Modal::Mcp { selected };
+            }
+        }
+    }
+}
+
+/// The command (if any) the `/mcp` screen's `t`/`r` keys map to for the
+/// highlighted row (B.11). Pure over the snapshot rows so the mapping is
+/// testable without a live manager: `t` enables a disabled server or
+/// disables anything else; `r` reconnects everything but a disabled one.
+/// `l` is handled separately (OAuth login, not an `McpCommand`).
+fn mcp_command_for(infos: &[McpServerInfo], selected: usize, code: KeyCode) -> Option<McpCommand> {
+    let info = infos.get(selected)?;
+    let name = info.name.clone();
+    match (code, &info.status) {
+        (KeyCode::Char('t') | KeyCode::Char('T'), McpServerStatus::Disabled) => {
+            Some(McpCommand::Toggle {
+                server: name,
+                enabled: true,
+            })
+        }
+        (KeyCode::Char('t') | KeyCode::Char('T'), _) => Some(McpCommand::Toggle {
+            server: name,
+            enabled: false,
+        }),
+        (KeyCode::Char('r') | KeyCode::Char('R'), status)
+            if *status != McpServerStatus::Disabled =>
+        {
+            Some(McpCommand::Reconnect { server: name })
+        }
+        _ => None,
+    }
 }
 
 /// Tier-assignment keys, tolerant of keyboard layout: Shift+1-4 may arrive as
@@ -412,6 +512,159 @@ mod tests {
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    // --- /mcp screen (B.11) ---
+
+    fn server_info(name: &str, status: McpServerStatus) -> McpServerInfo {
+        McpServerInfo {
+            name: name.into(),
+            transport_kind: "stdio",
+            tool_count: 2,
+            prompt_count: 1,
+            status,
+            config_path: std::path::PathBuf::from("/test/mcp.toml"),
+            url: None,
+            oauth: None,
+        }
+    }
+
+    /// `t` enables a disabled server and disables anything else; `r`
+    /// reconnects everything but a disabled one; `l` is the OAuth login path
+    /// (handled outside `mcp_command_for`), and every other key sends nothing.
+    #[test]
+    fn mcp_keys_map_to_the_right_commands() {
+        let infos = vec![
+            server_info("running-srv", McpServerStatus::Running),
+            server_info("connecting-srv", McpServerStatus::Connecting),
+            server_info("disabled-srv", McpServerStatus::Disabled),
+            server_info("failed-srv", McpServerStatus::Failed("boom".into())),
+            server_info(
+                "auth-srv",
+                McpServerStatus::NeedsAuth {
+                    url: Some("https://auth.example".into()),
+                },
+            ),
+        ];
+        let toggle = |i: usize, enabled: bool| {
+            matches!(
+                mcp_command_for(&infos, i, KeyCode::Char('t')),
+                Some(McpCommand::Toggle { ref server, enabled: e }) if server == &infos[i].name && e == enabled
+            )
+        };
+        assert!(toggle(0, false), "running disables");
+        assert!(toggle(1, false), "connecting disables");
+        assert!(toggle(2, true), "disabled enables");
+        assert!(toggle(3, false), "failed disables");
+        assert!(toggle(4, false), "needs-auth disables");
+        for i in [0, 1, 3, 4] {
+            assert!(
+                matches!(
+                    mcp_command_for(&infos, i, KeyCode::Char('r')),
+                    Some(McpCommand::Reconnect { ref server }) if server == &infos[i].name
+                ),
+                "row {i} reconnects"
+            );
+        }
+        assert!(
+            mcp_command_for(&infos, 2, KeyCode::Char('r')).is_none(),
+            "reconnect skips a disabled server"
+        );
+        assert!(
+            mcp_command_for(&infos, 4, KeyCode::Char('l')).is_none(),
+            "login is not an McpCommand; it runs the OAuth flow directly"
+        );
+        assert!(
+            mcp_command_for(&infos, 9, KeyCode::Char('t')).is_none(),
+            "an out-of-range selection sends nothing"
+        );
+    }
+
+    /// Arrows move the selection and clamp at the edges; `t` keeps the
+    /// screen open; `q` and Esc close it.
+    #[test]
+    fn mcp_screen_selection_moves_and_close_keys() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.overlays.modal = Modal::Mcp { selected: 0 };
+        // No handle: the row list is empty, so Down clamps to 0.
+        app.handle_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
+        app.handle_modal_key(key('t'), &tx);
+        assert!(
+            matches!(app.overlays.modal, Modal::Mcp { selected: 0 }),
+            "action keys keep the screen open"
+        );
+        app.handle_modal_key(key('q'), &tx);
+        assert!(matches!(app.overlays.modal, Modal::None));
+        app.overlays.modal = Modal::Mcp { selected: 3 };
+        app.handle_modal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 2 }));
+        app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(matches!(app.overlays.modal, Modal::None));
+    }
+    /// The send path against a real manager: a Failed server flips to
+    /// Disabled through the command loop, proving the key round-trips to the
+    /// manager and the snapshot republishes.
+    #[tokio::test]
+    async fn mcp_toggle_key_reaches_the_manager() {
+        use crate::mcp::config::{McpConfig, RawServerConfig, RawStdioFields, RawTransport};
+        use std::collections::HashMap;
+
+        let raw = RawServerConfig {
+            enabled: true,
+            timeout: 1_000,
+            transport: RawTransport::Stdio(RawStdioFields {
+                command: vec!["/nonexistent/definitely-not-here".into()],
+                environment: HashMap::new(),
+            }),
+        };
+        let mut mcp = HashMap::new();
+        mcp.insert("ghost".to_string(), raw);
+        let handle = crate::mcp::start_with_config(McpConfig {
+            mcp,
+            origins: HashMap::new(),
+        })
+        .unwrap();
+        handle.ready().await;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.mcp = Some(handle.clone());
+        app.overlays.modal = Modal::Mcp { selected: 0 };
+
+        wait_for_status(&handle, "ghost", |s| {
+            matches!(s, McpServerStatus::Failed(_))
+        })
+        .await;
+
+        app.handle_modal_key(key('t'), &tx);
+        assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
+        wait_for_status(&handle, "ghost", |s| *s == McpServerStatus::Disabled).await;
+        handle.shutdown().await;
+    }
+
+    /// Poll the published snapshot (25ms steps, 5s cap) until `server`'s
+    /// status satisfies `pred`.
+    async fn wait_for_status(
+        handle: &crate::mcp::McpHandle,
+        server: &str,
+        pred: impl Fn(&McpServerStatus) -> bool,
+    ) {
+        for _ in 0..200 {
+            let matched = handle
+                .reader()
+                .load()
+                .infos
+                .iter()
+                .find(|info| info.name == server)
+                .is_some_and(|info| pred(&info.status));
+            if matched {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("{server}'s status never matched");
     }
 
     #[test]

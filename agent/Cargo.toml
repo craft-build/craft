@@ -26,6 +26,8 @@ ratatui.workspace = true
 ratatui-image.workspace = true
 arboard.workspace = true
 regex.workspace = true
+rmcp.workspace = true
+arc-swap.workspace = true
 reqwest.workspace = true
 rig-core.workspace = true
 schemars.workspace = true
@@ -34,6 +36,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 minijinja.workspace = true
 sha2 = "0.10"
+async-trait = "0.1"
 tracing = "0.1"
 similar = { version = "3", features = ["inline", "unicode"] }
 snafu.workspace = true

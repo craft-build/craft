@@ -342,4 +342,11 @@ pub trait Provider {
         mpsc::UnboundedSender<Command>,
         mpsc::UnboundedReceiver<AgentEvent>,
     );
+
+    /// The session's MCP client handle (B.11), cloned into the app so the
+    /// `/mcp` screen can read snapshots and send commands. `None` for
+    /// providers without one.
+    fn mcp(&self) -> Option<crate::mcp::McpHandle> {
+        None
+    }
 }

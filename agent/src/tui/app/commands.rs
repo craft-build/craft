@@ -94,6 +94,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "Revert the last edit",
     },
     CommandSpec {
+        id: "mcp",
+        slash: Some("/mcp"),
+        alias: None,
+        label: "MCP servers",
+        hint: "/mcp",
+        desc: "Show MCP servers",
+    },
+    CommandSpec {
         id: "compact",
         slash: Some("/compact"),
         alias: None,
@@ -235,6 +243,7 @@ impl App {
             "undo" => {
                 let _ = tx.send(Command::Undo);
             }
+            "mcp" => self.open_mcp(),
             "compact" => {
                 let _ = tx.send(Command::Compact);
             }
@@ -272,6 +281,13 @@ impl App {
             selected,
             original,
         };
+    }
+
+    /// `/mcp`: open the server-status screen with the cursor on the first
+    /// row. Rows read the live snapshot at render time, so the screen needs
+    /// no state beyond the selection.
+    pub(crate) fn open_mcp(&mut self) {
+        self.overlays.modal = Modal::Mcp { selected: 0 };
     }
 
     pub(crate) fn run_slash(&mut self, cmd: &str, tx: &mpsc::UnboundedSender<Command>) {
@@ -584,6 +600,29 @@ mod tests {
             app.conversation.messages.last(),
             Some(Message::User(echo)) if echo.contains("/review src/lib.rs")
         ));
+    }
+
+    /// B.11: `/mcp` appears in slash completion and opens the server
+    /// screen; any close key dismisses it.
+    #[test]
+    fn mcp_slash_opens_the_server_screen() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.composer.text = "/mc".into();
+        assert!(
+            app.slash_matches().iter().any(|(cmd, _)| *cmd == "/mcp"),
+            "/mcp missing from completion"
+        );
+        app.run_slash("/mcp", &tx);
+        assert!(matches!(app.overlays.modal, Modal::Mcp { selected: 0 }));
+        app.handle_key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &tx,
+        );
+        assert!(matches!(app.overlays.modal, Modal::None));
     }
 
     /// J.5: a custom command whose name collides with a builtin slash

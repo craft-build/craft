@@ -161,6 +161,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     overlays::render_help(f, app, area);
     overlays::render_sessions(f, app, area);
     overlays::render_theme_picker(f, app, area);
+    overlays::render_mcp(f, app, area);
 
     // Snapshot the frame as plain text (selection copy extracts from this),
     // then draw the current text selection as reversed cells.

@@ -291,6 +291,10 @@ impl AppState {
         let workspace = Workspace::new(cwd)
             .map_err(|e| e.to_string())?
             .with_loaded_instructions(instructions.loaded.clone());
+        // MCP (B.11): headless paths have no frame to protect, so connect up
+        // front — `start_connected` waits for every server to settle.
+        let (mcp_handle, _mcp_errors) = crate::mcp::start_connected(workspace.root()).await;
+        workspace.set_mcp(mcp_handle);
         Ok((instructions, workspace, Arc::new(permissions)))
     }
 

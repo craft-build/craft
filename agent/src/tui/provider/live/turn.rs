@@ -453,6 +453,10 @@ const MAX_EMPTY_CONTINUATIONS: usize = 2;
 const CONTINUE_AFTER_EMPTY: &str = "Your last turn produced no visible reply and no tool \
      calls. Continue the task with your reply or the next tool call.";
 
+/// How long a turn waits for every MCP server to settle (B.11). Ten seconds
+/// covers slow initializes without letting a hung server pin the turn.
+const MCP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::history::ImageBlock>) {
     let TurnCtx {
         config,
@@ -514,6 +518,23 @@ pub(super) async fn run_turn(ctx: TurnCtx, text: String, images: Vec<crate::hist
                 tx.clone(),
                 cancel.clone(),
             )));
+    // B.11: the first prompt must not ship without the MCP tools, but a
+    // hung server can't block the turn forever — the gate times out and
+    // the turn proceeds with whatever has landed.
+    if let Some(mcp) = workspace.mcp()
+        && tokio::time::timeout(MCP_READY_TIMEOUT, mcp.ready())
+            .await
+            .is_err()
+    {
+        tracing::warn!("MCP servers not ready after {MCP_READY_TIMEOUT:?}");
+        let _ = tx.send(AgentEvent::Notice {
+            tone: Tone::Warning,
+            text: format!(
+                "MCP servers still connecting after {MCP_READY_TIMEOUT:?}; \
+                 continuing without their tools"
+            ),
+        });
+    }
     let tools = workspace
         .register_with_mode(mode.clone())
         .with_dedup(dedup)

@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::theme;
+use crate::mcp::config::{McpServerInfo, McpServerStatus};
 use crate::tui::app::App;
 use crate::tui::modals::Modal;
 
@@ -900,6 +901,117 @@ pub fn render_stats(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// `/mcp`: MCP server status screen (B.11). One row per server from the
+/// live snapshot — name, transport, tool/prompt counts on the left, status
+/// (color-coded) on the right — plus a detail line for the auth URL of a
+/// NeedsAuth server or a failure reason.
+pub fn render_mcp(f: &mut Frame, app: &App, area: Rect) {
+    let Modal::Mcp { selected } = &app.overlays.modal else {
+        return;
+    };
+    let reader = app
+        .mcp
+        .as_ref()
+        .map(|handle| handle.reader())
+        .unwrap_or_else(crate::mcp::McpSnapshotReader::empty);
+    render_mcp_sheet(f, &reader, *selected, area);
+}
+
+/// The `/mcp` sheet itself, drawn from any snapshot reader so tests can
+/// feed it a hand-built snapshot. One row per server — name, transport,
+/// tool/prompt counts on the left, status (color-coded) on the right —
+/// plus a detail line carrying the auth URL of a NeedsAuth server.
+fn render_mcp_sheet(
+    f: &mut Frame,
+    reader: &crate::mcp::McpSnapshotReader,
+    selected: usize,
+    area: Rect,
+) {
+    let t = theme::current();
+    dim(f, area);
+    let infos = reader.load().infos.clone();
+
+    // Row plan: every server's header row (the one the selection marks),
+    // plus a detail row for NeedsAuth / Failed servers.
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut header_rows: Vec<usize> = Vec::new();
+    for info in &infos {
+        header_rows.push(rows.len());
+        let (status_label, status_color) = mcp_status_style(info);
+        let left = format!(
+            " {} · {} · {} tools · {} prompts",
+            info.name, info.transport_kind, info.tool_count, info.prompt_count
+        );
+        let status = status_label.to_string();
+        let gap = 76usize.saturating_sub(left.chars().count() + status.chars().count());
+        rows.push(vec![
+            Span::styled(left, Style::default().fg(t.text_primary)),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(status, Style::default().fg(status_color)),
+        ]);
+        if let McpServerStatus::NeedsAuth { url } = &info.status
+            && let Some(url) = url
+        {
+            rows.push(vec![Span::styled(
+                format!("   login required: {url} (l to log in)"),
+                Style::default().fg(t.danger),
+            )]);
+        }
+    }
+
+    let width = 78.min(area.width.saturating_sub(4));
+    let n = rows.len().clamp(1, 10) as u16;
+    let rect = centered(width, n + 4, area);
+    f.render_widget(Clear, rect);
+    let block = boxed(rect);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "MCP servers — t toggle, r reconnect, esc close",
+            Style::default()
+                .fg(t.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    if rows.is_empty() {
+        rows.push(vec![Span::styled(
+            " no MCP servers configured".to_string(),
+            Style::default().fg(t.text_tertiary),
+        )]);
+    }
+    render_rows(
+        f,
+        &rows,
+        header_rows.get(selected).copied().unwrap_or(usize::MAX),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 2,
+            width: inner.width.saturating_sub(2),
+            height: n,
+        },
+    );
+}
+
+/// Status label and theme color for one server row: Running rides success,
+/// Connecting warning, Failed and NeedsAuth danger, Disabled the dim text.
+fn mcp_status_style(info: &McpServerInfo) -> (&'static str, ratatui::style::Color) {
+    let t = theme::current();
+    match &info.status {
+        McpServerStatus::Running => ("running", t.success),
+        McpServerStatus::Connecting => ("connecting", t.warning),
+        McpServerStatus::Disabled => ("disabled", t.text_disabled),
+        McpServerStatus::Failed(_) => ("failed", t.danger),
+        McpServerStatus::NeedsAuth { .. } => ("needs auth", t.danger),
+    }
+}
+
 /// `/help`: keybinding sheet, generated from the data-driven `KEYBINDS`
 /// table grouped by context (F.1); user overrides show their effective
 /// chords, disabled actions are omitted.
@@ -1066,4 +1178,93 @@ pub fn render_theme_picker(f: &mut Frame, app: &App, area: Rect) {
             height: n,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::config::{McpServerInfo, McpServerStatus};
+    use crate::mcp::{McpSnapshot, McpSnapshotReader};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    fn server_info(name: &str, status: McpServerStatus) -> McpServerInfo {
+        McpServerInfo {
+            name: name.into(),
+            transport_kind: "stdio",
+            tool_count: 3,
+            prompt_count: 1,
+            status,
+            config_path: PathBuf::new(),
+            url: None,
+            oauth: None,
+        }
+    }
+
+    /// B.11: the `/mcp` sheet renders one row per server from a snapshot —
+    /// name, transport, counts, and every status spelling — plus the auth
+    /// URL detail line for a NeedsAuth server.
+    #[test]
+    fn mcp_sheet_renders_rows_from_a_snapshot() {
+        let reader = McpSnapshotReader::from_snapshot(McpSnapshot {
+            infos: vec![
+                server_info("running-srv", McpServerStatus::Running),
+                server_info("connecting-srv", McpServerStatus::Connecting),
+                server_info("disabled-srv", McpServerStatus::Disabled),
+                server_info("failed-srv", McpServerStatus::Failed("spawn failed".into())),
+                server_info(
+                    "auth-srv",
+                    McpServerStatus::NeedsAuth {
+                        url: Some("https://auth.example/login".into()),
+                    },
+                ),
+            ],
+            prompts: Vec::new(),
+            generation: 1,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| render_mcp_sheet(f, &reader, 0, f.area()))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        for needle in [
+            "MCP servers",
+            "running-srv",
+            "running",
+            "connecting-srv",
+            "connecting",
+            "disabled-srv",
+            "disabled",
+            "failed-srv",
+            "failed",
+            "needs auth",
+            "https://auth.example/login",
+            "3 tools",
+        ] {
+            assert!(text.contains(needle), "{needle:?} missing from the sheet");
+        }
+    }
+
+    /// An empty snapshot (no servers configured) still renders the sheet
+    /// with its placeholder row instead of panicking.
+    #[test]
+    fn mcp_sheet_renders_an_empty_placeholder() {
+        let reader = McpSnapshotReader::empty();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| render_mcp_sheet(f, &reader, 0, f.area()))
+            .unwrap();
+        assert!(buffer_text(&terminal).contains("no MCP servers configured"));
+    }
 }

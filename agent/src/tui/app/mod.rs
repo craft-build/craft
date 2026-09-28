@@ -172,6 +172,11 @@ pub struct App {
     /// in tests unless set directly.
     pub custom_commands: Vec<crate::command::CustomCommand>,
 
+    /// MCP client handle (B.11): snapshot reader + command sender for the
+    /// `/mcp` screen. Cloned from the provider at startup; `None` when no
+    /// MCP servers are configured.
+    pub mcp: Option<crate::mcp::McpHandle>,
+
     pub should_quit: bool,
 }
 
@@ -229,6 +234,7 @@ impl App {
                 loads: Vec::new(),
             },
             custom_commands: Vec::new(),
+            mcp: None,
             should_quit: false,
         }
     }
@@ -297,10 +303,10 @@ impl App {
 
     /// Mark `id` most-recently-used in the image-state LRU.
     fn touch_image_state(&mut self, id: &str) {
-        if let Some(pos) = self.images.states_order.iter().position(|k| k == id) {
-            if let Some(k) = self.images.states_order.remove(pos) {
-                self.images.states_order.push_back(k);
-            }
+        if let Some(pos) = self.images.states_order.iter().position(|k| k == id)
+            && let Some(k) = self.images.states_order.remove(pos)
+        {
+            self.images.states_order.push_back(k);
         }
     }
 

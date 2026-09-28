@@ -958,6 +958,10 @@ pub async fn run_headless_query(config: crate::config::Config, q: HeadlessQuery)
     let workspace = crate::tools::Workspace::new(&cwd)
         .map_err(crate::error::client_error)?
         .with_loaded_instructions(instructions.loaded.clone());
+    // MCP (B.11): print mode is headless, so connect up front; MCP tools join
+    // the dispatch table before the first prompt ships.
+    let (mcp_handle, _mcp_errors) = crate::mcp::start_connected(&cwd).await;
+    workspace.set_mcp(mcp_handle);
     let state_dir = crate::storage::StateDir::resolve().ok();
 
     let mode = match q.mode {

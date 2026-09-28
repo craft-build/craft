@@ -353,6 +353,9 @@ pub struct CraftProvider {
     /// Resume this specific session id at startup (`craft -s/--session`,
     /// G.1); takes precedence over `resume_latest`.
     resume_session: Option<String>,
+    /// MCP client handle (B.11): installed on the workspace before the
+    /// first turn and cloned into the app for the `/mcp` screen.
+    mcp: Option<crate::mcp::McpHandle>,
 }
 
 impl CraftProvider {
@@ -392,9 +395,16 @@ impl CraftProvider {
         let workspace = Workspace::new(cwd)
             .map_err(client_error)?
             .with_loaded_instructions(instructions.loaded.clone());
-
         let mut catalogs: BTreeMap<String, Vec<CatalogModel>> = BTreeMap::new();
         let mut notes = Vec::new();
+        // B.11: start the MCP client up front but never await `ready` here —
+        // the first frame must not block on a slow server initialize. The
+        // turn path awaits the gate before registering tools.
+        let (mcp, mcp_errors) = crate::mcp::start(cwd).await;
+        if !mcp_errors.is_empty() {
+            notes.push(format!("mcp: {mcp_errors}"));
+        }
+        workspace.set_mcp(mcp.clone());
         for (name, provider_config) in &config.providers {
             if provider_config.kind == ProviderKind::Voyageai {
                 notes.push(format!("{name}: no completion models (non-chat provider)"));
@@ -490,6 +500,7 @@ impl CraftProvider {
             branch: cards::git_branch(cwd).await,
             resume_latest: false,
             resume_session: None,
+            mcp,
         })
     }
 
@@ -749,6 +760,12 @@ impl CraftProvider {
         // and flush a soft checkpointed draft that never hit its write
         // window, so a keystroke from a second ago still reaches disk.
         persist_on_exit(&ctx, &selection).await;
+        // B.11: the UI dropped its command half, so no turn can follow; tear
+        // the MCP servers down before the loop task ends (bounded by the
+        // manager's own shutdown timeout).
+        if let Some(handle) = ctx.workspace.mcp() {
+            handle.shutdown().await;
+        }
     }
 }
 
@@ -1115,10 +1132,10 @@ async fn persist_on_exit(ctx: &LoopCtx, selection: &Selection) {
     let drained = drain_shell_results(&ctx.pending_shell, &ctx.state).await;
     let mut guard = ctx.state.lock().await;
     let history = guard.history.clone();
-    if drained > 0 {
-        if let Some(store) = &mut guard.store {
-            store.record_turn(&history, LoopCtx::model_spec(selection));
-        }
+    if drained > 0
+        && let Some(store) = &mut guard.store
+    {
+        store.record_turn(&history, LoopCtx::model_spec(selection));
     }
     if let Some(store) = &mut guard.store {
         store.checkpoint_now();
@@ -1138,6 +1155,10 @@ impl Provider for CraftProvider {
         tokio::spawn(self.spawn_command_loop(cmd_rx, evt_tx));
 
         (cmd_tx, evt_rx)
+    }
+
+    fn mcp(&self) -> Option<crate::mcp::McpHandle> {
+        self.mcp.clone()
     }
 }
 
