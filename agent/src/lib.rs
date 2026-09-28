@@ -24,6 +24,7 @@ pub mod prompt;
 pub mod providers;
 pub mod run;
 pub mod sandbox;
+pub mod setup;
 pub mod snapshot;
 pub mod storage;
 pub mod subcmd;

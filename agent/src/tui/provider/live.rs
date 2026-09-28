@@ -383,7 +383,7 @@ impl CraftProvider {
     pub async fn new(config: Config, cwd: impl AsRef<Path>) -> Result<Self> {
         if config.providers.is_empty() {
             return InvalidSnafu {
-                reason: "no providers are configured in ~/.config/craft/agent.toml",
+                reason: crate::setup::setup_hint(),
             }
             .fail();
         }
@@ -416,7 +416,11 @@ impl CraftProvider {
         }
         if catalogs.is_empty() {
             return InvalidSnafu {
-                reason: format!("no usable provider/model catalog ({})", notes.join("; ")),
+                reason: format!(
+                    "no usable provider/model catalog ({}) - {}",
+                    notes.join("; "),
+                    crate::setup::setup_hint()
+                ),
             }
             .fail();
         }
@@ -500,6 +504,14 @@ impl CraftProvider {
     /// Takes precedence over [`Self::with_resume_latest`].
     pub fn with_session(mut self, id: Option<String>) -> Self {
         self.resume_session = id;
+        self
+    }
+
+    /// Prepend first-run notes (G.6 auto-detected providers) to the startup
+    /// notes so they surface before discovery problems.
+    pub fn with_startup_notes(mut self, mut notes: Vec<String>) -> Self {
+        notes.append(&mut self.notes);
+        self.notes = notes;
         self
     }
 

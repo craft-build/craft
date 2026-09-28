@@ -676,8 +676,7 @@ pub async fn run_print(cli: &Cli, mut config: crate::config::Config) -> Result<(
                 .map(|(name, c)| (name.to_string(), c.clone()))
                 .ok_or_else(|| {
                     InvalidSnafu {
-                        reason: "no providers are configured in ~/.config/craft/agent.toml"
-                            .to_string(),
+                        reason: crate::setup::setup_hint(),
                     }
                     .build()
                 })?,

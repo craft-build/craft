@@ -48,11 +48,17 @@ async fn main() -> Result<(), Error> {
             let mut config = Config::load().await?;
             // G.1 run overrides land in the config the TUI builds its run
             // parameters from.
+            // G.6 first run: auto-detect providers from credential env
+            // vars when agent.toml configures none.
+            let setup_notes = craft::setup::first_run(&mut config);
             config.agent.preamble = cli.effective_preamble(&config.agent.preamble);
             if let Some(max_turns) = cli.max_turns {
                 config.agent.max_turns = Some(max_turns);
             }
             if cli.print {
+                for note in &setup_notes {
+                    eprintln!("warning: {note}");
+                }
                 return run_print(&cli, config).await;
             }
             let cwd = std::env::current_dir().context(TuiSnafu {
@@ -63,6 +69,7 @@ async fn main() -> Result<(), Error> {
                 provider = provider.with_model_spec(spec)?;
             }
             let provider = provider
+                .with_startup_notes(setup_notes)
                 .with_resume_latest(cli.continue_session)
                 .with_session(cli.session.clone())
                 .with_permission_flags(cli.yolo, cli.auto_review);
