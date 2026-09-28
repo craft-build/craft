@@ -22,6 +22,7 @@ mod multiedit;
 mod question;
 mod read;
 mod retrieve;
+mod skill;
 pub(crate) mod ssrf;
 mod todo_write;
 mod view_image;
@@ -56,6 +57,7 @@ pub use question::{
 };
 pub use read::{Read, ReadArgs, ReadLine, ReadOutput};
 pub use retrieve::{Retrieve, RetrieveArgs, RetrieveOutput};
+pub use skill::{Skill, SkillArgs, SkillOutput};
 pub(crate) use todo_write::flatten_todos;
 pub use todo_write::{Todo, TodoWrite, TodoWriteArgs, TodoWriteOutput};
 pub use view_image::{ViewImage, ViewImageArgs, ViewImageOutput};
@@ -207,6 +209,7 @@ impl Workspace {
             dynamic(Inspect(self.clone())),
             dynamic(TodoWrite(self.clone())),
             dynamic(Retrieve(self.compression_store.clone())),
+            dynamic(Skill::new(self.root().to_path_buf())),
             dynamic(Webfetch),
             dynamic(Websearch),
             dynamic(ViewImage(self.clone())),

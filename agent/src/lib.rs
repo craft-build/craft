@@ -25,6 +25,7 @@ pub mod providers;
 pub mod run;
 pub mod sandbox;
 pub mod setup;
+pub mod skills;
 pub mod snapshot;
 pub mod storage;
 pub mod subcmd;
