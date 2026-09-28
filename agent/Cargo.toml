@@ -31,6 +31,7 @@ rig-core.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 tracing = "0.1"
 similar = { version = "3", features = ["inline", "unicode"] }
 snafu.workspace = true

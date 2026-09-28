@@ -30,4 +30,5 @@ pub mod storage;
 pub mod subcmd;
 pub mod tools;
 pub mod tui;
+pub mod update;
 pub mod usage;

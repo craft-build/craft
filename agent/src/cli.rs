@@ -209,6 +209,18 @@ pub enum Commands {
         #[arg(long)]
         export: bool,
     },
+    /// Update craft to the latest release (digest-pinned install script).
+    Update {
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Disable script highlighting (accepted; the script always
+        /// prints plainly here)
+        #[arg(long)]
+        no_color: bool,
+    },
+    /// Rollback to the version saved by the last update
+    Rollback,
     /// Show the rendered system prompt or tool definitions.
     Prompt {
         /// Prompt variant: system (default), research, general.
@@ -581,6 +593,30 @@ mod tests {
                 names: true,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn g7_update_and_rollback_subcommands_parse() {
+        let cli = parse(&["update", "-y", "--no-color"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                yes: true,
+                no_color: true
+            })
+        ));
+        let cli = parse(&["update"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                yes: false,
+                no_color: false
+            })
+        ));
+        assert!(matches!(
+            parse(&["rollback"]).unwrap().command,
+            Some(Commands::Rollback)
         ));
     }
 

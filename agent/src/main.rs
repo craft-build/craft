@@ -38,6 +38,8 @@ async fn main() -> Result<(), Error> {
             let config = Config::load().await?;
             craft::subcmd::doctor(config, *export).await
         }
+        Some(Commands::Update { yes, no_color }) => craft::update::update(*yes, *no_color).await,
+        Some(Commands::Rollback) => craft::update::rollback(),
         Some(Commands::Prompt {
             variant,
             plan,
