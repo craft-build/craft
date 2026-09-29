@@ -66,28 +66,17 @@ async fn fetch_text(url: &str) -> Result<String> {
 }
 
 /// Digest pinned at build time (`CRAFT_INSTALL_SHA256`), set by release
-/// automation out of band from the tag contents. Mandatory in release
-/// builds (the tag's `.sha256` file alone is same-origin and cannot
-/// detect a compromised tag); dev builds may omit it.
+/// automation out of band from the tag contents. Optional: builds without
+/// a pin (e.g. `cargo install`) still verify the script against the tag's
+/// published `.sha256` digest; a pin, when present, adds an independent
+/// out-of-band check.
 const BUILD_PIN: Option<&str> = option_env!("CRAFT_INSTALL_SHA256");
 
-#[cfg(not(debug_assertions))]
-const _: () = match BUILD_PIN {
-    Some(_) => {}
-    None => panic!("release builds must set CRAFT_INSTALL_SHA256 to pin the install script"),
-};
-
 fn check_build_pin(script: &str, pin: Option<&str>) -> Result<()> {
+    // No pin compiled in: rely on the tag-published digest verification
+    // (see `fetch_pinned_script`).
     let Some(pin) = pin else {
-        return if cfg!(debug_assertions) {
-            Ok(())
-        } else {
-            Err(invalid(
-                "no install-script digest pinned into this binary; \
-                 refusing to run the script"
-                    .to_string(),
-            ))
-        };
+        return Ok(());
     };
     let computed = sha256_hex(script.as_bytes());
     if !pin.eq_ignore_ascii_case(&computed) {
@@ -314,8 +303,8 @@ mod tests {
         assert!(check_build_pin(script, Some(&hex.to_uppercase())).is_ok());
         let err = check_build_pin(script, Some(&sha256_hex(b"other"))).unwrap_err();
         assert!(err.to_string().contains("pinned into"));
-        // No build-time pin: dev builds only; release builds fail in
-        // check_build_pin (and at compile time).
+        // No build-time pin (e.g. a cargo install build): the tag's
+        // published digest check is the remaining gate.
         assert!(check_build_pin(script, None).is_ok());
     }
 
